@@ -83,6 +83,7 @@ export function registerModelAccountChoiceRoutes(app: Hono, deps: ApiRouteDeps):
       SessionModelAccountChoiceResponse.parse({
         binding: choice.binding,
         bindings: choice.bindings,
+        serving: choice.serving,
         accounts: choice.connections,
         personal: choice.personal,
       }),

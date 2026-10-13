@@ -23,32 +23,56 @@ import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
-  createClaudeSubscriptionAccount,
   createDb,
   createScheduledTask,
   createSession,
-  createXaiSubscriptionCredential,
-  disconnectClaudeSubscriptionAccount,
-  disconnectXaiSubscriptionCredential,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   sendAgentMessageInTransaction,
-  setInitialActiveClaudeCredential,
   submitHumanPromptInTransaction,
   withRlsContext,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src";
+// Historical 0717 staging writes pre-fence Claude accounts with the legacy
+// account writers, which stay only for the API until C2b (design 5.3, C4).
+import {
+  createClaudeSubscriptionAccount,
+  disconnectClaudeSubscriptionAccount,
+  setInitialActiveClaudeCredential,
+} from "./fixtures/legacy-claude/accounts";
 import { rawRows } from "../src/database";
+// 0717 is applied before the SuperGrok cutover, so its pre-cutover SuperGrok
+// rows are written with the test-only snapshot of the deleted legacy writers.
+import {
+  createXaiSubscriptionCredential,
+  disconnectXaiSubscriptionCredential,
+} from "./fixtures/legacy-xai";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { subscriptionAuthorityCompatForCarriersInTransaction } from "../src/subscription-core-acceptance-authority";
 
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const FENCES = "0717_subscription_authority_fences.sql";
+const XAI_CUTOVER = "0747_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0748_subscription_core_claude_cutover.sql";
+/**
+ * This binary requires the SuperGrok and Claude receipts, which the rolling
+ * state lacks, and the absence of everything the drained retirement drops
+ * (held back with the cutovers, whose receipts it requires).
+ */
+const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+  "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+];
 const EMPTY = { version: 2, personal: [] };
 const ORGANIZATION_CLAUDE = { version: 1, scope: "organization" };
 let database: OwnerMigratedTestDatabase | null = null;
@@ -689,9 +713,11 @@ beforeAll(async () => {
   const owner = postgres(database.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${FENCES})`;
+    await owner`insert into schema_migrations(name) values (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${SUBSCRIPTION_RETIREMENT_MIGRATION}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+    // The legacy pools run before the retirement, under that release's grants.
+    await restorePreRetirementGrants(database.adminUrl);
   } finally {
     await owner.end();
   }
@@ -738,6 +764,7 @@ beforeAll(async () => {
   };
   const unprovisioned = await evaluate();
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
+  await restorePreRetirementGrants(database.adminUrl);
   posture = { unprovisioned, provisioned: await evaluate() };
   client = createDb(appUrl, { max: 4 });
   app = client.db;
@@ -750,13 +777,60 @@ afterAll(async () => {
 
 describe.skipIf(!realDb)("0717 subscription authority fences", () => {
   test("applies over a provisioned database and keeps the runtime posture before and after provisioning", async () => {
-    expect(posture).toEqual({ unprovisioned: [], provisioned: [] });
+    expect(posture).toEqual({
+      unprovisioned: BEFORE_XAI_CUTOVER,
+      provisioned: BEFORE_XAI_CUTOVER,
+    });
     const [identity] = await rawRows<{ role: string; superuser: boolean; bypass: boolean }>(
       client!.db,
       sql`select current_user::text as role, rolsuper as superuser, rolbypassrls as bypass
           from pg_roles where rolname = current_user`,
     );
     expect(identity).toEqual({ role: "opengeni_app", superuser: false, bypass: false });
+  });
+
+  test("the SuperGrok v1 carriers keep their NOT NULL workspace default and immutability triggers", async () => {
+    // New work writes the v1 default and derived rows copy it verbatim
+    // (design 5.3, v1 columns after a provider's cutover); the fences
+    // compare those copies, so both the default and the triggers must stay.
+    const columns = await database!.admin<
+      { tableName: string; nullable: string; columnDefault: string | null }[]
+    >`
+      select table_name as "tableName", is_nullable as nullable,
+        column_default as "columnDefault"
+      from information_schema.columns
+      where table_schema = current_schema()
+        and table_name = any(array[
+          'session_turns', 'scheduled_tasks', 'session_system_updates',
+          'session_system_update_outbox'
+        ]::text[])
+        and column_name = 'xai_provider_account_authority_snapshot'
+      order by table_name`;
+    expect(columns).toHaveLength(4);
+    for (const column of columns) {
+      expect(column.nullable).toBe("NO");
+      expect(column.columnDefault).toContain('"scope": "workspace"');
+    }
+    const triggers = await database!.admin<{ name: string }[]>`
+      select trigger.tgname::text as name
+      from pg_trigger trigger
+      join pg_class relation on relation.oid = trigger.tgrelid
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      where namespace.nspname = current_schema()
+        and trigger.tgname = any(array[
+          'session_turns_xai_authority_snapshot_immutable_trg',
+          'scheduled_tasks_xai_authority_snapshot_immutable_trg',
+          'session_system_updates_xai_authority_snapshot_immutable_trg',
+          'system_update_outbox_xai_snapshot_immutable_trg'
+        ]::text[])
+        and not trigger.tgisinternal and trigger.tgenabled <> 'D'
+      order by 1`;
+    expect(triggers.map((trigger) => trigger.name)).toEqual([
+      "scheduled_tasks_xai_authority_snapshot_immutable_trg",
+      "session_system_updates_xai_authority_snapshot_immutable_trg",
+      "session_turns_xai_authority_snapshot_immutable_trg",
+      "system_update_outbox_xai_snapshot_immutable_trg",
+    ]);
   });
 
   test("helpers are owner-only, definer fences search pg_temp last, the callers inherit the live check", async () => {

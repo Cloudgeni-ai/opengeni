@@ -1220,7 +1220,8 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
       !personal ||
       !identity.sessionOwnerSubjectId ||
       !identity.initiatingHumanSubjectId ||
-      identity.sessionOwnerMembershipId !== personal.ownerMembershipId
+      (identity.sessionOwnerMembershipId !== personal.ownerMembershipId &&
+        personal.sharedSessionChoice?.sessionId !== identity.sessionId)
     ) {
       return false;
     }

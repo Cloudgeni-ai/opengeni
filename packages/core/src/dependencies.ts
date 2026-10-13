@@ -1,6 +1,5 @@
 import type { Settings } from "@opengeni/config";
 import type {
-  ConnectionCredentialsPort,
   Document,
   DocumentAuthorityKind,
   EntitlementsPort,
@@ -11,6 +10,8 @@ import type {
   TurnInitiator,
 } from "@opengeni/contracts";
 import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
+import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
+import type { OnePasswordVaultProviderFactory } from "./domain/vaults/provider-registry";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -202,9 +203,16 @@ export type AppDependencies = {
   /**
    * Optional host-owned connection credential seam. API-side consumers use
    * the MCP leg for Codemode/Code Mode; worker consumers bind the same port
-   * for model MCP, Git, and sandbox-secret resolution.
+   * for model MCP, Git, and run credentials. `vaultProvider` is the host's
+   * password manager, linked as vaults with `source: "host"` (OP-6).
    */
-  connectionCredentials?: ConnectionCredentialsPort | null;
+  connectionCredentials?: VaultConnectionCredentialsPort | null;
+  /**
+   * Builds 1Password providers for linked vaults. apps/api and apps/worker
+   * bind it to a dynamic `import("@opengeni/vaults-onepassword")`; unset means
+   * 1Password vaults report `provider_unavailable`.
+   */
+  onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
   /**
    * Optional embedding-host session ACL. Unset preserves standalone workspace
    * authorization; once bound, every session-addressed surface fails closed on

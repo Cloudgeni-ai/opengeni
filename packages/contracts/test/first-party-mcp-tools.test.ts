@@ -5,6 +5,7 @@ import {
   DelegatedAccessTokenPayload,
   FIRST_PARTY_MCP_TOOL_NAMES,
   RETIRED_AGENT_LEARNING_TOOL_NAMES,
+  RETIRED_SECRET_TOOL_NAMES,
   SESSION_ADMIN_ACCESS_TOOL_NAMES,
 } from "../src";
 
@@ -89,6 +90,7 @@ describe("first-party MCP tool-name contract", () => {
         (name) =>
           !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name) &&
           !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name) &&
+          !(RETIRED_SECRET_TOOL_NAMES as readonly string[]).includes(name) &&
           !(SESSION_ADMIN_ACCESS_TOOL_NAMES as readonly string[]).includes(name),
       ),
     ).toEqual([...EXPLICIT_ONLY_CONNECTOR_TOOLS]);

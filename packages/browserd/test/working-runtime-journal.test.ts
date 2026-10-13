@@ -8,6 +8,7 @@ import {
   SqliteBrowserWorkingRuntimeJournal,
   assertDirectory,
   assertWorkingRuntimeReceipt,
+  isAbandonedLaunchReceipt,
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 
@@ -108,6 +109,63 @@ describe("existing controller journal read-only inspection", () => {
 });
 
 describe("durable working-runtime launch receipts", () => {
+  test("a launch settled failed records its bounded cause and is never adoptable", async () => {
+    const directory = await mkdtemp("/tmp/ogb-working-journal-failed-");
+    const profile = join(directory, "profile");
+    await mkdir(profile);
+    const journal = await SqliteBrowserWorkingRuntimeJournal.open({
+      sessionDirectory: directory,
+      browserSessionId,
+      controllerGeneration,
+    });
+    try {
+      const launch = journal.begin({
+        browserSessionId,
+        controllerGeneration,
+        intent: "launch",
+        authority,
+        launchDigest,
+        restoreAuthorityDigest: "e".repeat(64),
+        profile: await assertDirectory(profile),
+        process: null,
+        directoryLaunchAllowed: true,
+      });
+      const dispatched = journal.latest()!;
+      expect(dispatched.state).toBe("dispatched");
+      // A dispatched restore launch is abandoned only once its profile is gone.
+      expect(await isAbandonedLaunchReceipt(dispatched, profile)).toBe(false);
+      expect(
+        await isAbandonedLaunchReceipt({ ...dispatched, restoreAuthorityDigest: null }, profile),
+      ).toBe(false);
+      const failed = journal.fail(launch, "Bad Code With Secrets?");
+      expect(failed).toMatchObject({
+        state: "failed",
+        process: null,
+        directoryLaunchAllowed: false,
+        failureCode: "internal",
+      });
+      expect(journal.latest()).toEqual(failed);
+      expect(await isAbandonedLaunchReceipt(failed, profile)).toBe(true);
+      expect(() =>
+        assertWorkingRuntimeReceipt(failed, authority, launchDigest, launch.profile),
+      ).toThrow("preserved");
+      // A failed launch is terminal and cannot be completed afterwards.
+      expect(() => journal.complete(launch, null)).toThrow("invalid browser operation transition");
+      // The next launch never inherits a previous failure cause.
+      const next = journal.begin({ ...failed, intent: "launch", process: null });
+      expect(next.failureCode).toBeUndefined();
+      expect(journal.fail(next, "driver_failed").failureCode).toBe("driver_failed");
+      await rm(profile, { recursive: true });
+      expect(await isAbandonedLaunchReceipt(dispatched, profile)).toBe(true);
+      expect(await isAbandonedLaunchReceipt({ ...dispatched, intent: "suspend" }, profile)).toBe(
+        false,
+      );
+    } finally {
+      journal.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("only completed suspension with exact launch authority permits recovery", async () => {
     await withJournal(async ({ journal, receipt }) => {
       const suspended = journal.suspend(receipt);

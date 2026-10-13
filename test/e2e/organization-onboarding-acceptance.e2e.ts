@@ -218,7 +218,9 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
     pathname === "/v1/config/client" ||
     pathname === "/v1/auth/get-session" ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname) ||
-    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft)$/u.test(pathname) ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft|vaults)$/u.test(
+      pathname,
+    ) ||
     // Sending from the new-chat page routes to the new session, which can
     // cancel that session's first composer-draft read.
     /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/composer-draft$/u.test(pathname) ||
@@ -416,7 +418,7 @@ beforeAll(async () => {
     organizationUserSetupEmailTokenTransport: "query",
     organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
-    // Variable sets carry the developer setup key into the setup chat.
+    // Vault values are encrypted; the setup key is saved to the owner's Only-me vault.
     environmentsEncryptionKey: Buffer.alloc(32, 23).toString("base64"),
   });
   const api = createApp({
@@ -1518,8 +1520,8 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     ]);
     const session = await owner.getSession(workspaceId!, sessionId!);
     expect(session.id).toBe(sessionId);
-    // The key reaches the setup chat only through its write-only variable set;
-    // the onboarding context (which names where it is) is durable session data.
+    // The key reaches the setup chat only as a {{secret:}} reference to the owner's
+    // Only-me vault item; the onboarding context (which names it) is durable session data.
     const sessionRows = (pattern: string) => owned!.admin<Array<{ count: number }>>`
       select (
         (select count(*) from session_events e where e.session_id = ${sessionId}
@@ -1532,15 +1534,18 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
            and row_to_json(s)::text like ${pattern})
       )::int as count`;
     expect((await sessionRows(`%${token}%`))[0]?.count).toBe(0);
-    expect(
-      (await sessionRows("%DEVELOPER_SETUP_API_KEY environment variable%"))[0]?.count,
-    ).toBeGreaterThan(0);
-    const variableSets = await owner.listVariableSets(workspaceId!);
-    expect(
-      variableSets.map((set) => [set.name, set.variables.map((variable) => variable.name)]),
-    ).toEqual([["Opengeni developer setup", ["DEVELOPER_SETUP_API_KEY"]]]);
-    expect(JSON.stringify(variableSets)).not.toContain(token);
-    expect((await sessionRows(`%${variableSets[0]!.id}%`))[0]?.count).toBeGreaterThan(0);
+    expect((await sessionRows("%{{secret:Opengeni setup API key}}%"))[0]?.count).toBeGreaterThan(0);
+    const vaults = owner.vaults(workspaceId!);
+    const privateVaults = (await vaults.listVaults()).filter((vault) => vault.ownerKind === "user");
+    const setupItems = (
+      await Promise.all(
+        privateVaults.map(async (vault) => (await vaults.listItems(vault.id)).items),
+      )
+    ).flat();
+    expect(setupItems.map((item) => [item.name, item.type])).toEqual([
+      ["Opengeni setup API key", "api_key"],
+    ]);
+    expect(JSON.stringify(setupItems)).not.toContain(token);
     expect((await sessionRows("%builtin:opengeni-client%"))[0]?.count).toBeGreaterThan(0);
     await page.screenshot({
       path: `${EVIDENCE_DIR}/onboarding-developer-setup-chat-1440.png`,

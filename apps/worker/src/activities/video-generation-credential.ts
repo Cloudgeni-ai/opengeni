@@ -1,17 +1,7 @@
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "@opengeni/db";
-import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 
 export type VideoGenerationProviderCredential =
   | Readonly<{ kind: "api-key"; apiKey: string }>
-  | Readonly<{
-      kind: "xai-subscription";
-      accessToken: string;
-      refreshToken: string;
-      userId: string;
-      credentialId: string;
-      subjectId: string;
-      authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-    }>
   /**
    * A subscription-core funded operation (after the provider's cutover
    * receipt): a reference to the canonical connection, no token material.
@@ -26,25 +16,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function encryptVideoGenerationApiKey(key: Uint8Array, apiKey: string): string {
   if (!apiKey.trim()) throw new Error("Video provider credential is empty");
   return encryptEnvironmentValue(key, JSON.stringify({ kind: "api-key", apiKey }));
-}
-
-export function encryptVideoGenerationXaiCredential(
-  key: Uint8Array,
-  credential: Omit<
-    Extract<VideoGenerationProviderCredential, { kind: "xai-subscription" }>,
-    "kind"
-  >,
-): string {
-  if (
-    !credential.accessToken.trim() ||
-    !credential.refreshToken.trim() ||
-    !credential.userId.trim() ||
-    !credential.credentialId.trim() ||
-    !credential.subjectId.trim()
-  ) {
-    throw new Error("SuperGrok video credential is incomplete");
-  }
-  return encryptEnvironmentValue(key, JSON.stringify({ kind: "xai-subscription", ...credential }));
 }
 
 export function encryptVideoGenerationConnectionReference(
@@ -109,39 +80,9 @@ export function decryptVideoGenerationCredential(
       connectionId: row.connectionId,
     });
   }
-  const authority =
-    row?.authoritySnapshot &&
-    typeof row.authoritySnapshot === "object" &&
-    !Array.isArray(row.authoritySnapshot)
-      ? (row.authoritySnapshot as Record<string, unknown>)
-      : null;
-  if (
-    row?.kind !== "xai-subscription" ||
-    typeof row.accessToken !== "string" ||
-    !row.accessToken.trim() ||
-    typeof row.refreshToken !== "string" ||
-    !row.refreshToken.trim() ||
-    typeof row.userId !== "string" ||
-    !row.userId.trim() ||
-    typeof row.credentialId !== "string" ||
-    !row.credentialId.trim() ||
-    typeof row.subjectId !== "string" ||
-    !row.subjectId.trim() ||
-    authority?.version !== 1 ||
-    (authority.scope !== "workspace" && authority.scope !== "user") ||
-    (authority.scope === "user" && !Number.isSafeInteger(authority.authorityGeneration))
-  ) {
-    throw new Error("Video provider credential lease is malformed");
-  }
-  return Object.freeze({
-    kind: "xai-subscription",
-    accessToken: row.accessToken,
-    refreshToken: row.refreshToken,
-    userId: row.userId,
-    credentialId: row.credentialId,
-    subjectId: row.subjectId,
-    authoritySnapshot: authority as XaiProviderAccountAuthoritySnapshotV1,
-  });
+  // Anything else, including a legacy token envelope that the SuperGrok
+  // cutover did not re-encode, is refused: no token material is decoded.
+  throw new Error("Video provider credential lease is malformed");
 }
 
 export function decryptVideoGenerationApiKey(key: Uint8Array, stored: string): string {

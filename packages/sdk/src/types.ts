@@ -46,7 +46,8 @@ export type BundledSkillId =
   | "builtin:opengeni-spreadsheets"
   | "builtin:opengeni-presentations"
   | "builtin:opengeni-sites"
-  | "builtin:opengeni-video-generation";
+  | "builtin:opengeni-video-generation"
+  | "builtin:opengeni-secrets";
 
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
@@ -1513,7 +1514,6 @@ export type ForkSessionRequest = {
   visibility: SessionVisibility;
   workspaceSharedAcknowledged: boolean;
   rigId?: string | null | undefined;
-  variableSetIds?: string[] | undefined;
 };
 
 export type ForkSessionResponse = {
@@ -1643,10 +1643,11 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** Ordered low-to-high precedence; the final entry is the legacy singular alias. */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
   variableSetIds?: string[] | undefined;
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   variableSetId: string | null;
-  /** @deprecated use variableSetId */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
@@ -2134,7 +2135,57 @@ export type SessionTurn = {
   updatedAt: string;
 };
 
-export type HumanInputQuestionKind = "text" | "single_select" | "multi_select";
+export type HumanInputQuestionKind = "text" | "single_select" | "multi_select" | "secret";
+
+/** Options for a generated password (see `@opengeni/contracts` GeneratePasswordSpec). */
+export type GeneratePasswordSpec = {
+  length?: number | undefined;
+  lowercase?: boolean | undefined;
+  uppercase?: boolean | undefined;
+  digits?: boolean | undefined;
+  symbols?: boolean | undefined;
+  symbolSet?: string | undefined;
+  excludeAmbiguous?: boolean | undefined;
+  requireEachClass?: boolean | undefined;
+};
+
+export type HumanInputSecretSaveTo = "user" | "task" | "workspace";
+
+/** A secret question's spec; the value is saved to a vault, never to the response. */
+export type HumanInputSecretSpec = {
+  item: string;
+  field?: string | undefined;
+  fieldKind?: "concealed" | "totp" | "text" | undefined;
+  itemType?: "login" | "api_key" | "note" | undefined;
+  username?: { prompt: string; value?: string | null | undefined } | null | undefined;
+  website?: string | null | undefined;
+  looksLike?: string | null | undefined;
+  pattern?: string | null | undefined;
+  saveTo?: HumanInputSecretSaveTo | undefined;
+  vault?: string | null | undefined;
+  allowGenerate?: boolean | undefined;
+  generate?: GeneratePasswordSpec | null | undefined;
+  autocomplete?: "current-password" | "new-password" | "one-time-code" | "off" | undefined;
+};
+
+/** Write-only secret value for one secret question: exactly one of `value` or `generate`. */
+export type HumanInputSecretAnswer = {
+  questionId: string;
+  value?: string | undefined;
+  generate?: GeneratePasswordSpec | undefined;
+  username?: string | undefined;
+  saveTo: HumanInputSecretSaveTo;
+  vaultId?: string | undefined;
+};
+
+/** What the agent and timeline see for an answered secret question. */
+export type HumanInputSecretAnswerResult = {
+  reference: string;
+  username: string | null;
+  vaultName: string;
+  itemName: string;
+  saveTo: HumanInputSecretSaveTo;
+};
 
 export type HumanInputOption = {
   id: string;
@@ -2159,6 +2210,8 @@ export type HumanInputQuestion = {
   label?: string | null | undefined;
   helpText?: string | null | undefined;
   options: HumanInputOption[];
+  /** Required exactly when `kind` is "secret"; null otherwise. */
+  secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
   allowOther: boolean;
   validation?:
@@ -2174,6 +2227,8 @@ export type HumanInputAnswer = {
   questionId: string;
   values: string[];
   other?: string | null | undefined;
+  /** Secret questions: the saved reference, never the value. */
+  secret?: HumanInputSecretAnswerResult | undefined;
 };
 
 export type HumanInputResponse =
@@ -2181,7 +2236,12 @@ export type HumanInputResponse =
   | { outcome: "skipped" | "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
-  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | {
+      outcome: "answered";
+      answers: HumanInputAnswer[];
+      /** Write-only secret values; never echoed in events or responses. */
+      secretAnswers?: HumanInputSecretAnswer[] | undefined;
+    }
   | { outcome: "skipped" };
 
 export type SessionHumanInputRequest = {
@@ -2321,6 +2381,8 @@ export const SESSION_EVENT_TYPES = [
   "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  "subscription.account.selected",
+  "subscription.account.switched",
   "codex.account.selection.changed",
   // A person chose the session's account (any provider) or returned it to
   // automatic placement.
@@ -3300,11 +3362,14 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
   variableSetId: string | null;
-  /** @deprecated use variableSetId */
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
   environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
+  /** Vaults every run may resolve secret references from (the task vault is always included). */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -3451,11 +3516,6 @@ export type CreateSessionRequest = {
   // Host working directory for a connected-machine target (the agent runs here;
   // default = the machine's launch dir). Ignored for managed sandboxes.
   workingDir?: string | undefined;
-  /** Ordered low-to-high precedence; later sets win name collisions. */
-  variableSetIds?: string[] | undefined;
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
   // The rig to bind this session to (M3). Its active version is frozen onto the
   // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
   rigId?: string | undefined;
@@ -3553,6 +3613,7 @@ export const KNOWN_PERMISSIONS = [
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "codemode:call",
   "goals:manage",
@@ -3678,6 +3739,11 @@ export type FirstPartyMcpToolName =
   | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
+  | "secret_search"
+  | "secret_save"
+  | "secret_get"
+  | "secret_move"
+  | "secret_delete"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -4157,7 +4223,7 @@ export type ModelAccountSettingValues = {
   /** Ordered fallback models for a preferred model. */
   fallbackOrder: Record<string, string[]>;
   personalConnectionsAllowed: boolean;
-  /** Use the person's own account when shared accounts are exhausted (never in background work). */
+  /** Permit a person's opt-in fallback; accepted background work retains its captured authority. */
   personalFallbackAllowed: boolean;
 };
 
@@ -4279,6 +4345,19 @@ export type ModelAccountChoiceOption = {
 
 /** A session's current account, what it may switch to, and the effective personal settings. */
 export type SessionModelAccountChoiceResponse = {
+  /** Last committed placement; neither queued account choices nor unplaced proposals are serving truth. */
+  serving?:
+    | {
+        turnId: string;
+        provider: string;
+        connectionId: string | null;
+        modelId: string;
+        preferredModelId: string;
+        reasoningEffort: ReasoningEffort;
+        latencyMode: LatencyMode;
+      }
+    | null
+    | undefined;
   /** The session's account when it has bindings for one provider only; else null (see `bindings`). */
   binding: {
     provider: string;
@@ -4447,6 +4526,13 @@ export type WorkspaceCodexSubscriptionSource = {
   effectiveSource: "workspace" | "organization" | "disabled";
   workspaceAvailable: boolean;
   organizationAvailable: boolean;
+  /** Some of the workspace's own accounts are not in use here. Absent from older servers. */
+  workspaceSetAside?: boolean;
+  /**
+   * How many organization accounts other than the workspace's own reach this
+   * workspace (accounts limited to chosen people aside). Absent from older servers.
+   */
+  organizationCount?: number;
 };
 
 /**
@@ -4508,6 +4594,11 @@ export type CodexPlanExcludedModel = {
 export type CodexAccount = {
   id: string;
   source?: "workspace" | "organization";
+  /**
+   * Organization list only: shared workspaces that list the account among
+   * their own (it was connected there).
+   */
+  ownInWorkspaceIds?: string[];
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -6413,11 +6504,6 @@ export type UpdateSessionRequest = {
   title: string;
 };
 
-/** Replace the complete ordered low-to-high precedence Variable Set selection. */
-export type UpdateSessionVariableSetsRequest = {
-  variableSetIds: string[];
-};
-
 // --- Operator context controls (/clear, /compact) ----------------------------
 
 /** Outcome of a manual /compact trigger. */
@@ -6504,8 +6590,6 @@ export type NewSessionDraftOptions = {
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
   workingDir?: string | undefined;
-  variableSetIds?: string[] | undefined;
-  variableSetId?: string | undefined;
   rigId?: string | undefined;
   goal?: GoalSpec | undefined;
   firstPartyMcpPermissions?: Permission[] | undefined;
@@ -6879,9 +6963,6 @@ export type CreateAgentScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
-  variableSetId?: string | null | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | null | undefined;
   /**
    * Sandbox Environment each run binds to; its active version is resolved per
    * fire. Omit to resolve it once at create: the workspace default (none for a
@@ -6889,6 +6970,8 @@ export type CreateAgentScheduledTaskRequest = {
    * existing-session task. `null` means none.
    */
   rigId?: string | null | undefined;
+  /** Vault narrowing for every run; omission adds none. */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -6948,11 +7031,10 @@ export type UpdateScheduledTaskRequest = {
       }
     | undefined;
   status?: ScheduledTaskStatus | undefined;
-  variableSetId?: string | null | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | null | undefined;
   // The rig each run binds to (M3); active version resolved per fire.
   rigId?: string | null | undefined;
+  /** Vault narrowing for every run. */
+  vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -7142,85 +7224,6 @@ export type ListScheduledTaskAccessAttentionResponse = {
   tasks: ScheduledTaskAccessAttention[];
 };
 
-// --- VariableSets -------------------------------------------------------------
-
-/** Generic variable-set reads expose name + version metadata only. */
-export type VariableSetVariableMetadata = {
-  name: string;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
-/** Dedicated permissioned plaintext response; never embedded in metadata reads. */
-export type VariableSetSecret = {
-  variableSetId: string;
-  name: string;
-  version: number;
-  value: string;
-};
-
-export type VariableSet = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  scope: "organization" | "workspace" | "user";
-  generation: number;
-  status: "active" | "revoked";
-  name: string;
-  description: string | null;
-  variables: VariableSetVariableMetadata[];
-  createdAt: string;
-  updatedAt: string;
-};
-
-/** Exact-ID attachment metadata; intentionally excludes catalog and secret metadata. */
-export type VariableSetAttachmentMetadata = {
-  id: string;
-  scope: "organization" | "workspace" | "user";
-};
-
-export type ResolveVariableSetAttachmentsRequest = {
-  variableSetIds: string[];
-};
-
-export type ResolveVariableSetAttachmentsResponse = {
-  variableSets: VariableSetAttachmentMetadata[];
-};
-
-/** @deprecated use VariableSetVariableMetadata */
-export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
-
-/** @deprecated use VariableSet */
-export type WorkspaceEnvironment = VariableSet;
-
-export type CreateVariableSetRequest = {
-  /** Omitted remains the legacy workspace-owned path. */
-  scope?: "organization" | "workspace" | "user" | undefined;
-  name: string;
-  description?: string | undefined;
-  /** Initial variables. Values are write-only: they never come back on reads. */
-  variables?: { name: string; value: string }[] | undefined;
-};
-
-/** @deprecated use CreateVariableSetRequest */
-export type CreateWorkspaceEnvironmentRequest = CreateVariableSetRequest;
-
-export type UpdateVariableSetRequest = {
-  name?: string | undefined;
-  description?: string | null | undefined;
-};
-
-/** @deprecated use UpdateVariableSetRequest */
-export type UpdateWorkspaceEnvironmentRequest = UpdateVariableSetRequest;
-
-export type SetVariableSetVariableRequest = {
-  value: string;
-};
-
-/** @deprecated use SetVariableSetVariableRequest */
-export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
-
 // --- Rigs ---------------------------------------------------------------------
 // Workspace-scoped, versioned sandbox machine definitions. Versions are
 // append-only and content-immutable; exactly one is active per rig.
@@ -7272,6 +7275,7 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
+  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
   defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
@@ -7382,7 +7386,6 @@ export type CreateRigRequest = {
   setupScript?: string | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
-  defaultVariableSetIds?: string[] | undefined;
 };
 
 export type UpdateRigRequest = {
@@ -7400,7 +7403,6 @@ export type RigDefinitionEditPayload = {
   setupScript?: string | null | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
-  defaultVariableSetIds?: string[] | undefined;
   changelog?: string | null | undefined;
 };
 
@@ -9860,13 +9862,29 @@ export type DeviceEnrollmentDenyResponse = {
 /** POST /v1/workspaces/:ws/enrollments/token body. */
 export type MintEnrollTokenRequest = {
   allowScreenControl?: boolean;
+  /**
+   * Who can use the machine. `user` makes it the signed-in caller's own
+   * machine (requires a verified person: someone signed in, or a credential
+   * acting as them, such as a personal API key or an organization key acting
+   * `asUser`; a key, service or agent acting as itself gets 422); `workspace`
+   * shares it with this workspace's members. Omitted mints the original
+   * workspace-shared token.
+   */
+  scope?: EnrollTokenScope;
 };
+
+/** Who can use a machine connected with an enroll token. */
+export type EnrollTokenScope = "user" | "workspace";
 
 /** POST /v1/workspaces/:ws/enrollments/token response. The `token` is SECRET. */
 export type MintEnrollTokenResponse = {
   token: string;
   expiresAt: string;
   expiresInSeconds: number;
+  /** What the token grants. Absent from servers that predate scoped tokens,
+   *  which always mint workspace-shared tokens. */
+  scope?: EnrollTokenScope;
+  allowScreenControl?: boolean;
 };
 
 /** The credential payload the headless exchange returns (a subset of the agent's
@@ -9913,6 +9931,8 @@ export type ModelConnectionAccessPolicy = {
    * `allowPersonalWorkspaces: false`.
    */
   allowedPeople?: string[] | null;
+  /** Explicit owner consent to share a personal subscription with the organization. */
+  sharePersonal?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {
@@ -9928,6 +9948,7 @@ export type ModelConnectionAccessResponse = {
   localWorkspaceIds?: string[];
   /** The workspace whose administrators also manage the account, if any. */
   managedByWorkspaceId?: string | null;
+  personalSharingSupported?: boolean;
 };
 
 export type ConnectorToolPermission = "allow" | "ask" | "block";
@@ -10003,6 +10024,7 @@ export type AgentCapabilityId =
   | "schedules"
   | "artifacts"
   | "browser"
+  | "secrets"
   | "media"
   | "workspaceFiles"
   | "workspaceConnectors"
@@ -10021,6 +10043,7 @@ export type AgentCapabilityToggles = {
   schedules?: boolean | undefined;
   artifacts?: boolean | undefined;
   browser?: boolean | undefined;
+  secrets?: boolean | undefined;
   media?: boolean | undefined;
   workspaceFiles?: boolean | undefined;
   workspaceConnectors?: boolean | undefined;
@@ -10045,7 +10068,12 @@ export type AgentConfigRequest = {
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;
   renderer?: AgentRenderer | undefined;
+  /** Vaults this session may use (input only); intersected with the parent's policy. */
+  vaultPolicy?: VaultPolicy | undefined;
 };
+
+/** Which vaults a session or schedule may use (see `@opengeni/contracts` VaultPolicy). */
+export type VaultPolicy = { mode: "all" } | { mode: "selected"; vaultIds: string[] };
 
 export type WorkspaceAgentDefaults = {
   capabilities?: AgentCapabilities | undefined;
@@ -10063,6 +10091,7 @@ export type ResolvedAgentCapabilities = {
   schedules: boolean;
   artifacts: boolean;
   browser: boolean;
+  secrets: boolean;
   media: boolean;
   workspaceFiles: boolean;
   workspaceConnectors: boolean;

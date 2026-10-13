@@ -1,9 +1,4 @@
 import {
-  selectXaiCredentialForUse,
-  materializeXaiCredentialForRun,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  getXaiSessionAccountPin,
-  setXaiSessionAccountPin,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
   getExternalLinkTurnAuthorization,
@@ -29,21 +24,16 @@ import {
 } from "@opengeni/runtime";
 import {
   serviceTierForLatencyMode,
-  environmentsEncryptionKeyBytes,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   resolveModelProvider,
   type Settings,
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
-import {
-  executeCoreXaiImageGeneration,
-  executeXaiSubscriptionImageGeneration,
-} from "../xai-image-generation";
+import { executeCoreXaiImageGeneration } from "../xai-image-generation";
 import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
-  xaiVideoGenerationCredentialLease,
   type VideoGenerationCredentialLease,
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
@@ -77,10 +67,7 @@ import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
 import type { runtimeResourcesForTurn } from "./file-resources";
 import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
-import type {
-  loadWorkspaceEnvironmentForRunWithCredentials,
-  sandboxEnvironmentForRun,
-} from "../environment";
+import type { sandboxEnvironmentForRun } from "../environment";
 import type {
   AttemptIdentityState,
   EventingState,
@@ -91,8 +78,16 @@ import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
+import {
+  attemptQuestionVaultValidator,
+  createAttemptSecretResolver,
+  secretsCapabilityEnabled,
+  type AttemptVaultAccess,
+} from "./secret-resolver";
 
 export type BuildTurnAgentDeps = {
+  /** Connected-vault providers and the shared read budget for this attempt. */
+  vaultAccess: AttemptVaultAccess;
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
@@ -133,7 +128,6 @@ export type BuildTurnAgentDeps = {
   rigName: GovernanceModelOk["rigName"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
-  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
   runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
   sandboxEnvironment: Record<string, string>;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -201,7 +195,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     rigName,
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
-    workspaceVariableSet,
     runtimeResources,
     sandboxEnvironment,
     sandboxArtifactRuntime,
@@ -247,23 +240,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // resolved ONCE at turn start (above) via resolveActiveSandboxBackend (the
   // tested gate) and is reused here — resolving once is correct because the
   // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
-  // buildAgent's option key is `workspaceEnvironment` (internal runtime
-  // symbol; the product concept is a variable set). Built as a TYPED const —
-  // a direct literal assignment to Pick<BuildAgentOptions,...> IS excess-
-  // property-checked, so a wrong key fails tsc. A bare conditional spread
-  // inside the options literal is NOT checked, which is exactly how the M1
-  // key regression (workspaceVariableSet vs workspaceEnvironment) slipped
-  // through and silently dropped the variable-set instructions block.
-  const workspaceEnvironmentOption: Pick<BuildAgentOptions, "workspaceEnvironment"> =
-    workspaceVariableSet
-      ? {
-          workspaceEnvironment: {
-            name: workspaceVariableSet.name,
-            description: workspaceVariableSet.description,
-            variableNames: Object.keys(workspaceVariableSet.values),
-          },
-        }
-      : {};
   // Fallback mode (the default) keeps hosted search exactly as resolved; the
   // operator's `replace` mode withholds it in favour of provider tools.
   const hostedWebSearch = turnWebSearchPlan(
@@ -402,8 +378,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
 
     if (resolvedModel?.provider.kind === "xai-subscription") {
       // A SuperGrok turn placed by the shared core generates images on its own
-      // placed connection under an `image` operation lease; the legacy
-      // credential tables and the session binding are never touched.
+      // placed connection under an `image` operation lease; the session
+      // binding is never touched. A turn without a core placement offers no
+      // image tool (SuperGrok has no legacy path after its cutover).
       const core = providerTurn.xaiSubscriptionCore;
       if (core) {
         const executionGeneration = leases.xai.generation;
@@ -438,38 +415,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           },
         };
       }
-      const imageAuthority = connectedSubscriptionImageGenerationAuthority(
-        providerTurn.xaiRequestContext,
-        providerTurn.effectiveXaiCredentialId,
-      );
-      if (!imageAuthority) return {};
-      return {
-        imageGeneration: {
-          kind: "provider_adapter",
-          execute: async ({ prompt, references }, { toolCallId }) => {
-            const referenceResolution = await resolveImageReferences(references);
-            if (referenceResolution.status === "rejected") return referenceResolution.result;
-            const receipt = await executeXaiSubscriptionImageGeneration({
-              db,
-              objectStorage,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
-              toolCallId,
-              prompt,
-              references: referenceResolution.references,
-              credentialId: imageAuthority.credentialId,
-              xaiContext: imageAuthority.credentialContext,
-              ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
-            });
-            media.rememberGeneratedImageCreatedThisTurn(receipt);
-            await media.materializeGeneratedImage(receipt);
-            return receipt;
-          },
-        },
-      };
+      return {};
     }
 
     const gatewayResolution = resolveModelProvider(
@@ -552,76 +498,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             sessionId: input.sessionId,
           },
         );
-      }
-      const encryptionKey = environmentsEncryptionKeyBytes(eventing.modelRunSettings);
-      const subjectId = leases.xai.subjectId ?? turn.initiatingHumanSubjectId;
-      // A core-placed SuperGrok turn never reaches the legacy credential
-      // tables, the subject's current v1 authority or the legacy session pin,
-      // whatever the route reads now.
-      if (route === "legacy" && !providerTurn.xaiSubscriptionCore && encryptionKey && subjectId) {
-        const authoritySnapshot =
-          providerTurn.xaiAuthoritySnapshot ??
-          (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
-            workspaceId: input.workspaceId,
-            subjectId,
-          }));
-        const pin = await getXaiSessionAccountPin(db, {
-          workspaceId: input.workspaceId,
-          subjectId,
-          sessionId: input.sessionId,
-          turnId: turn.id,
-          authoritySnapshot,
-        });
-        const selected = providerTurn.effectiveXaiCredentialId
-          ? {
-              credentialId: providerTurn.effectiveXaiCredentialId,
-              rotationEnabled: providerTurn.xaiRotationEnabled,
-            }
-          : await selectXaiCredentialForUse(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              authoritySnapshot,
-              shardKey: input.sessionId,
-              pinnedCredentialId: pin?.pinnedCredentialId ?? null,
-              pinSource:
-                pin?.pinSource === "manual" || pin?.pinSource === "policy" ? pin.pinSource : null,
-            });
-        if (selected.credentialId) {
-          if (
-            selected.rotationEnabled &&
-            pin?.pinSource !== "manual" &&
-            pin?.pinnedCredentialId !== selected.credentialId
-          ) {
-            await setXaiSessionAccountPin(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              authoritySnapshot,
-              credentialId: selected.credentialId,
-              pinSource: "policy",
-              expectedVersion: pin?.version ?? null,
-            }).catch((error: unknown) => {
-              if (error instanceof Error && error.message === "xAI session pin changed") return;
-              throw error;
-            });
-          }
-          const credential = await materializeXaiCredentialForRun(db, {
-            workspaceId: input.workspaceId,
-            subjectId,
-            credentialId: selected.credentialId,
-            authoritySnapshot,
-            encryptionKey,
-          });
-          videoGenerationCredential = xaiVideoGenerationCredentialLease({
-            settings: eventing.modelRunSettings,
-            credential,
-            subjectId,
-            authoritySnapshot,
-          });
-        }
       }
     }
   }
@@ -750,10 +626,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     eventing.modelRunSettings.reasoningConfigurationUpdatesEnabled &&
     resolvedModel?.provider.api === "responses" &&
     (resolvedModel.provider.id === "codex" || resolvedModel.provider.id === "openai") &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    );
   const requestReasoningEffort =
     useReasoningUpdates &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort)
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    )
       ? await ensureSessionReasoningConfiguration(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -761,9 +643,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           turnId: turn.id,
           expectedExecutionGeneration: turn.executionGeneration,
           expectedAttemptId: input.attemptId,
-          effort: turn.reasoningEffort,
+          effort: turnExecutionPolicy.reasoningEffort,
         })
-      : turn.reasoningEffort;
+      : turnExecutionPolicy.reasoningEffort;
   const toolRouterInHistory = session.agent
     ? await sessionHasToolRouterHistory(db, {
         accountId: input.accountId,
@@ -808,6 +690,24 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        secrets: {
+          referencesEnabled: secretsCapabilityEnabled(session.agent),
+          // Same rule as the vault context (0739) and session authorization:
+          // the initiating human, else a subject initiator.
+          hasActingHuman: Boolean(
+            turn.initiatingHumanSubjectId ??
+            (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null),
+          ),
+          validateQuestionVault: attemptQuestionVaultValidator({
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+          }),
+        },
         missingSessionTitleHint,
         sandboxEnvironment,
         ...(preparedTools.attemptToolCatalog
@@ -815,6 +715,19 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        // W1: `{{secret:…}}` references resolve at the exec boundary.
+        secretResolver: createAttemptSecretResolver({
+          db,
+          settings: eventing.modelRunSettings,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          executionGeneration: turn.executionGeneration,
+          agent: session.agent,
+          vaultAccess: deps.vaultAccess,
+        }),
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },
@@ -926,7 +839,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
         ...(sessionInstructions ? { sessionInstructions } : {}),
-        ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
         // hooks. All absent for a rig-less turn (byte-for-byte today).

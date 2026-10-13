@@ -7,8 +7,7 @@ import {
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 
-import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
-import { workspaceClaudeSubscriptionActiveForAuthority } from "./claude-subscription-accounts";
+import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
 import {
   subscriptionCoreClaudeCustomModelAdmitted,
@@ -539,7 +538,7 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
         accountId: input.accountId,
         provider: SUBSCRIPTION_CORE_CLAUDE_PROVIDER,
       });
-      if (route === "maintenance") return null;
+      if (route !== "core") return null;
       if (route === "core") {
         if (
           !(await subscriptionCoreClaudeCustomModelAdmitted(scopedDb, {
@@ -548,45 +547,6 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
             upstreamModelId: input.upstreamModelId,
             carrier: claudeAdmissionCarrier(input.claudeAuthority),
           }))
-        )
-          return null;
-      } else {
-        let snapshot: unknown;
-        if ("sessionId" in input.claudeAuthority) {
-          const [session] = await scopedDb
-            .select({ snapshot: schema.sessions.initialClaudeProviderAccountAuthoritySnapshot })
-            .from(schema.sessions)
-            .where(
-              and(
-                eq(schema.sessions.accountId, input.accountId),
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                eq(schema.sessions.id, input.claudeAuthority.sessionId),
-              ),
-            )
-            .limit(1);
-          snapshot = session?.snapshot;
-        } else {
-          snapshot = input.claudeAuthority.authoritySnapshot;
-        }
-        const authority = ClaudeProviderAccountAuthoritySnapshotV1.safeParse(snapshot);
-        if (!authority.success || authority.data.scope !== "organization") return null;
-        // The admission caller already established this transaction's subject.
-        // Do not borrow a session creator or infer a human for a service actor.
-        const [scope] = await rawRows<{ subjectId: string | null }>(
-          scopedDb,
-          sql`select nullif(current_setting('opengeni.subject_id', true), '') as "subjectId"`,
-        );
-        if (
-          !scope?.subjectId ||
-          !(await workspaceClaudeSubscriptionActiveForAuthority(
-            scopedDb,
-            { claudeSubscriptionEnabled: true },
-            {
-              workspaceId: input.workspaceId,
-              subjectId: scope.subjectId,
-              authoritySnapshot: authority.data,
-            },
-          ))
         )
           return null;
       }

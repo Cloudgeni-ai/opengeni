@@ -158,6 +158,8 @@ import {
   useTurnSettleOpen,
 } from "../timeline";
 import { CopyHoverFrame } from "./copy-button";
+import { SecretAnswerChip } from "./secret-ref-chip";
+import { secretAnswerLabel } from "../human-input-model";
 import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
@@ -4525,7 +4527,12 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                         </p>
                       ) : null}
                       <div className={cn("text-og-md text-og-fg", multipleQuestions && "mt-0.5")}>
-                        {answer.values.length > 1 ? (
+                        {answer.secret ? (
+                          <SecretAnswerChip
+                            result={answer.secret}
+                            label={secretAnswerLabel(answer.secret)}
+                          />
+                        ) : answer.values.length > 1 ? (
                           <ul className="list-disc space-y-0.5 pl-5">
                             {answer.values.map((value) => (
                               <li key={`${answer.questionId}-${value}`}>{value}</li>
@@ -4566,7 +4573,11 @@ function humanInputConversationCopyText(item: HumanInputItem, settledLabel: stri
           item.questions.length > 1
             ? `${questionNumberById.get(answer.questionId) ?? index + 1}. `
             : ""
-        }${answer.label}: ${answer.values.join(", ") || "Answered"}`,
+        }${answer.label}: ${
+          answer.secret
+            ? `${secretAnswerLabel(answer.secret)} (${answer.secret.reference})`
+            : answer.values.join(", ") || "Answered"
+        }`,
     )
     .join("\n\n");
   return [questions, `${settledLabel}${answers ? `\n\n${answers}` : ""}`]

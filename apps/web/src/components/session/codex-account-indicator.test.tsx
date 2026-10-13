@@ -16,6 +16,67 @@ const { CodexAccountIndicator } = await import("./codex-account-indicator");
 const { retainSharedQueries } = await import("@/lib/shared-query");
 afterAll(() => GlobalRegistrator.unregister());
 
+test("shared menu hides cached quotas when the Codex adapter reports no live data", async () => {
+  const account = {
+    id: "unavailable",
+    label: "Team Codex",
+    status: "active",
+    plan: "Pro",
+    allocatorEnabled: true,
+    fiveHour: { percent: 10, remaining: 90 },
+    weekly: { percent: 20, remaining: 80 },
+  };
+  const client = Object.assign(fakeClient({}), {
+    listSessionCodexAccounts: async () => ({
+      accounts: [account],
+      currentAccount: account,
+      currentSelection: { credentialId: account.id, waiting: false },
+      pinnedAccountId: null,
+      lastAccountId: account.id,
+      activeAccountId: account.id,
+      settings: {
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+        activeCredentialId: account.id,
+      },
+    }),
+    refreshCodexUsage: async () => ({ usage: { unavailable: { status: "no-data", usage: null } } }),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+          <CodexAccountIndicator
+            workspaceId={WORKSPACE_ID}
+            sessionId="no-data"
+            model="codex/gpt-6-astra"
+            events={[]}
+          />
+        </OpenGeniProvider>,
+      ),
+    );
+    await act(async () =>
+      container
+        .querySelector("button")!
+        .dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false })),
+    );
+    expect(document.body.textContent).toContain("Usage unavailable");
+    expect(document.body.textContent).toContain("Team Codex");
+    expect(document.body.textContent).toContain("Pro");
+    expect(document.body.textContent).not.toContain("% remaining");
+    expect(document.querySelector('[role="progressbar"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-codex_subscription"]'),
+    ).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("running accepted account remains labeled while the switcher offers only the new pool", async () => {
   const client = Object.assign(fakeClient({}), {
     listSessionCodexAccounts: async () => ({
@@ -176,7 +237,9 @@ test("shows the blocked account instead of a healthy default and permits repeati
     const blockedOption = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
       (el) => el.textContent?.includes("Blocked account"),
     );
-    expect(blockedOption?.textContent).toContain("0% remaining");
+    // The selected account's quota is already shown in the summary above.
+    expect(blockedOption).toBeDefined();
+    expect(blockedOption?.textContent).not.toContain("remaining");
     const auto = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) =>
       el.textContent?.includes("Auto"),
     );

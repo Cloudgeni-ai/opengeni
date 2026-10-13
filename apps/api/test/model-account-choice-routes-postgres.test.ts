@@ -3,6 +3,7 @@ import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@o
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
+  appendSessionEvents,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -198,11 +199,14 @@ const network = spyOn(globalThis, "fetch").mockImplementation((async () => {
   throw new Error("Model-account reads must not poll upstream providers");
 }) as unknown as typeof fetch);
 
-async function ownerSession(visibility: "user_private" | "workspace_shared"): Promise<string> {
-  const session = await withSessionRlsActorContext({ subjectId: owner.subjectId }, () =>
+async function ownerSession(
+  visibility: "user_private" | "workspace_shared",
+  actor: Human = owner,
+): Promise<string> {
+  const session = await withSessionRlsActorContext({ subjectId: actor.subjectId }, () =>
     createSession(client!.db, {
-      accountId: owner.accountId,
-      workspaceId: owner.defaultWorkspaceId,
+      accountId: actor.accountId,
+      workspaceId: actor.defaultWorkspaceId,
       initialMessage: "model account choice routes",
       resources: [],
       metadata: {},
@@ -211,8 +215,8 @@ async function ownerSession(visibility: "user_private" | "workspace_shared"): Pr
       latencyMode: "standard",
       sandboxBackend: "none",
       visibility,
-      subjectId: owner.subjectId,
-      createdBy: { kind: "subject" as const, subjectId: owner.subjectId },
+      subjectId: actor.subjectId,
+      createdBy: { kind: "subject" as const, subjectId: actor.subjectId },
       createdByContext: {},
     }),
   );
@@ -241,6 +245,61 @@ afterAll(async () => {
 }, 60_000);
 
 describe.skipIf(!realDb)("model-account choice routes", () => {
+  test("SUB-OWN-06: managed owner explicitly shares through the organization access route, preserving accepted history", async () => {
+    const sharingOwner = await human("sharing-owner");
+    const sharingColleague = await colleagueOf(sharingOwner);
+    const sharingSessionId = await ownerSession("user_private", sharingOwner);
+    const id = crypto.randomUUID(),
+      authorityId = crypto.randomUUID();
+    const [membership] = await shared!.admin<{ id: string }[]>`
+      select id from organization_memberships where account_id = ${sharingOwner.accountId}::uuid
+        and subject_id = ${sharingOwner.subjectId}`;
+    await shared!.admin`insert into organization_user_resource_authorities
+      (id, account_id, organization_membership_id, resource_kind, resource_id, generation, status)
+      values (${authorityId}::uuid, ${sharingOwner.accountId}::uuid, ${membership!.id}::uuid,
+        'subscription_connection', ${id}::uuid, 1, 'active')`;
+    await shared!.admin`insert into subscription_connections
+      (id, account_id, provider, ownership, scope_kind, owner_organization_membership_id,
+        owner_subject_id, authority_id, authority_resource_kind, authority_generation,
+        credential_encrypted, provider_account_id, provider_subject_id)
+      values (${id}::uuid, ${sharingOwner.accountId}::uuid, 'codex', 'personal', 'people',
+        ${membership!.id}::uuid, ${sharingOwner.subjectId}, ${authorityId}::uuid, 'subscription_connection', 1,
+        'fixture-encrypted-envelope', ${`upstream-${id}`}, ${`upstream-person-${id}`})`;
+    const path = `/v1/organizations/${sharingOwner.accountId}/model-connections/codex/${id}/access`;
+    const beforeTurns = await shared!
+      .admin`select * from session_turns where session_id = ${sharingSessionId}::uuid order by id`;
+    const beforeHistory = await shared!
+      .admin`select * from session_history_items where session_id = ${sharingSessionId}::uuid order by id`;
+    const read = await call(sharingOwner, "GET", path);
+    expect(read.status).toBe(200);
+    expect(read.json.personalSharingSupported).toBe(true);
+    expect((await call(stranger, "GET", path)).status).not.toBe(200);
+    expect((await call(sharingColleague, "GET", path)).status).not.toBe(200);
+    const policy = {
+      ...(read.json.policy as Record<string, unknown>),
+      allowedWorkspaces: null,
+      allowPersonalWorkspaces: true,
+      sharePersonal: true,
+    };
+    expect(
+      (await call(sharingOwner, "PUT", path, policy, "https://foreign.example.test")).status,
+    ).toBe(403);
+    expect((await call(sharingOwner, "PUT", path, { ...policy, version: 999 })).status).toBe(409);
+    const write = await call(sharingOwner, "PUT", path, policy);
+    expect(write.status).toBe(200);
+    expect(write.json.version).toBe(2);
+    expect((await call(sharingOwner, "GET", path)).json.personalSharingSupported).not.toBe(true);
+    expect((await call(sharingOwner, "PUT", path, policy)).status).toBe(409);
+    expect(
+      await shared!
+        .admin`select * from session_turns where session_id = ${sharingSessionId}::uuid order by id`,
+    ).toEqual(beforeTurns);
+    expect(
+      await shared!
+        .admin`select * from session_history_items where session_id = ${sharingSessionId}::uuid order by id`,
+    ).toEqual(beforeHistory);
+  }, 60_000);
+
   for (const route of [
     { method: "PUT", suffix: "model-account", body: { connectionId: null } },
     { method: "POST", suffix: "codex-account", body: { target: "auto" } },
@@ -350,6 +409,33 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
     expect([403, 404]).toContain(
       (await call(stranger, "PUT", path, { connectionId: null })).status,
     );
+  });
+
+  test("SUB-FAIL-06 legacy or malformed selection payloads cannot manufacture a serving snapshot", async () => {
+    const path = `/v1/workspaces/${owner.defaultWorkspaceId}/sessions/${sessionId}/model-account`;
+    for (const payload of [
+      { provider: "codex", connectionId: crypto.randomUUID(), modelId: "codex/legacy" },
+      {
+        turnId: crypto.randomUUID(),
+        provider: "codex",
+        connectionId: crypto.randomUUID(),
+        modelId: "codex/uncommitted",
+        preferredModelId: "codex/preferred",
+        reasoningEffort: "high",
+        latencyMode: "standard",
+      },
+    ]) {
+      await appendSessionEvents(client!.db, owner.defaultWorkspaceId, sessionId, [
+        {
+          type: "subscription.account.selected",
+          payload,
+        },
+      ]);
+      const result = await call(owner, "GET", path);
+      expect(result.status).toBe(200);
+      expect(result.json.serving).toBeNull();
+      expect((await call(colleague, "GET", path)).status).toBe(404);
+    }
   });
 
   test("SUB-SEL-02: a person reads and changes only their own personal-fallback opt-in", async () => {

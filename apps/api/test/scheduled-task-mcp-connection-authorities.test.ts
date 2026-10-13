@@ -5,27 +5,21 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { UpdateScheduledTaskRequest, type AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  createValidatedScheduledTask,
-  updateScheduledTaskForApi,
-  validatedScheduledTaskUpdate,
-} from "@opengeni/core";
+import { updateScheduledTaskForApi, validatedScheduledTaskUpdate } from "@opengeni/core";
 import {
   createDb,
   createConnection,
   createOrganizationApiKey,
   createRig,
-  createRigVersion,
   createScheduledTask,
   createSession,
-  createVariableSet,
   getScheduledTask,
   getScheduledTaskCreatorPolicy,
   getSession,
   updateScheduledTask,
-  updateSessionVariableSets,
   type DbClient,
 } from "@opengeni/db";
+import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legacy-variable-sets";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -35,8 +29,6 @@ import {
 import postgres from "postgres";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { CreateScheduledTaskRequest } from "@opengeni/contracts";
-import { scheduledTaskTargetAccessHttpError } from "../src/http/api-error";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -299,71 +291,15 @@ describe("lossless scheduled-task model updates", () => {
     expect(saved.reusableSessionId).toBe(session.id);
   });
 
-  test("materialized message edits check the chat's current Variable Sets", async () => {
-    if (!available) return;
-    const { workspace, task, session, dependencies } = await materializedFixture();
-    const credentials = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "Current chat credentials",
-    });
-    expect(
-      await updateSessionVariableSets(client.db, {
-        ...workspace,
-        sessionId: session.id,
-        variableSets: [credentials],
-      }),
-    ).toMatchObject({ status: "updated" });
-    const validate = (existing: typeof task, grant: AccessGrant) =>
-      validatedScheduledTaskUpdate({
-        ...dependencies,
-        grant,
-        existing,
-        payload: UpdateScheduledTaskRequest.parse({ prompt: "Updated message" }),
-      });
-    await expect(validate(task, grantFor(workspace))).rejects.toMatchObject({ status: 403 });
-    const authorized = {
-      ...grantFor(workspace),
-      permissions: ["scheduled_tasks:manage", "variable-sets:use"] as AccessGrant["permissions"],
-    };
-    expect((await validate(task, authorized)).agentConfig?.prompt).toBe("Updated message");
-
-    // A retired creation binding must not require secret access once the chat
-    // no longer uses it. The task column is retained only as a creation default.
-    const staleTask = await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
-      variableSetId: credentials.id,
-    });
-    expect(
-      await updateSessionVariableSets(client.db, {
-        ...workspace,
-        sessionId: session.id,
-        variableSets: [],
-      }),
-    ).toMatchObject({ status: "updated" });
-    const saved = await updateScheduledTaskForApi(
-      client.db,
-      grantFor(workspace),
-      task.id,
-      await validate(staleTask, grantFor(workspace)),
-    );
-    expect(saved.agentConfig.prompt).toBe("Updated message");
-  });
-
   test("leaving a materialized reusable chat permits new creation attachments", async () => {
     if (!available) return;
     const { workspace, task, session, dependencies } = await materializedFixture();
-    dependencies.settings.environmentsEncryptionKey = Buffer.alloc(32, 9).toString("base64");
-    const credentials = await createVariableSet(client.db, {
-      ...workspace,
-      scope: "workspace",
-      name: "Fresh chat credentials",
-    });
     const rig = await createRig(client.db, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       name: "Fresh chat environment",
       createdBy: workspace.subjectId,
-      initialVersion: { changelog: "v1", defaultVariableSetIds: [credentials.id] },
+      initialVersion: { changelog: "v1" },
     });
     const grant: AccessGrant = { ...grantFor(workspace), permissions: ["workspace:admin"] };
     const validate = (runMode: "reusable_session" | "new_session_per_run") =>
@@ -374,7 +310,6 @@ describe("lossless scheduled-task model updates", () => {
         toolsProvided: true,
         payload: UpdateScheduledTaskRequest.parse({
           runMode,
-          variableSetId: credentials.id,
           rigId: rig.id,
           agentConfig: { prompt: "Fresh run", tools: [] },
         }),
@@ -390,181 +325,11 @@ describe("lossless scheduled-task model updates", () => {
       runMode: "new_session_per_run",
       reusableSessionId: null,
       targetSessionId: null,
-      variableSetId: credentials.id,
+      variableSetId: null,
       rigId: rig.id,
     });
     expect(await getSession(client.db, workspace.workspaceId, session.id)).toEqual(session);
   });
-
-  test.each([
-    ["existing_session", true],
-    ["existing_session", false],
-    ["reusable_session", true],
-    ["reusable_session", false],
-  ] as const)(
-    "%s message edits check pinned environment defaults (pinned secrets=%s)",
-    async (runMode, pinnedSecrets) => {
-      if (!available) return;
-      const workspace = await workspaceFixture();
-      const dependencies = deps(client.db);
-      const credentials = await createVariableSet(client.db, {
-        ...workspace,
-        scope: "workspace",
-        name: "Environment-only credentials",
-      });
-      const rig = await createRig(client.db, {
-        accountId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        name: "Pinned environment",
-        createdBy: workspace.subjectId,
-        initialVersion: {
-          changelog: "Pinned version",
-          defaultVariableSetIds: pinnedSecrets ? [credentials.id] : [],
-        },
-      });
-      const session = await createSession(client.db, {
-        ...workspace,
-        initialMessage: "Pinned chat",
-        resources: [],
-        tools: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        rigId: rig.id,
-        rigVersionId: rig.activeVersion!.id,
-      });
-      // The active version is deliberately opposite: existing chats continue
-      // riding their pinned version, including its separate default sets.
-      await createRigVersion(
-        client.db,
-        workspace.workspaceId,
-        rig.id,
-        {
-          changelog: "New active version",
-          defaultVariableSetIds: pinnedSecrets ? [] : [credentials.id],
-        },
-        { activate: true },
-      );
-      const task = await createScheduledTask(client.db, {
-        ...workspace,
-        name: "Pinned environment message",
-        status: "paused",
-        schedule: { type: "manual" },
-        temporalScheduleId: crypto.randomUUID(),
-        runMode,
-        targetSessionId: session.id,
-        overlapPolicy: "buffer_one",
-        agentConfig: { prompt: "Original message", resources: [], tools: [], metadata: {} },
-        createdBy: { kind: "subject", subjectId: workspace.subjectId },
-        metadata: {},
-      });
-      expect(session.variableSetIds).toEqual([]);
-      expect(task.variableSetId).toBeNull();
-      const grant: AccessGrant = {
-        ...grantFor(workspace),
-        permissions: ["scheduled_tasks:manage", "sessions:control"],
-      };
-      const validate = (usingGrant: AccessGrant) =>
-        validatedScheduledTaskUpdate({
-          ...dependencies,
-          grant: usingGrant,
-          existing: task,
-          payload: UpdateScheduledTaskRequest.parse({ prompt: "Updated environment message" }),
-        });
-      if (pinnedSecrets) await expect(validate(grant)).rejects.toMatchObject({ status: 403 });
-      else expect((await validate(grant)).agentConfig?.prompt).toBe("Updated environment message");
-      const authorized: AccessGrant = {
-        ...grant,
-        permissions: [...grant.permissions, "variable-sets:use"],
-      };
-      const saved = await updateScheduledTaskForApi(
-        client.db,
-        authorized,
-        task.id,
-        await validate(authorized),
-      );
-      expect(saved.agentConfig.prompt).toBe("Updated environment message");
-      if (runMode === "existing_session") {
-        const create = () =>
-          createValidatedScheduledTask({
-            ...dependencies,
-            grant,
-            payload: CreateScheduledTaskRequest.parse({
-              name: "New pinned message",
-              schedule: { type: "manual" },
-              prompt: "Use pinned defaults",
-              targetSessionId: session.id,
-            }),
-          });
-        if (pinnedSecrets) await expect(create()).rejects.toMatchObject({ status: 403 });
-        else expect((await create()).targetSessionId).toBe(session.id);
-      }
-    },
-  );
-
-  test.each(["reusable_session", "new_session_per_run"] as const)(
-    "%s generated message edits check active environment defaults",
-    async (runMode) => {
-      if (!available) return;
-      const workspace = await workspaceFixture();
-      const dependencies = deps(client.db);
-      const credentials = await createVariableSet(client.db, {
-        ...workspace,
-        scope: "workspace",
-        name: "Generated environment credentials",
-      });
-      const rig = await createRig(client.db, {
-        accountId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        name: "Generated environment",
-        createdBy: workspace.subjectId,
-        initialVersion: { changelog: "Initial version", defaultVariableSetIds: [] },
-      });
-      const task = await createScheduledTask(client.db, {
-        ...workspace,
-        name: "Generated environment message",
-        status: "paused",
-        schedule: { type: "manual" },
-        temporalScheduleId: crypto.randomUUID(),
-        runMode,
-        rigId: rig.id,
-        overlapPolicy: "buffer_one",
-        agentConfig: { prompt: "Original message", resources: [], tools: [], metadata: {} },
-        createdBy: { kind: "subject", subjectId: workspace.subjectId },
-        metadata: {},
-      });
-      await createRigVersion(
-        client.db,
-        workspace.workspaceId,
-        rig.id,
-        { changelog: "Uses credentials", defaultVariableSetIds: [credentials.id] },
-        { activate: true },
-      );
-      const grant = grantFor(workspace);
-      const validate = (usingGrant: AccessGrant) =>
-        validatedScheduledTaskUpdate({
-          ...dependencies,
-          grant: usingGrant,
-          existing: task,
-          payload: UpdateScheduledTaskRequest.parse({ prompt: "Updated generated message" }),
-        });
-      await expect(validate(grant)).rejects.toMatchObject({ status: 403 });
-      expect(
-        (await validate({ ...grant, permissions: [...grant.permissions, "variable-sets:use"] }))
-          .agentConfig?.prompt,
-      ).toBe("Updated generated message");
-      await createRigVersion(
-        client.db,
-        workspace.workspaceId,
-        rig.id,
-        { changelog: "No credentials", defaultVariableSetIds: [] },
-        { activate: true },
-      );
-      expect((await validate(grant)).agentConfig?.prompt).toBe("Updated generated message");
-    },
-  );
 
   test.each(["prompt", "agentConfigPatch"] as const)(
     "narrow %s edits reject blank messages before persistence",
@@ -867,24 +632,6 @@ describe("lossless scheduled-task model updates", () => {
     },
   );
 
-  test("model patches retain the Variable Set permission boundary", async () => {
-    if (!available) return;
-    const { workspace, task } = await fixture();
-    await expect(
-      validatedScheduledTaskUpdate({
-        settings: deps(client.db).settings,
-        db: client.db,
-        objectStorage: null,
-        grant: grantFor(workspace),
-        existing: { ...task, variableSetId: crypto.randomUUID() },
-        payload: UpdateScheduledTaskRequest.parse({
-          agentConfigPatch: { reasoningEffort: "high" },
-        }),
-      }),
-    ).rejects.toMatchObject({ status: 403 });
-    expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
-  });
-
   test("a concurrent config edit is not overwritten by the validated model patch", async () => {
     if (!available) return;
     const { workspace, task } = await fixture();
@@ -1007,7 +754,7 @@ describe("first-party MCP scheduled task pinned accounts", () => {
         ...grantFor(workspace),
         permissions: ["scheduled_tasks:manage", "sessions:control", "variable-sets:use"],
       };
-      const variables = await createVariableSet(client.db, {
+      const variables = await createLegacyVariableSet(client.db, {
         ...workspace,
         scope: "workspace",
         name: "Review inputs",
@@ -1201,104 +948,6 @@ describe("first-party MCP scheduled task pinned accounts", () => {
       }),
     ).rejects.toMatchObject({ status: 409 });
   }, 60_000);
-
-  test.each(["existing_session", "reusable_session"] as const)(
-    "moving a %s schedule reports the old chat's attachments through HTTP and MCP",
-    async (runMode) => {
-      if (!available) return;
-      const workspace = await workspaceFixture();
-      const grant = {
-        ...grantFor(workspace),
-        permissions: [
-          "scheduled_tasks:manage",
-          "sessions:control",
-          "variable-sets:use",
-        ] as import("@opengeni/contracts").Permission[],
-      };
-      const variableSet = await createVariableSet(client.db, {
-        ...workspace,
-        scope: "workspace",
-        name: "Review inputs",
-      });
-      const makeChat = (variableSetId: string | null) =>
-        createSession(client.db, {
-          ...workspace,
-          initialMessage: "Review",
-          resources: [],
-          metadata: {},
-          model: "scripted-model",
-          reasoningEffort: "medium",
-          latencyMode: "standard",
-          sandboxBackend: "none",
-          variableSetId,
-        });
-      const [source, target] = await Promise.all([makeChat(variableSet.id), makeChat(null)]);
-      const task =
-        runMode === "existing_session"
-          ? await createValidatedScheduledTask({
-              ...deps(client.db),
-              grant,
-              payload: CreateScheduledTaskRequest.parse({
-                name: "Review",
-                schedule: { type: "manual" },
-                prompt: "Review inputs",
-                targetSessionId: source.id,
-              }),
-            })
-          : await createScheduledTask(client.db, {
-              ...workspace,
-              name: "Review",
-              status: "active",
-              schedule: { type: "manual" },
-              temporalScheduleId: crypto.randomUUID(),
-              runMode,
-              targetSessionId: source.id,
-              overlapPolicy: "buffer_one",
-              agentConfig: { prompt: "Review inputs", resources: [], tools: [], metadata: {} },
-              createdBy: { kind: "subject", subjectId: workspace.subjectId },
-              metadata: {},
-            });
-      if (runMode === "reusable_session") expect(task.reusableSessionId).toBe(source.id);
-      expect(task.variableSetId).toBeNull();
-      const payload = { targetSessionId: target.id, expectedExecutionDigest: task.executionDigest };
-      let conflict: unknown;
-      try {
-        await validatedScheduledTaskUpdate({ ...deps(client.db), grant, existing: task, payload });
-      } catch (error) {
-        conflict = error;
-      }
-      expect(scheduledTaskTargetAccessHttpError(conflict)?.details).toMatchObject({
-        code: "scheduled_target_access_change",
-        removedVariableSetCount: 1,
-        removedVariableSetIds: [variableSet.id],
-        targetSessionId: target.id,
-      });
-      const connected = await connectedClient(buildOpenGeniMcpServer(deps(client.db), grant));
-      try {
-        const result = await connected.client.callTool({
-          name: "scheduled_tasks_update",
-          arguments: { id: task.id, ...payload },
-        });
-        expect(result.isError).toBe(true);
-        expect(JSON.parse(resultText(result)).error.details).toMatchObject({
-          code: "scheduled_target_access_change",
-          removedVariableSetIds: [variableSet.id],
-        });
-        const saved = await connected.client.callTool({
-          name: "scheduled_tasks_update",
-          arguments: { id: task.id, ...payload, adoptSessionSettings: true },
-        });
-        expect(saved.isError).not.toBe(true);
-        expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toMatchObject({
-          targetSessionId: target.id,
-          variableSetId: null,
-        });
-      } finally {
-        await connected.close();
-      }
-    },
-    60_000,
-  );
 
   test("creates an interval task through MCP using the advertised minimal agent input", async () => {
     if (!available) return;

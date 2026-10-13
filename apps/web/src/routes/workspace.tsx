@@ -1,7 +1,7 @@
 // The workspace shell: the Linear-style left rail (brand, org + workspace
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
-import { OpenGeniProvider, useOpenGeni } from "@opengeni/react";
+import { OpenGeniProvider, SecretsUiProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
+import { webSecretsUi } from "@/lib/secrets-ui";
 import { workspaceManagementLocation } from "@/lib/workspace-management-location";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@/components/ui/button";
@@ -554,23 +555,27 @@ function AuthorizedWorkspaceShell({
       }}
     >
       <WorkspaceStreamHealth />
-      {/* Settings mode swaps the rail: workspace and organization settings
+      {/* Secret reference chips and the ask card's Generate use the contracts
+          tokenizer and generator. */}
+      <SecretsUiProvider value={webSecretsUi}>
+        {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
-      {managementLocation ? (
-        <WorkspaceManagementShell
-          workspaceId={workspaceId}
-          workspaceName={activeWorkspace?.name}
-          organizationName={organizationName}
-          location={managementLocation}
-        >
-          {children}
-        </WorkspaceManagementShell>
-      ) : (
-        <RailProvider workspaceId={workspaceId}>
-          <RailShell>{children}</RailShell>
-        </RailProvider>
-      )}
+        {managementLocation ? (
+          <WorkspaceManagementShell
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name}
+            organizationName={organizationName}
+            location={managementLocation}
+          >
+            {children}
+          </WorkspaceManagementShell>
+        ) : (
+          <RailProvider workspaceId={workspaceId}>
+            <RailShell>{children}</RailShell>
+          </RailProvider>
+        )}
+      </SecretsUiProvider>
     </OpenGeniProvider>
   );
 }

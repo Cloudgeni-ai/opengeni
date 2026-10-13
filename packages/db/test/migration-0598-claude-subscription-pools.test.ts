@@ -14,6 +14,7 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -76,11 +77,24 @@ const subscriptionCoreMigrations = [
   "0730_subscription_core_personal_connection_versions.sql",
   // Rekeys the session bindings table from withheld 0642.
   "0733_subscription_session_bindings_per_provider.sql",
+  // Reads and narrows the personal authority routines withheld with 0642/0667.
+  "0749_subscription_shared_personal_choice.sql",
   // Previews the system-update claim rewritten by withheld core migrations.
   "0732_sandbox_maintenance_work_probes.sql",
   // Owner-only routines over the shared connection table from withheld 0642.
   "0735_subscription_core_owned_connection_usage.sql",
+  "0747_subscription_core_xai_cutover.sql",
+  // Extends the capacity waiter table from withheld shared-core migrations.
+  "0750_subscription_waiter_candidates.sql",
+  // Uses the shared connection row type and post-0715 owner routines.
+  "0752_subscription_personal_sharing.sql",
 ] as const;
+// The drained Claude cutover moves the very pools this test characterizes, so
+// it stays recorded as applied and never runs here.
+const claudeCutover = "0748_subscription_core_claude_cutover.sql";
+// The drained retirement drops those pools' routines and requires the Claude
+// receipt: it stays recorded as applied and never runs here either.
+const retirement = "0751_subscription_core_legacy_retirement.sql";
 const key = Buffer.alloc(32, 67);
 const ids = {
   account: randomUUID(),
@@ -135,6 +149,7 @@ beforeAll(async () => {
   await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
   await owner`INSERT INTO schema_migrations(name) VALUES(${migration})`;
   await owner`INSERT INTO schema_migrations(name) SELECT unnest(${subscriptionCoreMigrations}::text[])`;
+  await owner`INSERT INTO schema_migrations(name) VALUES (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql')`;
   await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
   await owner`DELETE FROM schema_migrations WHERE name = ${migration} OR name = ANY(${subscriptionCoreMigrations}::text[])`;
   await owned.admin`INSERT INTO managed_accounts(id, name) VALUES(${ids.account}, 'Subscription migration fixture')`;
@@ -385,6 +400,8 @@ test("cloned capacity waiters retain the enabled xAI tenancy fence and reject un
   expect(posture.every((row) => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
 
   await provisionRoles(owned.adminUrl, { appRole: "opengeni_app", appPassword: owned.appPassword });
+  // The pools run before the retirement, under that release's grants.
+  await restorePreRetirementGrants(owned.adminUrl);
   const url = new URL(owned.adminUrl);
   url.username = "opengeni_app";
   url.password = owned.appPassword;

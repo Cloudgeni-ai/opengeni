@@ -371,6 +371,10 @@ describe("the owner-only routines' predicates (0735)", () => {
   // settings/context matrix below before updating these fingerprints.
   // Sources: live 0707 routines (including their 0715/0727 repairs and both
   // 0728 connect overloads), and the three routines introduced by 0735.
+  // The 0736 shared-chat exception changes only acceptance's body here;
+  // subscription-shared-personal-choice-postgres.test.ts pins its restricted
+  // human/session/connection and mixed-runtime behavior. Administered routines
+  // retain the exact original fingerprints and Personal-workspace-only rules.
   const expectedBodies: Record<string, string> = {
     "opengeni_private.begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)":
       "ae583ca6bf31f1ef2ac97f8be27bfde5daec12c7cd16fba9d5e5d2507926585d",
@@ -387,7 +391,7 @@ describe("the owner-only routines' predicates (0735)", () => {
     "opengeni_private.record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)":
       "dadb5ac909e2986a96f665f317f3c41f576e3b38c2b2ca4216162d12ffd86b2f",
     "opengeni_private.subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)":
-      "61e579c35f316116337f5efdd5c673e413fde7cc0102b12b8187f80fcf10ad2e",
+      "9765ac89bbe2cb5a403999d7bd1494787fb9e502a36ceb790a136d99d7c6058b",
     "opengeni_subscription_internal.subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)":
       "91fd89de0908ef747007c9213dfc9e7939ece79261527e03e4176b8a9e8c1235",
   };

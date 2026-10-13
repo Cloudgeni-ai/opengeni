@@ -348,7 +348,6 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
     "upload",
     "repository",
     "policy",
-    "variable_sets",
     "personal_decision",
     "personal_loading",
   ] as const) {
@@ -646,6 +645,31 @@ test("definitive unsafe retry rejection removes the action", async () => {
   );
 });
 
+test("a permanently unknown tool outcome says what to do instead of still settling", async () => {
+  let sends = 0;
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={async () => {
+        sends += 1;
+        throw new OpenGeniApiError(409, "Unknown tool outcome", {
+          code: "RETRY_TOOL_OUTCOME_UNKNOWN",
+        });
+      }}
+    />,
+  );
+  await act(async () => container.querySelector("button")!.click());
+  expect(sends).toBe(1);
+  // Permanent: the action is removed rather than inviting a retry that can
+  // never succeed, and the copy names the person's next step.
+  expect(container.querySelector("button")).toBeNull();
+  const alert = container.querySelector('[role="alert"]')!.textContent!;
+  expect(alert).not.toContain("settling");
+  expect(alert).toBe(
+    "A tool may already have run, so Retry could repeat it. Check its result, then send a message to continue.",
+  );
+});
+
 for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
   test(`${code} allows explicit retry after the same failure's transient blocker clears`, async () => {
     let sends = 0;
@@ -658,7 +682,9 @@ for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
     );
     await act(async () => container.querySelector("button")!.click());
     expect(container.querySelector('[role="alert"]')!.textContent).toBe(
-      code === "RETRY_PAUSED" ? "This session is paused." : "Earlier work is still settling.",
+      code === "RETRY_PAUSED"
+        ? "This session is paused."
+        : "Earlier work is still settling. Try again in a moment.",
     );
     await act(async () =>
       root!.render(

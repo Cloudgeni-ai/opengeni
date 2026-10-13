@@ -10,7 +10,7 @@ import {
 
 import { managedSelfContextIdentity } from "./managed-self-context";
 import {
-  useFixedResourceScopes,
+  useFixedRigScope,
   usePersonalResourceAttachment,
 } from "./use-personal-resource-attachment";
 
@@ -20,10 +20,9 @@ afterEach(() => document.body.replaceChildren());
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const personalWorkspaceId = "33333333-3333-4333-8333-333333333333";
-const variableSetId = "44444444-4444-4444-8444-444444444444";
 const rigId = "77777777-7777-4777-8777-777777777777";
 const workspace = { id: workspaceId, accountId: organizationId };
-type ResourceKind = "variable_set" | "rig";
+type ResourceKind = "rig" | "connected_machine";
 
 function identity(principal: string) {
   return {
@@ -45,27 +44,11 @@ function identity(principal: string) {
   };
 }
 
-function variableSet(originWorkspaceId = personalWorkspaceId) {
-  return {
-    id: variableSetId,
-    accountId: organizationId,
-    workspaceId: originWorkspaceId,
-    scope: "user" as const,
-    generation: 1,
-    status: "active" as const,
-    name: "Private deploy keys",
-    description: null,
-    variables: [],
-    createdAt: "2026-01-01T00:00:00Z",
-    updatedAt: "2026-01-01T00:00:00Z",
-  };
-}
-
-function rig() {
+function rig(originWorkspaceId = personalWorkspaceId) {
   return {
     id: rigId,
     accountId: organizationId,
-    workspaceId: personalWorkspaceId,
+    workspaceId: originWorkspaceId,
     scope: "user" as const,
     generation: 1,
     status: "active" as const,
@@ -80,10 +63,8 @@ function rig() {
   };
 }
 
-function fixedResource(kind: ResourceKind, scope?: ResourceAuthorityScope | null) {
-  return kind === "variable_set"
-    ? { variableSetId, variableSetScope: scope, rigId: null, connectedMachine: null }
-    : { variableSetId: null, rigId, rigScope: scope, connectedMachine: null };
+function fixedResource(_kind: "rig", scope?: ResourceAuthorityScope | null) {
+  return { rigId, rigScope: scope, connectedMachine: null };
 }
 
 function authorityPage(
@@ -98,7 +79,7 @@ function authorityPage(
           {
             authorityId: "55555555-5555-4555-8555-555555555555",
             resourceKind: kind,
-            resourceId: kind === "variable_set" ? variableSetId : rigId,
+            resourceId: rigId,
             originWorkspaceId,
             generation: 1,
             status: "active" as const,
@@ -115,10 +96,6 @@ function personalClient(input?: {
   failure?: Error | null;
 }): OpenGeniBrowserClient {
   return {
-    listVariableSets: async () => {
-      if (input?.failure) throw input.failure;
-      return input?.active === false ? [] : [variableSet()];
-    },
     listRigs: async () => {
       if (input?.failure) throw input.failure;
       return input?.active === false ? [] : [rig()];
@@ -133,50 +110,40 @@ function personalClient(input?: {
   } as unknown as OpenGeniBrowserClient;
 }
 
-describe("useFixedResourceScopes", () => {
-  test("classifies both fixed resource kinds through exact ordinary catalog reads", async () => {
+describe("useFixedRigScope", () => {
+  test("classifies the fixed Rig through an exact ordinary catalog read", async () => {
     const requested: string[] = [];
     const client = {
-      getVariableSet: async (requestedWorkspaceId: string, requestedId: string) => {
-        requested.push(`variable_set:${requestedWorkspaceId}:${requestedId}`);
-        return { ...variableSet(), scope: "organization" as const };
-      },
       getRig: async (requestedWorkspaceId: string, requestedId: string) => {
         requested.push(`rig:${requestedWorkspaceId}:${requestedId}`);
         return { ...rig(), scope: "workspace" as const };
       },
     } as unknown as OpenGeniBrowserClient;
-    const hook = await renderHook(
-      () => useFixedResourceScopes(client, workspaceId, [variableSetId], rigId),
-      undefined,
-    );
+    const hook = await renderHook(() => useFixedRigScope(client, workspaceId, rigId), undefined);
     await flush();
-    expect(requested).toEqual([
-      `variable_set:${workspaceId}:${variableSetId}`,
-      `rig:${workspaceId}:${rigId}`,
-    ]);
-    expect(hook.result.current).toEqual([["organization"], "workspace"]);
+    expect(requested).toEqual([`rig:${workspaceId}:${rigId}`]);
+    expect(hook.result.current).toBe("workspace");
     await hook.unmount();
   });
 
   test("fails closed to unknown without retaining another route's classification", async () => {
     const client = {
-      getVariableSet: async (requestedWorkspaceId: string) => {
+      getRig: async (requestedWorkspaceId: string) => {
         if (requestedWorkspaceId !== workspaceId) throw new Error("ordinary catalog unavailable");
-        return { ...variableSet(), scope: "user" as const };
+        return { ...rig(), scope: "user" as const };
       },
     } as unknown as OpenGeniBrowserClient;
     const hook = await renderHook(
       ({ routedWorkspaceId }: { routedWorkspaceId: string }) =>
-        useFixedResourceScopes(client, routedWorkspaceId, [variableSetId], null),
+        useFixedRigScope(client, routedWorkspaceId, rigId),
       { routedWorkspaceId: workspaceId },
     );
     await flush();
-    expect(hook.result.current[0]).toEqual(["user"]);
+    expect(hook.result.current).toBe("user");
     await hook.rerender({ routedWorkspaceId: personalWorkspaceId });
-    expect(hook.result.current[0]).toEqual([null]);
+    expect(hook.result.current).toBeNull();
     await flush();
-    expect(hook.result.current[0]).toEqual([null]);
+    expect(hook.result.current).toBeNull();
     await hook.unmount();
   });
 });
@@ -185,10 +152,6 @@ describe("usePersonalResourceAttachment", () => {
   test("discovers personal options without surfacing authority failure when nothing is selected", async () => {
     let calls = 0;
     const client = {
-      listVariableSets: async () => {
-        calls += 1;
-        throw new Error("personal catalog unavailable");
-      },
       listRigs: async () => {
         calls += 1;
         throw new Error("personal catalog unavailable");
@@ -208,7 +171,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: "user:owner",
           managedSelfContext: current.managedSelfContext,
           workspace,
-          fixed: { variableSetId: null, rigId: null, connectedMachine: null },
+          fixed: { rigId: null, connectedMachine: null },
           personalWorkspaceTarget: false,
         }),
       undefined,
@@ -223,21 +186,20 @@ describe("usePersonalResourceAttachment", () => {
   });
 
   test("drops a late owner response after the authenticated principal changes", async () => {
-    let resolveVariable!: (value: ReturnType<typeof authorityPage>) => void;
+    let resolveRigAuthority!: (value: ReturnType<typeof authorityPage>) => void;
     let resolveRig!: (value: ReturnType<typeof authorityPage>) => void;
-    const variablePromise = new Promise<ReturnType<typeof authorityPage>>(
-      (resolve) => (resolveVariable = resolve),
+    const rigAuthorityPromise = new Promise<ReturnType<typeof authorityPage>>(
+      (resolve) => (resolveRigAuthority = resolve),
     );
     const rigPromise = new Promise<ReturnType<typeof authorityPage>>(
       (resolve) => (resolveRig = resolve),
     );
     const client = {
-      listVariableSets: async () => [variableSet()],
-      listRigs: async () => [],
+      listRigs: async () => [rig()],
       listUserResourceAuthorities: async (
         _workspaceId: string,
         options: { resourceKind: string },
-      ) => (options.resourceKind === "variable_set" ? variablePromise : rigPromise),
+      ) => (options.resourceKind === "rig" ? rigAuthorityPromise : rigPromise),
     } as unknown as OpenGeniBrowserClient;
     const hook = await renderHook(
       ({ principal }: { principal: string }) => {
@@ -249,7 +211,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: `user:${principal}`,
           managedSelfContext: principal === "shared-user" ? null : current.managedSelfContext,
           workspace,
-          fixed: { variableSetId, rigId: null, connectedMachine: null },
+          fixed: { rigId, connectedMachine: null },
           personalWorkspaceTarget: false,
         });
       },
@@ -257,8 +219,8 @@ describe("usePersonalResourceAttachment", () => {
     );
     await hook.rerender({ principal: "shared-user" });
     await actRun(() => {
-      resolveVariable(authorityPage(true, "variable_set"));
-      resolveRig(authorityPage(false, "rig"));
+      resolveRigAuthority(authorityPage(true, "rig"));
+      resolveRig(authorityPage(false, "connected_machine"));
     });
     await flush();
     expect(hook.result.current.catalog).toBeNull();
@@ -270,12 +232,11 @@ describe("usePersonalResourceAttachment", () => {
   test("an authoritative refresh that loses the fixed source clears and fences the decision", async () => {
     let active = true;
     const client = {
-      listVariableSets: async () => [variableSet()],
-      listRigs: async () => [],
+      listRigs: async () => [rig()],
       listUserResourceAuthorities: async (
         _workspaceId: string,
         options: { resourceKind: string },
-      ) => authorityPage(active, options.resourceKind as "variable_set" | "rig"),
+      ) => authorityPage(active, options.resourceKind as ResourceKind),
     } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
@@ -287,7 +248,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: "user:owner",
           managedSelfContext: current.managedSelfContext,
           workspace,
-          fixed: { variableSetId, rigId: null, connectedMachine: null },
+          fixed: { rigId, connectedMachine: null },
           personalWorkspaceTarget: false,
         }),
       undefined,
@@ -332,10 +293,9 @@ describe("usePersonalResourceAttachment", () => {
     await hook.unmount();
   });
 
-  test("recognizes a personal Variable Set created outside the Personal workspace", async () => {
+  test("recognizes a personal Rig created outside the Personal workspace", async () => {
     const client = {
-      listVariableSets: async () => [variableSet(workspaceId)],
-      listRigs: async () => [],
+      listRigs: async () => [rig(workspaceId)],
       listUserResourceAuthorities: async (
         _workspaceId: string,
         options: { resourceKind: ResourceKind },
@@ -352,9 +312,8 @@ describe("usePersonalResourceAttachment", () => {
           managedSelfContext: current.managedSelfContext,
           workspace,
           fixed: {
-            variableSetId,
-            variableSetScope: "user",
-            rigId: null,
+            rigId,
+            rigScope: "user",
             connectedMachine: null,
           },
           personalWorkspaceTarget: false,
@@ -363,9 +322,7 @@ describe("usePersonalResourceAttachment", () => {
     );
     await flush();
     expect(hook.result.current.error).toBeNull();
-    expect(hook.result.current.selected.variableSets.map((resource) => resource.id)).toEqual([
-      variableSetId,
-    ]);
+    expect(hook.result.current.selected.rigs.map((resource) => resource.id)).toEqual([rigId]);
     expect(hook.result.current.selected.resourceCount).toBe(1);
     expect(hook.result.current.requiresDecision).toBe(false);
     expect(hook.result.current.intent?.mode).toBe("session");
@@ -383,21 +340,20 @@ describe("usePersonalResourceAttachment", () => {
       const sessionReload = new Promise<void>((resolve) => {
         resolveSessionReload = resolve;
       });
-      let variableSetLoads = 0;
-      let resolveUpdatedCatalog!: (resources: ReturnType<typeof variableSet>[]) => void;
-      const updatedCatalog = new Promise<ReturnType<typeof variableSet>[]>((resolve) => {
+      let rigLoads = 0;
+      let resolveUpdatedCatalog!: (resources: ReturnType<typeof rig>[]) => void;
+      const updatedCatalog = new Promise<ReturnType<typeof rig>[]>((resolve) => {
         resolveUpdatedCatalog = resolve;
       });
       const client = {
-        listVariableSets: async () => {
-          variableSetLoads += 1;
-          return variableSetLoads >= 3 ? await updatedCatalog : [variableSet()];
+        listRigs: async () => {
+          rigLoads += 1;
+          return rigLoads >= 3 ? await updatedCatalog : [rig()];
         },
-        listRigs: async () => [],
         listUserResourceAuthorities: async (
           _workspaceId: string,
           options: { resourceKind: string },
-        ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+        ) => authorityPage(true, options.resourceKind as ResourceKind),
       } as unknown as OpenGeniBrowserClient;
       const current = identity("owner");
       const hook = await renderHook(
@@ -418,7 +374,7 @@ describe("usePersonalResourceAttachment", () => {
                 fork: null,
               },
             },
-            fixed: { variableSetId, rigId: null, connectedMachine: null },
+            fixed: { rigId, connectedMachine: null },
             personalWorkspaceTarget: false,
             onReloadSession: async () => {
               sessionReloads += 1;
@@ -458,11 +414,11 @@ describe("usePersonalResourceAttachment", () => {
       expect(hook.result.current.intent).toBeUndefined();
       // The new authority epoch starts catalog discovery. The prior recovery
       // timer may already have settled; loading must fence either ordering.
-      expect(variableSetLoads).toBe(3);
+      expect(rigLoads).toBe(3);
       expect(hook.result.current.loading).toBe(true);
       expect(hook.result.current.requiresDecision).toBe(true);
 
-      await actRun(() => resolveUpdatedCatalog([variableSet()]));
+      await actRun(() => resolveUpdatedCatalog([rig()]));
       await flush();
       expect(hook.result.current.mode).toBe("session");
       expect(hook.result.current.intent).toMatchObject({
@@ -481,17 +437,16 @@ describe("usePersonalResourceAttachment", () => {
     const sessionReload = new Promise<void>((resolve) => {
       resolveSessionReload = resolve;
     });
-    let variableSetLoads = 0;
+    let rigLoads = 0;
     const client = {
-      listVariableSets: async () => {
-        variableSetLoads += 1;
-        return variableSetLoads >= 3 ? [] : [variableSet()];
+      listRigs: async () => {
+        rigLoads += 1;
+        return rigLoads >= 3 ? [] : [rig()];
       },
-      listRigs: async () => [],
       listUserResourceAuthorities: async (
         _workspaceId: string,
         options: { resourceKind: string },
-      ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+      ) => authorityPage(true, options.resourceKind as ResourceKind),
     } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
@@ -512,7 +467,7 @@ describe("usePersonalResourceAttachment", () => {
               fork: null,
             },
           },
-          fixed: { variableSetId, rigId: null, connectedMachine: null },
+          fixed: { rigId, connectedMachine: null },
           personalWorkspaceTarget: false,
           onReloadSession: async () => await sessionReload,
         }),
@@ -546,12 +501,11 @@ describe("usePersonalResourceAttachment", () => {
   test("a stale-authority reload that does not advance the projection stays retryable", async () => {
     let sessionReloads = 0;
     const client = {
-      listVariableSets: async () => [variableSet()],
-      listRigs: async () => [],
+      listRigs: async () => [rig()],
       listUserResourceAuthorities: async (
         _workspaceId: string,
         options: { resourceKind: string },
-      ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+      ) => authorityPage(true, options.resourceKind as ResourceKind),
     } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
@@ -572,7 +526,7 @@ describe("usePersonalResourceAttachment", () => {
               fork: null,
             },
           },
-          fixed: { variableSetId, rigId: null, connectedMachine: null },
+          fixed: { rigId, connectedMachine: null },
           personalWorkspaceTarget: false,
           onReloadSession: async () => {
             sessionReloads += 1;
@@ -611,7 +565,6 @@ describe("usePersonalResourceAttachment", () => {
   test("a selected personal Connected Machine automatically authorizes ongoing work", async () => {
     const enrollmentId = "99999999-9999-4999-8999-999999999999";
     const client = {
-      listVariableSets: async () => [],
       listRigs: async () => [],
       listUserResourceAuthorities: async (
         _workspaceId: string,
@@ -646,7 +599,6 @@ describe("usePersonalResourceAttachment", () => {
           managedSelfContext: current.managedSelfContext,
           workspace,
           fixed: {
-            variableSetId: null,
             rigId: null,
             connectedMachine: { enrollmentId, name: "Owner Mac" },
           },
@@ -667,8 +619,8 @@ describe("usePersonalResourceAttachment", () => {
     await hook.unmount();
   });
 
-  for (const kind of ["variable_set", "rig"] as const) {
-    const label = kind === "variable_set" ? "Variable Set" : "Rig";
+  for (const kind of ["rig"] as const) {
+    const label = "Rig";
 
     for (const scope of ["organization", "workspace"] as const) {
       test(`${scope} ${label} never exposes a Personal catalog failure`, async () => {
@@ -781,10 +733,6 @@ describe("usePersonalResourceAttachment", () => {
       let calls = 0;
       const current = identity("owner");
       const client = {
-        listVariableSets: async () => {
-          calls += 1;
-          throw new Error("must remain inert");
-        },
         listRigs: async () => {
           calls += 1;
           throw new Error("must remain inert");
@@ -819,10 +767,6 @@ describe("usePersonalResourceAttachment", () => {
     test(`personal ${label} refresh failure retains identity and fences submission`, async () => {
       let failure: Error | null = null;
       const client = {
-        listVariableSets: async () => {
-          if (failure) throw failure;
-          return [variableSet()];
-        },
         listRigs: async () => {
           if (failure) throw failure;
           return [rig()];
@@ -865,10 +809,6 @@ describe("usePersonalResourceAttachment", () => {
     test(`personal ${label} retry clears the failure and restores the decision`, async () => {
       let failing = true;
       const client = {
-        listVariableSets: async () => {
-          if (failing) throw new Error("initial failure");
-          return [variableSet()];
-        },
         listRigs: async () => {
           if (failing) throw new Error("initial failure");
           return [rig()];
@@ -912,12 +852,11 @@ describe("usePersonalResourceAttachment", () => {
 
   test("disabling the managed-sandbox attachment lane clears a hidden decision", async () => {
     const client = {
-      listVariableSets: async () => [variableSet()],
-      listRigs: async () => [],
+      listRigs: async () => [rig()],
       listUserResourceAuthorities: async (
         _workspaceId: string,
         options: { resourceKind: string },
-      ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+      ) => authorityPage(true, options.resourceKind as ResourceKind),
     } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
@@ -929,7 +868,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: "user:owner",
           managedSelfContext: current.managedSelfContext,
           workspace,
-          fixed: { variableSetId, rigId: null, connectedMachine: null },
+          fixed: { rigId, connectedMachine: null },
           personalWorkspaceTarget: false,
           enabled,
         }),

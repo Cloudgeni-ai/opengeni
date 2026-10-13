@@ -39,7 +39,14 @@ const EMPTY: SubscriptionPersonalAuthorityV2 = { version: 2, personal: [] };
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1");
+  shared = await acquireSharedTestDatabase("subscription-core-codex-v2-carriers-v1", {
+    // A Codex-only world: the drained SuperGrok and Claude cutovers would write receipts.
+    withheldMigrations: [
+      "0747_subscription_core_xai_cutover.sql",
+      "0748_subscription_core_claude_cutover.sql",
+      "0751_subscription_core_legacy_retirement.sql",
+    ],
+  });
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
 }, 180_000);

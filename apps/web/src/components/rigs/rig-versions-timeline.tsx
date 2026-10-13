@@ -19,14 +19,12 @@ import type { RigCheck, RigVersion } from "@/types";
 export function RigVersionsTimeline({
   versions,
   activeVersionId,
-  variableSetName,
   canManage,
   mutating,
   onActivate,
 }: {
   versions: RigVersion[];
   activeVersionId: string | null;
-  variableSetName: (id: string) => string;
   canManage: boolean;
   mutating: boolean;
   onActivate: (versionId: string) => Promise<unknown>;
@@ -80,7 +78,7 @@ export function RigVersionsTimeline({
               onOpen={() => setOpen((current) => (current === version.id ? null : version.id))}
               panel={
                 <DetailInline>
-                  <VersionContent version={version} variableSetName={variableSetName} />
+                  <VersionContent version={version} />
                 </DetailInline>
               }
             />
@@ -111,13 +109,7 @@ export function RigVersionsTimeline({
   );
 }
 
-function VersionContent({
-  version,
-  variableSetName,
-}: {
-  version: RigVersion;
-  variableSetName: (id: string) => string;
-}) {
+function VersionContent({ version }: { version: RigVersion }) {
   return (
     <div className="px-4 [&>section+section]:border-t [&>section+section]:border-border">
       <DetailSection title="Setup script">
@@ -126,13 +118,6 @@ function VersionContent({
       <DetailSection title="Checks">
         <CheckList checks={version.checks} />
       </DetailSection>
-      {version.defaultVariableSetIds.length > 0 ? (
-        <DetailSection title="Default variable sets">
-          <p className="text-sm leading-5 text-fg">
-            {version.defaultVariableSetIds.map(variableSetName).join(", ")}
-          </p>
-        </DetailSection>
-      ) : null}
     </div>
   );
 }

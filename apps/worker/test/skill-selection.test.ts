@@ -141,7 +141,7 @@ test("schedule creation discovers readable guidance without optional dependencie
   for (const tool of [
     "scheduled_tasks_list",
     "github_repositories_list",
-    "variable_set_list",
+    "secret_search",
     "capability_catalog_search",
     "scheduled_tasks_create",
   ])
@@ -167,4 +167,42 @@ test("schedule guidance respects the configured workflow and host exclusions", (
       bundledSkillIds: ["builtin:opengeni-schedules"],
     }).map((entry) => entry.id),
   ).toEqual(["builtin:opengeni-schedules"]);
+});
+
+test("secrets guidance follows the selected secret_search tool and host selection", () => {
+  const context = { firstPartyTools: ["secret_search"], videoGenerationEnabled: false };
+  expect(configuredBundledSkillNames(context)).toContain("opengeni-secrets");
+  const selected = loadConfiguredBundledSkills(context).find(
+    (entry) => entry.id === "builtin:opengeni-secrets",
+  )!;
+  expect(selected).toBeDefined();
+  const paths = selected.artifact.files.map((file) => file.path).sort();
+  expect(paths).toEqual([
+    "SKILL.md",
+    "references/2fa-enrollment.md",
+    "references/account-creation.md",
+    "references/api-keys.md",
+    "references/ask-card.md",
+    "references/codemode-and-scripts.md",
+    "references/login-playbook.md",
+    "references/troubleshooting.md",
+  ]);
+  // Capability off: the capability gate removes every secret_* tool first.
+  for (const configuration of [
+    { ...context, firstPartyTools: [] },
+    { ...context, firstPartyTools: ["secret_save", "secret_get"] },
+    { ...context, bundledSkillIds: [] },
+    { ...context, bundledSkillIds: ["builtin:opengeni-help" as const] },
+  ]) {
+    expect(configuredBundledSkillNames(configuration)).not.toContain("opengeni-secrets");
+    expect(loadConfiguredBundledSkills(configuration).map((entry) => entry.id)).not.toContain(
+      "builtin:opengeni-secrets",
+    );
+  }
+  expect(
+    loadConfiguredBundledSkills({
+      ...context,
+      bundledSkillIds: ["builtin:opengeni-secrets"],
+    }).map((entry) => entry.id),
+  ).toEqual(["builtin:opengeni-secrets"]);
 });

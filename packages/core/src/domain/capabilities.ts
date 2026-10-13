@@ -71,6 +71,7 @@ import {
 } from "@opengeni/db/organization-integration-policy";
 
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
+import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 
@@ -134,6 +135,7 @@ export async function buildCapabilityCatalog(input: {
     ...configuredMcpCatalogItems(input.settings),
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
+    onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -1588,6 +1590,52 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
   });
 }
 
+/**
+ * The 1Password tile (design §10.9). Connecting a service account happens in
+ * Settings > Secrets (`POST /connections/1password/install`); its vaults are
+ * then reached through secret references and the secrets tools, not MCP.
+ * Enabled while a workspace-shared 1Password connection is active.
+ */
+function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCatalogItem {
+  const active = connections.filter((connection) => connection.status === "active");
+  const enabled = active.length > 0;
+  return CapabilityCatalogItem.parse({
+    id: "api:1password",
+    kind: "api",
+    source: "built_in",
+    name: "1Password",
+    description:
+      "Connect a 1Password service account so its vaults appear as read-only or read-write secret vaults.",
+    category: "security",
+    tags: ["api", "1password", "password-manager", "secrets", "vaults"],
+    homepageUrl: "https://1password.com",
+    authModel: "service_account_token",
+    providerDomain: "1password.com",
+    surfaceType: "first_party_onepassword",
+    authKind: "api_key",
+    tools: [],
+    runtime: {
+      available: true,
+      notes: "1Password vaults are used through secret references and the secrets tools.",
+    },
+    enabled,
+    enabledReason: enabled
+      ? `${active.length === 1 ? "1Password connection" : `${active.length} 1Password connections`} active`
+      : null,
+    metadata: {
+      connectorMode: "first_party_onepassword",
+      connectionCount: connections.length,
+      planTiers: [
+        ...new Set(
+          connections.map(
+            (connection) => onePasswordConnectionMetadata(connection.metadata)?.planTier,
+          ),
+        ),
+      ].filter(Boolean),
+    },
+  });
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
 ): CapabilityCatalogItem[] {
@@ -1897,9 +1945,9 @@ export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
 ): CapabilityCatalogItem {
-  if (item.surfaceType === "first_party_fiken") {
-    // Fiken is an API item with connection-derived state, not a generic API
-    // installation. Preserve that state before the non-MCP fallback below.
+  if (item.surfaceType === "first_party_fiken" || item.surfaceType === "first_party_onepassword") {
+    // Fiken and 1Password are API items with connection-derived state, not
+    // generic API installations. Preserve that state before the non-MCP fallback below.
     return { ...item, connectionRef: null };
   }
   if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {

@@ -115,6 +115,9 @@ async function actOnNotification(
   );
   const question = request.questions[0];
   if (request.status !== "pending" || request.questions.length !== 1 || !question) return false;
+  // A secret is never typed into a notification: the inline reply is plain
+  // text, so the reply is dropped and the session opens on the secure card.
+  if (question.kind === "secret") return false;
   if (question.kind === "text") {
     await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
       outcome: "answered",

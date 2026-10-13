@@ -337,8 +337,8 @@ export async function prepareGovernanceAndModel(
     // provider-native ID is applied only to fresh creation without
     // changing the logical lease image.
     ...providerImageSettings,
-    openaiModel: turn.model,
-    openaiReasoningEffort: turn.reasoningEffort,
+    openaiModel: turnExecutionPolicy.productModelId,
+    openaiReasoningEffort: turnExecutionPolicy.reasoningEffort,
     sandboxBackend: turn.sandboxBackend,
   };
   const runSettings = await measureTurnStartupPhase(
@@ -410,7 +410,10 @@ export async function prepareGovernanceAndModel(
     runSettings.reasoningConfigurationUpdatesEnabled &&
     providerApi === "responses" &&
     (resolvedModel?.provider.id === "codex" || resolvedModel?.provider.id === "openai") &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    );
   const modelHistoryProjector = async (
     items: Array<Record<string, unknown>>,
     projectionOptions?: Parameters<typeof attachmentProjector>[1],

@@ -405,6 +405,7 @@ try {
       "packages/network",
       "packages/observability",
       "packages/tool-gateway",
+      "packages/vaults",
       "packages/xai-subscription",
     ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),
   );

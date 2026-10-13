@@ -9,14 +9,15 @@ import { renderRuntimeMechanics } from "./runtime-mechanics";
 import { adminModule } from "./modules/admin";
 import { artifactsModule } from "./modules/artifacts";
 import { attachmentsModule } from "./modules/attachments";
-import { rigModule, workspaceEnvironmentModule } from "./modules/environment";
 import { goalsModule } from "./modules/goals";
 import { knowledgeModule } from "./modules/knowledge";
 import { connectedMachineModule } from "./modules/machines";
 import { mediaModule } from "./modules/media";
 import { rendererMarkdownModule } from "./modules/renderer-markdown";
 import { repositoriesModule } from "./modules/repositories";
+import { rigModule } from "./modules/rig";
 import { sandboxModule } from "./modules/sandbox";
+import { secretsModule } from "./modules/secrets";
 import { skillsModule } from "./modules/skills";
 import { subagentsModule } from "./modules/subagents";
 import type {
@@ -37,7 +38,6 @@ export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   sandboxModule,
   connectedMachineModule,
   repositoriesModule,
-  workspaceEnvironmentModule,
   rigModule,
   artifactsModule,
   mediaModule,
@@ -45,6 +45,7 @@ export const AGENT_PROMPT_MODULES: readonly AgentPromptModule[] = [
   subagentsModule,
   knowledgeModule,
   skillsModule,
+  secretsModule,
   adminModule,
   attachmentsModule,
 ];
@@ -90,12 +91,11 @@ export type ComposeModularAgentInstructionsInput = {
 export const MODULAR_LAYER_SEPARATOR = "\n\n";
 
 /**
- * Contract modules whose text depends on the workspace (environment name,
- * variables, sandbox environment) or the turn (attachments). Under the
- * stable-prefix experiment they follow every other module.
+ * Contract modules whose text depends on the workspace (sandbox environment)
+ * or the turn (attachments). Under the stable-prefix experiment they follow
+ * every other module.
  */
 const VOLATILE_CONTRACT_MODULE_IDS: ReadonlySet<AgentPromptModule["id"]> = new Set([
-  "workspace_environment",
   "rig",
   "attachments",
 ]);

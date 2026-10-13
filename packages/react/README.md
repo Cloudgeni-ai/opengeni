@@ -96,6 +96,17 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
+For an account-aware header, `useLastStartedTurnPolicy(sessionId, { events,
+includeServingModel: true })` overlays the latest lease-backed serving receipt
+only when it belongs to the last started turn. This requires the optional
+`getSessionModelAccount` client method. Without the option, the hook continues
+to return the accepted turn policy. Neither mode changes the composer's
+preferred model. `useSessionModelAccount` reads authorized accounts and choices;
+pass `provider` so Automatic resets only that provider's choice. Its optional
+`choice.serving` is the last committed placement, not a queued next-turn choice.
+The timeline renders neutral account-switch events without exposing account
+identity or duplicating provider compatibility events.
+
 `OpenGeniChat` and `SessionConversation` are the default product integration.
 Back them with `createSessionProxyHandler` from `@opengeni/sdk`, mounted on your
 server, and pass its mount as `baseUrl`. No provider, client, or workspace id
@@ -987,10 +998,12 @@ state remains application-owned; durable draft and session state remain in
   "summary" })` returns compact list entries; omit the option for full sessions.
   Scripted clients can omit the summary method and the hook projects full pages
   locally while retaining cancellation and causal read revisions.
-- `useVariableSets()` — workspace variable sets with metadata-only generic
-  reads and create/update/remove/set/delete operations. Dedicated permissioned
-  exact-value reveal is part of the held React/UI train rather than an
-  implicit field on ordinary reads.
+- `useVaults()` / `useVault()` / `useVaultItems()` / `useVaultItem()` /
+  `useVaultFieldVersions()` / `useSessionSecrets()` — vaults, items, field
+  history and a session's vault policy, metadata only. `useVaultsApi()` returns
+  the SDK's `client.vaults(workspaceId)` routes for writes and the one audited
+  `revealField` call; keep revealed values in component state, never in a
+  cache. Variable Sets and `useVariableSets()` were removed in 2.0.0.
 - `useWorkspaces()` — the caller's workspaces with create/update (client-only;
   not bound to the provider's workspace).
 - `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent
@@ -1413,6 +1426,10 @@ nested page. Model changes preserve supported reasoning effort and latency;
 unsupported effort falls back to the new model's default, and unsupported speed
 returns to Standard. Thinking uses inline radio choices and is hidden when the
 model has no adjustable reasoning levels. Availability and Codex-only session restrictions still disable choices.
+
+Use `allowModelOptions={false}` for policies that save only a model identity,
+such as a fallback order. This hides effort and speed controls without changing
+the catalog, payment-source labels, or model eligibility.
 
 The trigger renders immediately; the searchable popover loads when opened. Hosts
 can translate its search, current-selection, empty-result, attachment-warning, and

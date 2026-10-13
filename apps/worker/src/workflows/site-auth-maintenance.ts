@@ -8,7 +8,8 @@ const maintenanceActivity = proxyActivities<Pick<typeof activities, "maintainSit
   },
 );
 
-/** One bounded durable claim/dispatch sweep; the Temporal Schedule owns cadence. */
+/** One bounded durable claim/dispatch sweep over provider-managed (external_provider)
+ * site-auth connections; the Temporal Schedule owns cadence. */
 export async function siteAuthMaintenanceWorkflow(): Promise<void> {
   await maintenanceActivity.maintainSiteAuthConnections();
 }

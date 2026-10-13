@@ -40,6 +40,7 @@ export type SubscriptionAccountPlaces = {
   openAccount: (id: string) => void;
   openConnect: (id?: string) => void;
   openAccess: (id: string) => void;
+  sharePersonal?: ((id: string) => void) | undefined;
   backToList: () => void;
 };
 type AccountSummary = SubscriptionPoolAccount & {
@@ -191,7 +192,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
     workspaceId: pool.workspaceId,
     kind: connectionKind,
     connectionId: account.id,
-    enabled: canEdit,
+    enabled: canEdit && account.scope !== "user",
   });
   const scopeLabel = pool.organizationId
     ? organizationReachLabel(places.scope, access.data)
@@ -310,12 +311,28 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
                   </RowButton>
                 }
               />
-              <ConnectionAccessRows
-                access={access}
-                organization={organization}
-                canManage={canEdit}
-                onEdit={() => places.openAccess(account.id)}
-              />
+              {account.scope !== "user" ? (
+                <ConnectionAccessRows
+                  access={access}
+                  organization={organization}
+                  canManage={canEdit}
+                  onEdit={() => places.openAccess(account.id)}
+                />
+              ) : null}
+              {account.scope === "user" && places.sharePersonal ? (
+                <SettingRow
+                  label="Share with your organization"
+                  description="Choose which workspaces can use this account."
+                  control={
+                    <RowButton
+                      disabled={pool.busy}
+                      onClick={() => places.sharePersonal?.(account.id)}
+                    >
+                      Share account
+                    </RowButton>
+                  }
+                />
+              ) : null}
             </SettingRowGroup>
           </DetailSection>
         ) : (

@@ -3816,8 +3816,28 @@ async function continueSlackSession(
     deps.db,
     interaction.workspaceId,
     interaction.sessionId,
-    { status: "pending", limit: 2 },
+    { status: "pending", limit: 20 },
   );
+  // A secret is answered only in the Opengeni card, which saves it to a vault.
+  // While one is pending, a thread reply is neither an answer nor a message:
+  // it may be the pasted secret itself (AC-5).
+  if (pending.some((request) => hasSecretQuestion(request.questions))) {
+    const client = await createOpenGeniSlackBotInteractionClient(deps, {
+      accountId: entry.accountId,
+      workspaceId: entry.workspaceId,
+      connectionId: entry.connectionId,
+      subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+    });
+    await client.postMessage({
+      operationId: deterministicUuid(`slack-secret-reply-refused:${entry.id}`),
+      channelId: interaction.slackChannelId,
+      threadTimestamp: interaction.slackThreadTs,
+      text: slackSecretAnswerRefusalText(
+        slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId),
+      ),
+    });
+    return;
+  }
   if (pending.length === 1) {
     const response = humanInputResponse(pending[0]!.questions, entry.text);
     if (response) {
@@ -5062,7 +5082,14 @@ async function slackHumanInputCard(
   const operationId = deterministicUuid(
     slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:human-input`),
   );
-  const text = `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
+  const secretUrl = hasSecretQuestion(request.questions)
+    ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+    : null;
+  const text = hasSecretQuestion(request.questions)
+    ? `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\n${
+        secretUrl ? `<${secretUrl}|Answer in Opengeni>` : "Answer in Opengeni"
+      }; secrets are saved to a vault and never posted in Slack${request.allowSkip ? ". You can also choose Skip" : ""}.`
+    : `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
   if (!requesterAuthorized || !interaction.initiatingSlackUserId) return { text, operationId };
   const question = request.questions.length === 1 ? request.questions[0] : null;
   const canUseButtons =
@@ -5981,10 +6008,23 @@ function humanInputResponse(questions: HumanInputQuestion[], text: string) {
   };
 }
 
+function hasSecretQuestion(questions: readonly HumanInputQuestion[]): boolean {
+  return questions.some((question) => question.kind === "secret");
+}
+
+export function slackSecretAnswerRefusalText(sessionUrl: string | null): string {
+  return `This question asks for a secret, so it can only be answered in Opengeni, where it is saved to a vault: ${
+    sessionUrl ? `<${sessionUrl}|answer in Opengeni>` : "open the task in Opengeni"
+  }. Your reply was not sent to the agent; if it contained a password, delete it from Slack.`;
+}
+
 function formatQuestions(questions: HumanInputQuestion[]) {
   return questions
     .slice(0, 5)
     .map((question, index) => {
+      if (question.kind === "secret") {
+        return `${index + 1}. ${boundedOutput(question.prompt)} (secret: answer in Opengeni)`;
+      }
       const options = question.options
         .slice(0, 10)
         .map((option) => option.label)

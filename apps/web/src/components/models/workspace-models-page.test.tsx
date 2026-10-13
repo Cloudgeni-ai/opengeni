@@ -178,6 +178,56 @@ const client = {
     allowedProviders: null,
     allowedModels: null,
   })),
+  getWorkspaceModelAccountSettings: mock(async () => ({
+    workspaceId: "workspace-a",
+    values: {
+      rotation: {},
+      providers: {},
+      crossProviderFailover: false,
+      fallbackOrder: {},
+      personalConnectionsAllowed: true,
+      personalFallbackAllowed: false,
+    },
+    sources: {
+      rotation: "organization",
+      providers: "organization",
+      crossProviderFailover: "organization",
+      fallbackOrder: "organization",
+      personalConnectionsAllowed: "organization",
+      personalFallbackAllowed: "organization",
+    },
+    entrySources: { rotation: {}, providers: {}, fallbackOrder: {} },
+    locked: [],
+    overrides: {
+      rotation: null,
+      providers: null,
+      crossProviderFailover: null,
+      fallbackOrder: null,
+      personalConnectionsAllowed: null,
+      personalFallbackAllowed: null,
+    },
+    version: 0,
+    updatedAt: null,
+    canEdit: true,
+  })),
+  getModelAccountSettingsOverview: mock(async () => ({
+    organization: {
+      organizationId: "organization-a",
+      values: {
+        rotation: {},
+        providers: {},
+        crossProviderFailover: false,
+        fallbackOrder: {},
+        personalConnectionsAllowed: true,
+        personalFallbackAllowed: false,
+      },
+      locked: [],
+      version: 0,
+      updatedAt: null,
+    },
+    workspaces: [],
+    nextCursor: null,
+  })),
   getOrganizationModelProviderConnection: mock(async (): Promise<unknown> => null),
   upsertOrganizationModelProviderConnection: mock(
     async (): Promise<unknown> => ({ id: "org-key", status: "active", version: 1 }),
@@ -323,6 +373,56 @@ GlobalRegistrator.register();
   true;
 
 const { WorkspaceModelsPage } = await import("./workspace-models-page");
+const { codexPoolCopy } = await import("./codex-models");
+
+test("the pool notice names this workspace's kept people-limited copies, in every form", () => {
+  const base = {
+    inUse: "workspace" as const,
+    organizationAvailable: true,
+    organizationCount: 1,
+    canConnect: true,
+  };
+  // None of its own otherwise: work starts only for those people, a warning.
+  expect(
+    codexPoolCopy({ ...base, mode: "workspace", workspaceCount: 0, keptForPeople: ["A", "B"] }),
+  ).toEqual({
+    text: "New Codex work can start only for the people chosen for A and B, kept as this workspace's own. This workspace is set to use only its own accounts.",
+    blocked: true,
+  });
+  expect(
+    codexPoolCopy({
+      ...base,
+      mode: "workspace",
+      workspaceCount: 2,
+      keptForPeople: ["A", "B", "C"],
+    }).text,
+  ).toBe(
+    "New work uses this workspace's Codex accounts. A, B and C, kept as this workspace's own, serve only the people chosen for them. The organization's other account is never used here.",
+  );
+  expect(
+    codexPoolCopy({
+      ...base,
+      mode: "workspace",
+      organizationAvailable: false,
+      workspaceCount: 1,
+      keptForPeople: ["A"],
+    }).text,
+  ).toBe(
+    "New work uses this workspace's Codex account. A, kept as this workspace's own, serves only the people chosen for it.",
+  );
+  expect(
+    codexPoolCopy({
+      ...base,
+      mode: "automatic",
+      organizationCount: 2,
+      workspaceCount: 2,
+      keptForPeople: ["A"],
+    }),
+  ).toEqual({
+    text: "New work uses this workspace's Codex accounts. A, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
+    blocked: false,
+  });
+});
 
 afterAll(() => {
   mock.restore();
@@ -539,6 +639,14 @@ async function render(
 async function cleanup({ container, root }: { container: HTMLElement; root: Root }) {
   await act(async () => root.unmount());
   container.remove();
+}
+
+/** The description under the section titled `title`, or undefined. */
+function sectionDescription(container: HTMLElement, title: string): string | undefined {
+  const section = [...container.querySelectorAll<HTMLElement>("[data-slot=section]")].find(
+    (candidate) => candidate.querySelector("h2, h3")?.textContent === title,
+  );
+  return section?.querySelector("[data-slot=section-description]")?.textContent ?? undefined;
 }
 
 function button(container: HTMLElement, text: string | RegExp): HTMLButtonElement | undefined {
@@ -930,7 +1038,7 @@ describe("Codex pool controls", () => {
     try {
       expect(view.container.querySelector('[role="radiogroup"]')).toBeNull();
       expect(view.container.textContent).toContain(
-        "New work uses this workspace's Codex account. The organization's accounts are set aside while it's connected.",
+        "New work uses this workspace's Codex account. The organization's accounts are set aside while this workspace has its own.",
       );
       expect(button(view.container, "Use automatically")).toBeUndefined();
     } finally {
@@ -1024,6 +1132,27 @@ describe("Codex pool controls", () => {
       expect(client.setCodexRotationSettings).toHaveBeenCalledWith("workspace-a", {
         rotationEnabled: true,
       });
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("core settings provide one rotation control instead of a second legacy provider control", async () => {
+    accounts = {
+      ...accounts,
+      accounts: [codexAccount(), codexAccount({ id: "acct-2", label: "Backup plan" })],
+    };
+    const settings = await client.getWorkspaceModelAccountSettings();
+    client.getWorkspaceModelAccountSettings.mockResolvedValueOnce({
+      ...settings,
+      values: { ...settings.values, rotation: { codex: { mode: "spread" } } },
+    });
+    const view = await render();
+    try {
+      expect(
+        view.container.querySelectorAll('select[aria-label="Codex account rotation"]'),
+      ).toHaveLength(1);
+      expect(button(view.container, "Spread work")).toBeUndefined();
     } finally {
       await cleanup(view);
     }
@@ -1129,6 +1258,58 @@ describe("Codex account page", () => {
       expect(button(view.container, /Disconnect/)).toBeUndefined();
       expect(button(view.container, /Rename/)).toBeUndefined();
       expect(client.getModelConnectionAccess).not.toHaveBeenCalled();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("own accounts are set aside only when the server says some aren't in use", async () => {
+    const SET_ASIDE = "This workspace's Codex accounts";
+    // Its own account, also given to it by the organization, is in use here.
+    const own = codexAccount({ id: "acct-own", label: "Team plan", source: "workspace" });
+    const setAside = async (workspaceSetAside: boolean | undefined) => {
+      accounts = {
+        ...accounts,
+        accounts: [own],
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: true,
+          ...(workspaceSetAside === undefined ? {} : { workspaceSetAside }),
+        },
+      };
+      const view = await render();
+      try {
+        const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
+          (row) => row.textContent ?? "",
+        );
+        expect(rows.filter((row) => row.includes("Team plan"))).toHaveLength(1);
+        return rows.some((row) => row.includes(SET_ASIDE));
+      } finally {
+        await cleanup(view);
+      }
+    };
+    expect(await setAside(false)).toBe(false);
+    expect(await setAside(true)).toBe(true);
+    // An older server without the field follows the pool, as before.
+    expect(await setAside(undefined)).toBe(true);
+  });
+
+  test("the pool notice counts only the workspace's own accounts", async () => {
+    accounts = {
+      ...accounts,
+      accounts: [
+        codexAccount({ id: "acct-own", label: "Team plan", source: "workspace" }),
+        codexAccount({ id: "acct-org", label: "Acme Pro", source: "organization" }),
+      ],
+      source: { ...source, mode: "automatic", effectiveSource: "workspace" },
+    };
+    const view = await render();
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("New work uses this workspace's Codex account.");
+      expect(text).toContain("while this workspace has its own");
     } finally {
       await cleanup(view);
     }
@@ -1337,7 +1518,11 @@ describe("One Models page for the organization and the workspace", () => {
       const text = view.container.textContent ?? "";
       // This workspace's account is in use; the organization's is named and set aside.
       expect(text).toContain("Company plan");
-      expect(text).toContain("Set aside while this workspace has its own");
+      expect(
+        [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find((row) =>
+          row.textContent?.includes("Company plan"),
+        )?.textContent,
+      ).toContain("Set aside");
       expect(text).not.toContain("Shared Codex accounts");
       const orgRow = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")]
         .find((row) => row.textContent?.includes("Company plan"))!
@@ -1346,6 +1531,188 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Company plan");
       expect(view.container.textContent).toContain("Everyone in Acme");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a shared SuperGrok account not in use here gives its reason right after its tag, once its reach is known", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    const grok = (id: string, label: string, scope: "workspace" | "organization") => ({
+      id,
+      label,
+      scope,
+      subject: id,
+      plan: "SuperGrok Heavy",
+      status: "active" as const,
+      active: false,
+      allocatorEnabled: true,
+      allocatorVersion: 1,
+    });
+    const settings = {
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      activeCredentialId: null,
+    };
+    client.listSuperGrokAccounts.mockImplementation(async () => ({
+      accounts: [grok("grok-own", "Design grok", "workspace")],
+      activeAccountId: null,
+      settings,
+    }));
+    client.listOrganizationSuperGrokAccounts.mockImplementation(async () => ({
+      accounts: [
+        grok("grok-org", "Company grok", "organization"),
+        grok("grok-far", "Research grok", "organization"),
+        grok("grok-people", "People grok", "organization"),
+      ],
+      activeAccountId: null,
+      settings,
+    }));
+    const pending: (() => void)[] = [];
+    client.getModelConnectionAccess.mockImplementation(
+      (...args: unknown[]) =>
+        new Promise((resolve) =>
+          pending.push(() =>
+            resolve({
+              policy:
+                (args[0] as { connectionId: string }).connectionId === "grok-far"
+                  ? { ...openPolicy, allowedWorkspaces: ["workspace-b"] }
+                  : (args[0] as { connectionId: string }).connectionId === "grok-people"
+                    ? { ...openPolicy, allowedWorkspaces: [], allowedPeople: ["person-1"] }
+                    : openPolicy,
+              workspaces: [
+                { id: "workspace-a", name: "Design preview" },
+                { id: "workspace-b", name: "Research" },
+              ],
+              models: [],
+              personalWorkspacesSupported: true,
+            }),
+          ),
+        ),
+    );
+    const view = await render();
+    try {
+      await flush();
+      const row = (name: string) =>
+        [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+          (candidate) => candidate.textContent?.includes(name),
+        )!.textContent ?? "";
+      // No reason, guessed tag or usage while its reach loads.
+      expect(row("Company grok")).not.toContain("Set aside");
+      expect(row("Company grok")).not.toContain("Everyone in");
+      expect(row("Company grok")).not.toContain("Not in use");
+      expect(row("People grok")).not.toContain("Set aside");
+      await act(async () => {
+        for (const settle of pending.splice(0)) settle();
+      });
+      await flush();
+      // The reason comes right after the tag and before the plan, so a phone
+      // doesn't cut it off.
+      expect(row("Company grok")).toContain("·Everyone in Acme·Set aside·SuperGrok");
+      expect(row("Research grok")).toContain("·Selected workspaces·Not available here·SuperGrok");
+      // Chosen people's reach isn't a property of the workspace: once read, it
+      // is set aside like any other while this workspace uses its own.
+      expect(row("People grok")).toContain("·Selected people·Set aside·SuperGrok");
+    } finally {
+      await cleanup(view);
+    }
+    // A failed read says so in the tag's place, with no usage guess, and its
+    // named Try again reads it again.
+    const answered = client.getModelConnectionAccess.getMockImplementation()!;
+    client.getModelConnectionAccess.mockImplementation(async () => {
+      throw new Error("Connection request failed");
+    });
+    const failedView = await render();
+    try {
+      await flush();
+      const failedRow = [
+        ...failedView.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+      ].find((candidate) => candidate.textContent?.includes("Company grok"))!;
+      expect(failedRow.textContent).toContain("Couldn't check who can use it·SuperGrok");
+      expect(failedRow.textContent).not.toContain("Everyone in");
+      expect(failedRow.textContent).not.toContain("Not in use");
+      const retry = failedRow.querySelector<HTMLButtonElement>(
+        'button[aria-label="Try again for Company grok"]',
+      )!;
+      expect(retry).not.toBeNull();
+      client.getModelConnectionAccess.mockImplementation(answered);
+      await act(async () => retry.click());
+      await act(async () => {
+        for (const settle of pending.splice(0)) settle();
+      });
+      await flush();
+      expect(failedRow.textContent).toContain("·Everyone in Acme·Set aside·SuperGrok");
+    } finally {
+      client.getModelConnectionAccess.mockImplementation(answered);
+      await cleanup(failedView);
+    }
+  });
+
+  test("an administrator's own organization account: the notice counts the others, its tag waits for its reach, and an access save re-reads both lists", async () => {
+    organizationAdmin = true;
+    const ownAccount = codexAccount({ id: "own-1", label: "Team plan", source: "workspace" });
+    client.requestJson.mockImplementation(async (method: string, path: string) =>
+      method === "GET" && path === "/v1/organizations/organization-a/codex/accounts"
+        ? {
+            ...orgAccounts,
+            accounts: [
+              { ...orgAccounts.accounts[0], ownInWorkspaceIds: [] },
+              { ...ownAccount, source: "organization", ownInWorkspaceIds: ["workspace-a"] },
+            ],
+          }
+        : {},
+    );
+    accounts = {
+      ...accounts,
+      accounts: [ownAccount],
+      source: { ...source, mode: "automatic", effectiveSource: "workspace" },
+    };
+    let resolveAccess: (value: unknown) => void = () => undefined;
+    client.getModelConnectionAccess.mockImplementation(
+      () => new Promise((resolve) => (resolveAccess = resolve)),
+    );
+    const view = await render();
+    try {
+      const text = () => view.container.textContent ?? "";
+      // One organization account besides its own: "account is".
+      expect(text()).toContain(
+        "New work uses this workspace's Codex account. The organization's account is set aside while this workspace has its own.",
+      );
+      const ownRow = () =>
+        [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find((row) =>
+          row.textContent?.includes("Team plan"),
+        )!;
+      // No "<workspace> only" tag while its reach loads: it may be shared wider.
+      expect(ownRow().textContent).not.toContain("Design preview only");
+      expect(ownRow().textContent).not.toContain("Everyone in Acme");
+      expect(ownRow().textContent).not.toContain("Shared by");
+      await act(async () =>
+        resolveAccess({
+          policy: openPolicy,
+          workspaces: [{ id: "workspace-a", name: "Design preview" }],
+          models: [],
+          personalWorkspacesSupported: true,
+          localWorkspaceIds: ["workspace-a"],
+        }),
+      );
+      await flush();
+      expect(ownRow().textContent).toContain("Everyone in Acme");
+
+      // An access save elsewhere re-reads this workspace's and the organization's lists.
+      const workspaceReads = client.listCodexAccounts.mock.calls.length;
+      const organizationReads = () =>
+        client.requestJson.mock.calls.filter(
+          ([method, path]) =>
+            method === "GET" && path === "/v1/organizations/organization-a/codex/accounts",
+        ).length;
+      const before = organizationReads();
+      await act(async () => {
+        window.dispatchEvent(new Event("model-connections-changed"));
+      });
+      await flush();
+      expect(client.listCodexAccounts.mock.calls.length).toBeGreaterThan(workspaceReads);
+      expect(organizationReads()).toBeGreaterThan(before);
     } finally {
       await cleanup(view);
     }
@@ -1451,7 +1818,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
       expect(view.container.textContent).toContain(
-        "Connect it once for Acme, then choose which workspaces can use it.",
+        "Connect it once for Acme, then choose who can use it.",
       );
       // No peer "this workspace only" choice on the picker any more.
       expect(view.container.textContent).not.toContain("Connect for Design preview only");
@@ -1565,6 +1932,44 @@ describe("One Models page for the organization and the workspace", () => {
       );
     } finally {
       await cleanup(view);
+    }
+  });
+
+  test("an organization key whose workspaces leave this one out is not available here, and a Personal workspace says shared workspaces only", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
+      args[1] === "openrouter" ? { status: "active", version: 1 } : null,
+    );
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: { ...openPolicy, allowedWorkspaces: ["workspace-b"], allowPersonalWorkspaces: false },
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    const view = await render();
+    try {
+      await flush();
+      const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
+        (candidate) => candidate.textContent?.includes("OpenRouter"),
+      )!;
+      expect(row.textContent).toContain("Not available here");
+      expect(row.textContent).not.toContain("Not available in");
+    } finally {
+      await cleanup(view);
+    }
+    // Organization keys serve shared workspaces only.
+    personalWorkspace = true;
+    const personal = await render();
+    try {
+      await flush();
+      const row = [
+        ...personal.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+      ].find((candidate) => candidate.textContent?.includes("OpenRouter"))!;
+      expect(row.textContent).toContain("Shared workspaces only");
+    } finally {
+      await cleanup(personal);
+      client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
     }
   });
 
@@ -1750,7 +2155,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
       expect(view.container.textContent).toContain(
-        "Connect it once for Acme, then choose which workspaces can use it.",
+        "Connect it once for Acme, then choose who can use it.",
       );
       // Reached in context (Codex Apps, resets), the workspace's own Connect
       // Codex says what the account will be.
@@ -1875,6 +2280,969 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("an organization without accounts says to connect one, then choose who can use it", async () => {
+    organizationAdmin = true;
+    organizationList = true;
+    accounts = { ...accounts, accounts: [], activeAccountId: null };
+    client.requestJson.mockImplementation(async (method: string, path: string) => {
+      if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+        return { ...orgAccounts, accounts: [], activeAccountId: null };
+      }
+      if (method === "GET") throw new Error(`unexpected read ${path}`);
+      return {};
+    });
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      const empty = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=empty-state]"),
+      ].find((node) => node.textContent?.includes("No accounts connected"));
+      expect(empty).toBeDefined();
+      expect(empty!.textContent).toContain(
+        "Connect a subscription or an API key, then choose who can use it.",
+      );
+      expect(button(view.container, /Connect account/)).toBeDefined();
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  // Design 5.4: an account a shared workspace connected is also an organization account.
+  describe("a workspace's own account is an organization account", () => {
+    const workspaceOwn = {
+      ...codexAccount({ id: "acct-1", label: "Team plan", source: "organization" }),
+      ownInWorkspaceIds: ["workspace-a"],
+    };
+    const rowsNamed = (container: HTMLElement, name: string) =>
+      [...container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].filter(
+        (row) => row.querySelector("[data-row-action]")?.textContent?.includes(name) ?? false,
+      );
+    const routeBoth = () =>
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [...orgAccounts.accounts, workspaceOwn] };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+    const managedAccess = (id: string) => ({
+      policy:
+        id === "acct-1"
+          ? { ...openPolicy, allowedWorkspaces: [], allowPersonalWorkspaces: false }
+          : openPolicy,
+      workspaces: [{ id: "workspace-a", name: "Design preview" }],
+      models: [],
+      personalWorkspacesSupported: true,
+      localWorkspaceIds: id === "acct-1" ? ["workspace-a"] : [],
+      managedByWorkspaceId: id === "acct-1" ? "workspace-a" : null,
+    });
+
+    test("the organization's list shows it once, tagged with its workspace, without a Primary row", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        // Accounts reach workspaces or people, and their tags say which: the
+        // section doesn't promise only workspaces.
+        expect(sectionDescription(view.container, "Accounts")).toBe(
+          "Subscriptions, API keys and credits that pay for models.",
+        );
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+          "Design preview only",
+        );
+        // Its page is the organization's; the organization primary isn't offered for it.
+        await act(async () =>
+          rowsNamed(view.container, "Team plan")[0]!
+            .querySelector<HTMLElement>("[data-row-action]")!
+            .click(),
+        );
+        await flush();
+        expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
+        expect(view.container.textContent).toContain("Available in");
+        expect(view.container.textContent).not.toContain("Primary account");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("its workspace's page lists it once, as the workspace's own", async () => {
+      organizationAdmin = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Company plan")).toHaveLength(1);
+        expect(view.container.textContent).not.toMatch(/Team plan[^]*Set aside/);
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("while its workspace uses the organization's accounts, it isn't listed as one of them", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: true,
+        },
+      };
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        await flush();
+        // Its own accounts are in their "set aside" row, this one included.
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(0);
+        expect(rowsNamed(view.container, "Company plan")).toHaveLength(1);
+        expect(view.container.textContent).toContain("Set aside");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("shared with everyone while its workspace uses the organization's accounts: one row, in use, with its real reach", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [
+          codexAccount({ id: "org-1", label: "Company plan", source: "organization" }),
+          codexAccount({ id: "acct-1", label: "Team plan", source: "workspace" }),
+        ],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: true,
+          // Its only own account is in use through the organization's pool.
+          workspaceSetAside: false,
+        },
+      };
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return { ...access, policy: openPolicy };
+      });
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain("Everyone in");
+        // It is in use through the organization's pool: nothing of its own is set aside.
+        expect(view.container.textContent).not.toContain("This workspace's Codex accounts");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("limited to chosen people, its workspace no longer lists it as its own, so it shows as the organization's, in use for those people where placement serves them", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [...orgAccounts.accounts, { ...workspaceOwn, ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: ["person-a"] },
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        const row = rowsNamed(view.container, "Team plan")[0]!;
+        expect(row.textContent).toContain("Selected people");
+        // Chosen people's sessions here use it unless the workspace uses only its own.
+        expect(row.textContent).not.toContain("Set aside");
+        expect(row.textContent).not.toContain("Not in use");
+        expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
+      } finally {
+        await cleanup(view);
+      }
+      // Set to use only its own accounts: this workspace keeps it as its own
+      // (0689 merged its copy), so chosen people's sessions here still use it.
+      const workspaceSource = {
+        ...accounts,
+        accounts: [codexAccount({ id: "acct-2", label: "Other plan", source: "workspace" })],
+        activeAccountId: "acct-2",
+        source: { ...source, mode: "workspace" as const, effectiveSource: "workspace" as const },
+      };
+      accounts = workspaceSource;
+      const workspaceOnly = await render();
+      try {
+        await flush();
+        const row = rowsNamed(workspaceOnly.container, "Team plan")[0]!;
+        expect(row.textContent).not.toContain("Set aside");
+        expect(row.textContent).not.toContain("Not in use");
+        // Its pool doesn't list it, so the notice says it serves its people.
+        expect(workspaceOnly.container.textContent).toContain(
+          "New work uses this workspace's Codex account. Team plan, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are never used here.",
+        );
+      } finally {
+        await cleanup(workspaceOnly);
+      }
+      // With no other account of its own, new work starts only for those people,
+      // not "can't start … none are connected".
+      accounts = { ...workspaceSource, accounts: [], activeAccountId: null };
+      const keptOnly = await render();
+      try {
+        await flush();
+        const row = rowsNamed(keptOnly.container, "Team plan")[0]!;
+        expect(row.textContent).not.toContain("Set aside");
+        expect(keptOnly.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan, kept as this workspace's own. This workspace is set to use only its own accounts.",
+        );
+        expect(keptOnly.container.textContent).not.toContain("none are connected");
+        // Its row goes away (here: no longer an organization admin's page): the
+        // notice stops counting it.
+        organizationAdmin = false;
+        await act(async () => keptOnly.root.render(<Harness canManage={true} />));
+        await flush();
+        expect(keptOnly.container.textContent).not.toContain("Team plan");
+        expect(keptOnly.container.textContent).toContain("New Codex work can't start.");
+      } finally {
+        organizationAdmin = true;
+        await cleanup(keptOnly);
+      }
+      // While the rows still read their access, no "can't start" that a kept
+      // copy might contradict.
+      const held: (() => void)[] = [];
+      const keptAccess = client.getModelConnectionAccess.getMockImplementation()!;
+      client.getModelConnectionAccess.mockImplementation(
+        (...args: unknown[]) =>
+          new Promise((resolve) => {
+            held.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
+          }),
+      );
+      const pendingView = await render();
+      try {
+        expect(pendingView.container.textContent).not.toContain("New Codex work");
+        // Nor a guessed tag or "Not in use" on the row still reading.
+        const reading = rowsNamed(pendingView.container, "Team plan")[0]!;
+        expect(reading.textContent).not.toContain("Shared by");
+        expect(reading.textContent).not.toContain("Not in use");
+        await act(async () => held.forEach((release) => release()));
+        await flush();
+        expect(pendingView.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan",
+        );
+      } finally {
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(pendingView);
+      }
+      // A read that fails leaves it unknown: still no "can't start".
+      client.getModelConnectionAccess.mockImplementation(async () => {
+        throw new Error("Connection request failed");
+      });
+      const failedView = await render();
+      try {
+        await flush();
+        expect(failedView.container.textContent).not.toContain("New Codex work");
+        // Its row says so, with the way to read it again.
+        const failedRow = rowsNamed(failedView.container, "Team plan")[0]!;
+        expect(failedRow.textContent).toContain("Couldn't check who can use it");
+        // No guessed reach or use while it's unknown; its retry names the account.
+        expect(failedRow.textContent).not.toContain("Shared by");
+        expect(failedRow.textContent).not.toContain("Not in use");
+        expect(
+          failedRow.querySelector('button[aria-label="Try again for Team plan"]'),
+        ).not.toBeNull();
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        // Every failed row offers it; read them all again.
+        const retries = [...failedView.container.querySelectorAll("button")].filter(
+          (candidate) => candidate.textContent === "Try again",
+        );
+        expect(retries.length).toBeGreaterThan(0);
+        expect([...failedRow.querySelectorAll("button")].map((b) => b.textContent)).toContain(
+          "Try again",
+        );
+        for (const retry of retries) await act(async () => retry.click());
+        await flush();
+        expect(failedView.container.textContent).not.toContain("Couldn't check who can use it");
+        expect(failedView.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan",
+        );
+      } finally {
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(failedView);
+      }
+      // Nor while the organization's list (and so its rows) is still being read.
+      const keptList = client.requestJson.getMockImplementation()!;
+      const callList = keptList as (...input: unknown[]) => Promise<unknown>;
+      const heldLists: (() => void)[] = [];
+      client.requestJson.mockImplementation(
+        (...args: unknown[]): Promise<unknown> =>
+          args[0] === "GET" && args[1] === "/v1/organizations/organization-a/codex/accounts"
+            ? new Promise((resolve) => heldLists.push(() => resolve(callList(...args))))
+            : callList(...args),
+      );
+      const listPending = await render();
+      try {
+        await flush();
+        expect(heldLists.length).toBeGreaterThan(0);
+        expect(listPending.container.textContent).not.toContain("New Codex work");
+        await act(async () => heldLists.splice(0).forEach((release) => release()));
+        await flush();
+        expect(listPending.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan",
+        );
+      } finally {
+        client.requestJson.mockImplementation(keptList);
+        await cleanup(listPending);
+      }
+      // Nor when the organization's list can't be read.
+      client.requestJson.mockImplementation(async (...args: unknown[]): Promise<unknown> => {
+        if (args[0] === "GET" && args[1] === "/v1/organizations/organization-a/codex/accounts") {
+          throw new Error("Organization accounts unavailable");
+        }
+        return callList(...args);
+      });
+      // Its error row (with Try again) keeps the list from reading "No accounts connected".
+      const listFailed = await render();
+      try {
+        await flush();
+        expect(listFailed.container.textContent).toContain(
+          "Couldn't load the organization's Codex accounts.",
+        );
+        expect(listFailed.container.textContent).not.toContain("No accounts connected");
+        expect(listFailed.container.textContent).not.toContain("New Codex work");
+      } finally {
+        client.requestJson.mockImplementation(keptList);
+        await cleanup(listFailed);
+      }
+      // Two kept accounts are named in the rows' order, whichever read finishes first.
+      const zeta = {
+        ...codexAccount({ id: "acct-3", label: "Zeta plan", source: "organization" }),
+        ownInWorkspaceIds: [],
+      };
+      client.requestJson.mockImplementation(async (...args: unknown[]) => {
+        const listed = await callList(...args);
+        return args[0] === "GET" && args[1] === "/v1/organizations/organization-a/codex/accounts"
+          ? {
+              ...(listed as typeof orgAccounts),
+              accounts: [...(listed as typeof orgAccounts).accounts, zeta],
+            }
+          : listed;
+      });
+      const heldById = new Map<string, () => void>();
+      client.getModelConnectionAccess.mockImplementation(
+        (...args: unknown[]) =>
+          new Promise((resolve) => {
+            const id = (args[0] as { connectionId: string }).connectionId;
+            heldById.set(id, () =>
+              resolve(
+                id === "acct-3"
+                  ? (keptAccess as (...input: unknown[]) => unknown)({
+                      ...(args[0] as object),
+                      connectionId: "acct-1",
+                    })
+                  : (keptAccess as (...input: unknown[]) => unknown)(...args),
+              ),
+            );
+          }),
+      );
+      const twoKept = await render();
+      try {
+        await flush();
+        expect(rowsNamed(twoKept.container, "Zeta plan")).toHaveLength(1);
+        for (const id of ["acct-3", "acct-1", ...heldById.keys()]) {
+          await act(async () => heldById.get(id)?.());
+          await flush();
+        }
+        expect(twoKept.container.textContent).toContain(
+          "New Codex work can start only for the people chosen for Team plan and Zeta plan, kept as this workspace's own.",
+        );
+      } finally {
+        client.requestJson.mockImplementation(keptList);
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(twoKept);
+      }
+      // A pending read doesn't hide the notice where no "can't start" is at stake:
+      // the workspace uses the organization's accounts.
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization" as const,
+          effectiveSource: "organization" as const,
+        },
+      };
+      const heldOrg: (() => void)[] = [];
+      client.getModelConnectionAccess.mockImplementation(
+        (...args: unknown[]) =>
+          new Promise((resolve) => {
+            heldOrg.push(() => resolve((keptAccess as (...input: unknown[]) => unknown)(...args)));
+          }),
+      );
+      const organizationPending = await render();
+      try {
+        await flush();
+        expect(organizationPending.container.textContent).toContain(
+          "New work uses the organization's Codex",
+        );
+      } finally {
+        await act(async () => heldOrg.forEach((release) => release()));
+        client.getModelConnectionAccess.mockImplementation(keptAccess);
+        await cleanup(organizationPending);
+      }
+      // Automatic, with an account of its own in use: the notice names it too.
+      accounts = {
+        ...workspaceSource,
+        source: { ...source, mode: "automatic" as const, effectiveSource: "workspace" as const },
+      };
+      const automatic = await render();
+      try {
+        await flush();
+        expect(automatic.container.textContent).toContain(
+          "New work uses this workspace's Codex account. Team plan, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
+        );
+      } finally {
+        await cleanup(automatic);
+      }
+      // Limited to no one: kept here, but it serves nobody, so no such sentence.
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: [] },
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      accounts = workspaceSource;
+      const noOne = await render();
+      try {
+        await flush();
+        expect(noOne.container.textContent).toContain(
+          "New work uses this workspace's Codex account.",
+        );
+        expect(noOne.container.textContent).not.toContain("kept as");
+      } finally {
+        await cleanup(noOne);
+      }
+      client.getModelConnectionAccess.mockImplementation(keptAccess);
+      // Set to use only the organization's accounts: its own copy isn't used,
+      // and the organization's isn't given to this workspace: nobody uses it here.
+      accounts = {
+        ...accounts,
+        accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+        activeAccountId: "org-1",
+        source: {
+          ...source,
+          mode: "organization" as const,
+          effectiveSource: "organization" as const,
+        },
+      };
+      const organizationOnly = await render();
+      try {
+        await flush();
+        const row = rowsNamed(organizationOnly.container, "Team plan")[0]!;
+        expect(row.textContent).toContain("Set aside");
+        expect(row.textContent).toContain("Not in use");
+      } finally {
+        await cleanup(organizationOnly);
+      }
+      // Kept by no workspace: set to use only its own accounts, nobody's
+      // sessions here use it.
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) => {
+        const access = managedAccess((args[0] as { connectionId: string }).connectionId);
+        return (args[0] as { connectionId: string }).connectionId === "acct-1"
+          ? {
+              ...access,
+              policy: { ...access.policy, allowedPeople: ["person-a"] },
+              localWorkspaceIds: [],
+              managedByWorkspaceId: null,
+            }
+          : access;
+      });
+      accounts = workspaceSource;
+      const notKept = await render();
+      try {
+        await flush();
+        const row = rowsNamed(notKept.container, "Team plan")[0]!;
+        expect(row.textContent).toContain("Set aside");
+        expect(row.textContent).toContain("Not in use");
+        expect(row.querySelector('[aria-label^="More actions"]')).not.toBeNull();
+        // Not kept here: the notice names no kept account.
+        expect(notKept.container.textContent).not.toContain("kept as");
+      } finally {
+        await cleanup(notKept);
+      }
+      // Kept by no workspace, automatic or the organization's accounts: chosen
+      // people's sessions here use it.
+      for (const mode of ["automatic", "organization"] as const) {
+        accounts = {
+          ...accounts,
+          accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+          activeAccountId: "org-1",
+          source: { ...source, mode, effectiveSource: "organization" as const },
+        };
+        const modeView = await render();
+        try {
+          await flush();
+          const row = rowsNamed(modeView.container, "Team plan")[0]!;
+          expect(row.textContent).not.toContain("Set aside");
+          expect(row.textContent).not.toContain("Not in use");
+        } finally {
+          await cleanup(modeView);
+        }
+      }
+    });
+
+    test("an account no workspace manages keeps the organization Primary row", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      routeBoth();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await act(async () =>
+          rowsNamed(view.container, "Company plan")[0]!
+            .querySelector<HTMLElement>("[data-row-action]")!
+            .click(),
+        );
+        await flush();
+        expect(view.container.querySelector("h1")?.textContent).toBe("Company plan");
+        expect(view.container.textContent).toContain("Primary account");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    const failOrganizationRead = () =>
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          throw new Error("organization list unavailable");
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+
+    test("while the organization's list can't be read, its workspace page tags it with no reach", async () => {
+      organizationAdmin = true;
+      failOrganizationRead();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        await flush();
+        expect(view.container.textContent).toContain(
+          "Couldn't load the organization's Codex accounts.",
+        );
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        // It may be shared wider: "<workspace> only" may not be true.
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
+          "Design preview only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("while the organization's list can't be read, the organization's list tags it with no reach", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      failOrganizationRead();
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
+          "Design preview only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("while the organization's list loads, the organization's list tags it with no reach", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return new Promise(() => undefined);
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).not.toContain(
+          "Design preview only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("a Personal workspace's own account keeps its tag on the organization's list while that list can't be read", async () => {
+      organizationAdmin = true;
+      organizationList = true;
+      failOrganizationRead();
+      organizationWorkspaces = [
+        {
+          id: "workspace-a",
+          name: "Personal",
+          personal: true,
+          canManage: true,
+          savedDefaultModel: null,
+        },
+      ];
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+          "Personal workspace only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("a Personal workspace's own account keeps its tag on its page while the organization's list can't be read", async () => {
+      organizationAdmin = true;
+      personalWorkspace = true;
+      failOrganizationRead();
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
+        expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+          "Personal workspace only",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("on the organization's accounts with none reaching it, the notice doesn't call another workspace's account its own", async () => {
+      organizationAdmin = true;
+      const research = {
+        ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
+        ownInWorkspaceIds: ["workspace-b"],
+      };
+      accounts = {
+        ...accounts,
+        accounts: [],
+        activeAccountId: null,
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          organizationAvailable: false,
+          organizationCount: 0,
+          workspaceSetAside: false,
+        },
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return { ...orgAccounts, accounts: [research] };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async () => ({
+        ...managedAccess("acct-r"),
+        policy: { ...openPolicy, allowedWorkspaces: [], allowPersonalWorkspaces: false },
+        localWorkspaceIds: ["workspace-b"],
+        managedByWorkspaceId: "workspace-b",
+      }));
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Research plan")[0]!.textContent).toContain(
+          "Not available here",
+        );
+        expect(view.container.textContent).toContain(
+          "New work uses the organization's Codex accounts, even when accounts are connected here.",
+        );
+        expect(view.container.textContent).not.toContain("which here");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("another workspace's own account isn't available here and sets nothing aside", async () => {
+      organizationAdmin = true;
+      const research = {
+        ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
+        ownInWorkspaceIds: ["workspace-b"],
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }, research],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        (args[0] as { connectionId: string }).connectionId === "acct-r"
+          ? {
+              ...managedAccess("acct-r"),
+              policy: { ...openPolicy, allowedWorkspaces: [], allowPersonalWorkspaces: false },
+              localWorkspaceIds: ["workspace-b"],
+              managedByWorkspaceId: "workspace-b",
+            }
+          : managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      const view = await render();
+      try {
+        await flush();
+        const row = rowsNamed(view.container, "Research plan")[0]!;
+        expect(row.textContent).toContain("Not available here");
+        // The reason comes right after the tag and before the plan, so a phone
+        // doesn't cut it off.
+        expect(row.textContent).toContain("·Selected workspaces·Not available here·ChatGPT");
+        expect(row.textContent).not.toContain("Set aside");
+        expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
+        // The organization's account that does reach here is still set aside, with its way back.
+        const company = rowsNamed(view.container, "Company plan")[0]!;
+        expect(company.textContent).toContain("Set aside");
+        expect(company.querySelector('[aria-label^="More actions"]')).not.toBeNull();
+        // The notice counts only the organization's account known to reach here.
+        expect(view.container.textContent).toContain(
+          "The organization's account is set aside while this workspace has its own.",
+        );
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("an account limited to no one isn't available here and keeps its Not in use cell", async () => {
+      organizationAdmin = true;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async () => ({
+        ...managedAccess("org-1"),
+        policy: { ...openPolicy, allowedPeople: [] },
+      }));
+      const view = await render();
+      try {
+        await flush();
+        const row = rowsNamed(view.container, "Company plan")[0]!;
+        expect(row.textContent).toContain("No one");
+        expect(row.textContent).toContain("Not available here");
+        expect(row.textContent).toContain("Not in use");
+        expect(row.querySelector('[aria-label^="More actions"]')).toBeNull();
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("no set-aside reason while an organization account's reach loads", async () => {
+      organizationAdmin = true;
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      let resolveAccess: (value: unknown) => void = () => undefined;
+      client.getModelConnectionAccess.mockImplementation(
+        () => new Promise((resolve) => (resolveAccess = resolve)),
+      );
+      const view = await render();
+      try {
+        await flush();
+        expect(rowsNamed(view.container, "Company plan")[0]!.textContent).not.toContain(
+          "Set aside",
+        );
+        await act(async () => resolveAccess(managedAccess("org-1")));
+        await flush();
+        expect(rowsNamed(view.container, "Company plan")[0]!.textContent).toContain("Set aside");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("set to its own accounts with none connected, the organization's are set aside without claiming it has its own", async () => {
+      organizationAdmin = true;
+      accounts = {
+        ...accounts,
+        accounts: [],
+        activeAccountId: null,
+        source: {
+          ...source,
+          mode: "workspace",
+          effectiveSource: "workspace",
+          workspaceAvailable: false,
+        },
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async () => managedAccess("org-1"));
+      const view = await render();
+      try {
+        await flush();
+        expect(view.container.textContent).toContain("none are connected");
+        const row = rowsNamed(view.container, "Company plan")[0]!;
+        expect(row.textContent).toContain("Set aside");
+        expect(row.textContent).not.toContain("while this workspace has its own");
+      } finally {
+        await cleanup(view);
+      }
+    });
+
+    test("the pool notice counts what the server reports, and an older server's count includes another workspace's account this workspace lists", async () => {
+      organizationAdmin = true;
+      const research = {
+        ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
+        ownInWorkspaceIds: ["workspace-b"],
+      };
+      client.requestJson.mockImplementation(async (method: string, path: string) => {
+        if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
+          return {
+            ...orgAccounts,
+            accounts: [{ ...orgAccounts.accounts[0], ownInWorkspaceIds: [] }, research],
+          };
+        }
+        if (method === "GET") throw new Error(`unexpected read ${path}`);
+        return {};
+      });
+      client.getModelConnectionAccess.mockImplementation(async (...args: unknown[]) =>
+        managedAccess((args[0] as { connectionId: string }).connectionId),
+      );
+      // Older server, automatic source: Research's account is in this workspace's pool.
+      accounts = {
+        ...accounts,
+        accounts: [...accounts.accounts, { ...research, ownInWorkspaceIds: undefined }],
+      };
+      const older = await render();
+      try {
+        await flush();
+        expect(older.container.textContent).toContain(
+          "The organization's accounts are set aside while this workspace has its own.",
+        );
+      } finally {
+        await cleanup(older);
+      }
+      // The server's count wins: here it says one.
+      accounts = { ...accounts, source: { ...source, organizationCount: 1 } };
+      const current = await render();
+      try {
+        await flush();
+        expect(current.container.textContent).toContain(
+          "The organization's account is set aside while this workspace has its own.",
+        );
+      } finally {
+        await cleanup(current);
+      }
+    });
+  });
+
   test("a workspace admin sees their workspaces and what they use, read-only", async () => {
     organizationList = true;
     context.clientConfig.claudeSubscriptionEnabled = true;
@@ -1947,6 +3315,170 @@ describe("One Models page for the organization and the workspace", () => {
       );
     } finally {
       await cleanup(view);
+    }
+  });
+
+  test("a workspace admin sees their own account once after the organization shares it", async () => {
+    organizationList = true;
+    // Design connected it; the organization also gave it to Research.
+    client.listCodexAccounts.mockImplementation(async (workspaceId: string) => ({
+      ...accounts,
+      accounts: [
+        codexAccount({
+          id: "acct-1",
+          label: "Team plan",
+          source: workspaceId === "workspace-a" ? "workspace" : "organization",
+        }),
+      ],
+      source: {
+        ...source,
+        workspaceId,
+        effectiveSource: workspaceId === "workspace-a" ? "workspace" : "organization",
+      },
+    }));
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+      {
+        id: "workspace-b",
+        name: "Research",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].filter(
+        (row) => row.textContent?.includes("Team plan"),
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.textContent).toContain("Used in Design preview, Research");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("sharing a workspace's own account with the organization makes up no organization accounts on its page", async () => {
+    const own = codexAccount({ id: "acct-1", label: "Team plan", source: "workspace" });
+    // Its own account now also has an organization copy here, so the server
+    // reports the organization pool as available, with no other account.
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...source, organizationAvailable: true, organizationCount: 0 },
+    };
+    const automatic = await render();
+    try {
+      const text = automatic.container.textContent ?? "";
+      expect(text).not.toContain("Shared Codex accounts");
+      expect(text).not.toContain("The organization's");
+    } finally {
+      await cleanup(automatic);
+    }
+    accounts = {
+      ...accounts,
+      source: {
+        ...source,
+        mode: "workspace",
+        organizationAvailable: true,
+        organizationCount: 0,
+      },
+    };
+    const workspaceOnly = await render();
+    try {
+      const text = workspaceOnly.container.textContent ?? "";
+      expect(text).toContain(
+        "New work uses only this workspace's Codex account, never the organization's.",
+      );
+      expect(text).not.toContain("Shared Codex accounts");
+    } finally {
+      await cleanup(workspaceOnly);
+    }
+    // Set to the organization's accounts, which here are only its own, shared
+    // (the server lists that copy as the workspace's own).
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: {
+        ...source,
+        mode: "organization",
+        effectiveSource: "organization",
+        organizationAvailable: true,
+        organizationCount: 0,
+        workspaceSetAside: false,
+      },
+    };
+    const organizationOnly = await render();
+    try {
+      const text = organizationOnly.container.textContent ?? "";
+      expect(text).toContain(
+        "New work uses the organization's Codex account, which here is only this workspace's own.",
+      );
+      expect(text).not.toContain("even when accounts are connected here");
+    } finally {
+      await cleanup(organizationOnly);
+    }
+    // Two of its own, both shared: the plural.
+    accounts = {
+      ...accounts,
+      accounts: [own, codexAccount({ id: "acct-2", label: "Second plan", source: "workspace" })],
+    };
+    const two = await render();
+    try {
+      expect(two.container.textContent).toContain(
+        "New work uses the organization's Codex accounts, which here are only this workspace's own.",
+      );
+    } finally {
+      await cleanup(two);
+    }
+    // An older server without the count: the usual wording.
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...accounts.source!, organizationCount: undefined },
+    };
+    const olderServer = await render();
+    try {
+      expect(olderServer.container.textContent).toContain("even when accounts are connected here");
+    } finally {
+      await cleanup(olderServer);
+    }
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...accounts.source!, organizationCount: 0 },
+    };
+    // Another account of its own, not shared, is set aside: the usual wording.
+    accounts = {
+      ...accounts,
+      source: { ...accounts.source!, workspaceSetAside: true },
+    };
+    const withSetAside = await render();
+    try {
+      const text = withSetAside.container.textContent ?? "";
+      expect(text).toContain("even when accounts are connected here");
+      expect(text).not.toContain("which here is only this workspace's own");
+      expect(text).toContain("This workspace's Codex accounts");
+    } finally {
+      await cleanup(withSetAside);
+    }
+    // An older server doesn't report the count: the pool's availability decides.
+    accounts = {
+      ...accounts,
+      accounts: [own],
+      source: { ...source, organizationAvailable: true },
+    };
+    const older = await render();
+    try {
+      expect(older.container.textContent).toContain("Shared Codex accounts");
+    } finally {
+      await cleanup(older);
     }
   });
 

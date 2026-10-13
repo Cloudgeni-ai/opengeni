@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { CodexReloginRequired, type CodexUsagePayload } from "@opengeni/codex";
 import { ModelCallError } from "@opengeni/core";
 import { SingleModelCallUnsupportedError } from "@opengeni/runtime";
-import { codexIncludedUsageAvailable, publicModelCallError } from "../src/model-calls/service";
+import {
+  codexIncludedUsageAvailable,
+  publicModelCallError,
+  servedBySingleModelCalls,
+} from "../src/model-calls/service";
 
 const NOW = Date.parse("2026-10-10T12:00:00Z");
 
@@ -94,5 +98,24 @@ describe("publicModelCallError", () => {
     const mapped = publicModelCallError(new Error("socket hang up at 10.0.0.1")) as ModelCallError;
     expect(mapped.status).toBe(502);
     expect(mapped.message).toBe("The model request failed.");
+  });
+});
+
+describe("servedBySingleModelCalls", () => {
+  const selection = (credentialSource: unknown) =>
+    ({ model: { id: "m", credentialSource } }) as Parameters<typeof servedBySingleModelCalls>[0];
+
+  test("a SuperGrok subscription model is neither listed nor served (core completion is Codex-only)", () => {
+    expect(
+      servedBySingleModelCalls(selection({ kind: "connected_subscription", provider: "xai" })),
+    ).toBe(false);
+  });
+
+  test("Codex, Claude and every other credential source stay served", () => {
+    for (const provider of ["codex", "claude"])
+      expect(
+        servedBySingleModelCalls(selection({ kind: "connected_subscription", provider })),
+      ).toBe(true);
+    expect(servedBySingleModelCalls(selection({ kind: "deployment" }))).toBe(true);
   });
 });

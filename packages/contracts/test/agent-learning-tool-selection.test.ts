@@ -37,4 +37,24 @@ describe("current Agent learning tool selection", () => {
     expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("memory_save");
     expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("remember");
   });
+  test("retired variable-set tools select their secret successors (AG-5)", () => {
+    expect(
+      currentAgentLearningToolSelection([
+        "variable_set_list",
+        "environment_list",
+        "variable_set_get_variable",
+        "environment_set_variable",
+      ]),
+    ).toEqual(["secret_search", "secret_get", "secret_save"]);
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("variable_set_list");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toEqual(
+      expect.arrayContaining([
+        "secret_search",
+        "secret_save",
+        "secret_get",
+        "secret_move",
+        "secret_delete",
+      ]),
+    );
+  });
 });

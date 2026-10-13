@@ -17,6 +17,12 @@ import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-
 import { Button } from "@/components/ui/button";
 import { CadencePicker } from "@/components/ui/cadence-picker";
 import { Disclosure } from "@/components/ui/disclosure";
+import { useVaults } from "@opengeni/react";
+import {
+  ScheduleSecretsField,
+  scheduleSecretsSummary,
+} from "@/components/secrets/schedule-secrets-field";
+import { secretsCapabilityOff, secretsOffIn } from "@/components/secrets/vault-model";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { CheckboxField, Field, FieldStack, TextInput, useField } from "@/components/ui/field";
 import { FormPage } from "@/components/ui/form-dialog";
@@ -346,9 +352,9 @@ function AgentScheduleForm({
       const fromTask: ScheduleDraft = {
         ...formStateFromScheduledTask(task, formDefaults),
         cadence: cadenceOfSchedule(task.schedule),
-        variableSetId: task.variableSetId,
         rigId: task.rigId,
         visibility: task.visibility,
+        ...(task.vaultPolicy?.mode === "selected" ? { vaultPolicy: task.vaultPolicy } : {}),
       };
       if (editing) return fromTask;
       // Duplicate: a new schedule you own. Someone else's connected accounts
@@ -366,7 +372,6 @@ function AgentScheduleForm({
       return {
         ...recurringSessionTaskFormState(mode.sourceSessionId, canAttachOpenGeniTool, formDefaults),
         cadence: { timeZone: viewerTimeZone(), rule: { frequency: "hourly" } },
-        variableSetId: null,
         rigId: null,
         visibility: "workspace",
       };
@@ -399,7 +404,6 @@ function AgentScheduleForm({
   const [errors, setErrors] = useState<FormErrors>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [accessChange, setAccessChange] = useState<{
-    variableSets: boolean;
     environment: boolean;
   } | null>(null);
   const [adoptSessionSettings, setAdoptSessionSettings] = useState(false);
@@ -771,11 +775,29 @@ function AgentScheduleForm({
   const eachRun = draft.runMode as EachRun;
   const ifStillRunning: IfStillRunning = draft.overlapPolicy === "skip" ? "skip" : "queue";
   const learningCustom = Boolean(draft.agentLearning && Object.keys(draft.agentLearning).length);
+  // Secrets: shown while this schedule's agent can use secrets.
+  const canListSecrets =
+    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
+    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const scheduleSecretsOn =
+    !inheritsChatSettings &&
+    canListSecrets &&
+    !(
+      secretsOffIn(draft.agentCapabilities) ??
+      secretsCapabilityOff(context.workspaces.find((item) => item.id === workspaceId)?.settings)
+    );
+  const secretVaults = useVaults({
+    client: context.client,
+    workspaceId,
+    enabled: scheduleSecretsOn,
+  });
+  const secretsSummary = scheduleSecretsOn ? scheduleSecretsSummary(draft.vaultPolicy) : null;
   const advancedSummary = [
     ...(eachRun === "new_session_per_run"
       ? []
       : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
     ...(inheritsChatSettings ? [] : [whereLabel]),
+    ...(secretsSummary ? [`Secrets: ${secretsSummary}`] : []),
     // A task that continues an existing chat never posts on its own.
     ...(eachRun !== "existing_session" && draft.slackBotChannelId ? ["Posts to Slack"] : []),
     ...(eachRun === "existing_session"
@@ -861,9 +883,6 @@ function AgentScheduleForm({
             const details = (error as { details?: Record<string, unknown> }).details;
             if (details?.code === "scheduled_target_access_change") {
               setAccessChange({
-                variableSets:
-                  typeof details?.removedVariableSetCount === "number" &&
-                  details.removedVariableSetCount > 0,
                 environment: Boolean(details?.removedRigId),
               });
             }
@@ -1113,11 +1132,7 @@ function AgentScheduleForm({
                     label="Use this chat's attachments"
                     description={
                       <>
-                        {accessChange.variableSets && accessChange.environment
-                          ? "The previous Variable Sets and environment will no longer apply."
-                          : accessChange.variableSets
-                            ? "The previous Variable Sets will no longer apply."
-                            : "The previous environment will no longer apply."}{" "}
+                        The previous environment will no longer apply.{" "}
                         <Link
                           className="underline underline-offset-2"
                           to="/workspaces/$workspaceId/sessions/$sessionId"
@@ -1359,6 +1374,21 @@ function AgentScheduleForm({
                 <p className="-mt-3 text-xs leading-4.5 text-danger">
                   Connected machines couldn't load. Refresh the page and try again.
                 </p>
+              ) : null}
+              {scheduleSecretsOn ? (
+                <ScheduleSecretsField
+                  value={draft.vaultPolicy}
+                  onChange={(vaultPolicy) =>
+                    setDraft((previous) => {
+                      const { vaultPolicy: _previous, ...rest } = previous;
+                      return vaultPolicy ? { ...rest, vaultPolicy } : rest;
+                    })
+                  }
+                  vaults={secretVaults.vaults}
+                  loading={secretVaults.loading}
+                  error={secretVaults.error}
+                  ownerIsViewer={!editing || !task || ownsSchedule(task, access.viewerSubjectId)}
+                />
               ) : null}
               {eachRun !== "existing_session" ? (
                 <Suspense fallback={null}>
