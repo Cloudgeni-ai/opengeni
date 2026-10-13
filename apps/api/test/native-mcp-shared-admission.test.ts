@@ -175,12 +175,14 @@ test.each(["configured", "session-local", "durable"] as const)(
             prompt: "Read my account",
             tools: target ? [] : [{ kind: "mcp", id: server.id }],
           },
-          connectionAccounts: selections[i]!.selection,
+          // An existing-chat schedule uses that chat's connectors with the
+          // owner's current accounts; only a schedule that starts its own
+          // session pins them.
+          ...(target ? {} : { pinnedAccounts: selections[i]!.selection }),
         });
         if (target) {
           const updated = await actors[i]!.updateScheduledTask(workspace.id, task.id, {
             agentConfig: { prompt: "Read my account after updating the schedule", tools: [] },
-            connectionAccounts: selections[i]!.selection,
           });
           expect(updated.id).toBe(task.id);
           expect(updated.agentConfig.tools).toEqual([]);

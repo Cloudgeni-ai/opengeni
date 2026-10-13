@@ -436,13 +436,37 @@ async function passwordLogin(
   await browser.act({ type: "click", locator: css("#sign-in") });
 }
 
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
 function walk(directory: string, out: string[] = []): string[] {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    // browserd prunes its own temporary entries (finished downloads) while
+    // the scan runs; a directory that is already gone holds nothing to scan.
+    if (isMissing(error)) return out;
+    throw error;
+  }
+  for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) walk(path, out);
     else if (entry.isFile()) out.push(path);
   }
   return out;
+}
+
+/** A file's bytes, or null when browserd removed it after the walk listed it. */
+function readScannable(path: string): Buffer | null {
+  try {
+    if (statSync(path).size > 64 * 1024 * 1024) return null;
+    return readFileSync(path);
+  } catch (error) {
+    if (isMissing(error)) return null;
+    throw error;
+  }
 }
 
 describe(`fake-login flows through browserd with secret references (${mode})`, () => {
@@ -808,17 +832,16 @@ describe(`fake-login flows through browserd with secret references (${mode})`, (
     const files = walk(join(rootDirectory, "state"));
     const journalFiles = files.filter((path) => !path.includes("/profile/"));
     for (const path of journalFiles) {
-      if (statSync(path).size > 64 * 1024 * 1024) continue;
-      const bytes = readFileSync(path);
+      const bytes = readScannable(path);
+      if (!bytes) continue;
       hits.push(...scanBuffer(path.slice(rootDirectory.length), bytes, needles));
       scanCodes(path.slice(rootDirectory.length), bytes.toString("latin1"));
     }
     const profileHits: Hit[] = [];
     for (const path of files.filter((candidate) => candidate.includes("/profile/"))) {
-      if (statSync(path).size > 64 * 1024 * 1024) continue;
-      profileHits.push(
-        ...scanBuffer(path.slice(rootDirectory.length), readFileSync(path), needles),
-      );
+      const bytes = readScannable(path);
+      if (!bytes) continue;
+      profileHits.push(...scanBuffer(path.slice(rootDirectory.length), bytes, needles));
     }
     const report = {
       mode,

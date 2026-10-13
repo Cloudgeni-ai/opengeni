@@ -10,7 +10,11 @@ import postgres from "postgres";
 import { claimSessionWorkForAttempt, createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { stageVaultPolicyColumns } from "./vault-policy-column-fixture";
+import {
+  stageVaultPolicyColumns,
+  stageConnectionAccountIntentColumns,
+  dropConnectionAccountIntentColumns,
+} from "./vault-policy-column-fixture";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const REPAIR = "0343_personal_document_force_rls_lock_repair.sql";
@@ -30,6 +34,7 @@ async function applyBelow(url: string, upperBound: string): Promise<void> {
     }
     await migrate(url);
     await stageVaultPolicyColumns(url);
+    await stageConnectionAccountIntentColumns(url);
     await ledger`delete from schema_migrations where name >= ${upperBound}`;
   } finally {
     await ledger.end({ timeout: 5 });
@@ -391,6 +396,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_turns drop column execution_context_turn_id`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
     await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
+    await dropConnectionAccountIntentColumns(ownerUrl);
     await admin`alter table session_realtime_modes
       drop column personal_connection_delegations,
       drop column mcp_account_bindings`;
