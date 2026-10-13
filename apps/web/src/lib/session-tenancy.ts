@@ -60,13 +60,25 @@ const BLOCKER_COPY = {
   workspace_mutation_admission: "Wait for the current workspace file operation to finish.",
   retained_process: "Stop the retained terminal process first.",
   active_sandbox_access: "Close active Files, Terminal, Desktop, and viewer access first.",
-  shared_sandbox_group: "This session shares a sandbox. Private sessions need their own sandbox.",
+  shared_sandbox_group:
+    "This session shares its sandbox with other sessions. Fork it into a separate session to make this change.",
 } satisfies Record<SessionTenancyBlocker, string>;
 
 export function sessionTenancyBlockerMessage(blocker: unknown): string | null {
   return typeof blocker === "string" && blocker in BLOCKER_COPY
     ? BLOCKER_COPY[blocker as SessionTenancyBlocker]
     : null;
+}
+
+/**
+ * Making a session private hides its conversation, not its sandbox. Files on a
+ * shared sandbox or Connected Machine stay as available as the box itself.
+ */
+export function privateSessionSandboxNote(sandboxBackend: string | null | undefined): string {
+  if (sandboxBackend === "none") return "";
+  return sandboxBackend === "selfhosted"
+    ? " Files on its connected machine stay available to whoever can use that machine."
+    : " Files in its sandbox stay available to other sessions that share it.";
 }
 
 export function prepareSessionVisibilityAttempt(

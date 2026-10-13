@@ -6,7 +6,7 @@ selector, leases, refresh and failover path is removed in M3 PR 4. Missing or
 disabled cutover rows fail closed; neither permits a legacy-table fallback.
 Its historical text remains in git history, and historical database regression
 setup lives only in test fixtures. The reset-redemption ledger remains a live
-core fence. `bun run check:no-legacy-codex-runtime` enforces this boundary.
+core fence. `bun run check:no-legacy-subscription-runtime` enforces this boundary.
 
 | Topic | Now |
 | --- | --- |

@@ -36,6 +36,9 @@ export type SubscriptionCoreCodexFailurePayload = {
    */
   refusals?: number;
   maxRefusals?: number;
+  /** Combined model/provider changes and refusals, not a refusal count. */
+  failoverSteps?: number;
+  maxFailoverSteps?: number;
 };
 
 /** The provider-neutral name of the core turn failure payload. */
@@ -116,6 +119,23 @@ export function subscriptionCoreFailoverExhaustedFailure(
       maxRefusals,
     },
     displayName,
+  );
+}
+
+export function subscriptionCoreServingFailoverExhaustedFailure(
+  steps: number,
+  limit: number,
+): SubscriptionCoreCodexTurnError {
+  return new SubscriptionCoreCodexTurnError(
+    {
+      error:
+        "Model accounts reached this turn's failover limit. Send a new message after checking the accounts' health or capacity.",
+      code: "subscription_failover_exhausted",
+      retryable: false,
+      failoverSteps: steps,
+      maxFailoverSteps: limit,
+    },
+    "Model account",
   );
 }
 

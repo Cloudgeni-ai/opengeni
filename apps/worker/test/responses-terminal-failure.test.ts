@@ -4,7 +4,7 @@ import {
   agentRunFailurePayload,
   classifyCodexCredentialFailure,
   classifyContextWindowOverflowError,
-  classifyXaiCredentialFailure,
+  classifyXaiProviderError,
   isTransientProviderError,
   providerRecoveryExhaustedFailure,
   providerRecoveryResult,
@@ -29,7 +29,7 @@ describe("Responses terminal failure settlement", () => {
       expect(isTransientProviderError(error)).toBe(false);
       expect(classifyContextWindowOverflowError(error)).toBeNull();
       expect(classifyCodexCredentialFailure(error)).toBeNull();
-      expect(classifyXaiCredentialFailure(error)).toBeNull();
+      expect(classifyXaiProviderError(error)).toBeNull();
       expect(JSON.stringify(safeErrorDiagnostic(error))).not.toContain(detail);
     }
   });
@@ -70,7 +70,7 @@ describe("Responses terminal failure settlement", () => {
         expect(JSON.stringify(safeErrorDiagnostic(error))).not.toContain(detail);
         expect(isTransientProviderError(error)).toBe(failureCode === "provider_unavailable");
         expect(classifyCodexCredentialFailure(error)).toBeNull();
-        expect(classifyXaiCredentialFailure(error)).toBeNull();
+        expect(classifyXaiProviderError(error)).toBeNull();
       });
     }
   }

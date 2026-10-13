@@ -1,8 +1,8 @@
 /**
  * SuperGrok's binding of the provider-neutral core waits (SuperGrok track
- * X1b). Dormant: the SuperGrok binding is unregistered until the drained
- * cutover (X3), so every entry point here fails closed until then, and the
- * workflow reaches it only for a waiter the core holds.
+ * X1b). The only SuperGrok waits: the drained cutover moved every legacy
+ * waiter onto the core with its id and generation, and the workflow reaches
+ * this binding only for a waiter the core holds.
  */
 import {
   armSubscriptionCoreCapacityWait,
@@ -15,7 +15,7 @@ import {
   type SubscriptionCoreProvider,
 } from "@opengeni/db";
 import type { CoreWaitBinding } from "./subscription-core-codex-waits";
-import { refreshExhaustedXaiCoreQuota } from "./xai-quota";
+import { refreshExhaustedXaiCoreQuota } from "./subscription-core-xai-quota";
 
 const XAI = SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider;
 
@@ -35,13 +35,14 @@ export const XAI_CORE_WAIT_BINDING: CoreWaitBinding = {
   reconcileWaiter: (db, input) =>
     reconcileSubscriptionCoreCapacityWait(db, { ...input, provider: "xai" }),
   // A SuperGrok billing read can end an exhaustion before its stored reset, so
-  // a parked turn re-reads billing (shared connections only, as the core's
-  // service subject) at each bounded recheck, as the legacy waiter did.
+  // a parked turn re-reads shared billing and the personal connections its
+  // exact accepted identity authorizes, at each bounded recheck.
   refreshBeforeReconcile: ({ db, settings }, turn) =>
     refreshExhaustedXaiCoreQuota({
       db,
       settings,
       accountId: turn.accountId,
       workspaceId: turn.workspaceId,
+      personalTurn: turn,
     }),
 };

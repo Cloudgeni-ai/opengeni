@@ -322,6 +322,34 @@
   --og-component-line-height: var(--og-line-height-composer-wide);
 }
 
+/* The one text-link style. The default palette is neutral grey, so colour
+   alone cannot tell a link from body text: a resting underline carries the
+   affordance (WCAG 1.4.1). The underline is tinted from the link's own colour
+   so it stays quiet in dense rows and follows a call site's colour (muted
+   meta links); hover strengthens it to the full ink. A host that rebrands the
+   accent gets coloured links for free. Call-site utilities (text colour, focus
+   ring, outline-none) override these declarations. */
+@utility og-link {
+  color: var(--og-color-accent-strong);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: auto;
+  transition: text-decoration-color var(--og-duration-fast) var(--og-ease-out);
+  @media (hover: hover) {
+    &:hover {
+      text-decoration-color: currentColor;
+    }
+  }
+  &:focus-visible {
+    text-decoration-color: currentColor;
+    outline: 2px solid color-mix(in oklch, var(--og-color-accent) 70%, transparent);
+    outline-offset: 2px;
+    border-radius: var(--og-radius-xs);
+  }
+}
+
 /* Radix Collapsible disclosure: height auto-animates via the content var. Used
    by the timeline tool rows so an expand glides open instead of snapping.
 

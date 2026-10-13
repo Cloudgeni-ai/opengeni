@@ -64,9 +64,27 @@ export function installOneLinerWindows(
   return `${env.join("; ")}; irm ${quote(`${origin}/install.ps1`)} | iex`;
 }
 
-export type ConnectPlatform = "unix" | "windows";
+/** The operating systems a connect command is offered for. */
+export type ConnectOs = "macos" | "linux" | "windows";
 
-/** The platform a connect command should target by default for this browser. */
-export function detectConnectPlatform(userAgent: string | undefined): ConnectPlatform {
-  return userAgent && /windows/i.test(userAgent) ? "windows" : "unix";
+/**
+ * The OS a connect command should target by default for this browser. Mac is
+ * the default when the browser does not say (most people connect their own
+ * laptop); Linux desktops and Chromebooks pick Linux.
+ */
+export function detectConnectOs(userAgent: string | undefined): ConnectOs {
+  if (!userAgent) return "macos";
+  if (/windows/i.test(userAgent)) return "windows";
+  if (/macintosh|mac os x|iphone|ipad/i.test(userAgent)) return "macos";
+  if (/linux|x11|cros/i.test(userAgent) && !/android/i.test(userAgent)) return "linux";
+  return "macos";
+}
+
+/** The connect command for an OS: PowerShell on Windows, `sh` on Mac and Linux. */
+export function installCommandFor(
+  os: ConnectOs,
+  baseUrl: string,
+  opts?: { workspaceId?: string; enrollToken?: string },
+): string {
+  return os === "windows" ? installOneLinerWindows(baseUrl, opts) : installOneLiner(baseUrl, opts);
 }

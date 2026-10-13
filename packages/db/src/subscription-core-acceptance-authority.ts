@@ -11,9 +11,13 @@
  *   the trusted session-start context, is the session owner) in the owner's
  *   private session or Personal workspace, with the owner's one current
  *   active authority generation;
- * - an empty v2 value for everything else (shared sessions, co-members,
- *   service, API-key and agent acceptance, ownerless sessions, an ambiguous
- *   generation set).
+ * - an exact session-and-connection-restricted entry for an authenticated
+ *   participant's own explicit personal choice in a shared session (the
+ *   participant need not be the session creator). Only fresh human acceptance
+ *   captures this; retained work copies its existing value verbatim;
+ * - an empty v2 value for other shared sessions, another sender's choice,
+ *   service, API-key and agent acceptance, ownerless sessions, or an ambiguous
+ *   private generation set. Shared visibility never enables personal fallback.
  *
  * Providers not yet on the core keep their v1 snapshots.
  */

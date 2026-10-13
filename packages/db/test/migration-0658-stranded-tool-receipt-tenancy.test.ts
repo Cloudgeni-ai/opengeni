@@ -14,7 +14,6 @@ import {
   submitHumanPromptInTransaction,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
-  updateSessionVariableSets,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src/index";
@@ -236,16 +235,6 @@ describe("tenancy quiescence and stranded tool receipts", () => {
     await restoreStrandedReceipts(stranded);
     expect(await receiptCount(f)).toBe(1);
 
-    expect(
-      await updateSessionVariableSets(client.db, {
-        accountId: f.accountId,
-        workspaceId: f.workspaceId,
-        sessionId: f.sessionId,
-        subjectId: f.subjectId,
-        variableSets: [],
-      }),
-    ).toEqual({ status: "unchanged" });
-
     const fork = await forkSessionContent(client.db, {
       sourceWorkspaceId: f.workspaceId,
       sourceSessionId: f.sessionId,
@@ -313,17 +302,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       reason: "not_quiescent",
       blocker: "pending_tool_receipt",
     });
-    const variableSets = () =>
-      updateSessionVariableSets(client.db, {
-        accountId: f.accountId,
-        workspaceId: f.workspaceId,
-        sessionId: f.sessionId,
-        subjectId: f.subjectId,
-        variableSets: [],
-      });
-    expect(await variableSets()).toEqual({ status: "blocked", reason: "turn_in_flight" });
     await shared.admin`update session_turn_attempts set quiesced_at = now() where id = ${f.attemptId}`;
-    expect(await variableSets()).toEqual({ status: "unchanged" });
     expect((await transition(f)).visibility).toBe("user_private");
   }, 180_000);
 });

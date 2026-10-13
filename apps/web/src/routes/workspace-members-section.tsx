@@ -881,7 +881,7 @@ function MembersSectionContent({
       to="/workspaces/$workspaceId/organization"
       params={{ workspaceId }}
       search={{ section: "people" }}
-      className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+      className="rounded-sm font-medium og-link"
     >
       {children}
     </Link>
@@ -1059,7 +1059,7 @@ function MembersSectionContent({
                   <button
                     type="button"
                     onClick={() => setView({ kind: "add" })}
-                    className="rounded-sm font-medium text-brand underline-offset-2 hover:underline"
+                    className="rounded-sm font-medium og-link"
                   >
                     Add people from {organizationName}
                   </button>{" "}

@@ -302,6 +302,7 @@ postgresTest(
             const page = await listArtifactCatalogCandidates(client!.db, scope, {
               query: ArtifactCatalogListQuery.parse({ sort }),
               kinds: ["file", "site", "image", "document", "spreadsheet", "presentation"],
+              siteViewer: { subjectId: null },
               snapshotAt,
               ...(after ? { after } : {}),
               limit: 50,
@@ -333,6 +334,7 @@ postgresTest(
         const first = await listArtifactCatalogCandidates(client!.db, scope, {
           query: ArtifactCatalogListQuery.parse({ sort: "title" }),
           kinds: ["file"],
+          siteViewer: { subjectId: null },
           snapshotAt,
           limit: 1,
         });
@@ -340,6 +342,7 @@ postgresTest(
         const next = await listArtifactCatalogCandidates(client!.db, scope, {
           query: ArtifactCatalogListQuery.parse({ sort: "title" }),
           kinds: ["file"],
+          siteViewer: { subjectId: null },
           snapshotAt,
           after: { key: first[0]!.sort_key, kind: "file", id: sharedId, pinned: true },
           limit: 1,
@@ -352,6 +355,7 @@ postgresTest(
             sourceSessionId: source.id,
           }),
           kinds: ["file"],
+          siteViewer: { subjectId: null },
           snapshotAt,
           limit: 100,
         });

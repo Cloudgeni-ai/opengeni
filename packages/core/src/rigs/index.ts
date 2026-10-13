@@ -11,7 +11,6 @@ import type {
   ProposeRigChangeRequest,
   Rig,
   RigChange,
-  ResourceAuthorityScope,
   RigVersion,
   UpdateRigRequest,
 } from "@opengeni/contracts";
@@ -26,7 +25,6 @@ import {
   getRigByName,
   getRigChange,
   getRigVersion,
-  getVariableSet,
   listRigChanges,
   listRigVersions,
   recordAuditEvent,
@@ -37,8 +35,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { boundedParallelMap } from "@opengeni/runtime/mcp-network";
-import { requirePermission } from "../access";
+import { variableSetsRemovedError } from "../domain/encryption-key";
 import { rigProviderImagesFromVerification } from "./provider-images";
 
 export * from "./provider-images";
@@ -46,34 +43,9 @@ export * from "./provider-images";
 export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
-export const MAX_DEFAULT_VARIABLE_SETS_PER_RIG = 25;
-export const RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY = 4;
-
-type VariableSetEnvironment = { values: Record<string, string> } | null;
-
-/** Load complete rig defaults concurrently while preserving listed precedence. */
-export async function loadRigDefaultVariableSetEnvironment(
-  variableSetIds: readonly string[],
-  load: (variableSetId: string) => Promise<VariableSetEnvironment>,
-): Promise<Record<string, string>> {
-  const variableSets = await boundedParallelMap(
-    variableSetIds,
-    RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY,
-    load,
-  );
-  const values: Record<string, string> = {};
-  for (const variableSet of variableSets) {
-    Object.assign(values, variableSet?.values ?? {});
-  }
-  return values;
-}
-
-/** Rig defaults layer below the session's explicitly selected variable set. */
-export function mergeRigDefaultVariableSetEnvironment(
-  rigDefaultValues: Record<string, string>,
-  sessionValues: Record<string, string>,
-): Record<string, string> {
-  return { ...rigDefaultValues, ...sessionValues };
+/** Rig default Variable Sets were removed with Variable Sets (RM-1). */
+function assertNoDefaultVariableSets(ids: ReadonlyArray<string> | null | undefined): void {
+  if (ids?.length) throw variableSetsRemovedError("defaultVariableSetIds");
 }
 
 export type RigServices = {
@@ -172,51 +144,6 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
   }
 }
 
-// Every referenced default variable set must exist in the workspace. RLS makes a
-// cross-workspace id indistinguishable from a missing one, so both map to 422.
-async function assertVariableSetsExist(
-  db: Database,
-  access: AccessGrant,
-  rigScope: ResourceAuthorityScope,
-  ids: ReadonlyArray<string> | undefined,
-): Promise<void> {
-  if (ids === undefined) {
-    return;
-  }
-  requirePermission(access, "variable-sets:attach");
-  if (ids.length === 0) {
-    return;
-  }
-  requirePermission(access, "variable-sets:use");
-  const unique = [...new Set(ids)];
-  for (const id of unique) {
-    const variableSet = await getVariableSet(db, access, id);
-    if (!variableSet) {
-      throw new HTTPException(422, {
-        message: `unknown defaultVariableSetId: ${id}`,
-      });
-    }
-    if (!variableSetScopeAllowedForRig(rigScope, variableSet.scope)) {
-      throw new HTTPException(422, {
-        message: `${rigScope}-scoped sandbox environments cannot use ${variableSet.scope}-scoped variable sets`,
-      });
-    }
-  }
-}
-
-/** A resource may depend only on Variable Sets whose audience is no narrower
- * than its own. User-owned rigs may use anything visible to their owner. */
-export function variableSetScopeAllowedForRig(
-  rigScope: ResourceAuthorityScope,
-  variableSetScope: ResourceAuthorityScope,
-): boolean {
-  return (
-    rigScope === "user" ||
-    variableSetScope === "organization" ||
-    (rigScope === "workspace" && variableSetScope === "workspace")
-  );
-}
-
 export async function createRigForApi(
   deps: RigServices,
   grant: AccessGrant,
@@ -225,12 +152,7 @@ export async function createRigForApi(
 ): Promise<Rig> {
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(
-    deps.db,
-    grant,
-    payload.scope,
-    payload.defaultVariableSetIds.length > 0 ? payload.defaultVariableSetIds : undefined,
-  );
+  assertNoDefaultVariableSets(payload.defaultVariableSetIds);
   if ((await countRigs(deps.db, grant, payload.scope)) >= MAX_RIGS_PER_WORKSPACE) {
     throw new HTTPException(422, {
       message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} sandbox environments`,
@@ -344,12 +266,7 @@ export async function proposeRigChangeForApi(
   }
   if (request.kind === "definition_edit") {
     assertUniqueCheckNames(request.payload.checks);
-    await assertVariableSetsExist(
-      deps.db,
-      grant,
-      rig.scope,
-      request.payload.defaultVariableSetIds ?? undefined,
-    );
+    assertNoDefaultVariableSets(request.payload.defaultVariableSetIds);
   }
   const change = await createRigChange(deps.db, {
     accountId: grant.accountId,
@@ -593,12 +510,7 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "sandbox environment has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(
-    deps.db,
-    grant,
-    rig.scope,
-    payload.defaultVariableSetIds ?? undefined,
-  );
+  assertNoDefaultVariableSets(payload.defaultVariableSetIds);
   const base = rig.activeVersion;
   const version = await createRigVersion(
     deps.db,

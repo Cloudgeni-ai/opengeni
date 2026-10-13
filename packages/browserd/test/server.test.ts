@@ -2,12 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  BrowserActionCommand,
-  BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserTarget,
-} from "@opengeni/contracts";
+import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
 import { InteractionControllerError } from "@opengeni/interaction";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
@@ -294,6 +289,56 @@ describe("BrowserControlServer", () => {
         },
       },
     );
+  });
+
+  test("passkey sync is control-only, bound to the session path and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/passkeys/sync`;
+      const body = {
+        protocolVersion: 1,
+        ...reference,
+        credentials: null,
+        acknowledgeEventIds: [],
+      };
+      for (const token of [undefined, viewToken]) {
+        expect(
+          (await request(server, path, { method: "POST", ...(token ? { token } : {}), body }))
+            .status,
+        ).toBe(401);
+      }
+      expect((await request(server, path, { token: controlToken })).status).toBe(405);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, credentials: "all" },
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, browserSessionId: randomUUID() },
+          })
+        ).status,
+      ).toBe(409);
+      const synced = await request(server, path, { method: "POST", token: controlToken, body });
+      expect(synced.status).toBe(200);
+      // The fake driver hosts no page authenticators; the manager still answers.
+      expect((await json(synced)).data).toEqual({ ...reference, authenticators: 0, events: [] });
+    });
   });
 
   test("metadata-only opening never replays a mutation whose completion is unknown", async () => {
@@ -699,31 +744,16 @@ describe("BrowserControlServer", () => {
         },
       ]);
 
-      const protectedCommand = protectedAuthCommand(observation);
-      const protectedPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`;
+      // Protected fill is gone; logins use ordinary fill actions.
       expect(
         (
-          await request(server, protectedPath, {
-            method: "POST",
-            token: viewToken,
-            body: protectedCommand,
-          })
+          await request(
+            server,
+            `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`,
+            { method: "POST", token: controlToken, body: {} },
+          )
         ).status,
-      ).toBe(401);
-      const protectedFill = await request(server, protectedPath, {
-        method: "POST",
-        token: controlToken,
-        body: protectedCommand,
-      });
-      expect(protectedFill.status).toBe(200);
-      const protectedBody = await protectedFill.text();
-      expect(protectedBody).not.toContain("server-test-password");
-      expect(JSON.parse(protectedBody).data.state).toBe("completed");
-      const protectedReceiptPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-operations/${protectedCommand.operationId}`;
-      expect((await request(server, protectedReceiptPath, { token: viewToken })).status).toBe(401);
-      expect((await request(server, protectedReceiptPath, { token: controlToken })).status).toBe(
-        200,
-      );
+      ).toBe(404);
 
       const externalAuthPath = `/v1/browser-sessions/${reference.browserSessionId}/external-auth`;
       const externalAuthCommand = {
@@ -1550,9 +1580,6 @@ function fakeDriver(
       });
       return observation();
     },
-    async protectedFill() {
-      return { target: { ...target }, status: "submitted" };
-    },
     async externalAuth() {
       return {
         state: "needs_human",
@@ -1751,32 +1778,6 @@ function command(observation: BrowserObservation): BrowserActionCommand {
     expectedFrameId: observation.frameId!,
     actor: { kind: "system", subjectId: "server-test" },
     action: { type: "click", locator: { kind: "ref", ref: "e1" } },
-  };
-}
-
-function protectedAuthCommand(observation: BrowserObservation): BrowserProtectedAuthFillCommand {
-  return {
-    protocolVersion: 1,
-    operationId: randomUUID(),
-    browserSessionId: observation.browserSessionId,
-    controllerGeneration: observation.target.controllerGeneration,
-    targetId: observation.target.id,
-    expectedTargetGeneration: observation.target.targetGeneration,
-    expectedDocumentGeneration: observation.target.documentGeneration!,
-    expectedFrameId: observation.frameId!,
-    actor: { kind: "system", subjectId: "credential-broker-test" },
-    authorityId: "password-authority",
-    credentialVersion: 1,
-    allowedOrigins: ["https://example.test"],
-    fields: [
-      {
-        fieldId: "password",
-        locator: { kind: "ref", ref: "e-password" },
-        purpose: "password",
-        value: "server-test-password",
-      },
-    ],
-    submit: { type: "press", key: "Enter" },
   };
 }
 

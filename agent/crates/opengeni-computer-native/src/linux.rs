@@ -1666,12 +1666,11 @@ impl AtspiComputerAdapter {
             NativeAdapterError::unavailable("Linux X11 input is unavailable", true)
         })?;
         let inputs = screen_inputs(&command.action, target, frame)?;
-        for input in inputs {
-            desktop.inject(&input).await.map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "Linux XTEST delivery could not be confirmed: {error}"
-                ))
-            })?;
+        for (index, input) in inputs.into_iter().enumerate() {
+            desktop
+                .inject(&input)
+                .await
+                .map_err(|error| screen_input_error(error, index == 0))?;
         }
         Ok(())
     }
@@ -2566,6 +2565,21 @@ impl AtspiComputerAdapter {
     }
 }
 
+/// `LinuxDesktop::inject` resolves one whole input before its first XTEST
+/// event, so an unsupported refusal (such as a glyph no keycode can carry)
+/// of the first input emitted nothing and is a definite failure. Any other
+/// failure, or one after an earlier input, may follow delivered events.
+fn screen_input_error(error: PlatformError, first_input: bool) -> NativeAdapterError {
+    match error {
+        PlatformError::Unsupported(message) if first_input => {
+            NativeAdapterError::unsupported(message)
+        }
+        error => NativeAdapterError::outcome_unknown(format!(
+            "Linux XTEST delivery could not be confirmed: {error}"
+        )),
+    }
+}
+
 fn window_input_error(error: PlatformError, dispatched: bool) -> NativeAdapterError {
     if dispatched {
         return NativeAdapterError::outcome_unknown(format!(
@@ -3323,6 +3337,26 @@ mod live_tests {
     use tokio::process::Command;
 
     use super::*;
+
+    #[test]
+    fn only_a_refused_first_screen_input_is_a_definite_failure() {
+        let glyph = || {
+            PlatformError::Unsupported(
+                "X11 keymap cannot type Unicode scalar U+00C6; use clipboard paste".into(),
+            )
+        };
+        let refused = screen_input_error(glyph(), true);
+        assert_eq!(refused.code, NativeAdapterErrorCode::Unsupported);
+        assert!(!refused.dispatched);
+        assert!(refused.message.contains("use clipboard paste"));
+        for error in [
+            screen_input_error(glyph(), false),
+            screen_input_error(PlatformError::os("XTEST key press result: broken"), true),
+        ] {
+            assert_eq!(error.code, NativeAdapterErrorCode::OutcomeUnknown);
+            assert!(error.dispatched);
+        }
+    }
 
     #[tokio::test]
     async fn window_capture_retries_only_a_resize_before_recording_a_frame() {

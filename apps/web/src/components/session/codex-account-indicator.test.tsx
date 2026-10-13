@@ -13,7 +13,69 @@ import { fakeClient, WORKSPACE_ID } from "../../../../../packages/react/test/fak
 }
 const { OpenGeniProvider } = await import("@opengeni/react");
 const { CodexAccountIndicator } = await import("./codex-account-indicator");
+const { retainSharedQueries } = await import("@/lib/shared-query");
 afterAll(() => GlobalRegistrator.unregister());
+
+test("shared menu hides cached quotas when the Codex adapter reports no live data", async () => {
+  const account = {
+    id: "unavailable",
+    label: "Team Codex",
+    status: "active",
+    plan: "Pro",
+    allocatorEnabled: true,
+    fiveHour: { percent: 10, remaining: 90 },
+    weekly: { percent: 20, remaining: 80 },
+  };
+  const client = Object.assign(fakeClient({}), {
+    listSessionCodexAccounts: async () => ({
+      accounts: [account],
+      currentAccount: account,
+      currentSelection: { credentialId: account.id, waiting: false },
+      pinnedAccountId: null,
+      lastAccountId: account.id,
+      activeAccountId: account.id,
+      settings: {
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+        activeCredentialId: account.id,
+      },
+    }),
+    refreshCodexUsage: async () => ({ usage: { unavailable: { status: "no-data", usage: null } } }),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+          <CodexAccountIndicator
+            workspaceId={WORKSPACE_ID}
+            sessionId="no-data"
+            model="codex/gpt-6-astra"
+            events={[]}
+          />
+        </OpenGeniProvider>,
+      ),
+    );
+    await act(async () =>
+      container
+        .querySelector("button")!
+        .dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false })),
+    );
+    expect(document.body.textContent).toContain("Usage unavailable");
+    expect(document.body.textContent).toContain("Team Codex");
+    expect(document.body.textContent).toContain("Pro");
+    expect(document.body.textContent).not.toContain("% remaining");
+    expect(document.querySelector('[role="progressbar"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-codex_subscription"]'),
+    ).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
 
 test("running accepted account remains labeled while the switcher offers only the new pool", async () => {
   const client = Object.assign(fakeClient({}), {
@@ -175,7 +237,9 @@ test("shows the blocked account instead of a healthy default and permits repeati
     const blockedOption = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
       (el) => el.textContent?.includes("Blocked account"),
     );
-    expect(blockedOption?.textContent).toContain("0% remaining");
+    // The selected account's quota is already shown in the summary above.
+    expect(blockedOption).toBeDefined();
+    expect(blockedOption?.textContent).not.toContain("remaining");
     const auto = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) =>
       el.textContent?.includes("Auto"),
     );
@@ -277,5 +341,150 @@ test("weekly-only live usage replaces a mislabeled cached 5-hour reading", async
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("navigating back and reopening keeps the last account and live usage on screen", async () => {
+  let listReads = 0;
+  let usageReads = 0;
+  let releaseUsage: (() => void) | null = null;
+  const reading = (remaining: number) => ({
+    used: 100 - remaining,
+    limit: 100,
+    remaining,
+    percent: 100 - remaining,
+    resetAt: null,
+    resetAfterSeconds: null,
+    limitWindowSeconds: 604800,
+  });
+  const account = {
+    id: "team",
+    label: "Team account",
+    status: "active",
+    plan: "pro",
+    allocatorEnabled: true,
+    weekly: { percent: 10, remaining: 90 },
+  };
+  const client = Object.assign(fakeClient({}), {
+    listSessionCodexAccounts: async () => {
+      listReads += 1;
+      return {
+        accounts: [account],
+        currentAccount: account,
+        currentSelection: { credentialId: "team", waiting: false },
+        pinnedAccountId: null,
+        lastAccountId: "team",
+        activeAccountId: "team",
+        settings: {
+          rotationEnabled: true,
+          rotationStrategy: "sharded",
+          activeCredentialId: "team",
+        },
+      };
+    },
+    refreshCodexUsage: async () => {
+      usageReads += 1;
+      // The second check is slow: the menu must not blank out meanwhile.
+      if (usageReads > 1) await new Promise<void>((resolve) => (releaseUsage = resolve));
+      return {
+        usage: {
+          team: {
+            status: "ok" as const,
+            usage: {
+              status: "ok" as const,
+              planType: "pro",
+              fiveHour: null,
+              weekly: reading(usageReads > 1 ? 55 : 72),
+              limitReached: false,
+              fetchedAt: new Date().toISOString(),
+            },
+          },
+        },
+      };
+    },
+  });
+  const indicator = (
+    <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+      <CodexAccountIndicator
+        workspaceId={WORKSPACE_ID}
+        sessionId="cached"
+        model="codex/gpt-5.6-sol"
+        events={[]}
+      />
+    </OpenGeniProvider>
+  );
+  const open = (container: HTMLElement) =>
+    act(async () =>
+      container
+        .querySelector("button")!
+        .dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false })),
+    );
+  const close = () =>
+    act(async () =>
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+    );
+  const weeklyBar = () =>
+    document.querySelector<HTMLElement>('[role="progressbar"][aria-label="Week remaining"]');
+
+  // The console retains reads for its client above the routed pages, so
+  // leaving the session page (and its provider subtree) keeps them.
+  const release = retainSharedQueries(client);
+  const first = document.createElement("div");
+  document.body.append(first);
+  const firstRoot = createRoot(first);
+  await act(async () => firstRoot.render(indicator));
+  await open(first);
+  expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("72% remaining");
+  await close();
+  // Let the post-check account re-read settle before leaving.
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  const readsBeforeLeaving = listReads;
+  // Click away to another page: the session header unmounts.
+  await act(async () => firstRoot.unmount());
+  first.remove();
+
+  // Back to the session: the first frame already shows the account control,
+  // not the loading skeleton, and nothing waits on the network.
+  const second = document.createElement("div");
+  document.body.append(second);
+  const secondRoot = createRoot(second);
+  let skeletonOnFirstFrame: boolean | null = null;
+  try {
+    act(() => secondRoot.render(indicator));
+    skeletonOnFirstFrame = second.querySelector('[aria-label="Loading Codex account"]') !== null;
+    await act(async () => undefined);
+    expect(skeletonOnFirstFrame).toBe(false);
+    expect(second.querySelector("button")?.getAttribute("aria-label")).toContain(
+      "Current account · Team account",
+    );
+    expect(listReads).toBe(readsBeforeLeaving);
+
+    // Reopening within the reuse window shows the last live reading at once
+    // and does not ask the provider again.
+    await open(second);
+    expect(document.body.textContent).not.toContain("Checking usage");
+    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("72% remaining");
+    expect(usageReads).toBe(1);
+    await close();
+
+    // A later re-check keeps the previous reading visible until the new one lands.
+    // Age the retained reading past the reuse window.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 60_000;
+    try {
+      await open(second);
+      expect(usageReads).toBe(2);
+      expect(document.body.textContent).not.toContain("Checking usage");
+      expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("72% remaining");
+    } finally {
+      Date.now = realNow;
+    }
+    await act(async () => releaseUsage?.());
+    await act(async () => undefined);
+    expect(weeklyBar()?.getAttribute("aria-valuetext")).toBe("55% remaining");
+  } finally {
+    await act(async () => secondRoot.unmount());
+    second.remove();
+    release();
   }
 });

@@ -31,6 +31,8 @@ const testFiles =
         "./test/e2e/react-demo-mobile.browser.e2e.ts",
         "./test/e2e/realtime-demo.browser.e2e.ts",
         "./test/e2e/restored-attachment-preview.browser.e2e.ts",
+        "./test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+        "./test/e2e/secrets-fake-login.browser.e2e.ts",
         "./test/e2e/chat-media-entry.browser.e2e.ts",
         "./test/e2e/embedded-artifact-viewer.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",

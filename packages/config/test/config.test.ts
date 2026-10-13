@@ -1718,7 +1718,7 @@ describe("sandbox preparation profiles", () => {
   test("adds Codemode pointers whenever exact-attempt signing authority is available", () => {
     const local = withEnv({}, () => getSettings());
     expect(local.ogtoolPackageSpec).toBeUndefined();
-    expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
+    expect(stableSandboxEnvironmentForRun(local, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
       OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
     });
@@ -1732,7 +1732,7 @@ describe("sandbox preparation profiles", () => {
       () => getSettings(),
     );
     expect(configured.ogtoolPackageSpec).toBe("@opengeni/ogtool@0.1.0");
-    expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
+    expect(stableSandboxEnvironmentForRun(configured, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
       OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
       OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
@@ -1742,7 +1742,7 @@ describe("sandbox preparation profiles", () => {
       getSettings(),
     );
     expect(
-      stableSandboxEnvironmentForRun(unavailable, {}, { workspaceId: "ws-1" })
+      stableSandboxEnvironmentForRun(unavailable, { workspaceId: "ws-1" })
         .OPENGENI_CODEMODE_TOKEN_FILE,
     ).toBeUndefined();
   });
@@ -1767,7 +1767,7 @@ describe("sandbox preparation profiles", () => {
 
   test("adds stable git credential pointers and provider CLI wrapper PATH for provisioned sandboxes", () => {
     const settings = withEnv({}, () => getSettings());
-    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+    const env = stableSandboxEnvironmentForRun(settings, { workspaceId: "ws-1" });
 
     expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBe("/workspace/.opengeni/git-credentials");
     expect(env.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
@@ -1778,7 +1778,7 @@ describe("sandbox preparation profiles", () => {
 
   test("does not add git credential pointers or wrapper PATH for selfhosted sandboxes", () => {
     const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "selfhosted" }, () => getSettings());
-    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+    const env = stableSandboxEnvironmentForRun(settings, { workspaceId: "ws-1" });
 
     expect(env).toEqual({});
     expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
@@ -1795,7 +1795,7 @@ describe("sandbox preparation profiles", () => {
       },
       () => getSettings(),
     );
-    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+    const env = stableSandboxEnvironmentForRun(settings, { workspaceId: "ws-1" });
 
     expect(env).toEqual({});
   });

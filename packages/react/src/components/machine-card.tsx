@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
+import { machineScopeLabel } from "../sandbox-label-model";
 import type { MachineView, MetricSample } from "../types/machines";
 import { MachineHealthPill } from "./machine-health-pill";
 import { MachineMetrics } from "./machine-metrics";
@@ -157,9 +158,7 @@ export function MachineCard({
               ) : null}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
-              <span data-machine-scope={machine.scope} className="capitalize">
-                {machine.scope === "user" ? "personal" : machine.scope}
-              </span>
+              <span data-machine-scope={machine.scope}>{machineScopeLabel(machine.scope)}</span>
               <span aria-hidden>·</span>
               <span className="capitalize">{machine.kind}</span>
               <span aria-hidden>·</span>

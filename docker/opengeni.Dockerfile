@@ -43,6 +43,8 @@ COPY packages/storage/package.json packages/storage/package.json
 COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
+COPY packages/vaults/package.json packages/vaults/package.json
+COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 

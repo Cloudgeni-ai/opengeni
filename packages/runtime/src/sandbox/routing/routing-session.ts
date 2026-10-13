@@ -101,6 +101,17 @@ import {
   type RemoteOperationObservation,
 } from "../op-correlation";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
+import {
+  clearSecretFilesCommand,
+  secretEnvFileContent,
+  secretEnvFilePath,
+  secretExecCarryFor,
+  secretExecEnvironment,
+  spliceCarry,
+  withSecretEnvFilePrefix,
+  withSecretStdin,
+  type SecretFileWriter,
+} from "../secret-delivery";
 import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
@@ -141,6 +152,8 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   writeFile?(args: unknown): Promise<unknown>;
   writePlacementPrivate?(args: unknown): Promise<unknown>;
   deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
+  /** Backend-native secret-file cleanup (connected machines); else `rm -rf`. */
+  clearSecretFilesForAttempt?(scope?: string): Promise<void>;
   createEditor?(runAs?: string): unknown;
   listDir?(args: unknown, runner?: SynchronousCommandRunner): Promise<unknown>;
   pathExists?(path: string, runAs?: string): Promise<boolean>;
@@ -970,6 +983,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * that exact resolved route so pointer movement can never redirect stdin,
    * polling, or process-group helpers to another box. */
   private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
+  /** Attempt scopes that received secret files on this session (cleanup). */
+  private readonly secretScopes = new Set<string>();
   private readonly processControlReads = new Map<number, SharedProcessRead>();
   private readonly commandOwnerBackends = new Set<RoutableBackendSession>();
   /** Every backend whose settled op-stream results may still need a final ack.
@@ -1460,8 +1475,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (!write) throw new RoutingUnsupportedError(op, record.backend.kind);
     let result: string;
     try {
+      const providerArgs = await withSecretStdin(args);
       result = await this.invokeProviderOperation(op, record.backend, () =>
-        write.call(record.backend.session, args),
+        write.call(record.backend.session, providerArgs),
       );
     } catch (error) {
       let inputUnknown = false;
@@ -2603,13 +2619,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       return await this.dispatch(
         "execCommand",
         true,
-        async (s) => {
+        async (s, backend) => {
           notifyRemoteOperationTransportSelected(s);
+          // Secret delivery happens here, below every recorder: connected
+          // machines deliver natively in their own session; every other
+          // backend gets a sourced-then-deleted env file.
+          if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
+          const providerArgs =
+            backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
           if (s.execCommand) {
-            return s.execCommand(args);
+            return s.execCommand(providerArgs);
           }
           if (s.exec) {
-            const r = (await s.exec(args)) as { stdout?: string; output?: string };
+            const r = (await s.exec(providerArgs)) as { stdout?: string; output?: string };
             return r.stdout ?? r.output ?? "";
           }
           throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
@@ -2621,6 +2643,92 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct
       // verdict) instead of letting the SDK mislabel it "Please try again".
       return this.renderSelfhostedFaultOrThrow(error);
+    }
+  }
+
+  /**
+   * Env-file delivery (design §10.3 step 5) for one command carrying resolved
+   * references: write `export OPENGENI_SECRET_n=…` lines to a 0600 file under
+   * the attempt's 0700 secret directory through a writer whose bytes never
+   * pass through argv or command text, then prefix the command to source and
+   * delete it. Returns `args` unchanged for every other command (DL-8).
+   */
+  private async withSecretEnvFile(
+    session: RoutableBackendSession,
+    backend: ResolvedActiveBackend,
+    args: unknown,
+  ): Promise<unknown> {
+    if (!args || typeof args !== "object") return args;
+    const cmd = (args as { cmd?: unknown }).cmd;
+    const carry = secretExecCarryFor(cmd);
+    if (!carry || typeof cmd !== "string") return args;
+    // Managed sandboxes run commands through POSIX sh. A carry the tool
+    // wrapper could not splice (no turn-cancellation wrapper) is spliced here.
+    const spliced = spliceCarry(carry, "posix");
+    const command = carry.spliced ? cmd : cmd.split(carry.command).join(spliced.text);
+    const writer: SecretFileWriter = async (file) =>
+      await withoutProviderCommandHandle(() =>
+        writeSecretFileOnBackend(session, file, backend.kind),
+      );
+    const env = await secretExecEnvironment(carry, spliced, writer);
+    const envFile = secretEnvFilePath(carry.scope);
+    await writer({ path: envFile, content: new TextEncoder().encode(secretEnvFileContent(env)) });
+    this.secretScopes.add(carry.scope);
+    return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(command, envFile) };
+  }
+
+  /** Write attempt-scoped secret files (apply_patch / view_image `secretfile`). */
+  async writeSecretFiles(
+    scope: string,
+    files: ReadonlyArray<{ path: string; content: Uint8Array }>,
+  ): Promise<void> {
+    await this.dispatch("writeSecretFiles", false, async (session, backend) => {
+      for (const file of files) {
+        await withoutProviderCommandHandle(() =>
+          writeSecretFileOnBackend(session, file, backend.kind),
+        );
+      }
+      this.secretScopes.add(scope);
+    });
+  }
+
+  /**
+   * Remove this attempt's secret files on the current backend (attempt end,
+   * alongside run-credential cleanup). A no-op when nothing was written.
+   */
+  async clearSecretFilesForAttempt(scope?: string): Promise<void> {
+    const scopes = scope === undefined ? [...this.secretScopes] : [scope];
+    if (scopes.length === 0) return;
+    await this.dispatch("clearSecretFiles", false, async (session) => {
+      for (const entry of scopes) {
+        if (session.clearSecretFilesForAttempt) {
+          await session.clearSecretFilesForAttempt(entry);
+        } else {
+          await withoutProviderCommandHandle(async () => {
+            const result = await executeSynchronousCommand(session as ChannelASession, {
+              cmd: clearSecretFilesCommand(entry),
+              yieldTimeMs: 30_000,
+              maxOutputTokens: 1_000,
+            });
+            if (result.exitCode !== 0) throw new Error("secret file cleanup failed");
+          });
+        }
+        this.secretScopes.delete(entry);
+      }
+    });
+  }
+
+  /** Connected machines deliver natively (their own session writes any
+   * `{{secretfile:…}}`); remember the scope so attempt-end cleanup reaches it. */
+  private noteNativeSecretScope(args: unknown): void {
+    const cmd = args && typeof args === "object" ? (args as { cmd?: unknown }).cmd : undefined;
+    const carry = secretExecCarryFor(cmd);
+    if (
+      carry?.tokens.some(
+        (token) => token.type === "reference" && token.reference.kind === "secretfile",
+      )
+    ) {
+      this.secretScopes.add(carry.scope);
     }
   }
 
@@ -2656,7 +2764,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       if (!s.writeStdin) {
         throw new RoutingUnsupportedError("writeStdin", this.cached?.kind ?? "unknown");
       }
-      return s.writeStdin(args);
+      return s.writeStdin(await withSecretStdin(args));
     });
   }
 
@@ -3380,6 +3488,97 @@ async function writePlacementPrivateOnBackend(
   if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
   if (session.writeFile) return await session.writeFile(input);
   return await streamPlacementPrivateFile(session, input, backendKind);
+}
+
+/**
+ * Write one secret file (0600 under a 0700 directory). Uses the backend's
+ * private-file write, else streams the bytes over stdin; never argv, command
+ * text, or the workspace `writeFile` path (which providers may record).
+ */
+async function writeSecretFileOnBackend(
+  session: RoutableBackendSession,
+  file: { path: string; content: Uint8Array },
+  backendKind: string,
+): Promise<void> {
+  const input = { path: file.path, content: file.content, createParents: true };
+  if (session.writePlacementPrivate) {
+    await session.writePlacementPrivate(input);
+    return;
+  }
+  if (session.execCommand && session.writeStdin && backendKind !== "opensandbox") {
+    await streamSecretFile(session, file);
+    return;
+  }
+  throw new RoutingUnsupportedError("writeSecretFile", backendKind);
+}
+
+function execExitCode(raw: unknown): { exitCode: number | null; sessionId: number | null } {
+  if (typeof raw === "string") {
+    const banner = parseExecResponseBanner(raw);
+    return banner.kind === "exited"
+      ? { exitCode: banner.exitCode, sessionId: null }
+      : banner.kind === "running"
+        ? { exitCode: null, sessionId: banner.sessionId }
+        : { exitCode: null, sessionId: null };
+  }
+  const result = (raw ?? {}) as { exitCode?: unknown; sessionId?: unknown };
+  return {
+    exitCode: typeof result.exitCode === "number" ? result.exitCode : null,
+    sessionId: typeof result.sessionId === "number" ? result.sessionId : null,
+  };
+}
+
+/**
+ * Stream one private file over a pipe: `head -c N` reads exactly the base64
+ * payload from stdin, decodes it into a 0600 temp file and renames it into
+ * place. Success is the authenticated exit status alone, so this works on
+ * providers that cannot prove complete output collection (local, docker).
+ * The bytes never appear in argv or command text.
+ */
+async function streamSecretFile(
+  session: RoutableBackendSession,
+  file: { path: string; content: Uint8Array },
+): Promise<void> {
+  const payload = Buffer.from(file.content).toString("base64");
+  const parent = file.path.slice(0, file.path.lastIndexOf("/")) || "/";
+  const temporary = `${file.path}.partial-${crypto.randomUUID()}`;
+  const command = [
+    "umask 077",
+    `mkdir -p -- ${shellSingleQuote(parent)} || exit 70`,
+    `chmod 0700 -- ${shellSingleQuote(parent)} || exit 70`,
+    "if printf '' | base64 -d >/dev/null 2>&1; then decode_flag=-d",
+    "elif printf '' | base64 -D >/dev/null 2>&1; then decode_flag=-D",
+    "else exit 69; fi",
+    `head -c ${payload.length} | base64 "$decode_flag" > ${shellSingleQuote(temporary)} || { rm -f -- ${shellSingleQuote(temporary)}; exit 71; }`,
+    `chmod 0600 -- ${shellSingleQuote(temporary)} && mv -f -- ${shellSingleQuote(temporary)} ${shellSingleQuote(file.path)} || { rm -f -- ${shellSingleQuote(temporary)}; exit 72; }`,
+  ].join("\n");
+  const started = execExitCode(
+    await session.execCommand!({
+      cmd: command,
+      tty: false,
+      login: false,
+      yieldTimeMs: payload.length === 0 ? 10_000 : 250,
+      maxOutputTokens: 200,
+    }),
+  );
+  let status = started.exitCode;
+  if (status === null && started.sessionId !== null) {
+    let chars = payload;
+    for (let attempt = 0; attempt < 120 && status === null; attempt += 1) {
+      const step = execExitCode(
+        await session.writeStdin!({
+          sessionId: started.sessionId,
+          chars,
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 200,
+        }),
+      );
+      chars = "";
+      status = step.exitCode;
+      if (status === null && step.sessionId === null) break;
+    }
+  }
+  if (status !== 0) throw new Error(`secret file transfer failed (exit ${status ?? "unknown"})`);
 }
 
 async function deletePlacementPrivateOnBackend(

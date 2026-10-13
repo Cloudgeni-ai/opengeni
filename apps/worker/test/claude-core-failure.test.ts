@@ -21,7 +21,7 @@ import {
 // Failure settlement and finalization of a core-placed Claude turn (design
 // 5.3, Claude track C1a): an unknown outcome is terminal, a lost lease
 // recovers only after the history checkpoint, the legacy Claude receipts,
-// waits and release never run, and a legacy Claude turn keeps its paths.
+// waits and release never run, including for an unplaced turn.
 
 const restores: Array<{ mockRestore(): void }> = [];
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
@@ -314,23 +314,24 @@ describe("Claude failure settlement on the core", () => {
     for (const other of legacy.others) expect(other).not.toHaveBeenCalled();
   });
 
-  test("a legacy Claude turn keeps its paths: no core checkpoint, legacy refusal settlement", async () => {
+  test("an unplaced Claude turn cannot re-enter retired recovery or refusal settlement", async () => {
     const recoverAfter = spy(coreRequests, "coreLanesRecoverAfterCheckpoint");
     const lost = failureDeps(new Error("lease lost"), null, true);
     const recover = recovery(lost.order);
-    expect(await settleTurnFailure(lost.deps as never)).toMatchObject({ status: "recovering" });
+    await settleTurnFailure(lost.deps as never).catch(() => undefined);
     expect(recoverAfter).not.toHaveBeenCalled();
-    expect(recover).toHaveBeenCalledWith(
+    expect(recover).not.toHaveBeenCalledWith(
       expect.anything(),
       "workspace-1",
       expect.objectContaining({ reason: "claude_lease_lost" }),
     );
-    // The same refusal a core turn skips enters the legacy settlement.
+    // A missing core placement is not authority to use legacy settlement.
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
     const legacy = legacyClaudeSettlement();
     const refused = failureDeps(anthropic(429, "rate_limit_error"), null);
     await settleTurnFailure(refused.deps as never).catch(() => undefined);
-    expect(legacy.goal).toHaveBeenCalledTimes(1);
+    expect(legacy.goal).not.toHaveBeenCalled();
+    for (const other of legacy.others) expect(other).not.toHaveBeenCalled();
   });
 });
 
@@ -392,7 +393,7 @@ describe("Claude turn finalization by route", () => {
     };
   }
 
-  test("the legacy route releases the legacy lease; the core finalizes its binding and releases its own lease", async () => {
+  test("finalization never releases a retired lease; the core finalizes and releases its own lease", async () => {
     const legacyRelease = spy(db, "releaseClaudeCredentialLease").mockResolvedValue(
       undefined as never,
     );
@@ -401,7 +402,7 @@ describe("Claude turn finalization by route", () => {
     );
     const legacy = finalizationDeps(false);
     await finalizeTurnAttempt(legacy.deps);
-    expect(legacyRelease).toHaveBeenCalledTimes(1);
+    expect(legacyRelease).not.toHaveBeenCalled();
     expect(finalize).not.toHaveBeenCalled();
     expect(legacy.releaseCurrent).not.toHaveBeenCalled();
     const placed = finalizationDeps(true);
@@ -413,7 +414,7 @@ describe("Claude turn finalization by route", () => {
     });
     expect(placed.releaseCurrent).toHaveBeenCalledTimes(1);
     // The legacy release never runs for the core lease.
-    expect(legacyRelease).toHaveBeenCalledTimes(1);
+    expect(legacyRelease).not.toHaveBeenCalled();
   });
 
   for (const mode of [

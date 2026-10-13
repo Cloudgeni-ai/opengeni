@@ -5,7 +5,6 @@ import { join } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
@@ -15,6 +14,7 @@ import {
   BrowserSupervisor,
   imageDimensions,
   resolvePinnedAgentBrowserBinary,
+  restoreTabs,
 } from "../src";
 import { CdpConnection, CdpProtocolError, type CdpSendOptions } from "../src/cdp";
 
@@ -271,9 +271,13 @@ headedE2e(
   90_000,
 );
 
-headedE2e.each([false, true])(
-  "streams a mobile headed tab continuously while managed input stays in the background (headed=%j)",
-  async (headed) => {
+headedE2e.each([
+  { headed: false, passkeys: false },
+  { headed: true, passkeys: false },
+  { headed: true, passkeys: true },
+])(
+  "streams a mobile headed tab continuously while managed input stays in the background unless passkeys need the front (%j)",
+  async ({ headed, passkeys }) => {
     const directory = await mkdtemp("/tmp/ogb-background-input-");
     const socketDirectory = await mkdtemp("/tmp/ogb-bg-sockets-");
     const reference = {
@@ -283,7 +287,12 @@ headedE2e.each([false, true])(
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
       socketRootDirectory: socketDirectory,
+      // A passkey placement brings the acted-on tab to the front (Chromium
+      // refuses WebAuthn in a background tab); without passkeys managed
+      // input never switches the real tab.
+      passkeys,
     });
+    const actedFront = passkeys ? "hidden" : "visible";
     let cdp: CdpConnection | null = null;
     let frames: import("../src").BrowserFrameSubscription | null = null;
     let detachedDriver: AgentBrowserDriver | null = null;
@@ -356,7 +365,7 @@ headedE2e.each([false, true])(
         expect(result.state).toBe("completed");
         expect(result.observation).not.toBeNull();
         observed = result.observation!;
-        expect(await frontVisibility()).toBe("visible");
+        expect(await frontVisibility()).toBe(actedFront);
       };
       await act({ type: "viewport", width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
       const locator = { kind: "role", role: "textbox", name: "Name" } as const;
@@ -392,7 +401,7 @@ headedE2e.each([false, true])(
         { sessionId: attached.sessionId },
       );
       expect(state.result.value).toEqual({ visibility: "visible", value: "Background æøå 🦊" });
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       // Disconnecting one controller restores its override without closing
       // the shared owned browser or touching another controller's tab.
       detachedDriver = new AgentBrowserDriver({
@@ -429,7 +438,7 @@ headedE2e.each([false, true])(
         await Bun.sleep(25);
       }
       expect(await cleanupVisibility()).toBe("hidden");
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       await cdp.send("Target.closeTarget", { targetId: cleanup.target.id });
       frames = await supervisor.subscribeFrames(reference, background.target.id, {
         format: "jpeg",
@@ -440,7 +449,7 @@ headedE2e.each([false, true])(
       expect([...screenshot.data.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
       const next = await frameAfter(iterator, first.sequence, 3_000);
       expect([next.width, next.height]).toEqual([390, 844]);
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       // Explicit activation remains available for a human choosing direct control.
       const activated = await supervisor.action(command(observed, { type: "activate" }));
       expect(activated.state).toBe("completed");
@@ -844,7 +853,7 @@ e2e(
       releaseBarrier = resolve;
     });
     let barrierArrivals = 0;
-    let protectedAuthBody = "";
+    let loginBody = "";
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -866,7 +875,7 @@ e2e(
           });
         }
         if (url.pathname === "/logged-in" && request.method === "POST") {
-          protectedAuthBody = await request.text();
+          loginBody = await request.text();
           return new Response("<!doctype html><title>Logged in</title><p>Authenticated</p>", {
             headers: { "content-type": "text/html; charset=utf-8" },
           });
@@ -1211,29 +1220,35 @@ e2e(
           expectedFrameId: authState.frameId!,
         }),
       ).rejects.toMatchObject({ code: "invalid_action" });
-      const protectedResult = await driver.protectedFill(
-        protectedAuthCommand(authPage, parallelOrigin),
-      );
-      expect(protectedResult.status).toBe("submitted");
-      expect(protectedResult.target.url).toBe(`${parallelOrigin}/logged-in`);
-      expect(protectedAuthBody).toContain("username=fixture-user");
-      expect(protectedAuthBody).toContain("password=fixture-password");
-      expect(JSON.stringify(await driver.debug(authPage.target.id))).not.toContain(
-        "fixture-password",
-      );
-      await expect(driver.captureScreenshot(authPage.target.id)).rejects.toMatchObject({
-        code: "permission_denied",
-      });
-      const protectedState = await driver.targetState(authPage.target.id);
-      await expect(
-        driver.readDom(authPage.target.id, {
-          kind: "count",
-          selector: "button",
-          expectedTargetGeneration: protectedState.targetGeneration,
-          expectedDocumentGeneration: protectedState.documentGeneration!,
-          expectedFrameId: protectedState.frameId!,
+      // Logins are ordinary fill and click actions on the page.
+      let loginPage = await driver.dispatch(
+        command(authPage, {
+          type: "fill",
+          locator: { kind: "css", selector: "#username" },
+          value: "fixture-user",
         }),
-      ).rejects.toMatchObject({ code: "permission_denied" });
+      );
+      loginPage = await driver.dispatch(
+        command(loginPage, {
+          type: "fill",
+          locator: { kind: "css", selector: "#password" },
+          value: "fixture-password",
+        }),
+      );
+      loginPage = await driver.dispatch(
+        command(loginPage, { type: "click", locator: { kind: "css", selector: "#login" } }),
+      );
+      // The form post commits after the click receipt; wait for the navigation.
+      const loginDeadline = Date.now() + 10_000;
+      let loginUrl = loginPage.target.url;
+      while (loginUrl !== `${parallelOrigin}/logged-in` && Date.now() < loginDeadline) {
+        await Bun.sleep(50);
+        const targets = await driver.listTargets();
+        loginUrl = targets.find((target) => target.id === loginPage.target.id)?.url ?? loginUrl;
+      }
+      expect(loginUrl).toBe(`${parallelOrigin}/logged-in`);
+      expect(loginBody).toContain("username=fixture-user");
+      expect(loginBody).toContain("password=fixture-password");
 
       const firstParallel = await driver.openTarget("about:blank");
       const secondParallel = await driver.openTarget("about:blank");
@@ -1485,41 +1500,6 @@ function command(
     expectedFrameId: observation.frameId!,
     actor: { kind: "agent", subjectId: "browserd-cdp-e2e" },
     action,
-  };
-}
-
-function protectedAuthCommand(
-  observation: BrowserObservation,
-  origin: string,
-): BrowserProtectedAuthFillCommand {
-  return {
-    protocolVersion: 1,
-    operationId: randomUUID(),
-    browserSessionId: observation.browserSessionId,
-    controllerGeneration: observation.target.controllerGeneration,
-    targetId: observation.target.id,
-    expectedTargetGeneration: observation.target.targetGeneration,
-    expectedDocumentGeneration: observation.target.documentGeneration!,
-    expectedFrameId: observation.frameId!,
-    actor: { kind: "system", subjectId: "protected-auth-e2e" },
-    authorityId: "password-authority",
-    credentialVersion: 1,
-    allowedOrigins: [origin],
-    fields: [
-      {
-        fieldId: "username",
-        locator: { kind: "css", selector: "#username" },
-        purpose: "identifier",
-        value: "fixture-user",
-      },
-      {
-        fieldId: "password",
-        locator: { kind: "css", selector: "#password" },
-        purpose: "password",
-        value: "fixture-password",
-      },
-    ],
-    submit: { type: "click", locator: { kind: "css", selector: "#login" } },
   };
 }
 
@@ -1985,3 +1965,77 @@ chromiumE2e(
   },
   60_000,
 );
+
+for (const mode of ["start", "restore tabs"] as const) {
+  chromiumE2e(
+    `${mode} on a browser whose only restored tab crashed selects a live tab`,
+    async () => {
+      const directory = await mkdtemp("/tmp/ogb-crashed-restore-");
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: `crashrestore_${randomUUID().slice(0, 8)}`,
+        sessionName: "s",
+        socketDirectory: join(directory, "s"),
+        profileDirectory: join(directory, "profile"),
+        downloadDirectory: join(directory, "downloads"),
+        screenshotDirectory: join(directory, "screenshots"),
+        headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+        binary: await resolvePinnedAgentBrowserBinary(
+          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+            : {},
+        ),
+      });
+      const first = new AgentBrowserDriver({
+        browserSessionId: randomUUID(),
+        controllerGeneration: randomUUID(),
+        runner,
+      });
+      let restarted: AgentBrowserDriver | null = null;
+      let cdp: CdpConnection | null = null;
+      try {
+        const restoredUrl = dataUrl("<!doctype html><h1>Restored page</h1>");
+        const initial = await first.start(restoredUrl);
+        const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+        cdp = await CdpConnection.connect(endpoint.cdpUrl);
+        const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId: initial.target.id,
+          flatten: true,
+        });
+        await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+        await first.detach();
+
+        // A new controller generation meets the dead restored tab first, as a
+        // restored profile launch does. The browser is healthy, so startup works.
+        restarted = new AgentBrowserDriver({
+          browserSessionId: randomUUID(),
+          controllerGeneration: randomUUID(),
+          runner,
+        });
+        if (mode === "start") {
+          const started = await restarted.start(dataUrl("<!doctype html><h1>After restore</h1>"));
+          expect(started.target.id).not.toBe(initial.target.id);
+          expect(names(started)).toContain("After restore");
+          const tabs = await restarted.listTargets();
+          expect(tabs.map((target) => target.id)).toContain(initial.target.id);
+        } else {
+          // The checkpoint's selected tab has the same URL as the dead tab. The
+          // restored selection must be the live tab startup navigated there.
+          await restoreTabs(restarted, [{ url: restoredUrl, selected: true }]);
+          const tabs = await restarted.listTargets();
+          const selected = tabs.find((target) => target.selected);
+          expect(selected?.id).toBeDefined();
+          expect(selected?.id).not.toBe(initial.target.id);
+          expect(names(await restarted.observe(selected!.id))).toContain("Restored page");
+        }
+      } finally {
+        cdp?.close();
+        await (restarted ?? first).close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+}

@@ -103,11 +103,12 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
-  test("a SuperGrok subscription model bypasses Opengeni credits through its synthetic catalog", async () => {
+  test("a SuperGrok model off the core route is unfunded and keeps the credit gate", async () => {
     const restoreBal = mockZeroBalance();
     const restoreCred = mockCodexBilled(false);
-    // The legacy SuperGrok route (no cutover receipt): one route read, then
-    // the static overlay answer exactly as before.
+    // SuperGrok's legacy runtime is deleted: a route other than the core
+    // (no cutover receipt) fails closed exactly as maintenance does, so the
+    // static overlay no longer bypasses credits.
     const route = spyOn(opengeniDb, "readSubscriptionCoreRouteFunding").mockResolvedValue({
       route: "legacy",
     });
@@ -120,14 +121,16 @@ describe("API edge credit gate — codex bypass", () => {
         quantity: 1,
         model: "supergrok/grok-4.7",
       });
-      expect(decision.allowed).toBe(true);
-      await requireLimit(deps(settings), {
-        accountId: ACCOUNT,
-        workspaceId: WORKSPACE,
-        action: "agent_run:create",
-        quantity: 1,
-        model: "supergrok/grok-4.7",
-      });
+      expect(decision.allowed).toBe(false);
+      await expect(
+        requireLimit(deps(settings), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          action: "agent_run:create",
+          quantity: 1,
+          model: "supergrok/grok-4.7",
+        }),
+      ).rejects.toMatchObject({ status: 402 });
       expect(route).toHaveBeenCalledTimes(2);
       expect(route.mock.calls[0]![1]).toEqual({
         provider: "xai",

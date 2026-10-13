@@ -11,6 +11,7 @@ import {
 import { omitStructuredContentTextDuplicates, type AttemptToolResult } from "@opengeni/contracts";
 import packageManifest from "../package.json" with { type: "json" };
 import { compactOutput, parseListOptions } from "./catalog-discovery";
+import { parseToolArguments } from "./tool-arguments";
 
 const PACKAGE_NAME = "@opengeni/ogtool";
 const VERSION = packageManifest.version;
@@ -174,20 +175,6 @@ export function showOutput(catalog: AttemptToolCatalog, name: string): string {
 export function callOutput(result: AttemptToolResult, full = false): string {
   const printed = full ? result : omitStructuredContentTextDuplicates(result);
   return `${JSON.stringify(printed, null, 2)}\n`;
-}
-
-export function parseToolArguments(raw: string | undefined): Record<string, unknown> {
-  if (raw === undefined) return {};
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error("tool arguments must be valid JSON");
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("tool arguments must be a JSON object");
-  }
-  return value as Record<string, unknown>;
 }
 
 async function main(): Promise<void> {

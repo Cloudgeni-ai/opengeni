@@ -210,7 +210,7 @@ export type SessionConversationProps = ClientOverride &
     /** Localized questions and presentation; responses remain stock. */
     humanInputProps?: Pick<
       HumanInputSurfaceProps,
-      "messages" | "autoFocus" | "decisionButtons" | "className"
+      "messages" | "autoFocus" | "decisionButtons" | "allowedSaveTo" | "className"
     >;
     /** Product approval presentation; permission decisions remain stock. */
     approvalProps?: Omit<
@@ -563,7 +563,11 @@ function ConversationView({
               loadSkillReview={loadSkillReview}
               requests={human.requests}
               onSubmit={async (id, response) => {
-                await human.respond(id, response);
+                // `respond` reports a failed send as null. Reject so the card
+                // keeps what was typed (including a secret) for a retry.
+                if (!(await human.respond(id, response))) {
+                  throw new Error("Your answer wasn't sent. Try again.");
+                }
               }}
               respondingRequestId={human.respondingRequestId}
               error={human.mutationError ? formatError(human.mutationError) : null}

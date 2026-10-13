@@ -571,7 +571,7 @@ function GitHubRepositoryPanel({
           type="button"
           disabled={chooser.openingInstallation !== null}
           onClick={() => chooser.openGitHub(installation.installationId)}
-          className="inline-flex items-center gap-1 font-medium text-brand underline-offset-4 hover:underline disabled:opacity-60 pointer-coarse:min-h-11"
+          className="inline-flex items-center gap-1 font-medium og-link disabled:opacity-60 pointer-coarse:min-h-11"
         >
           {chooser.installations.length > 1 && installation.accountLogin
             ? `Choose ${installation.accountLogin} repositories`

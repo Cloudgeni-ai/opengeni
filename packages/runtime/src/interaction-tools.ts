@@ -49,8 +49,6 @@ import {
   ExternalAuthRunResponse,
   InteractionIntervention,
   InteractionPlacement,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
   ReportAuthRunPayload,
   RequestHumanInteractionToolInput,
@@ -483,14 +481,6 @@ const BrowserAuthInput = z.discriminatedUnion("operation", [
   }),
   z
     .object({
-      operation: z.literal("protected_fill"),
-      browserSessionId: z.string().uuid(),
-      authRunId: z.string().uuid(),
-    })
-    .extend(ProtectedAuthFillRequest.omit({ operationId: true }).shape)
-    .strict(),
-  z
-    .object({
       operation: z.literal("advance_external"),
       browserSessionId: z.string().uuid(),
       authRunId: z.string().uuid(),
@@ -524,7 +514,6 @@ const BrowserAuthOutput = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("get_run"), result: AuthRun }).strict(),
   z.object({ operation: z.literal("start"), result: AuthRunMutationResponse }).strict(),
   z.object({ operation: z.literal("report"), result: AuthRunMutationResponse }).strict(),
-  z.object({ operation: z.literal("protected_fill"), result: ProtectedAuthFillResponse }).strict(),
   z.object({ operation: z.literal("advance_external"), result: ExternalAuthRunResponse }).strict(),
   z.object({ operation: z.literal("verify"), result: AuthRunMutationResponse }).strict(),
 ]);
@@ -1027,7 +1016,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     output: BrowserAgentActionReceipt,
     readOnly: false,
@@ -1184,7 +1173,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "auth"],
     title: "Authenticate browser session",
     description:
-      "List configured site-auth connections and durable auth runs, or start, report, provider-advance, protected-fill, and verify one exact BrowserSession authentication run. Use advance_external for an external_provider authority. Provider secrets and hosted-login URLs never enter model tool arguments or results. If an operation returns needs_human, call interaction_request_human with the returned intervention id.",
+      "Reuse a saved sign-in, the first rung of the login ladder: list provider-managed (external_provider) site-auth connections and durable auth runs, or start, report, provider-advance with advance_external, and verify one exact BrowserSession authentication run. Provider credentials and hosted-login URLs stay with the provider. When no saved sign-in applies or a run returns needs_human, sign in yourself with browser_act fill or type: type saved credentials as secret references (such as {{secret:Item/password}} and {{secret:Item/otp}}), read email or SMS codes through connected tools, and solve CAPTCHAs yourself. Pass the returned intervention id to interaction_request_human only when a person must physically act, such as a push approval or a hardware key.",
     input: BrowserAuthInput,
     output: BrowserAuthOutput,
     readOnly: false,
@@ -1247,18 +1236,6 @@ export function createInteractionAttemptToolDefinitions(
           ),
         };
       }
-      if (value.operation === "protected_fill") {
-        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
-        return {
-          operation: value.operation,
-          result: await input.transport.protectedBrowserAuthFill(
-            input.workspaceId,
-            browserSessionId,
-            authRunId,
-            { operationId: context.operationId, ...request },
-          ),
-        };
-      }
       if (value.operation === "advance_external") {
         const { operation: _operation, browserSessionId, authRunId, ...request } = value;
         return {
@@ -1289,7 +1266,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "requestHuman"],
     title: "Request human interaction",
     description:
-      "Pause the current agent turn for a person to act in one exact browser tab or computer target. Browser login/MFA handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+      "Pause the current agent turn for a person to physically act in one exact browser tab or computer target: a push approval on their phone, a hardware security key, or another step only a person present can do. Log in yourself first (secret references and TOTP codes such as {{secret:Item/otp}} when secrets are available, email or SMS codes from connected tools) and solve CAPTCHAs yourself; never hand over a CAPTCHA or a step you can do. Handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
     input: RequestHumanInteractionToolInput,
     output: RequestHumanInteractionToolOutput,
     readOnly: false,
@@ -1392,7 +1369,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "publish"],
     title: "Save browser identity version",
     description:
-      "Explicitly quiesce and save the live BrowserSession as an immutable child revision of a reusable BrowserIdentity. Nothing is written back automatically.",
+      "Explicitly quiesce and save the live BrowserSession as an immutable child revision of a reusable BrowserIdentity. Nothing is written back automatically. After you log in with workspace or task credentials, publish so later browsers reuse the signed-in session instead of logging in again; do not publish after logging in with an Only me secret, because browser identities are shared with the whole workspace.",
     input: BrowserPublishInput,
     output: PublishBrowserRevisionResponse,
     readOnly: false,
@@ -1535,7 +1512,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActionReceipt,
     readOnly: false,
@@ -2210,6 +2187,8 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     }
     // A failed read is still a useful tool result. Preserve the API's public
     // explanation; mutations and uncertain outcomes retain their failure path.
+    const secretReferenceFailure = secretReferenceToolResult(error);
+    if (secretReferenceFailure) return secretReferenceFailure;
     if (
       error instanceof OpenGeniApiError &&
       !error.outcomeUnknown &&
@@ -2322,6 +2301,36 @@ function interactionErrorResult(
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],
     structuredContent: { error },
   };
+}
+
+/** The API refused a Browser or Computer action before dispatch because a
+ * `{{secret:…}}` reference failed. Render it exactly like the in-process
+ * adapters (`SecretReferenceError.toModelOutput()`), including the ready-made
+ * ask card for missing secrets. The body never contains values. */
+export function secretReferenceToolResult(error: unknown): AttemptToolResultValue | null {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 422 || !error.body) return null;
+  try {
+    const parsed = JSON.parse(error.body) as {
+      error?: { details?: { reason?: unknown; secretReference?: unknown } };
+    };
+    const details = parsed.error?.details;
+    const output = details?.secretReference;
+    if (
+      details?.reason !== "secret_reference_error" ||
+      typeof output !== "object" ||
+      output === null ||
+      Array.isArray(output)
+    ) {
+      return null;
+    }
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: JSON.stringify(output) }],
+      structuredContent: output as NonNullable<AttemptToolResultValue["structuredContent"]>,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function jsonSchema(schema: z.ZodType): AttemptToolJsonSchema {

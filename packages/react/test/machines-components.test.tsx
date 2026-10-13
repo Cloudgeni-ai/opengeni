@@ -189,17 +189,15 @@ describe("MachineMetrics", () => {
 describe("MachineCard — attach/swap affordance", () => {
   test("distinguishes personal, workspace, and organization machine scope", async () => {
     for (const [scope, label] of [
-      ["user", "personal"],
-      ["workspace", "workspace"],
-      ["organization", "organization"],
+      ["user", "Only me"],
+      ["workspace", "Workspace"],
+      ["organization", "Organization"],
     ] as const) {
       const r = await renderComponent(
         <MachineCard machine={machine({ sandboxId: `scope-${scope}`, state: "online", scope })} />,
       );
       await flush();
-      expect(
-        r.container.querySelector(`[data-machine-scope="${scope}"]`)?.textContent?.toLowerCase(),
-      ).toBe(label);
+      expect(r.container.querySelector(`[data-machine-scope="${scope}"]`)?.textContent).toBe(label);
       await r.unmount();
     }
   });

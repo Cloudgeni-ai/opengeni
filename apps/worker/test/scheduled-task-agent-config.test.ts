@@ -278,6 +278,19 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
   }, 60_000);
 
+  test("a schedule's vault narrowing lives on the run session, so later turns and children inherit it", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await generatedTask(grant, null);
+    const policy = { mode: "selected", vaultIds: [crypto.randomUUID()] };
+    await shared!.admin`
+      update scheduled_tasks set vault_policy = ${shared!.admin.json(policy)} where id = ${task.id}`;
+    const { session } = await dispatchGeneratedSession(grant, task.id);
+    const [row] = await shared!.admin<Array<{ vault_policy: unknown }>>`
+      select vault_policy from sessions where id = ${session.id}`;
+    expect(row!.vault_policy).toEqual(policy);
+  }, 60_000);
+
   test("configured dispatch canonicalizes creation metadata and replays its frozen instructions", async () => {
     if (!available) return;
     const grant = await workspaceGrant();

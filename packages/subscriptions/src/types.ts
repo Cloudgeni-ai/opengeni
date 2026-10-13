@@ -231,7 +231,12 @@ export type SessionBinding = {
 };
 
 /** Personal authority frozen on accepted work (design 3.7). */
-export type PersonalAuthority = { provider: ProviderId; ownerMembershipId: string };
+export type PersonalAuthority = {
+  provider: ProviderId;
+  ownerMembershipId: string;
+  /** SQL has verified the accepting human and live owner independently of the chat owner. */
+  sharedSessionChoice?: { sessionId: string; connectionId: string };
+};
 
 /** A re-selection point since the last placement (SUB-STICK-05). */
 export type ReselectionPoint = "compaction_completed" | "model_changed";

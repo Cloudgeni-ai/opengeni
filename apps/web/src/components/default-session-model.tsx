@@ -46,7 +46,7 @@ function InlineAction({ children, onClick }: { children: string; onClick: () => 
     <button
       type="button"
       onClick={onClick}
-      className="rounded-sm font-medium text-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
+      className="rounded-sm font-medium og-link focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
     >
       {children}
     </button>

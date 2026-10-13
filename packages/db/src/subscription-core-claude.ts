@@ -11,7 +11,7 @@
  * and refusal made with it.
  */
 import type { Settings } from "@opengeni/config";
-import { ClaudeSubscriptionReconnectRequired } from "./claude-subscription-tokens";
+import { ClaudeSubscriptionReconnectRequired } from "./subscription-core-claude-oauth";
 import type { Database } from "./database";
 import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import { buildSubscriptionCoreTurnTokenResolver } from "./subscription-core/turn-token-resolver";
@@ -24,6 +24,12 @@ import {
   SUBSCRIPTION_CORE_CLAUDE,
   type SubscriptionCoreClaudeCredential,
 } from "./subscription-core-claude-adapter";
+
+/**
+ * A Claude turn's core lease TTL: the five minutes the legacy Claude lease
+ * used (C1a kept it; owned here since the legacy pool's deletion, C4).
+ */
+export const SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS = 5 * 60_000;
 
 /** The Anthropic transport's credential snapshot, plus the credential version it came from. */
 export type SubscriptionCoreClaudeTokenSnapshot = {

@@ -265,7 +265,6 @@ describe("sandbox git credentials", () => {
           connectionId: "github-connection",
         },
       ],
-      {},
       {
         scope,
         authority,
@@ -320,7 +319,6 @@ describe("sandbox git credentials", () => {
             githubRepositoryId: 456,
           },
         ],
-        {},
         {
           scope,
           authority,
@@ -356,25 +354,20 @@ describe("sandbox git credentials", () => {
       },
     ];
 
-    const result = await sandboxEnvironmentForRun(
-      provisionedSettings(),
-      resources,
-      {},
-      {
-        scope,
-        authority,
-        gitCredentials: async (input) => {
-          calls.push(input);
-          return {
-            token: `${input.provider}-token`,
-            workspaceId: input.workspaceId,
-            ...(input.provider === "gitlab"
-              ? { identity: { name: "GitLab Bot", email: "gitlab-bot@example.com" } }
-              : {}),
-          };
-        },
+    const result = await sandboxEnvironmentForRun(provisionedSettings(), resources, {
+      scope,
+      authority,
+      gitCredentials: async (input) => {
+        calls.push(input);
+        return {
+          token: `${input.provider}-token`,
+          workspaceId: input.workspaceId,
+          ...(input.provider === "gitlab"
+            ? { identity: { name: "GitLab Bot", email: "gitlab-bot@example.com" } }
+            : {}),
+        };
       },
-    );
+    });
 
     expect(calls).toEqual([
       {
@@ -705,26 +698,21 @@ describe("sandbox git credentials", () => {
         githubRepositoryId: 2,
       },
     ];
-    const result = await sandboxEnvironmentForRun(
-      provisionedSettings(),
-      resources,
-      {},
-      {
-        scope,
-        authority,
-        authorizeGitHubTokenMint: async () => undefined,
-        gitCredentials: async (input) => {
-          calls.push(input);
-          return {
-            token: `token-${input.credentialBindingId}`,
-            workspaceId: input.workspaceId,
-            credentialBindingId: input.credentialBindingId,
-            provider: input.provider,
-            providerHost: input.providerHost,
-          };
-        },
+    const result = await sandboxEnvironmentForRun(provisionedSettings(), resources, {
+      scope,
+      authority,
+      authorizeGitHubTokenMint: async () => undefined,
+      gitCredentials: async (input) => {
+        calls.push(input);
+        return {
+          token: `token-${input.credentialBindingId}`,
+          workspaceId: input.workspaceId,
+          credentialBindingId: input.credentialBindingId,
+          provider: input.provider,
+          providerHost: input.providerHost,
+        };
       },
-    );
+    });
 
     expect(calls.map((call) => call.credentialBindingId)).toEqual([
       "github-installation:111",

@@ -74,6 +74,8 @@
     "@opengeni/storage": "workspace:*",
     "@opengeni/subscriptions": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
+    "@opengeni/vaults": "workspace:*",
+    "@opengeni/vaults-onepassword": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
     "@temporalio/activity": "^1.17.0",
     "@temporalio/client": "^1.17.0",

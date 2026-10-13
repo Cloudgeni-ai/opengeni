@@ -1599,25 +1599,14 @@ fn verify_key_intent(
         let PreparedInput::Key { request, events } = input else {
             continue;
         };
-        let text = request
-            .key
-            .chars()
-            .map(|character| match character {
-                '\n' | '\r' => 0xff0d,
-                '\t' => 0xff09,
-                character => character as u32,
-            })
-            .collect::<Vec<_>>();
-        let chord = if request.is_text {
-            Vec::new()
+        // Text glyphs match any keysym that types them, including temporary
+        // spare-keycode bindings bound before this snapshot.
+        let (mut text, chord) = if request.is_text {
+            (request.key.chars(), Vec::new())
         } else {
-            super::parse_named_key_chord(&request.key)?
+            ("".chars(), super::parse_named_key_chord(&request.key)?)
         };
-        let mut expected = if request.is_text {
-            text.iter()
-        } else {
-            chord.iter()
-        };
+        let mut expected = chord.iter();
         let mut held = BTreeSet::new();
         for &(kind, key) in events {
             if kind == KEY_RELEASE {
@@ -1639,12 +1628,21 @@ fn verify_key_intent(
                 if effect != 1 || modifier_mask(meaning.symbol(0)?) != Some(1) {
                     return Err(unavailable("text Shift key has another modifier effect"));
                 }
+            } else if request.is_text {
+                let wanted = text.next().ok_or_else(|| {
+                    unavailable("prepared key sequence differs from requested input")
+                })?;
+                if modifiers & !1 != 0
+                    || !super::keysyms::keysym_types(meaning.symbol(modifiers)?, wanted)
+                {
+                    return Err(unavailable("XKB key type changes the requested glyph"));
+                }
             } else {
                 let wanted = *expected.next().ok_or_else(|| {
                     unavailable("prepared key sequence differs from requested input")
                 })?;
                 if let Some(mask) = modifier_mask(wanted) {
-                    if request.is_text || effect != mask || meaning.symbol(0)? != wanted {
+                    if effect != mask || meaning.symbol(0)? != wanted {
                         return Err(unavailable(
                             "named modifier effect differs from the request",
                         ));
@@ -1653,9 +1651,7 @@ fn verify_key_intent(
                     if effect != 0 {
                         return Err(unavailable("requested glyph acts as a modifier"));
                     }
-                    let wanted = if request.is_text {
-                        wanted
-                    } else {
+                    let wanted = {
                         // Chord modifiers must not make an XKB type select an
                         // unexpected symbol. Preserve the core base/Shift intent.
                         let offset = usize::from(
@@ -1683,16 +1679,14 @@ fn verify_key_intent(
                                 .unwrap_or(base)
                         }
                     };
-                    if meaning.symbol(modifiers)? != wanted
-                        || request.is_text && modifiers & !1 != 0
-                    {
+                    if meaning.symbol(modifiers)? != wanted {
                         return Err(unavailable("XKB key type changes the requested glyph"));
                     }
                 }
             }
             held.insert(key);
         }
-        if expected.next().is_some() {
+        if expected.next().is_some() || text.next().is_some() {
             return Err(unavailable("prepared sequence omits requested input"));
         }
     }

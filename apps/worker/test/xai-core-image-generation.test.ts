@@ -85,6 +85,7 @@ function run(
     fetch: (url: string, init?: RequestInit) => Promise<Response>;
   }) => Promise<unknown>,
   chatLease: () => Promise<void> = async () => undefined,
+  extra: Record<string, unknown> = {},
 ): Promise<Outcome> {
   return executeCoreXaiImageGeneration(
     {
@@ -101,7 +102,8 @@ function run(
       core: { identity, connectionId: CONNECTION },
       executionGeneration: 3,
       assertChatLease: chatLease,
-    },
+      ...extra,
+    } as never,
     {
       execute: (async (operation: {
         generate: () => Promise<unknown>;
@@ -233,4 +235,22 @@ test("a refused request reservation or a failed lease acquisition is rejected be
   acquireFails = true;
   expect(await run(send)).toMatchObject({ rejected: true });
   expect(calls).toEqual([]);
+});
+
+test("passes sealed reference images to the xAI edit route", async () => {
+  let seen: unknown = null;
+  const outcome = await run(
+    async (input) => {
+      seen = (input as { references?: unknown }).references;
+      await send(input);
+    },
+    undefined,
+    {
+      references: [
+        { mediaType: "image/png", bytes: Uint8Array.of(1), sizeBytes: 1, sha256: "a".repeat(64) },
+      ],
+    },
+  );
+  expect(outcome).toMatchObject({ receipt: { toolCallId: "call-1" } });
+  expect(seen).toEqual([{ mediaType: "image/png", bytes: Uint8Array.of(1) }]);
 });

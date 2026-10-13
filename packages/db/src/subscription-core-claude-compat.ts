@@ -12,7 +12,7 @@
  * Claude table or returns credential material.
  */
 import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
-import type { ClaudeSubscriptionAccountMetadata } from "./claude-subscription-accounts";
+import type { SubscriptionCorePoolAccount } from "./subscription-core/account-projection";
 import { withRlsContext, type Database } from "./database";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import {
@@ -35,7 +35,8 @@ import { projectSubscriptionCoreClaudeUsage } from "./subscription-core-claude-u
 export type SubscriptionCoreClaudeScope = "workspace" | "user" | "organization";
 
 /** A core Claude connection in the legacy account shape, with its usage reading. */
-export type SubscriptionCoreClaudeAccount = ClaudeSubscriptionAccountMetadata & {
+export type ClaudeSubscriptionAccountMetadata = SubscriptionCorePoolAccount;
+export type SubscriptionCoreClaudeAccount = SubscriptionCorePoolAccount & {
   usage: ClaudeSubscriptionUsage;
 };
 

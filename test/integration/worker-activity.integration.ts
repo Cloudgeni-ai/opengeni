@@ -42,14 +42,11 @@ import {
   deleteScheduledTask,
   createSession,
   createSessionGoal,
-  createVariableSet,
   dbSql,
   setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
   requestSessionCompaction,
   isSessionCompactionRequested,
-  loadVariableSetForRun,
-  setVariableSetVariable,
   getSession,
   getSessionTurn,
   getSessionSystemUpdateOutboxByDedupeKey,
@@ -4941,101 +4938,7 @@ describe("worker activities integration", () => {
     ).toBe(agentRunsBefore);
   });
 
-  test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {
-    const grant = await testGrant(dbClient.db);
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      environmentsEncryptionKey: workerEnvironmentsKey,
-    });
-    const environment = await seedWorkspaceEnvironment(
-      dbClient.db,
-      grant,
-      {
-        API_TOKEN: "worker-secret-token-1234",
-        DB_PASSWORD: "worker-secret-pass-5678",
-      },
-      "Operator notes: API_TOKEN authenticates the worker against the test API.",
-    );
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "load attached variable set",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      variableSetId: environment.id,
-      subjectId: grant.subjectId,
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "load attached variable set" } },
-    ]);
-    const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: `environment-fixture-${crypto.randomUUID()}`,
-      trigger: { kind: "next" },
-    });
-    if (claimed.action !== "claimed") {
-      throw new Error(`environment fixture was not claimed: ${claimed.reason}`);
-    }
-    const initiatingHumanSubjectId = claimed.turn.initiatingHumanSubjectId;
-    if (!initiatingHumanSubjectId) {
-      throw new Error("environment fixture has no initiating human");
-    }
-    const authority = {
-      kind: "agent_attempt" as const,
-      subjectId: initiatingHumanSubjectId,
-      sessionId: session.id,
-      turnId: claimed.turn.id,
-      attemptId,
-      executionGeneration: claimed.turn.executionGeneration,
-    };
-
-    expect(
-      await loadVariableSetForRun(dbClient.db, settings, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        variableSetId: null,
-        authority,
-      }),
-    ).toBeNull();
-    const loaded = await loadVariableSetForRun(dbClient.db, settings, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      variableSetId: environment.id,
-      authority,
-    });
-    expect(loaded).toMatchObject({
-      id: environment.id,
-      name: environment.name,
-      description: "Operator notes: API_TOKEN authenticates the worker against the test API.",
-    });
-    expect(loaded?.values).toEqual({
-      API_TOKEN: "worker-secret-token-1234",
-      DB_PASSWORD: "worker-secret-pass-5678",
-    });
-
-    await expect(
-      loadVariableSetForRun(dbClient.db, testSettings({ databaseUrl: services.databaseUrl }), {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        variableSetId: environment.id,
-        authority,
-      }),
-    ).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
-    await expect(
-      loadVariableSetForRun(dbClient.db, settings, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        variableSetId: crypto.randomUUID(),
-        authority,
-      }),
-    ).rejects.toThrow();
-  });
-
-  test("layers workspace environment values between deployment env and GitHub run auth", async () => {
+  test("builds the sandbox environment from deployment env and GitHub run auth only", async () => {
     const settings = testSettings({
       sandboxBackend: "docker",
       sandboxEnvAllowlist: "WORKER_TEST_ALLOWLISTED",
@@ -5045,14 +4948,10 @@ describe("worker activities integration", () => {
     const previous = process.env.WORKER_TEST_ALLOWLISTED;
     process.env.WORKER_TEST_ALLOWLISTED = "deployment-value";
     try {
-      const { environment: unattached } = await sandboxEnvironmentForRun(settings, []);
-      expect(unattached.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
-      const { environment } = await sandboxEnvironmentForRun(settings, [], {
-        WORKER_TEST_ALLOWLISTED: "workspace-override",
-        WORKSPACE_ONLY_TOKEN: "workspace-only-value",
-      });
-      expect(environment.WORKER_TEST_ALLOWLISTED).toBe("workspace-override");
-      expect(environment.WORKSPACE_ONLY_TOKEN).toBe("workspace-only-value");
+      // Workspace secrets are never injected as env; agents reach them through
+      // `{{secret:…}}` references resolved at execution time.
+      const { environment } = await sandboxEnvironmentForRun(settings, []);
+      expect(environment.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
       expect(environment.GIT_AUTHOR_NAME).toBe("Deployment Author");
       expect(environment.HOME).toBe("/workspace");
     } finally {
@@ -5063,248 +4962,6 @@ describe("worker activities integration", () => {
       }
     }
   });
-
-  test("preserves attached environment values echoed by the agent in session events", async () => {
-    const secret = "echoed-workspace-secret-987654";
-    const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-      LEAKED_TOKEN: secret,
-    });
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "run",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      variableSetId: environment.id,
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "run" } },
-    ]);
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        environmentsEncryptionKey: workerEnvironmentsKey,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([
-          {
-            outputText: `the token is ${secret} end`,
-            chunks: ["the token is ", secret, " end"],
-          },
-        ]),
-      }),
-    });
-    const result = await activities.runAgentTurn({
-      attemptId: crypto.randomUUID(),
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      trigger: { kind: "next" },
-      workflowId: "workflow-environment-exact-content",
-      workflowRunId: crypto.randomUUID(),
-    });
-    expect(result.status).toBe("idle");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    const serialized = JSON.stringify(events);
-    expect(serialized).toContain(secret);
-    const completed = events.find((event) => event.type === "agent.message.completed");
-    expect((completed?.payload as { text?: string } | undefined)?.text).toBe(
-      `the token is ${secret} end`,
-    );
-  });
-
-  test("fails attached runs closed when the worker has no encryption key", async () => {
-    const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-      REQUIRED_TOKEN: "required-secret-123456",
-    });
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "run",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      variableSetId: environment.id,
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "run" } },
-    ]);
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "never reached" }]),
-      }),
-    });
-    const result = await activities.runAgentTurn({
-      attemptId: crypto.randomUUID(),
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      trigger: { kind: "next" },
-      workflowId: "workflow-environment-missing-key",
-      workflowRunId: crypto.randomUUID(),
-    });
-    expect(result.status).toBe("failed");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failed = events.find((event) => event.type === "turn.failed");
-    expect(JSON.stringify(failed?.payload)).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
-    expect(JSON.stringify(failed?.payload)).not.toContain("required-secret-123456");
-  });
-
-  test.each([
-    undefined,
-    { kind: "service" as const, subjectId: "cloudgeni:scheduled-sync", label: "Scheduled sync" },
-  ])(
-    "materializes scheduled task workspace Variable Sets for pure service turns (%j)",
-    async (createdBy) => {
-      const grant = await testGrant(dbClient.db);
-      const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-        TASK_TOKEN: "task-secret-123456",
-      });
-      const task = await createOwnedScheduledTask(dbClient.db, grant, {
-        name: "environment dispatch",
-        status: "active",
-        schedule: { type: "interval", everySeconds: 3600 },
-        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-        runMode: "new_session_per_run",
-        overlapPolicy: "allow_concurrent",
-        agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
-        ...(createdBy ? { createdBy, createdByContext: { job: "scheduled-sync-42" } } : {}),
-        variableSetId: environment.id,
-        metadata: {},
-      });
-      const activities = createWorkerActivities({
-        settings: testSettings({
-          databaseUrl: services.databaseUrl,
-          natsUrl: services.natsUrl,
-          environmentsEncryptionKey: workerEnvironmentsKey,
-        }),
-        db: dbClient.db,
-        bus,
-        runtime: createProductionAgentRuntime({
-          model: new ScriptedModel([{ outputText: "ok" }]),
-        }),
-      });
-      const dispatched = await activities.dispatchScheduledTaskRun({
-        workspaceId: grant.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-        producerKey: `worker-activity-${crypto.randomUUID()}`,
-      });
-      expect(dispatched.action).toBe("start");
-      if (dispatched.action !== "start")
-        throw new Error("Variable Set schedule was not dispatched");
-      const session = await getSession(dbClient.db, grant.workspaceId, dispatched.sessionId);
-      expect(session?.environmentId).toBe(environment.id);
-      expect(session?.createdBy).toEqual({
-        kind: "service",
-        subjectId: "scheduler",
-        label: "OpenGeni scheduler",
-      });
-      const events = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        dispatched.sessionId,
-        0,
-        10,
-      );
-      const createdEvent = events.find((event) => event.type === "session.created");
-      expect(createdEvent?.payload).toMatchObject({
-        variableSetId: environment.id,
-        variableSetName: environment.name,
-      });
-      expect(JSON.stringify(events)).not.toContain("task-secret-123456");
-
-      const attemptId = crypto.randomUUID();
-      const result = await activities.runAgentTurn({
-        attemptId,
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: dispatched.sessionId,
-        trigger: { kind: "next" },
-        workflowId: `session-${dispatched.sessionId}`,
-        workflowRunId: crypto.randomUUID(),
-      });
-      expect(result.status).toBe("idle");
-      const [scheduledTurn] = await listSessionTurns(
-        dbClient.db,
-        grant.workspaceId,
-        dispatched.sessionId,
-        10,
-      );
-      const expectedInitiator = createdBy ?? {
-        kind: "service",
-        subjectId: "scheduler",
-        label: "OpenGeni scheduler",
-      };
-      expect(scheduledTurn?.initiator).toEqual(expectedInitiator);
-      if (createdBy) {
-        expect(scheduledTurn?.initiatorContext).toMatchObject({ job: "scheduled-sync-42" });
-      }
-      expect(scheduledTurn?.personalConnections).toEqual([]);
-      const [storedAuthority] = await withWorkspaceRls(
-        dbClient.db,
-        grant.workspaceId,
-        async (scopedDb) =>
-          await scopedDb.execute<{
-            initiatorKind: string;
-            initiatorSubjectId: string;
-            initiatingHumanSubjectId: string | null;
-          }>(dbSql`
-          select initiator_kind as "initiatorKind",
-            initiator_subject_id as "initiatorSubjectId",
-            initiating_human_subject_id as "initiatingHumanSubjectId"
-          from session_turns where id = ${scheduledTurn!.id}
-        `),
-      );
-      expect(storedAuthority).toEqual({
-        initiatorKind: "service",
-        initiatorSubjectId: expectedInitiator.subjectId,
-        initiatingHumanSubjectId: null,
-      });
-      const [materializationAudit] = await withWorkspaceRls(
-        dbClient.db,
-        grant.workspaceId,
-        async (scopedDb) =>
-          await scopedDb.execute<{
-            subjectId: string;
-            actorKind: string;
-            causalHumanSubjectId: string | null;
-          }>(dbSql`
-          select subject_id as "subjectId", metadata->>'actorKind' as "actorKind",
-            metadata->>'causalHumanSubjectId' as "causalHumanSubjectId"
-          from audit_events
-          where workspace_id = ${grant.workspaceId}
-            and action = 'variable_set.materialized'
-            and metadata->>'attemptId' = ${attemptId}
-        `),
-      );
-      expect(materializationAudit).toEqual({
-        subjectId: expectedInitiator.subjectId,
-        actorKind: "service",
-        causalHumanSubjectId: null,
-      });
-      const completedEvents = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        dispatched.sessionId,
-        0,
-        100,
-      );
-      expect(completedEvents.some((event) => event.type === "turn.completed")).toBe(true);
-      expect(completedEvents.some((event) => event.type === "turn.failed")).toBe(false);
-      expect(JSON.stringify(completedEvents)).not.toContain("task-secret-123456");
-    },
-  );
 
   test("refuses to revive a cancelled reusable session on the next fire", async () => {
     const grant = await testGrant(dbClient.db);
@@ -6122,33 +5779,6 @@ function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavi
 }
 
 const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
-
-async function seedWorkspaceEnvironment(
-  db: TestDb,
-  grant: AccessGrant,
-  values: Record<string, string>,
-  description?: string,
-): Promise<{ id: string; name: string }> {
-  const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
-  const environment = await createVariableSet(db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    subjectId: grant.subjectId,
-    name: `worker-env-${crypto.randomUUID()}`,
-    ...(description !== undefined ? { description } : {}),
-  });
-  for (const [name, value] of Object.entries(values)) {
-    await setVariableSetVariable(db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      variableSetId: environment.id,
-      name,
-      valueEncrypted: encryptEnvironmentValue(key, value),
-    });
-  }
-  return { id: environment.id, name: environment.name };
-}
 
 async function testGrant(db: TestDb): Promise<AccessGrant> {
   const id = crypto.randomUUID();

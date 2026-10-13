@@ -196,7 +196,7 @@ export function UsageMeterView({
               <button
                 type="button"
                 onClick={onRetry}
-                className="rounded-og-sm text-og-fg underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-og-accent"
+                className="rounded-og-sm og-link focus-visible:outline-2 focus-visible:outline-og-accent"
               >
                 {labels.retry}
               </button>

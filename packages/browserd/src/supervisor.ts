@@ -18,8 +18,8 @@ import type {
   BrowserDownload,
   BrowserExternalAuthCommand,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserProtectedAuthObservation,
+  BrowserPasskeySyncRequest,
+  BrowserPasskeySyncResponse,
   BrowserRevisionMaterialization,
   BrowserTarget,
   BrowserTargetState,
@@ -38,7 +38,6 @@ import {
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
-  BrowserProtectedAuthController,
   InteractionControllerError,
   InteractionDefiniteDriverError,
   type BrowserInteractionAuthority,
@@ -53,6 +52,7 @@ import type { ResolvedAgentBrowserBinary } from "./binary";
 import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
 import { LightpandaRunner } from "./lightpanda-runner";
 import { ExternalProviderCdpRunner } from "./external-provider-runner";
+import { BrowserPasskeyManager } from "./passkeys";
 import {
   type BrowserFrameStreamOptions,
   type BrowserFrameSubscription,
@@ -71,12 +71,13 @@ import {
   SqliteBrowserWorkingRuntimeJournal,
   assertDirectory,
   assertWorkingRuntimeReceipt,
+  boundedFailureCode,
+  isAbandonedLaunchReceipt,
   unavailable as workingRuntimeUnavailable,
   type BrowserWorkingRuntimeAuthority,
   type BrowserWorkingRuntimeReceipt,
 } from "./working-runtime-journal";
 import { SqliteBrowserOperationJournal } from "./journal";
-import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
 import {
   captureEncryptedBrowserProfile,
@@ -229,7 +230,6 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   /** Private state capture adjunct, never part of runtimeSnapshot/public JSON. */
   captureSessionCookies?(): Promise<HeadlessSessionCookies | null>;
   readonly requiresExplicitProfileRestore?: boolean;
-  protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
   externalAuth?(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue>;
   /** Provider liveness probe used only after another operation reports a
    * failure. Managed Chromium implements it; unsupported providers fail
@@ -258,6 +258,9 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
   networkRoute?: BrowserSupervisorNetworkRoute;
+  /** One per browser session; outlives driver restarts so loaded credentials
+   * and undelivered passkey events survive browser recovery. */
+  passkeys?: BrowserPasskeyManager;
   resolveWorkspaceFiles: (
     operationId: string,
     workspaceFileIds: readonly string[],
@@ -271,6 +274,12 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
 
 export type BrowserSupervisorOptions = {
   ephemeralContextPoolEnabled?: boolean;
+  /** Host a virtual WebAuthn authenticator in every page target (default true
+   * where the transport supports it). Passkey placements bring the acted-on
+   * tab to the front before each action, because Chromium refuses WebAuthn
+   * ceremonies in a background tab; disabling passkeys keeps managed input in
+   * the background. */
+  passkeys?: boolean;
   rootDirectory: string;
   socketRootDirectory?: string;
   maxSessions?: number;
@@ -289,13 +298,11 @@ type Runtime = {
   sessionDirectory: string;
   driverContext: BrowserSupervisorDriverContext;
   journal: SqliteBrowserOperationJournal;
-  protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
   stateJournal: SqliteBrowserStateTransferJournal;
   workingJournal: SqliteBrowserWorkingRuntimeJournal | null;
   workingReceipt: BrowserWorkingRuntimeReceipt | null;
   driver: BrowserSupervisorDriver;
   controller: BrowserInteractionController;
-  protectedAuthController: BrowserProtectedAuthController;
   workspaceFileStager: BrowserWorkspaceFileStager;
   downloadStore: BrowserDownloadStore | null;
   lastSnapshot: BrowserRuntimeSnapshot;
@@ -338,6 +345,7 @@ export class BrowserSupervisor {
   readonly socketRootDirectory: string;
   private readonly maxSessions: number;
   private readonly ephemeralContextPoolEnabled: boolean;
+  private readonly passkeysEnabled: boolean;
   private readonly contextPools = new Map<string, EphemeralChromiumContextPool>();
   private readonly createDriver: (
     context: BrowserSupervisorDriverContext,
@@ -370,6 +378,7 @@ export class BrowserSupervisor {
       });
     }
     this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
+    this.passkeysEnabled = options.passkeys !== false;
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
@@ -462,6 +471,7 @@ export class BrowserSupervisor {
       resolveWorkspaceFiles: context.resolveWorkspaceFiles,
       downloadDirectory: context.downloadDirectory,
       ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+      ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     });
   }
 
@@ -726,17 +736,20 @@ export class BrowserSupervisor {
     return await this.requireActive(reference).workspaceFileStager.stage(request);
   }
 
-  async protectedAuthFill(command: BrowserProtectedAuthFillCommand) {
+  /** Controller-private: load the session's passkeys and drain its events. */
+  async passkeySync(request: BrowserPasskeySyncRequest): Promise<BrowserPasskeySyncResponse> {
     const runtime = this.requireActive({
-      browserSessionId: command.browserSessionId,
-      controllerGeneration: command.controllerGeneration,
+      browserSessionId: request.browserSessionId,
+      controllerGeneration: request.controllerGeneration,
     });
-    const receipt = await runtime.protectedAuthController.run(command);
-    if (receipt.observation) this.rememberTarget(runtime, receipt.observation.target);
-    if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
-      await this.recoverIfUnavailable(runtime).catch(() => false);
+    const passkeys = runtime.driverContext.passkeys;
+    if (!passkeys) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "this browser placement does not support passkeys",
+      );
     }
-    return receipt;
+    return await passkeys.sync(request);
   }
 
   externalAuth(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue> {
@@ -760,10 +773,6 @@ export class BrowserSupervisor {
 
   receipt(reference: BrowserSessionReference, operationId: string): BrowserActionReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
-  }
-
-  protectedAuthReceipt(reference: BrowserSessionReference, operationId: string) {
-    return this.requireBound(reference).protectedAuthController.receipt(operationId);
   }
 
   async screenshot(
@@ -898,20 +907,24 @@ export class BrowserSupervisor {
     const stateTransfer = this.stateTransferTails.get(reference.browserSessionId);
     if (stateTransfer) await stateTransfer.catch(() => undefined);
     if (!this.sessions.has(reference.browserSessionId)) {
+      const sessionDirectory = join(this.rootDirectory, "sessions", reference.browserSessionId);
+      let workingRuntimePresent = true;
       try {
-        await lstat(
-          join(
-            this.rootDirectory,
-            "sessions",
-            reference.browserSessionId,
-            "working-runtime.sqlite",
-          ),
-        );
-        // Missing memory cannot acknowledge cleanup of a possibly accepted
-        // launch. Its exact binding/holder must stay addressable for cleanup.
-        throw workingRuntimeUnavailable();
+        await lstat(join(sessionDirectory, "working-runtime.sqlite"));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        workingRuntimePresent = false;
+      }
+      // Missing memory cannot acknowledge cleanup of a possibly accepted
+      // launch. Its exact binding/holder must stay addressable for cleanup,
+      // unless this generation's latest launch provably never completed.
+      if (workingRuntimePresent) {
+        await this.cleanupAbandonedLaunch(
+          reference,
+          sessionDirectory,
+          options.removeState === true,
+        );
+        return;
       }
     }
     const runtime = this.requireBound(reference);
@@ -947,10 +960,7 @@ export class BrowserSupervisor {
       if (runtime.driver.isTerminal?.() || preserveWorkingRuntime) {
         // Settle already-dispatched commands before their durable journals close.
         // lifecycle=ending fences queued/new dispatches without replaying input.
-        await Promise.all([
-          runtime.controller.waitForIdle(),
-          runtime.protectedAuthController.waitForIdle(),
-        ]);
+        await runtime.controller.waitForIdle();
       }
       await this.disposeRuntime(
         runtime,
@@ -1068,11 +1078,7 @@ export class BrowserSupervisor {
           join(downloadDirectory, "files"),
         ])
           await assertOptionalDirectory(path);
-        for (const path of [
-          "operations.sqlite",
-          "protected-auth-operations.sqlite",
-          "state-transfers.sqlite",
-        ])
+        for (const path of ["operations.sqlite", "state-transfers.sqlite"])
           await assertOptionalRegularFile(join(sessionDirectory, path));
         await assertOptionalRegularFile(join(downloadDirectory, "downloads.sqlite"));
       } catch {
@@ -1144,17 +1150,6 @@ export class BrowserSupervisor {
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
     });
-    let protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
-    try {
-      protectedAuthJournal = await SqliteBrowserProtectedAuthJournal.open({
-        path: join(sessionDirectory, "protected-auth-operations.sqlite"),
-        browserSessionId: options.browserSessionId,
-        controllerGeneration: options.controllerGeneration,
-      });
-    } catch (error) {
-      journal.close();
-      throw error;
-    }
     let stateJournal: SqliteBrowserStateTransferJournal;
     try {
       stateJournal = await SqliteBrowserStateTransferJournal.open({
@@ -1164,7 +1159,6 @@ export class BrowserSupervisor {
       });
     } catch (error) {
       journal.close();
-      protectedAuthJournal.close();
       throw error;
     }
     let downloadStore: BrowserDownloadStore | null = null;
@@ -1177,7 +1171,6 @@ export class BrowserSupervisor {
         });
       } catch (error) {
         journal.close();
-        protectedAuthJournal.close();
         stateJournal.close();
         throw error;
       }
@@ -1217,10 +1210,19 @@ export class BrowserSupervisor {
       ...(options.linkedComputer ? { linkedComputer: options.linkedComputer } : {}),
       ...(options.launchEnvironment ? { launchEnvironment: options.launchEnvironment } : {}),
       ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
+      ...(this.passkeysEnabled && supportsPasskeys(options.transport)
+        ? {
+            passkeys: new BrowserPasskeyManager({
+              browserSessionId: options.browserSessionId,
+              controllerGeneration: options.controllerGeneration,
+            }),
+          }
+        : {}),
     };
     let driver: BrowserSupervisorDriver | null = null;
     let workingJournal: SqliteBrowserWorkingRuntimeJournal | null = null;
     let workingReceipt: BrowserWorkingRuntimeReceipt | null = null;
+    let workingReceiptCompleted = false;
     try {
       if (eligibleWorkingRuntime(options) && options.workingRuntimeAuthority) {
         workingJournal = await SqliteBrowserWorkingRuntimeJournal.open({
@@ -1243,14 +1245,12 @@ export class BrowserSupervisor {
           recoveredReceipt?.operationId,
         );
       }
-      const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
         options: runtimeOptions(options),
         sessionDirectory,
         driverContext,
         journal,
-        protectedAuthJournal,
         stateJournal,
         workingJournal,
         workingReceipt,
@@ -1258,7 +1258,6 @@ export class BrowserSupervisor {
         lifecycle: "active" as const,
         externalAuthTail: null,
         controller: null as unknown as BrowserInteractionController,
-        protectedAuthController: null as unknown as BrowserProtectedAuthController,
         workspaceFileStager,
         downloadStore,
         lastSnapshot: {
@@ -1276,11 +1275,6 @@ export class BrowserSupervisor {
         recovery: null,
       };
       runtime.controller = this.createController(runtime, driver);
-      runtime.protectedAuthController = this.createProtectedAuthController(
-        runtime,
-        driver,
-        initialProtectedAuthJournal,
-      );
       if (restoredManifest) {
         await restoreTabs(
           driver,
@@ -1312,6 +1306,7 @@ export class BrowserSupervisor {
           directoryLaunchAllowed: driver.requiresExplicitProfileRestore !== true,
         };
         runtime.workingReceipt = workingJournal.complete(workingReceipt, ownedProcess);
+        workingReceiptCompleted = true;
         if (recoveredReceipt)
           runtime.options.restoreAuthorityDigest = recoveredReceipt.restoreAuthorityDigest;
       }
@@ -1320,6 +1315,7 @@ export class BrowserSupervisor {
       if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
       let driverClosed = driver === null;
+      let restoredProfileRemoved = false;
       try {
         if (recoveredReceipt) await driver?.detach?.();
         else await driver?.close();
@@ -1330,9 +1326,44 @@ export class BrowserSupervisor {
       if (restoredProfileMaterialized && driverClosed) {
         try {
           await rm(profileDirectory, { recursive: true, force: true });
+          restoredProfileRemoved = true;
         } catch (cleanupError) {
           failures.push(cleanupError);
         }
+      }
+      // A fresh launch (not a reattach) whose driver closed and whose restored
+      // profile is gone can never be adopted. Settle its receipt failed so the
+      // exact binding can be cleaned up and restored again from durable state.
+      let launchReceiptSettled = false;
+      if (
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        !recoveredReceipt &&
+        driverClosed &&
+        (!restoredProfileMaterialized || restoredProfileRemoved)
+      ) {
+        try {
+          workingReceipt = workingJournal.fail(workingReceipt, launchFailureCode(error));
+          launchReceiptSettled = true;
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      if (workingReceipt) {
+        console.error("browser launch failed before its working-runtime receipt completed", {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          operationId: workingReceipt.operationId,
+          restoredProfile: restoredProfileMaterialized,
+          receiptState: workingReceiptCompleted
+            ? "completed"
+            : launchReceiptSettled
+              ? "failed"
+              : "dispatched",
+          failureCode: launchFailureCode(error),
+          error,
+        });
       }
       try {
         workingJournal?.close();
@@ -1341,11 +1372,6 @@ export class BrowserSupervisor {
       }
       try {
         journal.close();
-      } catch (cleanupError) {
-        failures.push(cleanupError);
-      }
-      try {
-        protectedAuthJournal.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
@@ -1427,10 +1453,7 @@ export class BrowserSupervisor {
         );
       }
       runtime.lifecycle = "capturing";
-      await Promise.all([
-        runtime.controller.waitForIdle(),
-        runtime.protectedAuthController.waitForIdle(),
-      ]);
+      await runtime.controller.waitForIdle();
       await runtime.downloadStore?.interruptInProgress("browser_restarted");
       snapshot = await runtime.driver.runtimeSnapshot();
       const cookies = await runtime.driver.captureSessionCookies?.();
@@ -1520,11 +1543,6 @@ export class BrowserSupervisor {
       const currentTargets = await driver.listTargets();
       runtime.driver = driver;
       runtime.controller = this.createController(runtime, driver);
-      runtime.protectedAuthController = this.createProtectedAuthController(
-        runtime,
-        driver,
-        runtime.protectedAuthJournal.loadAndRecover(),
-      );
       runtime.lastTargets = currentTargets;
       runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
       delete runtime.driverContext.headlessSessionCookies;
@@ -1580,10 +1598,7 @@ export class BrowserSupervisor {
     }
     runtime.lifecycle = "reconfiguring";
     try {
-      await Promise.all([
-        runtime.controller.waitForIdle(),
-        runtime.protectedAuthController.waitForIdle(),
-      ]);
+      await runtime.controller.waitForIdle();
       const result = await runtime.driver.externalAuth(command);
       if (result.profileLoaded) {
         const [snapshot, targets] = await Promise.all([
@@ -1670,10 +1685,7 @@ export class BrowserSupervisor {
     const previousDriver = runtime.driver;
     const snapshot = runtime.lastSnapshot;
     try {
-      await Promise.all([
-        runtime.controller.waitForIdle(),
-        runtime.protectedAuthController.waitForIdle(),
-      ]);
+      await runtime.controller.waitForIdle();
       await runtime.downloadStore?.interruptInProgress("browser_restarted");
       this.retireWorkingRuntime(runtime);
       await previousDriver.close();
@@ -1736,45 +1748,6 @@ export class BrowserSupervisor {
           },
         }),
     );
-  }
-
-  private createProtectedAuthController(
-    runtime: Runtime,
-    driver: BrowserSupervisorDriver,
-    initialJournal: ReturnType<SqliteBrowserProtectedAuthJournal["loadAndRecover"]>,
-  ): BrowserProtectedAuthController {
-    return new BrowserProtectedAuthController({
-      browserSessionId: runtime.options.browserSessionId,
-      controllerGeneration: runtime.options.controllerGeneration,
-      initialJournal,
-      onJournalRecord: (record) => runtime.protectedAuthJournal.write(record),
-      loadJournalRecord: (operationId) => runtime.protectedAuthJournal.read(operationId),
-      driver: {
-        target: async (targetId) => await driver.target(targetId),
-        observe: async (targetId) => {
-          const target = await driver.target(targetId);
-          if (!target) {
-            throw new InteractionDefiniteDriverError(
-              "target_not_found",
-              "protected-fill browser target does not exist",
-            );
-          }
-          return { target, status: "working" };
-        },
-        dispatch: async (command) => await driver.protectedFill(command),
-      },
-      authority: {
-        authorizeDispatch: () => {
-          if (runtime.lifecycle !== "active") {
-            throw new InteractionControllerError(
-              "resource_unavailable",
-              "browser session is changing state",
-              true,
-            );
-          }
-        },
-      },
-    });
   }
 
   private async currentObservation(runtime: Runtime): Promise<BrowserObservation> {
@@ -1864,6 +1837,46 @@ export class BrowserSupervisor {
     runtime.workingReceipt = runtime.workingJournal.complete(receipt, ownedProcess);
   }
 
+  /** Cleanup for a non-resident session whose latest working-runtime receipt,
+   * in this exact controller generation, is a launch that provably never
+   * completed. Any other history stays preserved for exact recovery. With
+   * removeState the session directory is removed so the next resume restores
+   * from durable state; nothing outside this session is touched. */
+  private async cleanupAbandonedLaunch(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+    removeState: boolean,
+  ): Promise<void> {
+    let abandoned = false;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        {
+          sessionDirectory,
+          browserSessionId: reference.browserSessionId,
+          controllerGeneration: reference.controllerGeneration,
+        },
+        true,
+      );
+      try {
+        abandoned = await isAbandonedLaunchReceipt(
+          reader.latest(),
+          join(sessionDirectory, "profile"),
+        );
+      } finally {
+        reader.close();
+      }
+    } catch {
+      abandoned = false;
+    }
+    if (!abandoned) throw workingRuntimeUnavailable();
+    if (!removeState) return;
+    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
+      recursive: true,
+      force: true,
+    });
+    await rm(sessionDirectory, { recursive: true, force: true });
+  }
+
   private retireWorkingRuntime(runtime: Runtime) {
     if (
       runtime.workingJournal &&
@@ -1928,7 +1941,6 @@ export class BrowserSupervisor {
       (runtime.workingReceipt?.intent === "retire" && runtime.workingReceipt.state === "completed");
     let workingJournalClosed = runtime.workingJournal === null;
     let actionJournalClosed = false;
-    let protectedAuthJournalClosed = false;
     let stateJournalClosed = false;
     let downloadStoreClosed = runtime.downloadStore === null;
     // Shutdown intent becomes durable before process cleanup; only confirmed
@@ -1992,12 +2004,6 @@ export class BrowserSupervisor {
       failures.push(error);
     }
     try {
-      runtime.protectedAuthJournal.close();
-      protectedAuthJournalClosed = true;
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
       runtime.stateJournal.close();
       stateJournalClosed = true;
     } catch (error) {
@@ -2029,7 +2035,6 @@ export class BrowserSupervisor {
       workingReceiptSettled &&
       workingJournalClosed &&
       actionJournalClosed &&
-      protectedAuthJournalClosed &&
       stateJournalClosed &&
       downloadStoreClosed
     ) {
@@ -2141,6 +2146,7 @@ async function createBrowserDriver(
       connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
       targetLifecycle: "cdp",
       focusEmulation: true,
+      ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     });
   }
   const route = context.networkRoute;
@@ -2229,6 +2235,7 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+    ...(context.passkeys ? { passkeys: context.passkeys } : {}),
     ...(route
       ? {
           emulation: {
@@ -2246,6 +2253,14 @@ function binding(runtime: Runtime): BrowserSessionReference {
     browserSessionId: runtime.options.browserSessionId,
     controllerGeneration: runtime.options.controllerGeneration,
   };
+}
+
+/** Virtual WebAuthn needs the CDP WebAuthn domain and browser-level target
+ * auto-attach: managed Chromium and remote Chromium providers have both. The
+ * attached user Chrome (extension debugger) and Lightpanda do not. */
+function supportsPasskeys(transport: BrowserSupervisorTransport): boolean {
+  if (transport.kind === "attached_chrome") return false;
+  return !(transport.kind === "managed" && transport.engine === "lightpanda");
 }
 
 function validateSessionOptions(
@@ -2944,6 +2959,14 @@ function shortDigest(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+/** Bounded, content-free cause for a launch receipt; never page data or secrets. */
+function launchFailureCode(error: unknown): string {
+  if (error instanceof InteractionControllerError) return boundedFailureCode(error.code);
+  if (error instanceof AggregateError) return "cleanup_failed";
+  const code = (error as { code?: unknown } | null)?.code;
+  return boundedFailureCode(typeof code === "string" ? code : "internal");
+}
+
 function boundedPositiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be positive`);
   return value;
@@ -3077,7 +3100,8 @@ function profileManifest(
   };
 }
 
-async function restoreTabs(
+/** Rebuild a checkpoint's tab set on a freshly launched restored profile. */
+export async function restoreTabs(
   driver: BrowserSupervisorDriver,
   capturedTabs: BrowserRuntimeSnapshot["tabs"],
 ): Promise<void> {
@@ -3097,13 +3121,14 @@ async function restoreTabs(
   const used = new Set<string>();
   let selectedTargetId: string | null = null;
   for (const [index, tab] of ordered.entries()) {
-    let target = available.find(
-      (candidate) => !used.has(candidate.id) && candidate.url === tab.url,
-    );
-    if (!target) {
-      const opened = index === 0 ? first : await driver.openTarget(tab.url);
-      target = opened.target;
-    }
+    // Startup chose a live tab for the primary and navigated it there. A
+    // reopened tab with the same URL may have a dead renderer, so the primary
+    // is always the tab startup returned, never a URL look-alike.
+    const target =
+      index === 0
+        ? first.target
+        : (available.find((candidate) => !used.has(candidate.id) && candidate.url === tab.url) ??
+          (await driver.openTarget(tab.url)).target);
     used.add(target.id);
     if (index === 0) selectedTargetId = target.id;
   }
