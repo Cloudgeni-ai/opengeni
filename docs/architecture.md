@@ -276,6 +276,11 @@ See [`goals.md`](goals.md).
 | Sandbox leases/envelopes | Provider identity/routing/recovery/workspace-generation truth | Conversation state |
 | Knowledge/instructions/Skills/organization identity | Scoped retrieval/governance authorities and lifecycle | Conversation history/temporary task notes |
 
+Terminal turn transitions retire their `agent_run_states` snapshots atomically
+at the database boundary, including SQL lifecycle writers. Nonterminal approval,
+recovery and capacity waits retain them; later turns use paired canonical history,
+not a terminal turn's control snapshots.
+
 The wake reaper repairs already-pending authentic terminal results for idle
 goalless parents through bounded identity-only discovery and scoped, fenced
 queue/wake registration. It never replays child work; see
