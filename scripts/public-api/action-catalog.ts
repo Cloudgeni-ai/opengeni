@@ -72,6 +72,11 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     reason:
       "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
   },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/usage-limit$/,
+    reason:
+      "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent",
+  },
 ];
 
 export function actionCatalogBrowserOnlyReason(method: string, path: string): string | undefined {

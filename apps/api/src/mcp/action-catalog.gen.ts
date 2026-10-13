@@ -3068,6 +3068,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionUsageLimit",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+    "request": [],
+    "response": [
+      "SessionUsageLimit"
+    ]
+  },
+  {
     "id": "getSiteAuthConnection",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
@@ -6382,6 +6391,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SetSessionModelAccountChoiceResponse"
     ]
+  },
+  {
+    "id": "setSessionUsageLimit",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+    "request": [
+      "SetSessionUsageLimitRequest"
+    ],
+    "response": [
+      "SessionUsageLimit"
+    ],
+    "browserOnly": "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent"
   },
   {
     "id": "setSuperGrokAccountAllocator",

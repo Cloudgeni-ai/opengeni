@@ -105,6 +105,7 @@ import {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  SetSessionUsageLimitRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
@@ -351,8 +352,13 @@ import {
   workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyContext,
   relayConfigFromSettings,
+  getSessionUsageLimitForAccess,
+  SessionUsageLimitHttpError,
+  sessionUsageLimitForRead,
+  setSessionUsageLimitForAccess,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
+import { isAgentActingAsPerson } from "../http/acting-person";
 import {
   humanSecretWriteContext,
   prepareSecretAnswers,
@@ -701,6 +707,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
       payload = withoutEmptyLegacyVariableSetFields(payload);
       CreateSessionRequest.parse(payload);
+      // OPE-798: only a person present in the app or the host's server sets a
+      // task usage limit; an agent acting for a person cannot, even null.
+      if (
+        (payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined &&
+        isAgentActingAsPerson(c)
+      ) {
+        throw new SessionUsageLimitHttpError(
+          403,
+          "session_usage_limit_forbidden",
+          "Only a person or the application's server can set a task usage limit.",
+        );
+      }
       const origin = await measureSessionCreatePhase(deps.observability, "site_origin", () =>
         resolveSiteSessionOrigin(
           db,
@@ -726,6 +744,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         keepLive: true,
       });
       if (kept.status === "updated") session = { ...session, retention: kept.retention };
+    }
+    // Echo a requested usage limit so clients can tell this server applied it
+    // (older servers strip the unknown field and would run unlimited).
+    if ((payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined) {
+      const usageLimit = await sessionUsageLimitForRead(db, session, {
+        subjectId: grant.subjectId,
+      });
+      if (usageLimit) session = { ...session, usageLimit };
     }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
@@ -1241,10 +1267,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         : Promise.resolve(new Set<string>()),
       loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
     ]);
+    // OPE-798: the task's usage projection. A failed read is `unavailable`,
+    // never $0 or unlimited; it does not fail the session read.
+    const usageLimit = await sessionUsageLimitForRead(db, session, {
+      subjectId: grant.subjectId,
+    });
     return c.json(
       sessionResponse(
         {
           ...session,
+          ...(usageLimit ? { usageLimit } : {}),
           hasSchedules: scheduleTargets.has(sessionId),
           ...(activity.get(sessionId)
             ? { backgroundCommandActivity: activity.get(sessionId) }
@@ -2553,6 +2585,50 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     if (!session) throw new HTTPException(404, { message: "session not found" });
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  // OPE-798 per-task usage limit. Reads follow session read access; a child
+  // returns its root's shared state. Writes are compare-and-set on the ROOT
+  // by a person in the app or the host's server key only, never an agent
+  // (including one acting for a person), and never wake or resume work.
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    return c.json(await getSessionUsageLimitForAccess(deps, authorization, sessionId));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:control",
+    );
+    if (isAgentActingAsPerson(c)) {
+      throw new SessionUsageLimitHttpError(
+        403,
+        "session_usage_limit_forbidden",
+        "Only a person or the application's server can change a task usage limit.",
+      );
+    }
+    const payload = await parseRequestJson(c, SetSessionUsageLimitRequest);
+    return c.json(
+      await setSessionUsageLimitForAccess(deps, authorization, sessionId, payload, c.req.raw),
+    );
   });
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
