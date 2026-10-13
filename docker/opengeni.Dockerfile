@@ -89,7 +89,14 @@ USER bun
 
 # Keep worker before artifact-runtime stages so legacy remote Docker builders
 # do not execute unrelated API/materializer prerequisites when targeting it.
-FROM source-base AS worker
+FROM source-base AS worker-build
+RUN bun scripts/build-runtime-processes.ts worker \
+  && bun scripts/assemble-server-runtime.ts worker
+
+FROM oven/bun:${BUN_VERSION}-slim AS worker
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
 # daemon socket. Interactive/cancellable commands use the Agents SDK's
 # host-side Python PTY bridge, so Python must live in this worker image rather
@@ -107,11 +114,12 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
   && /usr/bin/python3 -c 'import pty' \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
 ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3 \
   TESSDATA_PREFIX=/opt/opengeni/tessdata
+COPY --from=worker-build --chown=bun:bun /app/.release/server-runtime/worker/ /app/
 USER bun
-RUN bun scripts/build-runtime-processes.ts worker
 CMD ["bun", "apps/worker/dist/process/index.js"]
 
 FROM base AS northstar-demo-build
@@ -149,7 +157,14 @@ ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
 USER bun
 RUN bun packages/artifact-tool/src/runtime-cli-entry.ts doctor --json
 
-FROM artifact-runtime-base AS api
+FROM artifact-runtime-base AS api-build
+RUN bun scripts/build-runtime-processes.ts api \
+  && bun scripts/assemble-server-runtime.ts api
+
+FROM oven/bun:${BUN_VERSION}-slim AS api
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # API-owned browser/computer sessions use the Docker sandbox adapter directly,
 # including `docker network connect`. Install only the client; the daemon stays
 # outside this image and is reached through the mounted host socket.
@@ -166,14 +181,19 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
   && docker --version \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
+COPY --from=api-build --chown=bun:bun /app/.release/server-runtime/api/ /app/
+COPY --from=api-build --chown=root:root /app/artifact-runtime/ /app/artifact-runtime/
 USER bun
-ENV TESSDATA_PREFIX=/opt/opengeni/tessdata
-RUN bun scripts/build-runtime-processes.ts api
+ENV TESSDATA_PREFIX=/opt/opengeni/tessdata \
+  OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
+RUN bun artifact-runtime-doctor.js doctor --json
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
-# the `COPY --chown=bun:bun . .` above. The API serves them from /agent/* (see
+# the process bundle's assets/agent-install directory. The API serves /agent/* (see
 # apps/api/src/routes/install.ts), so a fresh machine installs an agent that matches
 # THIS control plane exactly. The signing key never enters this build — signing is
 # done in the pre-build CI step. When nothing is baked (a plain `docker build`),
