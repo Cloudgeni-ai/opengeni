@@ -435,7 +435,16 @@ handles: a dispatch result must follow an actual outer commit.
 
 A thirty-second database writer lease elects the transport writer, not command
 lifetime. Expiry preserves pending writes and requires a higher writer epoch;
-it never settles a process. Old physical-instance output remains collectible
+it never settles a process. Graceful host disposal first aborts and joins its
+actual input queue, output reader and diagnostics read, then expires only the
+last writer identity and epoch that host positively acquired. It retains that
+identity and epoch in the database so immediate reconnect still increments the
+epoch and requires native fencing. Stale or repeated disposal cannot expire a
+replacement writer. Pending bytes and every receipt remain unchanged; neither
+release nor reconnect permits automatic replay or proves command quiescence.
+A failed join or unacknowledged claim cannot release ownership. The thirty-second
+lease remains the crash-recovery path, not a required graceful-reconnect delay.
+Old physical-instance output remains collectible
 after replacement, but new input is refused. Initial-process EOF also fences
 input without converting it into a command exit. The current PostgreSQL
 integration tests exercise races, rollback, restart replay, exact scopes and

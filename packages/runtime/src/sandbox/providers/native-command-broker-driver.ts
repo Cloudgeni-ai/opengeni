@@ -45,6 +45,7 @@ export class NativeBrokerDispatchUnknownError extends Error {
  * No process/control/receipt is settled by this class. */
 export class NativeBrokerDriver {
   private inputBusy = false;
+  private writerEpoch: number | null = null;
   constructor(
     private readonly journal: DurableNativeBrokerTransport,
     private readonly channel: NativeBrokerChannel,
@@ -75,7 +76,22 @@ export class NativeBrokerDriver {
    * a new fence until the broker has accepted those exact bytes. */
   async claimWriter() {
     await this.identity();
-    return this.journal.claimWriter(this.writerId);
+    return this.claim();
+  }
+
+  private async claim() {
+    const writer = await this.journal.claimWriter(this.writerId);
+    this.writerEpoch = writer.epoch;
+    return writer;
+  }
+
+  /** Called only after the coordinator has joined its actual provider work.
+   * An unacknowledged claim or a replaced owner is not ours to release. */
+  async releaseWriter() {
+    return this.exclusive(async () => {
+      if (this.writerEpoch === null) return false;
+      return this.journal.releaseWriter(this.writerId, this.writerEpoch);
+    });
   }
 
   private async dispatch(
@@ -121,7 +137,7 @@ export class NativeBrokerDriver {
     return this.exclusive(async () => {
       signal?.throwIfAborted();
       await this.identity();
-      const writer = await this.journal.claimWriter(this.writerId);
+      const writer = await this.claim();
       const reserved = await this.journal.reserveRetainedStdinChunk(
         this.writerId,
         writer.epoch,
@@ -153,7 +169,7 @@ export class NativeBrokerDriver {
     return this.exclusive(async () => {
       signal?.throwIfAborted();
       await this.identity();
-      const writer = await this.journal.claimWriter(this.writerId);
+      const writer = await this.claim();
       const reserved = await this.journal.reserveRetainedStdin(
         this.writerId,
         writer.epoch,
@@ -184,7 +200,7 @@ export class NativeBrokerDriver {
     return this.exclusive(async () => {
       signal?.throwIfAborted();
       await this.identity();
-      const writer = await this.journal.claimWriter(this.writerId);
+      const writer = await this.claim();
       if (expectedEpoch !== undefined && writer.epoch !== expectedEpoch)
         throw new Error("Native broker launch writer epoch changed before reservation");
       const reserved = await this.journal.reserve(this.writerId, writer.epoch, request);
@@ -213,7 +229,7 @@ export class NativeBrokerDriver {
     return this.exclusive(async () => {
       signal?.throwIfAborted();
       await this.identity();
-      const writer = await this.journal.claimWriter(this.writerId);
+      const writer = await this.claim();
       const state = await this.identity();
       if (!state.input.pending) return { state: "nothing_pending" as const };
       const decoder = new NativeBrokerFrameDecoder(state.input.brokerId);

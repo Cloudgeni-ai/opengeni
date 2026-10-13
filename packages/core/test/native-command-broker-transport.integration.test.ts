@@ -1300,6 +1300,174 @@ test("shared coordination serializes native acceptance, preserves request bytes 
   await expect(f.coordinator.claimWriter()).rejects.toThrow("closed");
 });
 
+test("graceful coordinator close permits immediate fenced handoff without a lease timeout", async () => {
+  const f = await coordinatedFixture();
+  const successor = new NativeBrokerCoordinator(f.f.service(), f.channel, crypto.randomUUID());
+  try {
+    expect(await f.coordinator.claimWriter()).toMatchObject({ epoch: 1, live: true });
+    const closing = f.coordinator.close();
+    expect(f.coordinator.close()).toBe(closing);
+    await closing;
+    expect(await successor.claimWriter()).toMatchObject({ epoch: 2, live: true });
+    expect((await f.f.service().read()).input.acceptedWriterEpoch).toBe(2);
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2]);
+    // Repeated old disposal must not expire the new host's writer.
+    await f.coordinator.close();
+    expect(await successor.claimWriter()).toMatchObject({ epoch: 2, live: true });
+    expect(f.writes).toHaveLength(2);
+  } finally {
+    await f.coordinator.close();
+    await successor.close();
+  }
+});
+
+test("coordinator close retains its lease until an actual provider write has joined", async () => {
+  const f = await coordinatedFixture();
+  const successor = new NativeBrokerCoordinator(f.f.service(), f.channel, crypto.randomUUID());
+  let unblock!: () => void, entered!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let closing: Promise<void> | undefined;
+  let writing: Promise<unknown> | undefined;
+  try {
+    await f.coordinator.claimWriter();
+    f.blockNext(async () => {
+      entered();
+      await blocked;
+    });
+    const request = { ...fence(), kind: "prepare" as const, commandId: crypto.randomUUID() };
+    writing = f.coordinator.send(request).catch((error: unknown) => error);
+    await started;
+    let closed = false;
+    closing = f.coordinator.close().then(() => {
+      closed = true;
+    });
+    await expect(f.f.service().claimWriter(crypto.randomUUID())).rejects.toThrow("fenced");
+    expect(closed).toBe(false);
+    expect((await f.f.service().read()).input.pending?.phase).toBe("dispatch_intent");
+    unblock();
+    expect(await writing).toBeInstanceOf(NativeBrokerReconciliationRequiredError);
+    await closing;
+    // The new owner observes the original acceptance before its own fence;
+    // the original prepare is never resent after the old waiter is aborted.
+    expect(await successor.claimWriter()).toMatchObject({ epoch: 2, live: true });
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2, 3]);
+    expect(f.writes.filter((write) => write.requestId === request.requestId)).toHaveLength(1);
+  } finally {
+    unblock();
+    await writing;
+    await closing;
+    await f.coordinator.close();
+    await successor.close();
+  }
+});
+
+test("graceful handoff preserves unknown input and never replays it on reconnect", async () => {
+  const f = await coordinatedFixture();
+  const nextWriter = crypto.randomUUID();
+  const successor = new NativeBrokerCoordinator(f.f.service(), f.channel, nextWriter);
+  try {
+    await f.coordinator.claimWriter();
+    f.failNext();
+    const request = { ...fence(), kind: "prepare" as const, commandId: crypto.randomUUID() };
+    await expect(f.coordinator.send(request)).rejects.toBeInstanceOf(
+      NativeBrokerDispatchUnknownError,
+    );
+    const before = await f.f.service().read();
+    const receipt = await f.f.service().request(request.requestId);
+    await f.coordinator.close();
+    expect(await f.f.service().claimWriter(nextWriter)).toMatchObject({ epoch: 2, live: true });
+    expect((await f.f.service().read()).input.pending).toEqual(before.input.pending);
+    expect(await f.f.service().request(request.requestId)).toEqual(receipt);
+    await expect(successor.claimWriter(AbortSignal.timeout(100))).rejects.toBeInstanceOf(
+      NativeBrokerReconciliationRequiredError,
+    );
+    expect(f.writes.map((write) => write.index)).toEqual([1, 2]);
+    expect((await f.f.service().read()).input.pending).toEqual(before.input.pending);
+    expect((await f.f.service().read()).input.acceptedWriterEpoch).toBe(1);
+  } finally {
+    await f.coordinator.close();
+    await successor.close();
+  }
+});
+
+test("coordinator close joins a blocked diagnostics read before releasing its writer", async () => {
+  const f = await coordinatedFixture();
+  let unblock!: () => void, entered!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    unblock = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let closing: Promise<void> | undefined;
+  let release: (() => Promise<void>) | undefined;
+  try {
+    await f.coordinator.claimWriter();
+    f.setDiagnostics(async () => {
+      entered();
+      await blocked;
+      return [];
+    });
+    release = f.coordinator.retainDiagnostics();
+    await started;
+    closing = f.coordinator.close();
+    await expect(f.f.service().claimWriter(crypto.randomUUID())).rejects.toThrow("fenced");
+    unblock();
+    await closing;
+    expect(await f.f.service().claimWriter(crypto.randomUUID())).toMatchObject({ epoch: 2 });
+  } finally {
+    unblock();
+    await closing;
+    await release?.();
+    await f.coordinator.close();
+  }
+});
+
+test("closing a coordinator that never acquired a writer cannot release another host", async () => {
+  const f = await coordinatedFixture();
+  const unowned = new NativeBrokerCoordinator(f.f.service(), f.channel, crypto.randomUUID());
+  try {
+    await f.coordinator.claimWriter();
+    await unowned.close();
+    await expect(f.f.service().claimWriter(crypto.randomUUID())).rejects.toThrow("fenced");
+    expect(await f.coordinator.claimWriter()).toMatchObject({ epoch: 1 });
+    expect(f.writes).toHaveLength(1);
+  } finally {
+    await unowned.close();
+    await f.coordinator.close();
+  }
+});
+
+test("closing after an unacknowledged writer claim cannot release its uncertain lease", async () => {
+  const f = await coordinatedFixture();
+  const journal = f.f.service();
+  const uncertain = new NativeBrokerCoordinator(
+    {
+      ...journal,
+      async claimWriter(id) {
+        await journal.claimWriter(id);
+        throw new Error("lost writer claim reply");
+      },
+    },
+    f.channel,
+    crypto.randomUUID(),
+  );
+  try {
+    await expect(uncertain.claimWriter()).rejects.toThrow("lost writer claim reply");
+    await uncertain.close();
+    await expect(journal.claimWriter(crypto.randomUUID())).rejects.toThrow("fenced");
+    expect(f.writes).toHaveLength(0);
+  } finally {
+    await uncertain.close();
+    await f.coordinator.close();
+  }
+});
+
 test("one cancelled output waiter does not cancel a sibling or duplicate provider collectors", async () => {
   const f = await coordinatedFixture();
   try {
@@ -2511,6 +2679,40 @@ test("concurrent writer claims elect one owner; stale and foreign owners cannot 
   expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
   const loser = owners[results.findIndex((r) => r.status === "rejected")]!;
   await expect(f.service().reserve(loser, 1, fence())).rejects.toThrow();
+});
+
+test("writer release requires the exact owner and epoch without changing retained state", async () => {
+  const f = await fixture();
+  const { writerId, request } = await start(f);
+  const before = await f.service().read();
+  const receipt = await f.service().request(request.requestId);
+  expect(await f.service().releaseWriter(crypto.randomUUID(), 1)).toBe(false);
+  expect(await f.service().releaseWriter(writerId, 2)).toBe(false);
+  await expect(f.service().releaseWriter(writerId, 0)).rejects.toThrow();
+  await expect(f.service().releaseWriter("invalid", 1)).rejects.toThrow();
+  await expect(f.service().claimWriter(crypto.randomUUID())).rejects.toThrow("fenced");
+  expect(await f.service().releaseWriter(writerId, 1)).toBe(true);
+  expect(await f.service().releaseWriter(writerId, 1)).toBe(false);
+  expect(await f.service().read()).toEqual(before);
+  expect(await f.service().request(request.requestId)).toEqual(receipt);
+  // Even reuse of the same host UUID must advance the native epoch.
+  expect(await f.service().claimWriter(writerId)).toMatchObject({ epoch: 2 });
+  expect(await f.service().releaseWriter(writerId, 1)).toBe(false);
+  await expect(f.service().claimWriter(crypto.randomUUID())).rejects.toThrow("fenced");
+  expect(await f.service().releaseWriter(writerId, 2)).toBe(true);
+});
+
+test("writer release rolls back with its transaction and cannot expose an uncommitted handoff", async () => {
+  const f = await fixture();
+  const { writerId } = await start(f);
+  await expect(
+    f.store.transaction(async (tx) => {
+      expect(tx.releaseWriter(writerId, 1)).toBe(true);
+      throw new Error("injected release failure");
+    }),
+  ).rejects.toThrow("injected release failure");
+  await expect(f.service().claimWriter(crypto.randomUUID())).rejects.toThrow("fenced");
+  expect(await f.service().claimWriter(writerId)).toMatchObject({ epoch: 1, live: true });
 });
 
 test("concurrent registration is idempotent and a second broker cannot bind the same physical creation", async () => {

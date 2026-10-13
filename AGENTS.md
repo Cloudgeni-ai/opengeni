@@ -596,6 +596,11 @@ depend on that query succeeding. Retain definite faults before refusal, never
 turn timeout into fault or exit proof, and abort/join the final owner's actual
 read before replacement. Application installation still requires the original
 qualified broker birth; no deployment or enrollment follows from a source edit.
+Final coordinator disposal also joins its actual input tail and output reader
+before expiring only its last positively acquired database writer identity/epoch.
+Retain the old ID and epoch so immediate reconnect requires a higher native fence.
+Never clear pending bytes or receipts, release an uncertain claim or replacement
+owner, or treat graceful host release as command quiescence.
 
 New command routing must select its pipe/PTY protocol from the original frozen
 qualification before admission. Keep exact-protocol retained inspection separate;

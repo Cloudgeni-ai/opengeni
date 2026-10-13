@@ -73,6 +73,7 @@ export type NativeBrokerTransportPort = {
       framesAfter(sequence: number, limit: number): Promise<Entry[]>;
       insert(entry: Omit<Entry, "sha256">): Promise<Entry>;
       claimWriter(id: string): Writer;
+      releaseWriter(id: string, epoch: number): boolean;
       requireWriter(id: string, epoch: number): void;
       save(state: unknown): void;
     }) => Promise<T>,
@@ -396,6 +397,16 @@ export function durableNativeBrokerTransport(store: NativeBrokerTransportPort, i
         }
         tx.save(state);
         return writer;
+      });
+    },
+    /** The host must first join all of its physical input and observation.
+     * Pending bytes, receipts and epoch remain unchanged; a successor still
+     * needs exact pending acceptance and a higher native writer fence. */
+    async releaseWriter(id: string, epoch: number) {
+      return store.transaction(async (tx) => {
+        const state = validate(tx.state, identity);
+        if (tx.writer.epoch !== state.input.writerEpoch) invalid();
+        return tx.releaseWriter(id, epoch);
       });
     },
     async reserve(writerId: string, epoch: number, request: NativeBrokerRequest) {

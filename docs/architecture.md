@@ -86,7 +86,11 @@ is not application installation or physical provider qualification.
 `native-command-broker-coordinator.ts` shares one demand-driven collector and
 serializes input through native acceptance. It never automatically replays an
 unknown dispatch. Explicit global output ACK is limited to the committed prefix
-by the transport itself and is not command settlement. The idle-start primitive
+by the transport itself and is not command settlement. Final host disposal joins
+the actual input tail and both observers before expiring only its exact acquired
+writer lease. It preserves the old identity/epoch, unknown input and receipts;
+immediate reconnect still needs a higher native fence, never timeout-based
+command settlement or replay. The idle-start primitive
 in `native-command-broker-start.ts` requires private exact-protocol context and a
 committed canonical reservation before prepare/definition/launch.
 `NativeBrokerCommandSession` provides the distinct retained-handle/banner

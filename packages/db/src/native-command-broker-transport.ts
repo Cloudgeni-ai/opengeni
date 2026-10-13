@@ -77,6 +77,8 @@ export type NativeBrokerTransportTransaction = {
   insert(entry: Omit<NativeBrokerStoredEntry, "sha256">): Promise<NativeBrokerStoredEntry>;
   /** The callback must apply the corresponding pure writer-epoch transition. */
   claimWriter(id: string): NativeBrokerWriter;
+  /** Expire only the exact joined host owner; retain its identity and epoch. */
+  releaseWriter(id: string, epoch: number): boolean;
   requireWriter(id: string, epoch: number): void;
   save(state: unknown): void;
 };
@@ -447,6 +449,7 @@ export function nativeBrokerTransportStore(
       const writer = { id: row.writer_id, epoch, live: row.writer_live === true };
       let changed = false,
         renew = false,
+        release = false,
         requireLiveAtCommit = false;
       const currentInstance =
         lease.instance_id === binding.sandboxId &&
@@ -547,7 +550,23 @@ export function nativeBrokerTransportStore(
           writer.id = id;
           writer.live = true;
           changed = renew = true;
+          release = false;
           return { ...writer };
+        },
+        releaseWriter(id, expectedEpoch) {
+          if (
+            !uuid.safeParse(id).success ||
+            !Number.isSafeInteger(expectedEpoch) ||
+            expectedEpoch < 1
+          )
+            fenced();
+          if (!writer.live || writer.id !== id || writer.epoch !== expectedEpoch) return false;
+          // Do not clear the ID: the next claim must advance the native writer
+          // epoch. This is host transport disposal, not command settlement.
+          writer.live = false;
+          changed = release = true;
+          renew = false;
+          return true;
         },
         requireWriter(id, expectedEpoch) {
           if (
@@ -582,7 +601,8 @@ export function nativeBrokerTransportStore(
           dbtx,
           sql`UPDATE native_command_broker_transports SET
         revision = revision + 1, writer_id = ${writer.id}::uuid, writer_epoch = ${writer.epoch},
-        writer_until = CASE WHEN ${renew} THEN clock_timestamp() + ${TTL_SECONDS} * interval '1 second' ELSE writer_until END,
+        writer_until = CASE WHEN ${release} THEN clock_timestamp()
+          WHEN ${renew} THEN clock_timestamp() + ${TTL_SECONDS} * interval '1 second' ELSE writer_until END,
         state_encrypted = ${seal(encryptionKey, binding, "state", serialize(state))}
         WHERE id = ${binding.brokerId}::uuid AND ${scoped(binding)} AND revision = ${revision}
         RETURNING id`,

@@ -139,7 +139,11 @@ Then open the smallest source files that answer the question:
   bootstrap and host-only disposal. Its fresh-create selector defers only the
   empty canonical initial manifest until warm routing. Callers must explicitly
   own wrapper disposal. Worker cancellation drops its holder without closing a
-  still-used connection; finalization joins host-only disposal. API cache entries
+  still-used connection; finalization joins host-only disposal. Last coordinator
+  close joins actual input and both observers before expiring its exact positively
+  acquired writer lease. Retained identity/epoch force native fencing on immediate
+  reconnect; pending input and receipts remain untouched. A failed join, unknown
+  claim or replacement owner cannot be released. API cache entries
   have separate request borrows, last-borrower eviction and idle cleanup. Viewer
   setup uses an exact-instance direct holder and canonical home-only routing,
   never a bare SDK exec or an active-machine fallback. Snapshot restoration

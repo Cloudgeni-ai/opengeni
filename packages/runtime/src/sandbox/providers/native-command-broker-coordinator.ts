@@ -60,7 +60,8 @@ function interested<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
  * One demand-driven output reader commits each page before waking readers.
  * An unknown write is never replayed here, including after reconnection. The
  * separate driver's explicit recovery method remains an operator-owned action.
- * Closing disposes host observation only, never the sandbox or initial stdin.
+ * Closing joins host work and expires only its exact transport writer lease,
+ * never the sandbox, initial stdin or retained command custody.
  */
 export class NativeBrokerCoordinator {
   private readonly driver: NativeBrokerDriver;
@@ -73,6 +74,7 @@ export class NativeBrokerCoordinator {
   private readonly listeners = new Set<() => void>();
   private observationError: unknown;
   private pump: { controller: AbortController; settled: Promise<void> } | null = null;
+  private closing: Promise<void> | undefined;
 
   constructor(
     private readonly journal: DurableNativeBrokerTransport,
@@ -439,9 +441,17 @@ export class NativeBrokerCoordinator {
     }, signal);
   }
 
-  async close() {
+  close(): Promise<void> {
+    return (this.closing ??= this.dispose());
+  }
+
+  private async dispose() {
     this.stopped.abort(new Error("Native broker coordinator is closed"));
     const pump = this.pump;
     await Promise.all([pump?.settled, this.tail, this.diagnostics.close()]);
+    // Aborting a waiter is not joining its provider operation. Only the actual
+    // input tail and observer shutdown permit this exact-owner lease release.
+    // Unknown input remains retained, and replacement still needs native fencing.
+    await this.driver.releaseWriter();
   }
 }
