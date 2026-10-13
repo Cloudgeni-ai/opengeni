@@ -193,6 +193,17 @@ describe("dedicated editable artifact materializer", () => {
     expect(
       functionAcls.filter((entry) => entry.materializerExecute).map((entry) => entry.signature),
     ).toEqual(expectedFunctions);
+    for (const signature of [
+      "connection_account_intent_is_valid(jsonb)",
+      "prevent_connection_account_intent_mutation()",
+    ]) {
+      expect(functionAcls.find((entry) => entry.signature === signature)).toEqual({
+        signature,
+        appExecute: true,
+        materializerExecute: false,
+        publicExecute: false,
+      });
+    }
     for (const signature of expectedFunctions) {
       expect(functionAcls.find((entry) => entry.signature === signature)).toEqual({
         signature,

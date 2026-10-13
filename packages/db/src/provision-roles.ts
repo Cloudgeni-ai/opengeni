@@ -2701,6 +2701,10 @@ BEGIN
       );
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      -- 0755's application constraint/trigger helpers must not become extra
+      -- capabilities for the dedicated artifact roles through PUBLIC.
+      'connection_account_intent_is_valid(jsonb)',
+      'prevent_connection_account_intent_mutation()',
       'complete_temporal_schedule_connector_cleanup(uuid,uuid)',
       'upgrade_temporal_schedule_connector_cleanup(uuid,uuid,text,uuid,text,jsonb,uuid)',
       'complete_workspace_temporal_connector_cleanups(uuid,uuid)'

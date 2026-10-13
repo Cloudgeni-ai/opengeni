@@ -40,6 +40,10 @@ const withheldMigrations = [
   admissionDiagnosticsMigration,
   admissionRefusalsMigration,
   receiverExecutionContextMigration,
+  // These patch the receiving-context and accepted-account fences installed
+  // by the withheld 0494/0608 tail, so replay them after that tail.
+  "0755_turn_connection_account_intent.sql",
+  "0756_turn_connection_account_intent_schema.sql",
   inboxScheduleOwnerMigration,
   inboxPausedGoalSettingMigration,
   ...inboxTriggerTailMigrations,

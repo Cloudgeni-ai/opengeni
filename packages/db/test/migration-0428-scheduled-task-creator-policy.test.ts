@@ -138,19 +138,24 @@ describe("0428 creator policy (real PostgreSQL)", () => {
       firstPartyMcpPermissions: null,
       sessionPolicy: null,
     });
-    const [row] = await admin<Array<{ stored: string; legacy: string; recomputed: string }>>`
-      select task.execution_digest as stored,
+    const [row] = await admin<
+      Array<{ stored: string; legacy: string; recomputed: string; vaultPolicy: unknown }>
+    >`
+      select task.execution_digest as stored, task.vault_policy as "vaultPolicy",
         encode(sha256(convert_to((
           to_jsonb(task) - array[
             'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id',
             'creator_first_party_mcp_tools', 'creator_first_party_mcp_permissions',
             'creator_session_policy', 'subscription_authority', 'authority_inserted_at',
-            'visibility'
+            'visibility', 'vault_policy'
           ]::text[]
         )::text, 'UTF8')), 'hex') as legacy,
         scheduled_task_execution_digest(task) as recomputed
       from scheduled_tasks task
       where task.id = ${task.id}`;
+    // 0739 keeps the default all-vault policy out of the historical digest.
+    // This whole-row reference is valid only for that default policy.
+    expect(row!.vaultPolicy).toEqual({ mode: "all" });
     expect(row!.stored).toBe(row!.legacy);
     expect(row!.recomputed).toBe(row!.legacy);
   });
@@ -174,24 +179,27 @@ describe("0428 creator policy (real PostgreSQL)", () => {
     expect(await getScheduledTaskCreatorPolicy(client.db, scope.workspaceId, task.id)).toEqual(
       creatorPolicy,
     );
-    const [row] = await admin<Array<{ stored: string; stripped: string; full: string }>>`
-      select task.execution_digest as stored,
+    const [row] = await admin<
+      Array<{ stored: string; stripped: string; full: string; vaultPolicy: unknown }>
+    >`
+      select task.execution_digest as stored, task.vault_policy as "vaultPolicy",
         encode(sha256(convert_to((
           to_jsonb(task) - array[
             'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id',
             'creator_first_party_mcp_tools', 'creator_first_party_mcp_permissions',
             'creator_session_policy', 'subscription_authority', 'authority_inserted_at',
-            'visibility'
+            'visibility', 'vault_policy'
           ]::text[]
         )::text, 'UTF8')), 'hex') as stripped,
         encode(sha256(convert_to((
           to_jsonb(task) - array[
             'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id', 'subscription_authority',
-            'authority_inserted_at', 'visibility'
+            'authority_inserted_at', 'visibility', 'vault_policy'
           ]::text[]
         )::text, 'UTF8')), 'hex') as full
       from scheduled_tasks task
       where task.id = ${task.id}`;
+    expect(row!.vaultPolicy).toEqual({ mode: "all" });
     expect(row!.stored).toBe(row!.full);
     expect(row!.stored).not.toBe(row!.stripped);
     // A tombstoned task still answers so run recovery stays deterministic.
