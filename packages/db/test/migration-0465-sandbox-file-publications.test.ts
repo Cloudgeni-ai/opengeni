@@ -111,6 +111,7 @@ postgresTest(
         listArtifactCatalogCandidates(client!.db, scope, {
           query: ArtifactCatalogListQuery.parse({ sort: "title" }),
           kinds: ["file"],
+          siteViewer: { subjectId: null },
           snapshotAt: new Date(Date.now() + 1000).toISOString(),
           limit: 100,
         });

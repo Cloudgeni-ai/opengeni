@@ -34,7 +34,7 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
 
 const WORKSPACE_PAGE_TARGETS = [
   "/workspaces/$workspaceId/insights",
-  "/workspaces/$workspaceId/variable-sets",
+  "/workspaces/$workspaceId/secrets",
   "/workspaces/$workspaceId/rigs",
   "/workspaces/$workspaceId/machines",
 ] as const;

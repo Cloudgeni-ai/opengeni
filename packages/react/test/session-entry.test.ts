@@ -121,11 +121,13 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/lib/error-message.ts"))).toBe(true);
     // Pure provider-recovery copy used by failure presentation; no React graph.
     expect(reactSources.some((id) => id.endsWith("/src/lib/provider-recovery.ts"))).toBe(true);
+    // Pure compaction failure copy shared by the projection; no React graph.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/compaction-copy.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-conversation.ts"))).toBe(
       true,
     );
     expect(reactSources.some((id) => id.endsWith("/src/hooks/use-new-conversation.ts"))).toBe(true);
-    expect(reactSources.length).toBe(31);
+    expect(reactSources.length).toBe(32);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

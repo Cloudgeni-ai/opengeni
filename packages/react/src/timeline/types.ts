@@ -2,6 +2,7 @@ import type {
   AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
+  HumanInputSecretAnswerResult,
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
@@ -81,6 +82,8 @@ export type HumanInputAnswerSummary = {
   label: string;
   prompt: string;
   values: string[];
+  /** A secret question's saved reference (never a value). */
+  secret?: HumanInputSecretAnswerResult | undefined;
 };
 
 /**

@@ -190,9 +190,8 @@ describe("server effectiveTools environment projection", () => {
       });
       const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false);
       const codexPool = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
-      const xaiPool = spyOn(db, "workspaceXaiSubscriptionActiveForAuthority").mockResolvedValue(
-        true,
-      );
+      // SuperGrok readiness is the core route's answer (its legacy pool is gone).
+      const xaiPool = spyOn(db, "readSubscriptionCoreRouteReadiness");
       const credentials = spyOn(db, "loadWorkspaceVercelAiGatewayApiKey");
       const policy = spyOn(db, "getWorkspaceVideoGenerationPolicy");
       const authority = spyOn(db, "getLatestStartedSessionTurn");

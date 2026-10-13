@@ -18,7 +18,7 @@ const buttonVariants = cva(
         outline: "border border-border bg-surface text-fg hover:bg-surface-2",
         secondary: "bg-secondary text-secondary-foreground hover:bg-surface-3 hover:text-fg",
         ghost: "hover:bg-hover hover:text-fg",
-        link: "text-brand underline-offset-4 hover:underline",
+        link: "og-link",
       },
       size: {
         default: "h-9 px-4 py-2 has-[>svg]:px-3",

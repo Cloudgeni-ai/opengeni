@@ -71,6 +71,7 @@ import {
 } from "@opengeni/db/organization-integration-policy";
 
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
+import { isOnePasswordConnection, onePasswordConnectionMetadata } from "./vaults/provider-registry";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 
@@ -134,6 +135,7 @@ export async function buildCapabilityCatalog(input: {
     ...configuredMcpCatalogItems(input.settings),
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
+    onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -942,6 +944,8 @@ export async function settingsWithEnabledCapabilityMcpServers(
     subjectId?: string;
     personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /** Every enabled capability server read, before static-id shadowing. */
+    onResolvedCapabilityServers?: (servers: readonly EnabledMcpCapabilityServer[]) => void;
     /**
      * The Codex Apps designation the caller already resolves (a claim reads
      * its cutover once), or what it knows for resolving it here.
@@ -968,6 +972,57 @@ export async function settingsWithEnabledCapabilityMcpServers(
         : resolveCodexAppsDesignationForRun(db, workspaceId, options?.codexApps ?? {}),
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
+  options?.onResolvedCapabilityServers?.(enabled);
+  return settingsWithCodexAppsMcpServer(
+    settingsWithApiIntegrationServers(
+      settingsWithMcpCapabilityServers(settings, enabled),
+      apiIntegrations,
+    ),
+    codexAppsDesignation !== null,
+  );
+}
+
+/**
+ * `settingsWithEnabledCapabilityMcpServers` for a live target fence: only the
+ * rows that can produce `serverIds`. That is the capability installations that
+ * produced them at preparation plus any catalog item explicitly claiming one of
+ * those ids (shadowing), integrations with exactly those runtime keys (read
+ * with the same subject visibility), and the Codex designation only when Codex
+ * Apps itself is a target. Static servers come from `settings`, unchanged.
+ * Restricted to `serverIds`, the result equals the complete projection.
+ */
+export async function settingsWithEnabledCapabilityMcpServersForTargets(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  options: {
+    subjectId: string;
+    accountId: string;
+    serverIds: readonly string[];
+    capabilityIds: readonly string[];
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+    /** Checked between reads: a stopped caller starts no further read. */
+    signal?: AbortSignal;
+  },
+): Promise<Settings> {
+  const serverIds = new Set(options.serverIds);
+  // One RLS scope at a time: `db` may be a single bounded transaction.
+  const enabled = (
+    await listEnabledMcpCapabilityServers(db, workspaceId, {
+      capabilityIds: options.capabilityIds,
+      serverIds: [...serverIds],
+    })
+  ).filter((server) => serverIds.has(server.id));
+  options.signal?.throwIfAborted();
+  const apiIntegrations = await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [
+    ...serverIds,
+  ]);
+  options.signal?.throwIfAborted();
+  const codexAppsDesignation =
+    settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
+      ? await resolveCodexAppsDesignationForRun(db, workspaceId, { accountId: options.accountId })
+      : null;
+  options.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
     settingsWithApiIntegrationServers(
       settingsWithMcpCapabilityServers(settings, enabled),
@@ -1515,6 +1570,52 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
   });
 }
 
+/**
+ * The 1Password tile (design §10.9). Connecting a service account happens in
+ * Settings > Secrets (`POST /connections/1password/install`); its vaults are
+ * then reached through secret references and the secrets tools, not MCP.
+ * Enabled while a workspace-shared 1Password connection is active.
+ */
+function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCatalogItem {
+  const active = connections.filter((connection) => connection.status === "active");
+  const enabled = active.length > 0;
+  return CapabilityCatalogItem.parse({
+    id: "api:1password",
+    kind: "api",
+    source: "built_in",
+    name: "1Password",
+    description:
+      "Connect a 1Password service account so its vaults appear as read-only or read-write secret vaults.",
+    category: "security",
+    tags: ["api", "1password", "password-manager", "secrets", "vaults"],
+    homepageUrl: "https://1password.com",
+    authModel: "service_account_token",
+    providerDomain: "1password.com",
+    surfaceType: "first_party_onepassword",
+    authKind: "api_key",
+    tools: [],
+    runtime: {
+      available: true,
+      notes: "1Password vaults are used through secret references and the secrets tools.",
+    },
+    enabled,
+    enabledReason: enabled
+      ? `${active.length === 1 ? "1Password connection" : `${active.length} 1Password connections`} active`
+      : null,
+    metadata: {
+      connectorMode: "first_party_onepassword",
+      connectionCount: connections.length,
+      planTiers: [
+        ...new Set(
+          connections.map(
+            (connection) => onePasswordConnectionMetadata(connection.metadata)?.planTier,
+          ),
+        ),
+      ].filter(Boolean),
+    },
+  });
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
 ): CapabilityCatalogItem[] {
@@ -1824,9 +1925,9 @@ export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
 ): CapabilityCatalogItem {
-  if (item.surfaceType === "first_party_fiken") {
-    // Fiken is an API item with connection-derived state, not a generic API
-    // installation. Preserve that state before the non-MCP fallback below.
+  if (item.surfaceType === "first_party_fiken" || item.surfaceType === "first_party_onepassword") {
+    // Fiken and 1Password are API items with connection-derived state, not
+    // generic API installations. Preserve that state before the non-MCP fallback below.
     return { ...item, connectionRef: null };
   }
   if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {

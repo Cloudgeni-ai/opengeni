@@ -18,6 +18,9 @@ import {
   timeoutControlResponse,
 } from "../src/sandbox";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
+import { prepareSecretExec, runWithSecretCarry } from "../src/sandbox/secret-delivery";
+import { isSecretReferenceError, type SecretReferenceError } from "@opengeni/contracts";
+import { createStaticSecretResolver } from "@opengeni/vaults/testing";
 
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
@@ -1354,5 +1357,138 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
     }));
     const session = sessionWith(rpc);
     expect(await session.ping("42")).toBe(true);
+  });
+});
+
+describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
+  const CANARY = "cm-canary 'q' \"d\" $HOME `id`\nline2";
+
+  async function execWithSecret(
+    root: string,
+    cmd: string,
+    args: { shell?: string } = {},
+  ): Promise<{ mock: MockAgentResponder; error: unknown }> {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: root,
+      transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: "codemode-bearer" }),
+    });
+    const resolver = createStaticSecretResolver({ Canary: CANARY });
+    const prepared = await prepareSecretExec(cmd, {
+      resolver,
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    expect(prepared?.carry).toBeTruthy();
+    const error = await runWithSecretCarry(prepared!.carry, () =>
+      session.exec({ cmd: prepared!.text, ...args }),
+    ).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    return { mock, error };
+  }
+
+  test("POSIX machine: forced /bin/sh, values only in ExecRequest.env", async () => {
+    const { mock, error } = await execWithSecret(
+      "/home/user/project",
+      'printf %s "{{secret:Canary}}"',
+    );
+    expect(error).toBeNull();
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual(["/bin/sh", "-c", 'printf %s "${OPENGENI_SECRET_0}"']);
+    expect(exec.shell).toBe(false);
+    expect(Object.keys(exec.env).sort()).toEqual(["OPENGENI_CODEMODE_TOKEN", "OPENGENI_SECRET_0"]);
+    expect(exec.env.OPENGENI_SECRET_0).toBe(CANARY);
+    expect(JSON.stringify(exec.command)).not.toContain("cm-canary");
+  });
+
+  test("an explicit supported shell is honoured", async () => {
+    const { mock, error } = await execWithSecret("/home/user/project", "echo {{secret:Canary}}", {
+      shell: "bash",
+    });
+    expect(error).toBeNull();
+    expect(streamedExecRequest(mock).command).toEqual([
+      "bash",
+      "-c",
+      'echo "${OPENGENI_SECRET_0}"',
+    ]);
+  });
+
+  test("Windows machine: forced powershell -NoProfile -NonInteractive -Command", async () => {
+    const { mock, error } = await execWithSecret(
+      "C:/Users/user/project",
+      "Write-Output '{{secret:Canary}}'",
+    );
+    expect(error).toBeNull();
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual([
+      "powershell",
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      'Write-Output "${env:OPENGENI_SECRET_0}"',
+    ]);
+    expect(exec.env.OPENGENI_SECRET_0).toBe(CANARY);
+  });
+
+  test.each(["cmd", "C:\\Windows\\System32\\cmd.exe", "fish"])(
+    "%s is refused before dispatch with unsupported_shell",
+    async (shell) => {
+      const { mock, error } = await execWithSecret(
+        "C:/Users/user/project",
+        "echo {{secret:Canary}}",
+        {
+          shell,
+        },
+      );
+      expect(isSecretReferenceError(error)).toBe(true);
+      expect((error as SecretReferenceError).failures[0]?.code).toBe("unsupported_shell");
+      expect(mock.requests.some((request) => request.req.op?.$case === "opStart")).toBe(false);
+    },
+  );
+
+  test("commands without references are byte-identical (machine default shell)", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    await session.exec({ cmd: "echo plain" });
+    const exec = streamedExecRequest(mock);
+    expect(exec.command).toEqual(["echo plain"]);
+    expect(exec.shell).toBe(true);
+    expect(exec.env).toEqual({});
+  });
+
+  test("the session never persists secret env (CM-4: no ambient env copy)", async () => {
+    const { mock } = await execWithSecret("/home/user/project", "true {{secret:Canary}}");
+    expect(mock.requests.length).toBeGreaterThan(0);
+    const session = sessionWith(new MockAgentResponder());
+    expect(session.state.environment).toEqual({});
+    expect(session.state.manifest.environment).toEqual({});
+  });
+
+  test("attempt-end cleanup removes the machine's secretfile scope recursively", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot: "/home/user/project" });
+    const prepared = await prepareSecretExec("cat {{secretfile:Canary}}", {
+      resolver: createStaticSecretResolver({ Canary: CANARY }),
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    await runWithSecretCarry(prepared!.carry, () => session.exec({ cmd: prepared!.text }));
+    const write = mock.requests.find((entry) => entry.req.op?.$case === "fsWrite")?.req.op;
+    if (write?.$case !== "fsWrite") throw new Error("expected the secretfile fsWrite");
+    const scopeDir = `/tmp/opengeni-private/secrets/${prepared!.carry.scope}`;
+    expect(write.fsWrite.path.startsWith(`${scopeDir}/`)).toBe(true);
+    expect(write.fsWrite.mode).toBe(0o600);
+
+    await session.clearSecretFilesForAttempt();
+    const removes = mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove");
+    expect(removes.map((entry) => entry.req.op)).toEqual([
+      { $case: "fsRemove", fsRemove: { path: scopeDir, recursive: true } },
+    ]);
+    // Idempotent: the scope is forgotten once removed.
+    await session.clearSecretFilesForAttempt();
+    expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
   });
 });

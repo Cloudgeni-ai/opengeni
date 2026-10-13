@@ -2036,7 +2036,7 @@ function ComputerViewportFallback(props: {
           <button
             type="button"
             onClick={props.onReconnect}
-            className="mt-3 text-og-control font-medium text-og-accent hover:underline"
+            className="mt-3 text-og-control font-medium og-link"
           >
             {controlFailure?.retryable === false ? "Try again" : "Reconnect"}
           </button>

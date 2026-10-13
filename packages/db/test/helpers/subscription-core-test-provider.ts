@@ -61,15 +61,10 @@ export function testSubscriptionCoreProviderModules(
         .array(
           z
             .object({
+              ...realAuthority.SubscriptionPersonalAuthorityV2.shape.personal.element.shape,
               provider: z
                 .string()
                 .refine((value) => listed.includes(value) || registeredForTests.has(value)),
-              ownerMembershipId:
-                realAuthority.SubscriptionPersonalAuthorityV2.shape.personal.element.shape
-                  .ownerMembershipId,
-              authorityGeneration:
-                realAuthority.SubscriptionPersonalAuthorityV2.shape.personal.element.shape
-                  .authorityGeneration,
             })
             .strict(),
         )

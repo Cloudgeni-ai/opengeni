@@ -14,11 +14,11 @@ import {
   GraduationCapIcon,
   KeyRoundIcon,
   LaptopIcon,
+  LockKeyholeIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
   UsersIcon,
-  VariableIcon,
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 
@@ -123,9 +123,9 @@ export const ACTIVITY_PAGES = [
 
 export const RUNTIME_PAGES = [
   {
-    to: "/workspaces/$workspaceId/variable-sets" as const,
-    label: "Variable sets",
-    icon: VariableIcon,
+    to: "/workspaces/$workspaceId/secrets" as const,
+    label: "Secrets",
+    icon: LockKeyholeIcon,
   },
   {
     to: "/workspaces/$workspaceId/rigs" as const,

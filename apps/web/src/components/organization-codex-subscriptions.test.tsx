@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { CodexAccount, OrganizationCodexAccountsResponse } from "@opengeni/sdk";
 import { act, useState, type ReactNode } from "react";
@@ -188,6 +188,10 @@ const { OrgCodexAccountPage, reachesWorkspace } =
   await import("./models/organization-codex-models");
 const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
 const { modelsScopeLabels } = await import("./models/models-ui");
+const { clearSharedQueries } = await import("@/lib/shared-query");
+
+// Account lists are retained per client between mounts; every test starts cold.
+beforeEach(() => clearSharedQueries(context.client));
 
 afterAll(() => {
   mock.restore();
@@ -444,5 +448,17 @@ describe("organization Codex subscriptions", () => {
     expect(reachesWorkspace({ ...access, personalWorkspacesSupported: false }, personal)).toBe(
       false,
     );
+    // The workspace that connected it always reaches it; an older response
+    // without that list is unchanged.
+    expect(reachesWorkspace({ ...limited, localWorkspaceIds: ["workspace-a"] }, shared)).toBe(true);
+    expect(reachesWorkspace({ ...limited, localWorkspaceIds: [] }, shared)).toBe(false);
+    // Chosen people use it wherever they work: not a property of the workspace.
+    expect(
+      reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: ["p"] } }, shared),
+    ).toBeNull();
+    // An empty people choice reaches no one.
+    expect(
+      reachesWorkspace({ ...access, policy: { ...access.policy, allowedPeople: [] } }, shared),
+    ).toBe(false);
   });
 });

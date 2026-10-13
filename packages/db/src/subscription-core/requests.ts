@@ -186,7 +186,9 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
       // attempt that closed as failed (rerun only through an explicit Retry) or
       // as recoverable (worker shutdown, worker loss, lost lease) can no longer
       // write, so its response is never consumed and does not block the new
-      // generation. The request rows keep their outcome.
+      // generation on the SAME provider. Across providers the unresolved
+      // outcome still fences recovery/reclaim, even if its source is no longer
+      // registered (D-38). The request rows keep their outcome.
       const [prior] = await rawRows<{ unresolved: boolean }>(
         tx,
         sql`select exists (
@@ -194,7 +196,7 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
       where request.account_id = ${identity.accountId}::uuid
         and request.workspace_id = ${identity.workspaceId}::uuid
         and request.session_id = ${identity.sessionId}::uuid
-        and request.turn_id = ${identity.turnId}::uuid and request.provider = ${providerId}
+        and request.turn_id = ${identity.turnId}::uuid
         and request.operation_kind = 'model' and request.request_id is not null
         and (request.request_outcome = 'unknown'
           or (request.request_outcome = 'reserved' and request.attempt_id <> ${request.attemptId}::uuid))
@@ -205,7 +207,7 @@ export const subscriptionCoreRequests = memoByProvider((provider: SubscriptionCo
             and attempt.session_id = request.session_id and attempt.turn_id = request.turn_id
             and attempt.id = request.attempt_id
             and attempt.execution_generation < ${request.executionGeneration}
-            and attempt.state = 'closed'
+            and request.provider = ${providerId} and attempt.state = 'closed'
             and attempt.outcome in ('failed', 'interrupted_recoverable', 'lease_lost_recoverable'))
     ) as unresolved`,
       );

@@ -2734,7 +2734,7 @@ function SemanticBrowserFallback(props: {
           <button
             type="button"
             onClick={props.onReconnect}
-            className="mt-3 text-og-control font-medium text-og-accent hover:underline"
+            className="mt-3 text-og-control font-medium og-link"
           >
             {props.reconnectLabel ??
               (controlFailure?.retryable === false ? "Try again" : "Reconnect")}
@@ -2964,7 +2964,7 @@ function BrowserDiagnosticsDrawer(props: {
               <button
                 type="button"
                 onClick={props.onRefresh}
-                className="mt-2 text-og-control font-medium text-og-accent hover:underline"
+                className="mt-2 text-og-control font-medium og-link"
               >
                 Try again
               </button>
@@ -3070,7 +3070,7 @@ function BrowserDownloadsPanel(props: {
           <button
             type="button"
             onClick={props.onRefresh}
-            className="mt-2 text-og-control font-medium text-og-accent hover:underline"
+            className="mt-2 text-og-control font-medium og-link"
           >
             Try again
           </button>

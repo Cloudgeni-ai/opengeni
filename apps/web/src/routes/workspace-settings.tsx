@@ -390,7 +390,7 @@ function WorkspaceGeneralSettings({
                 <Link
                   to="/workspaces/$workspaceId/organization"
                   params={{ workspaceId: organizationSettingsWorkspaceId }}
-                  className="text-brand underline-offset-2 hover:underline"
+                  className="og-link"
                 >
                   {organizationLabel}
                 </Link>
@@ -701,7 +701,7 @@ export function DangerZone(props: {
       title="Delete workspace"
       description={
         disabledReason ??
-        `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, variable sets, knowledge, files and API keys.`
+        `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, secrets, knowledge, files and API keys.`
       }
       action={
         // When something blocks the delete, the description says what and who
@@ -729,7 +729,7 @@ export function DangerZone(props: {
           variant="type-to-confirm"
           title={`Delete ${props.workspaceName}?`}
           consequences={[
-            `Deletes every session, schedule, variable set, knowledge entry, file and API key in ${props.workspaceName}.`,
+            `Deletes every session, schedule, secret, knowledge entry, file and API key in ${props.workspaceName}.`,
             "Everyone loses access to it. Their other workspaces aren't affected.",
             "Running sessions, video generations, background commands and live sandboxes must finish first.",
             "This can't be undone.",

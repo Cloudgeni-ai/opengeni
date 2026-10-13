@@ -44,6 +44,7 @@ export interface SuperGrokPlaces {
   /** Opens the connect step; with an account, to sign that account in again. */
   openConnect: (reconnectAccountId?: string) => void;
   openAccess: (accountId: string) => void;
+  sharePersonal?: ((accountId: string) => void) | undefined;
   backToList: () => void;
 }
 

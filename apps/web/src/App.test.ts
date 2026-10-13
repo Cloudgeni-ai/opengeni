@@ -1112,7 +1112,7 @@ describe("api key permission options", () => {
       "Sessions",
       "Files & documents",
       "Scheduled tasks",
-      "Variable sets",
+      "Secrets",
       "Connections",
       "Machines",
       "GitHub",
@@ -1267,7 +1267,6 @@ describe("session create draft", () => {
     const draft = {
       ...emptySessionDraft(),
       compute: { kind: "sandbox" as const, backend: "docker" as const },
-      variableSetId: "env-1",
       goalText: "  Keep CI green  ",
       goalSuccessCriteria: "All checks pass for 7 days",
       goalMaxAutoContinuations: "12",
@@ -1277,7 +1276,6 @@ describe("session create draft", () => {
     expect(submissionFromSessionDraft(draft)).toEqual({
       extras: {
         sandboxBackend: "docker",
-        variableSetId: "env-1",
         goal: {
           text: "Keep CI green",
           successCriteria: "All checks pass for 7 days",

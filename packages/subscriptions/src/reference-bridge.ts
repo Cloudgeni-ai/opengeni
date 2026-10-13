@@ -147,7 +147,11 @@ export function toReferenceWorld(input: PlacementInput): {
       const owner = connection.ownership.ownerMembershipId;
       return session.personalAuthority.some(
         (authority) =>
-          authority.provider === connection.provider && authority.ownerMembershipId === owner,
+          authority.provider === connection.provider &&
+          authority.ownerMembershipId === owner &&
+          (!authority.sharedSessionChoice ||
+            (authority.sharedSessionChoice.sessionId === session.id &&
+              authority.sharedSessionChoice.connectionId === connection.id)),
       );
     }
     if (connection.assignmentPolicies !== undefined) return true;
@@ -207,6 +211,16 @@ export function toReferenceWorld(input: PlacementInput): {
           workspaceId: session.workspaceId,
           visibility: session.visibility,
           ownerId: session.ownerMembershipId,
+          sharedPersonalChoices: session.personalAuthority.flatMap((authority) =>
+            authority.sharedSessionChoice?.sessionId === session.id
+              ? [
+                  {
+                    connectionId: authority.sharedSessionChoice.connectionId,
+                    ownerId: authority.ownerMembershipId,
+                  },
+                ]
+              : [],
+          ),
           preferredModelId: session.preferredModelId,
           reasoningLevel: session.reasoningLevel,
           binding: binding

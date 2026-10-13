@@ -58,7 +58,6 @@ describe("codemode token mint and sandbox delivery pointers", () => {
         apiPort: 8000,
       }),
       [],
-      {},
       {
         scope: { accountId, workspaceId },
         codemodeAuthority: authority,
@@ -76,15 +75,10 @@ describe("codemode token mint and sandbox delivery pointers", () => {
       delegationSecret: "codemode-secret",
       apiPort: 8000,
     });
-    const result = await sandboxEnvironmentForRun(
-      settings,
-      [],
-      {},
-      {
-        scope: { accountId, workspaceId },
-        codemodeAuthority: authority,
-      },
-    );
+    const result = await sandboxEnvironmentForRun(settings, [], {
+      scope: { accountId, workspaceId },
+      codemodeAuthority: authority,
+    });
 
     expect(result.codemodeToken).toMatch(/^ogd_/);
     expect(result.environment.OPENGENI_CODEMODE_TOKEN_FILE).toBe(
@@ -119,16 +113,11 @@ describe("codemode token mint and sandbox delivery pointers", () => {
       delegationSecret: "codemode-secret",
       apiPort: 8000,
     });
-    const result = await sandboxEnvironmentForRun(
-      settings,
-      [],
-      {},
-      {
-        scope: { accountId, workspaceId },
-        codemodeAuthority: authority,
-        codemodeDelivery: "transient_exec",
-      },
-    );
+    const result = await sandboxEnvironmentForRun(settings, [], {
+      scope: { accountId, workspaceId },
+      codemodeAuthority: authority,
+      codemodeDelivery: "transient_exec",
+    });
 
     expect(result.codemodeToken).toMatch(/^ogd_/);
     expect(result.codemodeTokenExpiresAt).toBeInstanceOf(Date);
@@ -142,7 +131,6 @@ describe("codemode token mint and sandbox delivery pointers", () => {
     const result = await sandboxEnvironmentForRun(
       testSettings({ sandboxBackend: "modal", delegationSecret: "codemode-secret" }),
       [],
-      {},
       {
         scope: { accountId, workspaceId },
         codemodeAuthority: authority,
@@ -163,15 +151,10 @@ describe("codemode token mint and sandbox delivery pointers", () => {
       apiPort: 8000,
       opengeniMcpUrl: "https://app.opengeni.example/v1/workspaces/{workspaceId}/mcp",
     });
-    const result = await sandboxEnvironmentForRun(
-      settings,
-      [],
-      {},
-      {
-        scope: { accountId, workspaceId },
-        codemodeAuthority: authority,
-      },
-    );
+    const result = await sandboxEnvironmentForRun(settings, [], {
+      scope: { accountId, workspaceId },
+      codemodeAuthority: authority,
+    });
 
     expect(result.environment.OPENGENI_CODEMODE_URL).toBe(
       `https://app.opengeni.example/v1/workspaces/${workspaceId}/codemode`,
@@ -187,7 +170,6 @@ describe("codemode token mint and sandbox delivery pointers", () => {
         publicBaseUrl: "https://app.opengeni.example/",
       }),
       [],
-      {},
       {
         scope: { accountId, workspaceId },
         codemodeAuthority: authority,

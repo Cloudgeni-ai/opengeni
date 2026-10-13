@@ -526,7 +526,7 @@ function EntryPageContent({
               href={externalUrl(entry.source.uri)!}
               target="_blank"
               rel="noreferrer"
-              className="text-brand underline-offset-2 hover:underline"
+              className="og-link"
             >
               {KNOWLEDGE_SOURCE_LABEL[entry.source.kind] ?? "Original source"}
             </a>

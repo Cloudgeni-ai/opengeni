@@ -17,6 +17,9 @@ import {
   ensureManagedAccessForUser,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  retiredSubscriptionObjectDescriptions,
+  retiredSubscriptionObjectViolation,
+  SUBSCRIPTION_RETIREMENT_MIGRATION,
   withSessionRlsActorContext,
   withSubscriptionCoreAcceptedTurn,
   type DbClient,
@@ -33,6 +36,19 @@ const PRECURSOR = "0712_subscription_core_generic_precursor.sql";
 const COMPAT = "0716_subscription_authority_compat.sql";
 // 0717 requires 0716's routines; it follows 0716.
 const FENCES = "0717_subscription_authority_fences.sql";
+const XAI_CUTOVER = "0747_subscription_core_xai_cutover.sql";
+const CLAUDE_CUTOVER = "0748_subscription_core_claude_cutover.sql";
+// The drained retirement requires both receipts; held back with them.
+const RETIREMENT = SUBSCRIPTION_RETIREMENT_MIGRATION;
+/**
+ * This binary requires the SuperGrok and Claude receipts, which the rolling
+ * state lacks, and the absence of everything the retirement drops.
+ */
+const BEFORE_XAI_CUTOVER = [
+  ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
+  "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+  "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+];
 let database: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let appUrl = "";
@@ -175,7 +191,7 @@ beforeAll(async () => {
   });
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES})`;
+    await owner`insert into schema_migrations(name) values (${PRECURSOR}), (${COMPAT}), (${FENCES}), (${XAI_CUTOVER}), (${CLAUDE_CUTOVER}), (${RETIREMENT}), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
     await migrate(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
@@ -284,7 +300,7 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0712)",
       app_super: false,
       app_bypass: false,
     });
-    expect(unprovisionedPostureViolations).toEqual([]);
+    expect(unprovisionedPostureViolations).toEqual(BEFORE_XAI_CUTOVER);
     // A configured application role with another name can run the reader the
     // restrictive policies call, before provision-roles.
     expect(customRoleReaderBeforeProvision).toBe(true);
@@ -294,7 +310,7 @@ describe.skipIf(!realDb)("subscription-core generic precursor (migration 0712)",
       targetSchema: "public",
     };
     const posture = await inspectRuntimeDatabasePosture(client!.db, options);
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(BEFORE_XAI_CUTOVER);
     expect(posture.subscriptionProviderCutoverReceipts).toEqual(["codex"]);
     // Every new routine has a fixed search_path ending in pg_temp; only the
     // readiness function is executable by the runtime role.

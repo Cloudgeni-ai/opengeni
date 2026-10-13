@@ -7,14 +7,19 @@ import {
 import { recordCompletedModelCallBeforeOwnershipFences } from "../src/activities/agent-turn/model-usage";
 import { assertCodexDispatchAdmission } from "../src/activities/agent-turn/codex-credit-policy";
 
-test.each(["xai", "claude"] as const)(
-  "%s checkpoint lifecycle coalesces events while preserving scoped renewal and usage truth",
+// SuperGrok's legacy scoped lease was deleted (M4 X4); it holds only the core
+// turn lease, covered below with Codex's.
+
+test.each(["codex", "claude", "xai"] as const)(
+  "%s checkpoint lifecycle renews only the shared core lease and preserves usage truth",
   async (provider) => {
     let now = 0;
     const clock = spyOn(performance, "now").mockImplementation(() => now);
-    const xai = spyOn(db, "heartbeatXaiCredentialLeaseUntil").mockResolvedValue(new Date());
-    const claude = spyOn(db, "heartbeatClaudeCredentialLeaseUntil").mockResolvedValue(new Date());
-    const heartbeats = { xai, claude };
+
+    const renew = spyOn(db, "renewSubscriptionTurnLease").mockResolvedValue(new Date());
+    const rls = spyOn(db, "withRlsContext").mockImplementation(
+      async (_db, _context, callback) => await callback({} as TurnCredentialLeaseDeps["db"]),
+    );
     const deps = {
       db: {} as TurnCredentialLeaseDeps["db"],
       observability: {
@@ -25,16 +30,22 @@ test.each(["xai", "claude"] as const)(
       workspaceId: "workspace-fixture",
       codexWorkspaceKey: "fixture",
       getTurnId: () => "turn-fixture",
+      getSessionId: () => "session-fixture",
     };
     const leases = createTurnCredentialLeases(deps);
     const lease = leases[provider];
+    const ttlMs = {
+      codex: db.CODEX_CREDENTIAL_LEASE_TTL_MS,
+      claude: db.SUBSCRIPTION_CORE_CLAUDE_LEASE_TTL_MS,
+      xai: db.XAI_CREDENTIAL_LEASE_TTL_MS,
+    }[provider];
     Object.assign(lease, {
       held: true,
-      subjectId: "subject-fixture",
       holderId: "holder-fixture",
       generation: 2,
       confirmedUntilMs: 300_000,
     });
+    lease.useSubscriptionCoreLease("connection-fixture");
     let usage = 0;
     let signals = 0;
     const completedCall = () =>
@@ -50,51 +61,45 @@ test.each(["xai", "claude"] as const)(
         },
       });
     try {
-      // Mirror the runtime checkpoint and completed-response consumer seams.
       for (let event = 0; event < 100; event++) {
         await leases.renewServing("runtime_event");
         expect(leases.servingLost()).toBe(false);
         await completedCall();
         lease.assertUsable();
       }
-      expect(xai).not.toHaveBeenCalled();
-      expect(claude).not.toHaveBeenCalled();
+      expect(renew).not.toHaveBeenCalled();
       expect(lease.confirmedUntilMs).toBe(300_000);
       now = 60_000;
       await completedCall();
-      expect(heartbeats[provider]).toHaveBeenCalledTimes(1);
-      expect(heartbeats[provider].mock.calls[0]).toEqual([
-        deps.db,
-        {
-          workspaceId: deps.workspaceId,
-          subjectId: "subject-fixture",
-          turnId: "turn-fixture",
-          holderId: "holder-fixture",
-          generation: 2,
-          leaseTtlMs:
-            provider === "xai" ? db.XAI_CREDENTIAL_LEASE_TTL_MS : db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
-        },
-      ]);
-      expect(lease.confirmedUntilMs).toBe(360_000);
-      await leases.renewServing("runtime_event");
-      expect(heartbeats[provider]).toHaveBeenCalledTimes(1);
-      now = 120_000;
-      heartbeats[provider].mockResolvedValue(null);
+      expect(renew).toHaveBeenCalledTimes(1);
+      expect(renew.mock.calls[0]?.[1]).toEqual({
+        accountId: deps.accountId,
+        workspaceId: deps.workspaceId,
+        sessionId: "session-fixture",
+        turnId: "turn-fixture",
+        provider,
+        connectionId: "connection-fixture",
+        holderId: "holder-fixture",
+        generation: 2,
+        ttlMs: ttlMs,
+      });
+      expect(lease.confirmedUntilMs).toBe(60_000 + ttlMs);
+      now = 120_000 + ttlMs;
+      renew.mockResolvedValue(null);
       await expect(completedCall()).rejects.toThrow("fixture lease lost");
       expect(usage).toBe(102);
       expect(signals).toBe(101);
       expect(leases.servingLost()).toBe(true);
-      expect(lease.lossReason).toBe("not_found");
       expect(() => lease.assertUsable()).toThrow(
         "credential lease is not usable for provider dispatch",
       );
-      expect(lease.confirmedUntilMs).toBe(360_000);
     } finally {
       leases.codex.stopHeartbeat();
       leases.xai.stopHeartbeat();
       leases.claude.stopHeartbeat();
-      xai.mockRestore();
-      claude.mockRestore();
+
+      renew.mockRestore();
+      rls.mockRestore();
       clock.mockRestore();
     }
   },

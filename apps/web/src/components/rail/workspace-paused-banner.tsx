@@ -68,7 +68,7 @@ function PausedBanner({ workspaceId }: { workspaceId: string }) {
             to="/workspaces/$workspaceId/settings"
             params={{ workspaceId }}
             search={{ section: "general" }}
-            className="inline-flex h-8 items-center text-xs font-medium text-brand underline-offset-2 hover:underline"
+            className="inline-flex h-8 items-center text-xs font-medium og-link"
           >
             Agent activity
           </Link>

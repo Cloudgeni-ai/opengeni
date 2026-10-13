@@ -257,7 +257,7 @@ function MemberIdentity({
             <button
               type="button"
               onClick={() => void onResetToRole(member)}
-              className="inline-flex items-center gap-1 rounded-[6px] font-medium whitespace-nowrap text-brand hover:underline pointer-coarse:min-h-11"
+              className="inline-flex items-center gap-1 rounded-[6px] font-medium whitespace-nowrap og-link pointer-coarse:min-h-11"
             >
               <RotateCcwIcon aria-hidden="true" className="size-3" />
               Reset to {resetTo}

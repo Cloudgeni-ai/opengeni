@@ -8,6 +8,19 @@ export type {
   HumanInputFormProps,
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
+export {
+  SecretAnswerChip,
+  SecretRefChip,
+  SecretRefText,
+  secretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretAnswerChipProps,
+  SecretRefChipProps,
+  SecretRefTextProps,
+  SecretReferenceLabel,
+} from "./components/secret-ref-chip";
+export { SecretsUiProvider } from "./secrets-ui";
 export { ApprovalSurface } from "./components/approval-surface";
 export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
 export type { ToolReviewDetailsLoader } from "./components/tool-action-review";

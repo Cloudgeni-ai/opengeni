@@ -8,7 +8,6 @@ import {
   createRig,
   createRigVersion,
   createSession,
-  createVariableSet,
   getRigChange,
   listRigVersions,
   updateRigChangeStatus,
@@ -136,44 +135,16 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
 }
 
 describe("rig route permission matrix", () => {
-  test("default Variable Set references require independent attach and use permissions", async () => {
+  test("default Variable Set references are refused now that vaults replace them", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const variableSet = await createVariableSet(client.db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      name: "rig-default-secret",
-    });
-    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
-    const body = JSON.stringify({
-      name: "secret-rig",
-      defaultVariableSetIds: [variableSet.id],
-    });
-
-    for (const permissions of [
-      ["rigs:manage", "variable-sets:use"],
-      ["rigs:manage", "variable-sets:attach"],
-    ] satisfies Permission[][]) {
-      const denied = await app().request(base, {
-        method: "POST",
-        headers: { authorization: await bearer(ws, "user:m", permissions) },
-        body,
-      });
-      expect(denied.status).toBe(403);
-    }
-
-    const accepted = await app().request(base, {
+    const response = await app().request(`/v1/workspaces/${ws.workspaceId}/rigs`, {
       method: "POST",
-      headers: {
-        authorization: await bearer(ws, "user:m", [
-          "rigs:manage",
-          "variable-sets:attach",
-          "variable-sets:use",
-        ]),
-      },
-      body,
+      headers: { authorization: await bearer(ws, "user:m", ["rigs:manage"]) },
+      body: JSON.stringify({ name: "secret-rig", defaultVariableSetIds: [crypto.randomUUID()] }),
     });
-    expect(accepted.status).toBe(201);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: "variable_sets_removed" });
   });
 
   test("read requires rigs:use; write requires rigs:manage; propose requires rigs:use", async () => {

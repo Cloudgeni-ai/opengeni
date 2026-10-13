@@ -38,7 +38,7 @@ import {
 } from "../access";
 import { requireSessionAuthorization } from "../session-authorization";
 import type { AppDependencies } from "../dependencies";
-import { validateVariableSetAttachment } from "../domain/environments";
+import { variableSetsRemovedError } from "../domain/encryption-key";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
 
 type SessionTenancyDependencies = Pick<
@@ -366,31 +366,15 @@ export async function forkManagedHumanSession(
   const resolveRuntimeConfiguration = async () => {
     if (runtimeConfigurationPromise) return await runtimeConfigurationPromise;
     runtimeConfigurationPromise = (async () => {
+      // Variable Sets were replaced by vaults (RM-1).
+      if (request.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
       const variableSets: VariableSet[] = [];
-      for (const variableSetId of request.variableSetIds ?? []) {
-        variableSets.push(
-          await validateVariableSetAttachment(
-            { settings: deps.settings, db: deps.db },
-            authorization.grant,
-            workspaceId,
-            variableSetId,
-          ),
-        );
-      }
       let rigVersionId: string | null = null;
       if (request.rigId) {
         requirePermission(authorization.grant, "rigs:use");
         const rig = await getRig(deps.db, authorization.grant, request.rigId);
         if (!rig?.activeVersion) {
           throw new SessionTenancyInvalidRequestError();
-        }
-        for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
-          await validateVariableSetAttachment(
-            { settings: deps.settings, db: deps.db },
-            authorization.grant,
-            workspaceId,
-            defaultVariableSetId,
-          );
         }
         rigVersionId = rig.activeVersion.id;
       }

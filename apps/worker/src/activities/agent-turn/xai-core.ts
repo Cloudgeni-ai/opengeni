@@ -1,10 +1,9 @@
 /**
  * SuperGrok on the shared subscription core (design 5.3, SuperGrok track
  * X1a): the provider-neutral chat placement and request custody bound to
- * SuperGrok, and the turn's route between the legacy SuperGrok path and the
- * core. Dormant: the route is `core` only after the SuperGrok drained
- * cutover commits its receipt (X3), and the binding is unregistered until
- * then, so every core entry point fails closed.
+ * SuperGrok. SuperGrok runs only on the core (the legacy path was deleted in
+ * X4): the route is `core` after the SuperGrok drained cutover commits its
+ * receipt (X3), which this binary requires; any other route fails closed.
  */
 import {
   readSubscriptionCoreProviderRoute,
@@ -43,10 +42,9 @@ import {
 import type { CoreRefusalBinding } from "./subscription-core-settlement";
 import type { SubscriptionCoreTurn } from "./turn-context";
 import { subscriptionTurnLeaseHolderId } from "./subscription-lease";
-import { selectXaiTurnCapacity } from "./xai-capacity";
-import { refreshExhaustedXaiCoreQuota } from "../xai-quota";
 import { recoverCoreHealthAndWake } from "../subscription-core-codex-waits";
 import { XAI_CORE_WAIT_BINDING } from "../subscription-core-xai-waits";
+import { refreshExhaustedXaiCoreQuota } from "../subscription-core-xai-quota";
 
 const XAI = SUBSCRIPTION_CORE_XAI as SubscriptionCoreProvider;
 const DISPLAY_NAME = "SuperGrok";
@@ -70,22 +68,22 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
       identity,
     );
   },
-  // Re-read billing for exhausted shared connections before placement
-  // trusts a stored exhaustion, as the legacy path did (EP-N22, X2a).
+  // Re-read billing for exhausted connections before placement trusts a
+  // stored exhaustion, as the legacy path did (EP-N22): the shared pool, and
+  // the personal connections placement's personal authorization admits for
+  // this exact turn.
   beforePlacement: async ({ db, settings }, identity) => {
     await refreshExhaustedXaiCoreQuota({
       db,
       settings,
       accountId: identity.accountId,
       workspaceId: identity.workspaceId,
+      personalTurn: identity,
     });
   },
   adopt: ({ providerTurn }, core, placement) => {
     providerTurn.xaiSubscriptionCore = core;
     providerTurn.effectiveXaiCredentialId = placement.connectionId;
-    // Rotation is the core's placement policy, never the legacy rotation.
-    providerTurn.xaiRotationEnabled = false;
-    providerTurn.xaiAuthoritySnapshot = null;
   },
   // A wait parks the same turn on the durable core waiter (EP-T09).
   park: (deps, wait) => parkCoreSubscriptionTurn(deps, wait, XAI_CORE_WAIT_BINDING, DISPLAY_NAME),
@@ -98,9 +96,9 @@ export const XAI_CORE_TURN_PROVIDER: CoreTurnPlacementProvider = {
 };
 
 /**
- * The SuperGrok capacity phase by the organization's SuperGrok route:
- * `legacy` runs the legacy selection unchanged (one added route read),
- * `maintenance` fails closed, `core` places on the shared core.
+ * The SuperGrok capacity phase by the organization's SuperGrok route: `core`
+ * places on the shared core; `maintenance` and a missing receipt (`legacy`,
+ * which this binary's readiness check already refuses) fail closed.
  */
 export async function selectXaiTurnCapacityByRoute(
   deps: CapacityPhaseDeps,
@@ -113,8 +111,7 @@ export async function selectXaiTurnCapacityByRoute(
     (scoped) =>
       readSubscriptionCoreProviderRoute(scoped, { accountId: input.accountId, provider: "xai" }),
   );
-  if (route === "legacy") return await selectXaiTurnCapacity(deps);
-  if (route === "maintenance") throw subscriptionCoreCutoverDisabledFailure(DISPLAY_NAME);
+  if (route !== "core") throw subscriptionCoreCutoverDisabledFailure(DISPLAY_NAME);
   const turnId = deps.attempt.turnId;
   if (!turnId) throw new Error("Turn id was not initialized");
   deps.leases.xai.holderId ??= subscriptionTurnLeaseHolderId("xai", DISPLAY_NAME, input, turnId);

@@ -9,11 +9,13 @@
  * route reads and edits all of them. A workspace's own copy (its
  * `workspace`-pool assignment policy) keeps its assignment and row whatever is
  * chosen for workspaces. The workspace route reads and edits only the models
- * of a connection that workspace manages. Personal connections are never
- * read or written here.
+ * of a connection that workspace manages. The organization route also lets
+ * an exact personal owner who is an organization administrator explicitly
+ * share that named connection. It never inventories personal connections.
  *
  * Every query runs under the caller's own row-level-security context, so the
- * core tables' policies and the scope guard decide authority.
+ * core tables' policies and the scope guard decide authority. Personal
+ * sharing additionally uses an owner-fenced, versioned database capability.
  */
 import { sql, type SQL } from "drizzle-orm";
 import {
@@ -38,6 +40,7 @@ export type SubscriptionCoreAccessPolicy = {
   allowPersonalWorkspaces: boolean;
   /** The chosen people (organization membership ids), or null when not limited to people. */
   allowedPeople?: string[] | null | undefined;
+  sharePersonal?: true | undefined;
   version: number;
 };
 
@@ -61,6 +64,7 @@ export type SubscriptionCoreAccess = {
    * delegated managers, design 5.4 decision 5).
    */
   peopleSupported: boolean;
+  personalSharingSupported?: boolean;
 };
 
 /** A requested access policy names a workspace outside the organization's shared workspaces. */
@@ -133,6 +137,11 @@ export async function withSubscriptionCoreAccessScope<T>(
     db,
     { accountId: target.accountId, workspaceId: null },
     async (tx) => {
+      // Administration overview share-locks membership rows. Membership
+      // lifecycle takes this advisory fence first, so access/sharing must
+      // take it before the overview too (not only inside the sharing routine).
+      await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(
+        ${`organization-membership:${target.accountId}`}, 0))`);
       await setSubjectRlsContext(tx, target.subjectId);
       await tx.execute(
         sql`select get_organization_administration_overview(${target.accountId}::uuid, ${target.subjectId})`,
@@ -361,8 +370,43 @@ export async function readSubscriptionCoreConnectionAccess(
 ): Promise<SubscriptionCoreAccess | null> {
   return await withSubscriptionCoreAccessScope(db, target, async (tx) => {
     const connection = await accessConnection(tx, provider, target, false);
-    return connection ? await projection(tx, provider, target, connection) : null;
+    if (connection) return await projection(tx, provider, target, connection);
+    if (target.workspaceId !== null) return null;
+    const personal = await personalSharing(tx, provider, target);
+    return personal
+      ? {
+          policy: {
+            allowedModels: personal.allowedModels,
+            allowedWorkspaces: [],
+            allowPersonalWorkspaces: false,
+            allowedPeople: null,
+            version: personal.version,
+          },
+          localWorkspaceIds: [],
+          managedByWorkspaceId: null,
+          peopleSupported: false,
+          personalSharingSupported: true,
+        }
+      : null;
   });
+}
+
+/** Owner + organization-admin intersection; never an inventory of other people's accounts. */
+async function personalSharing(
+  tx: Database,
+  provider: SubscriptionCoreProvider,
+  target: SubscriptionCoreAccessTarget,
+  expectedVersion?: number,
+): Promise<{ id: string; allowedModels: string[] | null; version: number } | null> {
+  const [row] = await rawRows<{
+    value: { id: string; allowedModels: string[] | null; version: number } | null;
+  }>(
+    tx,
+    sql`select opengeni_private.subscription_core_personal_sharing(
+      ${subscriptionCoreProviderId(provider)}, ${target.accountId}::uuid,
+      ${target.subjectId}, ${target.connectionId}::uuid, ${expectedVersion ?? null}::integer) as value`,
+  );
+  return row?.value ?? null;
 }
 
 function textArray(values: readonly string[] | null) {
@@ -536,6 +580,15 @@ export async function updateSubscriptionCoreConnectionAccess(
   policy: SubscriptionCoreAccessPolicy,
 ): Promise<SubscriptionCoreAccess | null> {
   const people = policy.allowedPeople ?? null;
+  if (
+    policy.sharePersonal &&
+    (target.workspaceId !== null ||
+      people !== null ||
+      (policy.allowedWorkspaces?.length === 0 && !policy.allowPersonalWorkspaces))
+  )
+    throw new SubscriptionCoreAccessInvalidError(
+      "Choose workspaces before sharing this personal account",
+    );
   if (target.workspaceId !== null && (policy.allowedWorkspaces !== null || people !== null))
     throw new SubscriptionCoreAccessInvalidError(
       "Workspace connections cannot assign other workspaces",
@@ -545,14 +598,29 @@ export async function updateSubscriptionCoreConnectionAccess(
       "An account limited to people cannot also be given to workspaces",
     );
   return await withSubscriptionCoreAccessScope(db, target, async (tx) => {
+    if (policy.sharePersonal) {
+      try {
+        if (!(await personalSharing(tx, provider, target, policy.version))) return null;
+      } catch (error) {
+        if (nestedPostgresSqlState(error) === "22023")
+          throw new SubscriptionCoreAccessInvalidError(
+            "This account cannot be shared. Sign in again, or use its existing shared connection.",
+          );
+        throw error;
+      }
+    }
     const current = await accessConnection(tx, provider, target, true);
     if (!current) {
+      if (policy.sharePersonal) throw new SubscriptionCoreAccessForbiddenError();
       // Locking needs the write policy: a readable row it hides is a refusal.
       if (await accessConnection(tx, provider, target, false))
         throw new SubscriptionCoreAccessForbiddenError();
       return null;
     }
-    if (Number(current.access_version) !== policy.version) return null;
+    if (Number(current.access_version) !== policy.version) {
+      if (policy.sharePersonal) throw new SubscriptionCoreAccessForbiddenError();
+      return null;
+    }
     // A form that never saw people (an older client) must not replace them.
     if (
       target.workspaceId === null &&

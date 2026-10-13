@@ -44,6 +44,19 @@ describe("native push presentation", () => {
     expect(nativePushCategory(payload)).toBe(undefined);
   });
 
+  test("a secret question push is title-only with no inline answer action (AC-5)", () => {
+    const secret = {
+      ...payload,
+      eventType: "session.humanInput.requested",
+      secretQuestion: true,
+    };
+    expect(nativePushCategory(secret)).toBe(undefined);
+    const alert = nativePushAlert(secret);
+    expect(alert.title).toBe("The agent needs a secret");
+    expect(alert.body).not.toContain("Which branch");
+    expect(alert.body).toContain("Open Opengeni");
+  });
+
   test("falls back to a title per rule and keeps the agent's text", () => {
     expect(nativePushAlert(payload)).toEqual({
       title: "The agent needs you",

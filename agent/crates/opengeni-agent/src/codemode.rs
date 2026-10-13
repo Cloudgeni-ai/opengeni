@@ -544,15 +544,52 @@ fn nonempty(value: &str) -> Option<String> {
 }
 
 fn parse_arguments(raw: &str) -> Result<Map<String, Value>, CodemodeError> {
-    match serde_json::from_str(raw) {
+    let parsed = serde_json::from_str(raw).or_else(|error| {
+        // `\{{secret:` inside a JSON string: an escaped reference whose
+        // backslash the agent doubled for JSON and the shell splice halved.
+        // `\{` is not a valid JSON escape, so the literal reading is unambiguous.
+        let repaired = unescape_secret_references(raw);
+        if repaired == raw {
+            Err(error)
+        } else {
+            serde_json::from_str(&repaired)
+        }
+    });
+    match parsed {
         Ok(Value::Object(value)) => Ok(value),
         Ok(_) => Err(CodemodeError::InvalidArguments(
             "tool arguments must be a JSON object".to_string(),
+        )),
+        Err(_) if raw.contains("{{secret") => Err(CodemodeError::InvalidArguments(
+            "tool arguments must be valid JSON; inside `codemode call` write a reference as \\{{secret:…}} with one backslash"
+                .to_string(),
         )),
         Err(_) => Err(CodemodeError::InvalidArguments(
             "tool arguments must be valid JSON".to_string(),
         )),
     }
+}
+
+/// Drop a lone backslash directly before `{{secret:` or `{{secretfile:`.
+fn unescape_secret_references(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut previous_backslash = false;
+    let mut rest = raw;
+    while let Some(ch) = rest.chars().next() {
+        let after = &rest[ch.len_utf8()..];
+        if ch == '\\'
+            && !previous_backslash
+            && (after.starts_with("{{secret:") || after.starts_with("{{secretfile:"))
+        {
+            previous_backslash = false;
+            rest = after;
+            continue;
+        }
+        previous_backslash = ch == '\\' && !previous_backslash;
+        out.push(ch);
+        rest = after;
+    }
+    out
 }
 
 fn transport_error(error: &reqwest::Error) -> CodemodeError {
@@ -1090,6 +1127,19 @@ mod tests {
             Err(CodemodeError::InvalidArguments(_))
         ));
         assert_eq!(parse_arguments(r#"{"x":1}"#).expect("object")["x"], 1);
+    }
+
+    #[test]
+    fn reads_a_halved_reference_escape_as_the_literal_reference() {
+        let parsed = parse_arguments(r#"{"token":"\{{secret:Linear/token}}"}"#).expect("object");
+        assert_eq!(parsed["token"], "{{secret:Linear/token}}");
+        // A valid escaped backslash stays a backslash.
+        let kept = parse_arguments(r#"{"token":"\\{{secret:X}}"}"#).expect("object");
+        assert_eq!(kept["token"], "\\{{secret:X}}");
+        assert!(matches!(
+            parse_arguments(r#"{"token":"\q{{secret:X}}"}"#),
+            Err(CodemodeError::InvalidArguments(message)) if message.contains("one backslash")
+        ));
     }
 
     #[test]

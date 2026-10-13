@@ -38,8 +38,8 @@ describe("onboarding use case text", () => {
   });
 
   test("the setup chat context names where the key is, never a key", () => {
-    const withKey = developerSetupModelContext({ ...facts, keyInSandbox: true });
-    expect(withKey).toContain("DEVELOPER_SETUP_API_KEY environment variable");
+    const withKey = developerSetupModelContext({ ...facts, keySaved: true });
+    expect(withKey).toContain("OPENGENI_API_KEY={{secret:Opengeni setup API key}}");
     expect(withKey).toContain("builtin:opengeni-client");
     expect(withKey).toContain("one /api/opengeni server route plus the OpenGeniChat component");
     // Connecting GitHub gives the setup chat no Git credentials: the person
@@ -74,9 +74,9 @@ describe("onboarding use case text", () => {
     // An attached project zip is the code: never send the person back to GitHub.
     expect(withKey).toContain("that is my code: work from them right away");
     expect(withKey).not.toMatch(/ogk_/);
-    const withoutKey = developerSetupModelContext({ ...facts, keyInSandbox: false });
+    const withoutKey = developerSetupModelContext({ ...facts, keySaved: false });
     expect(withoutKey).toContain("No API key is attached to this chat.");
-    expect(withoutKey).not.toContain("DEVELOPER_SETUP_API_KEY");
+    expect(withoutKey).not.toContain("{{secret:");
     // Model context is bounded by the create-session contract.
     expect(withKey.length).toBeLessThan(32_768);
   });
@@ -90,7 +90,7 @@ describe("onboarding use case text", () => {
       expiresAt: "2026-11-02T12:00:00.000Z",
     });
     expect(codingAgentSetupPrompt(facts)).toContain("expires in 30 days");
-    expect(developerSetupModelContext({ ...facts, keyInSandbox: true })).toContain(
+    expect(developerSetupModelContext({ ...facts, keySaved: true })).toContain(
       "It expires in 30 days",
     );
   });

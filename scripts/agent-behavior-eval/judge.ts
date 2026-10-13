@@ -88,8 +88,16 @@ function endpoint(env: ModelEnv): { url: string; headers: Record<string, string>
       headers: { "api-key": env.OPENGENI_AZURE_OPENAI_API_KEY },
     };
   }
+  if (!env.OPENGENI_OPENAI_API_KEY && env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
+    // Gateway-only runs judge through the Gateway's OpenAI-compatible Responses API;
+    // pass a Gateway model id (for example moonshotai/kimi-k3) as --judge-model.
+    return {
+      url: "https://ai-gateway.vercel.sh/v1/responses",
+      headers: { authorization: `Bearer ${env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY}` },
+    };
+  }
   if (!env.OPENGENI_OPENAI_API_KEY)
-    throw new Error("judge needs OPENGENI_OPENAI_API_KEY or Azure credentials");
+    throw new Error("judge needs OPENGENI_OPENAI_API_KEY, Azure credentials or a Gateway key");
   const base = env.OPENGENI_OPENAI_BASE_URL ?? "https://api.openai.com/v1";
   return {
     url: `${base.replace(/\/+$/u, "")}/responses`,

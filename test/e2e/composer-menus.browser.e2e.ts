@@ -63,7 +63,7 @@ describe("consistent production composer menus", () => {
       for (const width of [1000, 390, 320]) {
         await page.setViewportSize({ width, height: 800 });
         await page.goto(url + (isNew ? "?new" : ""), { waitUntil: "networkidle" });
-        for (const name of ["Connectors", "Repositories", "Chat settings", "Variable sets"]) {
+        for (const name of ["Connectors", "Repositories", "Chat settings", "Secrets"]) {
           await open(name);
           const menu = page.getByRole("menu");
           const settingsInAgentTab = name === "Chat settings" && !isNew;
@@ -139,38 +139,37 @@ describe("consistent production composer menus", () => {
       }
     expect(errors).toEqual([]);
   }, 60_000);
-  test("variable shortlist preserves off rows, scrolls, removes with Undo, and saves top-first priority", async () => {
+  test("secrets checklist narrows a new chat to checked vaults and returns to all", async () => {
     await page.setViewportSize({ width: 390, height: 800 });
     await page.goto(url + "?new", { waitUntil: "networkidle" });
-    await open("Variable sets");
+    await open("Secrets");
     const menu = page.getByRole("menu");
-    const toggle = (name: string) =>
-      menu.getByRole("switch", { name: `Enable ${name}`, exact: true });
-    await toggle("Environment 1").click();
-    await menu.getByRole("button", { name: "Save", exact: true }).click();
-    expect((await state()).runtimeIds).toEqual(["set-2"]);
-    await open("Variable sets");
-    expect(await toggle("Environment 1").getAttribute("aria-checked")).toBe("false");
-    await menu.getByRole("button", { name: "Remove Environment 1", exact: true }).click();
-    expect(await toggle("Environment 1").count()).toBe(0);
-    await menu.getByRole("button", { name: "Undo", exact: true }).click();
-    expect(await toggle("Environment 1").count()).toBe(1);
-    await toggle("Environment 1").click();
-    await menu.getByRole("button", { name: "Add variable sets", exact: true }).click();
-    await toggle("Environment 20").scrollIntoViewIfNeeded();
-    await toggle("Environment 20").click();
-    expect(await menu.getByRole("button", { name: /Next page/i }).count()).toBe(0);
-    await menu.getByRole("textbox", { name: "Search variable sets" }).fill("Environment 19");
-    expect(await menu.getByRole("switch").count()).toBe(1);
-    await menu.getByRole("button", { name: "Back to selected variable sets" }).click();
-    await menu.getByRole("button", { name: "Save", exact: true }).click();
-    expect((await state()).runtimeIds).toEqual(["set-2", "set-1", "set-20"]);
-    await open("Variable sets");
-    await page.screenshot({ path: `${root}/composer-variables-mobile.png` });
-    await menu.getByRole("button", { name: "Remove Environment 20", exact: true }).click();
-    await menu.getByRole("button", { name: "Cancel", exact: true }).click();
-    await open("Variable sets");
-    expect(await toggle("Environment 20").getAttribute("aria-checked")).toBe("true");
+    const all = menu.getByRole("menuitemcheckbox", { name: "All vaults", exact: true });
+    const vault = (name: string) => menu.getByRole("menuitemcheckbox", { name, exact: true });
+    expect(await all.getAttribute("aria-checked")).toBe("true");
+    await all.click();
+    let policy = (await state()).vaultPolicy as { mode: string; vaultIds: string[] };
+    expect(policy.mode).toBe("selected");
+    expect(policy.vaultIds).toHaveLength(20);
+    await vault("Vault 2").click();
+    await vault("Vault 20").scrollIntoViewIfNeeded();
+    await vault("Vault 20").click();
+    policy = (await state()).vaultPolicy;
+    expect(policy.vaultIds).toHaveLength(18);
+    expect(policy.vaultIds).not.toContain("vault-2");
+    expect(policy.vaultIds).not.toContain("vault-20");
+    expect(await vault("Vault 2").getAttribute("aria-checked")).toBe("false");
+    await page.screenshot({ path: `${root}/composer-secrets-mobile.png` });
+    await page.keyboard.press("Escape");
+    expect(
+      await page
+        .getByRole("button", { name: "More composer actions" })
+        .click()
+        .then(() => page.getByRole("menuitem", { name: /Secrets/ }).innerText()),
+    ).toContain("18 vaults");
+    await page.getByRole("menuitem", { name: /Secrets/ }).click();
+    await all.click();
+    expect((await state()).vaultPolicy).toEqual({ mode: "all" });
     await page.keyboard.press("Escape");
     expect(errors).toEqual([]);
   });

@@ -13,7 +13,7 @@
  * binding below) and the test database gets its registry row. Run this file
  * in its own process: the registration replaces module bindings process-wide.
  */
-import { afterAll, beforeAll, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -30,19 +30,9 @@ const registryPath = Bun.resolveSync(
   import.meta.dir,
 );
 const realRegistry = await import(registryPath);
-const { SUBSCRIPTION_CORE_CLAUDE } = await import(
-  Bun.resolveSync("../../../packages/db/src/subscription-core-claude-adapter.ts", import.meta.dir)
-);
+
 const productionIds: string[] = realRegistry.subscriptionCoreProviderIds();
-const realProvider = realRegistry.subscriptionCoreProvider;
-const lookup = (providerId: string) =>
-  providerId === "claude" ? SUBSCRIPTION_CORE_CLAUDE : realProvider(providerId);
-mock.module(registryPath, () => ({
-  ...realRegistry,
-  subscriptionCoreProviderIds: () => [...productionIds, "claude"].sort(),
-  subscriptionCoreProvider: lookup,
-  subscriptionCoreAdapter: (providerId: string) => lookup(providerId).adapter,
-}));
+
 const opengeniDb = await import("@opengeni/db");
 const { resolveCatalogSettings } = await import("@opengeni/core");
 const { Hono } = await import("hono");
@@ -248,8 +238,8 @@ async function alias(connectionId: string) {
 let legacyAttempt: { attemptId: string; code: string } | null = null;
 
 describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser (M4 C2b)", () => {
-  test("runs as the restricted application role; production registers no Claude", async () => {
-    expect(productionIds).not.toContain("claude");
+  test("the restricted application role uses the production Claude registration", async () => {
+    expect(productionIds).toContain("claude");
     const [role] = await shared!.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
       select rolsuper, rolbypassrls from pg_catalog.pg_roles
       where rolname = ${new URL(shared!.appUrl).username}`;
@@ -264,18 +254,23 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
       attemptId: start.body.attemptId,
       code: `browser-code#${new URL(start.body.authorizationUrl).searchParams.get("state")}`,
     };
+
+    // Represent a pending grant written by a pre-cutover binary, without
+    // bringing a retired runtime back into this test.
+    const [pending] = await shared!.admin<
+      { state_encrypted: string }[]
+    >`select state_encrypted from integration_oauth_pending_states where id = ${legacyAttempt!.attemptId}::uuid`;
+    const oldAttempt = JSON.parse(
+      opengeniDb.decryptEnvironmentValue(encryptionKey, pending!.state_encrypted),
+    );
+    delete oldAttempt.runtime;
+    await shared!
+      .admin`update integration_oauth_pending_states set state_encrypted = ${opengeniDb.encryptEnvironmentValue(encryptionKey, JSON.stringify(oldAttempt))} where id = ${legacyAttempt!.attemptId}::uuid`;
   });
 
   test("maintenance: the organization routes and OAuth complete fail closed", async () => {
-    await shared!.admin`
-      insert into opengeni_private.subscription_core_providers (provider, extra_credits,
-        primary_setting_column)
-      values ('claude', false, 'claude_primary_connection_id')`;
-    await shared!.admin`
-      insert into opengeni_private.subscription_provider_cutover_receipts (
-        provider, migration, committed_at, seed_rotation
-      ) values ('claude', '0899_subscription_core_claude_cutover.sql', clock_timestamp(),
-        '{"mode":"spread"}')`;
+    await shared!
+      .admin`update subscription_provider_cutovers set enabled = false where provider = 'claude'`;
     const id = crypto.randomUUID();
     for (const [path, method, body] of [
       [organization("/claude/accounts"), "GET", undefined],
@@ -313,7 +308,7 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
   test("an OAuth attempt started on the legacy path never completes on the core", async () => {
     await shared!.admin`
       insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}::uuid, 'claude', true)`;
+      values (${organizationId}::uuid, 'claude', true) on conflict (account_id, provider) do update set enabled = true`;
     const completed = await browser(
       `${oauth(workspace(sharedWorkspaceId, ""))}/complete`,
       "POST",

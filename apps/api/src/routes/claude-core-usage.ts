@@ -1,10 +1,13 @@
 // Claude usage routes on the shared subscription core (design 5.3, Claude
 // track C2a, EP-N24 and EP-S13). The usage routes read the organization's
-// Claude provider route once after authentication: `legacy` (no cutover
-// receipt) runs the legacy handlers unchanged, `maintenance` answers a typed
-// 503, and `core` projects the connection's core quota in the legacy
+// Claude provider route once after authentication: missing or disabled
+// receipts answer a typed 503; `core` projects the connection's quota in the legacy
 // `ClaudeSubscriptionUsage` shape. Paths, auth checks and cache headers are
-// the legacy ones.
+// the legacy ones. A refresh reads live: a shared connection of the
+// workspace's pool through the core connection seam, the caller's own
+// personal connection in their own Personal workspace through the owner-only
+// seam, and an organization-pool connection on the organization route
+// through the administrator seam (design 5.3, C2c).
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
@@ -15,8 +18,8 @@ import {
   readSubscriptionCoreClaudeOrganizationUsageRow,
   readSubscriptionCoreClaudeWorkspaceUsageTarget,
   readSubscriptionCoreProviderRouteForWorkspace,
+  refreshSubscriptionCoreClaudeOrganizationUsage,
   refreshSubscriptionCoreClaudeWorkspaceUsage,
-  type SubscriptionCoreClaudeUsageRow,
 } from "@opengeni/db";
 import { ApiHttpError } from "../http/api-error";
 import { SUBSCRIPTION_CORE_CUTOVER_DISABLED } from "./codex-core";
@@ -37,20 +40,20 @@ export type CoreClaudeUsageCaller = {
 };
 
 /**
- * Claude's provider route for one authenticated usage caller: `legacy` or
- * `core`; maintenance fails closed with the typed 503 the Codex routes use.
+ * Require Claude's core route for an authenticated usage caller. Missing or
+ * disabled receipts fail closed with the typed 503 the Codex routes use.
  */
 export async function claudeUsageRoute(
   deps: ApiRouteDeps,
   accountId: string,
   workspaceId: string | null,
-): Promise<"legacy" | "core"> {
+): Promise<"core"> {
   const route = await readSubscriptionCoreProviderRouteForWorkspace(deps.db, {
     accountId,
     workspaceId,
     provider: "claude",
   });
-  if (route === "maintenance") {
+  if (route !== "core") {
     throw new ApiHttpError(503, {
       code: "upstream_unavailable",
       message: "Claude subscriptions are paused for maintenance in this organization",
@@ -63,19 +66,22 @@ export async function claudeUsageRoute(
 }
 
 /**
- * The stored projection of a connection this context cannot read live yet (a
- * personal connection, or the organization path, which has no workspace
- * context for the core credential seam; design 5.3, C2a: a gap awaiting a
- * decision before Claude's cutover). Nothing is refreshed and its refresh
- * status is `unavailable` (never `available` for a read that did not
- * happen), unless the connection itself needs a new sign-in or lacks the
- * usage scope.
+ * Wake the Claude core waiters after a reading that ended a stored
+ * exhaustion. The reading already committed; a failed wake hint never fails
+ * the read (every core waiter has its own recheck).
  */
-function unreadableUsage(row: SubscriptionCoreClaudeUsageRow): ClaudeSubscriptionUsage {
-  const stored = projectSubscriptionCoreClaudeUsage(row);
-  return stored.refreshStatus === "reconnect" || stored.refreshStatus === "scope_required"
-    ? stored
-    : projectSubscriptionCoreClaudeUsage(row, { status: "unavailable", checkedAt: null });
+async function wakeAfterRecovery(
+  deps: ApiRouteDeps,
+  accountId: string,
+  result: { usage: ClaudeSubscriptionUsage; recovered: boolean },
+): Promise<ClaudeSubscriptionUsage> {
+  if (result.recovered) {
+    await deliverSubscriptionCoreProviderWake(deps.db, "claude", {
+      accountId,
+      reason: "usage_recovered",
+    }).catch(() => undefined);
+  }
+  return result.usage;
 }
 
 /** GET or POST refresh of one Claude account's usage on the core. */
@@ -92,7 +98,17 @@ export async function coreClaudeUsage(
       accountIdParam: caller.accountIdParam,
     });
     if (!row) throw new HTTPException(404, { message: "Claude account not found" });
-    return mutation ? unreadableUsage(row) : projectSubscriptionCoreClaudeUsage(row);
+    if (!mutation) return projectSubscriptionCoreClaudeUsage(row);
+    return await wakeAfterRecovery(
+      deps,
+      caller.accountId,
+      await refreshSubscriptionCoreClaudeOrganizationUsage(
+        deps.db,
+        deps.settings,
+        { organizationId: caller.accountId, subjectId: caller.subjectId, row },
+        deps.claudeFetch ? { fetchImpl: deps.claudeFetch } : {},
+      ),
+    );
   }
   const workspaceId = caller.workspaceId;
   const target = await readSubscriptionCoreClaudeWorkspaceUsageTarget(deps.db, {
@@ -118,25 +134,14 @@ export async function coreClaudeUsage(
     "Claude",
     "personal_workspace",
   );
-  if (target.scope === "user") return unreadableUsage(target.row);
-  const { usage, recovered } = await refreshSubscriptionCoreClaudeWorkspaceUsage(
-    deps.db,
-    deps.settings,
-    {
-      accountId: caller.accountId,
-      workspaceId,
-      subjectId: caller.subjectId,
-      target,
-    },
-    deps.claudeFetch ? { fetchImpl: deps.claudeFetch } : {},
+  return await wakeAfterRecovery(
+    deps,
+    caller.accountId,
+    await refreshSubscriptionCoreClaudeWorkspaceUsage(
+      deps.db,
+      deps.settings,
+      { accountId: caller.accountId, workspaceId, subjectId: caller.subjectId, target },
+      deps.claudeFetch ? { fetchImpl: deps.claudeFetch } : {},
+    ),
   );
-  if (recovered) {
-    // The reading already committed; a failed wake hint never fails the read
-    // (every core waiter has its own recheck).
-    await deliverSubscriptionCoreProviderWake(deps.db, "claude", {
-      accountId: caller.accountId,
-      reason: "usage_recovered",
-    }).catch(() => undefined);
-  }
-  return usage;
 }

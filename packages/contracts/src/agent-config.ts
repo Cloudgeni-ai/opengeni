@@ -20,6 +20,7 @@
  */
 import { z } from "zod";
 import { CUA_DESKTOP_TOOLS, isCuaDesktopModelTool } from "./cua-desktop-tools";
+import { VaultPolicy } from "./vaults";
 import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index";
 
 export const AGENT_CAPABILITY_IDS = [
@@ -32,6 +33,7 @@ export const AGENT_CAPABILITY_IDS = [
   "schedules",
   "artifacts",
   "browser",
+  "secrets",
   "media",
   "workspaceFiles",
   "workspaceConnectors",
@@ -68,6 +70,7 @@ export const AgentCapabilityToggles = z
     schedules: z.boolean().optional(),
     artifacts: z.boolean().optional(),
     browser: z.boolean().optional(),
+    secrets: z.boolean().optional(),
     media: z.boolean().optional(),
     workspaceFiles: z.boolean().optional(),
     workspaceConnectors: z.boolean().optional(),
@@ -107,6 +110,11 @@ export const AgentConfigRequest = z
     /** Alias of the session `instructions` field (same column, same bound). */
     instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
     renderer: AgentRenderer.optional(),
+    /**
+     * Vaults this session may use (input only, Q-08). Intersected with the
+     * parent's policy and any session-level `vaultPolicy`.
+     */
+    vaultPolicy: VaultPolicy.optional(),
   })
   .strict();
 export type AgentConfigRequest = z.infer<typeof AgentConfigRequest>;
@@ -132,6 +140,7 @@ export const ResolvedAgentCapabilities = z
     schedules: z.boolean(),
     artifacts: z.boolean(),
     browser: z.boolean(),
+    secrets: z.boolean(),
     media: z.boolean(),
     workspaceFiles: z.boolean(),
     workspaceConnectors: z.boolean(),
@@ -155,17 +164,44 @@ export type ResolvedAgentConfigSource = z.infer<typeof ResolvedAgentConfigSource
  * wanted on but this deployment does not offer (reported off, never widened
  * later without a new resolution).
  */
-export const ResolvedAgentConfig = z
-  .object({
-    version: z.literal(1),
-    from: AgentCapabilityStartingPoint,
-    capabilities: ResolvedAgentCapabilities,
-    unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
-    identity: AgentIdentity.nullable(),
-    renderer: AgentRenderer,
-    source: ResolvedAgentConfigSource,
-  })
-  .strict();
+/**
+ * Configurations frozen before the `secrets` capability existed lack it.
+ * They read as `from === "all"` (Q-17); stored rows are never rewritten.
+ */
+function withStoredSecretsCapability(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const config = value as { from?: unknown; capabilities?: unknown };
+  const capabilities = config.capabilities;
+  if (
+    capabilities === null ||
+    typeof capabilities !== "object" ||
+    Array.isArray(capabilities) ||
+    Object.hasOwn(capabilities, "secrets")
+  ) {
+    return value;
+  }
+  return { ...config, capabilities: { ...capabilities, secrets: config.from === "all" } };
+}
+
+export const ResolvedAgentConfig = z.preprocess(
+  withStoredSecretsCapability,
+  z
+    .object({
+      version: z.literal(1),
+      from: AgentCapabilityStartingPoint,
+      capabilities: ResolvedAgentCapabilities,
+      unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
+      /**
+       * Why each `unavailable` capability is off, keyed by capability. Present
+       * whenever `unavailable` is non-empty; absent on historical configurations.
+       */
+      unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
+      identity: AgentIdentity.nullable(),
+      renderer: AgentRenderer,
+      source: ResolvedAgentConfigSource,
+    })
+    .strict(),
+);
 export type ResolvedAgentConfig = z.infer<typeof ResolvedAgentConfig>;
 
 /** `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/agent`. Omitted fields keep current values. */
@@ -305,11 +341,17 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   rig_propose_change: "workspaceAdmin",
   rig_verify: "workspaceAdmin",
   rig_promote: "workspaceAdmin",
-  variable_set_list: "workspaceAdmin",
-  environment_list: "workspaceAdmin",
-  variable_set_get_variable: "workspaceAdmin",
-  variable_set_set_variable: "workspaceAdmin",
-  environment_set_variable: "workspaceAdmin",
+  secret_search: "secrets",
+  secret_save: "secrets",
+  secret_get: "secrets",
+  secret_move: "secrets",
+  secret_delete: "secrets",
+  // Retired variable-set names select their secret_* successors.
+  variable_set_list: "secrets",
+  environment_list: "secrets",
+  variable_set_get_variable: "secrets",
+  variable_set_set_variable: "secrets",
+  environment_set_variable: "secrets",
   capability_catalog_search: "workspaceAdmin",
   capability_authorization_request: "workspaceAdmin",
   custom_mcp_setup_request: "workspaceAdmin",
@@ -590,6 +632,8 @@ export function resolveAgentToolFamilies(
     humanInput,
     media,
     subagents: enabled("subagents"),
+    /** Secret references resolve, the secret_* tools and the ask-card secret kind exist. */
+    secrets: enabled("secrets"),
     skills,
     router:
       !config || environment.hasDeferredTools === true || environment.routerInHistory === true,
@@ -674,6 +718,10 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
     description: "Publish files, documents, and Sites people can open.",
   },
   browser: { label: "Browser and computer", description: "Use a browser or desktop computer." },
+  secrets: {
+    label: "Secrets",
+    description: "Use saved passwords, keys, and codes by reference, and save new ones.",
+  },
   media: { label: "Images and video", description: "Generate images and videos." },
   workspaceFiles: {
     label: "Workspace files",
@@ -685,7 +733,7 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   },
   workspaceAdmin: {
     label: "Workspace admin",
-    description: "Manage variable sets, projects, rigs, machines, and connector setup.",
+    description: "Manage projects, rigs, machines, and connector setup.",
   },
 };
 
@@ -715,6 +763,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "subagents",
   "knowledge",
   "skills",
+  "secrets",
   "admin",
   "attachments",
 ] as const;
@@ -736,6 +785,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   subagents: "Session coordination",
   knowledge: "Knowledge",
   skills: "Skills",
+  secrets: "Secrets",
   admin: "Integration setup",
   attachments: "Attached files",
 };
@@ -750,6 +800,7 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
   subagents: ["subagents"],
   knowledge: ["knowledge"],
   skills: ["skills"],
+  secrets: ["secrets"],
   workspaceAdmin: ["admin"],
 };
 
@@ -797,6 +848,7 @@ export function allAgentCapabilities(): ResolvedAgentCapabilities {
     schedules: true,
     artifacts: true,
     browser: true,
+    secrets: true,
     media: true,
     workspaceFiles: true,
     workspaceConnectors: true,
@@ -816,6 +868,7 @@ export function noneAgentCapabilities(): ResolvedAgentCapabilities {
     schedules: false,
     artifacts: false,
     browser: false,
+    secrets: false,
     media: false,
     workspaceFiles: false,
     workspaceConnectors: false,
@@ -940,9 +993,11 @@ function agentConfigFromCapabilities(input: {
   renderer: AgentRenderer;
   source: ResolvedAgentConfigSource;
   inheritedUnavailable?: readonly AgentCapabilityId[] | undefined;
+  inheritedUnavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
 }): ResolvedAgentConfig {
   const capabilities = { ...input.wanted };
   const unavailable = new Set<AgentCapabilityId>(input.inheritedUnavailable ?? []);
+  const unavailableReasons: Partial<Record<AgentCapabilityId, string>> = {};
   for (const id of AGENT_CAPABILITY_IDS) {
     const reason = input.deployment.unavailable[id];
     if (reason === undefined || !agentCapabilityEnabled(capabilities, id)) continue;
@@ -958,6 +1013,10 @@ function agentConfigFromCapabilities(input: {
     else capabilities[id] = false;
   }
   for (const id of unavailable) {
+    unavailableReasons[id] =
+      input.deployment.unavailable[id] ??
+      input.inheritedUnavailableReasons?.[id] ??
+      "not available in the inherited configuration";
     if (id === "skills") capabilities.skills = false;
     else capabilities[id] = false;
   }
@@ -966,6 +1025,7 @@ function agentConfigFromCapabilities(input: {
     from: input.from,
     capabilities,
     unavailable: AGENT_CAPABILITY_IDS.filter((id) => unavailable.has(id)),
+    ...(unavailable.size > 0 ? { unavailableReasons } : {}),
     identity: input.identity,
     renderer: input.renderer,
     source: input.source,
@@ -1092,6 +1152,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
     renderer: request.renderer ?? parentConfig?.renderer ?? defaultRenderer(input.creator),
     source: "request",
     inheritedUnavailable: parentConfig?.unavailable,
+    inheritedUnavailableReasons: parentConfig?.unavailableReasons,
   });
   return {
     config: withGoalImplication(config, input.goal, requested.toggles.goals === false, ceiling),
@@ -1225,6 +1286,7 @@ export function resolveAgentConfigUpdate(input: {
     inheritedUnavailable: current.unavailable.filter(
       (id) => input.deployment.unavailable[id] !== undefined,
     ),
+    inheritedUnavailableReasons: current.unavailableReasons,
   });
   return withGoalImplication(
     config,
@@ -1403,6 +1465,8 @@ export function legacyEffectiveAgentCapabilities(input: {
     schedules: selected.has("schedules"),
     artifacts: selected.has("artifacts"),
     browser: selected.has("browser"),
+    // Legacy sessions keep reference resolution on (D25, Q-17).
+    secrets: true,
     media: true,
     workspaceFiles: serverOn("files"),
     workspaceConnectors:

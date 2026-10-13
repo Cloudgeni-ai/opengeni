@@ -39,6 +39,8 @@ export * from "./domain/realtime-voice-billing";
 // The central dependency type surface (AppDependencies, ApiRouteDeps,
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
+export * from "./domain/vaults/provider-registry";
+export * from "./domain/vaults/provider-sync";
 export * from "./workflow-wake-contract";
 export * from "./user-presence";
 export * from "./product-usage-metrics";
@@ -109,7 +111,8 @@ export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";
 export * from "./domain/github-skill-source";
-export * from "./domain/environments";
+export * from "./domain/encryption-key";
+export * from "./domain/vaults";
 export * from "./rigs";
 export * from "./domain/automations";
 export * from "./domain/pr-review";
@@ -123,6 +126,7 @@ export * from "./domain/agent-config-resolution";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-audience";
+export * from "./domain/site-audience";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";

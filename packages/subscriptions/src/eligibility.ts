@@ -166,16 +166,21 @@ export function authorizationIneligibility(
     const owner = ownership.ownerMembershipId;
     if (!input.settings.personalConnectionsAllowed) reasons.push("personal_connections_disabled");
     if (!findPerson(input, owner)?.active) reasons.push("personal_owner_inactive");
-    const ownersOwnWork =
-      session.ownerMembershipId === owner &&
-      (session.visibility === "private" ||
-        (workspace.kind === "personal" && workspace.ownerMembershipId === owner));
-    if (!ownersOwnWork) reasons.push("personal_not_owners_work");
-    const frozen = session.personalAuthority.some(
-      (authority) =>
-        authority.provider === connection.provider && authority.ownerMembershipId === owner,
+    const authority = session.personalAuthority.find(
+      (entry) => entry.provider === connection.provider && entry.ownerMembershipId === owner,
     );
-    if (!frozen) reasons.push("personal_authority_missing");
+    // A new shared-chat entry is a restriction, never a pool-wide grant and
+    // never an alias for the chat owner's identity. Historical entries keep
+    // their private-work eligibility unchanged.
+    const ownersOwnWork = authority?.sharedSessionChoice
+      ? session.ownerMembershipId !== null &&
+        authority.sharedSessionChoice.sessionId === session.id &&
+        authority.sharedSessionChoice.connectionId === connection.id
+      : session.ownerMembershipId === owner &&
+        (session.visibility === "private" ||
+          (workspace.kind === "personal" && workspace.ownerMembershipId === owner));
+    if (!ownersOwnWork) reasons.push("personal_not_owners_work");
+    if (!authority) reasons.push("personal_authority_missing");
     return reasons;
   }
   if (!sharedConnectionMatchesSource(input, connection)) {
@@ -308,6 +313,7 @@ export function servableAgainAt(
 /** Own Personal workspaces use connected accounts directly; elsewhere fallback requires consent. */
 export function personalFallbackActive(input: PlacementInput): boolean {
   if (input.session.ownerMembershipId === null) return false;
+  if (input.workspace.kind === "shared" && input.session.visibility === "shared") return false;
   return (
     (input.workspace.kind === "personal" &&
       input.workspace.ownerMembershipId === input.session.ownerMembershipId) ||

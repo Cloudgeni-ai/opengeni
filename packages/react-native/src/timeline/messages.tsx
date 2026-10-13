@@ -15,6 +15,8 @@ export interface NativeTimelineMessages {
   loadingEarlier: string;
   messageNotSent: string;
   humanInputOutcome: { answered: string; skipped: string; expired: string; cancelled: string };
+  /** An answered secret question: where the value was saved, never the value. */
+  humanInputSecretSaved: (vaultName: string, itemName: string) => string;
   working: string;
   waiting: string;
   thinking: string;
@@ -109,6 +111,7 @@ export const defaultNativeTimelineMessages: NativeTimelineMessages = {
     expired: "Expired",
     cancelled: "Cancelled",
   },
+  humanInputSecretSaved: (vaultName, itemName) => `Saved to ${vaultName} › ${itemName}`,
   working: "Working",
   waiting: "Waiting",
   thinking: "Thinking",

@@ -132,6 +132,7 @@ export const CLIENT_PAGES = [
   "machines",
   "files",
   "agents",
+  "secrets",
   "variable-sets",
   "environments",
   "rigs",

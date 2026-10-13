@@ -26,14 +26,14 @@ import {
   BrowserExternalAuthCommand,
   BrowserExternalAuthResult,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserProtectedAuthFillReceipt,
   BrowserRevisionMaterialization,
   BrowserTarget,
   BrowserTargetListResponse,
   BrowserTargetState,
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
+  BrowserPasskeySyncRequest,
+  BrowserPasskeySyncResponse,
   ComputerActionCommand,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -58,13 +58,13 @@ import {
   type BrowserDiagnosticKind,
   type BrowserTargetListResponse as BrowserTargetListResponseValue,
   type BrowserObservation as BrowserObservationValue,
-  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
-  type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type BrowserTarget as BrowserTargetValue,
   type BrowserTargetState as BrowserTargetStateValue,
   type BrowserWorkspaceFileStageRequest as BrowserWorkspaceFileStageRequestValue,
   type BrowserWorkspaceFileStageResponse as BrowserWorkspaceFileStageResponseValue,
+  type BrowserPasskeySyncRequest as BrowserPasskeySyncRequestValue,
+  type BrowserPasskeySyncResponse as BrowserPasskeySyncResponseValue,
   type ComputerActionCommand as ComputerActionCommandValue,
   type ComputerActionReceipt as ComputerActionReceiptValue,
   type ComputerClipboard as ComputerClipboardValue,
@@ -1878,36 +1878,25 @@ export class BrowserControlSessionClient {
     );
   }
 
-  /** Broker-only credential path. Callers must never pass this command through
-   * model-visible tool arguments, events, logs, or durable session history. */
-  async protectedAuthFill(
-    command: BrowserProtectedAuthFillCommandValue,
-  ): Promise<BrowserProtectedAuthFillReceiptValue> {
-    const parsed = BrowserProtectedAuthFillCommand.parse(command);
+  /** Controller-private passkey exchange (design §10B.4): load the
+   * principal's passkeys into every authenticator and pull registration and
+   * assertion events. Controllers that predate it answer 404. */
+  async passkeySync(
+    request: BrowserPasskeySyncRequestValue,
+  ): Promise<BrowserPasskeySyncResponseValue> {
+    const parsed = BrowserPasskeySyncRequest.parse(request);
     if (
       parsed.browserSessionId !== this.reference.browserSessionId ||
       parsed.controllerGeneration !== this.reference.controllerGeneration
     ) {
-      throw new BrowserControlProtocolError(
-        "protected fill targets another browser controller binding",
-      );
+      throw new BrowserControlProtocolError("passkey sync targets another controller binding");
     }
-    return BrowserProtectedAuthFillReceipt.parse(
+    return BrowserPasskeySyncResponse.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("protected-auth-fills"),
+        path: this.path("passkeys/sync"),
         token: this.controlToken,
         body: parsed,
-      }),
-    );
-  }
-
-  async protectedAuthReceipt(operationId: string): Promise<BrowserProtectedAuthFillReceiptValue> {
-    return BrowserProtectedAuthFillReceipt.parse(
-      await this.parent.requestForSession({
-        method: "GET",
-        path: this.path(`protected-auth-operations/${requireUuid(operationId, "operation id")}`),
-        token: this.controlToken,
       }),
     );
   }

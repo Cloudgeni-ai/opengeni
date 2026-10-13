@@ -1,7 +1,6 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
-import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -107,6 +106,7 @@ import {
 import {
   MODEL_PROVIDER_RECOVERY_CODES,
   providerRecoveryExhaustedMessage,
+  providerRecoverySubject,
   type ProviderCondition,
 } from "./provider-recovery-copy";
 import {
@@ -349,6 +349,38 @@ function isProviderCondition(value: unknown): value is ProviderCondition {
     value === "unresponsive" ||
     value === "rate_limited"
   );
+}
+
+/**
+ * A retryable failure whose automatic same-turn recovery was not authorized
+ * (for example, request custody could not be checkpointed). The classifier's
+ * "will retry" sentence would be false on a terminal record, so name the
+ * condition and the person's options instead.
+ */
+export function automaticRecoveryUnavailableFailure<
+  T extends Record<string, unknown> & { error: string },
+>(
+  failure: T,
+): T & {
+  retryable: false;
+  automaticRecovery: "unavailable";
+  lastRetryableError: string;
+} {
+  const subject = providerRecoverySubject({
+    code: typeof failure.code === "string" ? failure.code : null,
+    providerCondition: isProviderCondition(failure.providerCondition)
+      ? failure.providerCondition
+      : null,
+    modelLabel: typeof failure.modelLabel === "string" ? failure.modelLabel : null,
+    providerLabel: typeof failure.providerLabel === "string" ? failure.providerLabel : null,
+  });
+  return {
+    ...failure,
+    error: `${subject}. Opengeni couldn't retry this turn automatically. Try again, or send a message to continue.`,
+    retryable: false,
+    automaticRecovery: "unavailable",
+    lastRetryableError: failure.error,
+  };
 }
 
 /**
@@ -1175,8 +1207,10 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
   // request recovers exactly like one on an ordinary request: failure
   // settlement rotates to another account or waits for capacity on the same
   // logical turn. Its wording or retry hint never makes it a terminal quota.
-  if (isClaudeSubscriptionTransportError(error) && classifyClaudeCredentialFailure(error))
-    return true;
+  const claudeRefusal = isClaudeSubscriptionTransportError(error)
+    ? classifyClaudeProviderError(error)
+    : null;
+  if (claudeRefusal?.kind === "unauthorized" || claudeRefusal?.kind === "rate_limited") return true;
   // Codex may reject an opaque artifact it minted itself on the compaction
   // request exactly as it can on an ordinary request. Failure settlement
   // invalidates only the exact participating artifacts and recovers the same
@@ -1442,35 +1476,6 @@ export function isClaudeSubscriptionTransportError(error: unknown): boolean {
     current = current.cause;
   }
   return false;
-}
-
-export type XaiCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit";
-  cooldownMs: number | null;
-};
-
-/**
- * Only definitive SuperGrok account refusals may move the same logical turn to
- * another credential. A marked HTTP 401/403/429, or an HTTP 200 SSE terminal
- * that is a rate-limit/capacity diagnostic, proves inference was refused
- * without an accepted model response; refresh relogin is equally definitive.
- * The legacy SuperGrok path's view of `classifyXaiProviderError`.
- */
-export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
-  const outcome = classifyXaiProviderError(error);
-  switch (outcome?.kind) {
-    case "unauthorized":
-      return { kind: "auth", cooldownMs: null };
-    case "forbidden":
-      return { kind: "forbidden", cooldownMs: null };
-    case "rate_limited":
-      return {
-        kind: "rate_limit",
-        cooldownMs: outcome.retryAfterMs ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-      };
-    default:
-      return null;
-  }
 }
 
 /**
@@ -1783,9 +1788,6 @@ function baseAgentRunFailurePayload(
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
     };
-  }
-  if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
-    return { error: error.message, code: error.code, retryable: false };
   }
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
@@ -2359,32 +2361,6 @@ export function codexUsageLimitFailurePayload(
 // open indefinitely for a goal-bearing session; cap the continuation hold so the
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
-
-/** Only typed provider backpressure or a verified reconnect requirement can rotate Claude. */
-export function classifyClaudeCredentialFailure(
-  error: unknown,
-): (XaiCredentialFailure & { requestId?: string }) | null {
-  if (isProviderSafetyRefusal(error)) return null;
-  let current: unknown = error;
-  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
-    if (current instanceof ClaudeSubscriptionReconnectRequired)
-      return { kind: "auth", cooldownMs: null };
-    if (current instanceof AnthropicRequestError && current.status === 401)
-      return {
-        kind: "auth",
-        cooldownMs: null,
-        ...(current.request_id ? { requestId: current.request_id } : {}),
-      };
-    if (current instanceof AnthropicRequestError && current.status === 429)
-      return {
-        kind: "rate_limit",
-        cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-        ...(current.request_id ? { requestId: current.request_id } : {}),
-      };
-    current = current.cause;
-  }
-  return null;
-}
 
 /**
  * Claude's classification of a failed model request as a shared provider

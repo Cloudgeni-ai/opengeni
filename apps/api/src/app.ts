@@ -15,6 +15,7 @@ import {
   approveWorkspaceToolTarget,
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
+import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
 import { recordWorkspaceToolTargetOperation } from "./workspace-tool-gateway-observability";
 import {
   CLIENT_ERRORS_PATH,
@@ -50,6 +51,7 @@ import {
   agentConfigDeploymentPolicy,
   canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
+  environmentsEncryptionKeyBytes,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -279,6 +281,7 @@ import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access"
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
 import { registerConnectRoutes } from "./routes/connect";
 
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
@@ -287,7 +290,9 @@ import { registerKnowledgeRoutes } from "./routes/knowledge";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
-import { registerEnvironmentRoutes } from "./routes/environments";
+import { registerVariableSetsRemovedRoutes } from "./routes/variable-sets-removed";
+import { variableSetsRemovedErrorResponse } from "./http/variable-sets-removed";
+import { registerVaultRoutes } from "./routes/vaults";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
@@ -297,6 +302,7 @@ import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
 import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
+import { createVaultInteractionSecretsPort } from "./interaction-secrets-vault";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerPersonalGitHubRoutes } from "./routes/personal-github";
 import {
@@ -610,7 +616,6 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
           entitlements: deps.entitlements ?? null,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
-          ...(deps.xaiFetch ? { xaiFetch: deps.xaiFetch as never } : {}),
           log: (message, attributes) => observability.error(message, attributes),
         })
       : deps.modelCalls;
@@ -1868,8 +1873,11 @@ export function createAppComposition(deps: AppDependencies): {
         workspaceId,
         "workspace:read",
       );
+      let fence: TargetAuthorityFence | undefined;
       const options = {
         signal: c.req.raw.signal,
+        // Human callers keep their fresh grant. Organization keys and external
+        // actors are re-read by the request fence itself.
         reauthorize: async () => {
           const live = await requireFreshAccessGrant(c, routeDeps, workspaceId, "workspace:read");
           const original = authorization.grant;
@@ -1880,6 +1888,9 @@ export function createAppComposition(deps: AppDependencies): {
             original.permissions.some((permission) => !hasPermission(live.permissions, permission))
           )
             throw new HTTPException(403, { message: "tool_access_changed" });
+        },
+        onFence: (created: TargetAuthorityFence) => {
+          fence = created;
         },
       };
       const body: unknown = await c.req.json().catch(() => null);
@@ -1927,7 +1938,10 @@ export function createAppComposition(deps: AppDependencies): {
                   );
         c.header(
           "server-timing",
-          `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"`,
+          `gw-target;dur=${(performance.now() - started).toFixed(1)};desc="${operation}"` +
+            (fence
+              ? `, gw-fence;dur=${fence.stats.durationMs.toFixed(1)};desc="${fence.stats.evaluations}"`
+              : ""),
         );
         outcome = "ok";
         return c.json(response, operation === "target-approvals" ? 201 : 200);
@@ -2142,8 +2156,14 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
-  registerBrowserSessionRoutes(app, routeDeps);
-  registerComputerSessionRoutes(app, routeDeps);
+  const interactionSecrets = createVaultInteractionSecretsPort({
+    db: routeDeps.db,
+    encryptionKey: environmentsEncryptionKeyBytes(routeDeps.settings) ?? null,
+    providersFor: (workspaceId, subjectId) =>
+      vaultProviderRegistryFor(routeDeps, { workspaceId, subjectId }),
+  });
+  registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
+  registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
   registerDocumentRoutes(app, routeDeps);
   registerKnowledgeRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
@@ -2168,6 +2188,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalGitHubRoutes(app, routeDeps);
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerVaultProviderRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
 
   registerExternalIdentityLinkRoutes(app, routeDeps);
@@ -2177,7 +2198,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
-  registerEnvironmentRoutes(app, routeDeps);
+  registerVariableSetsRemovedRoutes(app);
+  registerVaultRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerAutomationRoutes(app, routeDeps);
@@ -2243,6 +2265,8 @@ export function createAppComposition(deps: AppDependencies): {
     // Archives remain read-only through the existing Send/Steer/control paths.
     const importErrorResponse = archivedSessionImportErrorResponse(c, rawError);
     if (importErrorResponse) return importErrorResponse;
+    const removedResponse = variableSetsRemovedErrorResponse(c, rawError);
+    if (removedResponse) return removedResponse;
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =
@@ -3120,7 +3144,7 @@ const routeLabelPatterns: Array<{
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/(external-auth|protected-fill|report|verify)$/,
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/(external-auth|report|verify)$/,
     label: (match) =>
       `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/${match[1]}`,
   },

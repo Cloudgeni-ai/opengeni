@@ -8,6 +8,23 @@ import "../src/styles.css";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "44444444-4444-4444-8444-444444444444";
+// ?case=machine or ?case=sandbox renders a workspace-visible session that
+// shares its box with a sibling, so "Limit to me" shows what stays shared.
+const sharedBox = new URLSearchParams(location.search).get("case");
+const sharedBoxSession: Partial<Session> | null =
+  sharedBox === "machine" || sharedBox === "sandbox"
+    ? {
+        title: "Release checklist",
+        sandboxBackend: sharedBox === "machine" ? "selfhosted" : "modal",
+        sandboxGroupId: "55555555-5555-4555-8555-555555555555",
+        tenancy: {
+          visibility: "workspace",
+          authorityEpoch: 1,
+          ownedByCurrentUser: true,
+          fork: null,
+        },
+      }
+    : null;
 
 function SessionTenancyControlFixture() {
   return (
@@ -28,6 +45,7 @@ function SessionTenancyControlFixture() {
               ownedByCurrentUser: true,
               fork: null,
             },
+            ...sharedBoxSession,
           } as Session
         }
         client={{} as OpenGeniBrowserClient}

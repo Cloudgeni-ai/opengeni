@@ -92,15 +92,16 @@ export async function renderHook<T, P = void>(
       });
       // The point of this helper is to expose the layout-to-passive interval
       // that `act` deliberately hides. Disable only the warning classifier for
-      // this one scheduled render; callers must return to `act` for settlement.
+      // this one scheduled render, until it commits (the render itself runs
+      // after scheduling); callers must return to `act` for settlement.
       const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
       globalThis.IS_REACT_ACT_ENVIRONMENT = false;
       try {
         root.render(<Harness props={lastProps} />);
+        await committed;
       } finally {
         globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
       }
-      await committed;
     },
     unmount: async () => {
       await act(async () => {

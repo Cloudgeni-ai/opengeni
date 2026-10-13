@@ -294,4 +294,72 @@ describe("one-shot Codex physical request admission", () => {
       expect(outcomes.map((value) => value.outcome)).toEqual([withOutput ? "unknown" : "refused"]);
     },
   );
+
+  // A provider-declared terminal failure (overload, server error, incomplete)
+  // before any completed output is a definite answer, exactly like an HTTP
+  // 5xx status, so the turn can be retried instead of failing as an
+  // unresolved request.
+  const providerTerminals = [
+    'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}\n\n',
+    'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"An error occurred while processing your request."}}}\n\n',
+    'data: {"type":"error","error":{"type":"server_error","message":"An error occurred while processing your request."}}\n\n',
+    'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n',
+  ];
+  for (const stream of [true, false]) {
+    for (const [index, body] of providerTerminals.entries()) {
+      for (const withOutput of [false, true]) {
+        test(`provider terminal ${index} (stream=${stream}, output=${withOutput}) is ${withOutput ? "unknown" : "refused"}`, async () => {
+          const outcomes: CodexProviderRequestSettlement[] = [];
+          const prefix = withOutput
+            ? 'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"effect","call_id":"call","arguments":"{}"}}\n\n'
+            : "";
+          const settle = async () => {
+            try {
+              const response = await dispatch(
+                context({
+                  onProviderRequestSettled: (value) => {
+                    outcomes.push(value);
+                  },
+                }),
+                async () =>
+                  new Response(prefix + body, {
+                    headers: { "content-type": "text/event-stream" },
+                  }),
+                {
+                  method: "POST",
+                  body: JSON.stringify({ model: "test", input: [], stream }),
+                },
+              );
+              await response.text();
+            } catch {
+              // The terminal failure surfaces to the caller either way.
+            }
+          };
+          await settle();
+          await Bun.sleep(1);
+          expect(outcomes.map((value) => value.outcome)).toEqual([
+            withOutput ? "unknown" : "refused",
+          ]);
+        });
+      }
+    }
+  }
+
+  test("a stream that ends without any terminal event stays unknown", async () => {
+    const outcomes: CodexProviderRequestSettlement[] = [];
+    const response = await dispatch(
+      context({
+        onProviderRequestSettled: (value) => {
+          outcomes.push(value);
+        },
+      }),
+      async () =>
+        new Response('data: {"type":"response.output_text.delta","delta":"hi"}\n\n', {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    await expect(response.text()).rejects.toThrow();
+    await Bun.sleep(1);
+    expect(outcomes.map((value) => value.outcome)).toEqual(["unknown"]);
+  });
 });

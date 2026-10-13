@@ -772,12 +772,7 @@ function ExternalLink({ href }: { href: string }) {
     // Not a URL: show it as written.
   }
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer noopener"
-      className="font-medium text-brand hover:underline"
-    >
+    <a href={href} target="_blank" rel="noreferrer noopener" className="font-medium og-link">
       {label}
     </a>
   );

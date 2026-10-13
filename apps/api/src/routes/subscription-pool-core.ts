@@ -6,7 +6,9 @@
 //
 // Every pool route reads `subscriptionCoreRoute` first. Without the
 // provider's cutover receipt it is `legacy` after one read and the legacy
-// handler runs unchanged; `maintenance` fails closed with a typed 503; `core`
+// handler runs unchanged (a provider whose legacy runtime was deleted uses
+// `requireSubscriptionCoreRoute`, which fails closed there instead);
+// `maintenance` fails closed with a typed 503; `core`
 // runs the handlers below: the same paths, verbs, request fields and
 // response shapes over core connections and settings, with legacy ids
 // resolved through the cutover's aliases. Authority is the core's own
@@ -101,6 +103,38 @@ export async function subscriptionCoreRoute(
     );
   }
   return route;
+}
+
+/**
+ * The runtime for a provider whose legacy runtime was deleted after its
+ * cutover: only `core` serves. Any other route (maintenance, or no receipt,
+ * which the deployed binary's readiness check refuses) fails closed exactly
+ * as maintenance does.
+ */
+export async function requireSubscriptionCoreRoute(
+  deps: ApiRouteDeps,
+  provider: string,
+  displayName: string,
+  accountId: () => Promise<string>,
+): Promise<"core"> {
+  const route = await subscriptionCoreRoute(deps, provider, displayName, accountId);
+  if (route !== "core") {
+    // Without a receipt the reader returns before resolving the
+    // organization; resolve it here so authorization runs first, as it does
+    // under maintenance, and a stranger learns nothing about the provider.
+    await accountId();
+    throw subscriptionCoreMaintenanceError(displayName);
+  }
+  return route;
+}
+
+/** The typed refusal of a core-only provider that is not on `core`. */
+export function subscriptionCoreMaintenanceError(displayName: string) {
+  return typedHttpError(
+    503,
+    SUBSCRIPTION_CORE_CUTOVER_DISABLED,
+    `${displayName} subscriptions are paused for maintenance in this organization`,
+  );
 }
 
 /** Deliver a committed change's wake; never fails the request (waiters recheck). */

@@ -20,7 +20,7 @@ import {
   SparklesIcon,
   TriangleAlertIcon,
   UsersIcon,
-  VariableIcon,
+  LockKeyholeIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
@@ -51,7 +51,7 @@ export type SettingsPageId =
   | "access"
   | "models"
   | "api-keys"
-  | "variable-sets"
+  | "secrets"
   | "sandbox-environments"
   | "machines"
   | "agent-learning"
@@ -101,20 +101,19 @@ function destinations(workspaceName: string): Record<SettingsPageId, Destination
       icon: KeyRoundIcon,
       description: "Keys that let your own tools start work in this workspace.",
     },
-    "variable-sets": {
-      id: "variable-sets",
-      label: "Variable sets",
-      icon: VariableIcon,
-      description: "Environment variables and secrets your agents get in their sandbox.",
-      preview: { section: "page-variable-sets", label: "Open the Variable sets preview" },
+    secrets: {
+      id: "secrets",
+      label: "Secrets",
+      icon: LockKeyholeIcon,
+      description: "Vaults of passwords, keys and logins agents use by reference.",
+      note: "Secrets isn't part of the page previews yet.",
     },
     "sandbox-environments": {
       id: "sandbox-environments",
       label: "Sandbox environments",
       icon: ContainerIcon,
       description: "Setup scripts and checks for the sandboxes agents work in.",
-      note: "Sandbox environments follows the Variable sets layout: a list, and a detail page per environment.",
-      preview: { section: "page-variable-sets", label: "Open the Variable sets preview" },
+      note: "Sandbox environments isn't part of the page previews yet.",
     },
     machines: {
       id: "machines",
@@ -176,7 +175,7 @@ function settingsGroups({
   const danger: SettingsPageId[] = dangerZonePage ? ["danger-zone"] : [];
   const runtime = {
     label: "Runtime",
-    items: ["variable-sets", "sandbox-environments", "machines"] as SettingsPageId[],
+    items: ["secrets", "sandbox-environments", "machines"] as SettingsPageId[],
   };
   if (settingsOnly) {
     return [{ items: ["general", "access", "models", "api-keys", ...danger] }, runtime];

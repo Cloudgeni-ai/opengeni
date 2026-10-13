@@ -186,7 +186,7 @@ export const RAW_SCOPE_GROUPS: Array<{ label: string; scopes: string[] }> = [
   },
   {
     label: "Automation",
-    scopes: ["schedules:read", "schedules:write", "variable-sets:list", "variable-sets:use"],
+    scopes: ["schedules:read", "schedules:write", "secrets:list", "secrets:use"],
   },
   { label: "Files and knowledge", scopes: ["files:read", "files:write", "knowledge:read"] },
   {

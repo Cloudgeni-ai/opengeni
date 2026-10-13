@@ -254,7 +254,7 @@ function maintenancePrompt(maintenance: SiteAuthMaintenanceClaim): string {
     maintenance.preferredNetworkRouteId
       ? `Preferred NetworkRoute: ${maintenance.preferredNetworkRouteId}`
       : "No preferred NetworkRoute is configured.",
-    "First call browser_auth get_connection and ensure this exact maintenance action is still active. Open a new browser (do not reuse an unrelated session) with the preferred identity, placement, and network route. Observe the current page, start one AuthRun with the exact purpose above, and settle it as verified, failed, cancelled, or a durable human intervention. For an external_provider authority use advance_external. If authentication is already valid, verify it without logging in again. If a health check finds invalid authentication, report it failed; automatic repair, when enabled, is a separate maintenance run. Never save/publish browser state in this run.",
+    "First call browser_auth get_connection and ensure this exact maintenance action is still active. Open a new browser (do not reuse an unrelated session) with the preferred identity, placement, and network route. Observe the current page, start one AuthRun with the exact purpose above, sign in through its provider-managed (external_provider) authority with browser_auth advance_external, and settle it as verified, failed, cancelled, or a durable human intervention. If authentication is already valid, verify it without logging in again. If a health check finds invalid authentication, report it failed; automatic repair, when enabled, is a separate maintenance run. Never save/publish browser state in this run.",
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
