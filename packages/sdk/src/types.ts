@@ -5099,6 +5099,7 @@ export type TranscriptionRecordingErrorCode =
   | "unknown"
   | "insufficient_credits"
   | "allowance_exhausted"
+  | "session_usage_limit_reached"
   | "monthly_model_cost_limit";
 
 export type TranscriptionRecordingState =

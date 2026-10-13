@@ -769,6 +769,8 @@ export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = z.enum([
   "allowance_exhausted",
+  /** The task's root usage limit is reached; details carry SessionUsageLimitReachedRefusal fields. */
+  "session_usage_limit_reached",
   "unauthenticated",
   "forbidden",
   "not_found",
