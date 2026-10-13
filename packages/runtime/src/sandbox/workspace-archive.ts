@@ -152,6 +152,7 @@ type WorkspaceSession = {
     workspacePersistence?: unknown;
     workspaceRootPath?: unknown;
     manifest?: {
+      root?: unknown;
       ephemeralPersistencePaths?: () => Set<unknown>;
     };
   };
@@ -385,17 +386,26 @@ function workspaceFingerprintExcludes(session: WorkspaceSession): string[] {
     .sort((left, right) => left.localeCompare(right));
 }
 
+/** Workspace-relative paths a session never persists (its manifest's
+ * ephemeral paths). Archives and fingerprints leave them out. */
+export function workspaceArchiveExcludedPaths(session: unknown): string[] {
+  return workspaceFingerprintExcludes(session as WorkspaceSession);
+}
+
+function findPruneExpression(excludedPaths: readonly string[]): string {
+  const findExcludes = excludedPaths.flatMap((path) => [
+    `-path ${shellQuote(`./${path}`)}`,
+    `-path ${shellQuote(`./${path}/*`)}`,
+  ]);
+  return findExcludes.length === 0 ? "" : `\\( ${findExcludes.join(" -o ")} \\) -prune -o `;
+}
+
 function workspaceFingerprintCommand(excludedPaths: readonly string[]): string {
   const tarExcludes = excludedPaths.flatMap((path) => [
     shellQuote(`--exclude=${path}`),
     shellQuote(`--exclude=./${path}`),
   ]);
-  const findExcludes = excludedPaths.flatMap((path) => [
-    `-path ${shellQuote(`./${path}`)}`,
-    `-path ${shellQuote(`./${path}/*`)}`,
-  ]);
-  const findPrefix =
-    findExcludes.length === 0 ? "" : `\\( ${findExcludes.join(" -o ")} \\) -prune -o `;
+  const findPrefix = findPruneExpression(excludedPaths);
   const script = String.raw`set -eu
 cd /workspace
 digest=$(LC_ALL=C tar ${tarExcludes.join(" ")} --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner --hard-dereference --format=gnu -cf - . | sha256sum | awk "{print \$1}")
@@ -731,6 +741,129 @@ async function fingerprintRemoteWorkspace(
     fileCount,
     totalFileBytes,
   };
+}
+
+/**
+ * A projection-independent description of a workspace tree: every directory by
+ * path and every regular file by path and content SHA-256. It verifies an
+ * archive restored by a provider whose native fingerprint is not the archive's
+ * own (for example a host-backed archive hydrated into a remote sandbox).
+ */
+export type WorkspaceContentManifest = {
+  sha256: string;
+  directoryCount: number;
+  fileCount: number;
+  totalFileBytes: number;
+};
+
+export type WorkspaceContentEntry =
+  | { kind: "directory"; path: string }
+  | { kind: "file"; path: string; sha256: string; byteSize: number };
+
+/** Records are `d  <path>` or `<sha256>  <path>` (the `sha256sum` line shape),
+ * NUL-terminated and ordered by their bytes, so a remote shell computes the
+ * identical digest with find, sha256sum -z and `LC_ALL=C sort -z`. */
+export function workspaceContentManifest(
+  entries: Iterable<WorkspaceContentEntry>,
+): WorkspaceContentManifest {
+  const records: Buffer[] = [];
+  let directoryCount = 0;
+  let fileCount = 0;
+  let totalFileBytes = 0;
+  for (const entry of entries) {
+    if (entry.kind === "directory") {
+      directoryCount += 1;
+      records.push(Buffer.from(`d  ${entry.path}`));
+    } else {
+      fileCount += 1;
+      totalFileBytes += entry.byteSize;
+      records.push(Buffer.from(`${entry.sha256}  ${entry.path}`));
+    }
+  }
+  records.sort(Buffer.compare);
+  const hash = createHash("sha256");
+  for (const record of records) hash.update(record).update("\0");
+  return { sha256: hash.digest("hex"), directoryCount, fileCount, totalFileBytes };
+}
+
+function workspaceRoot(target: WorkspaceSession): string {
+  const root = target.state?.manifest?.root;
+  return typeof root === "string" && isAbsolute(root) ? root : "/workspace";
+}
+
+function workspaceContentManifestCommand(root: string, excludedPaths: readonly string[]): string {
+  const prune = findPruneExpression(excludedPaths);
+  const script = String.raw`set -eu
+cd ${shellQuote(root)}
+digest=$( { find . -xdev -mindepth 1 ${prune}-type d -printf "d  %P\0"; find . -xdev -mindepth 1 ${prune}-type f -printf "%P\0" | xargs -0 -r sha256sum -z --; } | LC_ALL=C sort -z | sha256sum | awk "{print \$1}")
+dirs=$(find . -xdev -mindepth 1 ${prune}-type d -printf x | wc -c | tr -d " ")
+files=$(find . -xdev -mindepth 1 ${prune}-type f -printf x | wc -c | tr -d " ")
+bytes=$(find . -xdev -mindepth 1 ${prune}-type f -printf "%s\n" | awk "{s+=\$1} END {printf \"%.0f\", s+0}")
+printf "OPENGENI_WORKSPACE_CONTENTS_V1 %s %s %s %s\n" "$digest" "$dirs" "$files" "$bytes"`;
+  return `bash -o pipefail -c ${shellQuote(script)}`;
+}
+
+/** Reads the content manifest of a remote session's persistent workspace,
+ * excluding its manifest-declared ephemeral paths. */
+export async function readRemoteWorkspaceContentManifest(
+  session: unknown,
+): Promise<WorkspaceContentManifest> {
+  const target = session as WorkspaceSession;
+  const run = target.exec ?? target.execCommand;
+  if (!run) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      "sandbox session cannot execute the workspace content probe",
+    );
+  }
+  const result = await run.call(target, {
+    cmd: workspaceContentManifestCommand(
+      workspaceRoot(target),
+      workspaceFingerprintExcludes(target),
+    ),
+    yieldTimeMs: 300_000,
+    maxOutputTokens: 1_000,
+  });
+  const match = stdoutFromExecResult(result)
+    .trim()
+    .match(/^OPENGENI_WORKSPACE_CONTENTS_V1 ([a-f0-9]{64}) ([0-9]+) ([0-9]+) ([0-9]+)$/);
+  if (!match) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      `sandbox workspace content probe returned no valid digest (${execFailureDiagnostic(result)})`,
+      { retryable: true },
+    );
+  }
+  const directoryCount = Number(match[2]);
+  const fileCount = Number(match[3]);
+  const totalFileBytes = Number(match[4]);
+  if (![directoryCount, fileCount, totalFileBytes].every(Number.isSafeInteger)) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      "sandbox workspace content counters exceeded the supported range",
+    );
+  }
+  return { sha256: match[1]!, directoryCount, fileCount, totalFileBytes };
+}
+
+/** Verifies that a remote session's workspace holds exactly `expected`. */
+export async function verifyRestoredWorkspaceContents(
+  session: unknown,
+  expected: WorkspaceContentManifest,
+  revision: string,
+): Promise<void> {
+  const actual = await readRemoteWorkspaceContentManifest(session);
+  if (
+    actual.sha256 !== expected.sha256 ||
+    actual.directoryCount !== expected.directoryCount ||
+    actual.fileCount !== expected.fileCount ||
+    actual.totalFileBytes !== expected.totalFileBytes
+  ) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_mismatch",
+      `restored workspace does not match selected archive revision ${revision}`,
+    );
+  }
 }
 
 /** Fingerprints the provider's exact persistent projection. Local/Docker use
