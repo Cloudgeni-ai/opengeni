@@ -45,6 +45,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // Resolves knowledge_index_claim from the withheld 0461 migration.
       await owner`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+      // Rewrites the visibility transition installed by the withheld 0501 migration.
+      await owner`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
       // The import migration extends the withheld 0499 attachment helper.
       await owner`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
       // The session storage lifecycle extends the withheld 0560 import guards.

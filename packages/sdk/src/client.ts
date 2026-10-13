@@ -395,6 +395,7 @@ import type {
   DeviceEnrollmentApproveResponse,
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
+  MintEnrollTokenRequest,
   MintEnrollTokenResponse,
   EndSessionRealtimeRequest,
   DiscoverMcpCapabilitiesResponse,
@@ -2459,16 +2460,25 @@ export class OpenGeniClient {
    * Mint a short-TTL headless enroll token (the `oget_` token) for the fleet /
    * non-interactive enroll path. The returned `token` is SECRET — surface it once
    * with a copy-now warning; it cannot be re-read. `allowScreenControl` bakes the
-   * screen-control consent into the token.
+   * screen-control consent into the token. `scope: "user"` connects the signed-in
+   * person's own machine; `"workspace"` (or omitted) shares it with the workspace.
+   * Check the response's `scope` before showing a command: an older server ignores
+   * the request and mints a workspace-shared token.
    */
   async mintEnrollToken(
     workspaceId: string,
-    request: { allowScreenControl?: boolean } = {},
+    // The published `{ allowScreenControl }` shape stays in the union so the
+    // signature only widens; MintEnrollTokenRequest is its superset.
+    request: { allowScreenControl?: boolean } | MintEnrollTokenRequest = {},
   ): Promise<MintEnrollTokenResponse> {
+    const scope = "scope" in request ? request.scope : undefined;
     return await this.requestJson<MintEnrollTokenResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/enrollments/token`,
-      { allowScreenControl: request.allowScreenControl ?? false },
+      {
+        allowScreenControl: request.allowScreenControl ?? false,
+        ...(scope ? { scope } : {}),
+      },
     );
   }
 

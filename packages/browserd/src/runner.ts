@@ -557,6 +557,7 @@ export class AgentBrowserJsonRunner {
 export async function reapManagedBrowserProcesses(
   rootDirectory: string,
   preserveSession?: (sessionDirectory: string) => Promise<boolean>,
+  options: { readProcessCommandLines?: () => Promise<LinuxProcessCommandLines> } = {},
 ): Promise<void> {
   if (process.platform !== "darwin" && process.platform !== "linux") return;
   const sessionsDirectory = join(resolve(rootDirectory), "sessions");
@@ -567,6 +568,11 @@ export async function reapManagedBrowserProcesses(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
+  // One procfs inventory serves the whole pass. Scanning every process once
+  // per stale session directory made startup cost sessions x processes.
+  let inventory: Promise<LinuxProcessCommandLines> | undefined;
+  const processCommandLines = () =>
+    (inventory ??= (options.readProcessCommandLines ?? readLinuxProcessCommandLines)());
   for (const entry of entries) {
     if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/iu.test(entry.name)) continue;
     const sessionDirectory = join(sessionsDirectory, entry.name);
@@ -576,6 +582,7 @@ export async function reapManagedBrowserProcesses(
       profileDirectory: join(sessionDirectory, "profile"),
       executablePath: null,
       discoverByProfile: true,
+      processCommandLines,
     });
     await cleanupStaleChromeLaunchers(join(sessionDirectory, "chrome-launch"));
   }
@@ -838,6 +845,7 @@ async function terminateManagedBrowser(input: {
   profileDirectory: string;
   executablePath: string | null;
   discoverByProfile?: boolean;
+  processCommandLines?: () => Promise<LinuxProcessCommandLines>;
 }): Promise<void> {
   if (process.platform !== "darwin" && process.platform !== "linux") return;
   const recordedPid = await readManagedBrowserPid(input.pidFile);
@@ -845,7 +853,12 @@ async function terminateManagedBrowser(input: {
     recordedPid === null &&
     process.platform === "linux" &&
     (input.executablePath !== null || input.discoverByProfile === true)
-      ? await findLinuxManagedBrowserProcess(input.profileDirectory, input.executablePath)
+      ? await findLinuxManagedBrowserProcess(
+          input.profileDirectory,
+          input.executablePath,
+          false,
+          await input.processCommandLines?.(),
+        )
       : null;
   const pid = recordedPid ?? discovered?.pid ?? null;
   if (pid === null) return;
@@ -923,17 +936,45 @@ async function assertManagedBrowserIdentity(
   }
 }
 
+export type LinuxProcessCommandLines = ReadonlyArray<{ pid: number; commandLine: Uint8Array }>;
+
+/** A point-in-time procfs command-line inventory used only to preselect
+ * candidates; every candidate is still fully identity-checked. */
+async function readLinuxProcessCommandLines(): Promise<LinuxProcessCommandLines> {
+  const inventory: { pid: number; commandLine: Uint8Array }[] = [];
+  for (const entry of await readdir("/proc", { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    try {
+      inventory.push({ pid, commandLine: await readFile(`/proc/${pid}/cmdline`) });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "";
+      if (["EACCES", "EINVAL", "ENOENT", "EPERM", "ESRCH"].includes(code)) continue;
+      throw error;
+    }
+  }
+  return inventory;
+}
+
 async function findLinuxManagedBrowserProcess(
   profileDirectory: string,
   executablePath: string | null,
   requireCompleteInventory = false,
+  inventory?: LinuxProcessCommandLines,
 ): Promise<LinuxManagedBrowserIdentity | null> {
-  const procEntries = await readdir("/proc", { withFileTypes: true });
   const matches: LinuxManagedBrowserIdentity[] = [];
   const profileArgument = Buffer.from(`--user-data-dir=${resolve(profileDirectory)}`);
-  for (const entry of procEntries) {
-    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
-    const pid = Number(entry.name);
+  // Both the argv and the rewritten-title representations contain the exact
+  // profile switch bytes, so the inventory can only exclude non-matches.
+  const pids =
+    inventory !== undefined && !requireCompleteInventory
+      ? inventory
+          .filter((entry) => Buffer.from(entry.commandLine).includes(profileArgument))
+          .map((entry) => entry.pid)
+      : (await readdir("/proc", { withFileTypes: true }))
+          .filter((entry) => entry.isDirectory() && /^[1-9][0-9]*$/u.test(entry.name))
+          .map((entry) => Number(entry.name));
+  for (const pid of pids) {
     if (requireCompleteInventory) {
       try {
         const commandLine = await readFile(`/proc/${pid}/cmdline`);

@@ -191,6 +191,11 @@ export {
   type WorkspaceTreeFingerprint,
 } from "./workspace-archive";
 export {
+  ToolCallCommandNotStartedError,
+  toolCallCommandNotStartedCallIds,
+  withCommandNotStartedCallProof,
+} from "./tool-call-command-not-started";
+export {
   ensureModalRegistryImage,
   deleteModalCheckpointSnapshot,
   inspectModalSandboxLifecycle,

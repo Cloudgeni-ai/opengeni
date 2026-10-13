@@ -489,7 +489,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await restoreHeadlessSessionCookies(connection, this.headlessSessionCookies);
         this.headlessSessionCookies = null;
       }
-      let page = visiblePageTargets(await this.targetInfos(connection))[0];
+      // A restored profile can reopen a tab whose renderer is already dead.
+      // That tab stays in the inventory for the user to close; startup selects
+      // the first live tab instead, and only creates one when none is live.
+      let page: TargetInfo | undefined;
+      for (const candidate of visiblePageTargets(await this.targetInfos(connection))) {
+        try {
+          await this.ensureTargetState(candidate);
+        } catch (error) {
+          if (this.crashedTargets.has(candidate.targetId)) continue;
+          throw error;
+        }
+        page = candidate;
+        break;
+      }
       if (!page) {
         const created = await connection.send<{ targetId?: unknown }>(
           "Target.createTarget",

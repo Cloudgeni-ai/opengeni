@@ -1157,6 +1157,235 @@ describe("BrowserSupervisor", () => {
   });
 });
 
+describe("restored launch that fails before completion", () => {
+  // Synthetic sequence: restore a private checkpoint, the launch throws before
+  // its working-runtime receipt completes, creation cleanup closes the driver
+  // and removes the restored profile, then the browser is resumed again.
+  test.each(["settled", "legacy-dispatched"] as const)(
+    "exact cleanup succeeds and a later resume restores again from the checkpoint (%s)",
+    async (mode) => {
+      await withFailedRestoredLaunch(mode, async ({ supervisor, target, restoreInput }) => {
+        const sessionDirectory = join(
+          supervisor.rootDirectory,
+          "sessions",
+          target.browserSessionId,
+        );
+        // Other generations and non-restore launches still cannot use this history.
+        await expect(
+          supervisor.endSession(
+            { browserSessionId: target.browserSessionId, controllerGeneration: "controller-other" },
+            { removeState: true },
+          ),
+        ).rejects.toThrow("preserved");
+        await expect(supervisor.createSession(target)).rejects.toThrow("preserved");
+        expect(await exists(join(sessionDirectory, "working-runtime.sqlite"))).toBe(true);
+
+        // The control plane's cleanup after a definite resume failure.
+        await supervisor.endSession(
+          {
+            browserSessionId: target.browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+          },
+          { removeState: true },
+        );
+        expect(await exists(sessionDirectory)).toBe(false);
+
+        // The next resume binds a new generation and restores the same checkpoint.
+        const resumed = { ...target, controllerGeneration: "controller-resumed" };
+        const restored = await supervisor.createSession({ ...resumed, restore: restoreInput() });
+        expect(restored.observation.target.url).toBe("https://authenticated.test/account");
+        expect(await readFile(join(sessionDirectory, "profile", "Cookies"), "utf8")).toBe(
+          "session=durable",
+        );
+        expect(await latestWorkingReceipt(sessionDirectory, resumed)).toMatchObject({
+          intent: "launch",
+          state: "completed",
+          authority: workingAuthority,
+        });
+        await supervisor.endSession(resumed, { removeState: true });
+      });
+    },
+  );
+
+  test("an exact retry of the same resume generation restores again without cleanup", async () => {
+    await withFailedRestoredLaunch(
+      "settled",
+      async ({ supervisor, target, restoreInput, failed }) => {
+        const sessionDirectory = join(
+          supervisor.rootDirectory,
+          "sessions",
+          target.browserSessionId,
+        );
+        const restored = await supervisor.createSession({ ...target, restore: restoreInput() });
+        expect(restored.observation.target.url).toBe("https://authenticated.test/account");
+        expect(await readFile(join(sessionDirectory, "profile", "Cookies"), "utf8")).toBe(
+          "session=durable",
+        );
+        const completed = await latestWorkingReceipt(sessionDirectory, target);
+        expect(completed).toMatchObject({ intent: "launch", state: "completed" });
+        expect(completed?.operationId).not.toBe(failed.operationId);
+        expect(completed?.restoreAuthorityDigest).toBe(failed.restoreAuthorityDigest);
+        // A mismatched checkpoint authority is still refused for the live binding.
+        await expect(
+          supervisor.createSession({
+            ...target,
+            restore: { ...restoreInput(), dataKey: Buffer.alloc(32, 8) },
+          }),
+        ).rejects.toMatchObject({ code: "operation_conflict" });
+        await supervisor.endSession(target, { removeState: true });
+      },
+    );
+  });
+});
+
+async function withFailedRestoredLaunch(
+  mode: "settled" | "legacy-dispatched",
+  callback: (fixture: {
+    supervisor: BrowserSupervisor;
+    target: Parameters<BrowserSupervisor["createSession"]>[0] & {
+      browserSessionId: string;
+      controllerGeneration: string;
+    };
+    restoreInput: () => NonNullable<Parameters<BrowserSupervisor["createSession"]>[0]["restore"]>;
+    failed: BrowserWorkingRuntimeReceipt;
+  }) => Promise<void>,
+) {
+  const aad = Buffer.from("workspace:identity:private-checkpoint", "utf8");
+  let uploaded: Buffer | null = null;
+  // Only the first restored launch of the target fails, after Chrome started.
+  let failingInstance = 0;
+  let driverInstances = 0;
+  await withSupervisor(
+    async ({ supervisor, contexts }) => {
+      const source = reference(1);
+      await supervisor.createSession({
+        ...source,
+        headed: false,
+        initialUrl: "https://authenticated.test/account",
+      });
+      await writeFile(
+        join(contexts.get(source.browserSessionId)!.profileDirectory, "Cookies"),
+        "session=durable",
+      );
+      const operationId = "44444444-4444-4444-8444-444444444444";
+      const objectKey = `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/revisions/${operationId}/chromium-profile.ogbs`;
+      const captured = await supervisor.captureState({
+        ...source,
+        operationId,
+        objectKey,
+        afterCapture: "restart",
+        dataKey: Buffer.alloc(32, 7),
+        aad,
+        upload: uploadAuthority(),
+      });
+      await supervisor.endSession(source, { removeState: true });
+      const storage = Bun.serve({
+        port: 0,
+        fetch() {
+          return new Response(new Uint8Array(uploaded!), {
+            headers: { "content-length": String(uploaded!.byteLength) },
+          });
+        },
+      });
+      const platformBound = captured.manifest.profileCrypto === "platform_bound";
+      const restoreInput = () => ({
+        objectKey,
+        format: captured.format,
+        artifactDigest: captured.artifactDigest,
+        contentDigest: captured.contentDigest,
+        manifestDigest: canonicalDigest(captured.manifest),
+        sizeBytes: captured.sizeBytes,
+        dataKey: Buffer.alloc(32, 7),
+        aad: Buffer.from(aad),
+        materialization: {
+          portability: platformBound ? ("placement_bound" as const) : ("portable" as const),
+          reason: platformBound ? "Profile encryption depends on this placement." : null,
+          platform: captured.manifest.platform,
+          architecture: captured.manifest.architecture,
+          engine: captured.manifest.engine,
+          engineVersion: captured.manifest.engineVersion,
+          driverId: captured.manifest.driverId,
+          driverSchemaVersion: captured.manifest.driverSchemaVersion,
+          profileCrypto: captured.manifest.profileCrypto,
+          providerId: null,
+          placement: platformBound
+            ? {
+                kind: "sandbox_group" as const,
+                sandboxGroupId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              }
+            : null,
+        },
+        download: {
+          url: `${storage.url}/profile?signature=fixture`,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      });
+      const target = { ...reference(2), headed: false, workingRuntimeAuthority: workingAuthority };
+      const sessionDirectory = join(supervisor.rootDirectory, "sessions", target.browserSessionId);
+      failingInstance = driverInstances + 1;
+      // A build without failed settlement left the receipt dispatched.
+      const legacy =
+        mode === "legacy-dispatched" && "fail" in SqliteBrowserWorkingRuntimeJournal.prototype
+          ? spyOn(SqliteBrowserWorkingRuntimeJournal.prototype, "fail").mockImplementation(
+              (receipt) => receipt,
+            )
+          : null;
+      try {
+        try {
+          await expect(
+            supervisor.createSession({ ...target, restore: restoreInput() }),
+          ).rejects.toThrow("synthetic launch failure after restore");
+        } finally {
+          legacy?.mockRestore();
+        }
+        const failed = (await latestWorkingReceipt(sessionDirectory, target))!;
+        expect(await exists(join(sessionDirectory, "profile"))).toBe(false);
+        expect(failed).toMatchObject({
+          intent: "launch",
+          process: null,
+          ...(mode === "settled"
+            ? { state: "failed", failureCode: "internal", directoryLaunchAllowed: false }
+            : { state: "dispatched" }),
+        });
+        expect(failed.restoreAuthorityDigest).toMatch(/^[0-9a-f]{64}$/u);
+        await callback({ supervisor, target, restoreInput, failed });
+      } finally {
+        storage.stop(true);
+      }
+    },
+    {
+      onFactory: () => {
+        driverInstances++;
+      },
+      driverHooks: {
+        listTargets: (instance) => {
+          if (instance === failingInstance) {
+            throw new Error("synthetic launch failure after restore");
+          }
+        },
+      },
+      uploadArtifact: async (path) => {
+        uploaded = await readFile(path);
+      },
+    },
+  );
+}
+
+async function latestWorkingReceipt(
+  sessionDirectory: string,
+  session: { browserSessionId: string; controllerGeneration: string },
+): Promise<BrowserWorkingRuntimeReceipt | null> {
+  const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+    { ...session, sessionDirectory },
+    true,
+  );
+  try {
+    return journal.latest();
+  } finally {
+    journal.close();
+  }
+}
+
 async function withSupervisor(
   callback: (fixture: {
     supervisor: BrowserSupervisor;

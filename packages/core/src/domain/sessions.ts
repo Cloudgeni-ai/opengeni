@@ -2538,11 +2538,10 @@ async function createSessionForRequestInFileScope(
       });
     }
     await requireManagedHumanPrivateSessionCreate(unresolvedDeps, authorization, workspaceId);
-    if (payload.sandbox === "shared" || typeof payload.sandbox === "object") {
-      throw new HTTPException(422, {
-        message: "Only-me sessions require their own sandbox",
-      });
-    }
+    // Who can read a session and who can use a sandbox are separate: an
+    // Only-me session may join a sandbox group the creator can already see.
+    // Its own records stay scoped to its audience; files on the box are as
+    // shared as the box.
   }
   // Parent linkage and execution-context inheritance come ONLY from the
   // worker-signed sessionId claim. A caller cannot nominate a parent in the

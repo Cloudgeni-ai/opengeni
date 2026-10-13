@@ -1253,6 +1253,37 @@ describe("BrowserSession route discipline", () => {
     expect(resume).toContain("...(networkRoute ? { networkRoute } : {})");
   });
 
+  test("resumes an expired resume only after ending its retained controller generation", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    expect(resume).toContain('before.session.failureCode === "controller_transition_expired"');
+    expect(resume.indexOf("settleExpiredBrowserResume(")).toBeLessThan(
+      resume.indexOf("prepareBrowserSessionResume(deps.db"),
+    );
+    const settle = source.slice(
+      source.indexOf("async function settleExpiredBrowserResume"),
+      source.indexOf("async function finishSuspendedBrowserControllerCleanup"),
+    );
+    // Ineligible losses (create, suspend, end) never reach a controller call.
+    expect(settle.indexOf("if (!expired) return;")).toBeGreaterThan(
+      settle.indexOf("getExpiredBrowserSessionResume(deps.db"),
+    );
+    expect(settle.indexOf("if (!expired) return;")).toBeLessThan(
+      settle.indexOf("withBrowserPlacement("),
+    );
+    expect(settle).toContain("binding.placementInstanceId");
+    expect(settle.indexOf("endCapturedBrowserController(")).toBeLessThan(
+      settle.indexOf("settleExpiredBrowserSessionResume(deps.db"),
+    );
+    expect(settle).toContain("expectedControllerGeneration: expired.controllerGeneration");
+  });
+
   test("preserves exact human, service, and agent-attempt action provenance", () => {
     const grant = {
       accountId: "11111111-1111-4111-8111-111111111111",

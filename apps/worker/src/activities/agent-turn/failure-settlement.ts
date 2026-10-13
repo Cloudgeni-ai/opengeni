@@ -21,6 +21,7 @@ import {
   SubscriptionCoreCodexRequestOutcomeUnknownError,
   isSubscriptionCoreCodexSourceDisconnected,
   SubscriptionCoreCodexLeaseLostError,
+  readSessionTurnToolProgressRecoveryState,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -28,6 +29,8 @@ import {
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
   isProviderCommandObservationUnavailableError,
+  isRoutingMutationOutcomeUnknownError,
+  toolCallCommandNotStartedCallIds,
 } from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 
@@ -66,6 +69,7 @@ import { createTurnHistorySink } from "./history-sink";
 
 import { BudgetExhaustedError } from "./admission";
 import {
+  automaticRecoveryUnavailableFailure,
   providerRecoveryExhaustedFailure,
   withModelRoutePresentation,
   postClaimDatabaseRecoveryFailure,
@@ -1525,6 +1529,12 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
+  // Call-scoped proof that an in-flight exec_command never dispatched its
+  // command. Those calls settle as not started (replay safe), never unknown,
+  // whether this turn recovers or fails.
+  const notStartedToolCallIds = isRoutingMutationOutcomeUnknownError(error)
+    ? []
+    : toolCallCommandNotStartedCallIds(error);
   // Custody decides whether replay is safe, not what caused the failure. Keep
   // the existing diagnostic in the permission-controlled terminal event;
   // never copy it into logs or use its retry classification for admission.
@@ -1559,23 +1569,27 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   );
   const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
     !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
-  // A core Claude lane may hold answered requests that still await their
-  // history checkpoint when a retryable failure arrives (a paused search's
-  // continuation refused with a 529, or a tool or MCP failure after a
-  // complete response): commit the history durably and checkpoint first, as
-  // the lease-lost and failover paths do, so the failure can recover. Nothing
-  // is replayed: a lane without every response stays unrecoverable. Codex and
-  // SuperGrok keep their existing gate.
+  // A core lane holds the answered request that asked for a tool until the
+  // next model call checkpoints it, so a retryable failure thrown while a
+  // tool runs (a command that never started, an MCP transport failure) or a
+  // paused search's refused continuation finds an answered, unsettled
+  // request. Commit the history durably and checkpoint first, as the
+  // lease-lost and failover paths do, so the failure can recover. Nothing is
+  // replayed: a lane without every response stays unrecoverable. This holds
+  // for every core provider: a lane's answered request is complete regardless
+  // of who serves it.
+  const placedCore = coreClaude ?? coreCodex ?? coreXai;
   if (
-    coreClaude &&
+    placedCore &&
     attempt.turnId &&
     !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
     failure.retryable &&
     eventing.publish &&
     eventing.turnStartedPublished &&
-    !coreLaneRecoverable(coreClaude.requests)
+    !coreLaneRecoverable(placedCore.requests)
   ) {
-    await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
+    await coreLanesRecoverAfterCheckpoint(placedCore, async () => {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
     });
@@ -1590,8 +1604,22 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
-    const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
     const recoveryCode = providerRecoveryCode(error, failure);
+    // A recovery that interrupts a running tool is followed by a successful
+    // model response before the tool runs again, which resets the in-memory
+    // budget. Count those recoveries since the turn's last tool progress so
+    // the same bounded backoff and limit still apply.
+    const toolProgress =
+      earlyRecoverableSetup || recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+        ? null
+        : await readSessionTurnToolProgressRecoveryState(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: attempt.turnId,
+          }).catch(() => null);
+    const nextProviderRecoveryCount =
+      (toolProgress?.toolCallInFlight
+        ? Math.max(attempt.providerRecoveryCount, toolProgress.toolInterruptedRecoveries)
+        : attempt.providerRecoveryCount) + 1;
     const recoveryResult = providerRecoveryResult({
       failureCode: recoveryCode,
       attemptNumber: nextProviderRecoveryCount,
@@ -1651,6 +1679,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           attemptId: input.attemptId,
           reason: recoveryCode ?? "provider_unavailable",
           providerRecoveryCount: nextProviderRecoveryCount,
+          ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
           detail: {
             ...agentRunRecoveryFailurePayload(error, failure),
             continueDelayMs: recoveryResult.continueDelayMs,
@@ -1770,6 +1799,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   if (!eventing.publish || !eventing.turnStartedPublished) {
     throw error;
   }
+  // Automatic recovery was not authorized for this attempt. A terminal record
+  // never promises a retry that will not happen.
+  if (failure.retryable === true) failure = automaticRecoveryUnavailableFailure(failure);
   // A partial/malformed stream may have emitted assistant/tool items (and
   // external side effects) before its terminal error. Persist every item the
   // SDK state observed before marking the turn failed so a later user revive
@@ -1790,6 +1822,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       turnStatus: "failed",
       sessionStatus: "failed",
       activeTurnId: null,
+      ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
     }))
   ) {
     return claimedResult({ status: "cancelled" });

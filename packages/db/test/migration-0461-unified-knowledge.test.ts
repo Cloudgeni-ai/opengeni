@@ -83,6 +83,8 @@ const forwardMigrations = [
   "0660_session_archive_preference_snapshot_export.sql",
   // Resolves the Knowledge claim installed by the withheld 0461 migration.
   "0730_maintenance_work_probes.sql",
+  // Rewrites the visibility transition installed by withheld 0501; replay after it.
+  "0738_private_sessions_share_sandboxes.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

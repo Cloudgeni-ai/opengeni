@@ -31151,8 +31151,27 @@ async function createSessionInTransaction(
         }
         owner = scheduledOwner;
         await setSubjectRlsContext(tx, owner);
-      } else if (frozenCreator.initiator.kind !== "subject" || !owner || input.sandboxGroupId) {
-        throw new Error("Private session creation requires a top-level managed-human singleton");
+      } else if (frozenCreator.initiator.kind !== "subject" || !owner) {
+        throw new Error("Private session creation requires a top-level managed human");
+      } else if (input.sandboxGroupId) {
+        // An Only-me session may share an existing sandbox: who can read the
+        // conversation and who can use the box are separate. The creator must
+        // already see a session on that box, so a group id alone grants nothing.
+        await setSubjectRlsContext(tx, owner);
+        const [visibleMember] = await tx
+          .select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.accountId, input.accountId),
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+            ),
+          )
+          .limit(1);
+        if (!visibleMember) {
+          throw new Error("Private session sandbox group is not visible to its creator");
+        }
       }
       if (!owner) throw new Error("Private session owner is unavailable");
       const capability = await openPrivateSessionCreateCapability(tx, {
@@ -62599,6 +62618,20 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 // enrollment, atomically increments its credential generation, and REUSES its
 // selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
 // before this helper so replaying one already-approved request does not rotate.
+//
+// A personal machine belongs to the workspace it was first connected from, and
+// finalize_scoped_enrollment reuses the owner's enrollment for the same public
+// key wherever that is. Credentials and connection lookups are per workspace,
+// so a personal finalize from any other workspace is refused with
+// PersonalMachineConnectedElsewhereError. The caller's transaction rolls back,
+// so nothing is written and a single-use token is not claimed.
+export class PersonalMachineConnectedElsewhereError extends Error {
+  constructor() {
+    super("this machine was first connected as a personal machine from another workspace");
+    this.name = "PersonalMachineConnectedElsewhereError";
+  }
+}
+
 async function finalizeEnrollmentInScope(
   scopedDb: Database,
   input: {
@@ -62640,6 +62673,14 @@ async function finalizeEnrollmentInScope(
       .from(schema.sandboxes)
       .where(eq(schema.sandboxes.id, created.sandboxId))
       .limit(1);
+    if (
+      input.scope === "user" &&
+      (!enrollmentRow || enrollmentRow.workspaceId !== input.workspaceId)
+    ) {
+      // The owner's existing enrollment for this key lives in another workspace:
+      // this workspace cannot read it, and its credentials would not match.
+      throw new PersonalMachineConnectedElsewhereError();
+    }
     if (!enrollmentRow || !sandboxRow) throw new Error("Scoped enrollment finalize lost rows");
     return {
       enrollment: mapEnrollment(enrollmentRow),
@@ -62729,6 +62770,9 @@ async function finalizeEnrollmentInScope(
 // still active; any other machine, or a machine removed since, gets
 // EnrollTokenAlreadyRedeemedError and nothing is written. Legacy tokens without
 // an id keep their old multi-use behavior until they expire.
+// A personal token for a machine that is already its owner's personal machine
+// from another workspace gets PersonalMachineConnectedElsewhereError, also
+// without writing anything or claiming the token.
 export class EnrollTokenAlreadyRedeemedError extends Error {
   constructor() {
     super("enroll token was already used to connect another machine");
@@ -62736,11 +62780,41 @@ export class EnrollTokenAlreadyRedeemedError extends Error {
   }
 }
 
+// A personal token's owner can no longer own a machine here: they left the
+// organization, lost access to the minting workspace, or were suspended after
+// the command was created. Nothing is written.
+export class EnrollTokenOwnerUnavailableError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "the person who created this connect command can no longer connect machines here",
+      options,
+    );
+    this.name = "EnrollTokenOwnerUnavailableError";
+  }
+}
+
+function databaseErrorCode(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return "";
+}
+
 export async function finalizeEnrollmentByToken(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
+    /**
+     * The signed owner of a personal (`enroll_user`) token. When present the
+     * machine is created user-owned through the same scoped finalizer and
+     * organization-membership fence as a personal device-flow approval, which
+     * rechecks the owner's live membership and workspace access now.
+     */
+    ownerSubjectId?: string | null;
     pubkey: string;
     hasDisplay: boolean;
     allowScreenControl: boolean;
@@ -62759,67 +62833,109 @@ export async function finalizeEnrollmentByToken(
   if (tokenId !== null && !input.tokenExpiresAt) {
     throw new Error("a single-use enroll token requires its expiry");
   }
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      if (tokenId !== null) {
-        // Expired redemptions can never match a live token; drop them so the
-        // ledger stays bounded per workspace.
-        await scopedDb.execute(sql`
+  const ownerSubjectId = input.ownerSubjectId ?? null;
+  if (ownerSubjectId !== null && !ownerSubjectId.trim()) {
+    throw new Error("a personal enroll token requires its owner");
+  }
+  const finalizeInScope = (database: Database) =>
+    withRlsContext(
+      database,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        if (ownerSubjectId !== null) {
+          // The scoped finalizer reads the owner from this transaction-local
+          // subject, exactly as a personal device-flow approval does.
+          await setSubjectRlsContext(scopedDb, ownerSubjectId);
+        }
+        if (tokenId !== null) {
+          // Expired redemptions can never match a live token; drop them so the
+          // ledger stays bounded per workspace.
+          await scopedDb.execute(sql`
           delete from enrollment_token_redemptions
           where workspace_id = ${input.workspaceId}::uuid
             and expires_at < ${new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()}::timestamptz`);
-        // Claim the token first. A concurrent claim by another machine blocks on
-        // the primary key, then sees this row and is refused.
-        const claimed = await rawRows<{ tokenId: string }>(
-          scopedDb,
-          sql`insert into enrollment_token_redemptions
+          // Claim the token first. A concurrent claim by another machine blocks on
+          // the primary key, then sees this row and is refused.
+          const claimed = await rawRows<{ tokenId: string }>(
+            scopedDb,
+            sql`insert into enrollment_token_redemptions
                 (token_id, account_id, workspace_id, pubkey, expires_at, redeemed_at)
               values (${tokenId}, ${input.accountId}::uuid, ${input.workspaceId}::uuid,
                 ${input.pubkey}, ${input.tokenExpiresAt!.toISOString()}::timestamptz,
                 ${now.toISOString()}::timestamptz)
               on conflict (token_id) do nothing
               returning token_id as "tokenId"`,
-        );
-        if (claimed.length === 0) {
-          // A repeat by the same machine is a retry only while the machine it
-          // connected is still enrolled; a removed machine needs a new token.
-          const [existing] = await rawRows<{ pubkey: string; enrollmentActive: boolean }>(
-            scopedDb,
-            sql`select r.pubkey,
+          );
+          if (claimed.length === 0) {
+            // A repeat by the same machine is a retry only while the machine it
+            // connected is still enrolled; a removed machine needs a new token.
+            const [existing] = await rawRows<{ pubkey: string; enrollmentActive: boolean }>(
+              scopedDb,
+              sql`select r.pubkey,
                        coalesce(e.status = 'active', false) as "enrollmentActive"
                 from enrollment_token_redemptions r
                 left join enrollments e on e.id = r.enrollment_id
                 where r.token_id = ${tokenId}
                   and r.workspace_id = ${input.workspaceId}::uuid`,
-          );
-          if (!existing || existing.pubkey !== input.pubkey || !existing.enrollmentActive) {
-            throw new EnrollTokenAlreadyRedeemedError();
+            );
+            if (!existing || existing.pubkey !== input.pubkey || !existing.enrollmentActive) {
+              throw new EnrollTokenAlreadyRedeemedError();
+            }
           }
         }
-      }
-      const finalized = await finalizeEnrollmentInScope(scopedDb, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        pubkey: input.pubkey,
-        hasDisplay: input.hasDisplay,
-        allowScreenControl: input.allowScreenControl,
-        os: input.os,
-        arch: input.arch,
-        sandboxName: input.sandboxName,
-        now,
-      });
-      if (tokenId !== null) {
-        await scopedDb.execute(sql`
+        const finalized = await finalizeEnrollmentInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(ownerSubjectId !== null ? { scope: "user" as const } : {}),
+          pubkey: input.pubkey,
+          hasDisplay: input.hasDisplay,
+          allowScreenControl: input.allowScreenControl,
+          os: input.os,
+          arch: input.arch,
+          sandboxName: input.sandboxName,
+          now,
+        });
+        if (tokenId !== null) {
+          await scopedDb.execute(sql`
           update enrollment_token_redemptions
           set enrollment_id = ${finalized.enrollment.id}::uuid
           where token_id = ${tokenId}
             and workspace_id = ${input.workspaceId}::uuid`);
+        }
+        return finalized;
+      },
+    );
+  if (ownerSubjectId === null) return await finalizeInScope(db);
+  // Organization membership precedes the tenancy fence, then the redemption and
+  // enrollment rows (the same order as approveDeviceEnrollmentRequest). Fail
+  // closed on contention rather than wait on an unknown reverse-order holder.
+  try {
+    return await db.transaction(async (tx) => {
+      const database = tx as unknown as Database;
+      const [fence] = await rawRows<{ acquired: boolean }>(
+        database,
+        sql`
+        select pg_try_advisory_xact_lock(hashtextextended(
+          ${`organization-membership:${input.accountId}`}, 0
+        )) as acquired
+      `,
+      );
+      if (!fence?.acquired) {
+        throw Object.assign(new Error("Enrollment membership is changing; retry the transaction"), {
+          code: "55P03",
+        });
       }
-      return finalized;
-    },
-  );
+      return await finalizeInScope(database);
+    });
+  } catch (error) {
+    // P0002: no active organization membership for the owner (STRICT lookup);
+    // 42501: the owner no longer has access to the minting workspace.
+    const code = databaseErrorCode(error);
+    if (code === "P0002" || code === "42501") {
+      throw new EnrollTokenOwnerUnavailableError({ cause: error });
+    }
+    throw error;
+  }
 }
 
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:
@@ -63803,6 +63919,29 @@ export async function listSessionIdsInGroup(
     `,
     );
     return rows.map((r) => r.id);
+  });
+}
+
+/**
+ * Count every session on a sandbox group, including Only-me sessions the
+ * caller cannot read. Whether a box is shared is a property of the box, so the
+ * shared-exposure disclosure must not depend on the caller's visibility. Only
+ * a number leaves this function; member ids stay actor-scoped
+ * (listSessionIdsInGroup).
+ */
+export async function countAllSessionsInGroup(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+    const [row] = await rawRows<{ count: number }>(
+      scopedDb,
+      sql`select count(*)::int as count from sessions
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}`,
+    );
+    return Number(row?.count ?? 0);
   });
 }
 
@@ -77771,6 +77910,8 @@ export type ApplySessionTurnSettlementInput = {
     producerSeq?: number | null;
     occurredAt?: Date;
   };
+  /** In-flight calls with call-scoped proof that their command never started. */
+  notStartedToolCallIds?: readonly string[];
 };
 
 export type ApplySessionTurnSettlementResult =
@@ -78560,8 +78701,11 @@ export async function applySessionTurnSettlement(
             reason: `turn_${input.turnStatus}`,
             sequence,
             now,
+            ...(input.notStartedToolCallIds?.length
+              ? { notStartedCallIds: input.notStartedToolCallIds }
+              : {}),
           })
-        : { sequence, events: [] as SessionEvent[], closed: 0 };
+        : { sequence, events: [] as SessionEvent[], closed: 0, interrupted: 0 };
       sequence = closedTools.sequence;
       const compactionRequestEvent: AppendEventInput | null = input.compactionRequestFailure
         ? {
@@ -79064,6 +79208,8 @@ export type RequestSessionTurnRecoveryInput = {
   /** Park proven non-dispatch after the existing five-recovery budget. */
   sandboxSetupRecoveryExhausted?: true;
   providerRecoveryCount?: number;
+  /** In-flight calls with call-scoped proof that their command never started. */
+  notStartedToolCallIds?: readonly string[];
   /** One rejected-token renewal per serving account generation on this turn. */
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number };
   /**
@@ -79097,6 +79243,67 @@ export type RequestSessionTurnRecoveryResult =
       turnStatus: SessionTurnStatus | null;
       activeTurnId: string | null;
     };
+
+export type SessionTurnToolProgressRecoveryState = {
+  /** The turn has a model tool call whose execution has no recorded result. */
+  toolCallInFlight: boolean;
+  /**
+   * Budgeted recoveries that interrupted a tool call since the turn's last
+   * tool progress (a recorded tool result) or explicit human Retry.
+   */
+  toolInterruptedRecoveries: number;
+};
+
+/**
+ * Evidence for bounding recoveries that interrupt tool execution. Those
+ * recoveries are followed by a successful model response before the tool runs
+ * again, so the model-response reset alone would never exhaust their budget.
+ */
+export async function readSessionTurnToolProgressRecoveryState(
+  db: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId: string },
+): Promise<SessionTurnToolProgressRecoveryState> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{ in_flight: boolean; recoveries: number | string }>(
+      scopedDb as unknown as Database,
+      sql`select
+        exists (
+          select 1 from session_pending_tool_calls pending
+          where pending.workspace_id = ${workspaceId}
+            and pending.session_id = ${input.sessionId}
+            and pending.turn_id = ${input.turnId}
+            and pending.result_item_ordered is null
+            and pending.interruption_kind is null
+        ) as in_flight,
+        (
+          select count(*) from session_events recovery
+          where recovery.workspace_id = ${workspaceId}
+            and recovery.session_id = ${input.sessionId}
+            and recovery.turn_id = ${input.turnId}
+            and recovery.type = 'turn.recovery.requested'
+            and recovery.payload->>'toolCallInterrupted' = 'true'
+            and recovery.sequence > coalesce((
+              select max(progress.sequence) from session_events progress
+              where progress.workspace_id = ${workspaceId}
+                and progress.session_id = ${input.sessionId}
+                and progress.turn_id = ${input.turnId}
+                and (
+                  (progress.type = 'agent.toolCall.output'
+                    and coalesce(progress.payload->'recovery'->>'outcome', 'durable_result_found')
+                      = 'durable_result_found')
+                  or (progress.type = 'turn.recovery.requested'
+                    and progress.payload->>'reason' = 'human_retry')
+                )
+            ), 0)
+        ) as recoveries`,
+    );
+    return {
+      toolCallInFlight: row?.in_flight === true,
+      toolInterruptedRecoveries: Number(row?.recoveries ?? 0),
+    };
+  });
+}
 
 export async function requestSessionTurnRecovery(
   db: Database,
@@ -79309,6 +79516,9 @@ export async function requestSessionTurnRecovery(
           sequence,
           now,
           preserveInterruptionRows: true,
+          ...(input.notStartedToolCallIds?.length
+            ? { notStartedCallIds: input.notStartedToolCallIds }
+            : {}),
         },
       );
       sequence = closedTools.sequence;
@@ -79331,6 +79541,11 @@ export async function requestSessionTurnRecovery(
                   ...(input.detail ?? {}),
                   triggerEventId: input.triggerEventId,
                   reason: input.reason,
+                  // Durable fact for the tool-progress recovery bound: this
+                  // budgeted recovery interrupted an in-flight tool call.
+                  ...(input.providerRecoveryCount !== undefined && closedTools.interrupted > 0
+                    ? { toolCallInterrupted: true }
+                    : {}),
                   ...(providerArtifactsInvalidated > 0 ? { providerArtifactsInvalidated } : {}),
                 },
                 occurredAt: now,

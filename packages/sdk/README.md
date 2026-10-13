@@ -1449,8 +1449,12 @@ selection. The selected policy is revalidated for new admission. A duplicate
 operation replays its receipt even after execution advances.
 
 HTTP 409 codes distinguish `RETRY_STALE_FAILURE`, `RETRY_EXECUTION_UNRESOLVED`,
-`RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and `IDEMPOTENCY_KEY_REUSED`.
-Unresolved tool outcomes cannot be blindly replayed. A deliberate Pause must
+`RETRY_TOOL_OUTCOME_UNKNOWN`, `RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and
+`IDEMPOTENCY_KEY_REUSED`. `RETRY_EXECUTION_UNRESOLVED` is transient: earlier
+execution is still settling. `RETRY_TOOL_OUTCOME_UNKNOWN` is permanent: a tool
+call in the turn has an unknown outcome and cannot be blindly replayed, so
+continue with a new message instead. A call proven never started does not block
+Retry. A deliberate Pause must
 be resumed separately. Failure without a retained logical turn, a settled
 scheduled occurrence, and idle credit exhaustion are not supported retry
 boundaries. See [run lifecycle](../../docs/run-lifecycle.md).

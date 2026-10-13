@@ -4610,7 +4610,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "mintEnrollToken",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/enrollments/token",
-    "request": [],
+    "request": [
+      "MintEnrollTokenRequest"
+    ],
     "response": [
       "MintEnrollTokenResponse"
     ]

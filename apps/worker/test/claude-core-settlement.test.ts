@@ -470,10 +470,14 @@ describe("Claude refusal settlement on the core", () => {
   });
 
   for (const provider of ["Codex", "SuperGrok"] as const) {
-    test(`a ${provider} core lane with an answer awaiting its checkpoint keeps its gate: terminal, no checkpoint`, async () => {
+    test(`a ${provider} core lane with an answer awaiting its checkpoint checkpoints it, then recovers`, async () => {
       coreRuntime({ refusals: 1 });
       const recovery = recoveringRecovery();
       spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      spy(db, "readSessionTurnToolProgressRecoveryState").mockResolvedValue({
+        toolCallInFlight: false,
+        toolInterruptedRecoveries: 0,
+      });
       const settles: string[] = [];
       const lane = await answeredLane(settles, { continuesAfterResponse: false });
       const { deps } = failureDeps(anthropic(529, "overloaded_error"), null);
@@ -487,13 +491,13 @@ describe("Claude refusal settlement on the core", () => {
         codexSubscriptionCore: provider === "Codex" ? turn : null,
         xaiSubscriptionCore: provider === "SuperGrok" ? turn : null,
       });
-      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
-      expect(settles).toEqual([]);
-      expect(recovery).not.toHaveBeenCalled();
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(settles).toEqual(["first:response_received"]);
+      expect(recovery).toHaveBeenCalledTimes(1);
     });
   }
 
-  test("the same retryable failure and lane recover on Claude (the control for the gate cases)", async () => {
+  test("the same retryable failure and lane recover on Claude", async () => {
     coreRuntime({ refusals: 1 });
     const recovery = recoveringRecovery();
     spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);

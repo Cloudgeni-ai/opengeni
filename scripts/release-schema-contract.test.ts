@@ -131,6 +131,18 @@ describe("release schema contract", () => {
     });
   });
 
+  test("registers private sessions on shared sandboxes as rolling", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0738_private_sessions_share_sandboxes.sql",
+      ),
+    ).toMatchObject({
+      path: "0738_private_sessions_share_sandboxes.sql",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers proven built-in default intent as rolling", async () => {
     const contract = await buildCompleteSchemaContract();
     expect(
@@ -2264,7 +2276,9 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0738_private_sessions_share_sandboxes.sql",
       "0737_site_audience.sql",
+      "0734_connected_output_reachable_due.sql",
       "0733_subscription_session_bindings_per_provider.sql",
       "0732_sandbox_maintenance_work_probes.sql",
       "0731_published_site_versions_workspace_visible.sql",
