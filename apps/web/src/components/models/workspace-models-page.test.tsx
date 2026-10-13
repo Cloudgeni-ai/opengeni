@@ -857,9 +857,12 @@ describe("Models list", () => {
       expect(view.container.textContent).not.toContain("New chats here start with");
       const row = view.container.querySelector('[data-testid="default-model-row"]');
       expect(row?.textContent).toContain("paid by this workspace's Codex subscription");
-      // Defaults come before Accounts.
+      // Accounts come first, as on the organization's page, then Defaults.
       const headings = [...view.container.querySelectorAll("h2")].map((h) => h.textContent);
-      expect(headings.indexOf("Defaults")).toBeLessThan(headings.indexOf("Accounts"));
+      expect(headings.indexOf("Accounts")).toBeGreaterThan(-1);
+      expect(headings.indexOf("Accounts")).toBeLessThan(headings.indexOf("Defaults"));
+      // The header says this is one workspace, not the organization's page.
+      expect(view.container.textContent).toContain("Changes here apply only to this workspace");
     } finally {
       await cleanup(view);
     }

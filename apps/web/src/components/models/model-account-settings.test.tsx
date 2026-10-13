@@ -107,6 +107,7 @@ const {
   AccountRuleLocksPage,
   OrganizationAccountRulesSection,
   WorkspaceAccountRulesSection,
+  accountRuleChanges,
   changeableRulesSummary,
   useModelAccountSettingsOverview,
   useWorkspaceModelAccountSettings,
@@ -333,6 +334,41 @@ test("the summary says how many rules workspaces can change", () => {
   ).toBe("Nothing");
 });
 
+test("a workspace's changes read as words, and locked rules are never its changes", () => {
+  expect(
+    accountRuleChanges({
+      values: {
+        ...VALUES,
+        rotation: { ...VALUES.rotation, claude: { mode: "primary_first" } },
+        crossProviderFailover: false,
+      },
+      sources: {
+        ...SOURCES,
+        rotation: "workspace",
+        crossProviderFailover: "workspace",
+        fallbackOrder: "workspace",
+      },
+      entrySources: {
+        rotation: { claude: "workspace" },
+        providers: {},
+        fallbackOrder: { "claude/opus": "workspace" },
+      },
+    }),
+  ).toEqual([
+    "Claude: Primary only",
+    "Personal subscriptions: On",
+    "Switch models: Off",
+    "Own fallback order",
+  ]);
+  expect(
+    accountRuleChanges({
+      values: VALUES,
+      sources: { ...SOURCES, personalConnectionsAllowed: "organization" },
+      entrySources: { rotation: {}, providers: {}, fallbackOrder: {} },
+    }),
+  ).toEqual([]);
+});
+
 test("dependent rules show only while their rule is on", async () => {
   client.getModelAccountSettingsOverview.mockImplementationOnce(async () => ({
     organization: {
@@ -406,6 +442,7 @@ test("a workspace admin goes back to the organization's value in one step", asyn
     const fallback = view.container.querySelectorAll("[role='switch']")[1]!;
     expect(fallback.getAttribute("aria-disabled")).toBe("true");
     expect(view.container.textContent).toContain("Acme keeps this the same in every workspace.");
+    expect(view.container.textContent).toContain("1 rule changed here. The rest follow Acme.");
     const reset = buttons(view.container, "Use Acme’s setting");
     expect(reset).toHaveLength(1);
     await act(async () => reset[0]!.click());

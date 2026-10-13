@@ -406,12 +406,18 @@ Learned on Settings > Models, 27 Sep 2026.
   with its fallback nested under it; Switch models when accounts run out with the fallback order
   nested under it; and a "What workspaces can change" row opening its own page of checkboxes,
   never a lock link on each rule), then **Workspaces** (one row per workspace saying only what it
-  sets itself, "Own account rules", "3 models allowed", or "Follows Acme", and the person's own
-  Personal workspace last). Never show a table of every workspace's rules or raw setting keys. A
-  workspace row opens that workspace's model page (`?workspace=`): Default
-  model (with who pays and the one can't-run warning), Allowed models, the accounts it uses
-  (muted "Not in use" with the reason when one is set aside), its Codex and SuperGrok settings and
-  the Codex Apps row. Pages opened from it go back to it, named ("← Design preview").
+  sets itself, "3 models allowed", what it changed in its account rules in words ("Claude:
+  Primary only", "Switch models: Off"; more than two read "3 account rules changed"), or
+  "Follows Acme", and the person's own Personal workspace last). Never show a table of every
+  workspace's rules or raw setting keys. A workspace row opens that workspace's model page
+  (`?workspace=`), which says it is one workspace the way Workspaces does: the workspace tile,
+  its name, a soft "Workspace" chip and "Changes here apply only to this workspace" (a Personal
+  workspace: the lock tile and "Only you"). It follows the organization page's order: Accounts
+  first (the accounts it uses, muted "Not in use" with the reason when one is set aside), then
+  Defaults (Default model with who pays and the one can't-run warning, Allowed models), then How
+  accounts are used, whose description counts what changed here ("1 rule changed here. The rest
+  follow Acme."), then its Codex and SuperGrok settings and the Codex Apps row. Pages opened from
+  it go back to it, named ("← Design preview").
 - **Connect is for the organization.** Connect account makes an organization account and asks
   which workspaces use it: all (new ones too) or selected ones, which is its "Available in". An
   account owned by one workspace is offered only to owners and admins, and only where it is
