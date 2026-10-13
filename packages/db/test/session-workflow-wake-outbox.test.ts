@@ -2115,6 +2115,21 @@ describe("transactional session workflow wake outbox", () => {
     );
     expect(settledWake!.wakeRevision).toBe(recoveryWake!.wakeRevision + 1);
     expect(await markSessionWorkflowWakeDelivered(client.db, settledWake!)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_prompt_turn",
+    });
+    const resumed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: started.temporalWorkflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(resumed.action).toBe("claimed");
+    if (resumed.action !== "claimed") throw new Error("recovery was not reclaimed");
+    expect(resumed.turn.id).toBe(claimed.turn.id);
+    expect(await markSessionWorkflowWakeDelivered(client.db, settledWake!)).toEqual({
       action: "acknowledged",
     });
   });
@@ -2170,7 +2185,8 @@ describe("transactional session workflow wake outbox", () => {
       (entry) => entry.sessionId === ctx.session.id,
     );
     expect(await markSessionWorkflowWakeDelivered(client.db, recoveredWake!)).toEqual({
-      action: "acknowledged",
+      action: "pending_admission",
+      blocker: "pending_prompt_turn",
     });
 
     const successor = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {

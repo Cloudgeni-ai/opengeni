@@ -267,6 +267,16 @@ never clears a newer rejection. Operational outages retain backoff. Migration
 Paused recovering turns and capacity waiters remain resumable obligations, not
 age-based cancellation candidates.
 
+A quiescence receipt proves the previous writer stopped; it does not consume
+the recovering logical turn. Wake acknowledgement retains current runnable
+recovery debt until claim, and the bounded recovery inventory also rediscovers
+quiesced recoveries with lost wakes (0764), using ordinary admission blockers.
+Migration 0764 may terminally retire an operator-selected, exact version and
+event-sequence-fenced manifest without replay. No manifest means no retirement:
+Pause remains resumable, and historical age alone grants no cancellation intent.
+Reusable schedules skip under effective Pause instead of reserving an input
+that cannot execute; Resume makes later occurrences eligible normally.
+
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
 Reports default to chat; large ones use native documents (Documents Skill).

@@ -214,7 +214,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#failSessionWorkBeforeAttemptClaim": {
+  "packages/db/src/index.ts#settleSessionWorkBeforeAttemptClaim": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -384,7 +384,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   closePendingSessionToolCallsInTransaction: [
     "armSubscriptionCoreCapacityWait",
     "cancelSessionSubtreeInTransaction",
-    "failSessionWorkBeforeAttemptClaim",
+    "settleSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",
     "applySessionTurnSettlement",
@@ -421,7 +421,7 @@ const expectedFailedChildOutboxCallers = [
   // arm owns the canonical child-lifecycle prefix (including parent session)
   // before atomically emitting a false-capacity-recovery terminal boundary.
   "armSubscriptionCoreCapacityWait",
-  "failSessionWorkBeforeAttemptClaim",
+  "settleSessionWorkBeforeAttemptClaim",
   "recoverSessionOwner",
 ];
 const expectedSharedFailedChildOutboxCallers = [
@@ -451,7 +451,7 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "acceptSessionApprovalDecision",
     "acceptSessionHumanInputResponse",
     "applySessionTurnSettlement",
-    "failSessionWorkBeforeAttemptClaim",
+    "settleSessionWorkBeforeAttemptClaim",
   ],
   enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
