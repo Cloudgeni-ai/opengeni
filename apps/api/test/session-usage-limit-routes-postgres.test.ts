@@ -268,7 +268,7 @@ describe("task usage limit API", () => {
     ]);
   });
 
-  test("AC17: flag off rejects new limits on create and PUT, but clearing and enforcement continue", async () => {
+  test("AC21: flag off rejects new limits on create and PUT, but clearing and enforcement continue", async () => {
     const f = await fixture(true);
     const session = await json<Session>(await createRoot(f, { usageLimitMicros: 0 }));
     const off = f.appWithFlag(false);
@@ -460,7 +460,7 @@ describe("task usage limit API", () => {
     });
   });
 
-  test("AC06: only a person or the host server writes; agents are refused even with full access", async () => {
+  test("AC11: only a person or the host server writes; agents are refused even with full access", async () => {
     const f = await fixture();
     const session = await json<Session>(await createRoot(f));
     const human = await bearer(f, "human_session");

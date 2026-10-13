@@ -291,6 +291,24 @@ export async function ensureSessionUsageLimitAllows(
   if (!admission.allowed) throw new SessionUsageLimitReachedError(admission.refusal);
 }
 
+/**
+ * The task usage limit alone, for a paid request that has no allowance
+ * boundary of its own (the Codex remote compaction request). A reached limit
+ * becomes the same typed between-request stop as any other call; an
+ * unreadable state still throws `SessionUsageLimitUnavailableError`.
+ */
+export async function ensureSessionUsageLimitAllowsBetweenModelCalls(
+  db: ActivityServices["db"],
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<void> {
+  try {
+    await ensureSessionUsageLimitAllows(db, input);
+  } catch (error) {
+    if (!(error instanceof SessionUsageLimitReachedError)) throw error;
+    throw new BudgetExhaustedError(error.message, null, null, error.refusal);
+  }
+}
+
 export type AllowanceRefusal = AllowanceExhaustedRefusal;
 
 /** Account allowance exhaustion is recoverable state, never a provider failure. */

@@ -1,4 +1,7 @@
-import { ensureRunAllowedBetweenModelCalls } from "./admission";
+import {
+  ensureRunAllowedBetweenModelCalls,
+  ensureSessionUsageLimitAllowsBetweenModelCalls,
+} from "./admission";
 import { hasPendingSteerAfterContextCompaction, isSessionCompactionRequested } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -360,8 +363,15 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   // first so it does not send empty tools/instructions).
   const remoteCompactionRequester =
     resolvedModel && billingState.isCodexTurn
-      ? (s: Settings, m: Array<Record<string, unknown>>) =>
-          withCodexRemoteCompaction(async () => {
+      ? async (s: Settings, m: Array<Record<string, unknown>>) => {
+          // The remote compaction request is a paid model request: the task
+          // usage limit admits it exactly like the portable summarizer above.
+          await ensureSessionUsageLimitAllowsBetweenModelCalls(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          });
+          return await withCodexRemoteCompaction(async () => {
             if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
             const preparedRequest = preparedCompactionRequest(remotePrefix.agent);
             return requestRemoteCompactionV2(s, m, {
@@ -373,7 +383,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               signal: cancellationSignal,
               onUsage: recordCompactionUsage,
             });
-          })
+          });
+        }
       : undefined;
   const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);

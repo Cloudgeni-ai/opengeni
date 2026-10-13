@@ -91,6 +91,11 @@ the receipt, which is logged and counted.
 `usedMicros >= limitMicros` refuses the next model request. `0` means no model
 request can start; `null` means no limit.
 
+The check runs before a turn's first request (the parallel title request
+starts only alongside an admitted first request), before every later request
+in the turn, before each compaction summary or Codex remote compaction
+request, and before each attempt-authenticated single-model call.
+
 - **Before a turn's first request.** The worker records a completed, non-failed
   turn whose `turn.completed` payload has `segmentLimit: "session_usage_limit"`
   and a typed `sessionUsageLimit` refusal, and the session returns to idle.
