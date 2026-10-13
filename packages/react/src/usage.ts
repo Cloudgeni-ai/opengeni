@@ -48,3 +48,23 @@ export type {
   UsageMemberListProps,
 } from "./components/usage-member-list";
 export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
+
+// Per-task usage limits: one optional limit on a root chat's API-equivalent
+// model usage, shared by its agents. `summarizeSessionUsageLimit` turns the
+// server projection into words ("At least $12.34 of $50.00", "Preparing
+// usage") and `<SessionUsageLimitNotice>` is the calm near/at-limit line.
+export {
+  DEFAULT_SESSION_USAGE_LIMIT_LABELS,
+  SESSION_USAGE_LIMIT_NEAR_FRACTION,
+  sessionUsageLimitLabels,
+  sessionUsageLimitPercent,
+  summarizeSessionUsageLimit,
+  summarizeSessionUsageLimitRefusal,
+} from "./usage/session-usage-limit";
+export type {
+  SessionUsageLimitLabels,
+  SessionUsageLimitState,
+  SessionUsageLimitSummary,
+} from "./usage/session-usage-limit";
+export { SessionUsageLimitNotice } from "./components/session-usage-limit-notice";
+export type { SessionUsageLimitNoticeProps } from "./components/session-usage-limit-notice";

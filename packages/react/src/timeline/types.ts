@@ -441,7 +441,20 @@ export type NoticeItem = {
    * (customizable with `renderAllowanceExhausted` / `allowanceExhaustedLabels`).
    */
   allowance?: AllowanceExhaustedRefusal;
+  /**
+   * The task's own usage limit stopped further model requests: a calm,
+   * non-failure stop. Amounts are null when the marker carried none.
+   * `MessageTimeline` renders it as a "Usage limit reached" row.
+   */
+  sessionUsageLimit?: SessionUsageLimitStop;
   occurredAt: string;
+};
+
+/** What a timeline row knows about a task usage-limit stop. */
+export type SessionUsageLimitStop = {
+  rootSessionId: string | null;
+  limitMicros: number | null;
+  usedMicros: number | null;
 };
 
 /**

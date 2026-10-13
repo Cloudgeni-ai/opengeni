@@ -194,6 +194,7 @@ import {
   AllowancePresentationProvider,
   type RenderAllowanceExhausted,
 } from "../timeline/allowance-exhausted-row";
+import { SessionUsageLimitRow } from "../timeline/session-usage-limit-row";
 import type { AllowanceLabels } from "../usage/allowance-copy";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
 import { TimelineAnnotationCards } from "./timeline-annotations";
@@ -5115,6 +5116,7 @@ function formatVideoDuration(seconds: number): string {
 function NoticeRow({ item }: { item: NoticeItem }) {
   const enter = useEntranceAnimation();
   if (item.allowance) return <AllowanceExhaustedRow refusal={item.allowance} />;
+  if (item.sessionUsageLimit) return <SessionUsageLimitRow stop={item.sessionUsageLimit} />;
   if (item.recordedOutcome) {
     return (
       <details

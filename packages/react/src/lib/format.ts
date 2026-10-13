@@ -156,6 +156,26 @@ export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
 /**
+ * A fresh Send or Steer refused because the task's own usage limit is reached.
+ * The draft is kept; a person raises or removes the limit (or resumes a goal),
+ * so an unchanged retry is never offered as the remedy.
+ */
+export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
+  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
+
+/**
+ * Is this send refusal the task's usage limit? Reads the typed SDK error code
+ * (`OpenGeniSessionUsageLimitReachedError`), and also the composer's own
+ * sentence so a refusal restored from storage after a reload is recognized.
+ */
+export function isSessionUsageLimitSubmissionError(error: Error): boolean {
+  return (
+    (error instanceof OpenGeniApiError && error.code === "session_usage_limit_reached") ||
+    error.message === COMPOSER_SESSION_USAGE_LIMIT_MESSAGE
+  );
+}
+
+/**
  * Is this send refusal "the model is no longer available"? Reads the typed
  * `details.code`, and also the historical message so a refusal persisted
  * before a reload (only its text survives) or from an older API is recognized.
@@ -180,6 +200,7 @@ export function composerSubmissionErrorMessage(error: Error): string {
   if (error instanceof ComposerStateError) return error.message;
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
   if (isModelUnavailableSubmissionError(error)) return COMPOSER_MODEL_UNAVAILABLE_MESSAGE;
+  if (isSessionUsageLimitSubmissionError(error)) return COMPOSER_SESSION_USAGE_LIMIT_MESSAGE;
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
     // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
     // so this startup-path helper adds no SDK or wording imports.
@@ -205,11 +226,14 @@ export function composerSubmissionCanRetry(error: Error): boolean {
   return !(
     isComposerCreditRefusal(error) ||
     isModelUnavailableSubmissionError(error) ||
+    isSessionUsageLimitSubmissionError(error) ||
     (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
   );
 }
 
 function isComposerCreditRefusal(error: Error): boolean {
+  // A 402 for the task's own usage limit is not a credit or payment problem.
+  if (isSessionUsageLimitSubmissionError(error)) return false;
   return (
     (error instanceof OpenGeniApiError &&
       error.status === 402 &&

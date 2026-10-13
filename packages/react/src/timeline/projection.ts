@@ -19,6 +19,11 @@ import {
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/sdk/allowance-refusal";
 import {
+  parseSessionUsageLimitReachedRefusal,
+  SESSION_USAGE_LIMIT_SEGMENT,
+  sessionUsageLimitReachedMessage,
+} from "@opengeni/sdk/session-usage-limits";
+import {
   CREDIT_EXHAUSTION_MESSAGE,
   presentFailure,
   isCreditExhaustion,
@@ -1366,6 +1371,17 @@ export function buildTimeline(
         // session looking healthy while every future turn silently dies, so it
         // projects exactly like a failed turn plus an explicit notice.
         const allowance = parseAllowanceExhaustedRefusal(payload);
+        // The task's own usage limit refused the next model request. That is a
+        // person's setting doing its job, not a failure or a billing problem:
+        // the turn settles complete and one calm row says what stopped it.
+        if (payload.segmentLimit === SESSION_USAGE_LIMIT_SEGMENT) {
+          finalizeOpen(turnId, "complete", event.occurredAt);
+          takeAgentResponse(turnId);
+          takePendingWaitOutcome(turnId);
+          items.push(turnEndItem(event, "complete", null));
+          items.push(sessionUsageLimitNotice(event, payload));
+          break;
+        }
         if (allowance) {
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
@@ -2948,6 +2964,35 @@ function turnEndItem(
     turnId: event.turnId ?? null,
     outcome,
     failureText,
+    occurredAt: event.occurredAt,
+  };
+}
+
+/** Plain text for a usage-limit stop whose marker carried no readable amounts. */
+const SESSION_USAGE_LIMIT_STOP_TEXT =
+  "This task's usage limit is reached. A person can raise or remove the limit to continue.";
+
+/**
+ * The stop row for a `segmentLimit: "session_usage_limit"` completion. Only the
+ * typed amounts are kept (never upstream prose), and a malformed marker still
+ * reads as the same neutral stop instead of a credit or failure notice.
+ */
+function sessionUsageLimitNotice(
+  event: SessionEvent,
+  payload: Record<string, unknown>,
+): NoticeItem {
+  const refusal = parseSessionUsageLimitReachedRefusal(payload);
+  return {
+    kind: "notice",
+    id: `${event.id}-session-usage-limit`,
+    // Neutral: not a failure, and not an open wait the turn header should claim.
+    tone: "cancelled",
+    text: refusal ? sessionUsageLimitReachedMessage(refusal) : SESSION_USAGE_LIMIT_STOP_TEXT,
+    sessionUsageLimit: {
+      rootSessionId: refusal?.rootSessionId ?? null,
+      limitMicros: refusal?.limitMicros ?? null,
+      usedMicros: refusal?.usedMicros ?? null,
+    },
     occurredAt: event.occurredAt,
   };
 }
