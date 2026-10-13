@@ -157,10 +157,15 @@ export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
 /**
  * A fresh Send or Steer refused because the task's own usage limit is reached.
- * The draft is kept; a person raises or removes the limit (or resumes a goal),
- * so an unchanged retry is never offered as the remedy.
+ * The draft is kept and an unchanged retry is never offered. The one current
+ * recovery action (raise or remove the limit, resume a goal) belongs to the
+ * composer's `SessionUsageLimitNotice`, so this line only says what happened.
  */
 export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
+  "This task's usage limit is reached. Your message is saved.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
   "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
 
 /**
@@ -171,7 +176,8 @@ export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
 export function isSessionUsageLimitSubmissionError(error: Error): boolean {
   return (
     (error instanceof OpenGeniApiError && error.code === "session_usage_limit_reached") ||
-    error.message === COMPOSER_SESSION_USAGE_LIMIT_MESSAGE
+    error.message === COMPOSER_SESSION_USAGE_LIMIT_MESSAGE ||
+    error.message === LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE
   );
 }
 

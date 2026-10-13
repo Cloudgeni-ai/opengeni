@@ -38,6 +38,8 @@ export type SessionUsageLimitLabels = {
   legacyNote: string;
   preparingNote: string;
   unavailableNote: string;
+  /** A refresh failed after a good read: the last known amount is shown. */
+  staleNote: string;
   reachedTitle: string;
   /** "$52.10 of $50.00 API-equivalent model usage." */
   reachedAmount: (amount: string) => string;
@@ -71,6 +73,7 @@ export const DEFAULT_SESSION_USAGE_LIMIT_LABELS: SessionUsageLimitLabels = {
   legacyNote: "This chat started before usage limits, so some earlier usage may be missing.",
   preparingNote: "Earlier usage is still being counted. You can set a limit when it's ready.",
   unavailableNote: "Couldn't read this chat's usage right now. A set limit still applies.",
+  staleNote: "Couldn't refresh, so this may be out of date. The limit still applies.",
   reachedTitle: "Usage limit reached",
   reachedAmount: (amount) => `${amount} API-equivalent model usage.`,
   reachedRemedy: "Raise or remove the limit to continue.",
@@ -116,6 +119,8 @@ export type SessionUsageLimitSummary = {
   inherited: boolean;
   rootSessionId: string | null;
   version: number | null;
+  /** The last refresh failed: amounts are the last known ones, maybe out of date. */
+  stale: boolean;
 };
 
 const UNKNOWN: SessionUsageLimitSummary = {
@@ -130,6 +135,7 @@ const UNKNOWN: SessionUsageLimitSummary = {
   inherited: false,
   rootSessionId: null,
   version: null,
+  stale: false,
 };
 
 /**
@@ -140,13 +146,31 @@ const UNKNOWN: SessionUsageLimitSummary = {
 export function summarizeSessionUsageLimit(
   usage: SessionUsageLimit | null | undefined,
   overrides?: Partial<SessionUsageLimitLabels>,
+  options?: {
+    /**
+     * The last refresh failed after this projection was read. The amounts and
+     * any reached state stay (never $0); a note says they may be out of date.
+     */
+    stale?: boolean;
+  },
 ): SessionUsageLimitSummary {
   if (!usage) return UNKNOWN;
+  const summary = summarizeFresh(usage, overrides);
+  if (!options?.stale) return summary;
+  const labels = sessionUsageLimitLabels(overrides);
+  return { ...summary, stale: true, notes: [...summary.notes, labels.staleNote] };
+}
+
+function summarizeFresh(
+  usage: SessionUsageLimit,
+  overrides?: Partial<SessionUsageLimitLabels>,
+): SessionUsageLimitSummary {
   const labels = sessionUsageLimitLabels(overrides);
   const base = {
     inherited: usage.inherited,
     rootSessionId: usage.rootSessionId,
     version: usage.version,
+    stale: false,
   };
   if (usage.status === "unavailable") {
     return {

@@ -183,8 +183,9 @@ describe("usage-limit stop in the timeline", () => {
     );
     const row = view.container.querySelector("[data-og-session-usage-limit-stop]");
     expect(row?.getAttribute("role")).toBe("status");
-    expect(row?.textContent).toContain("Usage limit reached");
-    expect(row?.textContent).toContain("$52.10 of $50.00 API-equivalent model usage.");
+    // One compact historical line: the recovery lives in the composer notice.
+    expect(row?.textContent).toBe("Usage limit reached · $52.10 of $50.00");
+    expect(row?.textContent).not.toMatch(/raise or remove|API-equivalent/i);
     expect(row?.textContent).not.toMatch(/credit|retry|monthly/i);
     expect(row?.className).not.toContain("failed");
     await view.unmount();
@@ -212,9 +213,15 @@ describe("composer refusal", () => {
     const message = composerSubmissionErrorMessage(error);
     expect(message).toBe(COMPOSER_SESSION_USAGE_LIMIT_MESSAGE);
     expect(message).toContain("Your message is saved.");
+    // What happened only: the one recovery action lives in the notice.
+    expect(message).not.toContain("Raise or remove");
     expect(message).not.toMatch(/credit|payment|billing/i);
     // A refusal restored from storage after reload keeps its meaning.
     expect(composerSubmissionCanRetry(new Error(message))).toBe(false);
+    const legacy =
+      "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
+    expect(isSessionUsageLimitSubmissionError(new Error(legacy))).toBe(true);
+    expect(composerSubmissionCanRetry(new Error(legacy))).toBe(false);
     // Ordinary payment refusals are unchanged.
     expect(
       composerSubmissionCanRetry(
@@ -298,6 +305,26 @@ describe("SessionUsageLimitNotice", () => {
     );
     expect(view.container.textContent).toContain("$50.01 of $50.00");
     await view.unmount();
+  });
+
+  test("after a failed refresh the last known reached amount stays, labelled out of date", async () => {
+    const reached = usage({ status: "reached", usedMicros: 52_100_000 });
+    expect(summarizeSessionUsageLimit(reached, undefined, { stale: true })).toMatchObject({
+      state: "reached",
+      stale: true,
+      amountText: "$52.10 of $50.00",
+    });
+    const view = await renderComponent(
+      <SessionUsageLimitNotice usage={reached} stale onChangeLimit={() => undefined} />,
+    );
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Usage limit reached");
+    expect(text).toContain("$52.10 of $50.00");
+    expect(text).toContain("may be out of date. The limit still applies.");
+    expect(text).not.toContain("$0.00");
+    await view.unmount();
+    // Fresh reads carry no note.
+    expect(summarizeSessionUsageLimit(reached).notes).toEqual([]);
   });
 
   test("near is dismissible per limit version", async () => {

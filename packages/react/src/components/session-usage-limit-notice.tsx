@@ -34,6 +34,12 @@ export type SessionUsageLimitNoticeProps = {
   /** The goal paused at the limit: changing it never resumes, so say Resume is next. */
   goalPaused?: boolean;
   /**
+   * The last refresh of `usage` failed. The last known amount and any reached
+   * state stay, with a note that they may be out of date and that the limit
+   * still applies. Pass the read hook's error state; never zero the amount.
+   */
+  stale?: boolean;
+  /**
    * Remember a dismissed near-limit notice for this tab. The key should name
    * the workspace; the task and limit version are added, so a changed limit
    * shows it again. Reaching the limit is never dismissible.
@@ -64,12 +70,13 @@ export function SessionUsageLimitNotice({
   onChangeLimit,
   mainTaskHref,
   goalPaused = false,
+  stale = false,
   dismissStorageKey,
   labels: overrides,
   className,
 }: SessionUsageLimitNoticeProps) {
   const labels = sessionUsageLimitLabels(overrides);
-  const fromUsage = summarizeSessionUsageLimit(usage, overrides);
+  const fromUsage = summarizeSessionUsageLimit(usage, overrides, { stale });
   const summary: SessionUsageLimitSummary =
     refusal && fromUsage.state !== "reached"
       ? summarizeSessionUsageLimitRefusal(refusal, overrides)
@@ -141,11 +148,13 @@ export function SessionUsageLimitNotice({
             <p className="mt-0.5 text-og-fg-muted">
               {amount ? `${labels.reachedAmount(amount)} ` : ""}
               {remedy}
+              {summary.stale ? ` ${labels.staleNote}` : ""}
             </p>
           </>
         ) : (
           <p className="text-og-fg-muted">
             {labels.near(sessionUsageLimitPercent(summary.fraction ?? 0), amount)}
+            {summary.stale ? ` ${labels.staleNote}` : ""}
           </p>
         )}
       </div>

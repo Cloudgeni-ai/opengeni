@@ -7,40 +7,36 @@ import { useEntranceAnimation } from "./entrance";
 import type { SessionUsageLimitStop } from "./types";
 
 /**
- * The task's usage limit stopped further model requests. Calm by design:
- * nothing failed, the conversation is kept, and the row names the amounts
- * without implying only the final request caused the overshoot. Never a
- * credits or purchase remedy; the editor lives with the host's notice.
+ * A compact historical marker: the task's usage limit stopped further model
+ * requests here. One calm line with the amounts at the stop (the overshoot is
+ * kept, without implying only the final request caused it). The current
+ * state and the one recovery action live in the host's composer notice, so
+ * this row repeats neither. Never a credits or purchase remedy.
  */
 export function SessionUsageLimitRow({ stop }: { stop: SessionUsageLimitStop }) {
   const enter = useEntranceAnimation();
   const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS;
   const amount =
     stop.usedMicros !== null && stop.limitMicros !== null
-      ? labels.reachedAmount(
-          labels.usedOfLimit(
-            formatSessionUsageMicros(stop.usedMicros),
-            formatSessionUsageMicros(stop.limitMicros),
-          ),
+      ? labels.usedOfLimit(
+          formatSessionUsageMicros(stop.usedMicros),
+          formatSessionUsageMicros(stop.limitMicros),
         )
       : null;
   return (
-    <div
+    <p
       className={cn(
         enter && "animate-og-enter",
-        "flex items-start gap-2.5 rounded-og-md border border-og-border bg-og-surface-1 px-3.5 py-2.5 text-og-menu text-og-fg",
+        "flex min-w-0 items-center gap-2 text-og-sm text-og-fg-muted",
       )}
       role="status"
       data-og-session-usage-limit-stop=""
     >
-      <GaugeIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-og-status-waiting" />
-      <div className="min-w-0 flex-1">
-        <p className="font-medium">{labels.reachedTitle}</p>
-        <p className="mt-0.5 text-og-fg-muted">
-          {amount ? `${amount} ` : ""}
-          {labels.reachedRemedy}
-        </p>
-      </div>
-    </div>
+      <GaugeIcon aria-hidden className="size-3.5 shrink-0 text-og-status-waiting" />
+      <span className="min-w-0">
+        <span className="font-medium text-og-fg">{labels.reachedTitle}</span>
+        {amount ? ` · ${amount}` : ""}
+      </span>
+    </p>
   );
 }
