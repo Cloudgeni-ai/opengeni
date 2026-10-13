@@ -67,10 +67,11 @@ function fakeResolver(values: Record<string, string>, enabled = true) {
 function definition(
   source: ToolGatewayDefinition["source"],
   seen: Array<Record<string, unknown>>,
+  toolName = "call",
 ): ToolGatewayDefinition {
   return {
-    identity: { serverId: source === "mcp" ? "crm" : source, toolName: "call" },
-    modelName: `${source}__call`,
+    identity: { serverId: source === "mcp" ? "crm" : source, toolName },
+    modelName: `${source}__${toolName}`,
     description: "Call",
     inputSchema: { type: "object", properties: { text: { type: "string" } } },
     source,
@@ -87,6 +88,7 @@ async function run(
   text: string,
   resolver: SecretResolver,
   callerKind: "model" | "codemode" | "http" = "http",
+  toolName = "call",
 ) {
   const seen: Array<Record<string, unknown>> = [];
   const resolveArguments = createSecretArgumentResolver({ resolver });
@@ -94,7 +96,7 @@ async function run(
     accountId: "11111111-1111-4111-8111-111111111111",
     workspaceId: "22222222-2222-4222-8222-222222222222",
     generation: 1,
-    definitions: [definition(source, seen)],
+    definitions: [definition(source, seen, toolName)],
     ...(resolveArguments ? { resolveArguments } : {}),
   });
   const prepared = await gateway.prepareCall({
@@ -109,12 +111,20 @@ async function run(
 }
 
 describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
-  test("modes: remote MCP and Codex apps resolve; first-party and interaction preserve", () => {
-    expect(secretArgumentMode("mcp")).toBe("literal");
-    expect(secretArgumentMode("codex_apps")).toBe("literal");
-    for (const source of ["opengeni", "files", "docs", "interaction"] as const) {
-      expect(secretArgumentMode(source)).toBe("preserve");
+  test("modes: every tool resolves except interaction tools and the secret tools", () => {
+    const entry = (source: ToolGatewayDefinition["source"], toolName = "call") => ({
+      source,
+      identity: { serverId: source, toolName },
+    });
+    for (const source of ["mcp", "codex_apps", "opengeni", "files", "docs"] as const) {
+      expect(secretArgumentMode(entry(source))).toBe("literal");
     }
+    expect(secretArgumentMode(entry("interaction"))).toBe("preserve");
+    for (const toolName of ["secret_save", "secret_move", "secret_delete", "secret_get"]) {
+      expect(secretArgumentMode(entry("opengeni", toolName))).toBe("preserve");
+    }
+    // Only OpenGeni's own secret tools are exempt, not a connector's tool that happens to share the prefix.
+    expect(secretArgumentMode(entry("mcp", "secret_save"))).toBe("literal");
   });
 
   test("an MCP call gets the value; the persisted call keeps the reference", async () => {
@@ -133,11 +143,41 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
     expect(calls[0]?.use.surface).toBe("codemode");
   });
 
-  test("first-party and interaction tools receive the reference verbatim", async () => {
-    for (const source of ["opengeni", "interaction"] as const) {
+  test("OpenGeni tools get the value; an escape passes the reference on for later work", async () => {
+    const brace = "{";
+    const ref = (path: string) => `${brace}${brace}secret:${path}}}`;
+    const { resolver, calls } = fakeResolver({ "GitHub/token": VALUE });
+    const used = await run(
+      "opengeni",
+      ref("GitHub/token"),
+      resolver,
+      "model",
+      "session_send_message",
+    );
+    expect(used.seen[0]).toEqual({ text: VALUE });
+    expect(used.call.arguments).toEqual({ text: ref("GitHub/token") });
+    expect(calls).toHaveLength(1);
+    const handedOn = await run(
+      "opengeni",
+      `run with \\${ref("GitHub/token")}`,
+      resolver,
+      "model",
+      "scheduled_tasks_create",
+    );
+    expect(handedOn.seen[0]).toEqual({ text: `run with ${ref("GitHub/token")}` });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("interaction tools and OpenGeni's secret tools receive the reference verbatim", async () => {
+    const brace = "{";
+    const ref = `${brace}${brace}secret:GitHub/token}}`;
+    for (const [source, toolName] of [
+      ["interaction", "call"],
+      ["opengeni", "secret_save"],
+    ] as const) {
       const { resolver, calls } = fakeResolver({ "GitHub/token": VALUE });
-      const { seen } = await run(source, "{{secret:GitHub/token}}", resolver);
-      expect(seen[0]).toEqual({ text: "{{secret:GitHub/token}}" });
+      const { seen } = await run(source, ref, resolver, "http", toolName);
+      expect(seen[0]).toEqual({ text: ref });
       expect(calls).toHaveLength(0);
     }
   });

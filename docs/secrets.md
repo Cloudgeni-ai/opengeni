@@ -137,6 +137,7 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
 | MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed here. |
+| Opengeni's own tools (messages, sessions, schedules, goals, Knowledge, artifacts, admin actions) | Resolved like connectors: the executing call receives values, while the journal keeps the reference. To store or hand on a reference for later work, escape it (`\{{secret:Item}}`); the tool receives `{{secret:Item}}`. The `secret_*` tools take references as names and never resolve them. |
 | Sites | Tool calls from a Site resolve with the viewer's authority (no task vault) and audit the Site. |
 | Browser and desktop | `fill`, `type`, clipboard writes and key presses resolve for agent callers. Receipts keep the reference. `type` with `mode: "keys"` handles split one-time-code boxes. Resolved values are never pasted on the desktop. |
 | Passkeys | Registering a passkey in the managed browser saves a `passkey` item; later logins use it from the vault and write the sign count back. |

@@ -23,9 +23,21 @@ import type { ToolGatewayArgumentResolver } from "@opengeni/tool-gateway";
 
 export type SecretArgumentMode = "literal" | "preserve";
 
-/** Remote tools take values; OpenGeni's own tools and interaction tools keep references. */
-export function secretArgumentMode(source: ToolGatewayCatalogEntry["source"]): SecretArgumentMode {
-  return source === "mcp" || source === "codex_apps" ? "literal" : "preserve";
+/**
+ * One rule for every tool: a reference is used where it is written, and an
+ * escaped reference passes on as the literal reference. Two kinds keep their
+ * arguments unchanged: interaction tools, which the API resolves at dispatch
+ * so their journals keep references, and OpenGeni's secret tools, whose
+ * arguments name references rather than use them.
+ */
+export function secretArgumentMode(
+  entry: Pick<ToolGatewayCatalogEntry, "source" | "identity">,
+): SecretArgumentMode {
+  if (entry.source === "interaction") return "preserve";
+  if (entry.source === "opengeni" && entry.identity.toolName.startsWith("secret_")) {
+    return "preserve";
+  }
+  return "literal";
 }
 
 function hasMarker(value: unknown): boolean {
@@ -47,7 +59,7 @@ export function createSecretArgumentResolver(input: {
 }): ToolGatewayArgumentResolver | undefined {
   const resolver = input.resolver;
   if (!resolver?.enabled) return undefined;
-  const modeFor = input.modeFor ?? ((entry) => secretArgumentMode(entry.source));
+  const modeFor = input.modeFor ?? ((entry) => secretArgumentMode(entry));
   return async ({ call, entry, arguments: args, context }) => {
     if (modeFor(entry) !== "literal" || !hasMarker(args)) return args;
     const invalid = collectInvalidReferencesDeep(args);
