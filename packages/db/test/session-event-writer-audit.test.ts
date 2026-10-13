@@ -106,6 +106,11 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/unstarted-queue-retirement.ts#retireUnstartedSessionQueue": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/empty-session-queue.ts#repairEmptyQueuedSessionProjection": {
     inserts: 1,
     contract: "canonical",

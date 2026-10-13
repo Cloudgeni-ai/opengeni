@@ -2,6 +2,7 @@ import { z } from "zod";
 import { withRestoredSessionActivityRlsContext, type Database } from "./database";
 import { recordRetiredChildNotice, retireInterruptedSessionTurn } from "./index";
 import { repairEmptyQueuedSessionProjection } from "./empty-session-queue";
+import { retireUnstartedSessionQueue } from "./unstarted-queue-retirement";
 
 export const INTERRUPTED_TURN_RETIREMENT_MARKER = "-- OPENGENI_INTERRUPTED_TURN_RETIREMENT_STAGE";
 export const INTERRUPTED_TURN_RETIREMENT_MIGRATION = "0764_interrupted_turn_recovery.sql";
@@ -38,6 +39,28 @@ const manifestSchema = z
       )
       .max(1000)
       .optional(),
+    unstartedQueues: z
+      .array(
+        z
+          .object({
+            accountId: z.uuid(),
+            workspaceId: z.uuid(),
+            sessionId: z.uuid(),
+            expectedLastSequence: z.number().int().nonnegative(),
+            turns: z
+              .array(
+                z
+                  .object({ turnId: z.uuid(), expectedVersion: z.number().int().positive() })
+                  .strict(),
+              )
+              .min(1)
+              .max(1000)
+              .refine((turns) => new Set(turns.map((t) => t.turnId)).size === turns.length),
+          })
+          .strict(),
+      )
+      .max(1000)
+      .optional(),
   })
   .strict();
 export type InterruptedTurnRetirementManifest = z.infer<typeof manifestSchema>;
@@ -49,9 +72,20 @@ export function parseInterruptedTurnRetirementManifest(
 ): InterruptedTurnRetirementManifest {
   const parsed = manifestSchema.safeParse(value);
   if (!parsed.success) throw new Error("Invalid interrupted-turn retirement manifest");
-  const allTargets = [...parsed.data.targets, ...(parsed.data.emptyQueuedSessions ?? [])];
+  const allTargets = [
+    ...parsed.data.targets,
+    ...(parsed.data.emptyQueuedSessions ?? []),
+    ...(parsed.data.unstartedQueues ?? []),
+  ];
   if (allTargets.length < 1 || allTargets.length > 1000)
     throw new Error("Invalid interrupted-turn retirement manifest");
+  if (
+    parsed.data.targets.length +
+      (parsed.data.emptyQueuedSessions?.length ?? 0) +
+      (parsed.data.unstartedQueues ?? []).reduce((total, queue) => total + queue.turns.length, 0) >
+    1000
+  )
+    throw new Error("Interrupted-turn retirement manifest exceeds 1000 rows");
   if (new Set(allTargets.map((target) => target.sessionId)).size !== allTargets.length)
     throw new Error("Interrupted-turn retirement targets must name unique sessions");
   return parsed.data;
@@ -69,6 +103,7 @@ export async function migrateInterruptedTurnRetirement(
       ...target,
       kind: "empty" as const,
     })),
+    ...(manifest.unstartedQueues ?? []).map((target) => ({ ...target, kind: "queue" as const })),
   ].sort(
     (a, b) => a.workspaceId.localeCompare(b.workspaceId) || a.sessionId.localeCompare(b.sessionId),
   );
@@ -83,6 +118,13 @@ export async function migrateInterruptedTurnRetirement(
   for (const targets of workspaces.values()) {
     await withRestoredSessionActivityRlsContext(db, targets[0]!, async (scoped) => {
       for (const target of targets) {
+        if (target.kind === "queue") {
+          await retireUnstartedSessionQueue(scoped, {
+            ...target,
+            operationId: manifest.operationId,
+          });
+          continue;
+        }
         if (target.kind === "empty") {
           await repairEmptyQueuedSessionProjection(scoped, {
             ...target,

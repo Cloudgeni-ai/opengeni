@@ -1287,6 +1287,26 @@ not change Pause, create a turn/attempt/history item/input/wake, or notify a
 parent. An exact receipt replay never rewrites newer work. Ordinary upgrades
 without a manifest perform no shell repair.
 
+**Unwanted, never-run prompts require explicit withdrawal.** The same manifest
+accepts `unstartedQueues`, with one entry per session:
+`{accountId, workspaceId, sessionId, expectedLastSequence, turns: [{turnId, expectedVersion}]}`.
+Every selected prompt must still be a queued human/API prompt with generation
+zero, no attempt, no start time and no scheduled-run binding. The session must
+be active under effective control (Pause is never changed), have no active turn
+and retain the exact reviewed event cursor. All other accepted work, active
+goals, waits, voice leases, physical writers, pending deliveries and unfinished
+scheduled runs cause the complete manifest transaction to roll back. Include
+the entire queue: an omitted sibling is never released by clearing the block.
+
+The hook marks these prompts `cancelled` with `cancelReason: operator_not_run`,
+appends ordinary queue-deletion audit events and one `unstarted_queue_retired`
+status receipt, clears the admission block and leaves the session idle. It
+creates no attempt, history item, executable input, parent notice or wake.
+Existing prompt text, accepted authority and prior model context remain intact.
+The exact operation/cursor/turn-version receipt makes retries harmless even
+after a new human message arrives. This is not automatic error recovery, and
+does not authorize replay of any retired message.
+
 Skip-overlap schedule admission independently verifies an empty stale `queued`
 projection under the session lock rather than trusting its label forever.
 Accepted turns, pending input, active goals, live voice, waits and physical
