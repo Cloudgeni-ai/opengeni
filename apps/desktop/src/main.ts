@@ -6,6 +6,7 @@ const here = import.meta.dirname;
 
 createDesktopApp({
   productName: "Opengeni",
+  appId: "ai.opengeni.desktop",
   scheme: "opengeni",
   defaultServerUrl: "https://app.opengeni.ai",
   preloadPath: join(here, "preload.cjs"),

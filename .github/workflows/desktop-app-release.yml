@@ -5,6 +5,8 @@
 #   notarized with the App Store Connect key;
 # - Linux (x64 and arm64): AppImage, deb and rpm, with signed build provenance
 #   (verify a download with `gh attestation verify <file> --repo <this repo>`);
+# - Windows (x64 and arm64): an installer with signed build provenance. It is
+#   not yet Authenticode-signed, so SmartScreen warns on first run;
 # and publishes them together as the release desktop-v<version>. Installed apps
 # update from the newest desktop-v release. Releases in this repository are
 # immutable once published, so the release is created as a draft, filled, and
@@ -229,8 +231,72 @@ jobs:
             apps/desktop/release/latest-linux.yml
             apps/desktop/release/latest-linux-arm64.yml
 
+  windows:
+    needs: version
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: |
+          bun test ./packages/desktop/test
+          (cd packages/desktop && bun run typecheck)
+          (cd apps/desktop && bun run typecheck)
+
+      - name: Build
+        working-directory: apps/desktop
+        env:
+          OPENGENI_DESKTOP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          bun scripts/build.ts --production
+          bunx electron-builder --win --publish never
+
+      - name: Verify
+        working-directory: apps/desktop/release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -la
+          # One installer for people to download, carrying both architectures,
+          # and one per architecture that installed apps update from (the
+          # updater picks the file named for its own architecture).
+          for installer in "Opengeni-$VERSION-windows.exe" "Opengeni-$VERSION-windows-x64.exe" "Opengeni-$VERSION-windows-arm64.exe"; do
+            test -f "$installer"
+            test -f "$installer.blockmap"
+            grep -q "url: $installer" latest.yml
+          done
+          grep -q "version: $VERSION" latest.yml
+          test -f win-unpacked/Opengeni.exe
+          test -f win-arm64-unpacked/Opengeni.exe
+
+      - name: Provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: desktop-windows
+          if-no-files-found: error
+          path: |
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe.blockmap
+            apps/desktop/release/latest.yml
+
   publish:
-    needs: [version, macos, linux]
+    needs: [version, macos, linux, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -259,11 +325,12 @@ jobs:
           Opengeni desktop $VERSION.
 
           - **macOS:** download \`Opengeni-$VERSION-mac.dmg\`, open it and drag Opengeni to Applications.
+          - **Windows:** download \`Opengeni-$VERSION-windows.exe\` and open it. It installs for you alone, without administrator rights, and updates itself. Until the installer is signed, Windows may say it protected your PC: choose **More info**, then **Run anyway**.
           - **Ubuntu, Debian:** download the \`.deb\` for your machine (\`amd64\` or \`arm64\`) and run \`sudo apt install ./Opengeni-$VERSION-linux-amd64.deb\`.
           - **Fedora, RHEL, openSUSE:** download the \`.rpm\` (\`x86_64\` or \`aarch64\`) and run \`sudo dnf install ./Opengeni-$VERSION-linux-x86_64.rpm\`.
           - **Any Linux:** download the \`.AppImage\`, make it executable (\`chmod +x\`) and open it. It adds itself to your apps and updates itself.
 
-          Check a Linux download with \`gh attestation verify <file> --repo $GH_REPO\` or against \`SHA256SUMS\`.
+          Check a Windows or Linux download with \`gh attestation verify <file> --repo $GH_REPO\` or against \`SHA256SUMS\`.
           NOTES
             gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Opengeni desktop $VERSION" --latest=false \
               --notes-file "$RUNNER_TEMP/notes.md"

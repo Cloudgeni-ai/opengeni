@@ -39,6 +39,25 @@ export interface WindowEvents {
   focused(): void;
 }
 
+/**
+ * The height of the web app's title row. On macOS the traffic lights are
+ * centred on it; on Windows the caption buttons fill it.
+ */
+const TITLE_ROW_HEIGHT = 56;
+
+/**
+ * Windows' own minimize, maximize and close buttons, drawn over the page's
+ * title row. The overlay is transparent so the page shows through, and the
+ * glyphs follow the app's appearance.
+ */
+function captionButtons(dark: boolean) {
+  return {
+    color: "#00000000",
+    symbolColor: dark ? "#ffffff" : "#000000",
+    height: TITLE_ROW_HEIGHT,
+  };
+}
+
 /** Opens only web pages in the browser; anything else is ignored. */
 export function openExternalSafely(url: string): void {
   try {
@@ -86,6 +105,7 @@ export class MainWindow {
     const placement = this.placement();
     this.maximizeOnReveal = placement.maximize;
     const mac = process.platform === "darwin";
+    const windows = process.platform === "win32";
     const dark = nativeTheme.shouldUseDarkColors;
     this.window = new BaseWindow({
       ...placement.bounds,
@@ -95,8 +115,10 @@ export class MainWindow {
       show: false,
       backgroundColor: mac ? "#00000000" : dark ? config.background.dark : config.background.light,
       // macOS: the page runs under an inset title bar with sidebar material.
-      // Windows and Linux keep the system title bar, so the window follows the
-      // desktop's own theme and controls.
+      // Windows: the page runs under the caption buttons, as in other modern
+      // Windows apps, so there is one title row instead of two.
+      // Linux keeps the system title bar, so the window follows the desktop's
+      // own theme and controls.
       ...(mac
         ? {
             titleBarStyle: "hiddenInset" as const,
@@ -106,11 +128,20 @@ export class MainWindow {
             vibrancy: "sidebar" as const,
             visualEffectState: "followWindow" as const,
           }
-        : {
-            autoHideMenuBar: true,
-            ...(process.platform === "linux" ? { icon: config.appIconPath } : {}),
-          }),
+        : windows
+          ? {
+              titleBarStyle: "hidden" as const,
+              titleBarOverlay: captionButtons(dark),
+              autoHideMenuBar: true,
+            }
+          : { autoHideMenuBar: true, icon: config.appIconPath }),
     });
+    if (windows) {
+      nativeTheme.on("updated", () => {
+        if (this.window.isDestroyed()) return;
+        this.window.setTitleBarOverlay(captionButtons(nativeTheme.shouldUseDarkColors));
+      });
+    }
     this.window.on("resize", () => {
       this.scheduleSave();
     });

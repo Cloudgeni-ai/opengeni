@@ -67,6 +67,11 @@ html[data-platform="darwin"] body {
   -webkit-app-region: drag;
 }
 
+/* Windows: the caption buttons' row, which moves the window. */
+html[data-platform="win32"] .drag {
+  height: env(titlebar-area-height, 56px);
+}
+
 main {
   display: flex;
   min-height: 100%;
