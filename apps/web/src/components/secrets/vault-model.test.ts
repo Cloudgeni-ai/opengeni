@@ -11,6 +11,7 @@ import {
   secretsCapabilityOff,
   secretsOffIn,
   syncLabel,
+  vaultAudience,
   vaultErrorText,
   vaultsOfConnection,
 } from "./vault-model";
@@ -99,6 +100,26 @@ describe("vault list grouping", () => {
     expect(groupVaults([])).toEqual([]);
     expect(itemsLabel(1)).toBe("1 item");
     expect(itemsLabel(1400)).toBe(`${(1400).toLocaleString()} items`);
+  });
+});
+
+describe("who a vault is for", () => {
+  test("an Only-me vault says where its owner has it", () => {
+    const personal = (allowedWorkspaceIds: string[] | null) =>
+      vault({
+        ownerKind: "user",
+        workspaceId: "home",
+        availability: { allowedWorkspaceIds, allowPersonalWorkspaces: true },
+      });
+    expect(vaultAudience(personal(null), "Acme")).toBe("Only you, in all your workspaces");
+    expect(vaultAudience(personal([]), "Acme")).toBe("Only you, in your Personal workspace");
+    expect(vaultAudience(personal(["home"]), "Acme")).toBe("Only you, in your Personal workspace");
+    expect(vaultAudience(personal(["a"]), "Acme")).toBe(
+      "Only you, in Personal and 1 other workspace",
+    );
+    expect(vaultAudience(personal(["a", "b"]), "Acme")).toBe(
+      "Only you, in Personal and 2 other workspaces",
+    );
   });
 });
 
