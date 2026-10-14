@@ -1,32 +1,21 @@
 import {
-  OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
-  OPENGENI_SITE_BRIDGE_READY,
-  OPENGENI_SITE_BRIDGE_RESPONSE,
-  OPENGENI_SITE_BRIDGE_VERSION,
-  isOpenGeniSiteBridgeCancelMessage,
-  isOpenGeniSiteBridgeConnectMessage,
-  isOpenGeniSiteBridgeRequestMessage,
-  sanitizeOpenGeniSiteToolCallRequest,
-  sanitizeOpenGeniSiteToolInvokeRequest,
-  type OpenGeniSiteBridgeReadyMessage,
-  type OpenGeniSiteBridgeRequestMessage,
-  isSiteHttpRequest,
-  serveSiteHttp,
-  type SiteHttpRequest,
-  type OpenGeniSiteBridgeResponseMessage,
-  type OpenGeniSiteToolCatalog,
-} from "@opengeni/sdk/site";
-import type {
-  ToolGatewayCallRequest,
-  ToolGatewayCallResponse,
-  ToolGatewayDeclarationsResponse,
-  ToolGatewayResolveRequest,
-  ToolGatewayResolvedTool,
-  ToolGatewayInvokeRequest,
-  ToolGatewayInvokeResponse,
-} from "@opengeni/sdk";
+  SiteBridgeHost,
+  injectSiteBridgeBootstrap,
+  type SiteBridgeToolHandlers,
+  type SiteBridgeViewerHandlers,
+} from "@opengeni/sdk/site-bridge-host";
+import type { OpenGeniSiteSignInResult, OpenGeniSiteViewer } from "@opengeni/sdk/site";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
+
+export {
+  SiteBridgeDocumentLease,
+  SiteBridgeRequestRegistry,
+  handleSiteBridgeRequest,
+  openGeniSiteBridgePortFromBootstrap,
+  siteBridgeError,
+  siteBridgeReadyMessage,
+} from "@opengeni/sdk/site-bridge-host";
 
 export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = [
   "allow-downloads",
@@ -48,68 +37,24 @@ export type PublishedHtmlArtifactFrameProps = {
   className?: string;
   style?: CSSProperties;
   toolBridge?: PublishedHtmlArtifactToolBridge;
+  /**
+   * The signed-in member viewing the Site, answered to `site.viewer`. When
+   * omitted the frame does not advertise viewers and the SDK resolves `null`.
+   */
+  viewer?: OpenGeniSiteViewer;
+  /**
+   * Answer `site.auth.signIn()`. The console viewer is already signed in, so
+   * the default resolves `{ started: false }`.
+   */
+  onSignIn?: () => Promise<OpenGeniSiteSignInResult> | OpenGeniSiteSignInResult;
 };
 
-export type PublishedHtmlArtifactToolBridge = {
-  resolve?: (
-    request: ToolGatewayResolveRequest,
-    options: { signal: AbortSignal },
-  ) => Promise<ToolGatewayResolvedTool>;
-  invoke?: (
-    request: ToolGatewayInvokeRequest,
-    options: { signal: AbortSignal },
-  ) => Promise<ToolGatewayInvokeResponse>;
-  fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
-  /** Advertise Site Data: `fetch` forwards `published-artifacts/current` routes to the pinned Site. */
-  siteData?: boolean;
-  catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
-  call: (
-    request: ToolGatewayCallRequest,
-    options: { signal: AbortSignal },
-  ) => Promise<ToolGatewayCallResponse>;
-  declarations?: (options: { signal: AbortSignal }) => Promise<ToolGatewayDeclarationsResponse>;
-};
-
-/** Capabilities the host advertises when a Site connects; Sites never ask for more. */
-export function siteBridgeReadyMessage(
-  bridge: PublishedHtmlArtifactToolBridge | undefined,
-): OpenGeniSiteBridgeReadyMessage {
-  return {
-    type: OPENGENI_SITE_BRIDGE_READY,
-    version: OPENGENI_SITE_BRIDGE_VERSION,
-    ...(bridge?.resolve && bridge?.invoke ? { targetTools: 1 as const } : {}),
-    ...(bridge?.fetch && bridge.siteData ? { siteData: 1 as const } : {}),
-  };
-}
-
-const SITE_BRIDGE_BOOTSTRAP_SCRIPT = `<script>(()=>{const key=${JSON.stringify(
-  OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
-)};const parentWindow=window.parent;if(parentWindow===window)return;window.addEventListener("message",event=>{const data=event.data;if(event.source!==parentWindow||!data||data.type!==${JSON.stringify(
-  OPENGENI_SITE_BRIDGE_READY,
-)}||data.version!==${OPENGENI_SITE_BRIDGE_VERSION}||event.ports.length!==1)return;const port=event.ports[0];const previous=window[key]?.port;if(previous&&previous!==port)previous.close();Object.defineProperty(window,key,{configurable:true,value:{port}});port.start();});})();</script>`;
+/** Host handlers for Site tools and the Site HTTP channel (see `@opengeni/sdk/site-bridge-host`). */
+export type PublishedHtmlArtifactToolBridge = SiteBridgeToolHandlers;
 
 export function publishedHtmlArtifactDocument(html: string, toolBridgeEnabled: boolean): string {
   if (!toolBridgeEnabled) return html;
-  html = resolveSiteClientScript(html);
-  const doctypeEnd = leadingDoctypeEnd(html);
-  if (doctypeEnd >= 0) {
-    return `${html.slice(0, doctypeEnd + 1)}${SITE_BRIDGE_BOOTSTRAP_SCRIPT}${html.slice(doctypeEnd + 1)}`;
-  }
-  return `${SITE_BRIDGE_BOOTSTRAP_SCRIPT}${html}`;
-}
-
-function leadingDoctypeEnd(html: string): number {
-  const lower = html.toLowerCase();
-  let cursor = html.charCodeAt(0) === 0xfeff ? 1 : 0;
-  while (cursor < html.length) {
-    while (/\s/.test(html[cursor] ?? "")) cursor += 1;
-    if (!html.startsWith("<!--", cursor)) break;
-    const commentEnd = html.indexOf("-->", cursor + 4);
-    if (commentEnd < 0) return -1;
-    cursor = commentEnd + 3;
-  }
-  if (!lower.startsWith("<!doctype", cursor)) return -1;
-  return html.indexOf(">", cursor + 9);
+  return injectSiteBridgeBootstrap(resolveSiteClientScript(html));
 }
 
 /**
@@ -143,94 +88,29 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
     );
   }, [props.theme]);
   const bridgeRef = useRef(props.toolBridge);
+  const viewerRef = useRef(siteViewerHandlers(props.viewer, props.onSignIn));
   const onFrameLoadRef = useRef<() => void>(() => undefined);
   const frameLoadPendingRef = useRef(false);
-  const toolBridgeEnabled = props.toolBridge !== undefined;
+  // The bridge (and its bootstrap script) exists only when the host offers
+  // something over it: tools/Site HTTP, or the viewer.
+  const toolBridgeEnabled = props.toolBridge !== undefined || props.viewer !== undefined;
   useEffect(() => {
     bridgeRef.current = props.toolBridge;
   }, [props.toolBridge]);
   useEffect(() => {
+    viewerRef.current = siteViewerHandlers(props.viewer, props.onSignIn);
+  }, [props.viewer, props.onSignIn]);
+  useEffect(() => {
     if (!toolBridgeEnabled || typeof window === "undefined") return;
-    const requests = new SiteBridgeRequestRegistry();
-    const attachToolPort = (data: unknown, ports: readonly MessagePort[]) => {
-      const port = openGeniSiteBridgePortFromBootstrap(data, ports);
-      if (!port) return;
-      requests.addPort(port);
-      port.addEventListener("message", (portEvent: MessageEvent<unknown>) => {
-        const message = portEvent.data;
-        if (isOpenGeniSiteBridgeCancelMessage(message)) {
-          requests.cancel(port, message.requestId);
-          return;
-        }
-        if (isSiteHttpRequest(message) && portEvent.ports.length === 1) {
-          const controller = requests.start(port, message.requestId);
-          if (!controller) {
-            portEvent.ports[0]!.close();
-            return;
-          }
-          void serveSiteHttp(
-            message,
-            portEvent.ports[0]!,
-            async (request, signal) => {
-              const fetch = bridgeRef.current?.fetch;
-              if (!fetch) throw new Error("This Site host does not support the session SDK");
-              return fetch(request, signal);
-            },
-            controller.signal,
-          ).finally(() => requests.complete(port, message.requestId, controller));
-          return;
-        }
-        if (!isOpenGeniSiteBridgeRequestMessage(message)) return;
-        const controller = requests.start(port, message.requestId);
-        if (!controller) {
-          port.postMessage({
-            type: OPENGENI_SITE_BRIDGE_RESPONSE,
-            version: OPENGENI_SITE_BRIDGE_VERSION,
-            requestId: message.requestId,
-            ok: false,
-            error: {
-              code: "duplicate_request_id",
-              message: "A Site tool request with this id is already running",
-              retryable: false,
-            },
-          } satisfies OpenGeniSiteBridgeResponseMessage);
-          return;
-        }
-        void handleSiteBridgeRequest(bridgeRef.current, message, controller.signal)
-          .then((value) => {
-            if (!controller.signal.aborted) {
-              port.postMessage({
-                type: OPENGENI_SITE_BRIDGE_RESPONSE,
-                version: OPENGENI_SITE_BRIDGE_VERSION,
-                requestId: message.requestId,
-                ok: true,
-                value,
-              } satisfies OpenGeniSiteBridgeResponseMessage);
-            }
-          })
-          .catch((error) => {
-            if (!controller.signal.aborted) {
-              port.postMessage({
-                type: OPENGENI_SITE_BRIDGE_RESPONSE,
-                version: OPENGENI_SITE_BRIDGE_VERSION,
-                requestId: message.requestId,
-                ok: false,
-                error: siteBridgeError(error, message.method === "call"),
-              } satisfies OpenGeniSiteBridgeResponseMessage);
-            }
-          })
-          .finally(() => requests.complete(port, message.requestId, controller));
-      });
-      port.addEventListener("messageerror", () => requests.closePort(port));
-      port.start();
-      port.postMessage(siteBridgeReadyMessage(bridgeRef.current));
-    };
-    const documentLease = new SiteBridgeDocumentLease(attachToolPort, () => requests.closeAll());
+    const host = new SiteBridgeHost({
+      tools: () => bridgeRef.current,
+      viewer: () => viewerRef.current,
+    });
     const onFrameLoad = () => {
       frameLoadPendingRef.current = false;
       const frameWindow = frameRef.current?.contentWindow ?? null;
       if (!frameWindow) return;
-      documentLease.load(frameWindow);
+      host.load(frameWindow);
     };
     onFrameLoadRef.current = onFrameLoad;
     if (frameLoadPendingRef.current) {
@@ -239,7 +119,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
     }
     return () => {
       onFrameLoadRef.current = () => undefined;
-      documentLease.close();
+      host.close();
     };
   }, [props.html, toolBridgeEnabled]);
   return (
@@ -263,166 +143,13 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
   );
 }
 
-export class SiteBridgeRequestRegistry {
-  private readonly controllersByPort = new Map<MessagePort, Map<string, AbortController>>();
-
-  addPort(port: MessagePort): void {
-    // Several SDK clients may share one document bootstrap. Document teardown,
-    // not another client connecting, revokes all of that document's ports.
-    if (!this.controllersByPort.has(port)) this.controllersByPort.set(port, new Map());
-  }
-
-  start(port: MessagePort, requestId: string): AbortController | null {
-    const controllers = this.controllersByPort.get(port);
-    if (!controllers || controllers.has(requestId)) return null;
-    const controller = new AbortController();
-    controllers.set(requestId, controller);
-    return controller;
-  }
-
-  cancel(port: MessagePort, requestId: string): void {
-    const controllers = this.controllersByPort.get(port);
-    const controller = controllers?.get(requestId);
-    if (!controller) return;
-    controller.abort(new Error("Site tool request cancelled"));
-    controllers!.delete(requestId);
-  }
-
-  complete(port: MessagePort, requestId: string, controller: AbortController): void {
-    const controllers = this.controllersByPort.get(port);
-    if (controllers?.get(requestId) === controller) controllers.delete(requestId);
-  }
-
-  closePort(port: MessagePort): void {
-    const controllers = this.controllersByPort.get(port);
-    if (!controllers) return;
-    for (const controller of controllers.values()) {
-      controller.abort(new Error("Site tool bridge port closed"));
-    }
-    controllers.clear();
-    this.controllersByPort.delete(port);
-    port.close();
-  }
-
-  closeAll(): void {
-    for (const port of [...this.controllersByPort.keys()]) this.closePort(port);
-  }
-}
-
-export class SiteBridgeDocumentLease {
-  private loaded = false;
-  private bootstrapPort: MessagePort | null = null;
-
-  constructor(
-    private readonly attachToolPort: (data: unknown, ports: readonly MessagePort[]) => void,
-    private readonly closeActivePorts: () => void,
-    private readonly createMessageChannel: () => MessageChannel = () => new MessageChannel(),
-  ) {}
-
-  load(frameWindow: Pick<Window, "postMessage">): boolean {
-    if (this.loaded) {
-      this.close();
-      return false;
-    }
-    this.loaded = true;
-    const channel = this.createMessageChannel();
-    this.bootstrapPort = channel.port1;
-    channel.port1.addEventListener("message", (event: MessageEvent<unknown>) => {
-      this.attachToolPort(event.data, event.ports);
-    });
-    channel.port1.start();
-    frameWindow.postMessage(
-      {
-        type: OPENGENI_SITE_BRIDGE_READY,
-        version: OPENGENI_SITE_BRIDGE_VERSION,
-      },
-      "*",
-      [channel.port2],
-    );
-    return true;
-  }
-
-  close(): void {
-    this.bootstrapPort?.close();
-    this.bootstrapPort = null;
-    this.closeActivePorts();
-  }
-}
-
-export function openGeniSiteBridgePortFromBootstrap(
-  data: unknown,
-  ports: readonly MessagePort[],
-): MessagePort | null {
-  if (!isOpenGeniSiteBridgeConnectMessage(data)) return null;
-  return ports.length === 1 ? ports[0]! : null;
-}
-
-export async function handleSiteBridgeRequest(
-  bridge: PublishedHtmlArtifactToolBridge | undefined,
-  message: OpenGeniSiteBridgeRequestMessage,
-  signal: AbortSignal,
-): Promise<
-  | OpenGeniSiteToolCatalog
-  | ToolGatewayCallResponse
-  | ToolGatewayDeclarationsResponse
-  | ToolGatewayResolvedTool
-  | ToolGatewayInvokeResponse
-> {
-  if (!bridge) throw new Error("Site tool bridge is unavailable");
-  if (message.method === "resolve") {
-    if (!bridge.resolve) throw new Error("Targeted Site tools are unavailable");
-    return await bridge.resolve({ target: message.payload.target }, { signal });
-  }
-  if (message.method === "invoke") {
-    if (!bridge.invoke) throw new Error("Targeted Site tools are unavailable");
-    return await bridge.invoke(sanitizeOpenGeniSiteToolInvokeRequest(message.payload), { signal });
-  }
-  if (message.method === "catalog") return await bridge.catalog({ signal });
-  if (message.method === "declarations") {
-    if (!bridge.declarations) throw new Error("Site tool declarations are unavailable");
-    return await bridge.declarations({ signal });
-  }
-  return await bridge.call(sanitizeOpenGeniSiteToolCallRequest(message.payload!), { signal });
-}
-
-export function siteBridgeError(
-  error: unknown,
-  legacyCall = false,
-): {
-  code: string;
-  message: string;
-  retryable: boolean;
-  outcomeUnknown: boolean;
-} {
-  const candidate = error as {
-    code?: unknown;
-    message?: unknown;
-    retryable?: unknown;
-    outcomeUnknown?: unknown;
-    details?: { code?: unknown };
-  };
-  const nestedCode = candidate?.details?.code;
-  const knownPreexecution = candidate?.retryable === true && candidate?.outcomeUnknown === false;
-  const stale =
-    knownPreexecution && (nestedCode === "tool_definition_stale" || nestedCode === "catalog_stale");
-  // Historical saved bundles inspect code alone. A stale-named transport error
-  // without known pre-execution proof must remain an error, not invite replay.
-  const unsafeControl =
-    legacyCall &&
-    !knownPreexecution &&
-    (candidate?.code === "catalog_stale" || candidate?.code === "tool_definition_stale");
-  const message =
-    typeof candidate?.message === "string" ? candidate.message : "Site tool request failed";
+function siteViewerHandlers(
+  viewer: OpenGeniSiteViewer | undefined,
+  onSignIn: PublishedHtmlArtifactFrameProps["onSignIn"],
+): SiteBridgeViewerHandlers | undefined {
+  if (!viewer) return undefined;
   return {
-    code: stale
-      ? nestedCode
-      : unsafeControl
-        ? "site_tool_call_failed"
-        : typeof candidate?.code === "string"
-          ? candidate.code
-          : "site_tool_call_failed",
-    message: unsafeControl ? `[${candidate.code}] ${message}` : message,
-    retryable: candidate?.retryable === true,
-    outcomeUnknown: candidate?.outcomeUnknown === true,
+    viewer: () => viewer,
+    signIn: async () => (onSignIn ? await onSignIn() : { started: false }),
   };
 }

@@ -205,7 +205,9 @@ export {
   OPENGENI_SITE_BRIDGE_READY,
   OPENGENI_SITE_BRIDGE_REQUEST,
   OPENGENI_SITE_BRIDGE_RESPONSE,
+  OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD,
   OPENGENI_SITE_BRIDGE_VERSION,
+  OPENGENI_SITE_BRIDGE_VIEWER_METHOD,
   OpenGeniSiteBridgeError,
   createOpenGeniSiteClient,
   isOpenGeniSiteBridgeCancelMessage,
@@ -221,8 +223,10 @@ export type {
   OpenGeniSiteBridgeResponseMessage,
   OpenGeniSiteClient,
   OpenGeniSiteClientOptions,
+  OpenGeniSiteSignInResult,
   OpenGeniSiteToolCatalog,
   OpenGeniSiteToolCallRequest,
+  OpenGeniSiteViewer,
   OpenGeniSiteWorkspaceTools,
 } from "./site";
 export type {
