@@ -364,7 +364,7 @@ Render them with `textContent` or React text, never `innerHTML`,
 
 Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
 schema), `conflict` (stale `expectedVersion`, a duplicate unique value, or a
-schema changed mid-request: send it again),
+schema changed or record grew mid-request: send it again),
 `not_found`, `forbidden` (the access mode does not allow it),
 `quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
 and 100,000 per collection; at most 4 MB of records per request; files 10 MB

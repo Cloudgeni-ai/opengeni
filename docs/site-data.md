@@ -182,7 +182,14 @@ changed in between is checked again inside the transaction, on the same
 budget. Nothing is compiled under the lock: if a collection's schema changed
 between the check and the lock, the write fails with a retryable `conflict`
 (409, reason `schema_changed`, `retryable: true`) and the caller sends it
-again. Imports commit in batches of 100, so an import error reports
+again. Likewise, every record a request checks, before or inside the write,
+counts against its reservation (below) at 1 µs per byte of JSON; a record
+that would take the request more than 25 ms past its reservation is refused
+before it is checked, with a retryable `conflict` (409, reason
+`record_grew`). This happens when a large write lands between a patch's
+admission and its write: the retry reserves for the record's real size. A
+request whose reservation is already the whole 250 ms budget is held to the
+time budget instead, since a retry could not reserve more. Imports commit in batches of 100, so an import error reports
 `details.imported`; once that is above zero the error is never retryable
 (sending the same import again would duplicate the committed batches) and its
 message says how many records were imported.
@@ -225,12 +232,18 @@ are bounded by the windows: with the defaults up to 200 small validating
 requests (25 ms each) can be in flight on one Site, and up to 20 of the
 largest (250 ms each), so a page that inserts or patches many small items at
 once with `Promise.all` is not refused, while tiny patches into large records
-reserve the whole budget and stop at 20 in flight. A request can spend more
-than it reserved only when a record grew between admission and the write or a
-large schema compiles cold. Even then it stops at the request budget plus one
-record and its compile (about 0.45 s at worst), the overrun is charged when it
-settles, and further requests are refused until the window has room again. So a Site's validation per minute
-stays within about 5 s plus the overrun of the requests already in flight.
+reserve the whole budget and stop at 20 in flight. Patches admitted while a
+record is small do not validate it at full size if a large write lands first:
+by the byte estimate a request checks at most its reservation plus 25 ms, and
+anything more is refused as `record_grew` without being checked. A request
+can otherwise spend more than it reserved only when it reserved the whole
+budget, or when the byte estimate undercounts (a cold compile of a large
+schema). Even then it stops at the request budget plus one record and its
+compile (about 0.45 s at worst), the overrun is charged when it settles, and
+further requests are refused until the window has room again. So a Site's
+validation per minute stays within about 5 s plus 25 ms for each request in
+flight, plus the overrun of in-flight requests that reserved the whole
+budget.
 Data paths (filters, sorts, keys, increments, indexes, CSV headers) refuse
 `__proto__`, `prototype` and `constructor`.
 
@@ -342,7 +355,9 @@ mode are added.
   touch no window row), reservation under concurrent admission,
   request-sized reservations (25 concurrent small writes succeed),
   reservations for the stored records patches and increments merge into
-  (refused once the window is reserved; small patches unaffected), refunds
+  (refused once the window is reserved; small patches unaffected), patches
+  admitted before a large write lands refused as `record_grew` (deterministic
+  and concurrent, keeping the windows within their bound), refunds
   only within the reserved minute, non-retryable partial imports, compile-only
   operations on the budget, the retryable schema-changed conflict, the budget
   order, CSV import counting, and the lineage under the production session
