@@ -86,6 +86,9 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   // Never refuses the private transition: drops other people's pending
   // updates and account choices inside it; same owner-only boundary and locks.
   "packages/db/drizzle/0769_private_visibility_never_blocks.sql",
+  // Forks at a message older than the latest context reset copy the history
+  // that was live then; same fork body, owner-only boundary and locks.
+  "packages/db/drizzle/0784_message_fork_as_of_history.sql",
   "packages/db/src/session-tenancy.ts",
   // Reads the owner-only foreign-authority counts for the preview and consent.
   "packages/db/src/session-visibility-work.ts",

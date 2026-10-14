@@ -4745,11 +4745,13 @@ describe("worker activities integration", () => {
     expect(
       await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
     ).toHaveLength(1);
-    expect(
-      (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
-        (run) => run.status === "skipped" && run.error === "scheduled_session_not_idle",
-      ),
-    ).toHaveLength(3);
+    const skipped = (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
+      (run) => run.status === "skipped",
+    );
+    // The occurrence dispatched while the session was paused records that it
+    // was paused, not merely busy.
+    expect(skipped.filter((run) => run.error === "scheduled_session_not_idle")).toHaveLength(2);
+    expect(skipped.filter((run) => run.error === "scheduled_session_paused")).toHaveLength(1);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {
