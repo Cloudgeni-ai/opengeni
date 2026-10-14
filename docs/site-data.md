@@ -182,14 +182,18 @@ changed in between is checked again inside the transaction, on the same
 budget. Nothing is compiled under the lock: if a collection's schema changed
 between the check and the lock, the write fails with a retryable `conflict`
 (409, reason `schema_changed`, `retryable: true`) and the caller sends it
-again. Likewise, every record a request checks, before or inside the write,
-counts against its reservation (below) at 1 µs per byte of JSON; a record
-that would take the request more than 25 ms past its reservation is refused
-before it is checked, with a retryable `conflict` (409, reason
-`record_grew`). This happens when a large write lands between a patch's
-admission and its write: the retry reserves for the record's real size. A
-request whose reservation is already the whole 250 ms budget is held to the
-time budget instead, since a retry could not reserve more. Imports commit in batches of 100, so an import error reports
+again. Likewise, every patch or increment result a request checks counts
+against its reservation (below) at 1 µs per byte of JSON; one that would take
+the request more than 25 ms past its reservation is refused before it is
+checked, with a retryable `conflict` (409, reason `record_grew`). This
+happens when a large write lands between a patch's admission and its write:
+the retry reserves for the record's real size. A re-check inside the write
+(another write changed the record meanwhile) first uses what the check before
+the lock counted, so only real growth counts and concurrent increments on a
+large record are not refused. Inserts, puts and imports carry their records
+at admission and stay on the time budget, and a request whose reservation is
+already the whole 250 ms budget is held to the time budget too, since a retry
+could not reserve more. Imports commit in batches of 100, so an import error reports
 `details.imported`; once that is above zero the error is never retryable
 (sending the same import again would duplicate the committed batches) and its
 message says how many records were imported.
@@ -201,8 +205,9 @@ busy Site cannot use up the whole workspace. A request that would validate
 schema, or imports into one) reserves validation time on both windows in
 the same transaction that counts its rate windows, before any work. The
 reservation is sized to the request: 25 ms plus 1 µs per byte of record JSON
-it carries (for a define, the schema's JSON; for an import, the CSV text or
-the records' JSON) and per stored byte of the records its patches and
+it carries (for a define, the schema's JSON; for an import, the records' JSON,
+or for a CSV its text plus the header length per line, since every parsed row
+repeats the column names) and per stored byte of the records its patches and
 increments merge into, since those validate the whole merged record (read in
 the same admission transaction; a record that does not exist adds nothing),
 capped at the 250 ms request budget. 1 µs per byte is
@@ -234,11 +239,14 @@ largest (250 ms each), so a page that inserts or patches many small items at
 once with `Promise.all` is not refused, while tiny patches into large records
 reserve the whole budget and stop at 20 in flight. Patches admitted while a
 record is small do not validate it at full size if a large write lands first:
-by the byte estimate a request checks at most its reservation plus 25 ms, and
-anything more is refused as `record_grew` without being checked. A request
+by the byte estimate the merged records a request checks fit its reservation
+plus 25 ms (a re-check of a record that changed without growing is not
+counted again, so at most about twice that), and anything more is refused as
+`record_grew` without being checked. A request
 can otherwise spend more than it reserved only when it reserved the whole
 budget, or when the byte estimate undercounts (a cold compile of a large
-schema). Even then it stops at the request budget plus one record and its
+schema, or inserts, puts and imports, which are sized from what they carry
+and stay on the time budget). Even then it stops at the request budget plus one record and its
 compile (about 0.45 s at worst), the overrun is charged when it settles, and
 further requests are refused until the window has room again. So a Site's
 validation per minute stays within about 5 s plus 25 ms for each request in
@@ -357,7 +365,9 @@ mode are added.
   reservations for the stored records patches and increments merge into
   (refused once the window is reserved; small patches unaffected), patches
   admitted before a large write lands refused as `record_grew` (deterministic
-  and concurrent, keeping the windows within their bound), refunds
+  and concurrent, keeping the windows within their bound), no `record_grew`
+  for concurrent increments on a 120 KB record or for CSV imports into a
+  collection with a schema (1,000 rows × 8 columns and 200 columns), refunds
   only within the reserved minute, non-retryable partial imports, compile-only
   operations on the budget, the retryable schema-changed conflict, the budget
   order, CSV import counting, and the lineage under the production session
