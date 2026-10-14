@@ -1421,7 +1421,8 @@ jobs:
           bun scripts/prepare-development-artifact-runtime.ts \
             --repository-root "$GITHUB_WORKSPACE" \
             --output "$GITHUB_WORKSPACE/.opengeni/artifact-runtime-report-ci"
-          bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
+          bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \
+            ./apps/api/test/native-spreadsheet-transaction-order.test.ts
 
       - name: Build client packages (contracts + SDK + React)
         timeout-minutes: 21
