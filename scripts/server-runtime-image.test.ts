@@ -45,6 +45,16 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
           const png = await sharp({create:{width:1,height:1,channels:3,background:'white'}}).png().toBuffer();
           if (!png.length) throw new Error('missing Sharp native output');
           if (!existsSync('./apps/${role}/dist/process/assets/runtime/bundled_default_skills/document-parsing/SKILL.md')) throw new Error('missing Skills');
+          // Connected 1Password vaults: the SDK core reads core_bg.wasm beside
+          // its own module when it loads. A bundled copy would point at the
+          // build machine's path instead.
+          const onePassword = runtimeRequire('@1password/sdk');
+          if (typeof onePassword.createClient !== 'function') throw new Error('missing 1Password SDK');
+          for (const name of readdirSync('./apps/${role}/dist/process', { recursive: true })) {
+            if (String(name).endsWith('.js') && readFileSync(join('./apps/${role}/dist/process', String(name)), 'utf8').includes('core_bg.wasm')) {
+              throw new Error('the 1Password SDK core was bundled into ' + name);
+            }
+          }
           if (${JSON.stringify(role)} === 'worker') {
             const {LiteParse} = runtimeRequire('@llamaindex/liteparse');
             new LiteParse({ocrEnabled:false,numWorkers:1});

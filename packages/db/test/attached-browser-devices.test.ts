@@ -602,6 +602,7 @@ describe("attached browser endpoint registry", () => {
       await getAttachedBrowserDevice(client.db, {
         accountId: scope.accountId,
         workspaceId: scope.workspaceId,
+        subjectId: scope.subjectId,
         deviceId,
       }),
     ).toMatchObject({

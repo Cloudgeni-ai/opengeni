@@ -121,8 +121,14 @@ export const MODE_LABEL: Record<VaultSummary["mode"], string> = {
 /** Who a vault is shared with, in one short phrase. */
 export function vaultAudience(vault: VaultSummary, organizationName: string): string {
   switch (vault.ownerKind) {
-    case "user":
-      return "Only you";
+    case "user": {
+      const allowed = vault.availability?.allowedWorkspaceIds ?? null;
+      if (allowed === null) return "Only you, in all your workspaces";
+      // Its home (Personal) workspace always has it.
+      const others = allowed.filter((id) => id !== vault.workspaceId).length;
+      if (others === 0) return "Only you, in your Personal workspace";
+      return `Only you, in Personal and ${others} other ${others === 1 ? "workspace" : "workspaces"}`;
+    }
     case "task":
       return "This task and its subtasks";
     case "workspace":

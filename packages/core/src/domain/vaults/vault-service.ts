@@ -92,6 +92,7 @@ import {
   type VaultCallerAuthority,
 } from "./mapping";
 import { vaultErrorCodeForProvider } from "./provider-registry";
+import { LINKED_VAULT_SEARCH_MAX_AGE_MS, refreshStaleLinkedVaults } from "./provider-sync";
 import {
   archiveProviderVaultItem,
   writeProviderVaultItem,
@@ -940,9 +941,25 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
     async searchForAgent(principal, input) {
       const context = principalContext(principal);
-      const reachable = await listVaultsForSubject(deps.db, context, {
+      let reachable = await listVaultsForSubject(deps.db, context, {
         workspaceId: principal.workspaceId,
       });
+      // Items added straight in a connected provider (1Password) appear here
+      // without anyone pressing Sync: stale mirrors refresh before the scan.
+      if (deps.providers) {
+        const changed = await refreshStaleLinkedVaults({
+          db: deps.db,
+          context,
+          vaults: reachable,
+          providers: deps.providers,
+          maxAgeMs: LINKED_VAULT_SEARCH_MAX_AGE_MS,
+        });
+        if (changed.length > 0) {
+          reachable = await listVaultsForSubject(deps.db, context, {
+            workspaceId: principal.workspaceId,
+          });
+        }
+      }
       const byTier = (vaults: VaultRow[]) =>
         [...vaults].sort(
           (left, right) => left.tier - right.tier || left.name.localeCompare(right.name),

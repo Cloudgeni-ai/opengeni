@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 2.0.1
+
+### Patch Changes
+
+- Updated dependencies [e8d18da]
+  - @opengeni/sdk@2.0.1
+  - @opengeni/connect@2.0.1
+
 ## 2.0.0
 
 ### Major Changes
