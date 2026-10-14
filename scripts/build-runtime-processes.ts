@@ -75,6 +75,12 @@ const sharedBuild = {
 // either one detaches those bindings from their installed dependency graph.
 const nativeRuntimeExternals = ["@llamaindex/liteparse", "sharp"];
 
+// Packages that read a file next to their own module at load time. Bundling
+// freezes that location to the build machine's path, so the asset is missing
+// at runtime: the 1Password SDK core reads `core_bg.wasm` from its __dirname.
+// The API and worker load them from their runtime closure instead.
+export const PACKAGE_ASSET_RUNTIME_EXTERNALS = ["@1password/sdk", "@1password/sdk-core"];
+
 async function buildApi(): Promise<void> {
   const outdir = join(repositoryRoot, "apps/api/dist/process");
   await rm(outdir, { recursive: true, force: true });
@@ -82,7 +88,13 @@ async function buildApi(): Promise<void> {
     ...sharedBuild,
     entrypoints: [join(repositoryRoot, "apps/api/src/index.ts")],
     outdir,
-    external: [...nativeRuntimeExternals, "better-auth", "better-auth/*", "@better-auth/*"],
+    external: [
+      ...nativeRuntimeExternals,
+      ...PACKAGE_ASSET_RUNTIME_EXTERNALS,
+      "better-auth",
+      "better-auth/*",
+      "@better-auth/*",
+    ],
   });
   await copyDirectory(join(repositoryRoot, "agent/install"), join(outdir, "assets/agent-install"));
   await copyRuntimeSkillAssets(repositoryRoot, outdir);
@@ -95,7 +107,7 @@ async function buildWorker(): Promise<void> {
     ...sharedBuild,
     entrypoints: [join(repositoryRoot, "apps/worker/src/index.ts")],
     outdir,
-    external: [...nativeRuntimeExternals, "@temporalio/*"],
+    external: [...nativeRuntimeExternals, ...PACKAGE_ASSET_RUNTIME_EXTERNALS, "@temporalio/*"],
   });
 
   // Generate with the worker package's own Temporal dependency, then colocate

@@ -8,6 +8,7 @@ import {
   DATABASE_COMMAND_RUNNERS,
   finalizeCommandEntry,
 } from "./assemble-server-runtime";
+import { PACKAGE_ASSET_RUNTIME_EXTERNALS } from "./build-runtime-processes";
 
 const guardedSource =
   "export async function runMigrateCli() {}\nif (import.meta.main) await runMigrateCli();\n";
@@ -16,6 +17,13 @@ test("only the worker image retains the native Documents parser", () => {
   expect(API_RUNTIME_EXTERNALS).not.toContain("@llamaindex/liteparse");
   expect(WORKER_RUNTIME_EXTERNALS).toContain("@llamaindex/liteparse");
   expect(API_RUNTIME_EXTERNALS).toContain("sharp");
+});
+
+test("both images ship the 1Password SDK as a package, so its WASM core travels with it", () => {
+  // The bundles leave it external; the closures must then carry it.
+  expect(PACKAGE_ASSET_RUNTIME_EXTERNALS).toContain("@1password/sdk");
+  expect(API_RUNTIME_EXTERNALS).toContain("@1password/sdk");
+  expect(WORKER_RUNTIME_EXTERNALS).toContain("@1password/sdk");
 });
 
 describe("finalizeCommandEntry", () => {

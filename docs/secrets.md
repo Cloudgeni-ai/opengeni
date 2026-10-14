@@ -216,11 +216,23 @@ read-write) or create a managed vault with
   attempt for at most 60 seconds, with at most 50 provider reads per attempt.
 - Edits in a read-write linked vault are written to 1Password first, then the
   mirror refreshes. A changed item returns `provider_conflict`.
+- Items added or changed straight in 1Password show up without pressing Sync:
+  agent search refreshes a linked vault's mirror when it is more than 10
+  minutes old, and a reference that finds nothing refreshes mirrors more than
+  2 minutes old and looks again. A refresh costs one `vaults.list` call and
+  lists items only when the vault changed; a vault that failed to sync is
+  retried at most once per period, and a rate limit is waited out.
+- A personal (Only me) connection's token is used for its owner in every
+  workspace their Only-me vaults reach, and an organization connection serves
+  its organization vaults in every workspace they are available in, whichever
+  workspace the token was added in.
 - A per-connection budget follows the plan tier (Family 1,000, Teams 5,000,
   Business 50,000 reads a day). Rate limits set the vault's sync status to
   `rate_limited` with a retry time; expired tokens show `auth_expired`.
 - The SDK lives in `packages/vaults-onepassword` and is only loaded by the API
-  and worker.
+  and worker. Their images keep `@1password/sdk` as an installed package
+  rather than bundling it, because its core loads a WASM file from beside its
+  own module.
 - Not yet supported in linked vaults: `secret_move` into or out of them,
   restoring field history, and file fields.
 

@@ -426,3 +426,102 @@ export async function syncLinkedProviderVault(input: {
     ...(input.force ? { force: true } : {}),
   });
 }
+
+/** How stale a linked vault's mirror may be before a search refreshes it. */
+export const LINKED_VAULT_SEARCH_MAX_AGE_MS = 10 * 60_000;
+/** How stale it may be before a reference that found nothing refreshes it. */
+export const LINKED_VAULT_MISS_MAX_AGE_MS = 2 * 60_000;
+/** How long a search or resolution waits for refreshes before answering. */
+export const LINKED_VAULT_REFRESH_WAIT_MS = 8_000;
+
+/** The vault fields a freshness check needs (a `VaultRow` has them all). */
+export type LinkedVaultFreshness = {
+  id: string;
+  source: string;
+  syncStatus: VaultSyncStatus;
+  lastSyncedAt: string | null;
+  rateLimitedUntil: string | null;
+  updatedAt: string;
+};
+
+/**
+ * Whether a linked vault's mirror is older than `maxAgeMs`. A vault whose last
+ * sync failed counts from that failure (it is recorded as `updatedAt`), so a
+ * broken connection is retried once per `maxAgeMs`, not on every call. A vault
+ * under a provider rate limit is never stale until the limit lifts.
+ */
+export function linkedVaultNeedsRefresh(
+  vault: LinkedVaultFreshness,
+  maxAgeMs: number,
+  now: Date,
+): boolean {
+  if (vault.source === "opengeni") return false;
+  if (vault.rateLimitedUntil && new Date(vault.rateLimitedUntil).getTime() > now.getTime()) {
+    return false;
+  }
+  const last =
+    vault.syncStatus === "ok" || vault.syncStatus === "syncing"
+      ? vault.lastSyncedAt
+      : vault.updatedAt;
+  if (!last) return true;
+  return now.getTime() - new Date(last).getTime() >= maxAgeMs;
+}
+
+const linkedVaultRefreshes = new Map<string, Promise<ProviderVaultSyncResult | null>>();
+
+/**
+ * Bring stale linked vault mirrors up to date, so items added in the provider
+ * (for example straight in 1Password) are found without anyone pressing Sync.
+ *
+ * Each refresh is the ordinary non-forced sync: one `listVaults` call, and an
+ * item listing only when the provider says the vault changed. Refreshes of the
+ * same vault share one call per process. The caller waits at most `waitMs`;
+ * slower refreshes finish in the background and record their own status.
+ * Never throws: failures are recorded as the vault's sync status.
+ *
+ * Returns the ids of the vaults whose mirror changed before the wait ended.
+ */
+export async function refreshStaleLinkedVaults(input: {
+  db: Database;
+  context: VaultDbContext;
+  vaults: readonly LinkedVaultFreshness[];
+  providers: VaultProviderRegistry;
+  maxAgeMs: number;
+  waitMs?: number;
+  now?: () => Date;
+}): Promise<string[]> {
+  const now = (input.now ?? (() => new Date()))();
+  const stale = input.vaults.filter((vault) =>
+    linkedVaultNeedsRefresh(vault, input.maxAgeMs, now),
+  );
+  if (stale.length === 0) return [];
+  const changed: string[] = [];
+  const runs = stale.map((vault) => {
+    let run = linkedVaultRefreshes.get(vault.id);
+    if (!run) {
+      run = syncLinkedProviderVault({
+        db: input.db,
+        context: input.context,
+        vaultId: vault.id,
+        providers: input.providers,
+        ...(input.now ? { now: input.now } : {}),
+      })
+        .catch(() => null)
+        .finally(() => linkedVaultRefreshes.delete(vault.id));
+      linkedVaultRefreshes.set(vault.id, run);
+    }
+    return run.then((result) => {
+      if (result?.status === "synced") changed.push(vault.id);
+    });
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.all(runs),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, input.waitMs ?? LINKED_VAULT_REFRESH_WAIT_MS);
+      timer.unref?.();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return [...changed];
+}
