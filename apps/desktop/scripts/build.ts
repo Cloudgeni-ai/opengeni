@@ -1,8 +1,10 @@
 // Bundle the desktop app into dist/: one ES module for the main process (the
 // SDK and the updater split into chunks that load after the window is up),
 // CommonJS preloads (sandboxed preloads can't be modules), and static pages.
+// dist/ is the packaged app's root: its package.json has no dependencies, so
+// nothing from the workspace's node_modules reaches the app archive.
 
-import { cpSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const root = join(import.meta.dirname, "..");
@@ -50,4 +52,29 @@ for (const [entry, name] of [
 cpSync(join(kit, "pages"), join(dist, "pages"), { recursive: true });
 cpSync(join(root, "..", "web", "public", "favicon.svg"), join(dist, "pages", "logo.svg"));
 cpSync(join(root, "assets"), join(dist, "assets"), { recursive: true });
+
+const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as Record<
+  string,
+  unknown
+>;
+// Releases stamp their version without editing package.json.
+const version = process.env.OPENGENI_DESKTOP_VERSION || manifest.version;
+writeFileSync(
+  join(dist, "package.json"),
+  `${JSON.stringify(
+    {
+      name: "opengeni-desktop",
+      productName: "Opengeni",
+      version,
+      description: manifest.description,
+      homepage: manifest.homepage,
+      license: manifest.license,
+      author: manifest.author,
+      type: "module",
+      main: "main.mjs",
+    },
+    null,
+    2,
+  )}\n`,
+);
 console.log(`built ${production ? "production" : "development"} bundle in ${dist}`);
