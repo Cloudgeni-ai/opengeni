@@ -15,7 +15,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimWorkspaceArchiveCapture, createDb, readLease, type Database, type DbClient } from "@opengeni/db";
+import {
+  claimWorkspaceArchiveCapture,
+  createDb,
+  readLease,
+  type Database,
+  type DbClient,
+} from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import {
   acquireSharedTestDatabase,
@@ -184,11 +190,7 @@ describe("drain workspace capture budget", () => {
         );
         // Never terminated: the box keeps its files and stays draining.
         await expect(operation).rejects.toBeDefined();
-        await within(
-          Promise.race([published.promise, released.promise]),
-          30_000,
-          "drain capture",
-        );
+        await within(Promise.race([published.promise, released.promise]), 30_000, "drain capture");
         // The capture was stopped, not completed late: nothing is published,
         // the exact claim is released for a fresh retry, and the spool is gone.
         expect(publications).toBe(0);

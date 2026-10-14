@@ -599,7 +599,7 @@ function drainCaptureKey(lease: DrainCaptureIdentity & { instanceId: string }): 
 
 /** True while this worker still runs (or publishes, or removes the spool of)
  * a drain capture of this exact lease epoch and instance. */
-export function sandboxDrainCaptureSettlingInProcess(
+function sandboxDrainCaptureSettlingInProcess(
   lease: DrainCaptureIdentity,
   nowMs = Date.now(),
 ): boolean {
