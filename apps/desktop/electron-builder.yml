@@ -71,7 +71,7 @@ linux:
       arch: [x64, arm64]
     - target: rpm
       arch: [x64, arm64]
-  icon: resources/icon.png
+  icon: resources/linux-icons
   category: Development
   executableName: opengeni
   artifactName: Opengeni-${version}-linux-${arch}.${ext}

@@ -20,8 +20,13 @@ export interface AppImageEntryOptions {
   windowClass: string;
 }
 
-/** Quote a path for a .desktop Exec line (Desktop Entry Specification, "The Exec key"). */
+/**
+ * A path as a .desktop Exec argument (Desktop Entry Specification, "The Exec
+ * key"), quoted only when it holds a reserved character: xdg-open's fallback
+ * launcher, used outside the big desktops, can't run a quoted program.
+ */
 export function desktopExecQuote(path: string): string {
+  if (!/[\s"'\\><~|&;$*?#()`]/u.test(path)) return path;
   return `"${path.replace(/[\\"`$]/gu, (character) => `\\${character}`)}"`;
 }
 

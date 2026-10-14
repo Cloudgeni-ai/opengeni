@@ -64,7 +64,7 @@ describe("update installs", () => {
         throw new Error("no package-type file");
       }),
     ).toBe(false);
-    process.env.APPIMAGE = "/home/person/Opengeni.AppImage";
+    process.env.APPIMAGE = "/opt/Opengeni.AppImage";
     try {
       expect(updateNeedsPassword("linux", () => "deb")).toBe(false);
     } finally {
