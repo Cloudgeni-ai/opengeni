@@ -11,7 +11,29 @@ import {
   type CreditDebitAttribution,
   currentCreditDebitAttribution,
 } from "@opengeni/db";
-import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "./http/api-error";
+
+const AGENT_ATTEMPT_AUTHORITY_INVALID = "agent attempt authority is invalid";
+
+/**
+ * A refused agent-attempt credential. The detail code names why, so request
+ * telemetry can tell a process that outlived its turn (`caller_stale`) from a
+ * malformed or revoked credential instead of reporting it as unclassified.
+ */
+function agentAttemptAuthorityError(
+  reason: "malformed" | SessionAuthorizationDeniedError["reason"],
+  cause?: unknown,
+): ApiHttpError {
+  const error = new ApiHttpError(403, {
+    code: "forbidden",
+    message: AGENT_ATTEMPT_AUTHORITY_INVALID,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: `agent_attempt_${reason}` },
+  });
+  if (cause !== undefined) error.cause = cause;
+  return error;
+}
 
 /**
  * Trusted payer for a non-agent grant: an authenticated human session pays as
@@ -39,7 +61,7 @@ export async function withAccessGrantSessionRlsContext<T>(
   }
   const callerSessionId = grant.metadata?.sessionId;
   if (typeof callerSessionId !== "string") {
-    throw new HTTPException(403, { message: "agent attempt authority is invalid" });
+    throw agentAttemptAuthorityError("malformed");
   }
   try {
     const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
@@ -73,10 +95,7 @@ export async function withAccessGrantSessionRlsContext<T>(
     );
   } catch (error) {
     if (error instanceof SessionAuthorizationDeniedError) {
-      throw new HTTPException(403, {
-        message: "agent attempt authority is invalid",
-        cause: error,
-      });
+      throw agentAttemptAuthorityError(error.reason, error);
     }
     throw error;
   }
