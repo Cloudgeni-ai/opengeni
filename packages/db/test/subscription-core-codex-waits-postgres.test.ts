@@ -408,8 +408,11 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       earliestResetAt: new Date(resetAt),
     });
 
+    const armedAt = Date.now();
     const armed = await arm(turn, new Date(resetAt));
     if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
+    // OpenAI can reset a limit early, so the waiter rechecks on the bounded
+    // backoff (its first check a minute out) rather than at the stored reset.
     expect(armed.waiter).toMatchObject({
       blockedTurnId: turn.identity.turnId,
       blockedTurnGeneration: turn.executionGeneration,
@@ -417,9 +420,11 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       wakeRevision: 1,
       observedWakeRevision: 1,
       waitReason: "no_eligible_capacity",
-      resetKind: "authoritative",
-      nextCheckAt: new Date(resetAt),
+      resetKind: "bounded_refresh",
+      earliestResetAt: new Date(resetAt),
     });
+    expect(armed.waiter.nextCheckAt.getTime()).toBeGreaterThanOrEqual(armedAt + 60_000);
+    expect(armed.waiter.nextCheckAt.getTime()).toBeLessThan(resetAt);
     expect(armed.events.map((event) => event.type)).toEqual([
       "codex.capacity.waiting",
       "session.status.changed",
@@ -444,7 +449,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     expect(ref).toEqual({
       waiterId: armed.waiter.waiterId,
       generation: 1,
-      nextCheckAt: new Date(resetAt).toISOString(),
+      nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
       wakeRevision: 1,
     });
     expect(
@@ -477,7 +482,11 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         healthRetryAt: null,
       },
     });
-    expect(waiting).toMatchObject({ action: "waiting", waiter: { refreshAttempt: 0 } });
+    // An unchanged wait backs the next recheck off.
+    expect(waiting).toMatchObject({
+      action: "waiting",
+      waiter: { refreshAttempt: 1, resetKind: "bounded_refresh" },
+    });
 
     // Capacity returns: the exact blocked turn becomes recovering, the waiter goes.
     await exhaust(org, connectionId, null);

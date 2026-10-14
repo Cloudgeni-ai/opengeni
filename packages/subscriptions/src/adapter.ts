@@ -277,6 +277,14 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    */
   usageReadEndsQuotaExhaustion?: boolean;
   /**
+   * With `usageReadEndsQuotaExhaustion`: whether one `fetchUsage` response
+   * confirms the connection may serve again. A response can report every
+   * window below the limit and still say the account is refused (or that a
+   * feature-specific limit is spent); such a reading never ends a stored
+   * quota exhaustion. Absent: every reading below the limit does.
+   */
+  usageReadConfirmsAvailability?(response: unknown): boolean;
+  /**
    * The provider's usage-endpoint readings are complete: each reports every
    * window that limits the connection, so a stored exhausted window that a
    * newer reading omits has ended and is dropped. Absent or false: a

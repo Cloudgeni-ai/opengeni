@@ -24081,7 +24081,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       payload: { waiterId: waiter.waiterId, generation: waiter.generation, reason },
     }),
     cancelledBy: "codex_capacity_reconcile",
-    recheckBeforeReset: false,
+    recheckBeforeReset: true,
   },
   xai: {
     label: "SuperGrok",
@@ -24150,7 +24150,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     cancelledBy: "claude_capacity_reconcile",
     // Claude's adapter reads no usage that can end an exhaustion before its
     // stored reset (its quota comes from response headers), so its waiter
-    // sleeps until the reset like Codex's.
+    // sleeps until the reset.
     recheckBeforeReset: false,
   },
 };
