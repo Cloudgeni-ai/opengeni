@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "15c69176708310c5076815fbcbd07c278e5eab1068e117fd1cd4e98ee71f5079"
+      "sha256": "4b6bdd99e379d68215268ccf709dd1d289a5834015eb09567940482ed18e6ccb"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -817,7 +817,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "f1c68f7a528153f5653d6c8a5dd87410c1eab524214fc452a24989dca6fea75b"
+      "sha256": "5019ac6e5a9e7de2044e2fab17edc9432de6e26a0307b96d52cfa187325567b7"
     },
     {
       "workflow": ".github/workflows/ci.yml",
