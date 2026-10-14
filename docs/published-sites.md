@@ -148,7 +148,11 @@ dismiss them.
 
 The owner or a workspace admin can **take down** a Site at once with a
 reason: visitors see a takedown notice, the edge cache is purged and an
-audit event is recorded. **Restore** brings it back. Platform admins can
+audit event is recorded. The Site's API calls stop immediately; new page
+loads stop within a minute, and every edge location shows the takedown
+notice within about two minutes (see
+[the gateway's takedown latency](../apps/site-gateway/README.md#caching-and-takedown-latency)).
+**Restore** brings it back. Platform admins can
 take any Site down; only they can restore those. An optional content
 scanner (Google Web Risk) checks new versions when a key is configured.
 
