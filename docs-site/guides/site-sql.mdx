@@ -11,7 +11,7 @@ Use Site Data for records and files with ready-made access modes. Use Site SQL w
 
 Ask Opengeni, or use the tools directly:
 
-1. `site_sql_enable` turns the Site's database on.
+1. `site_sql_enable` turns the Site's database on. The owner can also use the **SQL database** switch on the Site's **Data** tab, which shows the database size and its number of queries; turning it off keeps the data.
 2. `site_sql_migrate` adds a named schema migration, such as `create_votes` with `CREATE TABLE votes (...)`. Migrations are kept in order and replayed if the database is ever rebuilt.
 3. `site_sql_define_query` defines a named query the Site may run, with an audience:
 
