@@ -21,9 +21,15 @@ each hosted field keeps encrypted **versions**.
 | Item type | `login`, `api_key`, `note`, `file`, `passkey` |
 | Field kind | `text`, `concealed`, `totp`, `file` |
 
-- **Only me** vaults belong to one organization member and are usable in every
-  workspace of that organization they can access. No admin can list or read
-  another person's Only me vault.
+- **Only me** vaults belong to one organization member. No admin can list or
+  read another person's Only me vault. Their owner sets where each one is
+  usable with "Available in": every workspace of the organization they can
+  access, or a list of them. Their Personal workspace (the vault's home)
+  always has it. A new Only me vault starts in the workspace it was created or
+  linked from (only Personal when added from there) unless the request sets
+  `availability`; `allowedWorkspaceIds: null` means every workspace. The
+  default **Private** vault is always available everywhere. Vaults created
+  before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
 - **Organization** vaults are managed with `account:admin`; their reach is set
   by "Available in" (all workspaces or a list, and optionally personal
@@ -131,7 +137,7 @@ implementation: `packages/contracts/src/secret-references.ts`,
 
 | Surface | Behaviour |
 |---|---|
-| `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where OpenGeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
+| `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where Opengeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
 | `run_on` | Exec splices for the target's shell; file writes resolve content; reads resolve nothing. |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
@@ -166,7 +172,7 @@ vault name.
   human answering.
 - Slack, push and email show a link to the card instead of collecting values;
   a value pasted into a Slack thread is never saved as an answer or to a vault,
-  though the message itself stays in Slack and in OpenGeni's Slack inbox. Voice
+  though the message itself stays in Slack and in Opengeni's Slack inbox. Voice
   tells the person to answer in the app.
 - `session_human_input_respond` from another agent accepts only a reference or
   a generate request, never a raw value.
@@ -212,19 +218,32 @@ read-write) or create a managed vault with
   `provider_conflict`.
 - `DELETE /connections/:connectionId/1password` unlinks every vault linked
   through the connection, then revokes it. Nothing is deleted in 1Password.
-- OpenGeni mirrors item metadata only; values are fetched live and cached per
+- Opengeni mirrors item metadata only; values are fetched live and cached per
   attempt for at most 60 seconds, with at most 50 provider reads per attempt.
 - Edits in a read-write linked vault are written to 1Password first, then the
   mirror refreshes. A changed item returns `provider_conflict`.
+- Items added or changed straight in 1Password show up without pressing Sync:
+  agent search and opening the vault in the app refresh a linked vault's mirror
+  when it is more than 10 minutes old, and a reference that finds nothing
+  refreshes mirrors more than 2 minutes old and looks again. A refresh costs one
+  `vaults.list` call and lists items only when the vault changed; a vault that
+  failed to sync is retried at most once per period, and a rate limit is waited
+  out.
+- A personal (Only me) connection's token is used for its owner in every
+  workspace their Only-me vaults reach, and an organization connection serves
+  its organization vaults in every workspace they are available in, whichever
+  workspace the token was added in.
 - A per-connection budget follows the plan tier (Family 1,000, Teams 5,000,
   Business 50,000 reads a day). Rate limits set the vault's sync status to
   `rate_limited` with a retry time; expired tokens show `auth_expired`.
 - The SDK lives in `packages/vaults-onepassword` and is only loaded by the API
-  and worker.
+  and worker. Their images keep `@1password/sdk` as an installed package
+  rather than bundling it, because its core loads a WASM file from beside its
+  own module.
 - Not yet supported in linked vaults: `secret_move` into or out of them,
   restoring field history, and file fields.
 
-**Host provider (embedders).** Products that embed OpenGeni can supply a
+**Host provider (embedders).** Products that embed Opengeni can supply a
 `vaultProvider` implementing `VaultProvider` from `@opengeni/vaults`; link its
 vaults with `provider: "host"`. This replaces the removed `sandboxSecrets` port.
 See [embedding.md](embedding.md).

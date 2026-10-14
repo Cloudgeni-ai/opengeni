@@ -69,6 +69,7 @@ import {
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
+import { siteAuthSearch } from "@/lib/site-auth";
 import {
   parseAgentParam,
   parseServiceAccountParam,
@@ -99,7 +100,7 @@ import {
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
 } from "@/lib/workspace-navigation-preference";
-import { installDesktopShell } from "@/lib/desktop";
+import { installDesktopShell, warmDesktopPages } from "@/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -147,6 +148,10 @@ const LazyPersonalSecurityRoute = lazyRouteComponent(
 const LazyNativeSignInRoute = lazyRouteComponent(
   () => import("@/routes/native-sign-in"),
   "NativeSignInRoute",
+);
+const LazySiteAuthorizeRoute = lazyRouteComponent(
+  () => import("@/routes/site-auth"),
+  "SiteAuthorizeRoute",
 );
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
@@ -337,6 +342,14 @@ const nativeSignInRoute = createRoute({
     };
   },
   component: NativeSignIn,
+});
+// Where a published Site's gateway sends a viewer to sign in: confirm the
+// Site and account, then hand the gateway a one-time code (code + PKCE).
+const siteAuthorizeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "site-auth/authorize",
+  validateSearch: siteAuthSearch,
+  component: SiteAuthorize,
 });
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
@@ -794,6 +807,7 @@ const routeTree = rootRoute.addChildren([
   accountAuthRoute,
   personalSecurityRoute,
   nativeSignInRoute,
+  siteAuthorizeRoute,
   ...(import.meta.env.DEV
     ? [composerChromeGalleryRoute, onboardingPreviewRoute, devSessionTimelineRoute]
     : []),
@@ -851,6 +865,14 @@ const router = createRouter({
   ...routerErrorOptions(() => appRoutePattern()),
 });
 installDesktopShell((path) => router.history.push(path));
+warmDesktopPages([
+  LazySessionRoute,
+  LazySessionsIndexRoute,
+  LazyInboxRoute,
+  LazyCapabilitiesRoute,
+  LazySchedulesRoute,
+  LazyArtifactsRoute,
+]);
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {
@@ -1263,6 +1285,11 @@ function Device() {
 function NativeSignIn() {
   const search = nativeSignInRoute.useSearch();
   return <LazyNativeSignInRoute search={search} />;
+}
+
+function SiteAuthorize() {
+  const search = siteAuthorizeRoute.useSearch();
+  return <LazySiteAuthorizeRoute search={search} />;
 }
 
 function ResetPassword() {

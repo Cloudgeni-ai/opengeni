@@ -97,6 +97,7 @@ import {
   elideSupersededViewImagePairs,
   generateSessionTitle,
   materializeSandboxFileDownloads,
+  sandboxFileDownloadFailureNote,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
@@ -5721,6 +5722,86 @@ describe("runtime event normalization", () => {
     expect(JSON.stringify(events)).not.toContain("sig=secret");
   });
 
+  test("explains a filesystem-root Connected Machine working directory on a failed staging command", async () => {
+    const workdirs: string[] = [];
+    const events: Array<{ type: string; payload: any }> = [];
+    // Localized (German) macOS diagnostic: the explanation must not depend on
+    // English command output.
+    const localized = "mkdir: .opengeni: Schreibgeschütztes Dateisystem";
+    const result = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/" }) },
+        exec: async ({ workdir }: { workdir?: string }) => {
+          workdirs.push(workdir ?? "");
+          return { output: localized, exitCode: 1 };
+        },
+      } as any,
+      [
+        {
+          fileId: "file-1",
+          mountPath: ".opengeni/files/file-1",
+          filename: "Invoice.pdf",
+          url: "https://storage.example/invoice.pdf?sig=secret",
+          sizeBytes: 5,
+        },
+      ],
+      {
+        sandboxBackend: "selfhosted",
+        onRuntimeEvent: (event) => events.push(event as any),
+      },
+    );
+
+    expect(workdirs).toEqual(["/"]);
+    expect(result.failures).toHaveLength(1);
+    const failure = result.failures[0]!;
+    expect(failure.path).toBe("/.opengeni/files/file-1/Invoice.pdf");
+    expect(failure.exitCode).toBe(1);
+    expect(failure.output).toBe(localized);
+    expect(failure.reason).toContain("working directory is the filesystem root (/)");
+    expect(failure.reason).toContain("may have failed for that reason");
+    expect(failure.reason).toContain(".opengeni/files/file-1/Invoice.pdf");
+    expect(failure.reason).toContain("start a new session on this machine");
+    expect(failure.reason).toContain("Underlying error: Sandbox file resource download file-1");
+    expect(failure.reason).toContain("Schreibgeschütztes Dateisystem");
+    expect(sandboxFileDownloadFailureNote(result.failures)).toContain(
+      "working directory is the filesystem root (/)",
+    );
+    expect(events[1]?.payload.error).toBe(failure.reason);
+    expect(events[1]?.payload.exitCode).toBe(1);
+    expect(events[1]?.payload.output).toBe(localized);
+    expect(JSON.stringify(events)).not.toContain("sig=secret");
+  });
+
+  test("keeps the raw staging failure for managed root workspaces and non-root machine folders", async () => {
+    const download = {
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename: "input.txt",
+      url: "https://storage.example/input.txt",
+    };
+    const refusing = (root: string) =>
+      ({
+        state: { manifest: new Manifest({ root }) },
+        exec: async () => ({ output: "mkdir: .opengeni: Read-only file system", exitCode: 1 }),
+      }) as any;
+
+    for (const sandboxBackend of ["modal", "docker", undefined] as const) {
+      const managed = await materializeSandboxFileDownloads(refusing("/"), [download], {
+        ...(sandboxBackend ? { sandboxBackend } : {}),
+      });
+      expect(managed.failures).toHaveLength(1);
+      expect(managed.failures[0]?.reason).toContain("Read-only file system");
+      expect(managed.failures[0]?.reason).not.toContain("filesystem root");
+    }
+
+    const nested = await materializeSandboxFileDownloads(refusing("/Users/me"), [download], {
+      sandboxBackend: "selfhosted",
+    });
+    expect(nested.failures).toHaveLength(1);
+    expect(nested.failures[0]?.reason).toContain("Read-only file system");
+    expect(nested.failures[0]?.reason).not.toContain("filesystem root");
+  });
+
   test("propagates turn cancellation instead of downgrading it to a file-download failure", async () => {
     const events: string[] = [];
     await expect(
@@ -7469,7 +7550,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("an ordinary inner extractor may own OpenGeni-looking custom-data keys", async () => {
+  test("an ordinary inner extractor may own Opengeni-looking custom-data keys", async () => {
     const fullResult = {
       content: [{ type: "text" as const, text: "caller-owned marker content" }],
       isError: false,

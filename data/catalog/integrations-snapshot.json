@@ -5244,7 +5244,7 @@
           "id": "google_oauth_client",
           "type": "oauth2",
           "generateUrl": "https://console.cloud.google.com/auth/clients",
-          "setup": "Create a Google OAuth web client for OpenGeni's integration callback, enable the Gmail API and Gmail MCP API, and approve the documented Gmail read-only, compose, and modify scopes."
+          "setup": "Create a Google OAuth web client for Opengeni's integration callback, enable the Gmail API and Gmail MCP API, and approve the documented Gmail read-only, compose, and modify scopes."
         }
       ],
       "tier": "verified",
@@ -18020,7 +18020,7 @@
           "httpStatus": 401
         }
       },
-      "reason": "Figma requires an approved MCP client; OpenGeni remote access must be approved before stock setup is offered"
+      "reason": "Figma requires an approved MCP client; Opengeni remote access must be approved before stock setup is offered"
     },
     {
       "row": {

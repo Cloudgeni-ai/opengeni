@@ -39,6 +39,7 @@ import {
   resolveScheduledTaskPreflightModel,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { assertNotSiteClampedAgent } from "@opengeni/core";
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
@@ -430,10 +431,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const existing = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"), viewer);
     const previous = await captureScheduledTaskRestoreState(db, existing);
     const ownerPause = viewer.subjectId !== null && existing.ownerSubjectId === viewer.subjectId;
-    const task =
-      viewer.admin && !ownerPause
-        ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
-        : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
+    const adminPause = viewer.admin && !ownerPause;
+    if (adminPause) await assertNotSiteClampedAgent(db, grant, "schedules");
+    const task = adminPause
+      ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
+      : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(scheduledTaskForGrant(task, grant));
   });

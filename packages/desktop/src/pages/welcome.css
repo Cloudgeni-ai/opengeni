@@ -67,6 +67,11 @@ html[data-platform="darwin"] body {
   -webkit-app-region: drag;
 }
 
+/* Windows: the caption buttons' row, which moves the window. */
+html[data-platform="win32"] .drag {
+  height: env(titlebar-area-height, 56px);
+}
+
 main {
   display: flex;
   min-height: 100%;
@@ -101,6 +106,13 @@ h1 {
   margin: 0 0 22px;
   color: var(--muted);
   line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.lead strong {
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 form {
@@ -140,7 +152,8 @@ summary:focus-visible {
   opacity: 0.85;
 }
 
-.primary:disabled {
+.primary:disabled,
+.primary[aria-disabled="true"] {
   opacity: 0.5;
 }
 

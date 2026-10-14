@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/desktop",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "Electron kit for Opengeni desktop apps: several accounts on several servers, the server's own web app in a native window, native notifications, deep links, the menu bar item, updates, and one-click connection of the computer it runs on.",
   "license": "Apache-2.0",

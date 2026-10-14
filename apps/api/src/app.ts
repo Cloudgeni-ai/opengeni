@@ -28,6 +28,9 @@ import {
   registerAnalyticsConsentRoutes,
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
+import { siteClampedAgentGuard } from "./site-agent-guard";
+import { siteFrameGuard } from "./site-frame-guard";
+import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
 import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
@@ -80,6 +83,7 @@ import {
   ToolGatewayManifestRequest,
   type AccessGrant,
   type ClientAgentConfig,
+  type ClientSitesConfig,
   type ErrorCode,
   type FirstPartyMcpToolName,
   type Session,
@@ -340,7 +344,11 @@ import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
+import { registerSitePublishingRoutes } from "./routes/site-publishing";
+import { configuredSitesDomain } from "./site-publishing/service";
+import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
+import { registerSiteSqlRoutes } from "./routes/site-sql";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
@@ -772,6 +780,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Session-Id",
       // Set by Site bridges on every bridged request (Site Data frame clamp).
       "X-OpenGeni-Site-Frame",
+      "X-OpenGeni-Site-Frame-Id",
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
@@ -793,6 +802,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Event-Mode",
       "X-OpenGeni-Event-Result",
       "X-OpenGeni-Event-Result-Mode",
+      "X-OpenGeni-Export-Next-Cursor",
+      "X-OpenGeni-Export-Truncated",
       "X-OpenGeni-Forensic-Exact",
       "X-OpenGeni-Has-More",
       "X-OpenGeni-Next-After",
@@ -1562,6 +1573,7 @@ export function createAppComposition(deps: AppDependencies): {
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
         structuredServices: structuredServicesHint(deps.settings.sandboxBackend),
+        sites: clientSitesConfig(deps.settings),
       }),
     );
   });
@@ -1688,6 +1700,14 @@ export function createAppComposition(deps: AppDependencies): {
     const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
     await withAccessGrantSessionRlsContext(routeDeps, grant, next);
   });
+
+  // Requests a host forwarded from a Site frame: SITE_OPERATIONS only, only
+  // the frame's own sessions, and the validated Site origin as provenance.
+  app.use("/v1/workspaces/:workspaceId/*", siteFrameGuard(routeDeps));
+  // Agents started from a Site page do not learn or widen access: their
+  // workspace writes are held to an allowlist (their tools, conversations,
+  // files and content); everything else is refused.
+  app.use("/v1/workspaces/:workspaceId/*", siteClampedAgentGuard(routeDeps));
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -2196,7 +2216,10 @@ export function createAppComposition(deps: AppDependencies): {
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
+  registerSitePublishingRoutes(app, routeDeps);
+  registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
+  registerSiteSqlRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);
@@ -2647,10 +2670,11 @@ function codemodeHttpError(error: unknown): HTTPException {
   // nothing and the client may resubmit the same operation id.
   const contention = databaseContentionHttpError(error, "POST", { outcomeUnknown: false });
   if (contention) return contention;
-  if (error instanceof SiteSessionPathError) {
-    // The proxied Site/SDK surface is an explicit allowlist; a route outside
-    // it (tool policy, visibility, forks, Steer, control, ...) does not exist
-    // for this caller rather than being a server fault.
+  if (error instanceof SiteSessionPathError || error instanceof SiteDataUnsupportedError) {
+    // Site frame requests are held to the SITE_OPERATIONS allowlist and the
+    // agent's own SDK requests to its workspace; a route outside them (or Site
+    // Data on a host without a published Site) does not exist for this
+    // caller rather than being a server fault.
     return new HTTPException(404, { message: error.message, cause: error });
   }
   if (error instanceof SessionAuthorizationDeniedError) {
@@ -4005,12 +4029,27 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/enrollments/token/exchange" ||
     // The runner authenticates this protocol with its install-key proof, not
     // a browser cookie or the product-client revision header.
-    pathname === "/v1/enrollments/renew"
+    pathname === "/v1/enrollments/renew" ||
+    // The Site gateway's signed protocol carries its own signature version (v1).
+    pathname.startsWith("/v1/site-runtime/")
   ) {
     return false;
   }
   const segments = pathname.split("/");
   return !segments.includes("mcp") && !segments.includes("codemode");
+}
+
+/** Published Sites deployment facts for the console; null while publishing is off. */
+function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
+  const domain = configuredSitesDomain(settings);
+  if (!domain) return null;
+  return {
+    domain,
+    publicEnabled: settings.sitesPublicEnabled,
+    publicAgentsEnabled: settings.sitesPublicAgentsEnabled,
+    loginOnly: settings.sitesLoginOnly,
+    forceNoindex: settings.sitesForceNoindex,
+  };
 }
 
 /** Client-safe agent-configuration projection. */

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import type { InboxItem, ListInboxResponse } from "@opengeni/sdk";
 
@@ -16,6 +16,7 @@ import {
 import { diffInbox, inboxItemPath, notificationPlan, plainText } from "../src/main/inbox-model";
 import { localFile, localPageUrl } from "../src/main/local-pages";
 import { nativeSignInUrl, parseSignInCallback, pkcePair } from "../src/main/pkce";
+import { newestReleaseTag, resolveUpdateFeedUrl } from "../src/main/update-feed";
 import { createHash } from "node:crypto";
 
 const cipher = {
@@ -149,6 +150,15 @@ describe("agent command line", () => {
       "/Users/user/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
       "/Users/user/.local/bin/opengeni-agent",
     ]);
+    expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
+      "/home/user/.local/bin/opengeni-agent",
+    ]);
+    expect(agentBinaryCandidates("win32", "C:\\Users\\user", {})).toEqual([
+      "C:\\Users\\user\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe",
+    ]);
+    expect(
+      agentBinaryCandidates("win32", "C:\\Users\\user", { LOCALAPPDATA: "D:\\Local" }),
+    ).toEqual(["D:\\Local\\Opengeni\\bin\\opengeni-agent.exe"]);
     expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
       "/home/user/.local/bin/opengeni-agent",
     ]);
@@ -289,12 +299,55 @@ describe("inbox notifications", () => {
 
 describe("local pages", () => {
   test("serve only page files inside the pages directory", () => {
-    expect(localFile("/app/pages", localPageUrl("welcome.html"))).toBe("/app/pages/welcome.html");
-    expect(localFile("/app/pages", "app://local/welcome.css?x=1")).toBe("/app/pages/welcome.css");
-    expect(localFile("/app/pages", "app://local/../main.mjs")).toBeNull();
-    expect(localFile("/app/pages", "app://local/..%2Fsecrets.html")).toBeNull();
-    expect(localFile("/app/pages", "app://local/notes.txt")).toBeNull();
-    expect(localFile("/app/pages", "app://elsewhere/welcome.html")).toBeNull();
-    expect(localFile("/app/pages", "https://local/welcome.html")).toBeNull();
+    // The host platform's paths, as the app uses them.
+    const pages = join(sep, "app", "pages");
+    expect(localFile(pages, localPageUrl("welcome.html"))).toBe(join(pages, "welcome.html"));
+    expect(localFile(pages, "app://local/welcome.css?x=1")).toBe(join(pages, "welcome.css"));
+    expect(localFile(pages, "app://local/../main.mjs")).toBeNull();
+    expect(localFile(pages, "app://local/..%2Fsecrets.html")).toBeNull();
+    expect(localFile(pages, "app://local/notes.txt")).toBeNull();
+    expect(localFile(pages, "app://elsewhere/welcome.html")).toBeNull();
+    expect(localFile(pages, "https://local/welcome.html")).toBeNull();
+  });
+});
+
+describe("update feed", () => {
+  test("picks the highest stable release tag with the prefix", () => {
+    expect(
+      newestReleaseTag(
+        [
+          "desktop-v0.9.0",
+          "desktop-v0.10.0",
+          "desktop-v1.0.0-beta.1",
+          "agent-v9.0.0",
+          "desktop-vx",
+        ],
+        "desktop-v",
+      ),
+    ).toBe("desktop-v0.10.0");
+    expect(newestReleaseTag(["agent-v1.0.0"], "desktop-v")).toBeNull();
+  });
+
+  test("reads the newest release's files, or a fixed feed as is", async () => {
+    const requested: string[] = [];
+    const fakeFetch = (async (input: string | URL | Request) => {
+      requested.push(String(input));
+      return Response.json([
+        { ref: "refs/tags/desktop-v0.1.0" },
+        { ref: "refs/tags/desktop-v0.2.1" },
+      ]);
+    }) as typeof fetch;
+    expect(
+      await resolveUpdateFeedUrl(
+        { githubRepository: "example/app", tagPrefix: "desktop-v" },
+        fakeFetch,
+      ),
+    ).toBe("https://github.com/example/app/releases/download/desktop-v0.2.1");
+    expect(requested).toEqual([
+      "https://api.github.com/repos/example/app/git/matching-refs/tags/desktop-v",
+    ]);
+    expect(await resolveUpdateFeedUrl({ url: "https://updates.example.com/app" })).toBe(
+      "https://updates.example.com/app",
+    );
   });
 });

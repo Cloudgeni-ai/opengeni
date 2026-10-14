@@ -333,7 +333,7 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
  */
 export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
 
-/** Remove OpenGeni-only durable fields before an SDK/provider sees the item. */
+/** Remove Opengeni-only durable fields before an SDK/provider sees the item. */
 export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
   const withoutResume = stripInternalResumeMarker(item);
   if (

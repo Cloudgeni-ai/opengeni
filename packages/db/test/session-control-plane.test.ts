@@ -2023,7 +2023,9 @@ describe("clean session control plane", () => {
     });
     expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
     expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_revision_idx");
-  });
+    // Seeding and analyzing the planner fixture takes about 25s on a 4-core CI
+    // runner, so the 30s default leaves no headroom.
+  }, 90_000);
 
   test("raw delta writers advance sequence without advancing monitoring activity", async () => {
     const baseline = "2020-01-02T03:04:05.123000Z";

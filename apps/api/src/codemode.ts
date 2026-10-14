@@ -1,4 +1,3 @@
-import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import {
   codemodeDispatchSubject,
   decodeCodemodeDispatchAck,
@@ -35,12 +34,20 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   signDelegatedAccessToken,
   readTurnExecutionPolicyV1,
-  siteSessionPath,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   type Permission,
   type Session,
 } from "@opengeni/contracts";
+import {
+  SITE_FRAME_HEADER,
+  SITE_FRAME_ID_HEADER,
+  SITE_PREVIEW_FRAME,
+  siteFrameFromHeaders,
+  siteHostWorkspacePath,
+  siteRequestHeaders,
+  siteSessionPath,
+} from "@opengeni/contracts/site-session-http";
 import { permissionsRequiredByFirstPartyTools } from "./mcp/first-party-tool-permissions";
 import { isPreparedMcpConnectPath, preparedMcpProxyPermissions } from "./prepared-mcp-permissions";
 
@@ -77,6 +84,34 @@ export function codemodeSessionProxyPermissions(
   );
 }
 
+const FRAME_ID = /^[A-Za-z0-9_-]{1,64}$/u;
+
+/**
+ * The route a Codemode SDK proxy request may take. The agent's own SDK calls
+ * keep the workspace prefix boundary under the proxy permission ceiling. A
+ * request a local Site preview forwarded from page code carries the frame
+ * marker and is held to the `SITE_OPERATIONS` allowlist; it stays marked as
+ * a preview frame (never a published Site) so the API records its origin and
+ * keeps it to the sessions it started.
+ */
+function codemodeProxyRoute(request: Request, path: string) {
+  const frame = siteFrameFromHeaders((name) => request.headers.get(name));
+  if (!frame) {
+    return {
+      path: (workspaceId: string) => siteHostWorkspacePath(path, workspaceId),
+      frameHeaders: null,
+    };
+  }
+  const frameId = frame.frameId && FRAME_ID.test(frame.frameId) ? frame.frameId : null;
+  return {
+    path: (workspaceId: string) => siteSessionPath(path, workspaceId, request.method),
+    frameHeaders: {
+      [SITE_FRAME_HEADER]: SITE_PREVIEW_FRAME,
+      ...(frameId ? { [SITE_FRAME_ID_HEADER]: frameId } : {}),
+    },
+  };
+}
+
 /** Reuse normal REST handlers, including their resource/command authorization.
  * The exact attempt is checked before issuing this internal-only credential. */
 export async function codemodeSessionRequest(
@@ -86,7 +121,8 @@ export async function codemodeSessionRequest(
   path: string,
   resolveProxySettings?: (session: Session) => FirstPartyMcpToolPolicySettings,
 ): Promise<Request> {
-  siteSessionPath(path, grant.workspaceId, request.method);
+  const route = codemodeProxyRoute(request, path);
+  route.path(grant.workspaceId);
   const { authority, turn, catalog } = await requireActiveCodemodeCatalog(deps, grant);
   const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
@@ -104,12 +140,7 @@ export async function codemodeSessionRequest(
     resolveProxySettings?.(session) ?? deps.settings,
     { ...session, firstPartyMcpTools: selection },
   );
-  if (
-    isPreparedMcpConnectPath(
-      siteSessionPath(path, grant.workspaceId, request.method),
-      request.method,
-    )
-  ) {
+  if (isPreparedMcpConnectPath(route.path(grant.workspaceId), request.method)) {
     if (selection.includes("custom_mcp_setup_request"))
       permissions.push(
         ...preparedMcpProxyPermissions(
@@ -134,9 +165,10 @@ export async function codemodeSessionRequest(
     exp: Math.floor(Date.now() / 1000) + 60,
   });
   const target = new URL(request.url);
-  const rewritten = siteSessionPath(path, authority.workspaceId, request.method);
+  const rewritten = route.path(authority.workspaceId);
   const url = new URL(rewritten, target.origin);
   const headers = siteRequestHeaders(request.headers);
+  for (const [name, value] of Object.entries(route.frameHeaders ?? {})) headers.set(name, value);
   headers.set("authorization", `Bearer ${token}`);
   headers.set(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
   return new Request(url, {

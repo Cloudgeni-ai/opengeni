@@ -387,7 +387,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
 // Exported for unit testing the external-billing bypass (codex-billing.test.ts); not
 // part of the activity surface. Takes the accepted policy's billing attribution and
 // the optional §7.5 P3 host `entitlements` port (when bound, its `admitRun` REPLACES
-// the local credit read for an OpenGeni-metered turn; unset → local ledger).
+// the local credit read for an Opengeni-metered turn; unset → local ledger).
 export async function ensureRunAllowed(
   settings: Settings,
   db: ActivityServices["db"],

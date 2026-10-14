@@ -212,7 +212,7 @@ OpenSandbox BatchSandbox template:
 - label: `opengeni.ai/sandbox-pool=opensandbox`
 - taint: `opengeni.ai/sandbox=true:NoSchedule`
 
-OpenGeni/control components do not tolerate that taint. OpenSandbox workload
+Opengeni/control components do not tolerate that taint. OpenSandbox workload
 Pods require both the label and toleration, preventing sandbox load from
 competing with the AKS system pool by default. This is capacity/autoscaling
 isolation, not a tenant-security boundary.

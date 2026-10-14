@@ -6,6 +6,7 @@ import type {
   SiteDataDescribeResponse,
   SiteDataQueryResponse,
   SiteDataRecordResponse,
+  SiteSqlDescribeResponse,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useAppContext } from "@/context";
@@ -19,13 +20,16 @@ import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { RelativeTime } from "@/components/ui/relative-time";
+import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
 import { UsageMeter } from "@/components/ui/usage-meter";
 import { formatBytes } from "@/lib/format";
 
 export type SiteDataClient = Pick<
   OpenGeniBrowserClient,
   "getSiteData" | "querySiteData" | "writeSiteData" | "exportSiteData"
->;
+> &
+  Partial<Pick<OpenGeniBrowserClient, "getSiteSql" | "updateSiteSqlSettings">>;
 
 const PAGE_SIZE = 50;
 const COLLECTION_COLUMNS: RowListColumn[] = [
@@ -222,7 +226,80 @@ export function SiteDataPanel({
           </RowList>
         </>
       )}
+      {!error && described ? (
+        <SiteSqlSetting client={client} workspaceId={workspaceId} siteId={siteId} />
+      ) : null}
     </section>
+  );
+}
+
+/** What the Site's SQL database holds, in one line. */
+export function siteSqlSummary(
+  state: Pick<SiteSqlDescribeResponse, "enabled" | "usage" | "limits" | "queries">,
+): string {
+  if (!state.enabled)
+    return state.usage.storageBytes > 0
+      ? "Off. Its data is kept."
+      : "Tables and queries for this Site. Ask Opengeni to set them up.";
+  const queries = state.queries.length;
+  return `${formatBytes(state.usage.storageBytes)} of ${formatBytes(state.limits.storageBytesPerSite)} · ${queries.toLocaleString()} ${queries === 1 ? "query" : "queries"}`;
+}
+
+/**
+ * The owner's switch for the Site's optional SQL database. Shown only where
+ * the deployment offers it; agents add the tables and queries.
+ */
+function SiteSqlSetting({
+  client,
+  workspaceId,
+  siteId,
+}: {
+  client: SiteDataClient;
+  workspaceId: string;
+  siteId: string;
+}) {
+  const [state, setState] = useState<SiteSqlDescribeResponse | null>(null);
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (!client.getSiteSql) return;
+    const controller = new AbortController();
+    setState(null);
+    client
+      .getSiteSql(workspaceId, siteId, { signal: controller.signal })
+      .then((next) => {
+        if (!controller.signal.aborted) setState(next);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [client, workspaceId, siteId]);
+  const update = client.updateSiteSqlSettings;
+  if (!state?.available || !update) return null;
+  const toggle = async (enabled: boolean) => {
+    setPending(true);
+    try {
+      setState(await update.call(client, workspaceId, siteId, { enabled }));
+    } catch {
+      toast.error(
+        enabled ? "Couldn't turn on the SQL database." : "Couldn't turn off the SQL database.",
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="SQL database"
+        description={siteSqlSummary(state)}
+        control={
+          <Switch
+            checked={state.enabled}
+            pending={pending}
+            onCheckedChange={(next) => void toggle(next)}
+          />
+        }
+      />
+    </SettingRowGroup>
   );
 }
 

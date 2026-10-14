@@ -1,3 +1,4 @@
+import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { randomUUID } from "node:crypto";
 import {
   resolveFirstPartyDelegationSecret,
@@ -128,6 +129,7 @@ import {
   resolveInteractionSecretValues,
   type InteractionSecretsPort,
 } from "../interaction-secrets";
+import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -630,6 +632,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: collectStringsDeep(request.arguments),
             use: { surface: "desktop", toolName: request.tool, operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.nativeCall(
             ComputerNativeCommand.parse({
@@ -685,6 +693,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: computerActionSecretTexts(request.action),
             use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.action(
             ComputerActionCommand.parse({
@@ -1114,19 +1128,16 @@ export function registerComputerSessionRoutes(
     }
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
+      // Personal machines are controlled only for their owner, as everywhere else.
+      const viewer = await attachedBrowserViewer(deps, grant, sourceSession.workspaceId);
       const device = await getAttachedBrowserDevice(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
+        ...viewer,
         deviceId: expectedPlacement.deviceId,
       });
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
       }
-      const enrollment = await getLiveEnrollmentConnection(
-        deps.db,
-        sourceSession.workspaceId,
-        device.enrollmentId,
-      );
+      const enrollment = await getLiveEnrollmentConnection(deps.db, viewer, device.enrollmentId);
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }

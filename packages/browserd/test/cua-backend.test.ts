@@ -355,7 +355,7 @@ describe("CUA desktop boundary", () => {
     }
   });
 
-  test("Windows retains real platform identity and only advertises native UIA actions", async () => {
+  test("Windows retains real platform identity and advertises UIA actions and ordinary input", async () => {
     const fixture = new WindowsFixture();
     const backend = await CuaComputerBackend.open(fixture, "windows");
     try {
@@ -368,8 +368,8 @@ describe("CUA desktop boundary", () => {
         semanticActions: true,
         backgroundActions: true,
         windowCapture: true,
-        pointerInput: false,
-        keyboardInput: false,
+        pointerInput: true,
+        keyboardInput: true,
         backgroundInput: false,
       });
       expect(
@@ -414,14 +414,56 @@ describe("CUA desktop boundary", () => {
           },
         }),
       ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
+      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows delivers pointer and keyboard input in the foreground with Windows modifiers", async () => {
+    const fixture = new WindowsFixture();
+    const backend = await CuaComputerBackend.open(fixture, "windows");
+    try {
+      const target = (await backend.targets())[0]!;
+      const frame = await backend.capture(target.id);
+      const observation = await backend.observe(target.id);
+      await backend.dispatch({
+        ...command(observation),
+        expectedFrameId: frame.frameId,
+        action: { type: "pointer", action: "click", frameId: frame.frameId, x: 120, y: 80 },
+      });
+      expect(fixture.calls.find((call) => call.name === "click")?.args).toMatchObject({
+        pid: 42,
+        window_id: 1,
+        x: 120,
+        y: 80,
+        button: "left",
+        count: 1,
+        delivery_mode: "foreground",
+      });
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "type", value: "Hello Ω" },
+      });
+      expect(fixture.calls.find((call) => call.name === "type_text")?.args).toMatchObject({
+        text: "Hello Ω",
+        delivery_mode: "foreground",
+      });
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "press", value: "Meta+Shift+S" },
+      });
+      expect(fixture.calls.find((call) => call.name === "press_key")?.args).toMatchObject({
+        key: "s",
+        modifiers: ["win", "shift"],
+        delivery_mode: "foreground",
+      });
       await expect(
-        backend.dispatch({
-          ...command(latest),
-          action: { type: "keyboard", action: "type", value: "Rejected" },
+        backend.validate({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "press", value: "Fn+A" },
         }),
       ).rejects.toMatchObject({ code: "unsupported", dispatched: false });
-      expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
-      expect(fixture.calls.filter((call) => call.name === "type_text")).toHaveLength(0);
     } finally {
       await backend.close();
     }

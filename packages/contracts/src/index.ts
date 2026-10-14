@@ -16,6 +16,8 @@ export {
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./site-data";
+export * from "./site-publishing";
+export * from "./site-sql";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
@@ -307,7 +309,7 @@ export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
 );
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
-// OpenGeni-owned identity carried beside the provider's opaque SDK envelope.
+// Opengeni-owned identity carried beside the provider's opaque SDK envelope.
 // Provider serializers intentionally use different keys (`sandboxId`,
 // `devboxId`, `sandboxName`, ...); durable lease logic must not need to learn a
 // new provider's private state shape. Existing envelopes remain readable via
@@ -1093,6 +1095,19 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_list",
   "site_files_upload",
   "site_files_delete",
+  "site_publication_get",
+  "site_publication_update",
+  "site_hostname_check",
+  "site_sql_inspect",
+  "site_sql_enable",
+  "site_sql_migrate",
+  "site_sql_define_query",
+  "site_sql_query",
+  "site_sql_run",
+  "site_sql_execute",
+  "site_sql_export",
+  "site_sql_import",
+  "site_sql_reset",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -3394,7 +3409,7 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
   "viaTruncated",
 ]);
 
-/** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
+/** Bounded host provenance that cannot forge Opengeni-owned lineage fields. */
 export const ServiceTurnInitiatorContext = /* @__PURE__ */ defineSchema(() =>
   TurnInitiatorContext.superRefine((value, ctx) => {
     for (const key of reservedServiceTurnInitiatorContextKeys) {
@@ -3813,7 +3828,7 @@ export async function verifyEnrollmentBearer(
 // (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
 // secret value is NEVER logged.
 /**
- * The OpenGeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
+ * The Opengeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
  * an installed Connected Machine agent through native messaging, so the machine
  * must be connected before the extension can link up.
  */
@@ -5138,7 +5153,7 @@ export type CredentialAuthNeededReason =
   | "refresh_failed";
 
 /**
- * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * Host-owned run credentials are materialized below one Opengeni-owned sandbox
  * directory. Paths are relative POSIX names; the runtime validates traversal,
  * collisions, bounds, and modes before any content reaches a sandbox.
  */
@@ -19735,6 +19750,25 @@ export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =
 );
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
+/** Published Sites facts the console needs to offer publishing (from OPENGENI_SITES_*). */
+export const ClientSitesConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Sites live at `<label>.<domain>`. */
+      domain: z.string().min(1),
+      /** `public` access may be chosen. */
+      publicEnabled: z.boolean(),
+      /** Agents may run for signed-out guests of public Sites. */
+      publicAgentsEnabled: z.boolean(),
+      /** `public` means any signed-in user; there are no guests. */
+      loginOnly: z.boolean(),
+      /** Every Site is served with noindex. */
+      forceNoindex: z.boolean(),
+    })
+    .strict(),
+);
+export type ClientSitesConfig = z.infer<typeof ClientSitesConfig>;
+
 export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.discriminatedUnion("mode", [
     z.object({
@@ -21614,6 +21648,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         terminalEvents: z.boolean(),
       })
       .default({ fileSystem: false, git: false, terminalEvents: false }),
+    // Published Sites on this deployment (OPENGENI_SITES_*): null when
+    // publishing is off; absent from servers that predate published Sites.
+    sites: ClientSitesConfig.nullable().optional(),
   }),
 );
 export type ClientConfig = z.infer<typeof ClientConfig>;

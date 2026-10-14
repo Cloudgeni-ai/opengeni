@@ -23,7 +23,7 @@ describe("action descriptions", () => {
         method: "PATCH",
         path: "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/allocator",
       }),
-    ).toContain('"Use for new work"');
+    ).toContain('"Enable account"');
   });
 
   test("search matches the words people use and returns the description", () => {
@@ -31,7 +31,7 @@ describe("action descriptions", () => {
     const allocator = found.find((action) =>
       action.path.endsWith("/codex/accounts/:accountId/allocator"),
     );
-    expect(allocator?.description).toContain("Use for new work");
+    expect(allocator?.description).toContain("Enable account");
     const entry = ACTION_CATALOG.find(
       (candidate) =>
         candidate.method === "PUT" &&

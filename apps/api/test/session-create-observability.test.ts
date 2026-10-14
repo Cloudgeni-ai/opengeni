@@ -8,7 +8,9 @@ import {
   variableSetsRemovedResponse,
   withoutEmptyLegacyVariableSetFields,
 } from "../src/http/variable-sets-removed";
+import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
+  currentSiteSessionOrigin,
   sessionCreationMetadata,
   withSiteSessionOrigin,
 } from "../../../packages/core/src/site-session-origin";
@@ -80,7 +82,8 @@ function productionRoute() {
     const { requireAccessGrantAuthorization, CreateSessionRequest, resolveSiteSessionOrigin,
       withSiteSessionOrigin, createSessionForRequest, sessionCreateErrorResponse,
       withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
-      variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields } = ports;
+      variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields,
+      currentSiteSessionOrigin, siteFrameBodyRefusal, siteFrameSessionProfile } = ports;
     ${code}
     return handler;
   `,
@@ -135,6 +138,13 @@ function routeFixture() {
     },
     withSiteSessionOrigin: () => {
       throw new Error("Unexpected Site scope");
+    },
+    currentSiteSessionOrigin,
+    siteFrameBodyRefusal,
+    // The route's minimal Site profile (module-private): recorded, payload kept.
+    siteFrameSessionProfile: async (_deps: unknown, _workspaceId: unknown, value: unknown) => {
+      calls.push({ name: "site profile", args: [value] });
+      return value;
     },
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
@@ -238,6 +248,8 @@ test("the production Site branch retains request-local provenance without export
   f.hold.projection.resolve(session);
   expect(await running).toEqual({ body: session, status: 202 });
   expect(metadata).toEqual({ _opengeniSiteOrigin: origin });
+  // A Site page's create runs on the minimal Site profile.
+  expect(f.calls.map((c) => c.name)).toContain("site profile");
   expect(sessionCreationMetadata({})).toEqual({});
   expect(JSON.stringify(f.o.endings)).not.toContain("private");
 });

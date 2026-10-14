@@ -140,8 +140,8 @@ page footer, or a menu.
 top-left and a peach wash from the bottom-right over `bg`. The signed-out pages use
 `.og-page-glow`, the same two washes down the left edge of the canvas.
 
-Grey (`fg-subtle`) is Paused, Not connected, Revoked, Off. Always a dot plus a sentence-case
-label; never color alone.
+Grey (`fg-subtle`) is Paused, Disabled, Not connected, Revoked, Off. Always a dot plus a
+sentence-case label; never color alone.
 
 **Only states that need attention are shown.** A healthy object carries no status: no green
 "Connected" or "Active" badge on a row or a page header. Show Needs reconnect, Paused, Out of
@@ -616,7 +616,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | Select | Menu select like the composer: title, description, payment source, a check on the selected option. The settings trigger is the 32px "field" style, as wide as its content (at least 180px). |
 | Disclosure | Advanced row: full-width row, rotating chevron, title and a summary of current values. |
 | Status badge | Plain dot + label in rows; the bordered 22px pill with a 6px dot in page headers. |
-| Usage meter | A 4px bar with "22% left" and the reset time on the account page. In an account row, `UsageReadout`: "78% left this week" and a 64px bar, right-aligned against the chevron (words only where the row folds on a phone). |
+| Usage meter | A 4px bar with "22% left" and the reset time on the account page. In an account row, `UsageReadout`: "78% left this week" and a 64px bar, right-aligned against the chevron, with when the limits reset under it in short times ("Resets Mon 09:00 · 5-hour 17:10"; the shown window first). Words only where the row folds on a phone. |
 | Form | **Form page** (section 8) for every create and edit flow; a centered dialog only for one-field prompts. |
 | Destructive confirm | Consequence list by default; type-to-confirm for permanent, wide-impact actions; Undo toast instead of a dialog when reversible; a blocked variant with no destructive button. |
 | Secret values | Use = reveal: whoever may use an item may reveal it, one field at a time, on request (Reveal, Copy; hidden again on leave); never shown by default or in lists. Agents get references, not values. |

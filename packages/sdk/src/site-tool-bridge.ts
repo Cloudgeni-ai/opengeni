@@ -1,4 +1,12 @@
-import { SITE_FRAME_HEADER, siteRequestHeaders } from "@opengeni/contracts/site-session-http";
+import {
+  SITE_FRAME_HEADER,
+  SITE_FRAME_ID_HEADER,
+  SITE_ID_HEADER,
+  SITE_VERSION_HEADER,
+  siteFrameBodyRefusal,
+  siteFrameOperation,
+  siteRequestHeaders,
+} from "@opengeni/contracts/site-session-http";
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
@@ -59,9 +67,15 @@ export type CreateSiteToolBridgeOptions = {
 
 /** Host-side bridge for the opaque Site frame. Supply an authenticated transport;
  * the server independently checks live viewer access and the exact Site version.
- * Recreate on actor/version change. Never take these pinned fields from HTML. */
+ * Recreate on actor/version change. Never take these pinned fields from HTML.
+ *
+ * `fetch` forwards only the `SITE_OPERATIONS` allowlist (`siteSessionPath`);
+ * every other route is refused before a request is made. Each bridge is one
+ * frame: it mints a frame id, so a frame without a published Site reaches only
+ * the sessions it started. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
   const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
+  const frameId = crypto.randomUUID();
   const targeted =
     input.workspaceTools.$targetProtocol === 1 &&
     input.workspaceTools.$resolve &&
@@ -171,12 +185,18 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
               message.method,
               input.artifactId,
             );
+            // Site code sends message text, not approvals, answers, resources,
+            // credentials or connection choices. The API refuses them too.
+            const refused = siteFrameBodyFieldRefusal(path, message, input);
+            if (refused) return refused;
             const headers = siteRequestHeaders(message.headers);
-            // Host-set marker: the API treats every bridged request as a Site frame.
+            // Host-set marker: the API treats every bridged request as a Site frame,
+            // limited to SITE_OPERATIONS and to this frame's own sessions.
             headers.set(SITE_FRAME_HEADER, "1");
+            headers.set(SITE_FRAME_ID_HEADER, frameId);
             if (input.artifactId) {
-              headers.set("x-opengeni-site-id", input.artifactId);
-              headers.set("x-opengeni-site-version", input.siteVersionId);
+              headers.set(SITE_ID_HEADER, input.artifactId);
+              headers.set(SITE_VERSION_HEADER, input.siteVersionId);
             }
 
             return input.fetchResponse!(path, {
@@ -341,4 +361,41 @@ function staleRetryVetoed(error: unknown): boolean {
 }
 function identityKey(identity: ToolGatewayIdentity): string {
   return `${identity.serverId}\u0000${identity.toolName}`;
+}
+
+/** A 403 like the API's for a body field Site code may not send, or null. */
+function siteFrameBodyFieldRefusal(
+  path: string,
+  message: SiteHttpRequest,
+  input: { workspaceId: string; artifactId?: string | undefined },
+): Response | null {
+  if (typeof message.body !== "string" || message.method === "GET") return null;
+  const operation = siteFrameOperation(
+    message.method,
+    path.split("?")[0]!,
+    input.workspaceId,
+    input.artifactId ?? null,
+  );
+  if (!operation) return null;
+  let body: unknown;
+  try {
+    body = JSON.parse(message.body);
+  } catch {
+    return null;
+  }
+  const field = siteFrameBodyRefusal(operation.operation.id, operation.suffix, body);
+  if (!field) return null;
+  return Response.json(
+    {
+      error: {
+        status: 403,
+        code: "forbidden",
+        message:
+          "A Site page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
+        retryable: false,
+        details: { code: "site_frame_field_forbidden", field },
+      },
+    },
+    { status: 403 },
+  );
 }

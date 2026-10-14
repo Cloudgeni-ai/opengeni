@@ -1,7 +1,7 @@
 // Reading the connected-machine agent's command line output. Pure, so the
 // formats are pinned by tests.
 
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 
 import { normalizeServerUrl } from "@opengeni/sdk/app-links";
 
@@ -22,9 +22,11 @@ export function agentBinaryCandidates(
   env: Record<string, string | undefined>,
 ): string[] {
   if (platform === "win32") {
-    const localAppData = env.LOCALAPPDATA ?? join(home, "AppData", "Local");
-    return [join(localAppData, "Opengeni", "bin", "opengeni-agent.exe")];
+    const localAppData = env.LOCALAPPDATA ?? win32.join(home, "AppData", "Local");
+    return [win32.join(localAppData, "Opengeni", "bin", "opengeni-agent.exe")];
   }
+  // The target platform's separators, whatever platform computes the paths.
+  const join = posix.join;
   const candidates: string[] = [];
   if (platform === "darwin") {
     candidates.push(

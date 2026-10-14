@@ -3,7 +3,7 @@
 These files are third-party vendor marks, committed so a default deployment can
 show connector logos without fetching from third-party logo hosts at deploy
 time. They are **not** covered by this repository's licence and are not
-OpenGeni's to relicense. Each mark remains the property of its owner and is
+Opengeni's to relicense. Each mark remains the property of its owner and is
 reproduced here solely to identify that owner's product in the connector
 catalog, which is nominative use.
 

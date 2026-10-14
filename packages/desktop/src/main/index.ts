@@ -1,5 +1,6 @@
 export { DesktopShell, cookieFromHeader } from "./app";
-export type { DesktopAppConfig } from "./config";
+export type { DesktopAppConfig, DesktopUpdateFeed } from "./config";
+export { newestReleaseTag, resolveUpdateFeedUrl } from "./update-feed";
 export {
   AccountStore,
   type AccountsState,

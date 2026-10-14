@@ -1,10 +1,16 @@
-# Build, sign, notarize and publish the Opengeni desktop app.
+# Build, sign and publish the Opengeni desktop app.
 #
-# A tag desktop-v<version> (or a manual run) builds the macOS app as a universal
-# DMG and ZIP signed with the Developer ID certificate and notarized with the
-# App Store Connect key. It publishes a versioned release desktop-v<version>
-# and refreshes the fixed desktop-stable release the installed apps read their
-# updates from (see apps/desktop/electron-builder.yml).
+# A tag desktop-v<version> (or a manual run) builds:
+# - macOS: a universal DMG and ZIP signed with the Developer ID certificate and
+#   notarized with the App Store Connect key;
+# - Linux (x64 and arm64): AppImage, deb and rpm, with signed build provenance
+#   (verify a download with `gh attestation verify <file> --repo <this repo>`);
+# - Windows (x64 and arm64): an installer with signed build provenance. It is
+#   not yet Authenticode-signed, so SmartScreen warns on first run;
+# and publishes them together as the release desktop-v<version>. Installed apps
+# update from the newest desktop-v release. Releases in this repository are
+# immutable once published, so the release is created as a draft, filled, and
+# only then published.
 name: desktop-app-release
 
 on:
@@ -18,19 +24,21 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: desktop-app-release
   cancel-in-progress: false
 
 jobs:
-  macos:
-    runs-on: macos-26
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
-    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Version
         id: v
         env:
@@ -47,6 +55,14 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    environment: desktop-release
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -110,7 +126,7 @@ jobs:
       - name: Build, sign and notarize
         working-directory: apps/desktop
         env:
-          OPENGENI_DESKTOP_VERSION: ${{ steps.v.outputs.version }}
+          OPENGENI_DESKTOP_VERSION: ${{ needs.version.outputs.version }}
         run: |
           bun scripts/build.ts --production
           bunx electron-builder --mac --publish never
@@ -124,21 +140,201 @@ jobs:
           xcrun stapler validate "$app"
           ls -la
 
-      - name: Publish
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: desktop-macos
+          if-no-files-found: error
+          path: |
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.dmg
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.zip
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.zip.blockmap
+            apps/desktop/release/latest-mac.yml
+
+  linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      # rpmbuild for the rpm packages; electron-builder brings fpm itself.
+      - name: Packaging tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: |
+          bun test ./packages/desktop/test
+          (cd packages/desktop && bun run typecheck)
+          (cd apps/desktop && bun run typecheck)
+
+      - name: Build
+        working-directory: apps/desktop
+        env:
+          OPENGENI_DESKTOP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          bun scripts/build.ts --production
+          bunx electron-builder --linux --publish never
+
+      - name: Verify
         working-directory: apps/desktop/release
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.v.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          files=(Opengeni-"$VERSION"-mac.dmg Opengeni-"$VERSION"-mac.zip Opengeni-"$VERSION"-mac.zip.blockmap latest-mac.yml)
+          set -euo pipefail
+          ls -la
+          for arch in amd64 arm64; do
+            deb="Opengeni-$VERSION-linux-$arch.deb"
+            dpkg-deb --info "$deb" | grep -E "Package: opengeni|Version: $VERSION|Architecture: $arch"
+            # List once into a file: grep -q closes the pipe early, which dpkg-deb reports as a failure.
+            dpkg-deb --contents "$deb" > "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './usr/share/applications/opengeni.desktop' "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './opt/Opengeni/opengeni' "$RUNNER_TEMP/deb-contents.txt"
+            # Desktops look icons up in the standard hicolor sizes, which stop at 512.
+            grep -q './usr/share/icons/hicolor/512x512/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './usr/share/icons/hicolor/48x48/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
+          done
+          for arch in x86_64 aarch64; do
+            rpm -qip "Opengeni-$VERSION-linux-$arch.rpm" | grep -E "^(Name|Version|Architecture)"
+          done
+          # The x64 AppImage unpacks and carries the desktop entry the app expects.
+          image="Opengeni-$VERSION-linux-x86_64.AppImage"
+          chmod +x "$image"
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/apps/desktop/release/$image" --appimage-extract >/dev/null)
+          grep -q '^StartupWMClass=opengeni$' "$RUNNER_TEMP/squashfs-root/opengeni.desktop"
+          grep -q '^MimeType=x-scheme-handler/opengeni;$' "$RUNNER_TEMP/squashfs-root/opengeni.desktop"
+          test -f "Opengeni-$VERSION-linux-arm64.AppImage"
+          grep -q "Opengeni-$VERSION-linux-x86_64.AppImage" latest-linux.yml
+          grep -q "Opengeni-$VERSION-linux-arm64.AppImage" latest-linux-arm64.yml
+
+      - name: Provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.AppImage
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.deb
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.rpm
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: desktop-linux
+          if-no-files-found: error
+          path: |
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.AppImage
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.deb
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.rpm
+            apps/desktop/release/latest-linux.yml
+            apps/desktop/release/latest-linux-arm64.yml
+
+  windows:
+    needs: version
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: |
+          bun test ./packages/desktop/test
+          (cd packages/desktop && bun run typecheck)
+          (cd apps/desktop && bun run typecheck)
+
+      - name: Build
+        working-directory: apps/desktop
+        env:
+          OPENGENI_DESKTOP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          bun scripts/build.ts --production
+          bunx electron-builder --win --publish never
+
+      - name: Verify
+        working-directory: apps/desktop/release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -la
+          # One installer for people to download, carrying both architectures,
+          # and one per architecture that installed apps update from (the
+          # updater picks the file named for its own architecture).
+          for installer in "Opengeni-$VERSION-windows.exe" "Opengeni-$VERSION-windows-x64.exe" "Opengeni-$VERSION-windows-arm64.exe"; do
+            test -f "$installer"
+            test -f "$installer.blockmap"
+            grep -q "url: $installer" latest.yml
+          done
+          grep -q "version: $VERSION" latest.yml
+          test -f win-unpacked/Opengeni.exe
+          test -f win-arm64-unpacked/Opengeni.exe
+
+      - name: Provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: desktop-windows
+          if-no-files-found: error
+          path: |
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
+            apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe.blockmap
+            apps/desktop/release/latest.yml
+
+  publish:
+    needs: [version, macos, linux, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Publish
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -la
+          sha256sum Opengeni-* > SHA256SUMS
           tag="desktop-v$VERSION"
+          if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            echo "$tag is already published; releases are immutable, so build a new version." >&2
+            exit 1
+          fi
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$GITHUB_SHA" --title "Opengeni desktop $VERSION" --latest=false \
-              --notes "Opengeni for macOS $VERSION. Download the DMG, open it and drag Opengeni to Applications."
+            cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Opengeni desktop $VERSION.
+
+          - **macOS:** download \`Opengeni-$VERSION-mac.dmg\`, open it and drag Opengeni to Applications.
+          - **Windows:** download \`Opengeni-$VERSION-windows.exe\` and open it. It installs for you alone, without administrator rights, and updates itself. Until the installer is signed, Windows may say it protected your PC: choose **More info**, then **Run anyway**.
+          - **Ubuntu, Debian:** download the \`.deb\` for your machine (\`amd64\` or \`arm64\`) and run \`sudo apt install ./Opengeni-$VERSION-linux-amd64.deb\`.
+          - **Fedora, RHEL, openSUSE:** download the \`.rpm\` (\`x86_64\` or \`aarch64\`) and run \`sudo dnf install ./Opengeni-$VERSION-linux-x86_64.rpm\`.
+          - **Any Linux:** download the \`.AppImage\`, make it executable (\`chmod +x\`) and open it. It adds itself to your apps and updates itself.
+
+          Check a Windows or Linux download with \`gh attestation verify <file> --repo $GH_REPO\` or against \`SHA256SUMS\`.
+          NOTES
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Opengeni desktop $VERSION" --latest=false \
+              --notes-file "$RUNNER_TEMP/notes.md"
           fi
-          gh release upload "$tag" "${files[@]}" --clobber
-          if ! gh release view desktop-stable >/dev/null 2>&1; then
-            gh release create desktop-stable --target "$GITHUB_SHA" --title "Opengeni desktop (update feed)" --latest=false \
-              --notes "The update feed installed Opengeni desktop apps read. Downloads are on the desktop-v releases."
-          fi
-          gh release upload desktop-stable "${files[@]}" --clobber
+          gh release upload "$tag" ./* --clobber
+          gh release edit "$tag" --draft=false --latest=false

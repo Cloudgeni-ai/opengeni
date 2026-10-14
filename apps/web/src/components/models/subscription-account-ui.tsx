@@ -4,6 +4,43 @@ import { ListRow } from "@/components/ui/list-row";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
+
+/** The on/off words for an account's allocator, shared by its switch and read-only facts. */
+export const ACCOUNT_ENABLED_LABELS = { on: "Enabled", off: "Disabled" } as const;
+
+/** Whether new work may pick a subscription account. Running work is never interrupted. */
+export function EnableAccountRow({
+  name,
+  checked,
+  pending,
+  disabled,
+  onCheckedChange,
+}: {
+  name: string;
+  checked: boolean;
+  pending: boolean;
+  disabled: boolean;
+  onCheckedChange: (enabled: boolean) => void;
+}) {
+  return (
+    <SettingRow
+      label="Enable account"
+      description="Allow this account to be used for new work. Turning it off won’t interrupt running work."
+      control={
+        <Switch
+          aria-label={`Enable ${name}`}
+          showStateText
+          stateLabels={ACCOUNT_ENABLED_LABELS}
+          checked={checked}
+          pending={pending}
+          disabled={disabled}
+          onCheckedChange={onCheckedChange}
+        />
+      }
+    />
+  );
+}
 
 export function SubscriptionAccountRow({
   provider,

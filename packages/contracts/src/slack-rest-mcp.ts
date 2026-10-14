@@ -1,6 +1,26 @@
 /** The catalog and OAuth identity stay stable while calls use the ordinary Web API. */
 export const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
 export const SLACK_REST_API_BASE = "https://slack.com/api/";
+/** Private Slack file bytes are served only from this origin and path. */
+export const SLACK_PRIVATE_FILE_ORIGIN = "https://files.slack.com";
+export const SLACK_PRIVATE_FILE_PATH_PREFIX = "/files-pri/";
+
+/** A private Slack file download URL that may carry a Slack user token. */
+export function isSlackPrivateFileUrl(value: string | URL): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.origin === SLACK_PRIVATE_FILE_ORIGIN &&
+      !url.username &&
+      !url.password &&
+      !url.hash &&
+      url.pathname.startsWith(SLACK_PRIVATE_FILE_PATH_PREFIX) &&
+      !url.pathname.split("/").some((segment) => segment === "." || segment === "..")
+    );
+  } catch {
+    return false;
+  }
+}
 
 export const OPENGENI_SLACK_REST_USER_SCOPES = [
   "channels:read",
@@ -12,6 +32,7 @@ export const OPENGENI_SLACK_REST_USER_SCOPES = [
   "im:history",
   "mpim:history",
   "users:read",
+  "files:read",
   "im:write",
   "chat:write",
 ] as const;
@@ -138,6 +159,12 @@ export const SLACK_REST_MCP_TOOLS: SlackRestMcpTool[] = [
     ["channel", "ts"],
   ),
   tool(
+    "slack_download_file",
+    "Downloads one file shared in Slack, such as a PDF or image, into your workspace like an attachment and returns its path. Use the file ID (F...) from a message's files.",
+    { file: { type: "string", pattern: "^F[A-Z0-9]+$", description: "Slack file ID." } },
+    ["file"],
+  ),
+  tool(
     "slack_open_dm",
     "Opens or resumes a direct message with one Slack user as your connected account.",
     { user: { type: "string" } },
@@ -167,6 +194,7 @@ const REQUIRED_ANY_SCOPES: Readonly<Record<string, readonly string[]>> = {
   slack_get_user_info: ["users:read"],
   slack_read_channel: historyScopes,
   slack_read_thread: historyScopes,
+  slack_download_file: ["files:read"],
   slack_open_dm: ["im:write"],
   slack_send_message: ["chat:write"],
 };

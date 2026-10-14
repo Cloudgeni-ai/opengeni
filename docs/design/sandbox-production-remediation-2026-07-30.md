@@ -220,7 +220,7 @@ The v2 descriptor discriminates:
 
 - `provider_snapshot`: opaque provider receipt, provider/persistence kind,
   snapshot ID, receipt hash/length, and mutation revision;
-- `tar_archive`: real OpenGeni-owned tar bytes, tree hash, and extraction limits.
+- `tar_archive`: real Opengeni-owned tar bytes, tree hash, and extraction limits.
 
 Native capture and restore never invoke the tar/tree fingerprint. Actual tar
 capture uses `--hard-dereference` so its own content contract survives a tar

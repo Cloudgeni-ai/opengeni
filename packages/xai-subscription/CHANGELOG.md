@@ -1,5 +1,18 @@
 # @opengeni/xai-subscription
 
+## 2.0.1
+
+### Patch Changes
+
+- @opengeni/network@2.0.1
+
+## 2.0.0
+
+### Patch Changes
+
+- 9975001: Prepare SuperGrok chat turns for the shared subscription core. A SuperGrok turn reads its provider route once: without the SuperGrok cutover it runs exactly as before; during maintenance it fails with typed copy; on the core it is placed, leased and funded like a Codex turn, every model request is reserved and settled before and after it goes out, and an unknown outcome is never replayed. The SuperGrok transport gains request identity and settlement hooks. Nothing changes today: no organization has the SuperGrok cutover, so SuperGrok and Codex behave exactly as before.
+  - @opengeni/network@2.0.0
+
 ## 1.4.4
 
 ### Patch Changes

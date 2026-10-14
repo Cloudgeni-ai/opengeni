@@ -119,7 +119,8 @@ export type ManagedEmailMessage = {
     | "email_verification"
     | "password_reset"
     | "organization_user_setup"
-    | "sign_in_method_changed";
+    | "sign_in_method_changed"
+    | "site_abuse_notice";
   from: string;
   to: string;
   subject: string;

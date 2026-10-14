@@ -14,6 +14,8 @@ import {
   retainKnowledgeMessage,
   searchKnowledgeEntries,
   requireLiveAgentAttemptAuthorization,
+  siteAgentClamp,
+  siteClampedAgentMessage,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -46,7 +48,24 @@ export function registerKnowledgeEntryTools(
   async function run(
     fn: (context: KnowledgeContext) => Promise<unknown>,
     surface: "knowledge" | "instruction" = "knowledge",
+    mode: "read" | "write" = "read",
   ) {
+    // An agent started from a Site page does not learn: it reads Knowledge
+    // and instructions but never writes them.
+    if (mode === "write" && (await siteAgentClamp(deps.db, grant))?.clamped) {
+      const message = siteClampedAgentMessage(
+        surface === "instruction" ? "workspace instructions" : "Knowledge",
+      );
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ error: { code: "site_agent_clamped", message } }),
+          },
+        ],
+      };
+    }
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
       const context: KnowledgeContext = {
@@ -131,24 +150,28 @@ export function registerKnowledgeEntryTools(
       },
     },
     (input) =>
-      run(async (context) => {
-        if (input.claimId && !input.proposalId && !input.decisionReceiptId) {
-          return confirmLegacyKnowledge(deps.db, context, {
-            operationId: input.operationId,
-            claimId: input.claimId,
-            humanInputRequestId: input.humanInputRequestId,
-          });
-        }
-        if (input.proposalId && input.decisionReceiptId && !input.claimId) {
-          return confirmLegacyInstruction(deps.db, context, {
-            operationId: input.operationId,
-            proposalId: input.proposalId,
-            decisionReceiptId: input.decisionReceiptId,
-            humanInputRequestId: input.humanInputRequestId,
-          });
-        }
-        throw new Error("Pass exactly one existing confirmation target");
-      }),
+      run(
+        async (context) => {
+          if (input.claimId && !input.proposalId && !input.decisionReceiptId) {
+            return confirmLegacyKnowledge(deps.db, context, {
+              operationId: input.operationId,
+              claimId: input.claimId,
+              humanInputRequestId: input.humanInputRequestId,
+            });
+          }
+          if (input.proposalId && input.decisionReceiptId && !input.claimId) {
+            return confirmLegacyInstruction(deps.db, context, {
+              operationId: input.operationId,
+              proposalId: input.proposalId,
+              decisionReceiptId: input.decisionReceiptId,
+              humanInputRequestId: input.humanInputRequestId,
+            });
+          }
+          throw new Error("Pass exactly one existing confirmation target");
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_prepare_save",
@@ -260,7 +283,8 @@ export function registerKnowledgeEntryTools(
         purpose: z.enum(["evidence", "reference"]).default("evidence"),
       },
     },
-    ({ fileId, purpose }) => run((context) => prepareKnowledgeFile(deps, context, fileId, purpose)),
+    ({ fileId, purpose }) =>
+      run((context) => prepareKnowledgeFile(deps, context, fileId, purpose), "knowledge", "write"),
   );
   server.registerTool(
     "knowledge_retain_message",
@@ -269,7 +293,8 @@ export function registerKnowledgeEntryTools(
         "Retain the exact text of a user message as supporting evidence only after identifying useful lasting Knowledge to save. Do not retain routine approvals, acknowledgments, task instructions or status chatter merely because they occurred. The source stays out of ordinary Knowledge discovery and can be read through its evidence link. Use when a user supplies or confirms a durable fact, before saving a finding based on it. Omit messageId for the user message that triggered this turn, or pass an earlier user message event ID from this same conversation. The server copies the actual message, preserves its identity and follows this task's learning policy. Repeated calls reuse the source. Cite the returned entryId/revisionId as evidence in knowledge_save, with location.messageIds=[messageId]. Retaining a message does not prove every statement in it or approve a pending finding.",
       inputSchema: { messageId: z.uuid().optional() },
     },
-    ({ messageId }) => run((context) => retainKnowledgeMessage(deps.db, context, messageId)),
+    ({ messageId }) =>
+      run((context) => retainKnowledgeMessage(deps.db, context, messageId), "knowledge", "write"),
   );
   server.registerTool(
     "knowledge_save",
@@ -278,7 +303,7 @@ export function registerKnowledgeEntryTools(
         "Retain retrieval-only facts, decisions, requirements, incidents or notes, or deliberately selected reference sources, not a behavioral preference or instruction for future sessions. Use instruction_policy_save for short always-on workspace rules and skill_save for applicable procedures and behavioral preferences; do not store them here as facts such as 'the user prefers concise replies', even if those destinations are unavailable or require review. First use knowledge_prepare_save when available (otherwise search published and needs_review Knowledge and browse collections). Skip unchanged duplicates; improve an existing entry when the subject is the same. Do not save routine approvals, acknowledgments, temporary instructions, screenshots or OCR merely because they occurred. State the reusable finding with enough context for a future task, preserve uncertainty and evidence, and place it in the relevant existing collections. Do this autonomously when useful for future work. Choose kind by content: source for retained original text; fact for a specific claim (the label is not verification); decision for a choice made and its reasoning; requirement for a need or constraint; incident for a problem with cause, fix and outcome when known; note for other useful context. Choose the closest kind without asking the user to classify it. A group is a collection about a customer, product, system or subject, not a finding type. Search published and needs_review views for an existing entry and relevant group before creating one, use groupIds to link entries across sources, and reuse an entry in multiple groups instead of copying it. Nest collections by setting a group entry's groupIds to its parent collections; keep the hierarchy shallow and useful, and never create circular membership. To create, omit entryId and pass expectedVersion 0; the returned entryId identifies the new entry. To correct or reorganize, pass an existing entryId and its current version. Source text and selected facts are independent entries, not mandatory duplicate stages. Evidence pins another entry's exact revision. When a user supplies or confirms a fact, retain the actual message with knowledge_retain_message and cite the returned revision; do not leave its provenance only in prose. Preserve existing evidence and relationships on corrections unless they are specifically no longer applicable; a contradictory original remains useful evidence of what changed. Use the same operationId only for an exact retry. Agent learning decides publication: published is available immediately; pending is saved for review and your task continues without an approval prompt. Do not turn Knowledge into instructions or Skills.",
       inputSchema: KnowledgeEntrySaveRequest.omit({ scope: true }).shape,
     },
-    (input) => run((context) => saveKnowledgeEntry(deps.db, context, input)),
+    (input) => run((context) => saveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
   );
   server.registerTool(
     "knowledge_archive",
@@ -291,7 +316,8 @@ export function registerKnowledgeEntryTools(
         expectedVersion: z.number().int().positive(),
       },
     },
-    (input) => run((context) => archiveKnowledgeEntry(deps.db, context, input)),
+    (input) =>
+      run((context) => archiveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
   );
   server.registerTool(
     "instruction_policy_get",
@@ -308,7 +334,8 @@ export function registerKnowledgeEntryTools(
       description: `Change a concise standing workspace instruction through this task's Agent learning policy. Use for short always-on behavior such as 'Keep replies concise; expand when asked', within the intended workspace scope; active instructions enter applicable prompts without Knowledge retrieval. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with a localized oldText that occurs exactly once and newText to update or remove only that passage. Agents cannot replace the complete instruction; direct the user to the manual workspace-instruction editor for a whole-policy rewrite. Each supplied text and the resulting instruction are limited to ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor. Facts and incidents belong in knowledge_save and reusable procedures or context-specific preferences in skill_save. Preserve personal scope rather than creating a workspace-wide rule. Review first saves an inactive revision and returns pending; continue the task without an approval question. Report the actual receipt; Knowledge is not a workaround for Off, pending review, unavailable scope or size limits.`,
       inputSchema: AgentInstructionSaveRequest.shape,
     },
-    (input) => run((context) => saveAgentInstruction(deps.db, context, input), "instruction"),
+    (input) =>
+      run((context) => saveAgentInstruction(deps.db, context, input), "instruction", "write"),
   );
   server.registerTool(
     "task_note_promote_knowledge",
@@ -317,6 +344,7 @@ export function registerKnowledgeEntryTools(
         "Retain one active task note as durable Knowledge with its exact text and origin, only for retrieval-only information. Do not promote behavior rules or preferences to Knowledge; use instruction_policy_save for short always-on workspace rules or skill_save for applicable procedures and preferences, under their own scope and learning policy. Omit entryId; the returned entryId identifies the new entry. The note stays temporary and unchanged; this creates one Knowledge entry in this task's scope, governed by the same learning policy. Pending review never pauses the task. Use knowledge_save for a selected or rewritten finding instead.",
       inputSchema: KnowledgeTaskNotePromotionRequest.shape,
     },
-    (input) => run((context) => promoteTaskNoteToKnowledge(deps.db, context, input)),
+    (input) =>
+      run((context) => promoteTaskNoteToKnowledge(deps.db, context, input), "knowledge", "write"),
   );
 }

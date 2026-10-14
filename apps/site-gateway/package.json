@@ -1,0 +1,23 @@
+{
+  "name": "@opengeni/site-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that serves published Opengeni Sites on their own hostnames.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build:shell": "bun scripts/build-shell.ts",
+    "check:shell": "bun scripts/build-shell.ts --check",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.0",
+    "miniflare": "4.20260730.0",
+    "typescript": "7.0.2"
+  }
+}

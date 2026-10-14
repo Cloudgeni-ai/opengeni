@@ -7,16 +7,21 @@ import { stageCuaRuntime } from "../scripts/stage-cua-runtime";
 // This can run headless. It does not grant permissions,
 // capture the desktop, discover apps or deliver input.
 test.skipIf(
-  !["darwin", "linux"].includes(process.platform) || process.env.OPENGENI_CUA_PACKAGING_E2E !== "1",
+  !["darwin", "linux", "win32"].includes(process.platform) ||
+    process.env.OPENGENI_CUA_PACKAGING_E2E !== "1",
 )(
   "compiled CUA loads only its adjacent release-contained assets",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-cua-package-"));
+    // Windows runs the published native runtime in process: no worker files.
+    const windows = process.platform === "win32";
     try {
       const staged = dirname(await stageCuaRuntime(process.arch));
-      for (const directory of ["cua-sdk", "node_modules", "cua-driver", "cua-source.json"])
+      for (const directory of windows
+        ? ["cua-sdk", "node_modules"]
+        : ["cua-sdk", "node_modules", "cua-driver", "cua-source.json"])
         await cp(join(staged, directory), join(root, directory), { recursive: true });
-      const binary = join(root, "probe");
+      const binary = join(root, windows ? "probe.exe" : "probe");
       const run = async (args: string[]) => {
         const child = Bun.spawn(args, {
           cwd: root,
@@ -59,10 +64,12 @@ test.skipIf(
         cursorAvailable: true,
         workerStopped: true,
       });
-      await rm(join(root, "cua-driver"));
-      const missingWorker = await run([binary]);
-      expect(missingWorker.exitCode).not.toBe(0);
-      expect(missingWorker.stderr).toContain("does not contain the CUA worker");
+      if (!windows) {
+        await rm(join(root, "cua-driver"));
+        const missingWorker = await run([binary]);
+        expect(missingWorker.exitCode).not.toBe(0);
+        expect(missingWorker.stderr).toContain("does not contain the CUA worker");
+      }
       await rm(join(root, "cua-sdk"), { recursive: true });
       const absent = await run([binary]);
       expect(absent.exitCode).not.toBe(0);

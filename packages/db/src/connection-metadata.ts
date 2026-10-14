@@ -9,8 +9,8 @@ import {
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
-import { and, desc, eq, isNull, or, type SQL } from "drizzle-orm";
-import { withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
+import { and, desc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
+import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 
 /** Server-owned verification facts; public schemas expose them read-only and nullable. */
@@ -103,6 +103,30 @@ export async function getConnectionMetadata(
       )
       .limit(1);
     return row ? mapConnectionMetadata(row) : null;
+  });
+}
+
+/**
+ * The workspace a provider connection was added in, when the caller may use
+ * it from `workspaceId`: their own personal connection (while they are an
+ * active organization member), or a shared connection an organization vault
+ * is linked through. Connected vaults reach beyond the workspace their token
+ * lives in (an Only-me vault follows its owner; an organization vault reaches
+ * every workspace it is available in), so the token is loaded from here.
+ * Null for anything else.
+ */
+export async function getProviderConnectionHomeWorkspace(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  subjectId?: string | null,
+): Promise<string | null> {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    const [row] = await rawRows<{ workspace_id: string | null }>(
+      scopedDb,
+      sql`select provider_connection_home_workspace(${connectionId}::uuid) as workspace_id`,
+    );
+    return row?.workspace_id ?? null;
   });
 }
 

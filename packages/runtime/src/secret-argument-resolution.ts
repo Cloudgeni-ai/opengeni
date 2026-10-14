@@ -3,7 +3,7 @@
  *
  * `literal` sources (remote MCP servers and Codex apps) receive the values in
  * place of each `{{secret:…}}`; `preserve` sources (interaction tools, which
- * the API resolves, and first-party OpenGeni tools, which store references
+ * the API resolves, and first-party Opengeni tools, which store references
  * verbatim) receive the arguments unchanged. The resolver only ever sees a
  * deep copy, so persisted arguments keep their references.
  */
@@ -27,7 +27,7 @@ export type SecretArgumentMode = "literal" | "preserve";
  * One rule for every tool: a reference is used where it is written, and an
  * escaped reference passes on as the literal reference. Two kinds keep their
  * arguments unchanged: interaction tools, which the API resolves at dispatch
- * so their journals keep references, and OpenGeni's secret tools, whose
+ * so their journals keep references, and Opengeni's secret tools, whose
  * arguments name references rather than use them.
  */
 export function secretArgumentMode(

@@ -5,6 +5,7 @@ import { useRail } from "@/components/rail/rail-context";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { windowControlsInPage as windowControlsInRail } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
 
 /**
@@ -13,7 +14,8 @@ import { cn } from "@/lib/utils";
  * the settings rail's top (12px, 32px brand row, 12px gap) so switching
  * between the two rails doesn't jump. The collapse toggle sits at the right end
  * of the brand row; collapsed, only the mark stays, with the expand toggle
- * under it.
+ * under it. In the macOS app the row holds just the toggle beside the window
+ * controls.
  */
 export function RailHeader() {
   const rail = useRail();
@@ -46,20 +48,26 @@ export function RailHeader() {
         data-rail-brand
         data-window-drag
         className={cn(
-          "flex h-8 min-w-0 items-center gap-2",
-          rail.collapsed ? "justify-center px-2" : "justify-between px-2",
+          "flex h-8 min-w-0 items-center gap-2 px-2",
+          rail.collapsed
+            ? "justify-center"
+            : windowControlsInRail
+              ? "justify-end"
+              : "justify-between",
         )}
       >
-        <Link
-          to="/workspaces/$workspaceId/sessions"
-          params={{ workspaceId: rail.workspaceId }}
-          className="flex h-8 shrink-0 items-center gap-2 rounded-md px-1.5 text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label="Opengeni home"
-        >
-          <BrandMark className="w-5" />
-          {!rail.collapsed ? <Wordmark className="text-[18px]" /> : null}
-        </Link>
-        {!rail.collapsed ? collapseToggle : null}
+        {windowControlsInRail ? null : (
+          <Link
+            to="/workspaces/$workspaceId/sessions"
+            params={{ workspaceId: rail.workspaceId }}
+            className="flex h-8 shrink-0 items-center gap-2 rounded-md px-1.5 text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Opengeni home"
+          >
+            <BrandMark className="w-5" />
+            {!rail.collapsed ? <Wordmark className="text-[18px]" /> : null}
+          </Link>
+        )}
+        {!rail.collapsed || windowControlsInRail ? collapseToggle : null}
         {rail.isMobile ? (
           <Button
             type="button"
@@ -73,7 +81,7 @@ export function RailHeader() {
           </Button>
         ) : null}
       </div>
-      {rail.collapsed && collapseToggle ? (
+      {rail.collapsed && collapseToggle && !windowControlsInRail ? (
         <div className="-mt-1 grid justify-items-center">{collapseToggle}</div>
       ) : null}
       {!rail.collapsed ? <SwitcherBlock /> : null}

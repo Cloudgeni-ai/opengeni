@@ -175,6 +175,9 @@ import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-comp
 import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
+import { registerSitePublicationTools } from "./site-publication-tools";
+import { registerSiteSqlTools } from "./site-sql-tools";
+import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
@@ -250,6 +253,7 @@ import {
   requireRigForApi,
 } from "@opengeni/core";
 import {
+  assertNotSiteClampedAgent,
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
@@ -375,6 +379,16 @@ import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletio
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
+import {
+  afterSiteArtifactMutation,
+  SITE_AGENT_OTHER_SITE_MESSAGE,
+  siteAgentMayChangeArtifact,
+} from "../site-publishing/service";
+import {
+  siteAgentClampRefusal,
+  siteAgentClampedToolResult,
+  siteAgentComputeRefusal,
+} from "./site-agent-clamp-tools";
 import {
   registerSessionAdminAccessTools,
   type SessionAdminAccessDispatch,
@@ -1133,12 +1147,36 @@ export function buildOpenGeniMcpServer(
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
+      // A Site-started agent does not propose or confirm the organization profile.
+      refuseSiteAgent: async () =>
+        await siteAgentClampRefusal(deps, grant, "the organization profile"),
       json,
     });
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
     registerSiteDataTools(
+      server,
+      deps,
+      grant,
+      async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    );
+    // Site SQL tools need a configured gateway (they also reach databases
+    // that already exist after the deployment stops offering Site SQL).
+    if (siteSqlGatewayConfig(deps.settings) !== null)
+      registerSiteSqlTools(
+        server,
+        deps,
+        grant,
+        async () => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+        },
+        json,
+      );
+    registerSitePublicationTools(
       server,
       deps,
       grant,
@@ -1974,11 +2012,13 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task =
+        const adminPause =
           viewer.admin &&
-          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
-            ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
-            : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
+          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
+        if (adminPause) await assertNotSiteClampedAgent(deps.db, grant, "schedules");
+        const task = adminPause
+          ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
+          : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -3341,6 +3381,16 @@ function registerWorkspaceArtifactTools(
       });
   const mutation = async (response: WorkspaceArtifactMutationResponse) =>
     await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  // A published Site follows its Site here exactly as through the API routes:
+  // the same hook resyncs the edge and scans a version that became current.
+  const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
+    await mutation(await afterSiteArtifactMutation(deps, response, { scan }));
+  // An agent started from a Site page changes only the Sites it was started
+  // from and Sites its own session tree created (the HTTP routes check the same).
+  const otherSiteRefusal = async (artifactId: string) =>
+    (await siteAgentMayChangeArtifact(deps, grant, artifactId))
+      ? null
+      : siteAgentClampedToolResult(SITE_AGENT_OTHER_SITE_MESSAGE);
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3567,8 +3617,10 @@ function registerWorkspaceArtifactTools(
       idempotencyKey,
     }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
-        await mutation(
+        await siteMutation(
           await publishWorkspaceArtifactVersion(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3578,6 +3630,7 @@ function registerWorkspaceArtifactTools(
             ...(await prepare(html, source, requestedTools, uploadId)),
             ...provenance(idempotencyKey, "artifacts_publish"),
           }),
+          true,
         ),
       );
     },
@@ -3598,8 +3651,10 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
-        await mutation(
+        await siteMutation(
           await rollbackWorkspaceArtifact(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3608,6 +3663,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_rollback"),
           }),
+          true,
         ),
       );
     },
@@ -3627,8 +3683,10 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
-        await mutation(
+        await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3637,6 +3695,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_archive"),
           }),
+          false,
         ),
       );
     },
@@ -3656,8 +3715,10 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
-        await mutation(
+        await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3666,6 +3727,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_restore"),
           }),
+          false,
         ),
       );
     },
@@ -4200,7 +4262,9 @@ function registerFleetTools(
         'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      (await siteAgentComputeRefusal(deps, grant)) ??
+      json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
@@ -4210,7 +4274,9 @@ function registerFleetTools(
         'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      (await siteAgentComputeRefusal(deps, grant)) ??
+      json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
@@ -4236,6 +4302,8 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
+      const refused = await siteAgentComputeRefusal(deps, grant);
+      if (refused) return refused;
       const typedOp = op as RunOnOp;
       const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
       // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
@@ -4262,13 +4330,15 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted posts the Connected Machine card in this chat: the person copies a one-line connect command, runs it on their own computer, and picks Use in this chat; the card also offers the OpenGeni Browser Chrome extension once the machine is connected. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+        "Provision a new sandbox for the fleet. kind=selfhosted posts the Connected Machine card in this chat: the person copies a one-line connect command, runs it on their own computer, and picks Use in this chat; the card also offers the Opengeni Browser Chrome extension once the machine is connected. When you can already run commands on the target machine, install it yourself with connected_machine_enroll_token instead. kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),
       },
     },
     async ({ kind, name }) => {
+      const refused = await siteAgentComputeRefusal(deps, grant);
+      if (refused) return refused;
       if (kind === "selfhosted" && exactAgentAttemptClaims(grant)) {
         // Same live-attempt authority the other fleet tools resolve, without
         // requiring a session box: a chat with no sandbox can still connect one.
@@ -4303,7 +4373,7 @@ function registerFleetTools(
             setup.status === "ready"
               ? `${setup.detail} The Connected Machine card lists them with Use in this chat and can connect another.`
               : "The Connected Machine card was posted. The person copies its one-line connect command, runs it on their machine, and picks Use in this chat; nothing is connected yet."
-          } Check sandboxes_list after they confirm. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
+          } Check sandboxes_list after they confirm. Chrome needs the Opengeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on the connected machine.`,
         });
       }
       return json(
@@ -4332,7 +4402,7 @@ function registerConnectedMachineTools(
     "connected_machine_enroll_token",
     {
       description:
-        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the OpenGeni Browser extension (" +
+        "Create a single-use Connected Machine enrollment token for this workspace (expires in one hour) using existing enrollments:manage authority. Returns the token, expiry and Unix/PowerShell install commands. Use it when you can run commands on the target machine yourself (run_on, SSH, a VM you control): run the matching command there, then verify the machine with sandboxes_list. One token connects one machine; mint another for each additional machine (the same machine may rerun its command). When the person must run it on their own computer, post the Connected Machine card instead (capability_authorization_request with api:connected-machine), which mints the command in their browser; do not paste a token into the chat. Screen control is optional and defaults off; to turn it on for a machine that is already connected, use connected_machine_enable_screen_control instead of reconnecting. The token grants whole-machine access on enrollment; do not put it in public code or unrelated logs. Existing machine connections are preserved. For Chrome, the person installs the Opengeni Browser extension (" +
         OPENGENI_BROWSER_EXTENSION_URL +
         ") after the machine is connected.",
       inputSchema: { allowScreenControl: z4.boolean().optional() },
@@ -4341,6 +4411,8 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
+      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
+      if (refused) return refused;
       const minted = await mintEnrollToken(deps, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -4363,7 +4435,7 @@ function registerConnectedMachineTools(
     "connected_machine_enable_screen_control",
     {
       description:
-        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: OpenGeni records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for OpenGeni: open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch OpenGeni on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the OpenGeni Browser extension (" +
+        "Turn screen control on for a machine that is already connected, in place, so agents can see and use its screen (computer and attached-Chrome tools). `target` is a sandboxes_list id or an enrollment id. Needs no human click, token, terminal or reconnect: Opengeni records the consent on that machine and its agent refreshes its own credentials over the live connection. status=active means it is on now. status=pending means it is allowed and turns on by itself: reason=offline when the machine next connects; reason=agent_update_required after its agent is updated (update it with the machine update action, POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/update); reason=renewal_failed: call again shortly; reason=reconnect_required: the machine's connection predates in-place changes, so rerun the connect command on it (connected_machine_enroll_token with allowScreenControl=true). On a Mac the OS must also allow Screen Recording, Accessibility and Input Monitoring for Opengeni: open each pane on the Mac with run_on exec `open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'` (Privacy_Accessibility, Privacy_ListenEvent; also the privacy-settings machine action) and ask the person to switch Opengeni on there, choosing Quit & Reopen if macOS asks; the machine list reports runtime.macPermissions. Chrome additionally needs the Opengeni Browser extension (" +
         OPENGENI_BROWSER_EXTENSION_URL +
         ") on that machine.",
       inputSchema: { target: z4.string().min(1) },
@@ -4372,6 +4444,8 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
+      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
+      if (refused) return refused;
       // Personal machines belong to the person the attempt acts for.
       const attempt = sessionId ? exactAgentAttemptClaims(grant) : null;
       const resourceGrant =
@@ -4444,6 +4518,8 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
+      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
+      if (refused) return refused;
       const resourceGrant =
         sessionId && exactAgentAttemptClaims(grant)
           ? {
@@ -4581,6 +4657,9 @@ function registerRigTools(
         },
       },
       async ({ rigId, command, note }) => {
+        // A Site-started agent does not change sandbox environments.
+        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
+        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const change = await proposeRigChangeForApi(
@@ -4662,6 +4741,9 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
+        // A Site-started agent does not change sandbox environments.
+        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
+        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         if (changeId) {
           const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
@@ -4765,6 +4847,9 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
+        // A Site-started agent does not change sandbox environments.
+        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
+        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
@@ -6555,7 +6640,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the OpenGeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
         (secretsSelected
           ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
           : ""),
@@ -6610,7 +6695,7 @@ function registerCapabilityDiscoveryTools(
           capabilityId: item.id,
           status: "ready",
           eventId,
-          message: `${setup.detail} The Connected Machine card is in this chat: the person can pick a machine with "Use in this chat" or connect another. Chrome needs the OpenGeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
+          message: `${setup.detail} The Connected Machine card is in this chat: the person can pick a machine with "Use in this chat" or connect another. Chrome needs the Opengeni Browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) on a connected machine.`,
         });
       }
       if (githubCardWhenReady) {

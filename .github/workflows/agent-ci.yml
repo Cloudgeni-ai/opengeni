@@ -16,6 +16,7 @@ on:
       - "packages/browserd/scripts/build-cua-worker.ts"
       - "packages/browserd/test/cua-runtime-packaging.e2e.test.ts"
       - "packages/browserd/test/cua-linux*.e2e.test.ts"
+      - "packages/browserd/test/cua-windows.e2e.test.ts"
       - "packages/browserd/test/fixtures/cua/**"
       - "packages/contracts/src/cua-desktop-tools*"
       - "packages/browserd/package.json"
@@ -67,6 +68,32 @@ jobs:
           OPENGENI_CUA_PACKAGING_E2E: "1"
         run: |
           bun test --timeout 120000 packages/browserd/test/cua-linux*.e2e.test.ts
+          bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
+
+  cua-windows:
+    name: Windows CUA
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
+    # Hosted Windows runners have an unlocked interactive desktop, which CUA
+    # requires; Session 0 services are refused.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: .
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Drive a real window and verify compiled packaging
+        env:
+          OPENGENI_CUA_E2E: "1"
+          OPENGENI_CUA_PACKAGING_E2E: "1"
+        run: |
+          bun test --timeout 120000 packages/browserd/test/cua-windows.e2e.test.ts
           bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
 
   native-command-supervisor:

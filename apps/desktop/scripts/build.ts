@@ -52,6 +52,7 @@ for (const [entry, name] of [
 cpSync(join(kit, "pages"), join(dist, "pages"), { recursive: true });
 cpSync(join(root, "..", "web", "public", "favicon.svg"), join(dist, "pages", "logo.svg"));
 cpSync(join(root, "assets"), join(dist, "assets"), { recursive: true });
+cpSync(join(root, "resources", "icon.png"), join(dist, "assets", "icon.png"));
 
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as Record<
   string,
@@ -72,6 +73,9 @@ writeFileSync(
       author: manifest.author,
       type: "module",
       main: "main.mjs",
+      // Linux: the installed packages' desktop entry, so URL scheme
+      // registration and notifications name the right app.
+      desktopName: "opengeni.desktop",
     },
     null,
     2,

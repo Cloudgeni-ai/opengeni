@@ -128,6 +128,7 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { useCapabilityToolDefaults } from "@/lib/use-capability-tool-defaults";
+import { useManualRepositoryCatalogReconciliation } from "@/lib/use-manual-repository-catalog-reconciliation";
 import { upsertWorkspace } from "@/lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
@@ -1292,6 +1293,19 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (!repositoryBuild.error) lastValidResources.current = repositoryBuild.resources;
   }, [repositoryBuild]);
+  useManualRepositoryCatalogReconciliation({
+    manualRepos,
+    selectedRepoIds,
+    selectedRepoRefs,
+    repositories: githubRepos,
+    catalogReady: githubCatalogReady,
+    personalRepositories: personalGitHubRepositories,
+    selectedPersonalRepoIds: selectedPersonalGitHubRepoIds,
+    selectedPersonalRepoRefs: selectedPersonalGitHubRepoRefs,
+    setManualRepos,
+    setSelectedRepoIds,
+    setSelectedRepoRefs,
+  });
   const currentResources = repositoryBuild.resources;
   const repositoryValidationError = repositoryBuild.error;
 
@@ -2953,12 +2967,13 @@ export function RootRouteComponent() {
         </SignedOutPage>
       </Suspense>
     </DesktopSignedOutRecovery>
-  ) : /^\/native-sign-in\/?$/.test(pathname) &&
+  ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (
-    // A phone app is signed in by the person, not by a workspace grant, so
-    // approval renders before the access and onboarding gates.
+    // A phone app, and a published Site's viewer, are signed in by the person,
+    // not by a workspace grant (an invited viewer may belong to no
+    // organization), so approval renders before the access and onboarding gates.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />
     ) : (

@@ -189,7 +189,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       insert into workspace_artifact_versions (account_id, workspace_id, artifact_id, revision, content_key, size_bytes, operation_key, created_by_subject_id)
       values (${grant.accountId}, ${grant.workspaceId}, ${site!.id}, 1, 'synthetic.html', 1, ${crypto.randomUUID()}, ${grant.subjectId}) returning id`;
     const origin = await resolveSiteSessionOrigin(client.db, grant, site!.id, version!.id);
-    expect(origin).toEqual({ siteId: site!.id, title: "Analytics" });
+    expect(origin).toEqual({ siteId: site!.id, title: "Analytics", versionId: version!.id });
     const other = await freshGrant();
     await expect(
       resolveSiteSessionOrigin(client.db, other, site!.id, version!.id),

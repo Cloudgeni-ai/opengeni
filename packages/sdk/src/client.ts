@@ -37,6 +37,32 @@ import type {
   SiteDataWriteResponse,
 } from "@opengeni/contracts";
 import type {
+  SiteSqlDescribeResponse,
+  SiteSqlExportFormat,
+  SiteSqlImportRequest,
+  SiteSqlImportResponse,
+  SiteSqlInspectResponse,
+  SiteSqlMigrateResponse,
+  SiteSqlMigrationRequest,
+  SiteSqlQueryDefinitionRequest,
+  SiteSqlQueryResponse,
+  SiteSqlResetResponse,
+  SiteSqlRunRequest,
+  SiteSqlRunResponse,
+  SiteSqlSettingsRequest,
+  SiteSqlStatementRequest,
+} from "@opengeni/contracts";
+import type {
+  SiteAbuseReport,
+  SiteAuthAuthorizeRequest,
+  SiteAuthAuthorizeResponse,
+  SiteHostnameAvailability,
+  SiteLimitProfile,
+  SitePublication,
+  SiteTakedownRequest,
+  UpsertSitePublicationRequest,
+} from "@opengeni/contracts";
+import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
   SessionMessagePreview,
@@ -2447,7 +2473,7 @@ export class OpenGeniClient {
   }
 
   /** Open one macOS Privacy & Security pane on a connected Mac, so the person
-   * only has to flip the permission for OpenGeni. */
+   * only has to flip the permission for Opengeni. */
   async openMachinePrivacySettings(
     workspaceId: string,
     enrollmentId: string,
@@ -8413,6 +8439,405 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * A Site's SQL database (optional Cloudflare storage): availability, whether
+   * it is on, migrations, named queries, usage and limits. Needs a manager.
+   */
+  async getSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlDescribeResponse> {
+    return await this.requestJson<SiteSqlDescribeResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Turn a Site's SQL database on or off; turning it off keeps its data. */
+  async updateSiteSqlSettings(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlSettingsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlDescribeResponse> {
+    return await this.requestJson<SiteSqlDescribeResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/sql/settings`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Add a named schema migration to a Site's SQL database. */
+  async migrateSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlMigrationRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlMigrateResponse> {
+    return await this.requestJson<SiteSqlMigrateResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/migrations`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create or replace a named query Site pages run with site.sql.run. */
+  async defineSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteSqlQueryDefinitionRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlQueryResponse> {
+    return await this.requestJson<SiteSqlQueryResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  async deleteSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run a named query with the caller's access (its audience decides who may). */
+  async runSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteSqlRunRequest = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run one read-only statement on a Site's SQL database. Needs a manager. */
+  async querySiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlStatementRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/query`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run one data-changing statement on a Site's SQL database. Needs a manager. */
+  async executeSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlStatementRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/execute`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Tables, columns, row counts and applied migrations of a Site's SQL database. */
+  async inspectSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlInspectResponse> {
+    return await this.requestJson<SiteSqlInspectResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql/inspect`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Export a Site's SQL database as SQL, CSV (one table) or JSON. One call
+   * returns at most `maxBytes` (16 MiB at most); when `nextCursor` is set,
+   * call again with it as `cursor` and append the pieces in order.
+   */
+  async exportSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: {
+      format?: SiteSqlExportFormat;
+      table?: string;
+      cursor?: string;
+      maxBytes?: number;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<{
+    content: string;
+    contentType: string;
+    truncated: boolean;
+    nextCursor: string | null;
+  }> {
+    const format = options.format ?? "sql";
+    const response = await this.requestResponse(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql/export`,
+      {
+        format,
+        ...(options.table ? { table: options.table } : {}),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.maxBytes !== undefined ? { maxBytes: String(options.maxBytes) } : {}),
+      },
+      { ...options, accept: format === "json" ? "application/json" : "*/*" },
+    );
+    return {
+      content: await response.text(),
+      contentType: response.headers.get("content-type") ?? "",
+      truncated: response.headers.get("x-opengeni-export-truncated") === "true",
+      nextCursor: response.headers.get("x-opengeni-export-next-cursor") || null,
+    };
+  }
+
+  /** Import SQL statements, CSV or JSON rows into a Site's SQL database. */
+  async importSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlImportRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlImportResponse> {
+    return await this.requestJson<SiteSqlImportResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/import`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Empty a Site's SQL database, keeping (rebuilding) or dropping its schema. */
+  async resetSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: { schema?: "keep" | "drop" } = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlResetResponse> {
+    return await this.requestJson<SiteSqlResetResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/reset`,
+      { confirm: true, ...request },
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * A Site's web publication: hostname, access, embedded agent, limits,
+   * status and moderation. 404 when the Site was never published; 503
+   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   */
+  async getSitePublication(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "GET",
+      sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Publish a Site on its own hostname or change its publication. Omitted
+   * fields keep their current values. 409 `site_hostname_taken` when the
+   * label belongs to another Site; 403 when the Site is Only me or the
+   * caller cannot manage it.
+   */
+  async updateSitePublication(
+    workspaceId: string,
+    siteId: string,
+    request: UpsertSitePublicationRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "PUT",
+      sitePublicationPath(workspaceId, siteId),
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Stop serving a published Site. Its hostname stays held for the workspace. */
+  async unpublishSite(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "DELETE",
+      sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Whether a hostname label is valid and free for a Site in this workspace. */
+  async checkSiteHostname(
+    workspaceId: string,
+    label: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteHostnameAvailability> {
+    return await this.requestJson<SiteHostnameAvailability>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-hostnames/${encodeURIComponent(label)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Take a published Site down at once; visitors see a takedown notice. */
+  async takeDownSite(
+    workspaceId: string,
+    siteId: string,
+    request: SiteTakedownRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/takedown`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Serve a Site that was taken down again. */
+  async restoreSite(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/restore`,
+      {},
+      undefined,
+      options,
+    );
+  }
+
+  /** Abuse reports visitors filed against a published Site. */
+  async listSiteAbuseReports(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ reports: SiteAbuseReport[] }> {
+    return await this.requestJson<{ reports: SiteAbuseReport[] }>(
+      "GET",
+      `${sitePublicationPath(workspaceId, siteId)}/reports`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Close an abuse report as dismissed or actioned. */
+  async updateSiteAbuseReport(
+    workspaceId: string,
+    siteId: string,
+    reportId: string,
+    request: { status: "dismissed" | "actioned" },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteAbuseReport> {
+    return await this.requestJson<SiteAbuseReport>(
+      "PATCH",
+      `${sitePublicationPath(workspaceId, siteId)}/reports/${encodeURIComponent(reportId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** The workspace's default limit profile for published Sites. */
+  async getSiteLimitProfile(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteLimitProfile> {
+    return await this.requestJson<SiteLimitProfile>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-limit-profile`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change the workspace's default limit profile for published Sites. Needs a workspace admin. */
+  async updateSiteLimitProfile(
+    workspaceId: string,
+    profile: SiteLimitProfile,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteLimitProfile> {
+    return await this.requestJson<SiteLimitProfile>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-limit-profile`,
+      profile,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Let the signed-in person open a published Site: returns a one-time code,
+   * bound to the Site host, PKCE challenge and redirect, inside `redirectTo`.
+   * 403 `site_access_denied` when they may not open the Site.
+   */
+  async authorizeSiteViewer(
+    request: SiteAuthAuthorizeRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteAuthAuthorizeResponse> {
+    return await this.requestJson<SiteAuthAuthorizeResponse>(
+      "POST",
+      "/v1/site-auth/authorize",
+      request,
+      undefined,
+      options,
+    );
+  }
+
   /** Search the official MCP registry for installable capabilities. */
   async discoverMcpCapabilities(
     workspaceId: string,
@@ -11066,4 +11491,8 @@ async function readBoundedResponseBytes(
 
 function siteDataPath(workspaceId: string, siteId: string): string {
   return `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}`;
+}
+
+function sitePublicationPath(workspaceId: string, siteId: string): string {
+  return `${siteDataPath(workspaceId, siteId)}/publication`;
 }

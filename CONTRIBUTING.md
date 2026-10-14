@@ -81,6 +81,40 @@ Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename fi
 
 Release and publishing guidance starts here; executable truth lives in [`package.json`](package.json) and the workflow files under `.github/workflows/`. When publishable packages change, keep changesets, package manifests, and the release workflow expectations aligned.
 
+### Release credential boundary
+
+Store release credentials as **environment secrets**, never repository-wide
+secrets. Configure required human reviewers and disable administrator deployment
+bypass on each credential-bearing environment. Restrict deployment branches to
+`main`; `agent-release` additionally admits the `agent-v*` tag pattern and
+`desktop-release` the `desktop-v*` tag pattern (tag rules, not branch rules).
+Review tagged source before approving its signing job.
+
+| Environment | Secret names | Consumers |
+| --- | --- | --- |
+| `package-release` | `NPM_TOKEN` | Canary, stable, explicit package publication and deprecation |
+| `production-release` | `NPM_TOKEN` | Verified official release |
+| `embedded-release` | `NPM_TOKEN` | Embedded release |
+| `agent-release` | `OPENGENI_AGENT_MINISIGN_KEY`, `APPLE_ASC_KEY`, `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD`, `APPLE_DEVELOPER_ID` | Agent build and publication |
+| `desktop-release` | `APPLE_ASC_KEY`, `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD` | Desktop signing and notarization |
+| `public-release` | `OPENGENI_AGENT_MINISIGN_KEY` | Release candidate and exact-main CI agent bake |
+
+The CI API-image job selects `public-release` only on a `push` to `main`.
+All other CI events select `ci-build`, which must contain **no secrets** and
+requires no release approval. Do not approve a release merely to unblock a PR.
+Other jobs already using `public-release` also inherit its approval requirement.
+Environment approval happens before the job can access its environment secrets;
+the existing repository-level copies must be removed to establish this boundary.
+Repository administrators and organization owners can still change environment
+configuration, so this does not isolate credentials from administrators.
+
+Secret migration must preserve the exact existing values. GitHub does not expose
+them through its read API: use the original secure store, or a reviewed one-time
+transfer that seals each value to the destination environment's public key on the
+runner. Only sealed ciphertext may leave that runner. Verify destination secret
+metadata before deleting source entries, and remove one-time transfer workflows
+and artifacts afterward. Never print values or commit them to Git.
+
 `main` is the daily integration branch. GitHub's default branch stays `main`. `production` is the official source pointer, not a live-cluster deploy. Staging pins already-baked `canary-sha-<commit>` images from a `main` SHA; it does not auto-deploy on merge.
 
 **Promote `main` → `production`:** open a GitHub PR with base `production` and compare `main`. Merge with a **merge commit** (never squash, never GitHub rebase-and-merge: both rewrite SHAs and poison the next promote). The extra merge commit lives only on `production`. The next ship is the same PR shape again. Do not PR `production` back to `main` just because of that merge commit. Do not force-push `production`.

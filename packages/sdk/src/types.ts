@@ -1464,7 +1464,7 @@ export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
 
 export type TurnInitiatorContext = Record<string, unknown>;
 
-/** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
+/** Bounded host provenance; Opengeni-owned lineage keys are reserved. */
 export type ServiceTurnInitiatorContext = TurnInitiatorContext;
 
 export type IntegrationClientMetadata = {
@@ -3909,6 +3909,19 @@ export type FirstPartyMcpToolName =
   | "site_files_list"
   | "site_files_upload"
   | "site_files_delete"
+  | "site_publication_get"
+  | "site_publication_update"
+  | "site_hostname_check"
+  | "site_sql_inspect"
+  | "site_sql_enable"
+  | "site_sql_migrate"
+  | "site_sql_define_query"
+  | "site_sql_query"
+  | "site_sql_run"
+  | "site_sql_execute"
+  | "site_sql_export"
+  | "site_sql_import"
+  | "site_sql_reset"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -9073,7 +9086,7 @@ export type GitHubInstallationBinding = {
   lifecycle: GitHubInstallationLifecycle;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
-  /** OpenGeni-owned entry point for changing the installation's repository allowlist. */
+  /** Opengeni-owned entry point for changing the installation's repository allowlist. */
   configureUrl: string | null;
   createdAt: string;
   updatedAt: string;

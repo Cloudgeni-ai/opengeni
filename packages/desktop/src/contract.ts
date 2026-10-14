@@ -17,7 +17,16 @@ export type DesktopCapability =
   /** Connect this computer to a workspace, pause and resume it. */
   | "thisComputer"
   /** Open a URL in the default browser. */
-  | "openExternal";
+  | "openExternal"
+  /** Menu bar and keyboard commands for the web app to carry out. */
+  | "commands";
+
+/**
+ * What the app's menus and shortcuts ask the web app to do. A page that does
+ * not listen still gets the navigation ones (the bridge falls back to loading
+ * the workspace's page), so older servers keep working.
+ */
+export type DesktopCommand = "newSession" | "searchSessions" | "toggleSidebar" | "openInbox";
 
 /** One signed-in account as the web app sees it. Never carries a credential. */
 export interface DesktopAccount {
@@ -104,6 +113,10 @@ export interface DesktopBridge {
   };
   /** Open a page in the default browser. Only http(s) URLs are accepted. */
   openExternal(url: string): Promise<void>;
+  readonly commands: {
+    /** Carry out menu and shortcut commands; only the newest listener receives them. */
+    onCommand(listener: (command: DesktopCommand) => void): Unsubscribe;
+  };
   /** Follow the web app's appearance, so window materials and controls match it. */
   setAppearance(appearance: "light" | "dark" | "system"): void;
 }
@@ -138,12 +151,22 @@ export const DESKTOP_IPC = {
   computerResume: "og:computer:resume",
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
+  command: "og:command",
   appearanceSet: "og:appearance:set",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",
+  welcomeRetry: "og:welcome:retry",
   welcomeChanged: "og:welcome:changed",
 } as const;
+
+/** The account the window should show, while its server can't be reached. */
+export interface WelcomeUnreachable {
+  /** The host a person recognizes, e.g. app.opengeni.ai. */
+  server: string;
+  /** A try is in progress. */
+  retrying: boolean;
+}
 
 /** What the first-run page shows while there is no account to show. */
 export interface WelcomeState {
@@ -154,6 +177,8 @@ export interface WelcomeState {
   error: string | null;
   /** An account is signed in, so the page can go back to it. */
   canCancel: boolean;
+  /** The page stands in for an account whose server is out of reach; it keeps trying. */
+  unreachable: WelcomeUnreachable | null;
 }
 
 /** The first-run page's bridge (`window.opengeniDesktopWelcome`). */
@@ -161,6 +186,8 @@ export interface DesktopWelcomeBridge {
   state(): Promise<WelcomeState>;
   signIn(serverUrl: string): Promise<void>;
   cancel(): Promise<void>;
+  /** Try the unreachable account's server again now. */
+  retry(): Promise<void>;
   onChange(listener: (state: WelcomeState) => void): Unsubscribe;
 }
 

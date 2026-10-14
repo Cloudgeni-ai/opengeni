@@ -15,6 +15,7 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
+import { assertNotSiteClampedAgent } from "../site-agent-clamp";
 import {
   privacyDeploymentLimits,
   resolveOrganizationPrivacy,
@@ -154,6 +155,7 @@ export async function pausePrivateScheduledTaskAsAdmin(
   taskId: string,
   viewer: ScheduledTaskViewer,
 ): Promise<PrivateScheduledTaskSummary> {
+  await assertNotSiteClampedAgent(db, grant, "schedules");
   if (!viewer.seesPrivateSummaries) throw scheduledTaskNotFound();
   const paused = await pausePrivateScheduledTask(db, {
     workspaceId: grant.workspaceId,

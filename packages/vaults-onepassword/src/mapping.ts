@@ -12,7 +12,7 @@ import type { SdkItem, SdkItemCreateParams, SdkItemField, SdkWebsite } from "./s
 export const NOTES_FIELD_ID = "@notes";
 export const DOCUMENT_FIELD_ID = "@document";
 export const FILE_FIELD_PREFIX = "@file:";
-/** Section used for custom fields that OpenGeni adds to 1Password items. */
+/** Section used for custom fields that Opengeni adds to 1Password items. */
 export const OPENGENI_SECTION_ID = "opengeni";
 
 const API_KEY_CATEGORIES = new Set([
@@ -49,8 +49,8 @@ export function categoryForItemType(type: VaultItemType): string {
       throw new VaultProviderError(
         "provider_unavailable",
         type === "passkey"
-          ? "1Password service accounts cannot store passkeys; keep passkeys in an OpenGeni vault"
-          : "Creating file items in 1Password from OpenGeni is not supported yet",
+          ? "1Password service accounts cannot store passkeys; keep passkeys in an Opengeni vault"
+          : "Creating file items in 1Password from Opengeni is not supported yet",
       );
   }
 }
@@ -77,7 +77,7 @@ function sdkTypeForKind(kind: VaultFieldKind): string {
   if (kind === "concealed") return "Concealed";
   throw new VaultProviderError(
     "provider_unavailable",
-    "Writing file fields to 1Password from OpenGeni is not supported yet",
+    "Writing file fields to 1Password from Opengeni is not supported yet",
   );
 }
 
@@ -212,7 +212,7 @@ function toWebsites(urls: readonly string[], previous: readonly SdkWebsite[] = [
 
 type WriteField = ProviderWriteItem["fields"][number];
 
-/** Built-in 1Password field that a named OpenGeni field maps onto, if any. */
+/** Built-in 1Password field that a named Opengeni field maps onto, if any. */
 function builtInFieldFor(
   category: string,
   field: WriteField,
@@ -323,7 +323,7 @@ export function applyWrite(item: SdkItem, write: ProviderWriteItem): SdkItem {
     if (target?.source === "file" || (!target && field.kind === "file")) {
       throw new VaultProviderError(
         "provider_unavailable",
-        "Writing file fields to 1Password from OpenGeni is not supported yet",
+        "Writing file fields to 1Password from Opengeni is not supported yet",
       );
     }
     if (field.remove) {

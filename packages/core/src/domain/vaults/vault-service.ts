@@ -93,6 +93,11 @@ import {
 } from "./mapping";
 import { vaultErrorCodeForProvider } from "./provider-registry";
 import {
+  LINKED_VAULT_OPEN_WAIT_MS,
+  LINKED_VAULT_SEARCH_MAX_AGE_MS,
+  refreshStaleLinkedVaults,
+} from "./provider-sync";
+import {
   archiveProviderVaultItem,
   writeProviderVaultItem,
   type ProviderWriteDeps,
@@ -423,7 +428,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
    * Values never live in both stores' databases at once: each field is read
    * from the source (service-side, unaudited like other internal copies),
    * written to the target through its own path, and a move then archives the
-   * source so the old item stays recoverable. OpenGeni-to-OpenGeni moves keep
+   * source so the old item stays recoverable. Opengeni-to-Opengeni moves keep
    * the single-statement database move, which preserves the item id.
    */
   async function moveAcrossProviders(input: {
@@ -766,7 +771,22 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async listItems(actor, workspaceId, vaultId, q) {
-      const result = await listVaultItems(deps.db, subjectContext(actor, workspaceId), {
+      const context = subjectContext(actor, workspaceId);
+      // Opening a linked vault shows items added straight in the provider
+      // (1Password) without anyone pressing Sync: the first page refreshes a
+      // stale mirror, on the same budget as agent search.
+      if (deps.providers && q.cursor === undefined) {
+        const vault = await getVault(deps.db, context, { vaultId });
+        await refreshStaleLinkedVaults({
+          db: deps.db,
+          context,
+          vaults: [vault],
+          providers: deps.providers,
+          maxAgeMs: LINKED_VAULT_SEARCH_MAX_AGE_MS,
+          waitMs: LINKED_VAULT_OPEN_WAIT_MS,
+        });
+      }
+      const result = await listVaultItems(deps.db, context, {
         vaultId,
         ...(q.q !== undefined ? { q: q.q } : {}),
         ...(q.type !== undefined ? { type: q.type } : {}),
@@ -940,9 +960,25 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
     async searchForAgent(principal, input) {
       const context = principalContext(principal);
-      const reachable = await listVaultsForSubject(deps.db, context, {
+      let reachable = await listVaultsForSubject(deps.db, context, {
         workspaceId: principal.workspaceId,
       });
+      // Items added straight in a connected provider (1Password) appear here
+      // without anyone pressing Sync: stale mirrors refresh before the scan.
+      if (deps.providers) {
+        const changed = await refreshStaleLinkedVaults({
+          db: deps.db,
+          context,
+          vaults: reachable,
+          providers: deps.providers,
+          maxAgeMs: LINKED_VAULT_SEARCH_MAX_AGE_MS,
+        });
+        if (changed.length > 0) {
+          reachable = await listVaultsForSubject(deps.db, context, {
+            workspaceId: principal.workspaceId,
+          });
+        }
+      }
       const byTier = (vaults: VaultRow[]) =>
         [...vaults].sort(
           (left, right) => left.tier - right.tier || left.name.localeCompare(right.name),
