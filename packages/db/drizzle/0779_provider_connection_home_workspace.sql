@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- A connected vault can be reached from workspaces other than the one its
 -- provider connection was added in: an Only-me vault follows its owner into
 -- every workspace they use, and an organization vault reaches every workspace
