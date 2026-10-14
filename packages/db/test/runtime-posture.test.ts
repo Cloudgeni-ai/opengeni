@@ -1575,12 +1575,15 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 5
             : 0) +
-          // 0782 adds the ten published Sites tables (FORCE RLS, full runtime DML).
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
+          // 0782 adds the ten published Sites tables (FORCE RLS): nine with full
+          // runtime DML and the hostname holds, which the runtime only reads.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
             ? 10
-            : 0) +
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 9
+              : tables === RUNTIME_READ_ONLY_TABLES
+                ? 1
+                : 0) +
           // 0776 adds the eight workspace-isolated Site Data tables with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -1720,7 +1723,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 0696 single-use enroll-token redemptions: full-DML, FORCE-RLS.
         1 + // 0761 schedule reconciliation outbox: full-DML, FORCE-RLS.
         8 + // 0776 Site Data tables: full-DML, FORCE-RLS.
-        10 + // 0782 published Sites tables: full-DML, FORCE-RLS.
+        10 + // 0782 published Sites tables: FORCE-RLS; nine full-DML, one read-only.
         5; // 0783 Site SQL tables: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");

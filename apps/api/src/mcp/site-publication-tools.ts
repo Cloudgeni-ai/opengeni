@@ -79,7 +79,7 @@ export function registerSitePublicationTools(
     "site_publication_update",
     {
       description:
-        'Publish a Site on its own hostname (https://<label>.<sites domain>/), or change its publication. The Site must be shared with the workspace. access: members (workspace members sign in), invited (members and invitedEmails), public (anyone; may be off on this deployment). status: "unpublished" stops serving it and keeps its hostname. The embedded agent runs as the Site with its own budget. Changing limitProfile, giving the agent tools (agent.tools) or letting anonymous guests use them (agent.guestTools) needs a workspace admin. Public puts the Site on the internet; make a Site public only when the person asked for it.',
+        'Publish a Site on its own hostname (https://<label>.<sites domain>/), or change its publication. The Site must be shared with the workspace. access: members (workspace members sign in), invited (members and invitedEmails), public (anyone; may be off on this deployment). status: "unpublished" stops serving it and keeps its hostname. The embedded agent runs as the Site with its own budget. Changing limitProfile, giving the agent tools (agent.tools) or letting everyone who is not a workspace member or invited use them (agent.guestTools) needs a workspace admin. Public puts the Site on the internet; make a Site public only when the person asked for it.',
       inputSchema: contractToolInput(
         z4.object({ siteId: SiteIdInput, ...UpsertSitePublicationRequest.shape }),
       ),

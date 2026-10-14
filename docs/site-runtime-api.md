@@ -105,9 +105,14 @@ Hostnames:
   holds the label for the platform (`site_hostname_holds`, with no foreign
   keys, so deleting the Site or its workspace does not free it); only
   `site-takedown.ts --release-hold` lifts it.
+- Deleting a Site or its workspace never frees its label at once: a
+  database trigger leaves a 30-day `release` hold (kept for that workspace,
+  `held` for everyone else) in `site_hostname_holds`.
 - Global lookups go through a transaction-local hostname "lane" setting
   that a row-level security policy matches (the `api_keys` pattern), not a
-  `SECURITY DEFINER` function.
+  `SECURITY DEFINER` function. The application role only reads holds; the
+  schema owner writes them (operator scripts, and the release-hold trigger,
+  which runs as the owner).
 
 Takedown:
 
@@ -118,6 +123,16 @@ Takedown:
   Unpublishing and narrowing access (a narrower mode or a removed
   invitation) do the same for sessions and conversations; turning the agent
   off cancels the conversations.
+- Narrowing access signs out every viewer of the Site and cancels every
+  conversation, including those of viewers who keep access; they sign in
+  again. The sign-out is prompt cleanup, not the boundary: every
+  site-runtime request re-checks the viewer's access.
+- A conversation's workspace tools are fixed when it starts and recorded
+  with it. Removing a tool, or turning **Let everyone use these tools**
+  (`guestTools`) off, cancels the running conversations that hold tools
+  they would not get now, without signing anyone out. Such a conversation
+  (also one whose viewer has since left the workspace) takes no more
+  messages: `409 site_conversation_outdated`; the viewer starts a new one.
 - An owner's takedown is restored by the owner or an admin; an admin's
   takedown only by an admin.
 - Only the operator script can lift a platform takedown:
@@ -176,13 +191,29 @@ request:
 - Requests that carry `Authorization`, `Proxy-Authorization`, `Cookie`,
   `X-Api-Key` or an external-actor header are refused.
 
-Bodies are capped before anything is read or verified: 4 MiB for JSON and
-25 MiB for `POST /published-artifacts/current/files` (the gateway's caps).
-A larger body returns 413 `site_request_too_large`.
+Every signed request also carries `x-opengeni-site-body-sha256`
+(`SITE_GATEWAY_BODY_SHA256_HEADER` in `@opengeni/contracts`): the lowercase
+hex SHA-256 the gateway signs as `bodySha256`, which is the hash of the empty
+string for `GET` and `HEAD`. The header is required, and there is no
+fallback. The API checks that it is 64 lowercase hex characters and verifies
+the signature from the headers alone, before reading the body. It then reads
+the body under the cap, hashing it as it arrives, and refuses a body that
+does not match the signed hash.
+
+Bodies are capped before they are read: 4 MiB for JSON and 25 MiB for
+`POST /published-artifacts/current/files` (the gateway's caps). A larger
+body returns 413 `site_request_too_large`.
 
 A failure returns `401 site_gateway_signature_invalid`, with
-`details.reason` set to `missing_headers`, `bad_timestamp`, `skew`,
-`bad_signature` or `credentials`.
+`details.reason` set to one of:
+
+- `missing_headers`: the signature, timestamp, host or body hash header is
+  absent.
+- `bad_timestamp` or `skew`: the timestamp is malformed or outside the window.
+- `bad_body_hash`: the body hash header is not 64 lowercase hex characters.
+- `bad_signature`: no configured secret produces the signature.
+- `body_mismatch`: the body read does not hash to the signed value.
+- `credentials`: the request also carries app credentials.
 
 The gateway must sign the normalized path. A path with dot segments is
 normalized by the URL parser before verification, so it fails the
@@ -205,7 +236,8 @@ signature.
 - **Rates.** Every call counts against the visitor's requests per minute.
   Guests are also counted per signed client address, at four times the
   visitor limit, so minting new visitor ids does not reset their limits;
-  both must pass. Going over returns 429 `site_rate_limited` with
+  both must pass. IPv6 addresses count per /64 prefix (IPv4-mapped
+  addresses as their IPv4 address). Going over returns 429 `site_rate_limited` with
   `{ bucket, retryAfterSeconds }`.
 
 ### Routes
@@ -248,9 +280,12 @@ Operations:
       (OPE-801 `SiteSessionOrigin`). The call runs inside
       `withSiteSessionOrigin` and carries the Site and version headers, which
       the Site frame guard validates again.
-    - Its workspace tools are the publication's `agent.tools` for signed-in
-      viewers, and for guests only when `agent.guestTools` is on. They are
-      optional references, so an unknown connection is skipped.
+    - Its workspace tools are the publication's `agent.tools` for workspace
+      members and invited viewers. Everyone else (signed-in `user` viewers
+      on a public Site and guests) gets them only when `agent.guestTools` is
+      on: tools for everyone who isn't a workspace member or invited (the
+      name is kept for compatibility). They are optional references, so an
+      unknown connection is skipped.
     - The create body may not choose tools, MCP servers, first-party tools
       or permissions, approval policies, vault policy or connection
       accounts for any other caller acting from a Site page: the session
@@ -267,10 +302,30 @@ Operations:
     404 `site_conversation_not_found`.
   - **Site-safe views.** `get`, `list` and `create` return a projection
     without account or workspace ids, instructions, tools or policies,
-    metadata, creator, sandbox ids or diagnostics. Query parameters are
-    allowlisted: event pages are always `mode=monitoring` with summarized
-    payloads (`payloadMode=summary`, or `none`), streams accept only `after`
-    and `transport`, the queue takes none and human input only `status`.
+    metadata, creator, sandbox ids or diagnostics.
+  - **Site-safe events.** Event pages and the stream (live SSE and the
+    finite `transport=http1-bounded` batch) carry one projection:
+    - Delivered event types: messages and their text deltas, tool-call
+      receipts, turn and session lifecycle, the queue and usage notices.
+    - Payloads keep allowlisted fields: message text, a tool call's id and
+      name and whether it failed (never its arguments or output), and short
+      status codes (never error text).
+    - Every other event (reasoning, sandbox and terminal output, model and
+      provider-account telemetry, setup, goals, memory, policies, late or
+      duplicate deliveries) arrives as a `session.event.envelope_omitted`
+      placeholder with an empty payload, at its own sequence. Sequences stay
+      contiguous, so gap detection, backfill and `Last-Event-ID` resume work.
+    - The envelope has no workspace id, attempt ids or generations, or
+      duplicate, codec or read-bound diagnostics.
+  - **Query parameters are allowlisted.**
+    - Event pages take `after`, `before`, `direction`, `limit` (default 40,
+      at most 500, newest first without a cursor), `compact`, `excludeTypes`,
+      `includeTypes` (only visible types; asking for hidden types only
+      returns an empty page) and `payloadMode=none`. Read modes, full
+      payloads, class filters and `latest` are not offered; responses report
+      `monitoring` and `summary`.
+    - Streams accept only `after` and `transport`, the queue takes none and
+      human input only `status`.
   - **Streams** resume after the gateway-forwarded `Last-Event-ID` when the
     query has no `after`.
   - **Composer drafts** are text only. A draft or submit with resources,
@@ -287,11 +342,18 @@ Operations:
     against the visitor's day, the Site's day and the Site's month, and
     counts the conversation against the visitor's and the Site's starts per
     day, in one transaction that refuses when any is over. A Site-wide
-    refusal first settles stale reservations and retries once. Sending,
-    steering and resuming re-check the turn count and top the reservation
-    up to the conversation's cap. Settling (on reads and later starts)
-    brings counted spend up to the session's actual usage and releases what
-    an idle conversation no longer needs. Over budget returns 429
+    refusal first sweeps reservations conversations no longer need and
+    retries once: a bounded batch of conversations whose session is idle,
+    failed or cancelled, starts whose session never appeared, and
+    reservations with no work for six hours, least recently visited first
+    (each at most every 30 seconds; an empty sweep pauses sweeping that Site
+    for a few seconds). Sending, steering and resuming re-check the turn
+    count and top the reservation up to the conversation's cap; a
+    per-conversation limit lowered since the start lowers the cap and the
+    session's own usage limit before the work runs. Settling (on reads,
+    later starts and pause or cancel) brings counted spend up to the
+    session's actual usage and releases what an idle conversation no longer
+    needs. Over budget returns 429
     `site_budget_exhausted` with `{ budget }`: `conversations_per_visitor_per_day`,
     `conversations_per_site_per_day`, `turns_per_conversation`,
     `agent_micros_per_conversation`, `agent_micros_per_visitor_per_day` or
@@ -321,9 +383,26 @@ defaults from settings.
 
 Counters are single-row upserts in `site_runtime_rate_windows` (per minute)
 and `site_runtime_usage` (per day and month). Rate windows can overshoot by
-a request or two under concurrency; agent budgets cannot, because starts
-and top-ups are conditional reservations. Old rate windows, usage rows and
-expired viewer sessions are deleted in small batches on the write path.
+a request or two under concurrency. Agent budgets are conditional
+reservations, so concurrent starts and top-ups cannot overshoot them, but
+counted spend can still end slightly above a budget in these bounded cases:
+
+- A model call that is already running finishes even when it crosses the
+  session's usage limit (see `docs/session-usage-limits.md`), so a
+  conversation can end a little above its cap.
+- A reservation released after six hours without admitted work or counted
+  spend frees the budget even if that session is somehow still running; it
+  is still capped by its own usage limit, so the overshoot is at most that
+  conversation's remaining cap.
+- A reservation counted in a day or month that has since ended is not
+  carried into the new period; the conversation's spend is still counted
+  when it lands.
+
+Every profile has a per-conversation cap (the flood brake applies to
+`unlimited` too), so every conversation reserves.
+
+Old rate windows, usage rows and expired viewer sessions are deleted in
+small batches on the write path.
 
 Agent spend is billed to the organization through the normal session usage
 ledger. Sign-ins, reports and Site Data use are recorded as usage-only
@@ -368,12 +447,22 @@ KV fallback entries with a TTL no longer than this setting.
 
 - Viewers report through `POST /v1/site-runtime/site/reports`. Owners and
   admins triage through the reports routes above.
+- Each reporter (signed-in session, guest visitor or client address) and
+  each client address may send
+  `OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR` reports a minute (5 by
+  default), and a Site accepts 60 a minute from everyone together, so one
+  reporter never fills a Site's cap.
+- Dismissed and actioned reports are deleted 180 days after they were made
+  (a bounded cleanup when the Site receives its next report). Open reports
+  stay until someone resolves them; a takedown actions them all.
 - Every report and flagged scan reaches the operator: a structured
   `site_abuse_notice` log line, and, when `OPENGENI_SITES_ABUSE_EMAIL` is
   set and managed email is configured, an email (at most one per Site and
   kind per hour, best effort). `bun scripts/operator/site-moderation-queue.ts`
-  lists open reports and flagged scans across workspaces (it needs the
-  migrations credential).
+  lists open reports and flagged scans across workspaces. It needs the
+  role that owns the Opengeni schema (the migrations credential), which
+  reads across workspaces through owner-only read policies, or a superuser
+  or `BYPASSRLS` role; the application role is refused.
 - After a version is published, the content scanner checks the URLs found
   in its HTML.
   - The default scanner is `none`, which records nothing.

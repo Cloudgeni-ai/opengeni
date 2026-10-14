@@ -82,6 +82,11 @@ const shots: Shot[] = [
     ready: (page) => text(page, "Agent spend this month"),
   },
   {
+    name: "publish-agent-guest-tools-nonadmin",
+    scenario: "agent-nonadmin",
+    ready: (page) => text(page, "Let everyone use these tools"),
+  },
+  {
     name: "publish-custom-limits",
     scenario: "public",
     ready: (page) => text(page, "Agent spend this month"),
@@ -130,12 +135,16 @@ const shots: Shot[] = [
     name: "site-auth-authorize",
     scenario: "auth",
     narrow: true,
-    ready: (page) => text(page, "Continue to Team CRM"),
+    ready: (page) => text(page, "Continue to team-crm-4k9x.opengeni.site"),
   },
   {
     name: "site-auth-denied",
     scenario: "auth-denied",
-    ready: (page) => text(page, "You can't open this Site"),
+    ready: (page) => text(page, "Continue to team-crm-4k9x.opengeni.site"),
+    act: async (page) => {
+      await page.getByRole("button", { name: "Continue" }).click();
+      await text(page, "You can't open this Site");
+    },
   },
 ];
 

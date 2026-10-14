@@ -22,7 +22,7 @@ Open the Site and choose **Publish**. The **Publish to web** page sets:
   are unique across every workspace, and reserved names and brand or
   credential words are refused. The page checks the name as you type.
   Changing the address moves the Site; a released name stays held for its
-  workspace for 30 days.
+  workspace for 30 days, also when the Site or its workspace is deleted.
 - **Who can open it**: workspace members, invited people, or anyone with the
   link (see below).
 - **Embedded agent**: whether visitors can chat with the Site's agent, and
@@ -141,12 +141,19 @@ agents.
 
 Workspace tools (MCP connections) act with the workspace's shared
 connections for whoever is viewing, so only a workspace admin can give them
-to a Site's agent. Signed-in viewers get them; guests get them only when an
-admin also turns on **guest tools** (`agent.guestTools`). A connection the
-workspace doesn't have is skipped rather than failing the conversation.
-Unpublishing, taking down, or narrowing a Site's access signs its viewers out
-and cancels its running conversations; turning the agent off cancels the
-conversations only.
+to a Site's agent. Workspace members and invited viewers get them. Everyone
+else (people who sign in but aren't in the workspace, on a public Site, and
+guests) gets them only when an admin also turns on **Let everyone use these
+tools** (`agent.guestTools`, which means tools for everyone who isn't a
+workspace member or invited; the name is kept for compatibility). A
+connection the workspace doesn't have is skipped rather than failing the
+conversation.
+Unpublishing, taking down, or narrowing a Site's access signs all its viewers
+out (those who keep access sign in again) and cancels its running
+conversations; turning the agent off cancels the conversations only.
+Removing a tool, or turning **Let everyone use these tools** off, cancels the
+conversations that hold tools they would no longer get, and those
+conversations take no more messages.
 
 ## Limits and billing
 
@@ -190,7 +197,10 @@ Reports and flagged content scans also reach the deployment operator:
   email configured, that address gets an email (at most one per Site per
   hour);
 - `bun scripts/operator/site-moderation-queue.ts` lists open reports and
-  flagged scans across all workspaces (it needs the migrations credential).
+  flagged scans across all workspaces. It needs the role that owns the
+  Opengeni schema (the migrations credential, which reads across workspaces
+  through owner-only policies and needs no `BYPASSRLS`), or a superuser or
+  `BYPASSRLS` role. The application role is refused.
 
 The abuse contact shown to visitors is `OPENGENI_SITES_ABUSE_EMAIL`, or
 `abuse@<sites domain>` when unset.
@@ -213,7 +223,10 @@ Risk) checks new versions when a key is configured.
 
 Publishing is off until `OPENGENI_SITES_DOMAIN` is set; the console then
 hides the Publish button. Staging uses its own registrable domain (never a
-subdomain of production) and forces sign-in and noindex. Nothing in the API
+subdomain of production) and forces sign-in and noindex. The Sites domain
+must be a registrable domain of its own: Opengeni refuses to start when
+`OPENGENI_PUBLIC_BASE_URL` or `OPENGENI_WEB_BASE_URL` is on the Sites domain,
+under it, or holds it. Nothing in the API
 depends on Cloudflare: edge sync is a no-op without its settings and the
 gateway falls back to the API for host lookups.
 

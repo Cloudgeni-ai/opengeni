@@ -40,7 +40,8 @@ import {
   SitePublishingError,
   SITE_RUNTIME_SITE_PRINCIPAL,
   upsertSitePublication,
-  withSiteHostnameEdgeState,
+  readSiteHostnameEdgeState,
+  readSiteHostnameLiveGeneration,
   type PublishedSiteRecord,
   type SiteDataSite,
   type SiteHostnameEdgeState,
@@ -150,8 +151,20 @@ export type SitePublishingEffects = {
   scanner: SiteContentScanner;
   /** Wait for every scheduled effect (tests and graceful shutdown). */
   flush(): Promise<void>;
+  /**
+   * Run `run` in the background, at most `SITE_EFFECT_CONCURRENCY` at a time;
+   * the rest wait in a bounded queue (beyond it a task is dropped and logged:
+   * edge copies self-heal and expire, scans and notices are best effort).
+   */
   schedule(name: string, run: () => Promise<void>): void;
+  /** Hostnames with an edge sync running or queued, and what it still owes. */
+  edgeLabels: Map<string, { again: boolean; purge: boolean; siteIdHint: string | null }>;
 };
+
+/** Background effects running at once per process. */
+export const SITE_EFFECT_CONCURRENCY = 4;
+/** Background effects waiting per process before new ones are dropped. */
+const SITE_EFFECT_QUEUE_LIMIT = 2_000;
 
 const effectsBySettings = new WeakMap<object, SitePublishingEffects>();
 const dispatchBySettings = new WeakMap<object, (request: Request) => Promise<Response>>();
@@ -179,7 +192,10 @@ function createEffects(
   options: { fetch?: typeof fetch; backoffMs?: number; scanner?: SiteContentScanner } = {},
 ): SitePublishingEffects {
   const pending = new Set<Promise<void>>();
+  const waiting: Array<() => void> = [];
+  let running = 0;
   return {
+    edgeLabels: new Map(),
     edgeSync: createSiteEdgeSync(settings, {
       ...(options.fetch ? { fetch: options.fetch } : {}),
       ...(options.backoffMs !== undefined ? { backoffMs: options.backoffMs } : {}),
@@ -191,15 +207,28 @@ function createEffects(
       while (pending.size > 0) await Promise.allSettled([...pending]);
     },
     schedule(name, run) {
-      const task = (async () => {
-        try {
-          await run();
-        } catch (error) {
-          console.warn(`[site-publishing] ${name} failed`, {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      })();
+      if (waiting.length >= SITE_EFFECT_QUEUE_LIMIT) {
+        console.warn(`[site-publishing] ${name} dropped: too many pending effects`);
+        return;
+      }
+      const task = new Promise<void>((resolve) => {
+        const start = async () => {
+          running += 1;
+          try {
+            await run();
+          } catch (error) {
+            console.warn(`[site-publishing] ${name} failed`, {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          } finally {
+            running -= 1;
+            resolve();
+            waiting.shift()?.();
+          }
+        };
+        if (running < SITE_EFFECT_CONCURRENCY) void start();
+        else waiting.push(() => void start());
+      });
       pending.add(task);
       void task.finally(() => pending.delete(task));
     },
@@ -272,7 +301,7 @@ export function siteHostnameEdgeRecord(
     v: 1,
     hostname: siteHostname(state.label, domain),
     siteId,
-    status: state.hold ? "suspended" : "unpublished",
+    status: state.hold?.kind === "platform" ? "suspended" : "unpublished",
     access: "members",
     versionId: null,
     title: "",
@@ -282,13 +311,23 @@ export function siteHostnameEdgeRecord(
   };
 }
 
-/** Labels whose edge copy is being rewritten now (no duplicate self-heal work). */
+/** When each label last asked for a self-heal sync (per process). */
 const recentHeals = new Map<string, number>();
+/** Self-heal syncs started in the current minute (per process). */
+const healWindow = { startedAt: 0, count: 0 };
+/** At most this many self-heal syncs per minute per process. */
+const SITE_EDGE_HEALS_PER_MINUTE = 60;
+/** Re-reads after an edge write before leaving the rest to the next sync. */
+const SITE_EDGE_SYNC_ROUNDS = 3;
 
 /**
- * Sync one hostname to the edge under its lock: write the live Site's record
- * or a tombstone, purge the edge cache when asked, then record the
- * generation the edge holds. A no-op without edge settings.
+ * Sync one hostname to the edge: read what it should hold (under the
+ * hostname's lock, in a short transaction that commits before any HTTP),
+ * write the live Site's record or a tombstone, purge the edge cache when
+ * asked, and record the generation the edge holds. Then re-read the label's
+ * live generation; if it moved while the HTTP calls ran, write again (up to
+ * `SITE_EDGE_SYNC_ROUNDS` times). No database transaction or lock is held
+ * during the Cloudflare calls. A no-op without edge settings.
  */
 export async function syncSiteHostnameEdge(
   deps: SitePublishingDeps,
@@ -298,26 +337,35 @@ export async function syncSiteHostnameEdge(
   const domain = configuredSitesDomain(deps.settings);
   const effects = sitePublishingEffects(deps.settings);
   if (!domain || (!effects.edgeSync.kvEnabled && !effects.edgeSync.purgeEnabled)) return "disabled";
-  const synced = await withSiteHostnameEdgeState(deps.db, label, async (state) => {
+  let outcome: "synced" | "skipped" = "skipped";
+  let purge = options.purge === true;
+  for (let round = 0; round < SITE_EDGE_SYNC_ROUNDS; round += 1) {
+    const state = await readSiteHostnameEdgeState(deps.db, label);
     const record = siteHostnameEdgeRecord(deps.settings, domain, state, options.siteIdHint ?? null);
-    if (!record) return null;
+    if (!record) return outcome;
     const put = await effects.edgeSync.putHostRecord(record);
-    if (options.purge) await effects.edgeSync.purgeHost(record.hostname);
-    return state.live && put !== "disabled"
-      ? {
-          scope: {
-            accountId: state.live.publication.accountId,
-            workspaceId: state.live.publication.workspaceId,
-          },
-          siteId: state.live.publication.siteId,
-          generation: state.live.publication.generation,
-        }
-      : null;
-  });
-  // Recorded after the hostname lock is released (it is a separate write).
-  if (synced)
-    await markSitePublicationEdgeSynced(deps.db, synced.scope, synced.siteId, synced.generation);
-  return synced ? "synced" : "skipped";
+    if (purge) {
+      await effects.edgeSync.purgeHost(record.hostname);
+      purge = false;
+    }
+    if (state.live && put !== "disabled") {
+      const { publication } = state.live;
+      await markSitePublicationEdgeSynced(
+        deps.db,
+        { accountId: publication.accountId, workspaceId: publication.workspaceId },
+        publication.siteId,
+        publication.generation,
+      );
+      outcome = "synced";
+    }
+    const now = await readSiteHostnameLiveGeneration(deps.db, label);
+    const unchanged = state.live
+      ? now?.siteId === state.live.publication.siteId &&
+        now.generation === state.live.publication.generation
+      : now === null;
+    if (unchanged) return outcome;
+  }
+  return outcome;
 }
 
 /**
@@ -326,6 +374,8 @@ export async function syncSiteHostnameEdge(
  * (takedown, unpublish). A no-op without edge settings; failures are retried
  * and logged, and a missed sync heals on the next host lookup. Lost if the
  * process stops first: the KV TTL then bounds how long the edge stays stale.
+ * One sync per hostname at a time; background effects run with bounded
+ * concurrency (`SITE_EFFECT_CONCURRENCY`).
  */
 export function scheduleSiteEdgeSync(
   deps: SitePublishingDeps,
@@ -336,16 +386,49 @@ export function scheduleSiteEdgeSync(
   const effects = sitePublishingEffects(deps.settings);
   if (!domain || (!effects.edgeSync.kvEnabled && !effects.edgeSync.purgeEnabled)) return;
   const unique = [...new Set(labels.filter((label): label is string => Boolean(label)))];
-  if (unique.length === 0) return;
-  effects.schedule("edge sync", async () => {
-    for (const label of unique) await syncSiteHostnameEdge(deps, label, options);
-  });
+  for (const label of unique) {
+    // At most one sync in flight per hostname: a change while one runs makes
+    // it run again (with the purge it now owes) instead of starting another.
+    const owed = effects.edgeLabels.get(label);
+    if (owed) {
+      owed.again = true;
+      owed.purge ||= options.purge === true;
+      owed.siteIdHint ??= options.siteIdHint ?? null;
+      continue;
+    }
+    const entry = {
+      again: false,
+      purge: options.purge === true,
+      siteIdHint: options.siteIdHint ?? null,
+    };
+    effects.edgeLabels.set(label, entry);
+    effects.schedule("edge sync", async () => {
+      try {
+        for (let pass = 0; pass < SITE_EDGE_SYNC_ROUNDS; pass += 1) {
+          const purge = entry.purge;
+          entry.again = false;
+          entry.purge = false;
+          await syncSiteHostnameEdge(deps, label, { purge, siteIdHint: entry.siteIdHint });
+          if (!entry.again) return;
+        }
+      } finally {
+        effects.edgeLabels.delete(label);
+        // Still owed after the last pass: queue one more sync for it.
+        if (entry.again)
+          scheduleSiteEdgeSync(deps, [label], {
+            purge: entry.purge,
+            siteIdHint: entry.siteIdHint,
+          });
+      }
+    });
+  }
 }
 
 /**
  * Self-heal: the edge copy of a live hostname is behind its publication
  * (a sync was lost or failed). Schedules one sync per hostname at most every
- * 30 seconds per process.
+ * 30 seconds, and at most `SITE_EDGE_HEALS_PER_MINUTE` in all, per process;
+ * none while a sync for that hostname is already running.
  */
 export function healSiteEdgeIfStale(
   deps: SitePublishingDeps,
@@ -356,9 +439,15 @@ export function healSiteEdgeIfStale(
 ): void {
   if (publication.edgeSyncedGeneration >= publication.generation) return;
   const effects = sitePublishingEffects(deps.settings);
-  if (!effects.edgeSync.kvEnabled) return;
+  if (!effects.edgeSync.kvEnabled || effects.edgeLabels.has(publication.label)) return;
   const now = Date.now();
   if ((recentHeals.get(publication.label) ?? 0) > now - 30_000) return;
+  if (healWindow.startedAt <= now - 60_000) {
+    healWindow.startedAt = now;
+    healWindow.count = 0;
+  }
+  if (healWindow.count >= SITE_EDGE_HEALS_PER_MINUTE) return;
+  healWindow.count += 1;
   if (recentHeals.size > 10_000) recentHeals.clear();
   recentHeals.set(publication.label, now);
   scheduleSiteEdgeSync(deps, [publication.label], { siteIdHint: publication.siteId });
@@ -533,7 +622,13 @@ export async function stopSiteViewers(
   deps: SitePublishingDeps,
   scope: SitePublishingScope,
   siteId: string,
-  options: { revokeSessions?: boolean; cancelConversations?: boolean; reason: string },
+  options: {
+    revokeSessions?: boolean;
+    cancelConversations?: boolean;
+    /** Cancel only conversations holding tools outside these (see `siteAgentToolsNarrowed`). */
+    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
+    reason: string;
+  },
 ): Promise<{ revokedSessions: number }> {
   let revokedSessions = 0;
   if (options.revokeSessions !== false) {
@@ -560,6 +655,7 @@ export async function stopSiteViewers(
     const sessionIds = await listActiveSiteRuntimeConversations(deps.db, scope, {
       siteId,
       limit: STOP_CONVERSATIONS_LIMIT,
+      ...(options.toolsNarrowedTo ? { toolsNarrowedTo: options.toolsNarrowedTo } : {}),
     });
     if (sessionIds.length === 0) return;
     // The Site acts with its own origin (a Site and one of its versions).
@@ -1032,6 +1128,17 @@ export async function upsertSitePublicationForManager(
       reason: stopping,
       revokeSessions: stopping !== "agent_disabled",
     });
+  else if (existing && siteAgentToolsNarrowed(existing.agent, publication.agent))
+    // Fewer tools, or no longer for everyone: stop the conversations that hold
+    // tools they would not get now. Viewers stay signed in.
+    await stopSiteViewers(deps, scope, record.id, {
+      reason: "agent_tools_narrowed",
+      revokeSessions: false,
+      toolsNarrowedTo: {
+        tools: publication.agent.tools ?? [],
+        everyoneTools: publication.agent.guestTools,
+      },
+    });
   scheduleSiteEdgeSync(deps, [publication.label, previousLabel], {
     siteIdHint: record.id,
     purge: stopping === "unpublished",
@@ -1060,6 +1167,19 @@ export function siteAccessNarrowed(
   }
   if (before.agent.enabled && !after.agent.enabled) return "agent_disabled";
   return null;
+}
+
+/**
+ * Whether a Site's workspace tools narrowed: a tool removed, or tools no
+ * longer given to everyone outside the workspace (`guestTools` turned off).
+ */
+export function siteAgentToolsNarrowed(
+  before: Pick<SitePublicationRecord["agent"], "tools" | "guestTools">,
+  after: Pick<SitePublicationRecord["agent"], "tools" | "guestTools">,
+): boolean {
+  const kept = new Set(after.tools ?? []);
+  if ((before.tools ?? []).some((tool) => !kept.has(tool))) return true;
+  return before.guestTools && !after.guestTools && (before.tools ?? []).length > 0;
 }
 
 /** MCP server ids (the session tool reference format). */

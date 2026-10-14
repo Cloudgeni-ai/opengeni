@@ -8,12 +8,18 @@ import type { Settings } from "@opengeni/config";
  *
  * Writes go through the Cloudflare REST API with plain fetch (no SDK, each
  * call bounded by a 10 s timeout) and never block the database write: callers
- * schedule them after commit, each is retried a few times and then logged. A
- * writer never replaces a newer generation (read, compare, write; KV has no
- * compare-and-set, so two writers racing within one round trip can still land
- * out of order). Generations come from one database sequence shared by every
- * hostname, so a later change to a label (a move, an unpublish tombstone, a
- * takedown) always carries a higher generation than anything written before.
+ * schedule them after commit, each is retried a few times and then logged.
+ * The caller reads what a hostname should hold in a short transaction under
+ * the hostname's lock and commits before any of these calls, so no database
+ * transaction or lock waits on Cloudflare; after writing it re-reads the
+ * hostname and writes again if it moved meanwhile. One process runs at most
+ * one sync per hostname at a time. A writer never replaces a newer
+ * generation (read, compare, write; KV has no compare-and-set, so writers in
+ * two processes racing within one round trip can still land out of order,
+ * until the entry's TTL ends it). Generations come from one database
+ * sequence shared by every hostname, so a later change to a label (a move,
+ * an unpublish tombstone, a takedown) always carries a higher generation
+ * than anything written before.
  *
  * Staleness bound: the API itself refuses a suspended or unpublished Site on
  * the very next site-runtime call (it re-checks publication status and access

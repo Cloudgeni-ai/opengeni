@@ -1,5 +1,6 @@
 import {
   SITE_NO_ORIGIN_ID,
+  siteFrameBodyRefusal,
   siteFrameFromHeaders,
   siteFrameOperation,
 } from "@opengeni/contracts/site-session-http";
@@ -13,6 +14,7 @@ import {
 import { getSession } from "@opengeni/db";
 import type { Context, Next } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "./http/api-error";
 import { resolveSiteRequestOrigin } from "./site-session-origin";
 
 /** The agent's own Codemode SDK proxy checks the proxied path itself. */
@@ -33,6 +35,13 @@ const SITE_DATA = /^\/v1\/workspaces\/[^/]+\/published-artifacts\/([^/]+)\/(?:da
  * - a per-session operation reaches only a session the same Site (or, for a
  *   frame without a published Site, the same mounted frame) started; anything
  *   else is the same 404 as a missing session;
+ * - a message, draft, queue or control body carries only the fields Site
+ *   code may set (`siteFrameBodyRefusal`): text and how the model answers it.
+ *   Approval decisions, answers to questions, resources, personal resource
+ *   attachments, MCP credential updates, connection accounts and model
+ *   context are refused with 403 `site_frame_field_forbidden`; the person
+ *   gives those in the console. Session creates get the same treatment in
+ *   the create route, which also applies the minimal Site profile;
  * - a session operation runs inside its validated Site origin, so every
  *   session or turn it starts records which Site it came from.
  *
@@ -75,6 +84,24 @@ export function siteFrameGuard(deps: ApiRouteDeps) {
       if (!session || !siteOriginsMatch(origin, siteSessionOriginFromMetadata(session.metadata)))
         throw new HTTPException(404, { message: "session not found" });
     }
+    if (c.req.method !== "GET" && match.operation.id !== "sessions.create") {
+      // Hono caches the parsed body, so the route reads the same JSON.
+      const body: unknown = await c.req.json().catch(() => undefined);
+      const refused = siteFrameBodyRefusal(match.operation.id, match.suffix, body);
+      if (refused) throw siteFrameFieldForbidden(refused);
+    }
     await withSiteSessionOrigin(origin, () => next());
   };
+}
+
+/** 403 for a body field Site code may not send; names the field, never its value. */
+export function siteFrameFieldForbidden(field: string): ApiHttpError {
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message:
+      "A Site page can send message text only. Approvals, answers, resources, credentials and connection choices happen in the console.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "site_frame_field_forbidden", field },
+  });
 }

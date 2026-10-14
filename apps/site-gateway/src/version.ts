@@ -40,12 +40,15 @@ function etagMatches(header: string | null, etag: string): boolean {
 }
 
 /**
- * Site HTML only ever loads inside its shell's iframe. Browsers send
- * `Sec-Fetch-Dest: iframe` for that load; a top-level navigation, a fetch or
- * a client that sends no Fetch Metadata goes back to the Site's shell.
+ * Site HTML is meant to load inside its shell's iframe, which browsers mark
+ * `Sec-Fetch-Dest: iframe`. A request that says it is anything else (a
+ * top-level navigation, a fetch) goes back to the Site's shell. A browser
+ * that sends no Fetch Metadata is served: the HTML's own sandbox CSP and
+ * `frame-ancestors 'self'` still isolate it.
  */
 export function isFrameLoad(request: Request): boolean {
-  return request.headers.get("sec-fetch-dest") === "iframe";
+  const dest = request.headers.get("sec-fetch-dest");
+  return dest === null || dest === "iframe";
 }
 
 /**

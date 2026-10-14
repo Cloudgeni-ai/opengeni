@@ -4,7 +4,11 @@
 // Labels are globally unique, a released label is held for its workspace, and
 // a platform takedown holds its label for good.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireOwnerMigratedTestDatabase,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
   checkSiteHostnameClaim,
@@ -22,7 +26,7 @@ import {
   findSiteViewerSession,
   getOwnedSiteRuntimeConversation,
   liftSiteHostnameHold,
-  listReservedSiteRuntimeConversations,
+  claimSiteRuntimeReservationSweep,
   listSiteModerationQueue,
   readSiteRuntimeUsage,
   recordSitePublicationScan,
@@ -34,7 +38,8 @@ import {
   revokeSiteViewerSessions,
   settleSiteRuntimeConversationSpend,
   createSiteAbuseReport,
-  withSiteHostnameEdgeState,
+  SITE_ABUSE_REPORT_RETENTION_DAYS,
+  readSiteHostnameEdgeState,
   type SiteRuntimeBudgetLimits,
   SiteDataError,
   SitePublishingError,
@@ -46,6 +51,7 @@ import {
   type SiteDataLimits,
 } from "../src/index";
 import { rawRows } from "../src/database";
+import { migrate } from "../src/migrate";
 
 const TABLES = [
   "site_abuse_reports",
@@ -62,16 +68,20 @@ const TABLES = [
 
 let shared: SharedTestDatabase;
 let client: DbClient;
+/** Operator tooling's connection (holds, cross-workspace reads); a superuser here. */
+let operator: DbClient;
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("migration-0782-published-sites");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });
+  operator = createDb(shared.adminUrl, { max: 1 });
 }, 180_000);
 
 afterAll(async () => {
   await client?.close().catch(() => undefined);
+  await operator?.close().catch(() => undefined);
   await shared?.release();
 }, 180_000);
 
@@ -144,10 +154,23 @@ test("published Sites tables are FORCE RLS with a workspace policy and runtime D
     select tablename, policyname from pg_policies where tablename = any(${TABLES})
     order by tablename, policyname`;
   expect(policies.filter((row) => row.policyname === "workspace_isolation")).toHaveLength(9);
-  // Holds outlive their workspace: no workspace policy, only the label lane.
+  // Holds outlive their workspace: no workspace policy, only the read-only
+  // label lane and the owner's lane (operator scripts, the release trigger).
   expect(
     policies.filter((row) => row.tablename === "site_hostname_holds").map((row) => row.policyname),
-  ).toEqual(["site_hostname_holds_label_lane"]);
+  ).toEqual(["site_hostname_holds_label_lane", "site_hostname_holds_owner"]);
+  // The moderation queue's owner-only read lanes.
+  expect(
+    policies
+      .filter((row) => row.policyname.endsWith("_owner"))
+      .map((row) => row.policyname)
+      .sort(),
+  ).toEqual(["site_abuse_reports_owner", "site_hostname_holds_owner", "site_publications_owner"]);
+  // The application role only reads holds.
+  const [privileges] = await shared.admin<Array<{ select: boolean; insert: boolean }>>`
+    select has_table_privilege('opengeni_app', 'site_hostname_holds', 'SELECT') as select,
+      has_table_privilege('opengeni_app', 'site_hostname_holds', 'INSERT') as insert`;
+  expect(privileges).toEqual({ select: true, insert: false });
   expect(
     policies.filter((row) => row.tablename === "site_hostnames").map((row) => row.policyname),
   ).toEqual([
@@ -270,7 +293,15 @@ test("suspension holds until restore and only the platform lifts its own", async
   const a = await workspace();
   const siteId = await site(a);
   await publish(a, siteId, label("takedown"));
-  const suspended = await suspendSitePublication(client.db, a, siteId, {
+  // The application role cannot place a platform hold.
+  await expect(
+    suspendSitePublication(client.db, a, siteId, {
+      by: "platform",
+      reason: "phishing",
+      subject: "platform:moderator",
+    }),
+  ).rejects.toThrow();
+  const suspended = await suspendSitePublication(operator.db, a, siteId, {
     by: "platform",
     reason: "phishing",
     subject: "platform:moderator",
@@ -297,7 +328,7 @@ test("suspension holds until restore and only the platform lifts its own", async
     subject: "user:owner",
   }).catch((error: unknown) => error);
   expect((ownerRestore as SitePublishingError).code).toBe("forbidden");
-  const restored = await restoreSitePublication(client.db, a, siteId, {
+  const restored = await restoreSitePublication(operator.db, a, siteId, {
     by: "platform",
     subject: "platform:moderator",
   });
@@ -313,7 +344,7 @@ test("a taken-down Site keeps its hostname and the platform holds it for good", 
   const siteB = await site(b);
   const name = label("held");
   await publish(a, siteId, name);
-  await suspendSitePublication(client.db, a, siteId, {
+  await suspendSitePublication(operator.db, a, siteId, {
     by: "platform",
     reason: "phishing",
     subject: "platform:moderator",
@@ -345,10 +376,76 @@ test("a taken-down Site keeps its hostname and the platform holds it for good", 
   expect((await findSiteHostnameState(client.db, name)).hostname).toBeNull();
   const claimed = await publish(b, siteB, name).catch((error: unknown) => error);
   expect((claimed as SitePublishingError).code).toBe("reserved");
-  // Only the operator lifts it.
-  expect(await liftSiteHostnameHold(client.db, name)).toBe(true);
-  expect(await liftSiteHostnameHold(client.db, name)).toBe(false);
+  // Only the operator lifts it: the application role cannot write holds.
+  await expect(liftSiteHostnameHold(client.db, name)).rejects.toThrow();
+  expect(await liftSiteHostnameHold(operator.db, name)).toBe(true);
+  expect(await liftSiteHostnameHold(operator.db, name)).toBe(false);
   expect((await publish(b, siteB, name)).publication.label).toBe(name);
+});
+
+test("deleting a Site or its workspace leaves a 30-day release hold on its label", async () => {
+  const a = await workspace();
+  const b = await workspace();
+  const siteA = await site(a);
+  const siteA2 = await site(a);
+  const siteB = await site(b);
+  const name = label("deleted");
+  await publish(a, siteA, name);
+  // Deleting the Site's rows (as deleting the Site cascades to them) holds the label.
+  await shared.admin`delete from site_publications where site_id = ${siteA}`;
+  await shared.admin`delete from site_hostnames where label = ${name}`;
+  const held = await findSiteHostnameState(client.db, name);
+  expect(held.hostname).toBeNull();
+  expect(held.hold).toMatchObject({ kind: "release", siteId: siteA, workspaceId: a.workspaceId });
+  const days = (held.hold!.expiresAt!.getTime() - Date.now()) / 86_400_000;
+  expect(days).toBeGreaterThan(29.9);
+  expect(days).toBeLessThanOrEqual(30);
+  // Another workspace waits for the hold; the workspace itself may reuse it.
+  expect(await checkSiteHostnameClaim(client.db, b, name, siteB, 30)).toEqual({
+    available: false,
+    problem: "held",
+  });
+  expect(
+    ((await publish(b, siteB, name).catch((e: unknown) => e)) as SitePublishingError).code,
+  ).toBe("held");
+  expect((await publish(a, siteA2, name)).publication.label).toBe(name);
+  // Deleting the whole workspace holds it too, outliving the workspace.
+  await shared.admin`delete from workspaces where id = ${a.workspaceId}`;
+  expect((await findSiteHostnameState(client.db, name)).hold).toMatchObject({
+    kind: "release",
+    siteId: siteA2,
+  });
+  expect(await checkSiteHostnameClaim(client.db, b, name, siteB, 30)).toEqual({
+    available: false,
+    problem: "held",
+  });
+  // When the hold ends the label is free.
+  await shared.admin`update site_hostname_holds set expires_at = now() - interval '1 minute'
+    where label = ${name}`;
+  expect((await publish(b, siteB, name)).publication.label).toBe(name);
+  // A released row past its hold (the takeover path) leaves nothing behind,
+  // and a release never replaces a platform hold.
+  const old = label("aged");
+  const siteB2 = await site(b);
+  await publish(b, siteB2, old);
+  await publish(b, siteB2, label("next"));
+  await shared.admin`update site_hostnames set released_at = now() - interval '31 days'
+    where label = ${old}`;
+  await shared.admin`delete from site_hostnames where label = ${old}`;
+  expect((await findSiteHostnameState(client.db, old)).hold).toBeNull();
+  const platformName = label("platform");
+  const siteB3 = await site(b);
+  await publish(b, siteB3, platformName);
+  await suspendSitePublication(operator.db, b, siteB3, {
+    by: "platform",
+    reason: "phishing",
+    subject: "platform:moderator",
+  });
+  await shared.admin`delete from site_hostnames where label = ${platformName}`;
+  expect((await findSiteHostnameState(client.db, platformName)).hold).toMatchObject({
+    kind: "platform",
+    expiresAt: null,
+  });
 });
 
 test("only an admin restores an admin takedown; a platform restore lifts the hold", async () => {
@@ -382,13 +479,13 @@ test("only an admin restores an admin takedown; a platform restore lifts the hol
   ).toBe("active");
   // Admin and owner takedowns hold nothing; a platform takedown holds until its restore.
   expect((await findSiteHostnameState(client.db, name)).hold).toBeNull();
-  await suspendSitePublication(client.db, a, siteId, {
+  await suspendSitePublication(operator.db, a, siteId, {
     by: "platform",
     reason: "malware",
     subject: "platform:moderator",
   });
   expect((await findSiteHostnameState(client.db, name)).hold).not.toBeNull();
-  await restoreSitePublication(client.db, a, siteId, {
+  await restoreSitePublication(operator.db, a, siteId, {
     by: "platform",
     subject: "platform:moderator",
   });
@@ -400,13 +497,13 @@ test("edge state is the live Site or a tombstone, with generations rising across
   const siteId = await site(a);
   const first = label("edge");
   const published = await publish(a, siteId, first);
-  const live = await withSiteHostnameEdgeState(client.db, first, async (state) => state);
+  const live = await readSiteHostnameEdgeState(client.db, first);
   expect(live.live?.publication.siteId).toBe(siteId);
   expect(live.tombstoneGeneration).toBeNull();
   const moved = await publish(a, siteId, label("moved"));
   expect(moved.publication.generation).toBeGreaterThan(published.publication.generation);
   // The released label gets a tombstone newer than anything written for the Site so far.
-  const old = await withSiteHostnameEdgeState(client.db, first, async (state) => state);
+  const old = await readSiteHostnameEdgeState(client.db, first);
   expect(old.live).toBeNull();
   expect(old.hostname?.releasedAt).not.toBeNull();
   expect(old.tombstoneGeneration!).toBeGreaterThan(moved.publication.generation);
@@ -452,6 +549,34 @@ test("the moderation queue reads across workspaces only with the admin credentia
   } finally {
     await admin.close();
   }
+});
+
+test("resolved abuse reports are deleted after 180 days; open ones stay", async () => {
+  const a = await workspace();
+  const siteId = await site(a);
+  const report = (message: string) =>
+    createSiteAbuseReport(client.db, a, {
+      siteId,
+      hostname: "kept.sites.test",
+      category: "spam",
+      message,
+      contactEmail: null,
+      reporterPrincipal: "guest:reporter",
+    });
+  const dismissed = await report("old dismissed");
+  const actioned = await report("old actioned");
+  const open = await report("old open");
+  const recent = await report("recent dismissed");
+  await shared.admin`update site_abuse_reports set status = 'dismissed'
+    where id in (${dismissed.id}, ${recent.id})`;
+  await shared.admin`update site_abuse_reports set status = 'actioned' where id = ${actioned.id}`;
+  await shared.admin`update site_abuse_reports
+    set created_at = now() - make_interval(days => ${SITE_ABUSE_REPORT_RETENTION_DAYS + 1})
+    where id in (${dismissed.id}, ${actioned.id}, ${open.id})`;
+  await report("new");
+  const left = await shared.admin<Array<{ message: string }>>`
+    select message from site_abuse_reports where site_id = ${siteId} order by message`;
+  expect(left.map((row) => row.message)).toEqual(["new", "old open", "recent dismissed"]);
 });
 
 test("sign-in codes are single use, short lived and bound to their Site and host", async () => {
@@ -601,6 +726,8 @@ test("conversation starts reserve their cap against every budget in one transact
       sessionId,
       siteId,
       viewerPrincipal: viewer,
+      viewerKind: viewer.startsWith("guest:") ? "guest" : "user",
+      toolIds: [],
       versionId: null,
       limits: budgets,
     });
@@ -676,9 +803,63 @@ test("conversation starts reserve their cap against every budget in one transact
       newTurn: true,
     }),
   ).toEqual({ ok: false, budget: "turns_per_conversation" });
+  // Work admitted after the conversation was read keeps its reservation even
+  // when the reservation itself did not change (steering an unchanged cap).
+  const read = await getOwnedSiteRuntimeConversation(client.db, a, {
+    sessionId: first.sessionId,
+    siteId,
+    viewerPrincipal: "guest:v1",
+  });
+  expect(read).toMatchObject({ admissions: 2, reservedMicros: 3_300, limitMicros: 4_000 });
   expect(
-    (await listReservedSiteRuntimeConversations(client.db, a, { siteId, limit: 10 })).length,
-  ).toBe(2);
+    await reserveSiteRuntimeConversationWork(client.db, a, {
+      sessionId: first.sessionId,
+      limits,
+      newTurn: false,
+    }),
+  ).toMatchObject({ ok: true, reservedMicros: 3_300 });
+  const idleSettle = (admissions: number) =>
+    settleSiteRuntimeConversationSpend(client.db, a, {
+      sessionId: first.sessionId,
+      usedMicros: 700,
+      idle: true,
+      expected: { admissions },
+    });
+  await idleSettle(read!.admissions);
+  const reserved = async () =>
+    (
+      await getOwnedSiteRuntimeConversation(client.db, a, {
+        sessionId: first.sessionId,
+        siteId,
+        viewerPrincipal: "guest:v1",
+      })
+    )?.reservedMicros;
+  expect(await reserved()).toBe(3_300);
+  // A lowered per-conversation limit lowers the conversation's cap.
+  expect(
+    await reserveSiteRuntimeConversationWork(client.db, a, {
+      sessionId: first.sessionId,
+      limits: { ...limits, agentMicrosPerConversation: 2_000 },
+      newTurn: false,
+    }),
+  ).toMatchObject({ ok: true, limitMicros: 2_000, reservedMicros: 1_300 });
+  // The sweep claims only conversations whose reservation can be released:
+  // these sessions never appeared, but their starts are recent.
+  expect(await claimSiteRuntimeReservationSweep(client.db, a, { siteId, limit: 10 })).toEqual([]);
+  // After six hours without work every reservation ages out, and a claimed
+  // conversation is not revisited for a while.
+  const later = new Date(Date.now() + 7 * 3_600_000);
+  const claimed = await claimSiteRuntimeReservationSweep(client.db, a, {
+    siteId,
+    limit: 10,
+    now: later,
+  });
+  expect(claimed.map((conversation) => conversation.aged)).toEqual([true, true]);
+  expect(
+    await claimSiteRuntimeReservationSweep(client.db, a, { siteId, limit: 10, now: later }),
+  ).toEqual([]);
+  await idleSettle(4);
+  expect(await reserved()).toBe(0);
   // Daily starts, per visitor and per Site.
   expect(await start("guest:v1", { ...limits, conversationsPerVisitorPerDay: 1 })).toEqual(
     expect.objectContaining({ ok: false, budget: "conversations_per_visitor_per_day" }),
@@ -718,6 +899,36 @@ test("rate windows count per principal and bucket and reset each minute", async 
   expect(refused.retryAfterSeconds).toBeGreaterThan(0);
   expect((await take("guest:b")).allowed).toBe(true);
   expect((await take("guest:a", new Date(now.getTime() + 60_000))).allowed).toBe(true);
+  // Cleanup keeps pace with new principals: each new row deletes up to four
+  // stale windows, whatever the 1% batch does.
+  for (let index = 0; index < 6; index += 1)
+    await shared.admin`insert into site_runtime_rate_windows (account_id, workspace_id, site_id,
+        principal_key, bucket, window_started_at, operations)
+      values (${a.accountId}, ${a.workspaceId}, ${siteId}, ${`ip:stale-${index}`}, 'requests',
+        now() - interval '20 minutes', 1)`;
+  const stale = async () =>
+    Number(
+      (
+        await shared.admin`select count(*)::int as n from site_runtime_rate_windows
+          where site_id = ${siteId} and window_started_at < now() - interval '10 minutes'`
+      )[0]!.n,
+    );
+  expect(await stale()).toBe(6);
+  const fresh = (principal: string) =>
+    consumeSiteRuntimeRate(client.db, a, {
+      siteId,
+      principal,
+      bucket: "requests",
+      limit: 2,
+      sweep: false,
+    });
+  await fresh("guest:new-1");
+  expect(await stale()).toBe(2);
+  // An existing principal's window is updated in place and deletes nothing.
+  await fresh("guest:new-1");
+  expect(await stale()).toBe(2);
+  await fresh("guest:new-2");
+  expect(await stale()).toBe(0);
 });
 
 test("Site Data guest rules: none hides, read reads, append adds, own changes only own", async () => {
@@ -844,3 +1055,101 @@ test("Site Data guest rules: none hides, read reads, append adds, own changes on
     })(),
   ).rejects.toThrow();
 });
+
+test("the schema owner, without BYPASSRLS, runs the moderation queue and places holds", async () => {
+  const owned = await acquireOwnerMigratedTestDatabase("published-sites-owner");
+  if (!owned) throw new Error("Real non-bypass owner PostgreSQL is required");
+  const owner = createDb(owned.ownerUrl, { max: 1 });
+  const seed = createDb(owned.adminUrl, { max: 1 });
+  try {
+    await migrate(owned.ownerUrl);
+    const [role] = await owned.admin<Array<{ super: boolean; bypass: boolean }>>`
+      select rolsuper as super, rolbypassrls as bypass from pg_roles where rolname = ${owned.ownerRole}`;
+    expect(role).toEqual({ super: false, bypass: false });
+    const scopes = [];
+    for (const name of ["Owner A", "Owner B"]) {
+      const [account] =
+        await owned.admin`insert into managed_accounts (name) values (${name}) returning id`;
+      const accountId = String(account!.id);
+      const workspaceId = (await createWorkspace(seed.db, { accountId, name })).id;
+      scopes.push({ accountId, workspaceId });
+    }
+    const [a, b] = scopes as [(typeof scopes)[0], (typeof scopes)[0]];
+    const siteIds: string[] = [];
+    for (const scope of [a, b]) {
+      const created = await createWorkspaceArtifact(seed.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        artifactId: crypto.randomUUID(),
+        slug: `owner-${crypto.randomUUID().slice(0, 8)}`,
+        title: "Owner Site",
+        description: null,
+        visibility: "workspace_shared",
+        ownerSubjectId: null,
+        contentKey: `sites/${crypto.randomUUID()}.html`,
+        contentSha256: "a".repeat(64),
+        sizeBytes: 16,
+        sourceKey: null,
+        sourceSha256: null,
+        sourceSizeBytes: null,
+        operationKey: crypto.randomUUID(),
+        actorSubjectId: "user:owner",
+        sourceSessionId: null,
+        sourceTurnId: null,
+        sourceAttemptId: null,
+        sourceExecutionGeneration: null,
+        sourceToolName: null,
+        persistContent: async () => undefined,
+        discardContent: async () => undefined,
+      });
+      siteIds.push(created.artifact.id);
+    }
+    const [siteA, siteB] = siteIds as [string, string];
+    const nameA = label("owner-a");
+    const nameB = label("owner-b");
+    for (const [scope, siteId, name] of [
+      [a, siteA, nameA],
+      [b, siteB, nameB],
+    ] as const)
+      await upsertSitePublication(seed.db, scope, {
+        siteId,
+        defaultLabel: name,
+        changes: { label: name },
+        actor: "user:owner",
+        holdDays: 30,
+        defaults: { access: "public", noindex: true },
+      });
+    await createSiteAbuseReport(seed.db, a, {
+      siteId: siteA,
+      hostname: `${nameA}.sites.test`,
+      category: "spam",
+      message: "spam",
+      contactEmail: null,
+      reporterPrincipal: "guest:reporter",
+    });
+    // Across workspaces, through the owner-only policies.
+    const queue = await listSiteModerationQueue(owner.db, { limit: 10 });
+    expect(queue.map((item) => [item.kind, item.siteId])).toEqual([["report", siteA]]);
+    expect(await findSitePublicationGlobally(owner.db, siteB)).toMatchObject({
+      workspaceId: b.workspaceId,
+      label: nameB,
+    });
+    // A platform takedown places the hold as the owner.
+    await suspendSitePublication(owner.db, b, siteB, {
+      by: "platform",
+      reason: "malware",
+      subject: "platform:moderator",
+    });
+    expect((await findSiteHostnameState(owner.db, nameB)).hold).toMatchObject({ kind: "platform" });
+    // The release trigger runs as the owner too, under FORCE RLS.
+    await owned.admin`delete from workspaces where id = ${a.workspaceId}`;
+    expect((await findSiteHostnameState(owner.db, nameA)).hold).toMatchObject({
+      kind: "release",
+      workspaceId: a.workspaceId,
+    });
+  } finally {
+    await owner.close().catch(() => undefined);
+    await seed.close().catch(() => undefined);
+    await owned.release();
+  }
+}, 180_000);

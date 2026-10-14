@@ -104,13 +104,20 @@ export type SiteHostnameRecord = {
   releasedAt: Date | null;
 };
 
-/** A platform hold: a taken-down label no workspace may claim. */
+/**
+ * A hold on a label. `platform`: a taken-down label no workspace may claim
+ * until the operator lifts it. `release`: the label of a deleted Site or
+ * workspace, kept for that workspace until `expiresAt` (written by the
+ * database when the hostname row is deleted).
+ */
 export type SiteHostnameHoldRecord = {
   label: string;
   siteId: string;
   workspaceId: string;
   reason: string;
   heldBy: string;
+  kind: "platform" | "release";
+  expiresAt: Date | null;
   createdAt: Date;
 };
 
@@ -251,8 +258,12 @@ type HoldRow = {
   workspace_id: string;
   reason: string;
   held_by: string;
+  kind: "platform" | "release";
+  expires_at: unknown;
   created_at: unknown;
 };
+
+const HOLD_COLUMNS = sql`label, site_id, workspace_id, reason, held_by, kind, expires_at, created_at`;
 
 function toHold(row: HoldRow): SiteHostnameHoldRecord {
   return {
@@ -261,6 +272,8 @@ function toHold(row: HoldRow): SiteHostnameHoldRecord {
     workspaceId: row.workspace_id,
     reason: row.reason,
     heldBy: row.held_by,
+    kind: row.kind,
+    expiresAt: nullableDate(row.expires_at),
     createdAt: date(row.created_at),
   };
 }
@@ -277,8 +290,7 @@ async function laneState(
   );
   const [hold] = await rawRows<HoldRow>(
     tx,
-    sql`select label, site_id, workspace_id, reason, held_by, created_at
-      from site_hostname_holds where label = ${label}`,
+    sql`select ${HOLD_COLUMNS} from site_hostname_holds where label = ${label}`,
   );
   return { hostname: row ? toHostname(row) : null, hold: hold ? toHold(hold) : null };
 }
@@ -309,8 +321,9 @@ export async function findSiteHostname(
 }
 
 /**
- * Lift a platform hold by label (operator only: the Site and workspace may
- * be gone). Returns whether a hold existed.
+ * Lift a hold by label (operator only, as the schema owner: the application
+ * role cannot write holds, and the Site and workspace may be gone). Returns
+ * whether a hold existed.
  */
 export async function liftSiteHostnameHold(db: Database, label: string): Promise<boolean> {
   if (!LABEL.test(label)) return false;
@@ -346,7 +359,15 @@ function claimCheck(
     existing.releasedAt === null &&
     existing.workspaceId === scope.workspaceId &&
     existing.siteId === siteId;
-  if (hold && !ownLive) return { available: false, problem: "reserved" };
+  if (hold?.kind === "platform" && !ownLive) return { available: false, problem: "reserved" };
+  // A deleted Site's (or workspace's) label stays its workspace's until the
+  // release hold ends, like a released row.
+  if (
+    hold?.kind === "release" &&
+    hold.workspaceId !== scope.workspaceId &&
+    (hold.expiresAt?.getTime() ?? 0) > now.getTime()
+  )
+    return { available: false, problem: "held" };
   if (!existing) return { available: true };
   if (existing.workspaceId === scope.workspaceId) {
     if (existing.releasedAt !== null) return { available: true };
@@ -556,8 +577,7 @@ async function claimInLane(
     const now = row ? date(row.now) : new Date();
     const [hold] = await rawRows<HoldRow>(
       tx,
-      sql`select label, site_id, workspace_id, reason, held_by, created_at
-        from site_hostname_holds where label = ${label}`,
+      sql`select ${HOLD_COLUMNS} from site_hostname_holds where label = ${label}`,
     );
     const check = claimCheck(existing, hold ? toHold(hold) : null, scope, siteId, holdDays, now);
     if (!check.available)
@@ -766,12 +786,14 @@ export async function suspendSitePublication(
       await lockHostnameLabel(tx, existing.label);
       await setHostnameLane(tx, existing.label);
       await tx.execute(
-        sql`insert into site_hostname_holds (label, site_id, workspace_id, reason, held_by)
+        sql`insert into site_hostname_holds (label, site_id, workspace_id, reason, held_by, kind)
           values (${existing.label}, ${siteId}, ${scope.workspaceId},
-            ${input.reason.trim().slice(0, 2000) || "Taken down"}, ${input.subject.slice(0, 300)})
+            ${input.reason.trim().slice(0, 2000) || "Taken down"}, ${input.subject.slice(0, 300)},
+            'platform')
           on conflict (label) do update set site_id = excluded.site_id,
             workspace_id = excluded.workspace_id, reason = excluded.reason,
-            held_by = excluded.held_by`,
+            held_by = excluded.held_by, kind = 'platform', expires_at = null,
+            created_at = now()`,
       );
       await setHostnameLane(tx, "");
     }
@@ -872,17 +894,18 @@ export type SiteHostnameEdgeState = {
 };
 
 /**
- * Run `fn` with the edge state of one hostname while holding that hostname's
- * advisory lock, so edge writes for a hostname land in generation order:
- * a claim, release, takedown or another sync waits until `fn` returns. The
- * live Site is read in the workspace that owns the label, wherever it moved.
- * `fn` must not write to the database through another connection.
+ * Read the edge state of one hostname under that hostname's advisory lock,
+ * allocate a fresh tombstone generation when no Site is live on it, and
+ * commit. The caller writes the edge after this returns, outside any
+ * transaction: the lock orders the reads (and generations) against claims,
+ * releases and takedowns, and the edge writer never replaces a newer
+ * generation. The live Site is read in the workspace that owns the label,
+ * wherever it moved.
  */
-export async function withSiteHostnameEdgeState<T>(
+export async function readSiteHostnameEdgeState(
   db: Database,
   label: string,
-  fn: (state: SiteHostnameEdgeState) => Promise<T>,
-): Promise<T> {
+): Promise<SiteHostnameEdgeState> {
   if (!LABEL.test(label)) throw new SitePublishingError("validation", "Invalid hostname label");
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
@@ -913,8 +936,44 @@ export async function withSiteHostnameEdgeState<T>(
       );
       tombstoneGeneration = Number(next!.generation);
     }
-    return await fn({ label, hostname, hold, live, tombstoneGeneration });
+    return { label, hostname, hold, live, tombstoneGeneration };
   });
+}
+
+/**
+ * Cheap re-read after an edge write: the generation of the Site live on the
+ * label now (null when none is), with no lock and no new generation. The
+ * writer compares it with what it wrote and syncs again when it moved.
+ */
+export async function readSiteHostnameLiveGeneration(
+  db: Database,
+  label: string,
+): Promise<{ siteId: string; generation: number } | null> {
+  if (!LABEL.test(label)) return null;
+  return await db.transaction(async (raw) => {
+    const tx = raw as unknown as Database;
+    await setHostnameLane(tx, label);
+    const { hostname } = await laneState(tx, label);
+    await setHostnameLane(tx, "");
+    if (!hostname || hostname.releasedAt !== null) return null;
+    const scope = { accountId: hostname.accountId, workspaceId: hostname.workspaceId };
+    return await withRlsContext(
+      tx,
+      scope,
+      async (scoped) => {
+        const [row] = await rawRows<{ generation: string | number; label: string }>(
+          scoped,
+          sql`select generation, label from site_publications
+            where workspace_id = ${scope.workspaceId} and site_id = ${hostname.siteId}`,
+        );
+        return row && row.label === label
+          ? { siteId: hostname.siteId, generation: Number(row.generation) }
+          : null;
+      },
+      undefined,
+      "none",
+    );
+  }, READ_ONLY);
 }
 
 export async function recordSitePublicationScan(
@@ -1198,17 +1257,26 @@ export async function putWorkspaceSiteLimitProfile(
 
 // --- conversations and budgets ---------------------------------------------------
 
+/** Who started a Site conversation, as the Site saw them then. */
+export type SiteRuntimeConversationViewerKind = "member" | "invited" | "user" | "guest";
+
 export type SiteRuntimeConversationRecord = {
   sessionId: string;
   siteId: string;
   viewerPrincipal: string;
+  viewerKind: SiteRuntimeConversationViewerKind;
+  /** The workspace tools (MCP connection ids) the conversation was started with. */
+  toolIds: string[];
   versionId: string | null;
   turns: number;
   meteredMicros: number;
   /** The conversation's own spend cap, fixed at start (its session usage limit). */
   limitMicros: number | null;
   reservedMicros: number;
+  /** Work admitted so far (start, messages, steering, resumes). */
+  admissions: number;
   createdAt: Date;
+  /** Last admitted work or counted spend. */
   updatedAt: Date;
 };
 
@@ -1216,6 +1284,8 @@ type ConversationRow = {
   session_id: string;
   site_id: string;
   viewer_principal: string;
+  viewer_kind: string;
+  tool_ids: unknown;
   version_id: string | null;
   turns: number;
   metered_micros: string | number;
@@ -1223,24 +1293,29 @@ type ConversationRow = {
   reserved_micros: string | number;
   reserved_day: unknown;
   reserved_month: unknown;
+  admissions: string | number;
   created_at: unknown;
   updated_at: unknown;
 };
 
-const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, version_id, turns,
+const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, viewer_kind, tool_ids,
+  version_id, turns,
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
-  reserved_month::text as reserved_month, created_at, updated_at`;
+  reserved_month::text as reserved_month, admissions, created_at, updated_at`;
 
 function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
   return {
     sessionId: row.session_id,
     siteId: row.site_id,
     viewerPrincipal: row.viewer_principal,
+    viewerKind: row.viewer_kind as SiteRuntimeConversationViewerKind,
+    toolIds: jsonValue<string[] | null>(row.tool_ids) ?? [],
     versionId: row.version_id,
     turns: Number(row.turns),
     meteredMicros: Number(row.metered_micros),
     limitMicros: row.limit_micros === null ? null : Number(row.limit_micros),
     reservedMicros: Number(row.reserved_micros),
+    admissions: Number(row.admissions),
     createdAt: date(row.created_at),
     updatedAt: date(row.updated_at),
   };
@@ -1282,25 +1357,69 @@ export async function listOwnedSiteRuntimeConversations(
   );
 }
 
-/** The Site's conversations that still hold a spend reservation, oldest activity first. */
-export async function listReservedSiteRuntimeConversations(
+/** Statuses of a session with no turn running or queued. */
+const IDLE_SESSION_STATUSES = ["idle", "failed", "cancelled"];
+/** A reservation with no admitted work or counted spend for this long is released. */
+export const SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS = 6;
+/** A sweep revisits a conversation at most this often. */
+const SWEEP_REVISIT_SECONDS = 30;
+/** A start whose session has not appeared after this long failed before its create committed. */
+export const SITE_RUNTIME_ABANDONED_START_MINUTES = 10;
+
+export type SiteRuntimeSweepCandidate = SiteRuntimeConversationRecord & {
+  /** No admitted work or counted spend for `SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS`. */
+  aged: boolean;
+};
+
+/**
+ * Claim up to `limit` of the Site's conversations whose reservation can
+ * likely be released, and mark them visited: those whose session is idle,
+ * failed or cancelled, starts whose session never appeared, and
+ * reservations inactive for `SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS`.
+ * Least recently visited first, each at most every 30 seconds, so repeated
+ * sweeps move through the Site instead of revisiting the same rows.
+ * Running conversations are not candidates: settling them would only move
+ * reserved spend into counted spend, freeing nothing.
+ */
+export async function claimSiteRuntimeReservationSweep(
   db: Database,
   scope: SitePublishingScope,
-  input: { siteId: string; limit: number },
-): Promise<SiteRuntimeConversationRecord[]> {
+  input: { siteId: string; limit: number; now?: Date },
+): Promise<SiteRuntimeSweepCandidate[]> {
+  if (!UUID.test(input.siteId)) return [];
+  const now = (input.now ?? new Date()).toISOString();
   return await withRlsContext(db, scope, async (tx) =>
     (
-      await rawRows<ConversationRow>(
+      await rawRows<ConversationRow & { aged: boolean }>(
         tx,
-        sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
-          where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
-            and reserved_micros > 0
-          order by updated_at asc limit ${Math.max(1, Math.min(input.limit, 100))}`,
+        sql`with picked as (
+            select c.session_id as picked_id from site_runtime_conversations c
+            left join sessions s on s.workspace_id = c.workspace_id and s.id = c.session_id
+            where c.workspace_id = ${scope.workspaceId} and c.site_id = ${input.siteId}
+              and c.reserved_micros > 0
+              and (c.swept_at is null
+                or c.swept_at < ${now}::timestamptz - make_interval(secs => ${SWEEP_REVISIT_SECONDS}))
+              and (s.status in (${sql.join(
+                IDLE_SESSION_STATUSES.map((status) => sql`${status}`),
+                sql`, `,
+              )})
+                or (s.id is null and c.created_at < ${now}::timestamptz
+                  - make_interval(mins => ${SITE_RUNTIME_ABANDONED_START_MINUTES}))
+                or c.updated_at < ${now}::timestamptz
+                  - make_interval(hours => ${SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS}))
+            order by c.swept_at asc nulls first, c.updated_at asc
+            limit ${Math.max(1, Math.min(input.limit, 100))}
+            for update of c skip locked
+          )
+          update site_runtime_conversations c set swept_at = ${now}::timestamptz
+          from picked
+          where c.workspace_id = ${scope.workspaceId} and c.session_id = picked.picked_id
+          returning ${CONVERSATION_COLUMNS}, c.updated_at < ${now}::timestamptz
+            - make_interval(hours => ${SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS}) as aged`,
       )
-    ).map(toConversation),
+    ).map((row) => ({ ...toConversation(row), aged: row.aged === true })),
   );
 }
-
 /** Statuses of a session that may still run or queue agent work. */
 const ACTIVE_SESSION_STATUSES = [
   "queued",
@@ -1317,9 +1436,24 @@ const ACTIVE_SESSION_STATUSES = [
 export async function listActiveSiteRuntimeConversations(
   db: Database,
   scope: SitePublishingScope,
-  input: { siteId: string; limit: number },
+  input: {
+    siteId: string;
+    limit: number;
+    /**
+     * Only conversations holding workspace tools the Site no longer gives
+     * them: a tool outside `tools`, or any tool for a viewer outside the
+     * workspace once `everyoneTools` is off.
+     */
+    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
+  },
 ): Promise<string[]> {
   if (!UUID.test(input.siteId)) return [];
+  const narrowed = input.toolsNarrowedTo;
+  const toolFilter = narrowed
+    ? sql`and (not (c.tool_ids <@ ${JSON.stringify(narrowed.tools)}::jsonb)
+        or (${!narrowed.everyoneTools} and jsonb_array_length(c.tool_ids) > 0
+          and c.viewer_kind in ('user', 'guest')))`
+    : sql``;
   return await withRlsContext(db, scope, async (tx) =>
     (
       await rawRows<{ session_id: string }>(
@@ -1327,7 +1461,7 @@ export async function listActiveSiteRuntimeConversations(
         sql`select c.session_id from site_runtime_conversations c
           join sessions s on s.workspace_id = c.workspace_id and s.id = c.session_id
           where c.workspace_id = ${scope.workspaceId} and c.site_id = ${input.siteId}
-            and c.updated_at > now() - interval '2 days'
+            and c.updated_at > now() - interval '2 days' ${toolFilter}
             and s.status in (${sql.join(
               ACTIVE_SESSION_STATUSES.map((status) => sql`${status}`),
               sql`, `,
@@ -1514,6 +1648,8 @@ export async function reserveSiteRuntimeConversationStart(
     sessionId: string;
     siteId: string;
     viewerPrincipal: string;
+    viewerKind: SiteRuntimeConversationViewerKind;
+    toolIds: readonly string[];
     versionId: string | null;
     limits: SiteRuntimeBudgetLimits;
     now?: Date;
@@ -1571,11 +1707,12 @@ export async function reserveSiteRuntimeConversationStart(
     const limitMicros = cap === null ? null : reserve;
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
-          viewer_principal, version_id, turns, limit_micros, reserved_micros, reserved_day,
-          reserved_month)
+          viewer_principal, viewer_kind, tool_ids, version_id, turns, limit_micros,
+          reserved_micros, reserved_day, reserved_month, admissions)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
-          ${input.viewerPrincipal}, ${input.versionId}, 1, ${limitMicros}, ${reserve},
-          ${periods.day}::date, ${periods.month}::date)`,
+          ${input.viewerPrincipal}, ${input.viewerKind}, ${JSON.stringify(input.toolIds)}::jsonb,
+          ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
+          ${periods.month}::date, 1)`,
     );
     for (const window of [visitorDay, siteDay, siteMonth])
       await adjustUsageWindow(tx, scope, input.siteId, window, {
@@ -1635,6 +1772,9 @@ export async function releaseSiteRuntimeConversationStart(
  * `newTurn`, else steering, resuming or running a queued message): under the
  * turn cap and its own spend cap, and top its reservation back up to what
  * the conversation may still spend, refusing when a budget cannot hold it.
+ * A per-conversation limit lowered since the start lowers the conversation's
+ * cap (returned as `limitMicros`; the caller lowers the session usage limit
+ * to it before the work runs).
  */
 export async function reserveSiteRuntimeConversationWork(
   db: Database,
@@ -1723,7 +1863,8 @@ export async function reserveSiteRuntimeConversationWork(
     await tx.execute(
       sql`update site_runtime_conversations set reserved_micros = ${target},
           reserved_day = ${periods.day}::date, reserved_month = ${periods.month}::date,
-          turns = turns + ${input.newTurn ? 1 : 0}, updated_at = now()
+          limit_micros = ${cap}, turns = turns + ${input.newTurn ? 1 : 0},
+          admissions = admissions + 1, updated_at = now()
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
     );
     return { ok: true, limitMicros: cap, reservedMicros: target } as const;
@@ -1735,8 +1876,10 @@ export async function reserveSiteRuntimeConversationWork(
  * so far): add the difference to the viewer's day and the Site's day and
  * month, and release that much of its reservation. When the session is
  * `idle` (no turn running or queued) the whole reservation is released, but
- * only if no work was admitted since `expected` was read. Never counts the
- * same micro twice; spend never goes down. Returns the spend added.
+ * only if no work was admitted since `expected` was read (its `admissions`
+ * counter moves with every admission, even one that leaves the reservation
+ * as it was). Never counts the same micro twice; spend never goes down.
+ * Returns the spend added.
  */
 export async function settleSiteRuntimeConversationSpend(
   db: Database,
@@ -1746,7 +1889,7 @@ export async function settleSiteRuntimeConversationSpend(
     usedMicros: number;
     idle?: boolean;
     /** The conversation as read before the session status (guards the idle release). */
-    expected?: Pick<SiteRuntimeConversationRecord, "turns" | "reservedMicros">;
+    expected?: Pick<SiteRuntimeConversationRecord, "admissions">;
     now?: Date;
   },
 ): Promise<number> {
@@ -1764,9 +1907,7 @@ export async function settleSiteRuntimeConversationSpend(
     const conversation = toConversation(row);
     const delta = Math.max(0, used - conversation.meteredMicros);
     const unchanged =
-      input.expected === undefined ||
-      (input.expected.turns === conversation.turns &&
-        input.expected.reservedMicros === conversation.reservedMicros);
+      input.expected === undefined || input.expected.admissions === conversation.admissions;
     const release =
       input.idle && unchanged
         ? conversation.reservedMicros
@@ -1834,7 +1975,7 @@ export async function consumeSiteRuntimeRate(
   const window = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
   const cap = Math.max(0, Math.floor(input.limit));
   return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ operations: number }>(
+    const [row] = await rawRows<{ operations: number; inserted: boolean }>(
       tx,
       sql`insert into site_runtime_rate_windows (account_id, workspace_id, site_id, principal_key,
           bucket, window_started_at, operations)
@@ -1849,16 +1990,19 @@ export async function consumeSiteRuntimeRate(
             else 1 end,
           window_started_at = greatest(site_runtime_rate_windows.window_started_at,
             excluded.window_started_at)
-        returning operations`,
+        returning operations, (xmax = 0) as inserted`,
     );
-    // Bounded cleanup on the write path, now and then: this Site's stale windows.
-    if (input.sweep ?? Math.random() < 0.01)
+    // Bounded cleanup on the write path, keeping pace with new principals:
+    // every new row deletes up to a few of this Site's stale windows, and
+    // about 1% of calls delete a larger batch.
+    const sweep = input.sweep ?? Math.random() < 0.01;
+    if (sweep || row?.inserted === true)
       await tx.execute(
         sql`delete from site_runtime_rate_windows where ctid = any(array(
             select ctid from site_runtime_rate_windows
             where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
               and window_started_at < now() - interval '10 minutes'
-            limit 100))`,
+            limit ${sweep ? 100 : 4}))`,
       );
     const allowed = Number(row!.operations) <= cap;
     return {
@@ -1889,13 +2033,34 @@ export type SiteModerationQueueItem = {
   at: Date;
 };
 
+/** The database role operator tooling needs for cross-workspace reads. */
+export const SITE_OPERATOR_ROLE_REQUIREMENT =
+  "the database role that owns the Opengeni schema (the migrations credential, OPENGENI_MIGRATIONS_DATABASE_URL), or a superuser or BYPASSRLS role";
+
+/**
+ * Refuse cross-workspace operator reads unless this connection is the schema
+ * owner (whose owner-only read policies show every row, migration 0782) or a
+ * role that bypasses RLS. The application role is neither, so it gets an
+ * error instead of a silently empty list.
+ */
+async function requireOperatorRole(tx: Database, what: string): Promise<void> {
+  const [role] = await rawRows<{ allowed: boolean }>(
+    tx,
+    sql`select (r.rolsuper or r.rolbypassrls or current_user = pg_catalog.pg_get_userbyid(c.relowner))
+        as allowed
+      from pg_catalog.pg_roles r, pg_catalog.pg_class c
+      where r.rolname = current_user and c.oid = 'site_publications'::regclass`,
+  );
+  if (!role?.allowed)
+    throw new SitePublishingError("forbidden", `${what} needs ${SITE_OPERATOR_ROLE_REQUIREMENT}`);
+}
+
 /**
  * The platform's moderation queue across every workspace: open abuse reports
  * and publications whose last content scan was flagged, newest first. For
- * operator tooling only: it reads with row security off in a read-only
- * transaction and refuses unless the connection's role is a superuser or
- * bypasses RLS (the migrations or admin credential), so the application role
- * can never run it.
+ * operator tooling only, in a read-only transaction: the schema owner reads
+ * through owner-only policies (no BYPASSRLS needed); the application role is
+ * refused.
  */
 export async function listSiteModerationQueue(
   db: Database,
@@ -1905,16 +2070,7 @@ export async function listSiteModerationQueue(
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
     await tx.execute(sql`set local statement_timeout = '10s'`);
-    const [role] = await rawRows<{ global: boolean }>(
-      tx,
-      sql`select (rolsuper or rolbypassrls) as global from pg_roles where rolname = current_user`,
-    );
-    if (!role?.global)
-      throw new SitePublishingError(
-        "forbidden",
-        "The moderation queue needs the migrations or admin database credential",
-      );
-    await tx.execute(sql`set local row_security = off`);
+    await requireOperatorRole(tx, "The moderation queue");
     const reports = await rawRows<{
       account_id: string;
       workspace_id: string;
@@ -1995,16 +2151,7 @@ export async function findSitePublicationGlobally(
   if (!UUID.test(siteId)) return null;
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
-    const [role] = await rawRows<{ global: boolean }>(
-      tx,
-      sql`select (rolsuper or rolbypassrls) as global from pg_roles where rolname = current_user`,
-    );
-    if (!role?.global)
-      throw new SitePublishingError(
-        "forbidden",
-        "Finding a Site by id needs the migrations or admin database credential",
-      );
-    await tx.execute(sql`set local row_security = off`);
+    await requireOperatorRole(tx, "Finding a Site by id");
     const [row] = await rawRows<{ account_id: string; workspace_id: string; label: string }>(
       tx,
       sql`select account_id, workspace_id, label from site_publications where site_id = ${siteId}`,
@@ -2052,6 +2199,14 @@ function toReport(row: ReportRow): SiteAbuseReportRecord {
   };
 }
 
+/** Resolved (dismissed or actioned) reports are kept this long after they were made. */
+export const SITE_ABUSE_REPORT_RETENTION_DAYS = 180;
+
+/**
+ * Record an abuse report. The write also deletes up to 20 of the Site's
+ * resolved reports older than the retention period (a bounded cleanup on the
+ * write path); open reports stay until someone resolves them.
+ */
 export async function createSiteAbuseReport(
   db: Database,
   scope: SitePublishingScope,
@@ -2073,6 +2228,14 @@ export async function createSiteAbuseReport(
           ${input.category}, ${input.message.slice(0, 4000)}, ${input.contactEmail},
           ${input.reporterPrincipal.slice(0, 300)})
         returning id, site_id, hostname, category, message, contact_email, status, created_at`,
+    );
+    await tx.execute(
+      sql`delete from site_abuse_reports where ctid = any(array(
+          select ctid from site_abuse_reports
+          where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+            and status in ('dismissed', 'actioned')
+            and created_at < now() - make_interval(days => ${SITE_ABUSE_REPORT_RETENTION_DAYS})
+          limit 20))`,
     );
     return toReport(row!);
   });

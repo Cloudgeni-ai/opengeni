@@ -38,6 +38,7 @@ import {
   ReasoningEffort,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  normalizeSitesDomain,
   OpenGeniSlackBotDisplayName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
@@ -9916,9 +9917,40 @@ export function localSandboxApiRouteAllowed(pathname: string): boolean {
   return LOCAL_SANDBOX_API_ROUTES.some((route) => route.test(pathname));
 }
 
+/**
+ * Published Sites serve untrusted HTML, so their domain must not hold or sit
+ * inside the console or API hosts: a Site could otherwise read or set their
+ * cookies. A separate registrable domain is required (see
+ * docs/published-sites.md); this catches the nesting a host check can see.
+ */
+export function validateSitesDomain(
+  settings: Pick<Settings, "sitesDomain" | "publicBaseUrl" | "webBaseUrl">,
+): void {
+  if (settings.sitesDomain === undefined) return;
+  let domain: string;
+  try {
+    domain = normalizeSitesDomain(settings.sitesDomain);
+  } catch {
+    throw new Error("OPENGENI_SITES_DOMAIN must be a domain name such as sites.example.com");
+  }
+  const hosts: Array<[string, string | undefined]> = [
+    ["OPENGENI_PUBLIC_BASE_URL", settings.publicBaseUrl],
+    ["OPENGENI_WEB_BASE_URL", settings.webBaseUrl],
+  ];
+  for (const [name, url] of hosts) {
+    if (!url) continue;
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/u, "");
+    if (host === domain || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`))
+      throw new Error(
+        `OPENGENI_SITES_DOMAIN (${domain}) must be a separate domain from the console and API: ${name} uses ${host}`,
+      );
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  validateSitesDomain(settings);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&
     !settings.organizationUserSetupQueryEdgeSanitizationConfirmed

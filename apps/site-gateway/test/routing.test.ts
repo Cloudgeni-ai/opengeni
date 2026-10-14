@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { classifyApiRequest, rateLimitKeys, readBodyCapped } from "../src/api";
+import { rateLimitIp } from "../src/client-ip";
 import { gatewayConfig, GatewayConfigError } from "../src/env";
 import { safeReturnPath } from "../src/return-path";
 import { isSameOriginRequest } from "../src/site-context";
@@ -54,6 +55,26 @@ describe("Site API routing", () => {
     expect(
       rateLimitKeys({ hostname: "a-site.x.test", visitor: null, clientIp: "1.2.3.4" }, "report"),
     ).toEqual(["report:ip:a-site.x.test:1.2.3.4"]);
+  });
+
+  test("IPv6 clients are limited per /64, IPv4 clients per address", () => {
+    expect(rateLimitIp("203.0.113.7")).toBe("203.0.113.7");
+    expect(rateLimitIp("")).toBe("unknown");
+    for (const ip of [
+      "2001:db8:1:2::1",
+      "2001:0db8:0001:0002:ffff:ffff:ffff:ffff",
+      "2001:DB8:1:2:3:4:5:6",
+      "2001:db8:1:2::1%eth0",
+    ])
+      expect(rateLimitIp(ip)).toBe("2001:db8:1:2::/64");
+    expect(rateLimitIp("2001:db8:1:3::1")).toBe("2001:db8:1:3::/64");
+    expect(rateLimitIp("::1")).toBe("0:0:0:0::/64");
+    expect(rateLimitIp("::ffff:198.51.100.9")).toBe("198.51.100.9");
+    expect(rateLimitIp("::ffff:c633:6409")).toBe("198.51.100.9");
+    expect(rateLimitIp("2001:db8::1:2:3:4:5:6:7")).toBe("2001:db8::1:2:3:4:5:6:7");
+    expect(
+      rateLimitKeys({ hostname: "a-site.x.test", visitor: null, clientIp: "2001:db8:1:2::9" }),
+    ).toEqual(["api:ip:a-site.x.test:2001:db8:1:2::/64"]);
   });
 
   test("bodies are capped", async () => {

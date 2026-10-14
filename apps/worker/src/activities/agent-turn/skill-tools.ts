@@ -21,6 +21,8 @@ import {
   resolveSkillImport,
   saveSkill,
   removeSkill,
+  siteClampedAgentMessage,
+  siteSessionClamp,
 } from "@opengeni/core";
 import {
   buildPortableSkillArtifact,
@@ -87,6 +89,25 @@ function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptTo
   };
 }
 
+/**
+ * The check before a Skill write (save, install, publish, remove): the live
+ * attempt, and that no Site page started the agent. An agent started from a
+ * Site page reads Skills but never changes them: it does not learn. The
+ * refusal is definite (nothing was saved).
+ */
+export function skillWriteAuthorizer(
+  authorize: () => Promise<void>,
+  siteClamped: () => Promise<boolean>,
+): () => Promise<void> {
+  return async () => {
+    await authorize();
+    if (await siteClamped())
+      throw new SkillLifecycleRefusedError("42501", siteClampedAgentMessage("Skills"), {
+        cause: null,
+      });
+  };
+}
+
 export function createWorkspaceSkillTools(input: {
   db: Database;
   settings: Settings;
@@ -114,6 +135,12 @@ export function createWorkspaceSkillTools(input: {
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
   };
   const authorize = () => assertSkillReadAttempt(input.db, { ...context, actor: input.actor });
+  const authorizeWrite = skillWriteAuthorizer(
+    authorize,
+    async () =>
+      (await siteSessionClamp(input.db, context, input.actor.sessionId, input.actor.turnId))
+        .clamped,
+  );
   const selected = new Map(input.selected.map((entry) => [entry.id, entry.artifact]));
   const shadowed = sessionShadowedSkillNames(input.selected);
   // Readable Skills that skill_search returned in this attempt.
@@ -197,7 +224,7 @@ export function createWorkspaceSkillTools(input: {
   };
   return [
     createSkillRemoveAttemptToolDefinition({
-      authorize,
+      authorize: authorizeWrite,
       remove: async (request) =>
         withReviewState(
           await removeSkill(input.db, { ...context, ...request, actor: input.actor }),
@@ -255,7 +282,7 @@ export function createWorkspaceSkillTools(input: {
       },
     }),
     createSkillSaveAttemptToolDefinition({
-      authorize,
+      authorize: authorizeWrite,
       save,
       load: async (skillId, revisionId) => {
         const record = await readSkill(input.db, context, skillId, revisionId);
@@ -264,7 +291,7 @@ export function createWorkspaceSkillTools(input: {
       },
     }),
     createSkillInstallAttemptToolDefinition({
-      authorize,
+      authorize: authorizeWrite,
       install: async (request) => {
         const requestIdentity = {
           operation: "skill_install",
@@ -354,7 +381,11 @@ export function createWorkspaceSkillTools(input: {
         return content;
       },
     }),
-    createSkillPublishAttemptToolDefinition({ authorize, filesystem: input.filesystem, save }),
+    createSkillPublishAttemptToolDefinition({
+      authorize: authorizeWrite,
+      filesystem: input.filesystem,
+      save,
+    }),
   ].map(withDefiniteSkillRefusals);
 }
 

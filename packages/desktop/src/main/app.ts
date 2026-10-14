@@ -34,10 +34,11 @@ import { AccountStore, type StoredAccount } from "./accounts";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
+import { installAppImageIntegration } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
-import { flushMarks, mark } from "./perf";
+import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { computerName } from "./computer-name";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
@@ -73,16 +74,31 @@ function desktopPlatform(): DesktopPlatform {
   return "linux";
 }
 
+/** The AppImage file this process runs from, on Linux. */
+function appImagePath(): string | null {
+  return process.platform === "linux" && app.isPackaged ? process.env.APPIMAGE || null : null;
+}
+
+/**
+ * The Wayland app id (and X11 WM_CLASS) Chromium gives the window: the desktop
+ * entry name Electron publishes from package.json's desktopName.
+ */
+function linuxWindowClass(): string {
+  return (process.env.CHROME_DESKTOP || `${app.getName()}.desktop`).replace(/\.desktop$/, "");
+}
+
 function errorMessage(caught: unknown, fallback: string): string {
   return caught instanceof Error && caught.message ? caught.message : fallback;
 }
 
-/** Memory in use by every process of the app, in megabytes. */
-function appMemoryMb(): number {
-  const kilobytes = app
-    .getAppMetrics()
-    .reduce((sum, metric) => sum + metric.memory.workingSetSize, 0);
-  return Math.round(kilobytes / 1024);
+/** Records the app's memory once the first page has loaded, and again once it has settled. */
+async function recordMemory(): Promise<void> {
+  const loaded = await privateMemoryMb(app.getAppMetrics());
+  const loadedMarks = loaded === null ? {} : { loadedMemoryMb: loaded };
+  flushMarks(loadedMarks);
+  await new Promise((resolve) => setTimeout(resolve, 15_000));
+  const idle = await privateMemoryMb(app.getAppMetrics());
+  flushMarks(idle === null ? loadedMarks : { ...loadedMarks, idleMemoryMb: idle });
 }
 
 /** The path a person was on, when it is one the app reopens: a workspace or a session. */
@@ -177,9 +193,12 @@ export class DesktopShell {
       return;
     }
     registerLocalScheme();
+    // Without it Windows shows no notifications for the installed app.
+    if (process.platform === "win32") app.setAppUserModelId(config.appId);
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
-    } else {
+    } else if (!appImagePath()) {
+      // An AppImage registers through its own desktop entry instead (see start()).
       app.setAsDefaultProtocolClient(config.scheme);
     }
     const queued: string[] = [];
@@ -233,6 +252,20 @@ export class DesktopShell {
       Menu.setApplicationMenu(this.menu());
       this.inbox.start();
       void this.refreshTray();
+      const appImage = appImagePath();
+      if (appImage) {
+        try {
+          installAppImageIntegration({
+            productName: this.config.productName,
+            scheme: this.config.scheme,
+            appImagePath: appImage,
+            iconPath: this.config.appIconPath,
+            windowClass: linuxWindowClass(),
+          });
+        } catch {
+          // Links and the dock icon degrade; the app itself still works.
+        }
+      }
     }, 0);
   }
 
@@ -275,13 +308,8 @@ export class DesktopShell {
       active && !active.signedOut ? window.showAccount(this.target(active)) : window.showWelcome();
     contents.once("did-finish-load", () => {
       mark("content-loaded");
-      const loadedMb = appMemoryMb();
-      flushMarks({ loadedMemoryMb: loadedMb });
-      // Idle memory is read once the page has settled.
-      setTimeout(
-        () => flushMarks({ loadedMemoryMb: loadedMb, idleMemoryMb: appMemoryMb() }),
-        15_000,
-      );
+      flushMarks();
+      if (measuring()) void recordMemory();
     });
     window.reveal();
     mark("window-shown");

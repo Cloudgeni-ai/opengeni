@@ -1,4 +1,5 @@
 import {
+  SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CLIENT_IP_HEADER,
   SITE_GATEWAY_HOST_HEADER,
   SITE_GATEWAY_HUMAN_HEADER,
@@ -13,6 +14,14 @@ import {
 } from "@opengeni/contracts";
 import { hmacBase64url, sha256Hex } from "./crypto";
 import type { GatewayConfig } from "./env";
+
+/**
+ * Hex SHA-256 of the forwarded body (of the empty string when there is
+ * none): exactly the `bodySha256` field of the signed canonical string. The
+ * API verifies the signature from headers alone, before reading the body,
+ * then checks the body against this hash. The API requires it.
+ */
+export { SITE_GATEWAY_BODY_SHA256_HEADER };
 
 /** `v1=<base64url HMAC-SHA256>` over the shared canonical string. */
 export async function signGatewayFields(
@@ -63,11 +72,12 @@ export async function signedApiRequest(
   const human = caller.human ? "1" : "";
   // Sign exactly the host value that is sent.
   const host = caller.host.toLowerCase();
+  const bodySha256 = await sha256Hex(body ?? "");
   const signature = await signGatewayFields(config.secret, {
     method,
     pathWithQuery,
     timestamp,
-    bodySha256: await sha256Hex(body ?? ""),
+    bodySha256,
     host,
     session: caller.session,
     visitor: caller.visitor,
@@ -77,6 +87,7 @@ export async function signedApiRequest(
   const headers = new Headers(init.headers);
   headers.set(SITE_GATEWAY_TIMESTAMP_HEADER, String(timestamp));
   headers.set(SITE_GATEWAY_SIGNATURE_HEADER, signature);
+  headers.set(SITE_GATEWAY_BODY_SHA256_HEADER, bodySha256);
   headers.set(SITE_GATEWAY_HOST_HEADER, host);
   if (caller.session) headers.set(SITE_GATEWAY_SESSION_HEADER, caller.session);
   if (caller.visitor) headers.set(SITE_GATEWAY_VISITOR_HEADER, caller.visitor);

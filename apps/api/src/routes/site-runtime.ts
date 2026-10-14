@@ -61,11 +61,12 @@ import {
 } from "../site-data/operations";
 import type { PublishedSiteDataViewer } from "../site-data/service";
 import {
-  precheckSiteGatewayRequest,
+  sameSha256Hex,
   verifySiteGatewayRequest,
   type SiteGatewayFields,
 } from "../site-publishing/gateway-signature";
 import {
+  capSiteConversationUsageLimit,
   enforceSiteRuntimeRate,
   enforceSiteRuntimeViewerRate,
   findSiteRuntimeHost,
@@ -84,7 +85,6 @@ import {
   siteRuntimeSessionRequest,
   siteWideBudget,
   sweepSiteRuntimeReservations,
-  SITE_GUEST_IP_LIMIT_FACTOR,
   type SiteRuntimeHost,
 } from "../site-publishing/runtime";
 import {
@@ -95,6 +95,23 @@ import {
   siteHostMapRecord,
   sitePublishingError,
 } from "../site-publishing/service";
+import {
+  siteSessionEventPage,
+  siteSessionEventPageResponse,
+  siteSessionEventStreamResponse,
+  SITE_VISIBLE_SESSION_EVENT_TYPES,
+} from "../site-publishing/session-events";
+import {
+  siteAcceptedEventView,
+  siteAcceptedMessageView,
+  siteControlResultView,
+  siteControlView,
+  siteDraftView,
+  siteHumanInputListView,
+  siteHumanInputRequestView,
+  siteQueueMutationView,
+  siteQueueView,
+} from "../site-publishing/session-views";
 import {
   effectiveSiteAccess,
   publicSiteViewer,
@@ -126,6 +143,8 @@ const MESSAGE_MAX_CHARS = 20_000;
 export const SITE_RUNTIME_JSON_BODY_LIMIT = 4 * 1024 * 1024;
 export const SITE_RUNTIME_FILE_BODY_LIMIT = 25 * 1024 * 1024;
 const FILE_UPLOAD_SUFFIX = "/published-artifacts/current/files";
+/** SHA-256 of the empty body: what the gateway signs for GET and HEAD. */
+const EMPTY_BODY_SHA256 = createHash("sha256").digest("hex");
 /** A version a publish or rollback replaced is still served this long (open pages keep loading). */
 export const SITE_VERSION_GRACE_SECONDS = 600;
 
@@ -213,14 +232,19 @@ function tooLarge(limit: number) {
 }
 
 /**
- * Read a request body of at most `limit` bytes: a larger declared length is
- * refused before reading, and the stream is cut off once it passes the cap.
+ * Read a request body of at most `limit` bytes, hashing it as it arrives: a
+ * larger declared length is refused before reading, and the stream is cut
+ * off once it passes the cap.
  */
-async function readCappedBody(request: Request, limit: number): Promise<Uint8Array> {
+async function readCappedBody(
+  request: Request,
+  limit: number,
+): Promise<{ body: Uint8Array; sha256: string }> {
+  const hash = createHash("sha256");
   const declared = request.headers.get("content-length")?.trim();
   if (declared && (!/^\d{1,15}$/u.test(declared) || Number(declared) > limit))
     throw tooLarge(limit);
-  if (!request.body) return new Uint8Array();
+  if (!request.body) return { body: new Uint8Array(), sha256: hash.digest("hex") };
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -233,6 +257,7 @@ async function readCappedBody(request: Request, limit: number): Promise<Uint8Arr
         await reader.cancel().catch(() => undefined);
         throw tooLarge(limit);
       }
+      hash.update(value);
       chunks.push(value);
     }
   } finally {
@@ -244,7 +269,7 @@ async function readCappedBody(request: Request, limit: number): Promise<Uint8Arr
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return body;
+  return { body, sha256: hash.digest("hex") };
 }
 
 /** Fields of a session a Site viewer sees: the conversation, not the workspace behind it. */
@@ -295,24 +320,23 @@ export function siteSessionProjection(session: unknown): Record<string, unknown>
   if (!session || typeof session !== "object" || Array.isArray(session)) return {};
   const value = session as Record<string, unknown>;
   const projected = pick(value, SITE_SESSION_FIELDS);
+  if ("effectiveControl" in projected)
+    projected.effectiveControl = siteControlView(projected.effectiveControl);
   const usage = value.usageLimit;
   if (usage && typeof usage === "object" && !Array.isArray(usage))
     projected.usageLimit = pick(usage as Record<string, unknown>, SITE_USAGE_LIMIT_FIELDS);
   return projected;
 }
 
-/** Query parameters forwarded per session read (anything else is dropped). */
-const EVENT_QUERY = [
-  "after",
-  "before",
-  "limit",
-  "direction",
-  "latest",
-  "includeTypes",
-  "excludeTypes",
-  "includeClasses",
-  "excludeClasses",
-] as const;
+/**
+ * Query parameters a Site viewer may pass to an event page (anything else is
+ * dropped). Class filters and `latest` are not offered: they select hidden
+ * event types by class, and the Site projection hides those anyway.
+ */
+const EVENT_QUERY = ["after", "before", "direction", "excludeTypes", "compact"] as const;
+/** Monitoring-read page sizes: the default, and the most one page returns. */
+const SITE_EVENT_PAGE_DEFAULT = 40;
+const SITE_EVENT_PAGE_MAX = 500;
 
 function allowedQuery(url: URL, names: readonly string[], extra: Record<string, string> = {}) {
   const params = new URLSearchParams();
@@ -327,18 +351,28 @@ function allowedQuery(url: URL, names: readonly string[], extra: Record<string, 
 
 /**
  * The workspace tools a Site conversation gets: the Site's admin-chosen MCP
- * connections for signed-in viewers, and for guests only when an admin opted
- * them in (`guestTools`). Optional references: a connection the workspace
- * does not have is skipped rather than failing the conversation.
+ * connections for workspace members and invited viewers. Everyone else
+ * (signed-in people outside the workspace on a public Site, and anonymous
+ * guests) gets them only when an admin opted them in (`guestTools`). Optional
+ * references: a connection the workspace does not have is skipped rather
+ * than failing the conversation.
  */
 export function siteAgentToolRefs(
   agent: Pick<SiteEmbeddedAgent, "tools" | "guestTools">,
   viewer: Pick<SiteRuntimeViewer, "kind">,
 ): ToolRef[] {
-  const toolIds = viewer.kind !== "guest" || agent.guestTools ? (agent.tools ?? []) : [];
+  const toolIds = siteViewerGetsTools(agent, viewer) ? (agent.tools ?? []) : [];
   return toolIds
     .filter((tool) => SessionMcpServerIdPattern.test(tool))
     .map((tool) => ({ kind: "mcp", id: tool, optional: true }));
+}
+
+/** Members and invited viewers get the Site's tools; everyone else only with `guestTools`. */
+export function siteViewerGetsTools(
+  agent: Pick<SiteEmbeddedAgent, "guestTools">,
+  viewer: Pick<SiteRuntimeViewer, "kind">,
+): boolean {
+  return viewer.kind === "member" || viewer.kind === "invited" || agent.guestTools;
 }
 
 /** A session id derived from the viewer's create idempotency key (same key, same conversation). */
@@ -385,27 +419,26 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         { reason },
       );
     // The gateway signature first: nothing about the request is trusted before
-    // it. The header and clock checks run before the body is read.
-    const pre = precheckSiteGatewayRequest({ headers: context.req.raw.headers, secrets });
-    if (!pre.ok) throw refuse(pre.reason);
+    // it. It is checked from the headers alone (the gateway signs the body
+    // hash and sends it as a header), so an unsigned request is refused
+    // before its body is read; the body is then read under the cap, hashed
+    // as it arrives, and must match the signed hash.
+    const headers = context.req.raw.headers;
+    const pathWithQuery = `${url.pathname}${url.search}`;
+    const verified = verifySiteGatewayRequest({ method, pathWithQuery, headers, secrets });
+    if (!verified.ok) throw refuse(verified.reason);
     const suffix = url.pathname.slice(SITE_RUNTIME_API_PREFIX.length);
-    const body =
+    const read =
       method === "GET" || method === "HEAD"
-        ? new Uint8Array()
+        ? { body: new Uint8Array(), sha256: EMPTY_BODY_SHA256 }
         : await readCappedBody(
             context.req.raw,
             method === "POST" && suffix === FILE_UPLOAD_SUFFIX
               ? SITE_RUNTIME_FILE_BODY_LIMIT
               : SITE_RUNTIME_JSON_BODY_LIMIT,
           );
-    const verified = verifySiteGatewayRequest({
-      method,
-      pathWithQuery: `${url.pathname}${url.search}`,
-      headers: context.req.raw.headers,
-      body,
-      secrets,
-    });
-    if (!verified.ok) throw refuse(verified.reason);
+    if (!sameSha256Hex(read.sha256, verified.bodySha256)) throw refuse("body_mismatch");
+    const body = read.body;
     context.header("cache-control", "no-store");
     const runtime: RuntimeRequest = {
       context,
@@ -597,8 +630,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   /**
    * Abuse reports: anyone who reaches a served Site host, rate limited per
-   * reporter, per client address and per Site. Each report also reaches the
-   * platform (a structured log line, and an email when an abuse address is set).
+   * reporter, per client address and per Site. A reporter and a client
+   * address each get the same small share (5 a minute by default) of the
+   * Site's 60, so no one reporter fills the Site's cap. Each report also
+   * reaches the platform (a structured log line, and an email when an abuse
+   * address is set).
    */
   const report = async (request: RuntimeRequest): Promise<Response> => {
     const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
@@ -612,13 +648,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const perVisitor = deps.settings.sitesReportsPerMinutePerVisitor;
     await enforceSiteRuntimeRate(deps, host, reporter, "reports", perVisitor);
     if (reporter !== address)
-      await enforceSiteRuntimeRate(
-        deps,
-        host,
-        address,
-        "reports",
-        perVisitor * SITE_GUEST_IP_LIMIT_FACTOR,
-      );
+      await enforceSiteRuntimeRate(deps, host, address, "reports", perVisitor);
     await enforceSiteRuntimeRate(
       deps,
       host,
@@ -928,12 +958,21 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           }),
         ),
       );
-    const forward = async (method: string, path: string, body?: unknown) =>
-      siteRuntimeForwardedResponse(await send(method, path, body));
     /** A forwarded session read, answered with the Site-safe projection. */
     const projected = async (response: Response, status = response.status) => {
       if (!response.ok) return siteRuntimeForwardedResponse(response);
       return context.json(siteSessionProjection(await response.json()), status as 200);
+    };
+    /** Forward, and answer a success with a Site-safe view of its body. */
+    const forwardView = async (
+      method: string,
+      path: string,
+      view: (value: unknown) => unknown,
+      body?: unknown,
+    ) => {
+      const response = await send(method, path, body);
+      if (!response.ok) return siteRuntimeForwardedResponse(response);
+      return context.json(view(await response.json()) as object, response.status as 200);
     };
     const notFound = () =>
       sitePublishingError(
@@ -943,13 +982,15 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Conversation not found",
       );
     const budgets = siteRuntimeBudgetLimits(limits);
-    /** Reserve, and when a Site-wide budget refuses, settle stale reservations and retry once. */
+    /**
+     * Reserve, and when a Site-wide budget refuses, release reservations
+     * finished conversations no longer need and retry once (unless the Site
+     * was swept moments ago).
+     */
     const reserve = async (run: () => Promise<SiteRuntimeReservation>) => {
       let reservation = await run();
-      if (siteWideBudget(reservation)) {
-        await sweepSiteRuntimeReservations(deps, host);
+      if (siteWideBudget(reservation) && (await sweepSiteRuntimeReservations(deps, host)))
         reservation = await run();
-      }
       if (!reservation.ok) throw siteBudgetExhausted(reservation.budget);
       return reservation;
     };
@@ -1002,20 +1043,24 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         limit: 5,
       }))
         await settleSiteRuntimeSpend(deps, host, conversation);
+      const agent = host.publication.agent;
+      const mcpTools = siteAgentToolRefs(agent, viewer);
       // One transaction counts the start and reserves the conversation's whole
       // cap against the visitor's day and the Site's day and month; the cap
-      // becomes the session's usage limit, set in the create transaction.
+      // becomes the session's usage limit, set in the create transaction. The
+      // row also records the tools the conversation gets, so narrowing them
+      // later stops it.
       const reservation = await reserve(() =>
         reserveSiteRuntimeConversationStart(deps.db, host.scope, {
           sessionId: requestedSessionId,
           siteId: host.site.id,
           viewerPrincipal: viewer.principal,
+          viewerKind: viewer.kind,
+          toolIds: mcpTools.map((tool) => tool.id),
           versionId: host.versionId,
           limits: budgets,
         }),
       );
-      const agent = host.publication.agent;
-      const mcpTools = siteAgentToolRefs(agent, viewer);
       const body = {
         initialMessage: input.initialMessage,
         requestedSessionId,
@@ -1094,28 +1139,74 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       return allowedQuery(url, ["after", "transport"], extra);
     };
     /**
-     * Event pages are monitoring reads: bounded pages, summarized oversized
-     * payloads, never a forensic or full-payload read. The stream delivers
-     * complete events.
+     * Event pages and the stream deliver the same Site-safe projection
+     * (site-publishing/session-events.ts): allowlisted event types and
+     * payload fields, with hidden events as placeholders so sequences stay
+     * contiguous. The page is read whole from the API (every type, stored
+     * payloads) because the projection, not the read mode, decides what a
+     * viewer sees, and message text must not be cut to a preview. Page sizes
+     * and the default newest-first order are those of a monitoring read;
+     * `payloadMode=none` drops payloads.
      */
-    const eventQuery = () => {
-      const payloadMode = url.searchParams.get("payloadMode");
+    const payloadNone = url.searchParams.get("payloadMode") === "none";
+    const eventQuery = (includeTypes: string | null) => {
+      const requested = Number(url.searchParams.get("limit") ?? SITE_EVENT_PAGE_DEFAULT);
+      const limit = Number.isFinite(requested)
+        ? Math.min(SITE_EVENT_PAGE_MAX, Math.max(1, Math.floor(requested)))
+        : SITE_EVENT_PAGE_DEFAULT;
+      const ordered = ["after", "before", "direction"].some((name) => url.searchParams.has(name));
       return allowedQuery(url, EVENT_QUERY, {
-        mode: "monitoring",
-        ...(payloadMode === "none" ? { payloadMode: "none" } : { payloadMode: "summary" }),
+        mode: "forensic",
+        payloadMode: payloadNone ? "none" : "full",
+        limit: String(limit),
+        ...(ordered ? {} : { direction: "before" }),
+        ...(includeTypes ? { includeTypes } : {}),
       });
+    };
+    /** Requested types a viewer can see; null when none of them is visible. */
+    const visibleIncludeTypes = (): string | null | undefined => {
+      const raw = url.searchParams.get("includeTypes");
+      if (raw === null) return undefined;
+      const visible = raw
+        .split(",")
+        .map((type) => type.trim())
+        .filter((type) => SITE_VISIBLE_SESSION_EVENT_TYPES.has(type));
+      return visible.length > 0 ? [...new Set(visible)].join(",") : null;
     };
     // The agent and budget checks every message-bearing operation passes.
     const admitAgentWork = async (newTurn: boolean) => {
       requireSiteAgent(deps, host, viewer, limits);
-      await settleSiteRuntimeSpend(deps, host, conversation);
-      await reserve(() =>
+      // Tools are bound when a conversation starts. One holding a tool the
+      // Site no longer gives this viewer (removed, or no longer for everyone,
+      // or the viewer left the workspace) takes no more work.
+      const allowedTools = new Set(
+        siteAgentToolRefs(host.publication.agent, viewer).map((t) => t.id),
+      );
+      if (conversation.toolIds.some((tool) => !allowedTools.has(tool)))
+        throw sitePublishingError(
+          409,
+          "conflict",
+          "site_conversation_outdated",
+          "This Site's assistant changed since this conversation started; start a new one",
+        );
+      const usage = await settleSiteRuntimeSpend(deps, host, conversation);
+      const admitted = await reserve(() =>
         reserveSiteRuntimeConversationWork(deps.db, host.scope, {
           sessionId: conversation.sessionId,
           limits: budgets,
           newTurn,
         }),
       );
+      // A per-conversation limit lowered since the start lowers the session's
+      // own usage limit too, before the work runs.
+      if (admitted.limitMicros !== null)
+        await capSiteConversationUsageLimit(
+          deps,
+          host,
+          conversation.sessionId,
+          admitted.limitMicros,
+          usage,
+        );
     };
     /**
      * A Site's composer drafts are text only: no workspace resources,
@@ -1163,21 +1254,36 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sessions.get":
         await settleSiteRuntimeSpend(deps, host, conversation);
         return await projected(await send("GET", target));
-      case "sessions.events":
-        return await forward("GET", `${target}/events${eventQuery()}`);
+      case "sessions.events": {
+        const payload = payloadNone ? ("none" as const) : ("summary" as const);
+        const includeTypes = visibleIncludeTypes();
+        // Asking only for hidden types yields nothing rather than everything.
+        if (includeTypes === null) return siteSessionEventPage([], { payload });
+        return await siteSessionEventPageResponse(
+          await send("GET", `${target}/events${eventQuery(includeTypes ?? null)}`),
+          { payload },
+        );
+      }
       case "sessions.stream":
-        return await forward("GET", `${target}/events/stream${streamQuery()}`);
+        return siteSessionEventStreamResponse(
+          await send("GET", `${target}/events/stream${streamQuery()}`),
+        );
       case "sessions.queue":
-        return await forward("GET", `${target}/queue`);
+        return await forwardView("GET", `${target}/queue`, siteQueueView);
       case "sessions.humanInput":
-        return await forward(
+        return await forwardView(
           "GET",
           `${target}/human-input-requests${allowedQuery(url, ["status"])}`,
+          siteHumanInputListView,
         );
       case "sessions.humanInput.get": {
         const requestId = /\/human-input-requests\/([^/]+)$/u.exec(request.suffix)?.[1];
         if (!requestId) throw unsupported();
-        return await forward("GET", `${target}/human-input-requests/${requestId}`);
+        return await forwardView(
+          "GET",
+          `${target}/human-input-requests/${requestId}`,
+          siteHumanInputRequestView,
+        );
       }
       case "sessions.queue.item": {
         const item = /\/queue\/([^/]+)\/(move|edit|steer|delete)$/u.exec(request.suffix);
@@ -1188,33 +1294,33 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           case "move": {
             const move = parseJson(request.body, MoveSessionQueueItemRequest);
             requireSiteAgent(deps, host, viewer, limits);
-            return await forward("POST", path, move);
+            return await forwardView("POST", path, siteQueueMutationView, move);
           }
           case "edit": {
             const edit = parseJson(request.body, EditSessionQueueItemRequest);
             requireSiteAgent(deps, host, viewer, limits);
-            return await forward("POST", path, edit);
+            return await forwardView("POST", path, siteQueueMutationView, edit);
           }
           case "delete": {
             const remove = parseJson(request.body, DeleteSessionQueueItemRequest);
             requireSiteAgent(deps, host, viewer, limits);
-            return await forward("POST", path, remove);
+            return await forwardView("POST", path, siteQueueMutationView, remove);
           }
           default: {
             // Steering a queued message runs it now: the message was counted
             // when it was sent, but the agent and spend checks still apply.
             const steer = parseJson(request.body, SteerSessionQueueItemRequest);
             await admitAgentWork(false);
-            return await forward("POST", path, steer);
+            return await forwardView("POST", path, siteQueueMutationView, steer);
           }
         }
       }
       case "sessions.composerDraft.get":
-        return await forward("GET", `${target}/composer-draft`);
+        return await forwardView("GET", `${target}/composer-draft`, siteDraftView);
       case "sessions.composerDraft.put": {
         const draft = parseJson(request.body, SaveComposerDraftRequest);
         requireSiteAgent(deps, host, viewer, limits);
-        return await forward("PUT", `${target}/composer-draft`, {
+        return await forwardView("PUT", `${target}/composer-draft`, siteDraftView, {
           ...(await siteDraft(draft)),
           expectedRevision: draft.expectedRevision,
         });
@@ -1230,18 +1336,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           throw invalid("Messages on a published Site are text only");
         const draft = await siteDraft(submit);
         await admitAgentWork(true);
-        return await forward("POST", `${target}/composer-draft/submit`, {
-          ...draft,
-          expectedDraftRevision: submit.expectedDraftRevision,
-          clientEventId: submit.clientEventId,
-          delivery: submit.delivery,
-          ...(submit.controlEtag ? { controlEtag: submit.controlEtag } : {}),
-        });
+        return await forwardView(
+          "POST",
+          `${target}/composer-draft/submit`,
+          siteAcceptedMessageView,
+          {
+            ...draft,
+            expectedDraftRevision: submit.expectedDraftRevision,
+            clientEventId: submit.clientEventId,
+            delivery: submit.delivery,
+            ...(submit.controlEtag ? { controlEtag: submit.controlEtag } : {}),
+          },
+        );
       }
       case "sessions.send": {
         const message = parseJson(request.body, SendMessageRequest);
         await admitAgentWork(true);
-        return await forward("POST", `${target}/events`, {
+        return await forwardView("POST", `${target}/events`, siteAcceptedEventView, {
           type: "user.message",
           ...(message.clientEventId ? { clientEventId: message.clientEventId } : {}),
           payload: { text: message.payload.text },
@@ -1250,7 +1361,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sessions.steer": {
         const steer = parseJson(request.body, SteerRequest);
         await admitAgentWork(false);
-        return await forward("POST", `${target}/steer`, {
+        return await forwardView("POST", `${target}/steer`, siteAcceptedMessageView, {
           text: steer.text,
           ...(steer.clientEventId ? { clientEventId: steer.clientEventId } : {}),
         });
@@ -1259,12 +1370,20 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         const control = parseJson(request.body, SessionControlRequest);
         // Pausing or cancelling is always allowed; resuming starts work again.
         if (control.action === "resume") await admitAgentWork(false);
-        else await settleSiteRuntimeSpend(deps, host, conversation);
-        return await forward("POST", `${target}/control`, {
+        const controlled = await send("POST", `${target}/control`, {
           action: control.action,
           clientEventId: control.clientEventId,
           ...(control.reason ? { reason: control.reason } : {}),
         });
+        // Settled after the control applied: a cancelled conversation releases
+        // its reservation at once.
+        if (control.action !== "resume" && controlled.ok)
+          await settleSiteRuntimeSpend(deps, host, conversation);
+        if (!controlled.ok) return siteRuntimeForwardedResponse(controlled);
+        return context.json(
+          siteControlResultView(await controlled.json()) as object,
+          controlled.status as 200,
+        );
       }
       default:
         throw unsupported();

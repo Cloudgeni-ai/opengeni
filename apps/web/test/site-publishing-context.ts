@@ -28,7 +28,7 @@ const publication = (patch: Partial<SitePublication> = {}): SitePublication => (
   access: "members",
   status: "active",
   noindex: true,
-  agent: { enabled: false, model: null, instructions: null, tools: null },
+  agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
   limitProfile: { kind: "free", overrides: null },
   effectiveLimits: { ...DEFAULT_FREE_SITE_LIMITS },
   invitedEmails: [],
@@ -39,16 +39,32 @@ const publication = (patch: Partial<SitePublication> = {}): SitePublication => (
   ...patch,
 });
 
+// Two workspace connections (sample ids) the Site's agent may use.
+const agentWithTools = {
+  enabled: true,
+  model: "gpt-6",
+  instructions: null,
+  tools: ["linear", "github"],
+  guestTools: false,
+};
+
+// Every scenario views as the Site's owner; all but one are also workspace admins.
+const workspaceAdmin = scenario !== "agent-nonadmin";
+
 const saved: Record<string, SitePublication | null> = {
   site: publication({
     access: "public",
-    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null },
+    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },
   }),
   first: null,
   taken: null,
   public: publication({
     access: "public",
-    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null },
+    agent: { ...agentWithTools },
+  }),
+  "agent-nonadmin": publication({
+    access: "public",
+    agent: { ...agentWithTools },
   }),
   invited: publication({
     access: "invited",
@@ -267,7 +283,7 @@ export function useAppContext() {
     accessKeyVersion: 0,
     busy: false,
     startSession: async () => null,
-    clientConfig: {},
+    clientConfig: { sites: { domain } },
     authSession: { user: { name: "Bendik", email: "bendik@cloudgeni.example" } },
     managedSelfContext: null,
     workspaces: [
@@ -285,7 +301,13 @@ export function useAppContext() {
           workspaceId,
           accountId: "99999999-9999-4999-8999-999999999999",
           subjectId: me,
-          permissions: ["sessions:create", "sessions:read", "artifacts:read", "artifacts:publish"],
+          permissions: [
+            "sessions:create",
+            "sessions:read",
+            "artifacts:read",
+            "artifacts:publish",
+            ...(workspaceAdmin ? ["workspace:admin"] : []),
+          ],
         },
       ],
     },

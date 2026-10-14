@@ -16,7 +16,7 @@ shared contracts: `packages/contracts/src/site-publishing.ts`.
 | `/_og/auth/login` | Mints state and a PKCE S256 verifier in `__Host-og_login` (10 minutes) and redirects to `${APP_ORIGIN}/site-auth/authorize` |
 | `/_og/auth/callback` | Verifies state, exchanges the code with signed `POST /v1/site-runtime/auth/exchange`, sets `__Host-og_session`, returns to a same-host relative path |
 | `/_og/auth/logout` | GET shows a script-free confirmation; the same-origin POST calls signed `POST /v1/site-runtime/auth/logout` (best effort) and clears the session |
-| `/_og/v/<versionId>` | Site HTML with the bridge bootstrap, the Site sandbox CSP and `frame-ancestors 'self'`, only for `Sec-Fetch-Dest: iframe` (anything else is redirected to `/`). `Cache-Control: private, no-cache` with an ETag; the current version is edge-cached for 60 seconds per host, generation, Site and version, after the access check |
+| `/_og/v/<versionId>` | Site HTML with the bridge bootstrap, the Site sandbox CSP and `frame-ancestors 'self'`, refused for requests whose `Sec-Fetch-Dest` says anything other than `iframe` (redirected to `/`); browsers that send no Fetch Metadata are served, still isolated by that CSP. `Cache-Control: private, no-cache` with an ETag; the current version is edge-cached for 60 seconds per host, generation, Site and version, after the access check |
 | `/_og/api/*` | Same-origin Site calls: re-checked against `matchSiteOperation` and `SITE_TOOL_METHODS`, rate-limited, size-capped, signed and forwarded to `${API_ORIGIN}/v1/site-runtime<suffix>`; SSE streams through |
 | `/_og/report` | Script-free abuse report form, posting a `SiteAbuseReportRequest` to signed `POST /v1/site-runtime/site/reports` (same-origin plus a form token); reports go to the Site's owners and the abuse team, and the pages show `ABUSE_EMAIL` |
 | `/_og/human` | Turnstile verification (only when both Turnstile values are set) |
@@ -67,7 +67,7 @@ Bindings:
 | Binding | Kind | Use |
 | --- | --- | --- |
 | `HOST_MAP` | KV namespace | Host-map records at `siteHostMapKey(host)`, written by the API's edge sync; the gateway reads with `cacheTtl` 60 and writes back API lookups for 5 minutes after a fresh (uncached) read, only when strictly newer than the stored generation, so a suspension is never overwritten by an older record |
-| `RATE_LIMITER` | Rate limiting (`[[ratelimits]]`) | Per-Site flood brake for `/_og/api/*` and reports. Every request is limited on the client IP (`CF-Connecting-IP`) and, when present, also on the verified visitor; both must pass, so rotating `__Host-og_v` doesn't reset a budget. 429 on limit |
+| `RATE_LIMITER` | Rate limiting (`[[ratelimits]]`) | Per-Site flood brake for `/_og/api/*` and reports. Every request is limited on the client IP (`CF-Connecting-IP`; IPv6 per /64 prefix) and, when present, also on the verified visitor; both must pass, so rotating `__Host-og_v` doesn't reset a budget. 429 on limit |
 | `SITE_DB` | Durable Object namespace, class `SiteDatabase` (`[[migrations]] tag = "v1"`, `new_sqlite_classes`) | Optional per-Site SQLite storage (Site SQL); bound for local development, commented out in the staging and production placeholders |
 
 `wrangler.toml` holds the local development configuration at the top level.
@@ -188,7 +188,11 @@ covers request-id expiry and pruning with a fake clock.
 ## What the API serves for the gateway
 
 All requests are signed (timestamp within `SITE_GATEWAY_MAX_SKEW_SECONDS`) and
-carry the host, session, visitor, client IP and human headers:
+carry the host, session, visitor, client IP and human headers. They also carry
+`x-opengeni-site-body-sha256`, the hex SHA-256 of the forwarded body (of the
+empty string when there is none). It is exactly the `bodySha256` field of
+`siteGatewayCanonicalString`, so the API can verify the signature from headers
+alone before reading the body, then check the body against it:
 
 | Route | Responses the gateway relies on |
 | --- | --- |

@@ -227,6 +227,11 @@ export type SitePublishPageProps = {
   onBack: () => void;
   /** The viewer owns the Site or administers the workspace, and may publish. */
   canManage: boolean;
+  /**
+   * The viewer administers the workspace. Only admins change limits, give
+   * guests the agent's tools, and restore an admin's takedown.
+   */
+  isAdmin: boolean;
   /** Offered while the Site is Only me and the viewer owns it. */
   onShareWithWorkspace?: (() => void) | undefined;
   sites: SitesClientConfig;
@@ -308,6 +313,7 @@ function SitePublishForm({
   onBack,
   sites,
   labelSuffix,
+  isAdmin,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -316,12 +322,15 @@ function SitePublishForm({
   const [labelError, setLabelError] = useState<string | null>(null);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [customError, setCustomError] = useState<string | null>(null);
+  const [agentError, setAgentError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"unpublish" | "restore" | null>(null);
   const [takedownOpen, setTakedownOpen] = useState(false);
   const update = (patch: Partial<SitePublishDraft>) =>
     setDraft((current) => ({ ...current, ...patch }));
 
   const labelUnchanged = saved?.label === draft.label;
+  // A taken-down Site keeps its address until it is restored.
+  const suspended = saved?.status === "suspended";
   const availability = useHostnameAvailability(client, workspaceId, draft.label, labelUnchanged);
   const reportedDomain =
     sites.domain ??
@@ -341,7 +350,10 @@ function SitePublishForm({
   const shownLabelError = labelError ?? localProblem ?? remoteProblem;
 
   const publishing = !saved || saved.status === "unpublished";
-  const request = publicationRequest(draft, saved, { publish: publishing });
+  const request = publicationRequest(draft, saved, {
+    publish: publishing,
+    canChangeLimits: isAdmin,
+  });
   const dirty = Object.keys(request).length > 0;
   const limits = knownLimits(
     draft.profile,
@@ -353,9 +365,13 @@ function SitePublishForm({
   );
   const publicDisabled = sites.publicEnabled === false;
   const agentsBlocked = draft.access === "public" && sites.publicAgentsEnabled === false;
+  const agentTools = saved?.agent.tools ?? [];
+  // Non-admins may turn guest tools off, never on.
+  const guestToolsLocked = !isAdmin && !draft.guestTools && !saved?.agent.guestTools;
 
   const submit = async () => {
     setLabelError(null);
+    setAgentError(null);
     if (localProblem || remoteProblem) return false;
     if (availability.state === "checking" && !labelUnchanged) return false;
     const badEmail =
@@ -381,8 +397,14 @@ function SitePublishForm({
       });
       return true;
     } catch (error) {
-      if (apiErrorFacts(error).code === "site_hostname_taken") {
+      const { code } = apiErrorFacts(error);
+      if (code === "site_hostname_taken") {
         setLabelError("Another Site uses this name.");
+        return false;
+      }
+      if (code === "site_admin_required") {
+        if (request.limitProfile) setCustomError("Only a workspace admin can change limits.");
+        else setAgentError("Only a workspace admin can give the agent's tools to guests.");
         return false;
       }
       throw error;
@@ -441,6 +463,7 @@ function SitePublishForm({
           {saved ? (
             <PublicationStatus
               publication={saved}
+              isAdmin={isAdmin}
               busy={busy}
               onUnpublish={() => void unpublish()}
               onRestore={() => void restore()}
@@ -450,17 +473,22 @@ function SitePublishForm({
             label="Address"
             error={shownLabelError}
             hint={
-              <AvailabilityHint
-                availability={availability}
-                label={draft.label}
-                domain={domain}
-                unchanged={labelUnchanged}
-              />
+              suspended ? (
+                "Restore the Site to change its address."
+              ) : (
+                <AvailabilityHint
+                  availability={availability}
+                  label={draft.label}
+                  domain={domain}
+                  unchanged={labelUnchanged}
+                />
+              )
             }
           >
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
               <TextInput
                 value={draft.label}
+                disabled={suspended}
                 onChange={(event) => {
                   setLabelError(null);
                   update({ label: normalizeLabelInput(event.target.value) });
@@ -529,13 +557,36 @@ function SitePublishForm({
               onCheckedChange={(agentEnabled) => update({ agentEnabled })}
             />
             {draft.agentEnabled && !agentsBlocked ? (
-              <div className="pl-7">
+              <div className="flex min-w-0 flex-col gap-4 pl-7">
                 <SiteAgentModelField
                   workspaceId={workspaceId}
                   model={draft.agentModel}
                   allowed={limits?.agentModels ?? null}
                   onChange={(agentModel) => update({ agentModel })}
                 />
+                {agentTools.length > 0 ? (
+                  <Field label="Tools" group error={agentError}>
+                    <div className="flex min-w-0 flex-col gap-3">
+                      <p className="text-sm text-fg-muted">
+                        Uses {agentTools.length} workspace{" "}
+                        {agentTools.length === 1 ? "connection" : "connections"}.
+                      </p>
+                      {draft.access === "public" ? (
+                        <CheckboxField
+                          label="Let everyone use these tools"
+                          description="People outside the workspace get them too."
+                          checked={draft.guestTools}
+                          disabled={guestToolsLocked}
+                          disabledReason="Only workspace admins can turn this on."
+                          onCheckedChange={(guestTools) => {
+                            setAgentError(null);
+                            update({ guestTools });
+                          }}
+                        />
+                      ) : null}
+                    </div>
+                  </Field>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -543,13 +594,18 @@ function SitePublishForm({
           <Field
             label="Limits"
             group
-            hint={limitProfileDescription(draft.profile)}
+            hint={
+              isAdmin
+                ? limitProfileDescription(draft.profile)
+                : "Only workspace admins change limits."
+            }
             error={customError}
           >
             <div className="flex min-w-0 flex-col gap-4">
               <SegmentedControl
                 options={LIMIT_PROFILE_OPTIONS}
                 value={draft.profile}
+                disabled={!isAdmin}
                 onValueChange={(profile) => {
                   setCustomError(null);
                   update({ profile });
@@ -557,7 +613,7 @@ function SitePublishForm({
                 className="self-start max-sm:self-stretch"
                 fullWidth={false}
               />
-              {draft.profile === "custom" ? (
+              {draft.profile === "custom" && isAdmin ? (
                 <CustomLimitFields
                   values={draft.custom}
                   onChange={(custom) => {
@@ -657,11 +713,13 @@ function AvailabilityHint({
 
 function PublicationStatus({
   publication,
+  isAdmin,
   busy,
   onUnpublish,
   onRestore,
 }: {
   publication: SitePublication;
+  isAdmin: boolean;
   busy: "unpublish" | "restore" | null;
   onUnpublish: () => void;
   onRestore: () => void;
@@ -670,13 +728,15 @@ function PublicationStatus({
   if (publication.status === "suspended") {
     const { suspendedAt, suspendedBy, suspendedReason } = publication.moderation;
     const byPlatform = suspendedBy === "platform";
+    // Only Opengeni restores its own takedowns, and only admins restore an admin's.
+    const adminOnly = suspendedBy === "admin" && !isAdmin;
     return (
       <Notice
         tone="failed"
         title="Taken down"
         actionLayout="responsive"
         action={
-          byPlatform ? undefined : (
+          byPlatform || adminOnly ? undefined : (
             <Button type="button" size="sm" disabled={busy !== null} onClick={onRestore}>
               <RotateCcwIcon aria-hidden="true" />
               {busy === "restore" ? "Restoring…" : "Restore"}
@@ -694,6 +754,7 @@ function PublicationStatus({
         . {suspendedReason ? `${sentence(suspendedReason)} ` : null}Visitors to{" "}
         {publication.hostname} see a takedown notice.
         {byPlatform ? " Contact support to restore it." : null}
+        {adminOnly ? " A workspace admin can restore it." : null}
       </Notice>
     );
   }

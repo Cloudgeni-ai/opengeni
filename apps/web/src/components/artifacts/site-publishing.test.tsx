@@ -10,17 +10,17 @@ import {
 } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
-mock.module("@/context", () => ({
-  useAppContext: () => ({
-    client: {
-      getWorkspaceModelCatalog: async () => ({
-        models: [],
-        defaultSelection: null,
-        creditsSelection: null,
-      }),
-    },
-  }),
-}));
+// One stable context: the model catalog hook refetches whenever its client changes.
+const appContext = {
+  client: {
+    getWorkspaceModelCatalog: async () => ({
+      models: [],
+      defaultSelection: null,
+      creditsSelection: null,
+    }),
+  },
+};
+mock.module("@/context", () => ({ useAppContext: () => appContext }));
 let module: typeof import("./site-publishing");
 let ownsDom = false;
 let previousActEnvironment: PropertyDescriptor | undefined;
@@ -121,6 +121,7 @@ async function renderPage(props: Partial<PageProps> & Pick<PageProps, "client" |
         onReload={() => {}}
         onBack={() => {}}
         canManage
+        isAdmin
         sites={{ domain: "sites.example" }}
         labelSuffix="abcd"
         {...props}
@@ -146,6 +147,14 @@ const waitForCheck = async () => {
 };
 const button = (root: ParentNode, label: string) =>
   [...root.querySelectorAll("button")].find((element) => element.textContent?.trim() === label);
+
+/** The checkbox a CheckboxField's label names. */
+const checkbox = (root: ParentNode, label: string) => {
+  const element = [...root.querySelectorAll("label")].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  return element ? (document.getElementById(element.htmlFor) as HTMLButtonElement | null) : null;
+};
 
 function typeInto(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype = Object.getPrototypeOf(element) as object;
@@ -327,4 +336,96 @@ test("take down asks for a reason, and a taken-down Site offers Restore", async 
   expect(byPlatform.host.textContent).toContain("Contact support");
   expect(button(byPlatform.host, "Restore")).toBeUndefined();
   await byPlatform.unmount();
+});
+
+test("a taken-down Site keeps its address, and only admins restore an admin's takedown", async () => {
+  const { client } = fakeClient();
+  const byAdmin = published({
+    status: "suspended",
+    moderation: { openReports: 0, suspendedAt: now, suspendedBy: "admin", suspendedReason: null },
+  });
+  const owner = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: byAdmin },
+    isAdmin: false,
+  });
+  expect(owner.host.querySelector("input")?.disabled).toBe(true);
+  expect(owner.host.textContent).toContain("Restore the Site to change its address.");
+  expect(owner.host.textContent).toContain("A workspace admin can restore it.");
+  expect(button(owner.host, "Restore")).toBeUndefined();
+  await owner.unmount();
+
+  const admin = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: byAdmin },
+  });
+  expect(button(admin.host, "Restore")).toBeDefined();
+  await admin.unmount();
+});
+
+test("admins let everyone use the agent's tools; others can't turn it on or change limits", async () => {
+  const withTools = published({
+    access: "public",
+    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
+  });
+  const { client, calls } = fakeClient();
+  const admin = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withTools },
+  });
+  expect(admin.host.textContent).toContain("Uses 1 workspace connection.");
+  await act(async () => checkbox(admin.host, "Let everyone use these tools")!.click());
+  await act(async () => button(admin.host, "Save changes")!.click());
+  await flush();
+  expect(calls.updates.at(-1)).toEqual({ agent: { enabled: true, model: null, guestTools: true } });
+  await admin.unmount();
+
+  const member = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withTools },
+    isAdmin: false,
+  });
+  expect(checkbox(member.host, "Let everyone use these tools")?.disabled).toBe(true);
+  expect(member.host.textContent).toContain("Only workspace admins can turn this on.");
+  expect(member.host.textContent).toContain("Only workspace admins change limits.");
+  await member.unmount();
+});
+
+test("an admin-only refusal shows next to the agent's tools", async () => {
+  const withTools = published({
+    access: "public",
+    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
+  });
+  const { client } = fakeClient({
+    updateSitePublication: async () => {
+      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
+    },
+  });
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withTools },
+  });
+  await act(async () => checkbox(page.host, "Let everyone use these tools")!.click());
+  await act(async () => button(page.host, "Save changes")!.click());
+  await flush();
+  expect(page.host.textContent).toContain(
+    "Only a workspace admin can give the agent's tools to guests.",
+  );
+  expect(page.published).toHaveLength(0);
+  await page.unmount();
+});
+
+test("a non-admin's first publish leaves limits to the workspace default", async () => {
+  const { client, calls } = fakeClient();
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "none" },
+    isAdmin: false,
+  });
+  await waitForCheck();
+  await act(async () => button(page.host, "Publish")!.click());
+  await flush();
+  expect(calls.updates).toHaveLength(1);
+  expect(calls.updates[0]).not.toHaveProperty("limitProfile");
+  await page.unmount();
 });
