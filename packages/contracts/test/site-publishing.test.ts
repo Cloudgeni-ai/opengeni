@@ -69,6 +69,37 @@ describe("Site operation allowlist", () => {
     ).toBe("data.read");
   });
 
+  test("covers SessionConversation's queue, composer draft and human-input reads", () => {
+    const session = "/v1/workspaces/site-host/sessions/abc";
+    for (const [method, path, id, agent] of [
+      ["POST", `${session}/queue/turn-1/move`, "sessions.queue.item", true],
+      ["POST", `${session}/queue/turn-1/edit`, "sessions.queue.item", true],
+      ["POST", `${session}/queue/turn-1/steer`, "sessions.queue.item", true],
+      ["POST", `${session}/queue/turn-1/delete`, "sessions.queue.item", true],
+      ["GET", `${session}/composer-draft`, "sessions.composerDraft.get", undefined],
+      ["PUT", `${session}/composer-draft`, "sessions.composerDraft.put", undefined],
+      ["POST", `${session}/composer-draft/submit`, "sessions.composerDraft.submit", true],
+      ["GET", `${session}/human-input-requests/req-1`, "sessions.humanInput.get", undefined],
+    ] as const) {
+      const match = matchSiteOperation(method, path);
+      expect(match?.operation.id).toBe(id);
+      expect(match?.operation.agent).toBe(agent);
+    }
+    for (const [method, path] of [
+      ["GET", `${session}/queue/turn-1/edit`],
+      ["POST", `${session}/queue/turn-1/archive`],
+      ["DELETE", `${session}/composer-draft`],
+      ["POST", `${session}/human-input-requests/req-1`],
+      ["GET", "/v1/workspaces/site-host/new-session-draft"],
+      ["POST", `${session}/tool-policy`],
+      ["POST", `${session}/fork`],
+      ["GET", `${session}/turns`],
+      ["GET", `${session}/goal`],
+      ["GET", "/v1/workspaces/site-host/files"],
+    ] as const)
+      expect(matchSiteOperation(method, path)).toBeNull();
+  });
+
   test("refuses everything else", () => {
     for (const [method, path] of [
       ["GET", "/v1/workspaces/site-host/scheduled-tasks"],

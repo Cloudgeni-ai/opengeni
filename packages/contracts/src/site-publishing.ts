@@ -675,10 +675,40 @@ export const SITE_OPERATIONS: readonly SiteOperation[] = Object.freeze([
     agent: true,
   },
   { id: "sessions.queue", method: "GET", pattern: new RegExp(`^/sessions/${ID}/queue$`, "u") },
+  // SessionConversation's documented queue edit/delete/steer/move.
+  {
+    id: "sessions.queue.item",
+    method: "POST",
+    pattern: new RegExp(`^/sessions/${ID}/queue/${ID}/(?:move|edit|steer|delete)$`, "u"),
+    agent: true,
+  },
+  // SessionConversation's durable composer draft and its Send.
+  {
+    id: "sessions.composerDraft.get",
+    method: "GET",
+    pattern: new RegExp(`^/sessions/${ID}/composer-draft$`, "u"),
+  },
+  {
+    id: "sessions.composerDraft.put",
+    method: "PUT",
+    pattern: new RegExp(`^/sessions/${ID}/composer-draft$`, "u"),
+  },
+  {
+    id: "sessions.composerDraft.submit",
+    method: "POST",
+    pattern: new RegExp(`^/sessions/${ID}/composer-draft/submit$`, "u"),
+    agent: true,
+  },
   {
     id: "sessions.humanInput",
     method: "GET",
     pattern: new RegExp(`^/sessions/${ID}/human-input-requests$`, "u"),
+  },
+  // SessionConversation's human-input form reads the one open request.
+  {
+    id: "sessions.humanInput.get",
+    method: "GET",
+    pattern: new RegExp(`^/sessions/${ID}/human-input-requests/${ID}$`, "u"),
   },
   { id: "data.read", method: "GET", pattern: new RegExp(`^${DATA}$`, "u") },
   { id: "data.write", method: "POST", pattern: new RegExp(`^${DATA}$`, "u") },

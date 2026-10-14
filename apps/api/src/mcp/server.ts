@@ -250,6 +250,7 @@ import {
   requireRigForApi,
 } from "@opengeni/core";
 import {
+  assertNotSiteClampedAgent,
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
@@ -1974,11 +1975,13 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task =
+        const adminPause =
           viewer.admin &&
-          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId)
-            ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
-            : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
+          (viewer.subjectId === null || existing.ownerSubjectId !== viewer.subjectId);
+        if (adminPause) await assertNotSiteClampedAgent(deps.db, grant, "schedules");
+        const task = adminPause
+          ? await pauseScheduledTaskAsAdmin(deps.db, grant.workspaceId, id)
+          : await updateScheduledTaskForApi(deps.db, grant, id, { status: "paused" });
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,

@@ -26,7 +26,11 @@ import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
-import { sessionCreationMetadata } from "../site-session-origin";
+import {
+  currentSiteSessionOrigin,
+  sessionCreationMetadata,
+  SITE_ORIGIN_METADATA_KEY,
+} from "../site-session-origin";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
@@ -2049,6 +2053,8 @@ export async function postUserMessageTurn(
   const { db, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
+  // A message sent from a Site page records which Site (and version) on its turn.
+  const siteOrigin = currentSiteSessionOrigin();
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
@@ -2125,6 +2131,7 @@ export async function postUserMessageTurn(
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               mcpAccountBindings: input.mcpAccountBindings ?? null,
               connectionAccountIntent: input.connectionAccountIntent ?? null,
+              ...(siteOrigin ? { turnMetadata: { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } } : {}),
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
