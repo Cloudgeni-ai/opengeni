@@ -63,6 +63,8 @@ const personalOpengeni = {
   selectedAccess: "write",
 } satisfies PersonalGitHubRepositoryCatalogItem;
 const personalBindingId = "7f0c8f5e-2a51-4f40-9d8e-1c3e7b9a6d21";
+const personalIds = new Set([personalOpengeni.repositoryId]);
+const personalRefs = { [personalOpengeni.repositoryId]: "main" };
 
 const savedDraftResources: ResourceRef[] = [
   {
@@ -85,6 +87,10 @@ const savedDraftResources: ResourceRef[] = [
   },
 ];
 
+const noPersonalSelection = new Set<string>();
+const noPersonalRefs: Record<string, string> = {};
+const noPersonalRepositories: PersonalGitHubRepositoryCatalogItem[] = [];
+
 type HarnessProps = {
   catalogReady: boolean;
   repositories: GitHubRepository[];
@@ -92,8 +98,9 @@ type HarnessProps = {
   initialSelectedRepoIds: Set<number>;
   initialSelectedRepoRefs: Record<number, string>;
   personalRepositories?: PersonalGitHubRepositoryCatalogItem[];
-  initialSelectedPersonalRepoIds?: Set<string>;
-  initialSelectedPersonalRepoRefs?: Record<string, string>;
+  /** Owned by the personal GitHub picker and its catalog refresh, not by this harness. */
+  selectedPersonalRepoIds?: Set<string>;
+  selectedPersonalRepoRefs?: Record<string, string>;
   /** False when the picker menu is closed: its body, and any open editor, unmount. */
   pickerOpen?: boolean;
   onResources: (resources: ResourceRef[]) => void;
@@ -105,11 +112,9 @@ function ComposerRepositories(props: HarnessProps) {
   const [manualRepos, setManualRepos] = useState(props.initialManualRepos);
   const [selectedRepoIds, setSelectedRepoIds] = useState(props.initialSelectedRepoIds);
   const [selectedRepoRefs, setSelectedRepoRefs] = useState(props.initialSelectedRepoRefs);
-  const [selectedPersonalRepoIds] = useState(
-    () => props.initialSelectedPersonalRepoIds ?? new Set<string>(),
-  );
-  const [selectedPersonalRepoRefs] = useState(() => props.initialSelectedPersonalRepoRefs ?? {});
-  const personalRepositories = props.personalRepositories ?? [];
+  const selectedPersonalRepoIds = props.selectedPersonalRepoIds ?? noPersonalSelection;
+  const selectedPersonalRepoRefs = props.selectedPersonalRepoRefs ?? noPersonalRefs;
+  const personalRepositories = props.personalRepositories ?? noPersonalRepositories;
   useManualRepositoryCatalogReconciliation({
     manualRepos,
     selectedRepoIds,
@@ -237,8 +242,6 @@ function typeInto(input: HTMLInputElement, value: string): void {
   )[reactPropsKey!]!.onChange;
   onChange!({ target: input });
 }
-
-const noPersonalSelection = new Set<string>();
 
 type CatalogProps = { catalogReady: boolean; repositories: GitHubRepository[] };
 
@@ -538,8 +541,8 @@ describe("repository picker catalog reconciliation (OPE-804)", () => {
           initialSelectedRepoIds: new Set<number>(),
           initialSelectedRepoRefs: {},
           personalRepositories: [personalOpengeni],
-          initialSelectedPersonalRepoIds: new Set([personalOpengeni.repositoryId]),
-          initialSelectedPersonalRepoRefs: { [personalOpengeni.repositoryId]: "main" },
+          selectedPersonalRepoIds: personalIds,
+          selectedPersonalRepoRefs: personalRefs,
           onResources: (next) => {
             resources = next;
           },
@@ -582,5 +585,122 @@ describe("repository picker catalog reconciliation (OPE-804)", () => {
       ]);
       await rendered.unmount();
     });
+
+    describe("restored while the personal catalog is still loading", () => {
+      // The incident draft also selected opengeni through personal GitHub.
+      const restored = repositorySelectionFromResources(
+        rehydrateRepositoryResources([personalResource(), savedDraftResources[1]!], [], {
+          catalogReady: false,
+          personalCatalogReady: false,
+        }),
+        [],
+      );
+
+      async function renderRestored() {
+        let resources: ResourceRef[] = [];
+        let error: string | null = null;
+        const props = (
+          personalRepositories: PersonalGitHubRepositoryCatalogItem[],
+          selectedPersonalRepoIds: Set<string>,
+        ): HarnessProps => ({
+          catalogReady: true,
+          repositories: [benchmarks, opengeni],
+          initialManualRepos: restored.manualRepos,
+          initialSelectedRepoIds: restored.selectedRepoIds,
+          initialSelectedRepoRefs: restored.selectedRepoRefs,
+          personalRepositories,
+          selectedPersonalRepoIds,
+          selectedPersonalRepoRefs: restored.selectedPersonalRepoRefs,
+          onResources: (next) => {
+            resources = next;
+          },
+          onResourceError: (next) => {
+            error = next;
+          },
+        });
+        // The workspace catalog is ready; the personal refresh has not finished.
+        const rendered = await renderComponent(
+          createElement(ComposerRepositories, props([], restored.selectedPersonalRepoIds)),
+        );
+        await flush();
+        return { rendered, props, resources: () => resources, error: () => error };
+      }
+
+      test("keeps the workspace App attachment until the personal copy attaches", async () => {
+        const { rendered, props, resources, error } = await renderRestored();
+        expect(error()).toBeNull();
+        expect(switchFor(rendered.container, opengeni.fullName)?.getAttribute("aria-checked")).toBe(
+          "false",
+        );
+        expect(resources()).toEqual([savedDraftResources[1]!]);
+
+        await rendered.rerender(
+          createElement(
+            ComposerRepositories,
+            props([personalOpengeni], restored.selectedPersonalRepoIds),
+          ),
+        );
+        await flush();
+        expect(error()).toBeNull();
+        expect(resources()).toEqual([personalResource()]);
+        await rendered.unmount();
+      });
+
+      test("folds into the workspace App selection when the personal selection is pruned", async () => {
+        const { rendered, props, resources, error } = await renderRestored();
+        expect(resources()).toEqual([savedDraftResources[1]!]);
+
+        // The refresh found no selected access and pruned the personal id.
+        await rendered.rerender(
+          createElement(ComposerRepositories, props([], noPersonalSelection)),
+        );
+        await flush();
+        expect(error()).toBeNull();
+        expect(switchFor(rendered.container, opengeni.fullName)?.getAttribute("aria-checked")).toBe(
+          "true",
+        );
+        expect(resources()).toEqual([savedDraftResources[1]!]);
+        await rendered.unmount();
+      });
+    });
+  });
+
+  test("re-attaching an attached row ends the edit before a later catalog refresh", async () => {
+    const custom: RepoDraft = {
+      id: 9,
+      url: "https://git.example.com/acme/app.git",
+      ref: "main",
+      attached: true,
+    };
+    let resources: ResourceRef[] = [];
+    const rendered = await renderComponent(
+      createElement(ComposerRepositories, {
+        catalogReady: true,
+        repositories: [opengeni],
+        initialManualRepos: [custom],
+        initialSelectedRepoIds: new Set<number>(),
+        initialSelectedRepoRefs: {},
+        onResources: (next) => {
+          resources = next;
+        },
+      }),
+    );
+    await actRun(() => buttonNamed(rendered.container, "Edit")!.click());
+    await actRun(() => typeInto(inputNamed(rendered.container, "Repository ref")!, "release"));
+    await actRun(() => buttonNamed(rendered.container, "Attach")!.click());
+    await flush();
+
+    // Saved and closed, like a first attach: nothing typed afterwards can be lost.
+    expect(inputNamed(rendered.container, "Repository ref")).toBeNull();
+    expect(buttonNamed(rendered.container, "Edit")).not.toBeNull();
+    expect(resources).toEqual([
+      {
+        kind: "repository",
+        uri: custom.url,
+        ref: "release",
+        mountPath: "repos/git.example.com/acme/app.git",
+      },
+    ]);
+    await rendered.unmount();
   });
 });

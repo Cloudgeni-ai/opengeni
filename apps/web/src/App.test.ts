@@ -2755,29 +2755,33 @@ describe("GitHub repository resources", () => {
 
     describe("with the same repository selected through personal GitHub", () => {
       const personalId = String(opengeni.id);
-      const personalSelection = (ref: string | undefined, loaded = true) => ({
-        repositories: loaded
-          ? [
-              {
-                repositoryId: personalId,
-                fullName: "cloudgeni-AI/OpenGeni",
-                canonicalUrl: "https://github.com/cloudgeni-AI/OpenGeni",
-                defaultBranch: "main",
-                visibility: "private" as const,
-                private: true,
-                archived: false,
-                disabled: false,
-                permissions: {
-                  pull: true,
-                  push: true,
-                  admin: false,
-                  maintain: false,
-                  triage: false,
+      const personalSelection = (
+        ref: string | undefined,
+        catalog: "attachable" | "no access" | "not loaded" = "attachable",
+      ) => ({
+        repositories:
+          catalog !== "not loaded"
+            ? [
+                {
+                  repositoryId: personalId,
+                  fullName: "cloudgeni-AI/OpenGeni",
+                  canonicalUrl: "https://github.com/cloudgeni-AI/OpenGeni",
+                  defaultBranch: "main",
+                  visibility: "private" as const,
+                  private: true,
+                  archived: false,
+                  disabled: false,
+                  permissions: {
+                    pull: true,
+                    push: true,
+                    admin: false,
+                    maintain: false,
+                    triage: false,
+                  },
+                  selectedAccess: (catalog === "attachable" ? "write" : null) as "write" | null,
                 },
-                selectedAccess: "write" as const,
-              },
-            ]
-          : [],
+              ]
+            : [],
         selectedRepoIds: new Set([personalId]),
         selectedRepoRefs: ref === undefined ? {} : { [personalId]: ref },
       });
@@ -2805,15 +2809,6 @@ describe("GitHub repository resources", () => {
             [opengeni],
             true,
             personalSelection("main"),
-          ),
-        ).toEqual(expected);
-        // A restored personal selection matches by GitHub id before its catalog loads.
-        expect(
-          reconcileManualRepositoriesWithCatalog(
-            unselected([bareRow("main")]),
-            [opengeni],
-            true,
-            personalSelection("main", false),
           ),
         ).toEqual(expected);
         // A retained workspace identity at the same ref is the same duplicate.
@@ -2853,15 +2848,54 @@ describe("GitHub repository resources", () => {
             personalSelection("main"),
           ),
         ).toBeNull();
-        // Neither the personal ref nor its catalog default is known yet.
+      });
+
+      test("a personal selection that cannot attach yet replaces nothing", () => {
+        // The incident draft restored before either catalog loaded: the
+        // workspace App row stays attached until the personal copy attaches,
+        // and is still never switched to the workspace App selection.
+        const incident = restoreWhileCatalogUnknown([boundResource]);
+        for (const catalog of ["not loaded", "no access"] as const) {
+          for (const state of [incident, unselected([bareRow("main")])]) {
+            expect(
+              reconcileManualRepositoriesWithCatalog(
+                state,
+                [opengeni],
+                true,
+                personalSelection("main", catalog),
+              ),
+            ).toBeNull();
+          }
+        }
         expect(
           reconcileManualRepositoriesWithCatalog(
-            unselected([bareRow("main")]),
+            incident,
             [opengeni],
             true,
-            personalSelection(undefined, false),
+            personalSelection(undefined, "not loaded"),
           ),
         ).toBeNull();
+        // Once the personal copy attaches, the App row is the duplicate.
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            incident,
+            [opengeni],
+            true,
+            personalSelection("main"),
+          ),
+        ).toEqual({ manualRepos: [], selectedRepoIds: new Set<number>(), selectedRepoRefs: {} });
+        // A personal selection pruned by its refresh lets the row fold as usual.
+        expect(
+          reconcileManualRepositoriesWithCatalog(incident, [opengeni], true, {
+            repositories: [],
+            selectedRepoIds: new Set<string>(),
+            selectedRepoRefs: {},
+          }),
+        ).toEqual({
+          manualRepos: [],
+          selectedRepoIds: new Set([opengeni.id]),
+          selectedRepoRefs: { [opengeni.id]: "main" },
+        });
       });
 
       test("a personal selection of another repository changes nothing", () => {

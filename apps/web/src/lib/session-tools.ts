@@ -616,9 +616,10 @@ export type PersonalRepositorySelection = {
 };
 
 /**
- * The ref of the personal GitHub selection that stands for the same GitHub
- * repository as a workspace catalog repository, or undefined when it is not
- * selected through personal GitHub. The ref is null when it is not known yet.
+ * The personal GitHub selection that stands for the same GitHub repository as a
+ * workspace catalog repository: undefined when there is none, otherwise its ref
+ * when that selection is attached right now, or null when it is not (catalog not
+ * loaded, or no selected access), so it cannot replace another attachment yet.
  * Personal ids are GitHub repository ids, so a restored selection matches
  * before the personal catalog has loaded.
  */
@@ -636,11 +637,12 @@ function selectedPersonalCounterpartRef(
           candidate.fullName.toLowerCase() === fullName,
       )?.repositoryId;
   if (repositoryId === undefined) return undefined;
-  const ref =
-    personal.selectedRepoRefs[repositoryId] ??
-    personal.repositories.find((candidate) => candidate.repositoryId === repositoryId)
-      ?.defaultBranch;
-  return ref?.trim() || null;
+  // Mirror buildResources: only a catalog item with selected access attaches.
+  const attachable = personal.repositories.find(
+    (candidate) => candidate.repositoryId === repositoryId && candidate.selectedAccess !== null,
+  );
+  if (!attachable) return null;
+  return (personal.selectedRepoRefs[repositoryId] ?? attachable.defaultBranch).trim() || null;
 }
 
 /**
@@ -653,8 +655,9 @@ function selectedPersonalCounterpartRef(
  * - A match selected at a different ref keeps its row: two refs are never
  *   collapsed silently.
  * - A repository selected through personal GitHub keeps that authority: the
- *   workspace App copy is never selected for it. A row at the personal
- *   selection's ref is an exact duplicate and is dropped; any other row stays.
+ *   workspace App copy is never selected for it. A row at the ref of an
+ *   attached personal selection is an exact duplicate and is dropped; any
+ *   other row stays, including while the personal selection cannot attach yet.
  * - A row open in the editor is left alone until the edit ends.
  * - A retained identity that a ready catalog no longer contains is dropped,
  *   exactly like draft hydration drops it when the catalog is already loaded.

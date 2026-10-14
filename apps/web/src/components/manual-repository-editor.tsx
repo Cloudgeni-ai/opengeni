@@ -57,6 +57,7 @@ export function ManualRepositoryEditor(props: {
 
   async function attach(): Promise<void> {
     if (checking || props.pending || props.mounted) return;
+    const reattaching = props.repository.attached === true;
     setChecking(true);
     setError(null);
     setWarning(null);
@@ -68,6 +69,10 @@ export function ManualRepositoryEditor(props: {
         attached: false,
       });
       setWarning(result?.warning ?? null);
+      // A first attach ends the edit when the row turns attached. A row that
+      // was already attached stays attached, so end its edit here: the saved
+      // row is no longer marked as mid-edit.
+      if (reattaching) setEditing(false);
     } catch (caught) {
       setError(userErrorText(caught));
     } finally {
