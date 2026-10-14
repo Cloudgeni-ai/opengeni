@@ -509,6 +509,7 @@ export * from "./artifact-catalog";
 export * from "./site-data";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
+export * from "./site-sql";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
