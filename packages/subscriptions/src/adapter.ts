@@ -1,3 +1,4 @@
+import type { SubscriptionQuotaBlock } from "./quota";
 import type { CacheFacts, ModelId, ModelTier, ProviderId, SubscriptionQuota } from "./types";
 
 /**
@@ -284,6 +285,22 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    * quota exhaustion. Absent: every reading below the limit does.
    */
   usageReadConfirmsAvailability?(response: unknown): boolean;
+  /**
+   * With `usageReadEndsQuotaExhaustion`: which stored blocks one `fetchUsage`
+   * response that confirms availability shows have ended, judged from each
+   * block's own claim (the limits the observation that set it named, tied
+   * to its exact deadline: `QuotaBlockClaim`). `modelId` is the cooled
+   * product model, or null for the quota exhaustion deadline. The predicate
+   * must be false for a block without a claim, for a claim observed no
+   * earlier than the response, and unless the response reports every
+   * claimed limit numerically below it (an explicit "no such limit" does
+   * not clear a limit that refused). A cooldown the reading itself reports
+   * stands, and so does every block the predicate does not end.
+   * When defined, a stored quota exhaustion deadline ends only where it
+   * returns true. Absent: a reading ends no cooldown (each runs until its
+   * own end), and `usageReadEndsQuotaExhaustion` alone decides the deadline.
+   */
+  usageReadEndsClaimedBlock?(response: unknown): (block: SubscriptionQuotaBlock) => boolean;
   /**
    * The provider's usage-endpoint readings are complete: each reports every
    * window that limits the connection, so a stored exhausted window that a

@@ -101,12 +101,34 @@ export type QuotaWindow = {
 
 export type QuotaSource = "usage_endpoint" | "response_headers" | "refusal";
 
+/**
+ * Which reported limits one stored block (a model cooldown, or the quota
+ * exhaustion deadline) came from: the provider's own window ids, as the
+ * observation that set the block named them, tied to that block's exact
+ * deadline. A block whose deadline no longer equals `until` (a later write
+ * extended it without evidence) has no claim. A block without a claim (an
+ * unrecognized or missing limit, or a refusal without usage evidence) never
+ * ends before its own deadline.
+ */
+export type QuotaBlockClaim = {
+  /** The deadline of the block this claim explains. */
+  until: number;
+  /** When the observation that set the block was made. */
+  observedAt: number;
+  /** The provider window ids whose limit set the block (never empty). */
+  windowIds: readonly string[];
+};
+
 export type SubscriptionQuota = {
   windows: readonly QuotaWindow[];
   /** Per-model cooldowns (model-specific limits some providers report). */
   modelCooldowns: Readonly<Record<ModelId, number>>;
+  /** Optional evidence per model cooldown (see `QuotaBlockClaim`); absent: none. */
+  modelCooldownClaims?: Readonly<Record<ModelId, QuotaBlockClaim>>;
   exhaustedUntil: number | null;
   exhaustedKind: "quota" | "rate_limit" | null;
+  /** Optional evidence for `exhaustedUntil` (see `QuotaBlockClaim`); absent: none. */
+  exhaustedClaim?: QuotaBlockClaim | null;
   revision: number;
   observedAt: number | null;
   observedRefreshGeneration: number | null;
