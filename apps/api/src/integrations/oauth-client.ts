@@ -672,28 +672,27 @@ async function startMcpOAuthWithinDeadline(
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const expiresAt = new Date(Date.now() + oauthStateTtlMs);
-  let state = fullState;
-  if (settings.integrationsOauthShortStateEnabled) {
-    const stateId = randomUUID();
-    state = createSignedState(requireIntegrationsStateSecret(settings), {
-      kind: "mcp_oauth_reference",
+  // Providers cap `state` length (Stripe at 1024 characters), so only a short
+  // signed reference leaves; the full context waits encrypted at rest.
+  const stateId = randomUUID();
+  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    kind: "mcp_oauth_reference",
+    id: stateId,
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+  });
+  if (state.length > 512) {
+    throw new Error("MCP OAuth reference state exceeded its provider-safe length");
+  }
+  await deadline.run("state_persist", async () =>
+    storeIntegrationOAuthPendingState(db, {
       id: stateId,
       accountId: context.accountId,
       workspaceId: context.workspaceId,
-    });
-    if (state.length > 512) {
-      throw new Error("MCP OAuth reference state exceeded its provider-safe length");
-    }
-    await deadline.run("state_persist", async () =>
-      storeIntegrationOAuthPendingState(db, {
-        id: stateId,
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        stateEncrypted: encryptEnvironmentValue(key, fullState),
-        expiresAt,
-      }),
-    );
-  }
+      stateEncrypted: encryptEnvironmentValue(key, fullState),
+      expiresAt,
+    }),
+  );
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
     settings,

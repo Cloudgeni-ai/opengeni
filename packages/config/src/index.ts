@@ -488,7 +488,6 @@ const SettingsSchema = z.object({
   onePasswordFakeTokens: EnvBoolean.default(false),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
-  integrationsOauthShortStateEnabled: EnvBoolean.default(false),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   // Privacy limits a deployment (for example a product that embeds Opengeni)
   // sets for every organization. They only narrow what organizations choose:
@@ -4552,7 +4551,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
-    integrationsOauthShortStateEnabled: optional("OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
@@ -5069,26 +5067,37 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       }
     }
   }
-  warnRetiredOrganizationTenancyActivationSwitch(source);
+  warnRetiredDeploymentSwitches(source);
   validateSettings(settings, source);
   return settings;
 }
 
-let retiredOrganizationTenancyActivationSwitchWarned = false;
-
 /**
- * Session-tenancy activation is universal since migration 0611, so the former
- * deployment switch is accepted and ignored. Deployments that still set it keep
- * booting; the one-time warning tells the operator to delete it.
+ * Former deployment switches that are now accepted and ignored. Deployments
+ * that still set one keep booting; a one-time warning tells the operator to
+ * delete it.
  */
-function warnRetiredOrganizationTenancyActivationSwitch(source: NodeJS.ProcessEnv): void {
-  if (retiredOrganizationTenancyActivationSwitchWarned) return;
-  if (source.OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED === undefined) return;
-  retiredOrganizationTenancyActivationSwitchWarned = true;
-  console.warn(
-    "[config] OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is retired and ignored: " +
-      "every organization is session-tenancy activated (migration 0611). Remove it from the deployment.",
-  );
+const RETIRED_DEPLOYMENT_SWITCHES: ReadonlyArray<{ name: string; reason: string }> = [
+  {
+    name: "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
+    reason: "every organization is session-tenancy activated (migration 0611)",
+  },
+  {
+    name: "OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED",
+    reason: "MCP OAuth always sends the short reference state (migration 0507)",
+  },
+];
+
+const warnedRetiredDeploymentSwitches = new Set<string>();
+
+function warnRetiredDeploymentSwitches(source: NodeJS.ProcessEnv): void {
+  for (const { name, reason } of RETIRED_DEPLOYMENT_SWITCHES) {
+    if (source[name] === undefined || warnedRetiredDeploymentSwitches.has(name)) continue;
+    warnedRetiredDeploymentSwitches.add(name);
+    console.warn(
+      `[config] ${name} is retired and ignored: ${reason}. Remove it from the deployment.`,
+    );
+  }
 }
 
 const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";

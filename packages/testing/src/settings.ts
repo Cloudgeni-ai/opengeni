@@ -111,7 +111,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     onePasswordFakeTokens: false,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
-    integrationsOauthShortStateEnabled: false,
     integrationsAllowPrivateNetworkTargets: false,
     privacyOnlyMeAllowed: true,
     privacyWorkspaceDefaultRequired: false,
