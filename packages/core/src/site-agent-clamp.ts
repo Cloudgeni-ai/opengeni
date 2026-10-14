@@ -45,6 +45,8 @@ export async function siteAgentClamp(
   );
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
 /** How long an agent turn's clamp is reused (per process). */
 const CLAMP_CACHE_MS = 60_000;
 const CLAMP_CACHE_LIMIT = 5_000;
@@ -82,9 +84,14 @@ async function readSiteSessionClamp(
   sessionId: string,
   turnId: string | null,
 ): Promise<{ clamp: SiteAgentClamp; cacheable: boolean }> {
-  const own = await getSession(db, scope.workspaceId, sessionId).catch(() => null);
-  // No session to read: other checks refuse a caller whose session is gone.
-  // Never cached: the read may have failed only for now.
+  // A session id that is not a UUID names no session.
+  const own = UUID.test(sessionId)
+    ? await getSession(db, scope.workspaceId, sessionId).catch(() => undefined)
+    : null;
+  // A read that failed fails closed, as a partial lineage does. Never cached:
+  // it may have failed only for now.
+  if (own === undefined) return { clamp: { clamped: true, originSiteIds: [] }, cacheable: false };
+  // No such session: other checks refuse a caller whose session is gone.
   if (!own) return { clamp: { clamped: false, originSiteIds: [] }, cacheable: false };
   const lineage = await getSiteDataAgentSession(db, scope, sessionId, turnId);
   let frameOrigin = siteSessionOriginFromMetadata(own.metadata) !== null;

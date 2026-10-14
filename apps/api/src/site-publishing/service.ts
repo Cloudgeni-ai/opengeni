@@ -15,7 +15,7 @@ import {
   type SitePublication,
   type UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, SiteAccessMode } from "@opengeni/contracts";
 import {
   assertNotSiteClampedAgent,
   currentSiteSessionOrigin,
@@ -1109,16 +1109,20 @@ export async function upsertSitePublicationForManager(
       "site_admin_required",
       "Only a workspace admin can open a Site with tools to everyone",
     );
-  // Invited viewers always get the Site's tools, so inviting people (adding
-  // invitees, or switching to invited access) while the agent has tools needs
-  // an admin too. Removing invitees does not.
-  const accessAfter = request.access ?? existing?.access;
-  const invitedBefore = new Set(existing?.invitedEmails ?? []);
+  // Invitees are invited viewers, who always get the Site's tools, whenever
+  // access is not members-only (public Sites included). So while the agent
+  // has tools, giving them to more invitees (adding invitees, or opening a
+  // Site that lists some) needs an admin too, unless everyone on the public
+  // Site gets the tools anyway. Removing invitees or narrowing does not.
+  const accessAfter = request.access ?? existing?.access ?? "members";
+  const invitedAfter =
+    request.invitedEmails !== undefined ? request.invitedEmails : (existing?.invitedEmails ?? []);
+  const toolInvitees = (access: SiteAccessMode | undefined, emails: readonly string[]) =>
+    access !== undefined && access !== "members" ? normalizeEmails(emails) : [];
+  const toolInviteesBefore = new Set(toolInvitees(existing?.access, existing?.invitedEmails ?? []));
   const invitesPeople =
-    accessAfter === "invited" &&
-    (existing?.access !== "invited" ||
-      (request.invitedEmails !== undefined &&
-        normalizeEmails(request.invitedEmails).some((email) => !invitedBefore.has(email))));
+    !(accessAfter === "public" && everyoneToolsAfter) &&
+    toolInvitees(accessAfter, invitedAfter).some((email) => !toolInviteesBefore.has(email));
   if (invitesPeople && toolsAfter.length > 0 && !management.admin)
     throw sitePublishingError(
       403,

@@ -133,9 +133,11 @@ guests) gets them only when an admin also turns on **Let everyone use these
 tools** (`agent.guestTools`, which means tools for everyone who isn't a
 workspace member or invited; the name is kept for compatibility). Opening
 such a Site to everyone (changing its access to public while those tools are
-on for everyone) also needs an admin, and so does inviting people (switching
-to invited access or adding invitees) while the Site's agent has tools,
-since invited viewers always get them. A connection the workspace doesn't
+on for everyone) also needs an admin. Invitees get the tools whenever the
+Site isn't members-only (public Sites included), so while the Site's agent
+has tools, giving them to more invitees (adding invitees, or opening a
+members Site that lists some to invited or public access) needs an admin
+too; removing invitees or narrowing access doesn't. A connection the workspace doesn't
 have is skipped rather than failing the conversation.
 Unpublishing, taking down, or narrowing a Site's access signs all its viewers
 out (those who keep access sign in again) and cancels its running
