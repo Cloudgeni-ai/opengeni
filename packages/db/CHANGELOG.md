@@ -1,5 +1,37 @@
 # @opengeni/db
 
+## 2.0.1
+
+### Patch Changes
+
+- dfc66e9: Attached browsers follow their machine's audience.
+
+  - A personal (Only me) machine's browsers are listed, read and controlled only for the machine's owner. Before, any workspace member could see them, and the browser and linked-desktop control paths reached the machine without the owner check that normal machine use applies. An agent counts as the person whose turn it runs for; keys and services see no personal machines.
+  - A revoked machine's browsers no longer show as connected with their old profiles and tab counts. They read as disconnected (from when the machine was revoked) and leave the default listing.
+
+- a9052e9: Connected 1Password vaults work again and stay current on their own.
+
+  - The API and worker images ship the 1Password SDK as a real package. Bundling it left its WASM core behind, so every 1Password connect, sync and read failed with a generic error.
+  - An Only-me vault's personal 1Password token now loads in every workspace the vault reaches, not only the one it was added in. Before, using or syncing it elsewhere marked the vault "expired, reconnect 1Password" for everyone. Organization vaults likewise load their organization connection in every workspace they are available in.
+  - Linked vault mirrors refresh themselves: agent secret search refreshes mirrors older than 10 minutes, and a reference that finds nothing refreshes mirrors older than 2 minutes and looks again. Each refresh is one provider call (plus an item listing only when the vault changed), honours provider rate limits, and retries a failing vault at most once per period.
+
+- 2ea5f7b: People choose which of their workspaces each Only-me vault is available in.
+
+  - "Available in" now works for Only-me vaults: every workspace you use, or the ones you pick. Your Personal workspace always has the vault, so you can always find and widen it there.
+  - A new Only-me vault, created or linked from 1Password, starts in the workspace it was added from instead of every workspace. Existing Only-me vaults keep working everywhere until you narrow them, and the default Private vault stays available everywhere.
+  - Vault summaries report `availability` for Only-me vaults too.
+
+- f2ffb76: Creating many tasks in one database statement no longer slows down quadratically. Per-task usage-limit counters are now seeded once per insert statement instead of once per row, so bulk inserts such as imports cost the same per task as single inserts.
+- Updated dependencies [2ea5f7b]
+  - @opengeni/contracts@2.0.1
+  - @opengeni/codemode@2.0.1
+  - @opengeni/codex@2.0.1
+  - @opengeni/config@2.0.1
+  - @opengeni/observability@2.0.1
+  - @opengeni/network@2.0.1
+  - @opengeni/subscriptions@2.0.1
+  - @opengeni/xai-subscription@2.0.1
+
 ## 2.0.0
 
 ### Minor Changes
