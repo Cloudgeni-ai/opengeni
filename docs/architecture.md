@@ -1396,6 +1396,7 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
+| `apps/site-gateway` | `@opengeni/site-gateway` | Cloudflare Worker serving published Sites on `<label>.<sites domain>`: host lookup, viewer sign-in cookies, signed forwarding to `/v1/site-runtime`, immutable HTML caching and edge headers; no authorization of its own ([README](../apps/site-gateway/README.md)) |
 | `apps/mobile` | Standalone Expo app `opengeni-mobile` (own `bun.lock`) | iOS and Android client: web sign-in for its own app credential, accounts, workspace switching, settings, and push; a leaf client ([README](../apps/mobile/README.md)) |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
@@ -1669,6 +1670,9 @@ Local preview remains frozen-attempt Codemode, not current-human authority.
 Explicit catalog/declarations discovery and OAuth remain separate paths.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
+The framework-free bridge host (`packages/sdk/src/site-bridge-host.ts`) is
+shared by the console frame and the published-Sites gateway shell
+(`apps/site-gateway`); hosts inject tool transport, viewer and sign-in.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
 for loading, versioning, visualization assets, and retained images.
 
