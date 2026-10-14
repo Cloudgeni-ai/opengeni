@@ -231,6 +231,29 @@ reaches the Durable Object through its own binding; agents reach it through
 HMAC-signed requests from the API to the gateway's internal endpoint. Usage
 (rows read and written, storage) is metered like Site Data.
 
+As built (see [Site SQL](../site-data.md#site-sql-optional-cloudflare-storage)),
+with these refinements:
+
+- Site pages reach the Durable Object only through the API as well
+  (`/_og/api` -> `/v1/site-runtime/.../sql/queries/<name>` -> signed internal
+  route), so authorization, audiences, limits and metering live in one place;
+  the gateway's `SITE_DB` binding is used only by the internal route.
+- The API reaches the gateway at its own setting,
+  `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN`, behind
+  `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`. The internal route answers on
+  any host the Worker serves; deployments should use a reserved label such as
+  `internal.<sites domain>`. It accepts `GATEWAY_SECRET_PREVIOUS` for
+  rotation, and the Durable Object refuses replayed request ids.
+- Named queries carry an audience (`everyone`, `signed_in`, `managers`);
+  guests run only `everyone` queries. `:viewer_kind` and `:viewer_signed_in`
+  are bound alongside `:viewer`.
+- Site SQL has its own limits (`SiteSqlLimits`, `OPENGENI_SITES_SQL_*`)
+  derived from the profile kind rather than new `SiteLimits` fields; custom
+  profiles use the free Site SQL numbers.
+- Schema changes go only through migrations: `site_sql_execute` refuses
+  them, and a SQL import's schema statements are recorded as an
+  `import_<time>` migration so a rebuild reproduces them.
+
 ## Alternatives rejected
 
 - **Serving Site HTML directly on the Site origin** (no shell): Site code

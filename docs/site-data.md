@@ -6,7 +6,9 @@ Site Data gives every published Site persistent collections of JSON records
 and files. Site HTML reads and writes them through `site.data` and
 `site.files` on the existing `@opengeni/sdk/site` client; agents and scheduled
 tasks use first-party tools; the Site page's Data tab shows them to the Site's
-managers. There is no Site server, no live push, and no per-Site SQL.
+managers. There is no Site server and no live push. Sites that need tables
+and SQL can turn on the optional per-Site database described in
+[Site SQL](#site-sql-optional-cloudflare-storage).
 
 ## Ownership and lifecycle
 
@@ -354,6 +356,163 @@ records usage events in the same transaction (`site_data.write` operations,
 `usage_only`: nothing is debited until a reviewed rate and a `shadow`/`paid`
 mode are added.
 
+## Site SQL (optional Cloudflare storage)
+
+Site SQL gives one published Site its own SQLite database: one
+SQLite-backed Durable Object (`SiteDatabase`, `SITE_DB.idFromName(siteId)`)
+in the Sites gateway Worker. It sits next to Site Data; the owner turns it on
+per Site. Postgres stays the source of truth for the definitions, so the
+database can always be rebuilt; the Durable Object holds only the rows.
+
+### Availability
+
+The deployment enables it with `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED=true`
+plus `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN` (the gateway origin the API
+calls: `https://...`, or `http://` on loopback for local development) and
+`OPENGENI_SITES_GATEWAY_SECRET`. Missing any of them, every Site SQL call
+returns `unavailable` (503) and nothing else changes. Export keeps working
+while a Site's database is turned off, so data can always leave Cloudflare.
+Turning a Site's database off keeps its data.
+
+### Definitions in Postgres
+
+Migration `0790_site_sql.sql` (placeholder ordinal) adds four
+workspace-owned FORCE-RLS tables, keyed and cascading like Site Data:
+
+- `site_sql_databases`: one row per Site that ever turned Site SQL on:
+  `enabled`, the month's rows read and written, the last reported database
+  size, and when it was last rebuilt.
+- `site_sql_migrations`: the ordered, append-only schema migrations (name,
+  SQL, checksum). The Durable Object records which ones it applied, so
+  `migrate` and `reset` can replay the missing ones on an empty database.
+- `site_sql_queries`: named queries (name, one statement, parameter names,
+  `read` or `write`, audience, row cap, description).
+- `site_sql_rate_windows`: per-minute call windows per viewer and per Site.
+
+The store is `packages/db/src/site-sql.ts`; `withSiteSqlDatabaseLock`
+serializes migrations and resets per Site.
+
+### Statements
+
+`compileSiteSql` (`packages/contracts/src/site-sql.ts`) checks every
+statement on the API and again inside the Durable Object. It tokenizes the
+SQL (strings, quoted identifiers, comments, blobs), splits statements, and
+refuses `ATTACH`/`DETACH`, `VACUUM` (including `VACUUM INTO`),
+`load_extension`, transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT` ...),
+any PRAGMA write and every PRAGMA except the schema readers, `?`, `?NNN`,
+`@name` and `$name` parameters (only `:name`), more than 100 parameters, and
+names starting with `_cf_` or `_og_`. Three profiles decide the rest:
+
+| Profile  | Used for                  | Rules                                                                 |
+| -------- | ------------------------- | --------------------------------------------------------------------- |
+| `named`  | named queries Sites call  | exactly one SELECT/INSERT/UPDATE/DELETE/REPLACE (WITH allowed, not recursive); no schema changes, PRAGMA or EXPLAIN; 16K characters |
+| `agent`  | `site_sql_query`/`execute` | exactly one statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration); 64K characters |
+| `script` | migrations and SQL imports | up to 2,000 statements, run in one transaction; 2M characters         |
+
+Values are always bound as parameters, never spliced into SQL.
+
+### Named queries and viewers
+
+Sites never send SQL. Site code calls `site.sql.run(name, params)`
+(`@opengeni/sdk/site`), which posts
+`/published-artifacts/current/sql/queries/<name>` over the Site HTTP channel
+like Site Data (the `sql.run` entry of `SITE_OPERATIONS`; on a published host
+the gateway sends it to `/v1/site-runtime/...`). The API resolves the caller
+exactly like Site Data (a Site frame is always a viewer), then applies the
+query's audience:
+
+| Audience    | Who may run it from a Site page                                  |
+| ----------- | ---------------------------------------------------------------- |
+| `everyone`  | every viewer, including anonymous guests of public Sites         |
+| `signed_in` | (default) viewers who are signed in; guests get `forbidden`       |
+| `managers`  | no Site page; only managers through tools and the API            |
+
+`:viewer` (the viewer's stable principal, such as `user:<id>` or
+`guest:<visitor>`), `:viewer_kind` and `:viewer_signed_in` (1 or 0) are bound
+by the API from the verified caller. A request that supplies one is refused
+with `validation`, so a Site cannot impersonate another viewer:
+
+```sql
+-- define with site_sql_define_query, audience signed_in
+INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
+ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
+```
+
+Rows come back as objects keyed by column name; blobs as
+`{ "$base64": "..." }`. Errors are `OpenGeniSiteSqlError` with the codes in
+`SITE_SQL_ERROR_STATUS` (`validation`, `not_found`, `forbidden`, `conflict`,
+`quota_exceeded`, `rate_limited`, `sql_error`, `unavailable`, `disabled`).
+
+### API to Durable Object
+
+The API reaches the database through the gateway's internal route
+`POST <OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN>/_og/internal/site-db/<siteId>/<operation>`
+(`run`, `script`, `migrate`, `insert`, `export`, `inspect`, `reset`). It
+signs the request like gateway-to-API requests:
+`siteGatewayCanonicalString` over the method, the gateway host, the path,
+the body hash and the timestamp, with empty session, visitor, client IP and
+human fields, HMAC-SHA256 with `OPENGENI_SITES_GATEWAY_SECRET`. The gateway
+accepts the current or previous secret (`GATEWAY_SECRET_PREVIOUS`) within
+30 seconds, forwards to the Durable Object and adds nothing else. Every
+request carries a fresh id the Durable Object refuses to replay. Site pages
+never call this route; it has no cookies and returns 404 when `SITE_DB` is
+not bound.
+
+The Durable Object runs each call in one transaction, rolls back a read that
+wrote and any write that would grow the database past the Site's storage cap,
+cuts results at the row and response-size limits (`truncated: true`), and
+reports rows read, rows written and the database size, which the API meters.
+
+### Owner tools and routes
+
+Managers (the Site's owner, workspace admins and agents acting for them) use
+`/v1/workspaces/:ws/published-artifacts/:artifactId/sql` (GET describe,
+PUT `/settings`, POST|PUT|DELETE `/queries/:name`, POST `/migrations`, `/query`,
+`/execute`, `/import`, `/reset`, GET `/inspect`, `/export?format=&table=`) and
+the matching agent tools:
+
+| Tool                    | Does                                                                  |
+| ----------------------- | --------------------------------------------------------------------- |
+| `site_sql_inspect`      | settings, limits, usage, tables, migrations, pending migrations, queries |
+| `site_sql_enable`       | turn the Site's database on or off                                     |
+| `site_sql_migrate`      | append a named schema migration and apply every missing one            |
+| `site_sql_define_query` | create, replace or delete a named query                                |
+| `site_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
+| `site_sql_execute`      | one write statement (schema changes go through migrations)             |
+| `site_sql_export`       | the database as SQL (schema plus INSERTs), one table as CSV, or JSON   |
+| `site_sql_import`       | SQL (schema statements become an `import_<time>` migration), CSV or JSON rows into a table |
+| `site_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
+
+Read tools need `artifacts:read`; the rest need `artifacts:publish`.
+Exports are capped at 16 MB per call (page by table for larger databases).
+CSV and JSON imports insert in chunks; a failure part way reports how many
+rows landed in `details.imported`.
+
+### Limits and metering
+
+`siteSqlLimits` derives the effective limits from the Site's limit profile:
+
+| Setting (`OPENGENI_SITES_SQL_*`)    | Free default | Meaning                              |
+| ----------------------------------- | ------------ | ------------------------------------ |
+| `FREE_STORAGE_BYTES`                | 50 MiB       | database size per Site               |
+| `FREE_ROWS_READ_PER_MONTH`          | 5,000,000    | rows read per Site per month         |
+| `FREE_ROWS_WRITTEN_PER_MONTH`       | 100,000      | rows written per Site per month      |
+| `FREE_CALLS_PER_MINUTE_PER_VIEWER`  | 60           | Site page calls per viewer           |
+| `FREE_CALLS_PER_MINUTE_PER_SITE`    | 600          | Site page calls per Site             |
+| `MAX_ROWS_PER_CALL`                 | 1,000        | rows one call returns (hard cap 5,000) |
+| `MAX_RESPONSE_BYTES`                | 1 MiB        | response size per call (hard cap 4 MiB) |
+| `TIMEOUT_MS`                        | 15,000       | API to gateway request timeout       |
+
+`credits` multiplies the free numbers by
+`OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER` (default 10),
+`unlimited` lifts the monthly caps (5 GB storage, 600 calls per viewer and
+6,000 per Site per minute still apply), and `custom` profiles use the free
+Site SQL numbers. Managers share one window of 600 calls per minute per Site.
+Monthly caps are checked before each call, so the last call of a month can
+overshoot by its own rows. Every call records `site_sql.rows_read`,
+`site_sql.rows_written` and `site_sql.storage_growth_bytes` usage events
+(source resource `site`) in `usage_only` mode like Site Data.
+
 ## Tests
 
 - `apps/api/test/site-data-postgres.test.ts`: real routes on Postgres as the
@@ -391,6 +550,15 @@ mode are added.
   `packages/react/test/published-html-artifact-frame.test.ts`: the bridge
   routing, capability negotiation and binary uploads.
 - `apps/web/src/components/artifacts/site-data.test.tsx`: the Data tab.
+- Site SQL: `packages/contracts/test/site-sql.test.ts` (the statement
+  checker and its refusals), `apps/site-gateway/test/site-db.miniflare.test.ts`
+  (the `SiteDatabase` Durable Object in workerd: signatures, previous secret,
+  skew, replay, refusals, limits, migrations, rebuild, export and import),
+  `packages/sdk/test/site-sql.test.ts` (`site.sql.run` over the bridge),
+  `packages/db/test/migration-0790-site-sql-postgres.test.ts` (FORCE RLS and
+  cascades) and `apps/api/test/site-sql-postgres.test.ts` (routes and tools on
+  Postgres against the real gateway Worker in Miniflare: audiences, guests,
+  principal parameters, limits and metering, export and import round trips).
 
 ## Follow-ups
 
@@ -404,3 +572,9 @@ mode are added.
   each Site turn.
 - Stamp the Site origin onto child sessions at creation so the lineage check
   is one lookup instead of a bounded walk.
+- Site SQL: per-call CPU time is bounded only by the Durable Object's own
+  limits (rows and bytes are bounded, recursive CTEs are refused in named
+  queries); custom limit profiles have no Site SQL fields; a Postgres commit
+  failure after a migration applied leaves the database one migration ahead
+  until the next reset; blobs cannot be imported from JSON; a console view
+  of the database.

@@ -498,8 +498,10 @@ gives every framed request viewer reach, whoever is viewing. Hosts without
 previews) do not advertise it, and Site code gets `site_data_unsupported`
 without a request being sent; their bridges also refuse `current` Site Data
 paths. No host forwards an explicit `published-artifacts/<id>/data|files`
-path from a Site. `createOpenGeniSessionProxy`
-does not forward Site Data routes yet.
+path from a Site. `site.sql.run` (Site SQL) travels the same way on
+`published-artifacts/current/sql/queries/<name>` and gets
+`site_sql_unsupported` where Site Data is unsupported. `createOpenGeniSessionProxy`
+does not forward Site Data or Site SQL routes yet.
 
 ### Viewers and published Sites
 

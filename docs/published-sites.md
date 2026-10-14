@@ -107,6 +107,19 @@ collection) allows it:
 Guest records belong to the guest's visitor id, so a guest who clears
 cookies loses them. Guest writes have their own rate limit.
 
+## Site SQL (optional)
+
+Where the deployment turns on Cloudflare storage, an owner can give a Site
+its own SQLite database (one Durable Object per Site) next to Site Data.
+Agents define the schema as migrations and the queries the Site may run;
+Site code calls them by name with `site.sql.run(name, params)` and never
+sends SQL. Each named query has an audience: `everyone` (guests too),
+`signed_in` (the default) or `managers` (never from a Site page).
+Opengeni binds `:viewer` from the signed-in viewer or guest, so a Site
+cannot act as someone else. Data can always be exported as SQL, CSV or
+JSON, even while the database is turned off. Details and limits are in
+[Site Data: Site SQL](site-data.md#site-sql-optional-cloudflare-storage).
+
 ## Embedded agents
 
 When the embedded agent is on, visitors can start conversations with it from

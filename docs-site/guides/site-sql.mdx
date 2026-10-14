@@ -1,0 +1,53 @@
+---
+title: "Site SQL"
+description: "Give a published Site its own SQLite database: tables and named queries for polls, leaderboards and bookings, with the signed-in viewer bound by the server."
+---
+
+Site SQL is an optional database for one published Site, next to [Site Data](/guides/site-data). Each Site gets its own SQLite database (a Cloudflare Durable Object). It is available where the deployment turns on Cloudflare storage, and the Site's owner turns it on per Site.
+
+Use Site Data for records and files with ready-made access modes. Use Site SQL when a Site needs tables, joins, aggregates or unique keys.
+
+## Set it up with an agent
+
+Ask Opengeni, or use the tools directly:
+
+1. `site_sql_enable` turns the Site's database on.
+2. `site_sql_migrate` adds a named schema migration, such as `create_votes` with `CREATE TABLE votes (...)`. Migrations are kept in order and replayed if the database is ever rebuilt.
+3. `site_sql_define_query` defines a named query the Site may run, with an audience:
+
+| Audience    | Who can run it from the Site                            |
+| ----------- | ------------------------------------------------------- |
+| `everyone`  | every viewer, including guests of public Sites          |
+| `signed_in` | signed-in viewers (the default)                         |
+| `managers`  | nobody on the Site page; only managers and their agents |
+
+```sql
+INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
+ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
+```
+
+`:viewer` is filled in by Opengeni with the signed-in viewer (or the guest's visitor id), so one person cannot vote as another. `:viewer_kind` and `:viewer_signed_in` work the same way.
+
+## In Site code
+
+```ts
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+await site.sql.run("cast_vote", { poll: "lunch", choice: "tacos" });
+const { rows } = await site.sql.run("poll_results", { poll: "lunch" });
+```
+
+Sites never send SQL; they can only run the named queries an owner defined. Errors are `OpenGeniSiteSqlError` with a `code` such as `forbidden`, `not_found`, `validation`, `rate_limited`, `quota_exceeded` or `disabled`. Rows come from other people: show them as text, never as HTML.
+
+## Managing data
+
+`site_sql_inspect` shows tables, row counts, migrations, queries, usage and limits. `site_sql_query` and `site_sql_execute` run one statement for the owner. `site_sql_export` downloads the database as SQL, a table as CSV, or everything as JSON, even while the database is turned off; `site_sql_import` loads SQL, CSV or JSON. `site_sql_reset` empties the database and rebuilds the tables, or deletes everything.
+
+Statements are checked: no `ATTACH`, no extensions, no `VACUUM`, no PRAGMA writes, and one statement per named query.
+
+## Limits and usage
+
+On the free profile a Site's database holds up to 50 MB and reads 5 million and writes 100,000 rows a month. Each viewer can make 60 calls a minute and the Site 600, and one call returns at most 1,000 rows and 1 MB. The credits profile raises these. Self-hosted deployments change them with the `OPENGENI_SITES_SQL_*` settings. Rows read, rows written and storage are recorded for the workspace like Site Data; they are not charged yet.
+
+See [Site SQL internals](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/site-data.md#site-sql-optional-cloudflare-storage).

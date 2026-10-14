@@ -1,0 +1,10 @@
+---
+"@opengeni/sdk": minor
+"@opengeni/contracts": minor
+"@opengeni/db": minor
+"@opengeni/config": minor
+"@opengeni/runtime": minor
+"@opengeni/api-router": minor
+---
+
+Sites can have their own SQL database. Where a deployment turns on Cloudflare storage (`OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`, `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN` and the gateway secret), a Site's owner can enable a per-Site SQLite database, one Durable Object per Site in the Sites gateway, next to Site Data. Agents define schema migrations and named queries with the new `site_sql_*` tools (`site_sql_inspect`, `site_sql_enable`, `site_sql_migrate`, `site_sql_define_query`, `site_sql_query`, `site_sql_execute`, `site_sql_export`, `site_sql_import`, `site_sql_reset`), and Site code runs those queries with `site.sql.run(name, params)` from `@opengeni/sdk/site`. Sites never send SQL; each query has an audience (`everyone`, `signed_in` or `managers`), and `:viewer` is bound from the verified viewer. Statements are checked against an allowlist (one statement per named query; no ATTACH, VACUUM, extensions or PRAGMA writes), results are bounded, and rows read, rows written and storage are metered in `usage_only` mode under the Site's limit profile (`OPENGENI_SITES_SQL_*` settings). Data can always be exported as SQL, CSV or JSON. Postgres keeps the settings, migrations and queries in new FORCE-RLS `site_sql_*` tables so a database can be rebuilt. The SDK client adds `getSiteSql`, `updateSiteSqlSettings`, `migrateSiteSql`, `defineSiteSqlQuery`, `deleteSiteSqlQuery`, `runSiteSqlQuery`, `querySiteSql`, `executeSiteSql`, `inspectSiteSql`, `exportSiteSql`, `importSiteSql` and `resetSiteSql`. Without the settings nothing changes.
