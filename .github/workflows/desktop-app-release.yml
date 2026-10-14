@@ -61,10 +61,29 @@ jobs:
           (cd packages/desktop && bun run typecheck)
           (cd apps/desktop && bun run typecheck)
 
+      # electron-builder's own temporary keychain cannot be unlocked for the key
+      # partition list on the macOS 26 runner, so the job owns its keychain and
+      # electron-builder only discovers the Developer ID identity in it.
       - name: Signing and notarization credentials
         env:
           APPLE_ASC_KEY: ${{ secrets.APPLE_ASC_KEY }}
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
         run: |
+          keychain="$RUNNER_TEMP/signing.keychain"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+          echo "CSC_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
           key_dir="$RUNNER_TEMP/asc"
           mkdir -p "$key_dir"
           printf '%s' "$APPLE_ASC_KEY" | jq -r .private_key > "$key_dir/key.p8"
@@ -78,8 +97,6 @@ jobs:
         working-directory: apps/desktop
         env:
           OPENGENI_DESKTOP_VERSION: ${{ steps.v.outputs.version }}
-          CSC_LINK: ${{ secrets.APPLE_CERT_P12 }}
-          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
         run: |
           bun scripts/build.ts --production
           bunx electron-builder --mac --publish never
