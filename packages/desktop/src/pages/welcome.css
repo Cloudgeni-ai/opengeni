@@ -1,0 +1,234 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f6f6;
+  --fg: #242424;
+  --muted: #5f5f5f;
+  --border: #dedede;
+  --field: #ffffff;
+  --primary: #242424;
+  --primary-fg: #ffffff;
+  --danger: oklch(0.52 0.2 22);
+  --ring: #79d9c1;
+  --glow-teal: #9fe3d359;
+  --glow-peach: #ffb78752;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #303030;
+    --fg: #e6e6e6;
+    --muted: #b8b8b8;
+    --border: #454545;
+    --field: #383838;
+    --primary: #e6e6e6;
+    --primary-fg: #1f1f1f;
+    --danger: oklch(0.76 0.13 22);
+    --glow-teal: #79d9c125;
+    --glow-peach: #ffb78724;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  color: var(--fg);
+  background:
+    radial-gradient(ellipse 60% 55% at 0 0, var(--glow-teal), transparent 85%),
+    radial-gradient(ellipse 60% 55% at 100% 100%, var(--glow-peach), transparent 85%),
+    var(--bg);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* macOS: the window's vibrancy shows through a translucent page. */
+html[data-platform="darwin"] body {
+  background:
+    radial-gradient(ellipse 60% 55% at 0 0, var(--glow-teal), transparent 85%),
+    radial-gradient(ellipse 60% 55% at 100% 100%, var(--glow-peach), transparent 85%),
+    color-mix(in srgb, var(--bg) 72%, transparent);
+}
+
+.drag {
+  position: fixed;
+  inset: 0 0 auto;
+  height: 44px;
+  -webkit-app-region: drag;
+}
+
+main {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 56px 24px 40px;
+  text-align: center;
+}
+
+section {
+  display: flex;
+  width: min(340px, 100%);
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.mark {
+  margin-bottom: 18px;
+  color: var(--fg);
+}
+
+h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.lead {
+  margin: 0 0 22px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+button,
+input,
+summary {
+  font: inherit;
+}
+
+button {
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0 16px;
+  font-weight: 550;
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.primary {
+  background: var(--primary);
+  color: var(--primary-fg);
+}
+
+.primary:active {
+  opacity: 0.85;
+}
+
+.primary:disabled {
+  opacity: 0.5;
+}
+
+.secondary {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.link {
+  height: auto;
+  padding: 4px 6px;
+  background: none;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.link:hover {
+  color: var(--fg);
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+details {
+  text-align: left;
+}
+
+summary {
+  width: fit-content;
+  margin: 0 auto;
+  color: var(--muted);
+  list-style: none;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+summary:hover {
+  color: var(--fg);
+}
+
+details[open] summary {
+  margin-bottom: 10px;
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+input {
+  width: 100%;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--field);
+  color: var(--fg);
+  padding: 0 10px;
+  user-select: text;
+}
+
+.error {
+  max-width: 340px;
+  margin: 14px 0 0;
+  color: var(--danger);
+  line-height: 1.4;
+}
+
+.back {
+  position: fixed;
+  top: 52px;
+  left: 16px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  section:not([hidden]) {
+    animation: enter 180ms ease-out;
+  }
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
