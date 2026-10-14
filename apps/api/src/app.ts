@@ -28,6 +28,8 @@ import {
   registerAnalyticsConsentRoutes,
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
+import { siteFrameGuard } from "./site-frame-guard";
+import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
 import {
   SiteSessionPathError,
   OrganizationIntegrationDeniedError,
@@ -772,6 +774,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Session-Id",
       // Set by Site bridges on every bridged request (Site Data frame clamp).
       "X-OpenGeni-Site-Frame",
+      "X-OpenGeni-Site-Frame-Id",
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
@@ -1687,6 +1690,10 @@ export function createAppComposition(deps: AppDependencies): {
     const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
     await withAccessGrantSessionRlsContext(routeDeps, grant, next);
   });
+
+  // Requests a host forwarded from a Site frame: SITE_OPERATIONS only, only
+  // the frame's own sessions, and the validated Site origin as provenance.
+  app.use("/v1/workspaces/:workspaceId/*", siteFrameGuard(routeDeps));
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -2646,10 +2653,11 @@ function codemodeHttpError(error: unknown): HTTPException {
   // nothing and the client may resubmit the same operation id.
   const contention = databaseContentionHttpError(error, "POST", { outcomeUnknown: false });
   if (contention) return contention;
-  if (error instanceof SiteSessionPathError) {
-    // The proxied Site/SDK surface is an explicit allowlist; a route outside
-    // it (tool policy, visibility, forks, Steer, control, ...) does not exist
-    // for this caller rather than being a server fault.
+  if (error instanceof SiteSessionPathError || error instanceof SiteDataUnsupportedError) {
+    // Site frame requests are held to the SITE_OPERATIONS allowlist and the
+    // agent's own SDK requests to its workspace; a route outside them (or Site
+    // Data on a host without a published Site) does not exist for this
+    // caller rather than being a server fault.
     return new HTTPException(404, { message: error.message, cause: error });
   }
   if (error instanceof SessionAuthorizationDeniedError) {

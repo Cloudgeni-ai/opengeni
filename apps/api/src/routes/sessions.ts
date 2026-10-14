@@ -728,6 +728,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           c.req.header("x-opengeni-site-id"),
           c.req.header("x-opengeni-site-version"),
+          // A frame without a published Site (inline HTML, a preview) is
+          // recorded as that frame, so its later requests reach this session.
+          {
+            marker: c.req.header("x-opengeni-site-frame"),
+            frameId: c.req.header("x-opengeni-site-frame-id"),
+          },
         ),
       );
       const create = () =>

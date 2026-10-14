@@ -601,8 +601,13 @@ describe("API helpers", () => {
       workflowClient: {} as never,
       managedAuth: null,
     });
-    // The bridge marks every bridged request as framed and pins the Site.
-    const bridgeHeaders = [SITE_FRAME_HEADER, "x-opengeni-site-id", "x-opengeni-site-version"];
+    // The bridge marks every bridged request as framed, names the frame and pins the Site.
+    const bridgeHeaders = [
+      SITE_FRAME_HEADER,
+      "x-opengeni-site-frame-id",
+      "x-opengeni-site-id",
+      "x-opengeni-site-version",
+    ];
     for (const origin of ["https://product.example", "http://localhost:5173"]) {
       const preflight = await app.request(
         "http://localhost/v1/workspaces/00000000-0000-4000-8000-000000000001/published-artifacts/current/data/query",
