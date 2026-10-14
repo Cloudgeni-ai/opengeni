@@ -19,4 +19,6 @@ export const allowanceMigrationTail = [
   // Extends the scheduled refusal guard patched by withheld 0612 (exact
   // anchor) and meters into the allowance-era usage receipts; replay after it.
   "0773_session_usage_limits.sql",
+  // Replaces the 0773 root-seed trigger with its statement-level form.
+  "0781_session_usage_limit_statement_seed.sql",
 ] as const;
