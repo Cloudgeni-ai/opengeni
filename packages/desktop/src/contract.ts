@@ -156,8 +156,17 @@ export const DESKTOP_IPC = {
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",
+  welcomeRetry: "og:welcome:retry",
   welcomeChanged: "og:welcome:changed",
 } as const;
+
+/** The account the window should show, while its server can't be reached. */
+export interface WelcomeUnreachable {
+  /** The host a person recognizes, e.g. app.opengeni.ai. */
+  server: string;
+  /** A try is in progress. */
+  retrying: boolean;
+}
 
 /** What the first-run page shows while there is no account to show. */
 export interface WelcomeState {
@@ -168,6 +177,8 @@ export interface WelcomeState {
   error: string | null;
   /** An account is signed in, so the page can go back to it. */
   canCancel: boolean;
+  /** The page stands in for an account whose server is out of reach; it keeps trying. */
+  unreachable: WelcomeUnreachable | null;
 }
 
 /** The first-run page's bridge (`window.opengeniDesktopWelcome`). */
@@ -175,6 +186,8 @@ export interface DesktopWelcomeBridge {
   state(): Promise<WelcomeState>;
   signIn(serverUrl: string): Promise<void>;
   cancel(): Promise<void>;
+  /** Try the unreachable account's server again now. */
+  retry(): Promise<void>;
   onChange(listener: (state: WelcomeState) => void): Unsubscribe;
 }
 
