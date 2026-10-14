@@ -15,7 +15,7 @@ import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import { codemodeSessionRequest } from "../src/codemode";
 
-// OPE-801: a Codemode local preview forwards page SDK requests through the
+// Site provenance: a Codemode local preview forwards page SDK requests through the
 // agent's own SDK proxy. Requests it marks as a Site frame are Site code: the
 // proxy holds them to SITE_OPERATIONS, and forwards them still marked as a
 // preview frame (never as a published Site) so the API records the preview

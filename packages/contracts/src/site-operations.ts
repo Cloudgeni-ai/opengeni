@@ -2,7 +2,7 @@
 // bridge and the gateway shell) import this module, and must not pull in zod.
 
 // ---------------------------------------------------------------------------
-// Site operation allowlist (OPE-801)
+// Site operation allowlist
 // ---------------------------------------------------------------------------
 
 /**

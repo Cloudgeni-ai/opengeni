@@ -110,7 +110,7 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   new chat to manage data.
 - So "Site HTML cannot define collections or change access rules" holds for
   the page's own requests and for agents it starts or messages directly.
-  Indirect paths are closed too (OPE-801): Site code reaches only the
+  Indirect paths are closed too: Site code reaches only the
   `SITE_OPERATIONS` allowlist, a page reaches only sessions its own Site
   started (a page on Site B gets a 404 for a Site A session), each Site turn
   records which Site sent it, a schedule created from a Site records the Site

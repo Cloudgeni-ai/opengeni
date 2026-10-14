@@ -5,8 +5,7 @@
 > record supersedes the "no separate Site host or wildcard Site domain"
 > decision in [workspace-html-sites-2026-09-01.md](workspace-html-sites-2026-09-01.md);
 > everything else in that record (single-file Sites, the opaque-origin frame,
-> the MessagePort bridge, provenance) still stands. Tracking: Linear OPE-802,
-> which also closes OPE-801.
+> the MessagePort bridge, provenance) still stands.
 
 # Published Sites and optional Cloudflare storage
 
@@ -20,7 +19,7 @@ staging), to workspace members, to invited people, or to the public, with
 the Site's embedded agents, Site Data and tools working the same way, under
 strict limits paid by the organization.
 
-It also closes OPE-801: Site HTML could reach the viewer's general
+It also closes a gap in Site provenance: Site HTML could reach the viewer's general
 workspace API through the console bridge, because `siteSessionPath` was a
 URL-prefix boundary rather than an operation allowlist.
 
@@ -164,7 +163,7 @@ table; a viewer can only list, read, stream and message their own
 conversations on that Site. Conversation, visitor-day and Site-month
 budgets are checked before each new conversation and message.
 
-## OPE-801: operation allowlist and provenance
+## Site operation allowlist and provenance
 
 - `SITE_OPERATIONS` in `packages/contracts/src/site-operations.ts` (zod-free,
   re-exported from the contracts index) is the single allowlist. The console bridge (`siteSessionPath`,
