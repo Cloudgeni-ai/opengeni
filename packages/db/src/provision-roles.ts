@@ -797,8 +797,8 @@ BEGIN
     -- points are runtime-callable; helpers and private tables stay owner-only.
     IF to_regprocedure(format('%I.session_usage_limit_command(jsonb)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.session_usage_limit_capability_active(uuid,uuid) TO PUBLIC', ${literal(schema)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.session_usage_limit_state(jsonb,boolean), %I.session_usage_limit_apply_receipt(uuid,uuid,uuid,text,uuid,uuid,bigint,text,text,text), %I.session_usage_limit_import_page(uuid,uuid,uuid,integer), %I.session_usage_limit_import_step(uuid,uuid,uuid,integer), %I.seed_session_usage_limit_root() FROM %I',
-        ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.session_usage_limit_state(jsonb,boolean), %I.session_usage_limit_apply_receipt(uuid,uuid,uuid,text,uuid,uuid,bigint,text,text,text), %I.session_usage_limit_import_page(uuid,uuid,uuid,integer), %I.session_usage_limit_import_step(uuid,uuid,uuid,integer), %I.session_usage_limit_meter_amount(numeric,text,numeric,numeric), %I.session_usage_limit_event_amount(jsonb), %I.seed_session_usage_limit_root(), %I.meter_session_usage_limit_event() FROM %I',
+        ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
       FOREACH runtime_table IN ARRAY ARRAY['session_usage_limit_roots','session_usage_limit_receipts',
         'session_usage_limit_config_receipts','session_usage_limit_capabilities']
       LOOP

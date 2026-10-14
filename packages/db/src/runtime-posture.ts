@@ -1356,13 +1356,20 @@ export const SESSION_USAGE_LIMIT_RUNTIME_ROUTINES = [
   SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
 ] as const;
 export const SESSION_USAGE_LIMIT_STATE_ROUTINE = "session_usage_limit_state(jsonb, boolean)";
+/** Pure amount rules shared by the event trigger and the legacy import. */
+export const SESSION_USAGE_LIMIT_AMOUNT_ROUTINES = [
+  "session_usage_limit_meter_amount(numeric, text, numeric, numeric)",
+  "session_usage_limit_event_amount(jsonb)",
+] as const;
 /** Owner-internal helpers; never runtime-callable. */
 export const SESSION_USAGE_LIMIT_INTERNAL_ROUTINES = [
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   "session_usage_limit_apply_receipt(uuid, uuid, uuid, text, uuid, uuid, bigint, text, text, text)",
   "session_usage_limit_import_page(uuid, uuid, uuid, integer)",
   "session_usage_limit_import_step(uuid, uuid, uuid, integer)",
+  ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "seed_session_usage_limit_root()",
+  "meter_session_usage_limit_event()",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   "scheduled_task_is_exhausted(uuid)",
@@ -1470,6 +1477,7 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
+  ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,

@@ -682,6 +682,18 @@ describe("session usage limits (real PostgreSQL, non-bypass app role)", () => {
       expect(evaluateRuntimeDatabasePosture(columnGrant, options)).toContain(
         "session usage limit private table session_usage_limit_receipts is missing or unsafe",
       );
+      // The event meter and its amount rules are owner-internal too.
+      await owner.admin`grant execute on function public.meter_session_usage_limit_event(), public.session_usage_limit_event_amount(jsonb) to opengeni_app`;
+      const helperGrant = evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(currentApp.db, options),
+        options,
+      );
+      expect(helperGrant).toContain(
+        "runtime role has forbidden owner-internal helper meter_session_usage_limit_event()",
+      );
+      expect(helperGrant).toContain(
+        "runtime role has forbidden owner-internal helper session_usage_limit_event_amount(jsonb)",
+      );
       // Re-provisioning converges the drift away.
       await provisionRoles(owner.adminUrl, {
         appRole: "opengeni_app",
