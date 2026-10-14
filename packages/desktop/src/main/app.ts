@@ -41,7 +41,7 @@ import { computerName } from "./computer-name";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
 import { ThisComputer } from "./this-computer";
 import { AppTray } from "./tray";
-import { startUpdates } from "./updates";
+import { AppUpdates } from "./updates";
 import { MainWindow, openExternalSafely } from "./window";
 
 type SdkModule = typeof import("@opengeni/sdk");
@@ -93,6 +93,7 @@ export class DesktopShell {
   private readonly computer: ThisComputer;
   private readonly inbox: InboxNotifier;
   private tray: AppTray | null = null;
+  private updates: AppUpdates | null = null;
   private quitting = false;
   private readonly lastPaths = new Map<string, string>();
   private readonly redirectUri: string;
@@ -196,11 +197,18 @@ export class DesktopShell {
     });
     // Everything below waits until the window is up.
     setTimeout(() => {
+      if (this.config.updates && app.isPackaged) {
+        this.updates = new AppUpdates(
+          this.config.productName,
+          this.config.updates,
+          app.getVersion(),
+          () => Menu.setApplicationMenu(this.menu()),
+        );
+        this.updates.start();
+      }
       Menu.setApplicationMenu(this.menu());
       this.inbox.start();
       void this.refreshTray();
-      if (this.config.updates && app.isPackaged)
-        startUpdates(this.config.productName, this.config.updates);
     }, 0);
   }
 
@@ -665,6 +673,9 @@ export class DesktopShell {
               if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.command, command);
             }
           : null,
+      updates: this.updates
+        ? { state: this.updates.menuState, run: () => this.updates?.menuAction() }
+        : null,
       contents: () => {
         const id = this.window?.accountId;
         return id

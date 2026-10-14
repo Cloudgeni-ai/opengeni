@@ -1,6 +1,7 @@
 import { app, Menu, type MenuItemConstructorOptions, type WebContents } from "electron";
 
 import type { DesktopCommand } from "../contract";
+import type { UpdateMenuState } from "./updates";
 
 export interface MenuModel {
   productName: string;
@@ -11,8 +12,27 @@ export interface MenuModel {
   openSettings: (() => void) | null;
   /** Ask the signed-in page to carry out a command; null while no account shows. */
   command: ((command: DesktopCommand) => void) | null;
+  /** App updates; null when this build doesn't update itself. */
+  updates: { state: UpdateMenuState; run(): void } | null;
   /** The page the window shows now, for navigation and reload. */
   contents(): WebContents | null;
+}
+
+/** The update item reads like the Mac convention: check, progress, then restart. */
+export function updateMenuItem(
+  updates: NonNullable<MenuModel["updates"]>,
+): MenuItemConstructorOptions {
+  const { state } = updates;
+  switch (state.kind) {
+    case "checking":
+      return { label: "Checking for Updates…", enabled: false };
+    case "downloading":
+      return { label: `Downloading ${state.version}…`, enabled: false };
+    case "ready":
+      return { label: `Restart to Update to ${state.version}`, click: () => updates.run() };
+    case "idle":
+      return { label: "Check for Updates…", click: () => updates.run() };
+  }
 }
 
 /**
@@ -21,7 +41,12 @@ export interface MenuModel {
  * settings on the web.
  */
 export function buildApplicationMenu(model: MenuModel): Menu {
+  return Menu.buildFromTemplate(applicationMenuTemplate(model));
+}
+
+export function applicationMenuTemplate(model: MenuModel): MenuItemConstructorOptions[] {
   const mac = process.platform === "darwin";
+  const update = model.updates ? [updateMenuItem(model.updates)] : [];
   const withContents = (action: (contents: WebContents) => void) => () => {
     const contents = model.contents();
     if (contents && !contents.isDestroyed()) action(contents);
@@ -68,6 +93,7 @@ export function buildApplicationMenu(model: MenuModel): Menu {
             label: model.productName,
             submenu: [
               { role: "about" as const },
+              ...update,
               { type: "separator" as const },
               settings,
               { type: "separator" as const },
@@ -147,12 +173,13 @@ export function buildApplicationMenu(model: MenuModel): Menu {
           accelerator: "CmdOrCtrl+-",
           click: withContents((contents) => contents.setZoomLevel(contents.getZoomLevel() - 0.5)),
         },
-        { type: "separator" },
-        { role: "togglefullscreen" },
+        // macOS adds its own Enter Full Screen item to the View menu.
+        ...(mac ? [] : [{ type: "separator" as const }, { role: "togglefullscreen" as const }]),
       ],
     },
     { label: "Account", submenu: accounts },
     { role: "windowMenu" },
+    ...(!mac && update.length > 0 ? [{ label: "&Help", submenu: update }] : []),
   ];
-  return Menu.buildFromTemplate(template);
+  return template;
 }
