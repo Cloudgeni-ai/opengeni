@@ -28,6 +28,7 @@ import {
   registerAnalyticsConsentRoutes,
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
+import { siteClampedAgentGuard } from "./site-agent-guard";
 import { siteFrameGuard } from "./site-frame-guard";
 import { SiteDataUnsupportedError } from "@opengeni/contracts/site-session-http";
 import {
@@ -1700,6 +1701,10 @@ export function createAppComposition(deps: AppDependencies): {
   // Requests a host forwarded from a Site frame: SITE_OPERATIONS only, only
   // the frame's own sessions, and the validated Site origin as provenance.
   app.use("/v1/workspaces/:workspaceId/*", siteFrameGuard(routeDeps));
+  // Agents started from a Site page do not learn or widen access: no writes
+  // to instructions, Skills, Knowledge, credentials, members, connections
+  // or settings.
+  app.use("/v1/workspaces/:workspaceId/*", siteClampedAgentGuard(routeDeps));
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");

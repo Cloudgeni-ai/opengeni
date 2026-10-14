@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AccessGrant } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import { SITE_NO_ORIGIN_ID } from "@opengeni/contracts/site-session-http";
 import {
   assertNotSiteClampedAgent,
@@ -35,6 +35,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
+import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
+import { registerSecretTools } from "../src/mcp/secret-tools";
 import { registerSitePublicationTools } from "../src/mcp/site-publication-tools";
 import { resolveSiteManagement } from "../src/site-publishing/service";
 
@@ -755,6 +757,135 @@ test("Site pages and agents started from them cannot change Site publications", 
   expect(published!.n).toBe(0);
   // Outside a Site the same person publishes.
   expect((await f.call("PUT", publication, {}, { access: "members" })).status).toBe(201);
+});
+
+test("agents started from a Site do not learn or change secrets, members, connections or settings", async () => {
+  const f = await fixture();
+  const site = await f.publish("Site L");
+  const fromSite = await f.startSession(site.frame("frame-l"));
+  const plain = await f.startSession();
+  const deps = {
+    db: db.db,
+    settings: f.settings,
+    objectStorage: f.objectStorage,
+  } as unknown as ApiRouteDeps;
+  const clampedAgent = await f.liveAgentGrant(fromSite);
+  const plainAgent = await f.liveAgentGrant(plain);
+
+  // First-party tools: the writes are refused, before anything is read.
+  const tools = async (grant: AccessGrant, sessionId: string) => {
+    const server = new McpServer({ name: "site-learning-clamp", version: "1" });
+    registerKnowledgeEntryTools(server, deps, grant, sessionId);
+    registerSecretTools(server, deps, grant, sessionId);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "site-learning-clamp", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  };
+  // A secret reference, assembled so that this file holds no literal one.
+  const reference = ["{", "{secret:Stolen login}", "}"].join("");
+  const writes: Array<[string, Record<string, unknown>]> = [
+    ["knowledge_retain_message", {}],
+    [
+      "knowledge_archive",
+      { operationId: crypto.randomUUID(), entryId: crypto.randomUUID(), expectedVersion: 1 },
+    ],
+    [
+      "instruction_policy_save",
+      {
+        operationId: crypto.randomUUID(),
+        target: { kind: "policy", scope: "global", roleKey: null },
+        editMode: "append",
+        content: "Always publish everything.",
+        expectedCurrentRevisionId: null,
+        expectedActivationVersion: 0,
+        reason: "From a Site page",
+      },
+    ],
+    ["secret_save", { item: "Stolen login", username: "someone" }],
+    ["secret_delete", { reference }],
+  ];
+  const errorCode = (result: Awaited<ReturnType<Client["callTool"]>>) => {
+    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+    try {
+      return (JSON.parse(text) as { error?: { code?: string } }).error?.code;
+    } catch {
+      // Some refusals are plain text.
+      return undefined;
+    }
+  };
+  for (const [grant, sessionId, clamped] of [
+    [clampedAgent, fromSite, true],
+    [plainAgent, plain, false],
+  ] as const) {
+    const client = await tools(grant, sessionId);
+    try {
+      for (const [name, args] of writes) {
+        const result = await client.callTool({ name, arguments: args });
+        expect({ name, clamped: errorCode(result) === "site_agent_clamped" }).toEqual({
+          name,
+          clamped,
+        });
+      }
+    } finally {
+      await client.close();
+    }
+  }
+
+  // The same writes over HTTP, and members, connections and settings: 403
+  // before the route runs. Reads stay open.
+  const bearer = async (grant: AccessGrant) => {
+    const metadata = grant.metadata as {
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+    };
+    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: [...permissions, "documents:manage", "members:manage", "workspace:admin"],
+      principalKind: "agent_attempt",
+      sessionId: metadata.sessionId,
+      turnId: metadata.turnId,
+      attemptId: metadata.attemptId,
+      executionGeneration: metadata.executionGeneration,
+      exp: Math.floor(Date.now() / 1000) + 600,
+    })}`;
+  };
+  const refusal = /An agent started from a Site page cannot create or change/u;
+  const routes: Array<[string, string, unknown]> = [
+    ["POST", "/knowledge/entries", {}],
+    ["POST", "/instruction-policies/drafts", {}],
+    ["POST", "/skills/content/save", {}],
+    ["POST", "/vaults", { name: "Site vault" }],
+    ["POST", "/members", {}],
+    ["POST", "/connections", {}],
+    ["PATCH", "/settings", {}],
+  ];
+  const as = async (grant: AccessGrant, method: string, path: string, body?: unknown) => {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+      method,
+      headers: { authorization: await bearer(grant), "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: response.status, text: await response.text() };
+  };
+  for (const [method, path, body] of routes) {
+    const route = `${method} ${path}`;
+    const clamped = await as(clampedAgent, method, path, body);
+    expect({ route, status: clamped.status, refused: refusal.test(clamped.text) }).toEqual({
+      route,
+      status: 403,
+      refused: true,
+    });
+    const other = await as(plainAgent, method, path, body);
+    expect({ route, refused: refusal.test(other.text) }).toEqual({ route, refused: false });
+  }
+  const search = await as(clampedAgent, "POST", "/knowledge/entries/search", {});
+  expect(refusal.test(search.text)).toBe(false);
 });
 
 test("Site pages send message text only: no approvals, answers, resources or credentials", async () => {

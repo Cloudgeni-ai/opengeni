@@ -79,7 +79,13 @@ project, visibility, usage limit, nesting). The session then runs on a minimal
 Site profile: no vault access and the workspace defaults for everything else.
 An agent started from a Site page is also clamped (`assertNotSiteClampedAgent`):
 it cannot create or change schedules, automations, Site publications,
-workspace instructions, Skills, Knowledge or secrets, so it does not learn.
+workspace instructions, Skills, Knowledge or secrets, so it does not learn,
+nor workspace members, connections, integrations or settings. The
+first-party tools refuse those writes (`knowledge_*` writes,
+`instruction_policy_save`, `secret_save`, `secret_move`, `secret_delete`,
+`skill_save`, `skill_install`, `skill_publish`, `skill_remove`), and the API
+refuses the same agent's writes to those workspace route families with 403
+(`apps/api/src/site-agent-guard.ts`). Reading stays open.
 Published Sites start their agents as `site:<siteId>` with the publication's
 own tools and limits instead (see `docs/site-runtime-api.md`).
 

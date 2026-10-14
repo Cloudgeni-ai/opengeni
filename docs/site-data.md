@@ -399,8 +399,10 @@ mode are added.
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
   principals; live updates.
-- Clamp indirect paths from Site HTML (schedules, automations and other
-  agents created with the viewer's authority), and record which Site sent
-  each Site turn.
+- Review new workspace route families and first-party tools for the Site
+  agent clamp as they are added. Agents started from a Site page already
+  cannot change schedules, automations, publications, instructions, Skills,
+  Knowledge, secrets, members, connections or settings (see
+  `docs/site-conversations.md`).
 - Stamp the Site origin onto child sessions at creation so the lineage check
   is one lookup instead of a bounded walk.

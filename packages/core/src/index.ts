@@ -171,8 +171,10 @@ export {
   assertNotSiteClampedAgent,
   siteAgentClamp,
   siteAgentMayReachSession,
+  siteClampedAgentMessage,
   siteSessionClamp,
   type SiteAgentClamp,
+  type SiteClampedResource,
 } from "./site-agent-clamp";
 export {
   currentHostSessionUsageLimit,
