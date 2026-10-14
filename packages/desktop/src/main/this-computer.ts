@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { ThisComputerConnectOptions, ThisComputerStatus } from "../contract";
@@ -13,6 +13,7 @@ import {
   type AgentConnection,
   type AgentPlatform,
 } from "./agent-cli";
+import { computerName } from "./computer-name";
 
 interface RunResult {
   code: number;
@@ -89,7 +90,7 @@ export class ThisComputer {
   }
 
   async status(baseUrl: string, workspaceId: string): Promise<ThisComputerStatus> {
-    const base = { busy: this.busy, error: this.error, machineName: hostname() };
+    const base = { busy: this.busy, error: this.error, machineName: await computerName() };
     if (!this.supported) return { ...base, state: "unavailable" };
     const snapshot = await this.snapshot();
     if (!snapshot.installed) return { ...base, state: "not_installed" };

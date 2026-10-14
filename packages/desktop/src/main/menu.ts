@@ -1,5 +1,7 @@
 import { app, Menu, type MenuItemConstructorOptions, type WebContents } from "electron";
 
+import type { DesktopCommand } from "../contract";
+
 export interface MenuModel {
   productName: string;
   accounts: Array<{ id: string; label: string; active: boolean }>;
@@ -7,17 +9,34 @@ export interface MenuModel {
   addAccount(): void;
   signOut: (() => void) | null;
   openSettings: (() => void) | null;
+  /** Ask the signed-in page to carry out a command; null while no account shows. */
+  command: ((command: DesktopCommand) => void) | null;
   /** The page the window shows now, for navigation and reload. */
   contents(): WebContents | null;
 }
 
-/** The menu bar: standard roles plus accounts, history and settings on the web. */
+/**
+ * The menu bar: standard roles, the everyday commands with their usual
+ * shortcuts (new session, search, sidebar, inbox), history, accounts and
+ * settings on the web.
+ */
 export function buildApplicationMenu(model: MenuModel): Menu {
   const mac = process.platform === "darwin";
   const withContents = (action: (contents: WebContents) => void) => () => {
     const contents = model.contents();
     if (contents && !contents.isDestroyed()) action(contents);
   };
+  const command = (
+    label: string,
+    name: DesktopCommand,
+    accelerator: string,
+  ): MenuItemConstructorOptions => ({
+    label,
+    accelerator,
+    enabled: Boolean(model.command),
+    click: () => model.command?.(name),
+  });
+  const newSession = command("New Session", "newSession", "CmdOrCtrl+N");
   const settings: MenuItemConstructorOptions = {
     label: "Settings…",
     accelerator: "CmdOrCtrl+,",
@@ -61,17 +80,32 @@ export function buildApplicationMenu(model: MenuModel): Menu {
               { role: "quit" as const },
             ],
           },
+          {
+            label: "File",
+            submenu: [newSession, { type: "separator" as const }, { role: "close" as const }],
+          },
         ]
       : [
           {
             label: "&File",
-            submenu: [settings, { type: "separator" as const }, { role: "quit" as const }],
+            submenu: [
+              newSession,
+              { type: "separator" as const },
+              settings,
+              { type: "separator" as const },
+              { role: "quit" as const },
+            ],
           },
         ]),
     { role: "editMenu" },
     {
       label: "View",
       submenu: [
+        command("Toggle Sidebar", "toggleSidebar", mac ? "Ctrl+Cmd+S" : "Ctrl+Shift+S"),
+        { type: "separator" },
+        command("Search Sessions…", "searchSessions", "CmdOrCtrl+K"),
+        command("Inbox", "openInbox", "CmdOrCtrl+Shift+I"),
+        { type: "separator" },
         {
           label: "Back",
           accelerator: mac ? "Cmd+[" : "Alt+Left",
@@ -93,7 +127,7 @@ export function buildApplicationMenu(model: MenuModel): Menu {
           : [
               {
                 label: "Developer Tools",
-                accelerator: mac ? "Alt+Cmd+I" : "Ctrl+Shift+I",
+                accelerator: mac ? "Alt+Cmd+I" : "F12",
                 click: withContents((contents) => contents.toggleDevTools()),
               },
             ]),

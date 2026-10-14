@@ -109,6 +109,9 @@ const useDockLayoutEffect = typeof window === "undefined" ? useEffect : useLayou
  */
 const DOCK_OVERLAY_BREAKPOINT = 1024;
 
+/** The panel group's layout while the dock is closed. */
+const CLOSED_LAYOUT: Layout = { primary: 100, dock: 0 };
+
 /** SSR-safe `(max-width: …)` match; false until mounted, then live. */
 function useIsNarrow(maxWidth: number): boolean {
   const [narrow, setNarrow] = useState(false);
@@ -161,6 +164,8 @@ export function WorkspaceDock({
   // dismiss it; standalone usage keeps the thin reopen rail as well.
   const hostControlled = collapsedProp !== undefined;
   const previousCollapsedRef = useRef(collapsed);
+  const collapsedNowRef = useRef(collapsed);
+  collapsedNowRef.current = collapsed;
 
   // Persisted layout (width split) keyed by autoSaveId.
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -170,6 +175,11 @@ export function WorkspaceDock({
   });
   const expandedDefaultLayout =
     defaultLayout && (defaultLayout.dock ?? 0) > 1 ? defaultLayout : undefined;
+  // A panel group reads its starting layout once, when it mounts (on first
+  // render, and again whenever the window widens out of the overlay). A
+  // closed dock starts closed, so it never shows its saved width for a frame
+  // or keeps it as an invisible column.
+  const mountLayout = collapsed ? CLOSED_LAYOUT : expandedDefaultLayout;
   const lastExpandedSizeRef = useRef(expandedDefaultLayout?.dock ?? defaultSize);
   const layoutIdentityRef = useRef(autoSaveId);
   if (layoutIdentityRef.current !== autoSaveId) {
@@ -219,6 +229,13 @@ export function WorkspaceDock({
       dockPanelRef.current?.resize(`${lastExpandedSizeRef.current}%`);
     }
   }, [collapsedProp, dockPanelRef]);
+
+  // Widening past the overlay breakpoint mounts a fresh panel group at its
+  // saved split. A closed dock must stay closed there, not hold its old width
+  // as an invisible column beside the chat.
+  useDockLayoutEffect(() => {
+    if (!narrow && collapsedNowRef.current) dockPanelRef.current?.collapse();
+  }, [narrow, dockPanelRef]);
 
   // Treat the narrow overlay like a real modal: remember the external opener,
   // move focus into the selected tab, and restore it on close. The standalone
@@ -453,7 +470,7 @@ export function WorkspaceDock({
       <Group
         orientation="horizontal"
         className="min-h-0 flex-1"
-        {...(expandedDefaultLayout ? { defaultLayout: expandedDefaultLayout } : {})}
+        {...(mountLayout ? { defaultLayout: mountLayout } : {})}
         onLayoutChanged={persistExpandedLayout}
       >
         <Panel id="primary" minSize="30%" className="min-h-0 min-w-0">
