@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import type { InboxItem, ListInboxResponse } from "@opengeni/sdk";
 
@@ -153,6 +153,15 @@ describe("agent command line", () => {
     expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
       "/home/user/.local/bin/opengeni-agent",
     ]);
+    expect(agentBinaryCandidates("win32", "C:\\Users\\user", {})).toEqual([
+      "C:\\Users\\user\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe",
+    ]);
+    expect(
+      agentBinaryCandidates("win32", "C:\\Users\\user", { LOCALAPPDATA: "D:\\Local" }),
+    ).toEqual(["D:\\Local\\Opengeni\\bin\\opengeni-agent.exe"]);
+    expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
+      "/home/user/.local/bin/opengeni-agent",
+    ]);
     expect(agentBinaryCandidates("win32", "C:/Users/user", { LOCALAPPDATA: "C:/L" })[0]).toContain(
       "opengeni-agent.exe",
     );
@@ -290,13 +299,15 @@ describe("inbox notifications", () => {
 
 describe("local pages", () => {
   test("serve only page files inside the pages directory", () => {
-    expect(localFile("/app/pages", localPageUrl("welcome.html"))).toBe("/app/pages/welcome.html");
-    expect(localFile("/app/pages", "app://local/welcome.css?x=1")).toBe("/app/pages/welcome.css");
-    expect(localFile("/app/pages", "app://local/../main.mjs")).toBeNull();
-    expect(localFile("/app/pages", "app://local/..%2Fsecrets.html")).toBeNull();
-    expect(localFile("/app/pages", "app://local/notes.txt")).toBeNull();
-    expect(localFile("/app/pages", "app://elsewhere/welcome.html")).toBeNull();
-    expect(localFile("/app/pages", "https://local/welcome.html")).toBeNull();
+    // The host platform's paths, as the app uses them.
+    const pages = join(sep, "app", "pages");
+    expect(localFile(pages, localPageUrl("welcome.html"))).toBe(join(pages, "welcome.html"));
+    expect(localFile(pages, "app://local/welcome.css?x=1")).toBe(join(pages, "welcome.css"));
+    expect(localFile(pages, "app://local/../main.mjs")).toBeNull();
+    expect(localFile(pages, "app://local/..%2Fsecrets.html")).toBeNull();
+    expect(localFile(pages, "app://local/notes.txt")).toBeNull();
+    expect(localFile(pages, "app://elsewhere/welcome.html")).toBeNull();
+    expect(localFile(pages, "https://local/welcome.html")).toBeNull();
   });
 });
 

@@ -1,6 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
 
+import { electronStub } from "./electron-stub";
+
 const calls: string[] = [];
 
 class FakeUpdater extends EventEmitter {
@@ -17,22 +19,10 @@ class FakeUpdater extends EventEmitter {
 }
 const autoUpdater = new FakeUpdater();
 
-class FakeNotification extends EventEmitter {
-  static isSupported() {
-    return false;
-  }
-}
-
-// Bun's module mocks are shared across test files: keep what menu.test needs too.
-mock.module("electron", () => ({
-  app: { isPackaged: true },
-  Menu: { buildFromTemplate: (template: unknown) => template },
-  dialog: { showMessageBox: async () => ({ response: 0 }) },
-  Notification: FakeNotification,
-}));
+mock.module("electron", () => electronStub);
 mock.module("electron-updater", () => ({ autoUpdater }));
 
-const { AppUpdates } = await import("../src/main/updates");
+const { AppUpdates, updateNeedsPassword } = await import("../src/main/updates");
 
 describe("app updates", () => {
   test("restarting into an update lets the shell quit first", async () => {
@@ -51,5 +41,24 @@ describe("app updates", () => {
 
     updates.menuAction();
     expect(calls).toEqual(["beforeRestart", "quitAndInstall"]);
+  });
+});
+
+describe("update installs", () => {
+  test("deb and rpm installs need a password; AppImage and other platforms don't", () => {
+    expect(updateNeedsPassword("linux", () => "deb\n")).toBe(true);
+    expect(updateNeedsPassword("linux", () => "rpm")).toBe(true);
+    expect(updateNeedsPassword("darwin", () => "deb")).toBe(false);
+    expect(
+      updateNeedsPassword("linux", () => {
+        throw new Error("no package-type file");
+      }),
+    ).toBe(false);
+    process.env.APPIMAGE = "/opt/Opengeni.AppImage";
+    try {
+      expect(updateNeedsPassword("linux", () => "deb")).toBe(false);
+    } finally {
+      delete process.env.APPIMAGE;
+    }
   });
 });

@@ -71,10 +71,18 @@ linux:
       arch: [x64, arm64]
     - target: rpm
       arch: [x64, arm64]
-  icon: resources/icon.png
+  icon: resources/linux-icons
   category: Development
   executableName: opengeni
   artifactName: Opengeni-${version}-linux-${arch}.${ext}
+  synopsis: Work with your agents from the desktop
+  description: Opengeni for Linux. Chat with agents, follow sessions and the inbox, and let agents use this computer.
+  # Debian packages need a maintainer; there is no maintainer mailbox.
+  maintainer: Opengeni
+  vendor: Opengeni
   desktop:
     entry:
+      Name: Opengeni
+      Comment: Work with your agents
       MimeType: x-scheme-handler/opengeni;
+      StartupWMClass: opengeni
