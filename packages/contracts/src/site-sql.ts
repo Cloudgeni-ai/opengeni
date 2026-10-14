@@ -593,6 +593,40 @@ export const SiteSqlRunRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteSqlRunRequest = z.infer<typeof SiteSqlRunRequest>;
 
+/** POST .../sql/query and .../sql/execute: one ad hoc statement from a manager. */
+export const SiteSqlStatementRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sql: z
+      .string()
+      .min(1)
+      .max(SITE_SQL_MAX_AGENT_LENGTH)
+      .describe("Exactly one SQLite statement; use :name parameters for values."),
+    params: SiteSqlParams.optional(),
+    maxRows: z
+      .number()
+      .int()
+      .min(1)
+      .max(SITE_SQL_HARD_LIMITS.maxRowsPerCall)
+      .optional()
+      .describe("Most rows to return (capped by the Site's limits)."),
+  }),
+);
+export type SiteSqlStatementRequest = z.infer<typeof SiteSqlStatementRequest>;
+
+/** POST .../sql/reset. */
+export const SiteSqlResetRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    confirm: z.literal(true).describe("Must be true."),
+    schema: z
+      .enum(["keep", "drop"])
+      .optional()
+      .describe(
+        "keep (default): delete every row and rebuild the tables from the migrations. drop: delete the database and forget every migration and named query.",
+      ),
+  }),
+);
+export type SiteSqlResetRequest = z.infer<typeof SiteSqlResetRequest>;
+
 export const SiteSqlMigrationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: SqlName.describe("A unique migration name, such as create_votes."),
@@ -735,6 +769,22 @@ export type SiteSqlDescribeResponse = {
   limits: SiteSqlLimits;
 };
 
+export type SiteSqlMigrateResponse = {
+  migration: SiteSqlMigrationResponse;
+  /** Migrations the database applied now (earlier ones it was missing, then this one). */
+  applied: string[];
+};
+
+export type SiteSqlImportResponse = {
+  /** Rows inserted (csv, json) or data statements run (sql). */
+  imported: number;
+  /** The migration a sql import recorded for its schema statements, if any. */
+  migration: string | null;
+  rowsWritten: number;
+};
+
+export type SiteSqlResetResponse = { applied: string[]; droppedSchema: boolean };
+
 // ---------------------------------------------------------------------------
 // API -> gateway internal protocol
 // ---------------------------------------------------------------------------
@@ -851,6 +901,12 @@ export type SiteDbInspectResponse = SiteDbMeter & {
   }>;
   indexes: SiteDbSchemaEntry[];
   migrations: Array<{ name: string; checksum: string; appliedAt: string }>;
+};
+
+/** GET .../sql/inspect: the database as the Durable Object sees it. */
+export type SiteSqlInspectResponse = Omit<SiteDbInspectResponse, "rowsRead" | "rowsWritten"> & {
+  /** Migrations Postgres has that the database has not applied (migrate or reset to apply). */
+  pendingMigrations: string[];
 };
 
 export type SiteDbErrorCode =

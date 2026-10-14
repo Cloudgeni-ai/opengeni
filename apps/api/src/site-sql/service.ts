@@ -15,10 +15,14 @@ import {
   type SiteSqlErrorCode,
   type SiteSqlExportFormat,
   type SiteSqlImportRequest,
+  type SiteSqlImportResponse,
+  type SiteSqlInspectResponse,
   type SiteSqlLimits,
+  type SiteSqlMigrateResponse,
   type SiteSqlMigrationResponse,
   type SiteSqlQueryDefinitionRequest,
   type SiteSqlQueryResponse,
+  type SiteSqlResetResponse,
   type SiteSqlRunResponse,
   type SiteSqlValue,
 } from "@opengeni/contracts";
@@ -542,7 +546,7 @@ export async function migrateSiteSql(
   authority: SiteSqlAuthority,
   siteId: string,
   request: { name: string; sql: string },
-): Promise<{ migration: SiteSqlMigrationResponse; applied: string[] }> {
+): Promise<SiteSqlMigrateResponse> {
   return guarded(async () => {
     const resolved = await resolve(deps, authority, siteId, { management: true });
     const gateway = requireGateway(resolved);
@@ -603,7 +607,7 @@ export async function resetSiteSql(
   authority: SiteSqlAuthority,
   siteId: string,
   request: { schema?: "keep" | "drop" | undefined },
-): Promise<{ applied: string[]; droppedSchema: boolean }> {
+): Promise<SiteSqlResetResponse> {
   return guarded(async () => {
     const resolved = await resolve(deps, authority, siteId, { management: true });
     const gateway = requireGateway(resolved);
@@ -650,13 +654,7 @@ export async function inspectSiteSql(
   deps: SiteSqlDeps,
   authority: SiteSqlAuthority,
   siteId: string,
-): Promise<
-  Omit<SiteDbInspectResponse, "rowsRead" | "rowsWritten" | "databaseBytes"> & {
-    databaseBytes: number;
-    /** Migrations Postgres has that the database has not applied (rebuild or migrate to apply). */
-    pendingMigrations: string[];
-  }
-> {
+): Promise<SiteSqlInspectResponse> {
   return guarded(async () => {
     const resolved = await resolve(deps, authority, siteId, { management: true });
     const gateway = requireGateway(resolved);
@@ -1028,7 +1026,7 @@ export async function importSiteSql(
   authority: SiteSqlAuthority,
   siteId: string,
   request: SiteSqlImportRequest,
-): Promise<{ imported: number; migration: string | null; rowsWritten: number }> {
+): Promise<SiteSqlImportResponse> {
   const resolved = await guarded(() => resolve(deps, authority, siteId, { management: true }));
   if (request.format === "sql") {
     const compiled = await guarded(async () => {

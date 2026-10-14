@@ -2,8 +2,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   SiteSqlExportFormat,
   SiteSqlImportRequest,
-  SiteSqlParams,
   SiteSqlQueryDefinitionRequest,
+  SiteSqlResetRequest,
+  SiteSqlStatementRequest,
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -31,11 +32,6 @@ const NameInput = z4
   .string()
   .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
   .describe("A letter, then letters, digits, - or _ (up to 64).");
-const StatementInput = z4
-  .string()
-  .min(1)
-  .max(64 * 1024)
-  .describe("Exactly one SQLite statement; use :name parameters for values.");
 
 /**
  * First-party Site SQL tools: optional per-Site Cloudflare storage (one SQLite
@@ -161,12 +157,7 @@ export function registerSiteSqlTools(
   );
 
   const statementInput = contractToolInput(
-    z4.object({
-      siteId: SiteIdInput,
-      sql: StatementInput,
-      params: SiteSqlParams.optional(),
-      maxRows: z4.number().int().min(1).max(5_000).optional().describe("Most rows to return."),
-    }),
+    z4.object({ siteId: SiteIdInput, ...SiteSqlStatementRequest.shape }),
   );
 
   server.registerTool(
@@ -286,11 +277,9 @@ export function registerSiteSqlTools(
     {
       description:
         'Empty a Site\'s database. schema "keep" (default) deletes every row and rebuilds the tables from the migrations; "drop" deletes the database and forgets every migration and named query. Export first if the data matters. Needs confirm: true.',
-      inputSchema: {
-        siteId: SiteIdInput,
-        schema: z4.enum(["keep", "drop"]).optional(),
-        confirm: z4.literal(true).describe("Must be true."),
-      },
+      inputSchema: contractToolInput(
+        z4.object({ siteId: SiteIdInput, ...SiteSqlResetRequest.shape }),
+      ),
     },
     call((args: { siteId: string; schema?: "keep" | "drop" | undefined; confirm: true }) =>
       resetSiteSql(deps, grant, args.siteId, { schema: args.schema }),

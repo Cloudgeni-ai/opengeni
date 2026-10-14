@@ -37,6 +37,22 @@ import type {
   SiteDataWriteResponse,
 } from "@opengeni/contracts";
 import type {
+  SiteSqlDescribeResponse,
+  SiteSqlExportFormat,
+  SiteSqlImportRequest,
+  SiteSqlImportResponse,
+  SiteSqlInspectResponse,
+  SiteSqlMigrateResponse,
+  SiteSqlMigrationRequest,
+  SiteSqlQueryDefinitionRequest,
+  SiteSqlQueryResponse,
+  SiteSqlResetResponse,
+  SiteSqlRunRequest,
+  SiteSqlRunResponse,
+  SiteSqlSettingsRequest,
+  SiteSqlStatementRequest,
+} from "@opengeni/contracts";
+import type {
   SiteAbuseReport,
   SiteAuthAuthorizeRequest,
   SiteAuthAuthorizeResponse,
@@ -8418,6 +8434,204 @@ export class OpenGeniClient {
       "DELETE",
       `${siteDataPath(workspaceId, siteId)}/files/${encodeURIComponent(fileId)}`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * A Site's SQL database (optional Cloudflare storage): availability, whether
+   * it is on, migrations, named queries, usage and limits. Needs a manager.
+   */
+  async getSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlDescribeResponse> {
+    return await this.requestJson<SiteSqlDescribeResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Turn a Site's SQL database on or off; turning it off keeps its data. */
+  async updateSiteSqlSettings(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlSettingsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlDescribeResponse> {
+    return await this.requestJson<SiteSqlDescribeResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/sql/settings`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Add a named schema migration to a Site's SQL database. */
+  async migrateSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlMigrationRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlMigrateResponse> {
+    return await this.requestJson<SiteSqlMigrateResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/migrations`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create or replace a named query Site pages run with site.sql.run. */
+  async defineSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteSqlQueryDefinitionRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlQueryResponse> {
+    return await this.requestJson<SiteSqlQueryResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  async deleteSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run a named query with the caller's access (its audience decides who may). */
+  async runSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteSqlRunRequest = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run one read-only statement on a Site's SQL database. Needs a manager. */
+  async querySiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlStatementRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/query`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run one data-changing statement on a Site's SQL database. Needs a manager. */
+  async executeSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlStatementRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/execute`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Tables, columns, row counts and applied migrations of a Site's SQL database. */
+  async inspectSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlInspectResponse> {
+    return await this.requestJson<SiteSqlInspectResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql/inspect`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Export a Site's SQL database as SQL, CSV (one table) or JSON (bounded; check `truncated`). */
+  async exportSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: { format?: SiteSqlExportFormat; table?: string; signal?: AbortSignal } = {},
+  ): Promise<{ content: string; contentType: string; truncated: boolean }> {
+    const format = options.format ?? "sql";
+    const response = await this.requestResponse(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql/export`,
+      { format, ...(options.table ? { table: options.table } : {}) },
+      { ...options, accept: format === "json" ? "application/json" : "*/*" },
+    );
+    return {
+      content: await response.text(),
+      contentType: response.headers.get("content-type") ?? "",
+      truncated: response.headers.get("x-opengeni-export-truncated") === "true",
+    };
+  }
+
+  /** Import SQL statements, CSV or JSON rows into a Site's SQL database. */
+  async importSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlImportRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlImportResponse> {
+    return await this.requestJson<SiteSqlImportResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/import`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Empty a Site's SQL database, keeping (rebuilding) or dropping its schema. */
+  async resetSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: { schema?: "keep" | "drop" } = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlResetResponse> {
+    return await this.requestJson<SiteSqlResetResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/reset`,
+      { confirm: true, ...request },
       undefined,
       options,
     );

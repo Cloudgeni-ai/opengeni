@@ -4,7 +4,8 @@ import {
   SiteSqlExportFormat,
   SiteSqlImportRequest,
   SiteSqlMigrationRequest,
-  SiteSqlParams,
+  SiteSqlResetRequest,
+  SiteSqlStatementRequest,
   SiteSqlQueryDefinitionRequest,
   SiteSqlRunRequest,
   SiteSqlSettingsRequest,
@@ -102,19 +103,6 @@ function refuseFramed(context: Context, what: string): void {
     throw siteSqlHttpError(new SiteSqlError("forbidden", `A Site cannot ${what}`));
 }
 
-const StatementRequest = z.object({
-  sql: z
-    .string()
-    .min(1)
-    .max(64 * 1024),
-  params: SiteSqlParams.optional(),
-  maxRows: z.number().int().min(1).max(5_000).optional(),
-});
-const ResetRequest = z.object({
-  confirm: z.literal(true),
-  schema: z.enum(["keep", "drop"]).optional(),
-});
-
 /**
  * Site SQL routes. Running a named query needs Site access (`artifacts:read`
  * and the viewer's audience); the query's audience decides the rest. Everything
@@ -189,7 +177,7 @@ export function registerSiteSqlRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post(`${base}/query`, async (context) => {
     const grant = await grantFor(context, "artifacts:read");
-    const request = await siteSqlBody(context, StatementRequest);
+    const request = await siteSqlBody(context, SiteSqlStatementRequest);
     refuseFramed(context, "run ad hoc SQL");
     return context.json(
       await runSiteSqlRoute(() =>
@@ -200,7 +188,7 @@ export function registerSiteSqlRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post(`${base}/execute`, async (context) => {
     const grant = await grantFor(context, "artifacts:publish");
-    const request = await siteSqlBody(context, StatementRequest);
+    const request = await siteSqlBody(context, SiteSqlStatementRequest);
     refuseFramed(context, "run ad hoc SQL");
     return context.json(
       await runSiteSqlRoute(() =>
@@ -249,7 +237,7 @@ export function registerSiteSqlRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post(`${base}/reset`, async (context) => {
     const grant = await grantFor(context, "artifacts:publish");
-    const request = await siteSqlBody(context, ResetRequest);
+    const request = await siteSqlBody(context, SiteSqlResetRequest);
     refuseFramed(context, "reset its database");
     return context.json(
       await runSiteSqlRoute(() => resetSiteSql(deps, grant, siteId(context), request)),
