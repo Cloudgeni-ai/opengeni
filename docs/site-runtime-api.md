@@ -8,9 +8,9 @@ three kinds of caller:
 - **Management** (`/v1/workspaces/:workspaceId/...`): workspace credentials,
   used by the console, the SDK and the agent tools.
 - **Viewer sign-in** (`POST /v1/site-auth/authorize`): an ordinary signed-in
-  OpenGeni user, called by the console's authorize page.
+  Opengeni user, called by the console's authorize page.
 - **Site runtime** (`/v1/site-runtime/*`): only the Site gateway, with HMAC
-  signatures. It refuses OpenGeni credentials.
+  signatures. It refuses Opengeni credentials.
 
 Every route returns `404 sites_publishing_disabled` when
 `OPENGENI_SITES_DOMAIN` is unset. The site-runtime routes do the same when
@@ -30,7 +30,7 @@ forceNoindex }`. It is `null` when `OPENGENI_SITES_DOMAIN` is unset.
 | `OPENGENI_SITES_GATEWAY_SECRET_PREVIOUS` | unset | Also accepted during rotation |
 | `OPENGENI_SITES_PUBLIC_ENABLED` | `true` | Allows `public` access |
 | `OPENGENI_SITES_PUBLIC_AGENTS_ENABLED` | `true` | Allows agents for signed-out guests |
-| `OPENGENI_SITES_LOGIN_ONLY` | `false` | `public` means any signed-in OpenGeni user, and there are no guests |
+| `OPENGENI_SITES_LOGIN_ONLY` | `false` | `public` means any signed-in Opengeni user, and there are no guests |
 | `OPENGENI_SITES_FORCE_NOINDEX` | `false` | Forces `noindex` on every Site |
 | `OPENGENI_SITES_ABUSE_EMAIL` | unset | Abuse contact shown in `SiteRuntimeConfig` and takedown pages |
 | `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` | `false` | A guest agent start needs the gateway's human header |
@@ -104,7 +104,7 @@ Takedown:
 - The owner or a workspace admin can restore their own takedown.
 - Only the operator script can lift a platform takedown:
   `bun scripts/operator/site-takedown.ts --host <label> --operator <name> --reason "..."`
-  takes a Site down, and adding `--restore` lifts it. OpenGeni has no
+  takes a Site down, and adding `--restore` lifts it. Opengeni has no
   platform-admin API.
 
 Agent tools: `site_publication_get`, `site_publication_update` and

@@ -4,7 +4,7 @@
  * Thin by design (docs/design/published-sites-2026-10-14.md, Decision 5):
  * host lookup, cookies, sign-in redirects, signing and forwarding to the
  * site-runtime API, caching immutable Site HTML, and security headers. All
- * authorization stays in the OpenGeni API.
+ * authorization stays in the Opengeni API.
  */
 import {
   SITE_GATEWAY_API_PREFIX,

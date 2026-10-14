@@ -8,7 +8,7 @@ import type { Settings } from "@opengeni/config";
 import type { StoredSiteLimitProfile } from "@opengeni/db";
 
 /**
- * Limit profiles for published Sites. OpenGeni enforces these values (the
+ * Limit profiles for published Sites. Opengeni enforces these values (the
  * edge only brakes floods). Effective limits come from the Site's own profile,
  * else the workspace default, else the free profile from settings; every
  * profile keeps the flood brakes, and deployment switches (public agents)

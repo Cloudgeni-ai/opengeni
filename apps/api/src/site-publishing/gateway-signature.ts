@@ -41,7 +41,7 @@ export type SiteGatewayVerification =
         | "credentials";
     };
 
-/** Request headers that carry OpenGeni app credentials; site-runtime refuses them. */
+/** Request headers that carry Opengeni app credentials; site-runtime refuses them. */
 export const SITE_RUNTIME_REFUSED_HEADERS: readonly string[] = Object.freeze([
   "authorization",
   "proxy-authorization",

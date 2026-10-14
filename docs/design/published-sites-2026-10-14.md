@@ -12,7 +12,7 @@
 
 ## Purpose
 
-A workspace Site today is visible only inside the OpenGeni console, to
+A workspace Site today is visible only inside the Opengeni console, to
 members of its workspace, in a sandboxed opaque-origin iframe. This design
 lets the owner publish the same Site on its own hostname under a Sites
 domain (`<name>.opengeni.site` in production, a separate staging domain on
@@ -38,7 +38,7 @@ URL-prefix boundary rather than an operation allowlist.
    Default labels are a slug plus a random suffix (`team-dashboard-4k9x`). A
    released label stays held for its workspace for 30 days.
 3. **Three access modes.** `members`, `invited` (members plus invited email
-   addresses who sign in to OpenGeni) and `public`. Public publishing and
+   addresses who sign in to Opengeni) and `public`. Public publishing and
    embedded agents on public Sites are on by default and controlled by limit
    profiles and deployment settings. A Site must be visible to its workspace
    (not "Only me") to be published.
@@ -47,17 +47,17 @@ URL-prefix boundary rather than an operation allowlist.
    gateway-signed `__Host-og_v` HttpOnly cookie. Guests are not workspace
    members, external actors or users; they exist only inside site-runtime.
 5. **One gateway Worker.** `apps/site-gateway` is a single Cloudflare Worker
-   on `*.<sites domain>`. It serves an OpenGeni shell page that embeds the
+   on `*.<sites domain>`. It serves an Opengeni shell page that embeds the
    unchanged Site HTML in a sandboxed opaque-origin iframe and runs the
    existing MessagePort bridge host. The Worker is thin: host lookup, cookies,
    sign-in redirects, signing and forwarding, caching immutable HTML, and
-   security headers. All authorization stays in the OpenGeni API.
+   security headers. All authorization stays in the Opengeni API.
 6. **Narrow site-runtime API.** Site calls go same-origin to `/_og/api/*` on
    the Site host; the gateway signs and forwards them to `/v1/site-runtime/*`
    on the configurable API origin. Site-runtime serves only the Site
    operation allowlist (`SITE_OPERATIONS`), the tool bridge methods, viewer
-   sign-in exchange, host lookup and version HTML. It never accepts OpenGeni
-   app credentials, and no OpenGeni credential ever reaches a Site origin.
+   sign-in exchange, host lookup and version HTML. It never accepts Opengeni
+   app credentials, and no Opengeni credential ever reaches a Site origin.
 7. **Sign-in by redirect.** The gateway redirects to the app's
    `/site-auth/authorize` with state and a PKCE challenge kept in a
    `__Host-og_login` cookie. The signed-in app mints a one-time code bound to
@@ -80,7 +80,7 @@ URL-prefix boundary rather than an operation allowlist.
    database (PR B) is the one Cloudflare-resident store, and it always has
    export and import.
 10. **Limits and billing.** Cloudflare cannot cap spend, so the edge only
-    brakes (rate-limit binding, WAF rule, Worker CPU limit) and OpenGeni
+    brakes (rate-limit binding, WAF rule, Worker CPU limit) and Opengeni
     enforces limit profiles stored in Postgres: `free` (strict defaults),
     `credits`, `unlimited` (still keeps flood brakes and per-conversation
     caps) and `custom`, per workspace and per Site. Embedded agent spend is

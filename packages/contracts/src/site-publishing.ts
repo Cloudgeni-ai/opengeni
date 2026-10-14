@@ -235,7 +235,7 @@ export function parseSiteHostname(host: string, sitesDomain: string): string | n
  * - members: signed-in members of the Site's workspace.
  * - invited: members plus people invited by email (they sign in to OpenGeni).
  * - public: anyone; anonymous visitors use a guest principal. On deployments
- *   configured login-only (staging), public means any signed-in OpenGeni user.
+ *   configured login-only (staging), public means any signed-in Opengeni user.
  */
 export const SiteAccessMode = /* @__PURE__ */ defineSchema(() =>
   z.enum(["members", "invited", "public"]),
@@ -256,7 +256,7 @@ export const SiteLimitProfileKind = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["free", "credits", "unlimited", "custom"])
     .describe(
-      "free: strict platform defaults. credits: larger defaults paid from organization credits. unlimited: no OpenGeni budget caps (flood brakes and per-conversation caps still apply). custom: explicit values.",
+      "free: strict platform defaults. credits: larger defaults paid from organization credits. unlimited: no Opengeni budget caps (flood brakes and per-conversation caps still apply). custom: explicit values.",
     ),
 );
 export type SiteLimitProfileKind = z.infer<typeof SiteLimitProfileKind>;
@@ -267,7 +267,7 @@ const NullableLimit = (description: string) =>
 /**
  * Effective limits for a published Site. Money is in micro-USD
  * (1_000_000 = $1). Cloudflare cannot cap spend, so the edge applies only
- * flood brakes; OpenGeni enforces these values.
+ * flood brakes; Opengeni enforces these values.
  */
 export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -438,7 +438,7 @@ export type SiteAbuseReport = z.infer<typeof SiteAbuseReport>;
 /**
  * The viewer as a Site sees it (`site.viewer`). Guests have no name or
  * email. `id` is stable per Site and is the Site Data owner principal
- * (`user:<subject>` or `guest:<visitor>`); it is not an OpenGeni subject id
+ * (`user:<subject>` or `guest:<visitor>`); it is not an Opengeni subject id
  * usable anywhere else.
  */
 export const SiteViewer = /* @__PURE__ */ defineSchema(() =>

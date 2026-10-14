@@ -2,7 +2,7 @@
   "name": "@opengeni/site-gateway",
   "version": "0.1.0",
   "private": true,
-  "description": "Cloudflare Worker that serves published OpenGeni Sites on their own hostnames.",
+  "description": "Cloudflare Worker that serves published Opengeni Sites on their own hostnames.",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {

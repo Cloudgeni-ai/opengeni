@@ -93,7 +93,7 @@ import { siteDataHttpError } from "./site-data";
  * `/v1/site-runtime/*`: the API a Site gateway calls for one published Site
  * host. Nothing else may call it: every request must carry a fresh gateway
  * signature over its method, host, path, body and viewer headers, and must
- * not carry OpenGeni credentials. The signature is checked before anything
+ * not carry Opengeni credentials. The signature is checked before anything
  * else; then the host names exactly one Site, the viewer is resolved for it,
  * and only the operations in `SITE_OPERATIONS` (plus the gateway's own host,
  * version, sign-in and report calls) are served.
@@ -443,7 +443,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   /**
    * Workspace tools from a published Site. The tool gateway runs only for a
-   * person present in OpenGeni (a canonical human session); a site-session is
+   * person present in Opengeni (a canonical human session); a site-session is
    * not one, so published Sites cannot call tools yet. Refused after the
    * signature, host and viewer checks so the gateway sees a stable error.
    */
