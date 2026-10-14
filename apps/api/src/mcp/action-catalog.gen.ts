@@ -483,6 +483,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "changeMachineAudience",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience",
+    "request": [
+      "ChangeMachineAudienceRequest"
+    ],
+    "response": [
+      "ChangeMachineAudienceResponse"
+    ]
+  },
+  {
     "id": "changePreferenceRegistryScope",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/preferences/:preferenceId/scope",
@@ -5616,6 +5627,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ApiIntegrationUninstallPreview"
+    ]
+  },
+  {
+    "id": "previewMachineAudience",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview",
+    "request": [
+      "MachineAudiencePreviewRequest"
+    ],
+    "response": [
+      "MachineAudiencePreview"
     ]
   },
   {

@@ -48,11 +48,6 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
-  {
-    pattern: /^\/v1\/workspaces\/:workspaceId\/machines\/:enrollmentId\/audience(\/preview)?$/,
-    reason:
-      "who can use a connected machine is decided by a person on the Machines page or through the API; agents are refused",
-  },
 ];
 
 export function isActionCatalogExempt(path: string): boolean {
