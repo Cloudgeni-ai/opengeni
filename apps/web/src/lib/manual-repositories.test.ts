@@ -140,4 +140,28 @@ describe("manual repository attachment", () => {
       expect.objectContaining({ attached: true, expectedCommitSha: undefined }),
     );
   });
+
+  test("an edited restored row never keeps its retained GitHub identity", async () => {
+    const attach = mock((_repository: unknown) => {});
+    await attachManualRepository({
+      repository: {
+        id: 1,
+        url: "https://git.example.com/acme/app.git",
+        ref: "main",
+        attached: false,
+        github: { repositoryId: 1, installationId: 2 },
+      },
+      workspaceRepositories: [workspaceRepository],
+      personalRepositories: [],
+      selectWorkspaceRepository: () => {},
+      selectPersonalRepository: () => {},
+      verifyPublicGitHubRepository: async () => {
+        throw new Error("not used");
+      },
+      attach,
+      remove: () => {},
+    });
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(attach.mock.calls[0]![0]).not.toHaveProperty("github");
+  });
 });
