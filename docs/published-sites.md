@@ -185,6 +185,9 @@ gateway falls back to the API for host lookups.
 | `OPENGENI_SITES_FREE_*`                                    | see above           | Free profile defaults                                |
 | `OPENGENI_SITES_HOSTNAME_HOLD_DAYS`                        | `30`                | How long a released name stays held                  |
 | `OPENGENI_SITES_CLOUDFLARE_*`                              | unset               | Optional edge sync (KV host map, cache purge)        |
+| `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`                | `false`             | Offer Site SQL (per-Site Durable Object databases)   |
+| `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN`                   | unset               | Gateway origin the API calls for Site SQL            |
+| `OPENGENI_SITES_SQL_*`                                     | see Site SQL        | Site SQL limits                                      |
 | `OPENGENI_SITES_WEB_RISK_API_KEY`                          | unset               | Optional content scanner                             |
 
 The gateway Worker is configured with Wrangler: `SITES_DOMAIN`,

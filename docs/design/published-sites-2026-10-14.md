@@ -210,12 +210,16 @@ edge sync: `SITES_CLOUDFLARE_API_TOKEN`, `SITES_CLOUDFLARE_ACCOUNT_ID`,
 `SITES_CLOUDFLARE_KV_NAMESPACE_ID`, `SITES_CLOUDFLARE_ZONE_ID`, plus
 `SITES_WEB_RISK_API_KEY`. The app origin comes from the existing
 `OPENGENI_WEB_BASE_URL`/`OPENGENI_PUBLIC_BASE_URL`.
+PR B adds `SITES_CLOUDFLARE_STORAGE_ENABLED` (default false),
+`SITES_GATEWAY_INTERNAL_ORIGIN` and the `SITES_SQL_*` limits.
 
 Gateway (Wrangler vars and secrets): `SITES_DOMAIN`, `API_ORIGIN`,
 `APP_ORIGIN`, `GATEWAY_SECRET`, `ENVIRONMENT`, `FORCE_NOINDEX`,
 `LOGIN_ONLY`, `ABUSE_EMAIL`, optional `TURNSTILE_SITE_KEY` and
-`TURNSTILE_SECRET`; bindings `HOST_MAP` (KV) and `RATE_LIMITER`
-(rate-limit binding), and in PR B `SITE_DB` (Durable Object namespace).
+`TURNSTILE_SECRET` (and in PR B `GATEWAY_SECRET_PREVIOUS`); bindings
+`HOST_MAP` (KV) and `RATE_LIMITER` (rate-limit binding), and in PR B
+`SITE_DB` (Durable Object namespace, class `SiteDatabase`, migration tag
+`v1` with `new_sqlite_classes`).
 
 ## PR B: optional Cloudflare storage
 
