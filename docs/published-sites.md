@@ -207,7 +207,10 @@ Risk) checks new versions when a key is configured.
 
 Publishing is off until `OPENGENI_SITES_DOMAIN` is set; the console then
 hides the Publish button. Staging uses its own registrable domain (never a
-subdomain of production) and forces sign-in and noindex. Nothing in the API
+subdomain of production) and forces sign-in and noindex. The Sites domain
+must be a registrable domain of its own: Opengeni refuses to start when
+`OPENGENI_PUBLIC_BASE_URL` or `OPENGENI_WEB_BASE_URL` is on the Sites domain,
+under it, or holds it. Nothing in the API
 depends on Cloudflare: edge sync is a no-op without its settings and the
 gateway falls back to the API for host lookups.
 
