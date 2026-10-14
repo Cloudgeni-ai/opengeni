@@ -581,7 +581,7 @@ export async function migrateSiteSql(
         const existing = await listSiteSqlMigrations(tx, resolved.scope);
         if (existing.some((entry) => entry.name === request.name))
           throw new SiteSqlError("conflict", `A migration named ${request.name} already exists`);
-        const response = await callSiteDb<SiteDbMigrateResponse>(
+        const applied = await callSiteDb<SiteDbMigrateResponse>(
           gateway,
           siteId,
           "migrate",
@@ -594,13 +594,13 @@ export async function migrateSiteSql(
           },
           siteSqlTransport.fetch,
         );
-        const migration = await appendSiteSqlMigration(
+        const appended = await appendSiteSqlMigration(
           tx,
           resolved.scope,
           { name: request.name, sql: request.sql, checksum },
           actor,
         );
-        return { migration, response };
+        return { migration: appended, response: applied };
       },
     );
     await meter(deps, resolved, response);
