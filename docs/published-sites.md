@@ -111,17 +111,38 @@ cookies loses them. Guest writes have their own rate limit.
 
 When the embedded agent is on, visitors can start conversations with it from
 the Site. Each conversation runs as the Site's own service principal with
-narrow permissions, the publication's model, instructions and tools, and a
-per-conversation spend cap. A visitor can list, read and continue only their
-own conversations on that Site. Agents started from a Site can't create or
-change schedules or automations. Public Sites can let guests chat too; the
-limit profile and the deployment decide.
+narrow permissions, the publication's model and instructions, and a
+per-conversation spend cap that is in place before the first model call. A
+visitor can list, read and continue only their own conversations on that
+Site, and sees a Site-safe view of them (no workspace ids, instructions,
+tools or metadata). Agents started from a Site can't create or change
+schedules, automations or Site publications, and can't read other sessions.
+Public Sites can let guests chat too; the limit profile and the deployment
+decide. Guest agents can optionally require a human check
+(`OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` with the gateway's Turnstile
+keys); it is off by default but recommended for public Sites with guest
+agents.
+
+Workspace tools (MCP connections) act with the workspace's shared
+connections for whoever is viewing, so only a workspace admin can give them
+to a Site's agent. Signed-in viewers get them; guests get them only when an
+admin also turns on **guest tools** (`agent.guestTools`). A connection the
+workspace doesn't have is skipped rather than failing the conversation.
+Unpublishing, taking down, or narrowing a Site's access signs its viewers out
+and cancels its running conversations; turning the agent off cancels the
+conversations only.
 
 ## Limits and billing
 
 The organization pays for everything a published Site does, metered into the
 credit ledger like Site Data. The edge only brakes floods; Opengeni enforces
-the limit profile before every conversation and message.
+the limit profile before every conversation and message. Each new
+conversation reserves its whole spend cap against the visitor's day and the
+Site's day and month in one transaction, so visitors who keep changing
+their visitor id or address can't spend past the Site's budget; unused
+reservations are released as conversations finish. Guests are also rate
+limited per client address (four visitors' worth), so new visitor ids
+don't reset their limits.
 
 | Profile     | What it means                                                              |
 | ----------- | -------------------------------------------------------------------------- |
@@ -132,25 +153,43 @@ the limit profile before every conversation and message.
 
 Free defaults (`DEFAULT_FREE_SITE_LIMITS`): 120 requests per visitor per
 minute, 30 guest data writes per minute, 10 conversations per visitor per
-day, 20 messages per conversation, and agent spend of $0.02 per
-conversation, $0.20 per visitor per day and $2.00 per Site per month. Even
-unlimited keeps 600 requests per visitor per minute and $5.00 per
-conversation. Workspace admins set the default profile for new
+day, 50 conversations per Site per day, 20 messages per conversation, and
+agent spend of $0.02 per conversation, $0.20 per visitor per day and $2.00
+per Site per month. Even unlimited keeps 600 requests per visitor per
+minute, 10,000 conversations per Site per day and $5.00 per conversation. Workspace admins set the default profile for new
 publications; each Site can override it. The Publish page shows this
 month's agent spend against the monthly budget.
 
 ## Reports and takedown
 
 Every published Site shows a small **Report** link. Reports go to the Site's
-managers (the **Reports** section on the Publish page) and to the abuse
-contact, `abuse@<sites domain>` by default. Managers mark reports handled or
-dismiss them.
+managers (the **Reports** section on the Publish page), who mark them handled
+or dismiss them. Reports are rate limited per reporter, per client address
+and per Site.
+
+Reports and flagged content scans also reach the deployment operator:
+
+- every one writes a structured `site_abuse_notice` log line;
+- when `OPENGENI_SITES_ABUSE_EMAIL` is set and the deployment has managed
+  email configured, that address gets an email (at most one per Site per
+  hour);
+- `bun scripts/operator/site-moderation-queue.ts` lists open reports and
+  flagged scans across all workspaces (it needs the migrations credential).
+
+The abuse contact shown to visitors is `OPENGENI_SITES_ABUSE_EMAIL`, or
+`abuse@<sites domain>` when unset.
 
 The owner or a workspace admin can **take down** a Site at once with a
-reason: visitors see a takedown notice, the edge cache is purged and an
-audit event is recorded. **Restore** brings it back. Platform admins can
-take any Site down; only they can restore those. An optional content
-scanner (Google Web Risk) checks new versions when a key is configured.
+reason: the API stops serving it immediately, its viewers are signed out,
+its running conversations are cancelled, the edge cache is purged and an
+audit event is recorded. **Restore** brings it back; only a workspace admin
+restores an admin's takedown. While a Site is taken down its hostname can't
+be changed. The operator takes any Site down with
+`bun scripts/operator/site-takedown.ts` (by hostname, label or `--site-id`);
+only the operator restores those, and the hostname stays held for the
+platform even if the Site or its workspace is deleted (`--release-hold`
+frees it). An optional content scanner (Google Web Risk) checks new versions
+when a key is configured.
 
 ## Staging and self-hosting
 
@@ -168,7 +207,8 @@ gateway falls back to the API for host lookups.
 | `OPENGENI_SITES_PUBLIC_AGENTS_ENABLED`                     | `true`              | Allow embedded agents on public Sites                |
 | `OPENGENI_SITES_LOGIN_ONLY`                                | `false` (staging on) | Require sign-in on every Site                        |
 | `OPENGENI_SITES_FORCE_NOINDEX`                             | `false` (staging on) | Always send noindex                                  |
-| `OPENGENI_SITES_ABUSE_EMAIL`                               | `abuse@<domain>`    | Abuse contact shown on takedown pages                |
+| `OPENGENI_SITES_ABUSE_EMAIL`                               | `abuse@<domain>`    | Abuse contact shown to visitors; operator notices     |
+| `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK`                   | `false`             | Require a human check before guest agent conversations |
 | `OPENGENI_SITES_FREE_*`                                    | see above           | Free profile defaults                                |
 | `OPENGENI_SITES_HOSTNAME_HOLD_DAYS`                        | `30`                | How long a released name stays held                  |
 | `OPENGENI_SITES_CLOUDFLARE_*`                              | unset               | Optional edge sync (KV host map, cache purge)        |
@@ -225,3 +265,6 @@ if (check.available) {
   other people. Set them with `textContent`, never `innerHTML`.
 - Site code reaches only the Site operation allowlist (`SITE_OPERATIONS`);
   it can't call the general workspace API, even for a member.
+- Invited access matches the viewer's verified email. On deployments
+  without managed sign-in an Opengeni user may have no email, so they can
+  only reach `members` or `public` Sites.
