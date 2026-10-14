@@ -130,6 +130,7 @@ import {
   prepareBrowserSessionEnd,
   prepareBrowserSessionResume,
   settleExpiredBrowserSessionResume,
+  continueExpiredBrowserSessionResume,
   prepareBrowserSessionSuspend,
   prepareBrowserRevisionPublication,
   reportAuthRun,
@@ -2329,8 +2330,23 @@ export function registerBrowserSessionRoutes(
           before.session.lifecycle === "lost" &&
           before.session.failureCode === "controller_transition_expired"
         ) {
-          // A resume whose transition expired never activated: end its retained
-          // controller generation, then resume normally from the same durable state.
+          // A resume whose transition expired never activated. When its
+          // controller still holds that generation's working copy, continue the
+          // same browser from it; nothing is restored over it or discarded.
+          const continued = await continueExpiredBrowserResume(
+            context,
+            grant,
+            workspaceId,
+            browserSessionId,
+            request.operationId,
+          );
+          if (continued) {
+            const parsed = BrowserSessionMutationResponse.parse(continued);
+            observeLifecycleResult(deps.observability, startedAtMs, parsed);
+            return context.json(parsed, 200);
+          }
+          // Otherwise end its retained controller generation, then resume
+          // normally from the same durable state.
           await settleExpiredBrowserResume(context, grant, workspaceId, browserSessionId);
           before = await getBrowserSessionControlRecord(deps.db, {
             accountId: grant.accountId,
@@ -3482,6 +3498,174 @@ export function registerBrowserSessionRoutes(
       });
       throw error;
     }
+  }
+
+  /** Continue an expired resume on its retained controller generation when the
+   * controller still holds that generation's own working copy (a resident
+   * browser, or its preserved profile and launch receipt after the controller
+   * restarted). The controller's existing same-generation recovery adopts or
+   * relaunches it from that directory, so the record, its history and the
+   * possibly newer working profile all survive. Returns null when the browser
+   * cannot be continued this way, leaving the record unchanged for the
+   * settle-and-restore path. */
+  async function continueExpiredBrowserResume(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+  ): Promise<BrowserSessionMutationResponse | null> {
+    const expired = await getExpiredBrowserSessionResume(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    if (!expired?.controllerGeneration) return null;
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    const binding = record.session.controller;
+    if (binding?.controllerGeneration !== expired.controllerGeneration) {
+      throw new BrowserSessionStateError("BrowserSession controller authority changed");
+    }
+    // Only a private profile has a working copy the controller can adopt.
+    if (browserSessionStorageMode(record.session) !== "private_profile") return null;
+    const rootSecret = browserAuthorityRoot(deps);
+    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    if (
+      record.session.placement.kind === "connected_machine" &&
+      sourceSession.activeSandboxId !== record.session.placement.sandboxId
+    ) {
+      return null;
+    }
+    return await withBrowserPlacement(
+      sourceSession,
+      grant,
+      record.session.placement,
+      binding.placementInstanceId,
+      "browser.resume",
+      context.req.raw.signal,
+      async (placement) => {
+        const transport = browserRuntimeTransport(record.session, placement.transport);
+        if (
+          transport.kind !== "managed" ||
+          transport.engine !== "chromium" ||
+          transport.ephemeralPartition
+        ) {
+          return null;
+        }
+        const client = await provisionController(
+          deps,
+          grant,
+          record,
+          placement,
+          requestOrigin(context, deps.settings),
+        );
+        let linkedComputer: Awaited<ReturnType<typeof ensureLinkedComputerController>>;
+        try {
+          linkedComputer = await ensureLinkedComputerController(
+            deps,
+            grant,
+            record.session,
+            placement,
+            client,
+          );
+        } catch (error) {
+          // Its working copy was launched on a desktop that is gone.
+          if (error instanceof BrowserSessionStateError) return null;
+          throw error;
+        }
+        const networkRoute = await resolveActiveBrowserNetworkRouteLaunch({
+          deps,
+          grant,
+          record,
+          placement: placement.placement,
+        });
+        const tokens = deriveBrowserSessionControllerTokens({
+          rootSecret,
+          accountId: grant.accountId,
+          workspaceId,
+          browserSessionId,
+          placement: placement.placement,
+          placementInstanceId: placement.placementInstanceId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        });
+        const interactionHeld = await ensureInteractionHolder(
+          deps,
+          grant,
+          sourceSession,
+          browserSessionId,
+          placement,
+          context.req.raw.signal,
+        );
+        const release = async () => {
+          if (!interactionHeld) return;
+          await releaseInteractionHolder(
+            deps,
+            grant,
+            workspaceId,
+            browserSessionId,
+            placement.controllerHostSandboxGroupId,
+          ).catch(() => undefined);
+        };
+        try {
+          await withInteractionHolderHeartbeat(
+            deps,
+            {
+              grant,
+              workspaceId,
+              sandboxGroupId: placement.controllerHostSandboxGroupId,
+              holderId: interactionHolderId(browserSessionId),
+              operationId,
+              resourceId: browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+            },
+            async () => {
+              await ensureHeadedBrowserDisplayStack(
+                placement.session,
+                record.session.headless,
+                linkedComputer !== null,
+              );
+              await client.createSession({
+                browserSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                tokenGeneration: record.tokenGeneration,
+                ...tokens,
+                headed: !record.session.headless,
+                transport,
+                recoverExistingWorkingDirectory: true,
+                ...(linkedComputer ? { linkedComputer } : {}),
+                ...(networkRoute ? { networkRoute } : {}),
+              });
+            },
+          );
+        } catch (error) {
+          // The controller proves no adoptable working copy for this generation
+          // (none was completed, or its authority or profile changed): leave
+          // the record for the settle-and-restore path.
+          if (
+            isDefiniteBrowserControllerFailure(error) &&
+            error instanceof BrowserControlRequestError &&
+            error.error.code === "resource_unavailable"
+          ) {
+            await release();
+            return null;
+          }
+          throw error;
+        }
+        return await continueExpiredBrowserSessionResume(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          browserSessionId,
+          operationId,
+          actorSubjectId: grant.subjectId,
+          controller: binding,
+        });
+      },
+    );
   }
 
   /** End the retained controller generation of an expired resume and return

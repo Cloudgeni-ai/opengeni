@@ -29,6 +29,7 @@ import {
   getBrowserSession,
   getBrowserSessionControlRecord,
   getBrowserPrivateCheckpointAuthority,
+  continueExpiredBrowserSessionResume,
   getExpiredBrowserSessionResume,
   listBrowserSessions,
   LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
@@ -1468,10 +1469,155 @@ describe("durable BrowserSession lifecycle", () => {
         expectedControllerGeneration: active.controllerGeneration,
       }),
     ).rejects.toBeInstanceOf(BrowserSessionStateError);
+    await expect(
+      continueExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+        controller: {
+          controllerId: "browserd:test",
+          controllerGeneration: active.controllerGeneration,
+          placementInstanceId: "placement:test",
+        },
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
     expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
       lifecycle: "lost",
       controller: { controllerGeneration: active.controllerGeneration },
     });
+  });
+
+  test("an expired resume continues on its retained generation without restoring over it", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const active = await activeBrowser(scope);
+    const browserSessionId = active.session.id;
+    const suspendOperationId = crypto.randomUUID();
+    await prepareBrowserSessionSuspend(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: suspendOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      stateUpload: {
+        objectKey: checkpointArtifact(scope, suspendOperationId).objectKey,
+        cleanupAfter: new Date(Date.now() + 60_000),
+      },
+    });
+    await commitBrowserSessionSuspension(client.db, {
+      ...scope,
+      operationId: suspendOperationId,
+      browserSessionId,
+      controllerGeneration: active.controllerGeneration,
+      artifact: checkpointArtifact(scope, suspendOperationId),
+    });
+    await clearSuspendedBrowserSessionController(client.db, {
+      ...scope,
+      browserSessionId,
+      expectedControllerGeneration: active.controllerGeneration,
+    });
+    const checkpoint = await getBrowserPrivateCheckpointAuthority(client.db, {
+      ...scope,
+      browserSessionId,
+    });
+
+    const expiredOperationId = crypto.randomUUID();
+    await prepareBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId: expiredOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    const expiredGeneration = crypto.randomUUID();
+    const controller = {
+      controllerId: "browserd:test",
+      controllerGeneration: expiredGeneration,
+      placementInstanceId: "placement:expired",
+    };
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: expiredOperationId,
+      browserSessionId,
+      controllerGeneration: expiredGeneration,
+      controller,
+    });
+    await expireBrowserTransition(scope.workspaceId, browserSessionId, expiredOperationId);
+
+    // A different generation or controller instance cannot claim the record.
+    for (const stale of [
+      { ...controller, controllerGeneration: crypto.randomUUID() },
+      { ...controller, placementInstanceId: "placement:other" },
+    ]) {
+      await expect(
+        continueExpiredBrowserSessionResume(client.db, {
+          ...scope,
+          browserSessionId,
+          operationId: crypto.randomUUID(),
+          actorSubjectId: scope.subjectId,
+          controller: stale,
+        }),
+      ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
+    }
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "controller_transition_expired",
+    });
+
+    const operationId = crypto.randomUUID();
+    const continued = await continueExpiredBrowserSessionResume(client.db, {
+      ...scope,
+      browserSessionId,
+      operationId,
+      actorSubjectId: scope.subjectId,
+      controller,
+    });
+    expect(continued.session).toMatchObject({
+      id: browserSessionId,
+      lifecycle: "active",
+      failureCode: null,
+      controller: { controllerGeneration: expiredGeneration },
+    });
+    expect(continued.operation).toMatchObject({ operationId, kind: "resume", state: "completed" });
+    // Same record, same durable checkpoint; the expired attempt stays settled.
+    expect(
+      await getBrowserPrivateCheckpointAuthority(client.db, { ...scope, browserSessionId }),
+    ).toEqual(checkpoint);
+    const operations = await shared!.admin<{ operation_id: string; state: string }[]>`
+      select operation_id, state from interaction_operations
+      where workspace_id = ${scope.workspaceId}
+        and operation_id in (${expiredOperationId}, ${operationId})`;
+    expect(Object.fromEntries(operations.map((row) => [row.operation_id, row.state]))).toEqual({
+      [expiredOperationId]: "outcome_unknown",
+      [operationId]: "completed",
+    });
+
+    // A retried request replays; a new one finds nothing left to continue.
+    expect(
+      (
+        await continueExpiredBrowserSessionResume(client.db, {
+          ...scope,
+          browserSessionId,
+          operationId,
+          actorSubjectId: scope.subjectId,
+          controller,
+        })
+      ).operation,
+    ).toMatchObject({ operationId, state: "completed" });
+    await expect(
+      continueExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: scope.subjectId,
+        controller,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
   });
 
   test("returns a failed suspension to the same active controller", async () => {

@@ -2199,6 +2199,97 @@ export async function settleExpiredBrowserSessionResume(
 
 const CONTROLLER_TRANSITION_EXPIRED = "controller_transition_expired";
 
+/** Continue an expired resume on its retained controller generation after that
+ * controller re-adopted the generation's own working copy. The browser keeps
+ * its record, history and working profile; nothing is restored or discarded.
+ * The new resume operation completes on that generation, and the expired one
+ * stays settled as `outcome_unknown`. */
+export async function continueExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    operationId: string;
+    actorSubjectId: string;
+    controller: InteractionControllerBinding;
+  },
+): Promise<BrowserSessionMutationResponseValue> {
+  const digest = lifecycleRequestDigest(input.browserSessionId, "resume", input.actorSubjectId);
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+      const existing = await loadOperation(tx, input.workspaceId, input.operationId);
+      if (existing) {
+        return await replayedMutation(tx, input.workspaceId, existing, {
+          kind: "resume",
+          digest,
+        });
+      }
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) throw new BrowserSessionNotFoundError("BrowserSession not found");
+      if (!(await expiredResumeEligible(tx, row))) {
+        throw new BrowserSessionStateError("Only a suspended BrowserSession can be resumed");
+      }
+      if (
+        row.controllerGeneration !== input.controller.controllerGeneration ||
+        row.controllerId !== input.controller.controllerId ||
+        row.placementInstanceId !== input.controller.placementInstanceId
+      ) {
+        throw new BrowserSessionOperationConflictError(
+          "BrowserSession controller authority changed",
+        );
+      }
+      const now = new Date();
+      const [operationRow] = await tx
+        .insert(schema.interactionOperations)
+        .values({
+          operationId: input.operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          resourceKind: "browser_session",
+          resourceId: input.browserSessionId,
+          kind: "resume",
+          requestDigest: digest,
+          state: "completed",
+          actorSubjectId: input.actorSubjectId,
+          controllerGeneration: input.controller.controllerGeneration,
+          dispatchedAt: now,
+          settledAt: now,
+        })
+        .returning();
+      if (!operationRow) throw new Error("BrowserSession resume continuation insert was lost");
+      const [sessionRow] = await tx
+        .update(schema.browserSessions)
+        .set({
+          lifecycle: "active",
+          failureCode: null,
+          controllerHeartbeatAt: now,
+          lastUsedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.id, input.browserSessionId),
+            eq(schema.browserSessions.lifecycle, "lost"),
+            eq(schema.browserSessions.failureCode, CONTROLLER_TRANSITION_EXPIRED),
+            eq(schema.browserSessions.controllerGeneration, input.controller.controllerGeneration),
+          ),
+        )
+        .returning();
+      if (!sessionRow) throw new Error("BrowserSession resume continuation was lost");
+      const associations = await loadAssociations(tx, input.workspaceId, [input.browserSessionId]);
+      await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+      return BrowserSessionMutationResponse.parse({
+        session: browserSessionFromRows(sessionRow, associations),
+        operation: operationReceipt(operationRow, false),
+      });
+    }),
+  );
+}
+
 async function loadBrowserSessionRow(
   tx: Database,
   workspaceId: string,
