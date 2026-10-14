@@ -156,7 +156,7 @@ describe("fail-closed change impact", () => {
         "packages/db/src/editable-artifacts.ts",
         "packages/db/src/session-goal-reports.ts",
         "packages/db/drizzle/0474_goal_report_requirements.sql",
-        "packages/db/drizzle/0784_editable_spreadsheet_ordered_operation_ids.sql",
+        "packages/db/drizzle/0785_editable_spreadsheet_ordered_operation_ids.sql",
         "packages/contracts/src/session-goal-reports.ts",
         "packages/testing/src/shared-pg.ts",
         "packages/storage/src/index.ts",

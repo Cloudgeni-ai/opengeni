@@ -2687,7 +2687,7 @@ describe("Postgres editable artifact authority", () => {
   test("grants the operation identity validator to configured application roles only", async () => {
     if (!available || !shared) return;
     const migration = await readFile(
-      new URL("../drizzle/0784_editable_spreadsheet_ordered_operation_ids.sql", import.meta.url),
+      new URL("../drizzle/0785_editable_spreadsheet_ordered_operation_ids.sql", import.meta.url),
       "utf8",
     );
     expect(migration).toContain("opengeni.migration_application_roles");
