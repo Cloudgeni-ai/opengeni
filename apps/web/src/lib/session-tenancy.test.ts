@@ -130,6 +130,34 @@ describe("session tenancy browser operation state", () => {
     );
     expect(classifySessionTenancyFailure(epoch).kind).toBe("epoch_conflict");
     expect(classifySessionTenancyFailure(epoch).retainAttempt).toBe(false);
+
+    const forkPoint = (reason: string) =>
+      classifySessionTenancyFailure(
+        new OpenGeniApiError(
+          422,
+          JSON.stringify({
+            error: {
+              code: "validation_failed",
+              message: "This message can't be a fork point.",
+              retryable: false,
+              details: { reason },
+            },
+          }),
+          { mutation: true },
+        ),
+      );
+    expect(forkPoint("fork_point_history_compacted")).toEqual({
+      kind: "fork_point",
+      message:
+        "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
+      retainAttempt: false,
+      reconcile: false,
+    });
+    expect(forkPoint("fork_point_boundary_not_retained").message).toContain(
+      "before the conversation was compacted",
+    );
+    expect(forkPoint("fork_point_unfinished_tool_exchange").message).toContain("tool result");
+    expect(forkPoint("fork_point_new_future_reason").message).toContain("fork point");
   });
 
   test("treats a later matching epoch as authoritative completion", () => {

@@ -645,14 +645,17 @@ operation, source, and outcome labels. The same observer emits
 (`surface`, `op`, `provider`, `outcome`, `durationMs`). It never emits workspace,
 subject, tool-name, argument, result, credential, or approval-token values.
 
-## MCP provider OAuth short-state rollout (0507)
+## MCP provider OAuth short state (0507)
 
-Apply rolling migration `0507_integration_oauth_pending_states.sql`, then deploy
-the new API with `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED=false` on all
-replicas. Once every old API replica has drained, set the flag to `true` in a
-separate configuration rollout. Both flag values accept old and short callback
-states; only new replicas can read short states. Providers such as Resend that
-limit `state` length work after the flag is enabled.
+MCP OAuth always sends providers a short signed reference as `state` and keeps
+the full callback context encrypted in `integration_oauth_pending_states`
+(rolling migration `0507_integration_oauth_pending_states.sql`). Callbacks still
+accept a full signed state, so grants started before an upgrade finish normally.
+The former `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED` switch is retired:
+the API ignores it with a one-time startup warning, so remove it from deployment
+configuration. An API older than migration 0507 cannot read a short reference;
+when upgrading straight from one, a connect started on a new replica whose
+callback lands on an old replica during the rollout fails and the user retries.
 
 ## Personal GitHub OAuth
 

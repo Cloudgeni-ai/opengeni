@@ -5,6 +5,7 @@ import {
 } from "@opengeni/contracts";
 import {
   SessionTenancyConflictError,
+  SessionTenancyInvalidRequestError,
   SessionTenancyNotActivatedError,
   SessionVisibilityWorkConflictError,
 } from "@opengeni/db";
@@ -153,6 +154,20 @@ describe("session HTTP authorization classification", () => {
       retryable: true,
       outcomeUnknown: true,
     });
+    expect(
+      sessionTenancyHttpError(
+        new SessionTenancyInvalidRequestError(undefined, "history_compacted"),
+      ),
+    ).toMatchObject({
+      status: 422,
+      code: "validation_failed",
+      retryable: false,
+      message: expect.stringContaining("compacted"),
+      details: { reason: "fork_point_history_compacted" },
+    });
+    const generic = sessionTenancyHttpError(new SessionTenancyInvalidRequestError());
+    expect(generic).toMatchObject({ status: 422, message: "Invalid session tenancy request." });
+    expect((generic as ApiHttpError).details).toBeUndefined();
   });
 
   test("an old proposal cannot be applied using the newer current revision as its fence", () => {

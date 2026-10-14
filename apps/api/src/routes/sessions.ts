@@ -22,7 +22,7 @@ import {
   RealtimeVoiceUnavailableError,
   TranscriptionBillingRefusedError,
 } from "@opengeni/core";
-import type { CreditDebitAttribution } from "@opengeni/db";
+import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
@@ -5603,6 +5603,17 @@ function sessionAuthorizationHttpError(error: unknown): HTTPException {
   throw error;
 }
 
+const SESSION_FORK_POINT_REFUSAL_MESSAGES: Record<SessionForkPointRefusal, string> = {
+  message_unavailable:
+    "Only your messages and the agent's replies can be fork points. Choose one of those, or fork the whole session.",
+  boundary_not_retained:
+    "This message is from before the conversation was compacted, so it can't be a fork point. Choose a more recent message, or fork the whole session.",
+  history_compacted:
+    "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
+  unfinished_tool_exchange:
+    "The agent was still waiting for a tool result at this message. Choose a later message, or fork the whole session.",
+};
+
 export function sessionTenancyHttpError(error: unknown): Error {
   if (error instanceof SessionTenancyManagedHumanRequiredError) {
     return new ApiHttpError(403, {
@@ -5665,6 +5676,14 @@ export function sessionTenancyHttpError(error: unknown): Error {
     });
   }
   if (error instanceof SessionTenancyInvalidRequestError) {
+    if (error.forkPointRefusal) {
+      return new ApiHttpError(422, {
+        code: "validation_failed",
+        message: SESSION_FORK_POINT_REFUSAL_MESSAGES[error.forkPointRefusal],
+        retryable: false,
+        details: { reason: `fork_point_${error.forkPointRefusal}` },
+      });
+    }
     return new ApiHttpError(422, {
       code: "validation_failed",
       message: "Invalid session tenancy request.",

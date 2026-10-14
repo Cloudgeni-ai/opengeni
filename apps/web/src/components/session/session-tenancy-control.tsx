@@ -657,10 +657,7 @@ export function SessionTenancyControl({
           classified.retainAttempt ||
           (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
         if (!retainAttempt) operationController.settleFork(operationScope, attempt);
-        const message =
-          sourceEventId && isApiErrorStatus(error, 400)
-            ? "This message cannot be used as a fork point. Its history may have been compacted, or it may not have a unique, complete saved boundary. Choose another message or fork the whole session."
-            : classified.message;
+        const message = classified.message;
         setFailure(message);
         setAnnouncement(message);
         return sourceEventId ? false : !retainAttempt;

@@ -2101,6 +2101,36 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("SUB-OWN-09: a shared workspace's admin connects every provider for the workspace, Codex too", async () => {
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Connect a subscription or an API key for everyone in Design preview.",
+      );
+      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
+        (row) => row.textContent ?? "",
+      );
+      for (const provider of ["Codex", "SuperGrok", "Claude subscription", "OpenRouter"]) {
+        expect(rows.some((row) => row.includes(provider))).toBe(true);
+      }
+      // Codex signs in for this workspace, not for the organization.
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+      expect(view.container.textContent).toContain(
+        "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
+      );
+      expect(view.container.textContent).not.toContain("Which workspaces can use it");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("a shared workspace's member who isn't its admin connects for themselves only", async () => {
     workspaceSettingsAdmin = false;
     context.clientConfig.claudeSubscriptionEnabled = true;

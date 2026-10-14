@@ -114,6 +114,17 @@ for it until the matching requirement below is implemented:
   however many workspaces it serves, so its quota is counted once.
   Verification: `packages/db/test/subscription-core-m2-postgres.test.ts`
   (provider-account uniqueness per organization/provider/owner).
+- **SUB-OWN-09** A shared workspace's administrator, without being an
+  organization administrator, can connect a new account of any provider for
+  that workspace and remove it again. It is the workspace's own account: the
+  organization owns it (SUB-OWN-01), it serves only that workspace and never
+  Personal workspaces, the workspace manages it (SUB-OWN-04), and the
+  organization's administrators see it and alone widen its scope or change
+  its manager. Once it serves any other workspace, only an organization
+  administrator removes it. An upstream account already connected elsewhere
+  in the organization is refused, never duplicated or taken over.
+  Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`,
+  `apps/web/src/components/models/workspace-models-page.test.tsx`.
 
 ### Settings and overrides
 
@@ -515,6 +526,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | --- | --- | --- |
 | D-47 | 2026-10-13 | The product owner accepted refusing cross-provider switching while `remote_v2` is in use. This supersedes D-40 and Q-05 as delivery requirements: portable conversion is deferred; preserve clear refusal, original history and mode. No conversion retry or production deployment is authorized. |
 | D-48 | 2026-10-13 | Finish-line implementation scope: chat-turn renewal is a lease ownership/liveness check, not a second authorization system; operation leases retain their existing extra access check. Selection and every physical request retain live revocation checks (SUB-ACCESS-05). Expiry fencing and generation-based reclaim, not a separate sweeper, provide crash recovery (SUB-LEASE-03). This documents the existing runtime boundary rather than adding heartbeat work. |
+| D-49 | 2026-10-14 | The product owner decided that a workspace administrator connects subscription accounts for their own workspace without being an organization administrator (SUB-OWN-09). Before, only an organization administrator could create any new shared connection, so a workspace administrator saw providers they could not add. The workspace's own account is exactly the shape an organization administrator already created from a workspace route, so selection, pools and settings are unchanged, and organization ownership, visibility and scope changes stay with the organization (SUB-OWN-01/04). |
 
 ### Open decisions
 
