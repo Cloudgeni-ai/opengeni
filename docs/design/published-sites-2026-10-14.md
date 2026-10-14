@@ -229,12 +229,16 @@ edge sync: `SITES_CLOUDFLARE_API_TOKEN`, `SITES_CLOUDFLARE_ACCOUNT_ID`,
 `SITES_CLOUDFLARE_KV_NAMESPACE_ID`, `SITES_CLOUDFLARE_ZONE_ID`, plus
 `SITES_WEB_RISK_API_KEY`. The app origin comes from the existing
 `OPENGENI_WEB_BASE_URL`/`OPENGENI_PUBLIC_BASE_URL`.
+PR B adds `SITES_CLOUDFLARE_STORAGE_ENABLED` (default false),
+`SITES_GATEWAY_INTERNAL_ORIGIN` and the `SITES_SQL_*` limits.
 
 Gateway (Wrangler vars and secrets): `SITES_DOMAIN`, `API_ORIGIN`,
 `APP_ORIGIN`, `GATEWAY_SECRET`, `ENVIRONMENT`, `FORCE_NOINDEX`,
 `LOGIN_ONLY`, `ABUSE_EMAIL`, optional `TURNSTILE_SITE_KEY` and
-`TURNSTILE_SECRET`; bindings `HOST_MAP` (KV) and `RATE_LIMITER`
-(rate-limit binding), and in PR B `SITE_DB` (Durable Object namespace).
+`TURNSTILE_SECRET` (and in PR B `GATEWAY_SECRET_PREVIOUS`); bindings
+`HOST_MAP` (KV) and `RATE_LIMITER` (rate-limit binding), and in PR B
+`SITE_DB` (Durable Object namespace, class `SiteDatabase`, migration tag
+`v1` with `new_sqlite_classes`).
 
 ## PR B: optional Cloudflare storage
 
@@ -249,6 +253,42 @@ against an allowlist: no `ATTACH`, no `PRAGMA` writes, no
 reaches the Durable Object through its own binding; agents reach it through
 HMAC-signed requests from the API to the gateway's internal endpoint. Usage
 (rows read and written, storage) is metered like Site Data.
+
+As built (see [Site SQL](../site-data.md#site-sql-optional-cloudflare-storage)),
+with these refinements:
+
+- Site pages reach the Durable Object only through the API as well
+  (`/_og/api` -> `/v1/site-runtime/.../sql/queries/<name>` -> signed internal
+  route), so authorization, audiences, limits and metering live in one place;
+  the gateway's `SITE_DB` binding is used only by the internal route.
+- The API reaches the gateway at its own setting,
+  `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN`, behind
+  `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`. The flag only offers and runs
+  Site SQL; with the origin and secret configured, export, inspect and
+  dropping a database keep working after the flag is turned off, so data
+  can always leave. The internal route answers on
+  any host the Worker serves; deployments should use a reserved label such as
+  `internal.<sites domain>`. It accepts `GATEWAY_SECRET_PREVIOUS` for
+  rotation, and the Durable Object refuses replayed request ids.
+- Named queries carry an audience (`everyone`, `signed_in`, `managers`);
+  guests run only `everyone` queries. `:viewer_kind` and `:viewer_signed_in`
+  are bound alongside `:viewer`.
+- Site SQL has its own limits (`SiteSqlLimits`, `OPENGENI_SITES_SQL_*`)
+  derived from the profile kind rather than new `SiteLimits` fields; custom
+  profiles use the free Site SQL numbers.
+- Schema changes go only through migrations: `site_sql_execute` refuses
+  them, and a SQL import's schema statements are recorded as an
+  `import_<time>` migration so a rebuild reproduces them (triggers as a
+  second migration after the data). A Site's migrations hold at most 6 MiB
+  of SQL, and migrations travel to the Durable Object in bounded calls
+  (only the missing ones on migrate), so a rebuild always fits the
+  gateway's request limit.
+- Usage counters live in their own `site_sql_usage` row, and only Site page
+  calls count toward the monthly caps; management is metered as events
+  only. Exports come in cursor pieces of at most 16 MiB.
+- Postgres definitions cascade with the workspace; the Durable Objects are
+  dropped best effort after workspace deletion (a retry sweep is a
+  follow-up).
 
 ## Alternatives rejected
 

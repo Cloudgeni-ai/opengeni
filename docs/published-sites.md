@@ -107,6 +107,22 @@ collection) allows it:
 Guest records belong to the guest's visitor id, so a guest who clears
 cookies loses them. Guest writes have their own rate limit.
 
+## Site SQL (optional)
+
+Where the deployment turns on Cloudflare storage, an owner can give a Site
+its own SQLite database (one Durable Object per Site) next to Site Data.
+Agents define the schema as migrations and the queries the Site may run;
+Site code calls them by name with `site.sql.run(name, params)` and never
+sends SQL. Each named query has an audience: `everyone` (guests too),
+`signed_in` (the default; viewers signed in as a person) or `managers`
+(never from a Site page).
+Opengeni binds `:viewer` from the signed-in viewer or guest, so a Site
+cannot act as someone else. Data can always be exported as SQL, CSV or
+JSON (in pieces with a cursor for large databases), even while the database
+is turned off or after the deployment stops offering Site SQL, as long as
+the gateway origin and secret stay configured. Details and limits are in
+[Site Data: Site SQL](site-data.md#site-sql-optional-cloudflare-storage).
+
 ## Embedded agents
 
 When the embedded agent is on, visitors can start conversations with it from
@@ -234,6 +250,9 @@ gateway falls back to the API for host lookups.
 | `OPENGENI_SITES_FREE_*`                                    | see above           | Free profile defaults                                |
 | `OPENGENI_SITES_HOSTNAME_HOLD_DAYS`                        | `30`                | How long a released name stays held                  |
 | `OPENGENI_SITES_CLOUDFLARE_*`                              | unset               | Optional edge sync (KV host map, cache purge)        |
+| `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`                | `false`             | Offer Site SQL (per-Site Durable Object databases)   |
+| `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN`                   | unset               | Gateway origin the API calls for Site SQL            |
+| `OPENGENI_SITES_SQL_*`                                     | see Site SQL        | Site SQL limits                                      |
 | `OPENGENI_SITES_WEB_RISK_API_KEY`                          | unset               | Optional content scanner                             |
 
 The gateway Worker is configured with Wrangler: `SITES_DOMAIN`,

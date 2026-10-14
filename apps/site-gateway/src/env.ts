@@ -20,6 +20,12 @@ export interface GatewayEnv {
   API_ORIGIN?: string;
   APP_ORIGIN?: string;
   GATEWAY_SECRET?: string;
+  /**
+   * The previous gateway secret during rotation. Accepted only when verifying
+   * the API's signed internal Site database requests; the gateway always
+   * signs with GATEWAY_SECRET.
+   */
+  GATEWAY_SECRET_PREVIOUS?: string;
   ENVIRONMENT?: string;
   FORCE_NOINDEX?: string;
   LOGIN_ONLY?: string;
@@ -29,9 +35,9 @@ export interface GatewayEnv {
   HOST_MAP?: KVNamespaceLike;
   RATE_LIMITER?: RateLimiterLike;
   /**
-   * PR B extension point: the per-Site SQLite Durable Object namespace
-   * (`idFromName(siteId)`). Unbound until optional Cloudflare storage ships;
-   * see `src/site-db.ts`.
+   * Optional per-Site Cloudflare storage: the `SiteDatabase` SQLite Durable
+   * Object namespace (`idFromName(siteId)`). Without it the internal Site
+   * database route answers 404; see `src/site-db.ts`.
    */
   SITE_DB?: unknown;
 }
@@ -43,6 +49,8 @@ export type GatewayConfig = {
   apiOrigin: string;
   appOrigin: string;
   secret: string;
+  /** The previous secret (rotation), accepted only for internal Site database requests. */
+  previousSecret: string | null;
   environment: string;
   /** Local development: Site origins may be plain HTTP on loopback names. */
   development: boolean;
@@ -78,6 +86,9 @@ export function gatewayConfig(env: GatewayEnv): GatewayConfig {
   const secret = env.GATEWAY_SECRET ?? "";
   if (secret.length < 32)
     throw new GatewayConfigError("GATEWAY_SECRET must be at least 32 characters");
+  const previousSecret = env.GATEWAY_SECRET_PREVIOUS ?? "";
+  if (previousSecret && previousSecret.length < 32)
+    throw new GatewayConfigError("GATEWAY_SECRET_PREVIOUS must be at least 32 characters");
   const turnstileSiteKey = env.TURNSTILE_SITE_KEY?.trim() ?? "";
   const turnstileSecret = env.TURNSTILE_SECRET?.trim() ?? "";
   const config: GatewayConfig = {
@@ -85,6 +96,7 @@ export function gatewayConfig(env: GatewayEnv): GatewayConfig {
     apiOrigin: origin(env.API_ORIGIN, "API_ORIGIN"),
     appOrigin: origin(env.APP_ORIGIN, "APP_ORIGIN"),
     secret,
+    previousSecret: previousSecret || null,
     environment,
     development,
     forceNoindex: flag(env.FORCE_NOINDEX),

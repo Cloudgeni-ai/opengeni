@@ -348,6 +348,7 @@ import { registerSitePublishingRoutes } from "./routes/site-publishing";
 import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
+import { registerSiteSqlRoutes } from "./routes/site-sql";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerInsightsUsageRoutes } from "./routes/insights-usage";
@@ -801,6 +802,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Event-Mode",
       "X-OpenGeni-Event-Result",
       "X-OpenGeni-Event-Result-Mode",
+      "X-OpenGeni-Export-Next-Cursor",
+      "X-OpenGeni-Export-Truncated",
       "X-OpenGeni-Forensic-Exact",
       "X-OpenGeni-Has-More",
       "X-OpenGeni-Next-After",
@@ -2216,6 +2219,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSitePublishingRoutes(app, routeDeps);
   registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
+  registerSiteSqlRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);

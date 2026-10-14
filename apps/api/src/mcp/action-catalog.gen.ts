@@ -1248,6 +1248,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "defineSiteSqlQuery",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlQueryDefinitionRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -1474,6 +1483,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteSiteDataFile",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteSqlQuery",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
     "request": [],
     "response": []
   },
@@ -1808,6 +1824,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
+    "id": "executeSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/execute",
+    "request": [
+      "SiteSqlStatementRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "exportCompanyBrainOkf",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/company-brain/export",
@@ -1822,6 +1847,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/export",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "exportSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/export",
+    "request": [
+      "SiteSqlExportFormat"
+    ],
     "response": []
   },
   {
@@ -3214,6 +3248,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "getSlackUserLinkAccess",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId",
@@ -3649,9 +3690,25 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "importSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/import",
+    "request": [
+      "SiteSqlImportRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "inspectMcpAuthentication",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-auth",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "inspectSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/inspect",
     "request": [],
     "response": []
   },
@@ -4762,6 +4819,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "migrateSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/migrations",
+    "request": [
+      "SiteSqlMigrationRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "mintEnrollToken",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/enrollments/token",
@@ -5813,6 +5879,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "querySiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/query",
+    "request": [
+      "SiteSqlStatementRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "readBrowserClipboard",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/clipboard",
@@ -6126,6 +6201,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "resetSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/reset",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "resolveInteractionIntervention",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve",
@@ -6389,6 +6471,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "DocumentDefaultCollectionBackfill"
     ]
+  },
+  {
+    "id": "runSiteSqlQuery",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlRunRequest"
+    ],
+    "response": []
   },
   {
     "id": "saveAgentLearningSettings",
@@ -7675,6 +7766,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SiteLimitProfile"
     ]
+  },
+  {
+    "id": "updateSiteSqlSettings",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/settings",
+    "request": [
+      "SiteSqlSettingsRequest"
+    ],
+    "response": []
   },
   {
     "id": "updateSource",

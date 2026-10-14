@@ -51,6 +51,7 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: true,
     why: "published Site version HTML for the gateway (scripts sandboxed in an opaque origin)",
   },
+  "site-sql.ts": { count: 1, userContent: true, why: "Site SQL export download (sql, csv, json)" },
   "workspace-artifacts.ts": { count: 1, userContent: true, why: "Site HTML (opaque origin)" },
   "workspace-state.ts": { count: 1, userContent: true, why: "workspace state export" },
 };
@@ -257,6 +258,7 @@ describe("user-content response headers", () => {
       "routes/browser-sessions.ts",
       "routes/site-data.ts",
       "routes/site-runtime.ts",
+      "routes/site-sql.ts",
     ]) {
       expect({
         path,

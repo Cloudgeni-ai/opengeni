@@ -12,6 +12,8 @@ import {
   SiteDataGetRequest,
   SiteDataQueryRequest,
   SiteDataWriteRequest,
+  SiteSqlRunRequest,
+  type SiteLimitProfileKind,
   SITE_GATEWAY_CALLBACK_PATH,
   SITE_RUNTIME_API_PREFIX,
   SITE_TOOL_METHODS,
@@ -79,7 +81,7 @@ import {
   siteClientAddressPrincipal,
   siteRuntimeBudgetLimits,
   siteRuntimeForwardedResponse,
-  siteRuntimeLimits,
+  siteRuntimeLimitProfile,
   siteRuntimeSessionRequest,
   siteWideBudget,
   sweepSiteRuntimeReservations,
@@ -116,7 +118,9 @@ import {
   signedInSiteViewerKind,
   type SiteRuntimeViewer,
 } from "../site-publishing/viewer";
+import { runSiteSqlQuery } from "../site-sql/service";
 import { siteDataHttpError } from "./site-data";
+import { runSiteSqlRoute } from "./site-sql";
 
 /**
  * `/v1/site-runtime/*`: the API a Site gateway calls for one published Site
@@ -487,7 +491,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const viewing = async (request: RuntimeRequest) => {
     const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
     const viewer = await resolveSiteRuntimeViewer(deps, host, request.fields);
-    const limits = await siteRuntimeLimits(deps, host);
+    const { limits, kind: profileKind } = await siteRuntimeLimitProfile(deps, host);
     await enforceSiteRuntimeViewerRate(
       deps,
       host,
@@ -496,7 +500,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       "requests",
       limits.requestsPerMinutePerVisitor,
     );
-    return { host, viewer, limits };
+    return { host, viewer, limits, profileKind };
   };
 
   /**
@@ -689,7 +693,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
 
   const operation = async (request: RuntimeRequest, id: string): Promise<Response> => {
-    const { host, viewer, limits } = await viewing(request);
+    const { host, viewer, limits, profileKind } = await viewing(request);
     const { context } = request;
     switch (id) {
       case "config.client":
@@ -738,10 +742,80 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "data.patch":
       case "data.delete":
         return await siteData(request, host, viewer, limits.guestWritesPerMinute);
+      case "sql.run":
+        return await siteSql(request, host, viewer, limits.guestWritesPerMinute, profileKind);
       default:
         if (id.startsWith("sessions.")) return await sessions(request, id, host, viewer, limits);
         throw unsupported();
     }
+  };
+
+  /** This Site's viewer (`user:<subject>` or `guest:<visitor>`) as Site Data and Site SQL see it. */
+  const publishedViewer = (
+    host: SiteRuntimeHost & { versionId: string },
+    viewer: SiteRuntimeViewer,
+  ): PublishedSiteDataViewer => ({
+    kind: "published_viewer",
+    accountId: host.scope.accountId,
+    workspaceId: host.scope.workspaceId,
+    site: {
+      id: host.site.id,
+      title: host.site.title,
+      status: host.site.status,
+      visibility: host.site.visibility,
+      ownerSubjectId: host.site.ownerSubjectId,
+      createdBySubjectId: host.site.createdBySubjectId,
+    },
+    principal: viewer.principal,
+    guest: viewer.kind === "guest",
+  });
+
+  /**
+   * Site SQL: run one named query of this Site as the viewer. The query's
+   * audience decides who may run it (guests only `everyone`), and `:viewer`
+   * is bound from this viewer; the Site never sends SQL. Guests' write
+   * queries also count against the guest write limit per visitor and per
+   * client address, like Site Data.
+   */
+  const siteSql = async (
+    request: RuntimeRequest,
+    host: SiteRuntimeHost & { versionId: string },
+    viewer: SiteRuntimeViewer,
+    guestWritesPerMinute: number | null,
+    profileKind: SiteLimitProfileKind,
+  ): Promise<Response> => {
+    const name = /^\/published-artifacts\/current\/sql\/queries\/([^/]+)$/u.exec(
+      request.suffix,
+    )?.[1];
+    if (request.method !== "POST" || !name) throw unsupported();
+    const input = parseJson(request.body, SiteSqlRunRequest);
+    const siteId = host.site.id;
+    return request.context.json(
+      await runSiteSqlRoute(() =>
+        runSiteSqlQuery(
+          deps,
+          publishedViewer(host, viewer),
+          siteId,
+          name,
+          input.params ?? {},
+          { frameSiteId: siteId },
+          {
+            profileKind,
+            beforeWrite: async () => {
+              if (viewer.kind === "guest")
+                await enforceSiteRuntimeViewerRate(
+                  deps,
+                  host,
+                  viewer,
+                  request.fields,
+                  "guest_writes",
+                  guestWritesPerMinute,
+                );
+            },
+          },
+        ),
+      ),
+    );
   };
 
   /** Site Data and files of this Site, as the viewer (`user:<subject>` or `guest:<visitor>`). */
@@ -753,21 +827,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   ): Promise<Response> => {
     const { context, method, url } = request;
     const path = request.suffix.slice("/published-artifacts/current".length);
-    const authority: PublishedSiteDataViewer = {
-      kind: "published_viewer",
-      accountId: host.scope.accountId,
-      workspaceId: host.scope.workspaceId,
-      site: {
-        id: host.site.id,
-        title: host.site.title,
-        status: host.site.status,
-        visibility: host.site.visibility,
-        ownerSubjectId: host.site.ownerSubjectId,
-        createdBySubjectId: host.site.createdBySubjectId,
-      },
-      principal: viewer.principal,
-      guest: viewer.kind === "guest",
-    };
+    const authority = publishedViewer(host, viewer);
     const siteId = host.site.id;
     const surface = { frameSiteId: siteId };
     // Guest writes count per visitor and per client address; both must pass.
@@ -879,7 +939,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     id: string,
     host: SiteRuntimeHost & { versionId: string },
     viewer: SiteRuntimeViewer,
-    limits: Awaited<ReturnType<typeof siteRuntimeLimits>>,
+    limits: Awaited<ReturnType<typeof siteRuntimeLimitProfile>>["limits"],
   ): Promise<Response> => {
     const { context, url } = request;
     const base = `/v1/workspaces/${host.scope.workspaceId}/sessions`;

@@ -34,10 +34,12 @@ import { handleReport } from "./report";
 import { SITE_GATEWAY_HUMAN_PATH } from "./shell/shell-config";
 import { handleShell } from "./shell";
 import type { SiteContext } from "./site-context";
-import { SITE_DB_INTERNAL_PREFIX, handleSiteDbInternal } from "./site-db";
+import { handleSiteDbInternal, isSiteDbInternalPath } from "./site-db";
 import { handleVersionHtml } from "./version";
 
 export type { GatewayEnv } from "./env";
+/** The per-Site SQLite Durable Object class bound as `SITE_DB` (optional Cloudflare storage). */
+export { SiteDatabase } from "./site-database";
 
 function plain(status: number, body: string, headers: HeadersInit = {}): Response {
   const out = applySecurityHeaders(new Headers(headers), { noindex: true, hsts: false });
@@ -71,6 +73,10 @@ export async function handleRequest(
     return plain(500, "Site gateway is not configured.\n");
   }
   const url = new URL(request.url);
+  // The API's signed Site database route is not a Site page: it answers on
+  // any host the Worker serves and never looks up a Site host.
+  if (isSiteDbInternalPath(url.pathname))
+    return await handleSiteDbInternal(request, url, env, config);
   const requestHost = url.hostname.toLowerCase();
   if (!parseSiteHostname(requestHost, config.sitesDomain)) return plain(404, "Not found.\n");
   // `<site>.<domain>.` is the same DNS name but another browser origin (and
@@ -164,8 +170,6 @@ export async function handleRequest(
     if (pathname === SITE_GATEWAY_HUMAN_PATH) return await handleHumanCheck(site);
     if (pathname.startsWith(`${SITE_GATEWAY_VERSION_PREFIX}/`))
       return await handleVersionHtml(site, pathname.slice(SITE_GATEWAY_VERSION_PREFIX.length + 1));
-    if (pathname === SITE_DB_INTERNAL_PREFIX || pathname.startsWith(`${SITE_DB_INTERNAL_PREFIX}/`))
-      return await handleSiteDbInternal(site);
     if (pathname === SITE_GATEWAY_PREFIX || pathname.startsWith(`${SITE_GATEWAY_PREFIX}/`))
       return neutralPage(site);
     if (request.method !== "GET" && request.method !== "HEAD")

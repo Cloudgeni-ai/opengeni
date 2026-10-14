@@ -1545,6 +1545,40 @@ const SettingsSchema = z.object({
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Site SQL: optional per-Site Cloudflare storage (one SQLite Durable Object
+  // per Site, docs/site-data.md). Off unless enabled here, the gateway's
+  // internal origin is set and the published Sites gateway secret is
+  // configured; the API signs its calls to the gateway with that secret.
+  // Usage is recorded in the usage ledger only. Free-profile defaults are strict.
+  sitesCloudflareStorageEnabled: EnvBoolean.default(false),
+  sitesGatewayInternalOrigin: z
+    .string()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      if (url.pathname !== "/" || url.search || url.hash || url.username || url.password)
+        return false;
+      if (url.protocol === "https:") return true;
+      return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+    }, "must be an https origin (http only on loopback)")
+    .optional(),
+  sitesSqlFreeStorageBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(50 * 1024 * 1024),
+  sitesSqlFreeRowsReadPerMonth: z.coerce.number().int().positive().default(5_000_000),
+  sitesSqlFreeRowsWrittenPerMonth: z.coerce.number().int().positive().default(100_000),
+  sitesSqlFreeCallsPerMinutePerViewer: z.coerce.number().int().positive().default(60),
+  sitesSqlFreeCallsPerMinutePerSite: z.coerce.number().int().positive().default(600),
+  sitesSqlMaxRowsPerCall: z.coerce.number().int().min(1).max(5_000).default(1_000),
+  sitesSqlMaxResponseBytes: z.coerce
+    .number()
+    .int()
+    .min(1024)
+    .max(4 * 1024 * 1024)
+    .default(1024 * 1024),
+  sitesSqlTimeoutMs: z.coerce.number().int().min(1_000).max(60_000).default(15_000),
   // Site Data quotas and write rate limits. Usage is recorded in the
   // usage ledger only; shadow and paid modes are a later rollout step.
   siteDataRecordBytesPerSite: z.coerce
@@ -4962,6 +4996,20 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
+    sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
+    sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
+    sitesSqlFreeStorageBytes: optional("OPENGENI_SITES_SQL_FREE_STORAGE_BYTES"),
+    sitesSqlFreeRowsReadPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_READ_PER_MONTH"),
+    sitesSqlFreeRowsWrittenPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_WRITTEN_PER_MONTH"),
+    sitesSqlFreeCallsPerMinutePerViewer: optional(
+      "OPENGENI_SITES_SQL_FREE_CALLS_PER_MINUTE_PER_VIEWER",
+    ),
+    sitesSqlFreeCallsPerMinutePerSite: optional(
+      "OPENGENI_SITES_SQL_FREE_CALLS_PER_MINUTE_PER_SITE",
+    ),
+    sitesSqlMaxRowsPerCall: optional("OPENGENI_SITES_SQL_MAX_ROWS_PER_CALL"),
+    sitesSqlMaxResponseBytes: optional("OPENGENI_SITES_SQL_MAX_RESPONSE_BYTES"),
+    sitesSqlTimeoutMs: optional("OPENGENI_SITES_SQL_TIMEOUT_MS"),
     siteDataRecordBytesPerSite: optional("OPENGENI_SITE_DATA_RECORD_BYTES_PER_SITE"),
     siteDataMaxRecordBytes: optional("OPENGENI_SITE_DATA_MAX_RECORD_BYTES"),
     siteDataMaxCollectionsPerSite: optional("OPENGENI_SITE_DATA_MAX_COLLECTIONS_PER_SITE"),

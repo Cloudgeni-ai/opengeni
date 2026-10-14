@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
-import { parseSiteHostname, siteHostname, type SiteLimits } from "@opengeni/contracts";
+import {
+  parseSiteHostname,
+  siteHostname,
+  type SiteLimitProfileKind,
+  type SiteLimits,
+} from "@opengeni/contracts";
 import { sessionUsageLimitsProducerEnabled, type ApiRouteDeps } from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
@@ -29,7 +34,7 @@ import {
   type SiteRuntimeReservation,
 } from "@opengeni/db";
 import type { SiteGatewayFields } from "./gateway-signature";
-import { effectiveSiteLimits } from "./limits";
+import { effectiveSiteLimits, sourceSiteLimitProfile } from "./limits";
 import {
   siteLimitInputs,
   sitePublishingError,
@@ -166,8 +171,19 @@ export async function siteRuntimeLimits(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
 ): Promise<SiteLimits> {
+  return (await siteRuntimeLimitProfile(deps, host)).limits;
+}
+
+/** The Site's effective limits and the kind of limit profile they come from. */
+export async function siteRuntimeLimitProfile(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+): Promise<{ limits: SiteLimits; kind: SiteLimitProfileKind }> {
   const profiles = await siteLimitInputs(deps, host.scope, host.publication);
-  return effectiveSiteLimits(deps.settings, profiles.site, profiles.workspace);
+  return {
+    limits: effectiveSiteLimits(deps.settings, profiles.site, profiles.workspace),
+    kind: sourceSiteLimitProfile(profiles.site, profiles.workspace).kind,
+  };
 }
 
 /** A guest's client address may carry this many visitors' worth of traffic. */

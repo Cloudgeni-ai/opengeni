@@ -17,6 +17,7 @@ export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./site-data";
 export * from "./site-publishing";
+export * from "./site-sql";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
@@ -1097,6 +1098,16 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_publication_get",
   "site_publication_update",
   "site_hostname_check",
+  "site_sql_inspect",
+  "site_sql_enable",
+  "site_sql_migrate",
+  "site_sql_define_query",
+  "site_sql_query",
+  "site_sql_run",
+  "site_sql_execute",
+  "site_sql_export",
+  "site_sql_import",
+  "site_sql_reset",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",

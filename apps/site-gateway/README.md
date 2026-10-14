@@ -20,7 +20,7 @@ shared contracts: `packages/contracts/src/site-publishing.ts`.
 | `/_og/api/*` | Same-origin Site calls: re-checked against `matchSiteOperation` and `SITE_TOOL_METHODS`, rate-limited, size-capped, signed and forwarded to `${API_ORIGIN}/v1/site-runtime<suffix>`; SSE streams through |
 | `/_og/report` | Script-free abuse report form, posting a `SiteAbuseReportRequest` to signed `POST /v1/site-runtime/site/reports` (same-origin plus a form token); reports go to the Site's owners and the abuse team, and the pages show `ABUSE_EMAIL` |
 | `/_og/human` | Turnstile verification (only when both Turnstile values are set) |
-| `/_og/internal/site-db` | PR B extension point (per-Site Durable Object storage); 404 until bound, 501 when bound |
+| `/_og/internal/site-db/<siteId>/<operation>` | Site SQL (optional per-Site storage): signed `POST` from the API only (see below), forwarded to the Site's `SiteDatabase` Durable Object; 404 without the `SITE_DB` binding |
 | anything else (GET) | The shell page: nonce'd bridge-host script, a full-viewport sandboxed iframe (`allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals`, never `allow-same-origin`) on `/_og/v/<versionId>`, and a Report link |
 
 A trailing-dot host (`<site>.<domain>.`) is redirected to the canonical
@@ -59,6 +59,7 @@ Secrets (`.dev.vars` locally, `wrangler secret put` when deployed):
 | Name | Meaning |
 | --- | --- |
 | `GATEWAY_SECRET` | At least 32 characters, shared with the API; signs API requests (`siteGatewayCanonicalString`, HMAC-SHA256, `v1=<base64url>`) and gateway cookies |
+| `GATEWAY_SECRET_PREVIOUS` | Optional; the previous `GATEWAY_SECRET` during a rotation. Only the internal Site SQL route accepts it |
 | `TURNSTILE_SECRET` | Optional Turnstile siteverify secret |
 
 Bindings:
@@ -67,12 +68,52 @@ Bindings:
 | --- | --- | --- |
 | `HOST_MAP` | KV namespace | Host-map records at `siteHostMapKey(host)`, written by the API's edge sync; the gateway reads with `cacheTtl` 60 and writes back API lookups for 5 minutes after a fresh (uncached) read, only when strictly newer than the stored generation, so a suspension is never overwritten by an older record |
 | `RATE_LIMITER` | Rate limiting (`[[ratelimits]]`) | Per-Site flood brake for `/_og/api/*` and reports. Every request is limited on the client IP (`CF-Connecting-IP`; IPv6 per /64 prefix) and, when present, also on the verified visitor; both must pass, so rotating `__Host-og_v` doesn't reset a budget. 429 on limit |
-| `SITE_DB` | Durable Object namespace (PR B, commented out) | Optional per-Site SQLite storage; see `src/site-db.ts` |
+| `SITE_DB` | Durable Object namespace, class `SiteDatabase` (`[[migrations]] tag = "v1"`, `new_sqlite_classes`) | Optional per-Site SQLite storage (Site SQL); bound for local development, commented out in the staging and production placeholders |
 
 `wrangler.toml` holds the local development configuration at the top level.
 `[env.staging]` and `[env.production]` are placeholders: the ops repository
 owns real account ids, routes, KV and rate-limit namespace ids, and secrets.
 No domain is named in this app.
+
+## Site SQL storage
+
+`src/site-database.ts` exports `SiteDatabase` (also exported from the Worker
+entry): one SQLite-backed Durable Object per Site, `SITE_DB.idFromName(siteId)`.
+Postgres keeps the definitions (migrations and named queries); the object
+holds the rows. `src/site-db.ts` serves the internal route the API calls:
+
+- `POST /_og/internal/site-db/<siteId>/<operation>`, operation one of
+  `run`, `script`, `migrate`, `insert`, `export`, `inspect`, `reset`.
+- Signed like gateway-to-API requests: `siteGatewayCanonicalString` over the
+  method, the request's host and path, the body's SHA-256 and the timestamp,
+  with empty session, visitor, client IP and human fields (a request that
+  carries any viewer header is refused). The current or previous secret is
+  accepted within 30 seconds; the Durable Object refuses a repeated request
+  id.
+- `no-store`, no cookies; another method, a bad path, a query string, a body
+  over 8 MB or a bad signature is refused before the Durable Object is
+  touched. Outside development the route needs https.
+- `migrate` takes an optional `position` per migration (its Postgres
+  ordinal), so the API can send only the missing ones in bounded calls;
+  `inspect` takes `migrationsOnly`; every `export` page carries the schema,
+  so the API can end a dump (triggers last) on whichever page finishes it.
+
+The API has already authorized the caller, applied limits and resolved
+named queries; the Durable Object still re-checks every statement with
+`compileSiteSql`, binds values only as parameters, runs each call in one
+transaction, bounds rows and response size and enforces the storage cap.
+Its bookkeeping (request ids seen, migrations applied with the checksum it
+recomputes) is in the Durable Object's key-value storage (`ctx.storage.kv`),
+which workerd keeps in `_cf_KV` and refuses to user SQL, so no statement or
+trigger can touch it; there are no bookkeeping tables in the database.
+The route checks the timestamp, skew and signature header before reading
+the body.
+Site pages never reach the route: `site.sql.run` goes through `/_og/api` to
+the API, which calls back here. The route works on any host the Worker
+serves; deployments should point the API's
+`OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN` at a reserved label such as
+`internal.<sites domain>` that no Site can take. See
+[docs/site-data.md](../../docs/site-data.md#site-sql-optional-cloudflare-storage).
 
 ## Cookies
 
@@ -139,6 +180,10 @@ bun run typecheck
 Miniflare with KV and a rate limiter, and points it at a fake site-runtime API
 on an ephemeral loopback port (set `SITE_GATEWAY_TEST_API_PORT` to pin one)
 that verifies every gateway signature independently.
+`test/site-db.miniflare.test.ts` runs the `SiteDatabase` Durable Object in
+workerd: signatures, secret rotation, skew and replay, statement refusals,
+limits, migrations, rebuild, export and import. `test/site-database.test.ts`
+covers request-id expiry and pruning with a fake clock.
 
 ## What the API serves for the gateway
 

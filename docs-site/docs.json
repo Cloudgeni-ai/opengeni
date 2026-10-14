@@ -73,6 +73,7 @@
           "guides/task-usage-limits",
           "guides/insights",
           "guides/site-data",
+          "guides/site-sql",
           "guides/published-sites"
         ]
       },

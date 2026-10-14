@@ -30,14 +30,17 @@ name = "RATE_LIMITER"
 namespace_id = "1001"
 simple = { limit = 600, period = 60 }
 
-# PR B extension point (optional per-Site Cloudflare storage): one
-# SQLite-backed Durable Object per Site. Not part of PR A.
-# [[durable_objects.bindings]]
-# name = "SITE_DB"
-# class_name = "SiteDatabase"
-# [[migrations]]
-# tag = "v1"
-# new_sqlite_classes = ["SiteDatabase"]
+# Optional per-Site Cloudflare storage: one SQLite-backed Durable Object per
+# Site (`SITE_DB.idFromName(siteId)`), reached only through the API's signed
+# internal route `/_og/internal/site-db`. Remove the binding to turn the
+# route off (404). The migration tag is permanent once deployed.
+[[durable_objects.bindings]]
+name = "SITE_DB"
+class_name = "SiteDatabase"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SiteDatabase"]
 
 [env.staging]
 name = "opengeni-site-gateway-staging"
@@ -61,6 +64,12 @@ LOGIN_ONLY = "true"
 # namespace_id = "<staging rate-limit namespace id>"
 # simple = { limit = 600, period = 60 }
 
+# Durable Object bindings are not inherited by environments; the top-level
+# [[migrations]] apply to every environment.
+# [[env.staging.durable_objects.bindings]]
+# name = "SITE_DB"
+# class_name = "SiteDatabase"
+
 [env.production]
 name = "opengeni-site-gateway-production"
 # account_id = "<production account id>"
@@ -82,3 +91,7 @@ LOGIN_ONLY = "false"
 # name = "RATE_LIMITER"
 # namespace_id = "<production rate-limit namespace id>"
 # simple = { limit = 600, period = 60 }
+
+# [[env.production.durable_objects.bindings]]
+# name = "SITE_DB"
+# class_name = "SiteDatabase"

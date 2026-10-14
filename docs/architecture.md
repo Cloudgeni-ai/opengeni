@@ -1930,6 +1930,13 @@ access modes are enforced only in the API, Site frames reach it through the
 existing Site HTTP channel with host-pinned `current` routes only and always
 with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
 
+Site SQL is the optional per-Site database next to it: one SQLite-backed
+Durable Object per Site in the Sites gateway Worker, reached only by the API
+through a signed internal gateway route. Postgres keeps the definitions
+(settings, migrations and named queries) so the database can be rebuilt; Site
+pages run only named queries with `:viewer` bound by the API. See
+[`site-data.md`](site-data.md#site-sql-optional-cloudflare-storage).
+
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
