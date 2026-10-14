@@ -20,6 +20,7 @@ import {
   assertNotSiteClampedAgent,
   currentSiteSessionOrigin,
   hasLiteralPermission,
+  siteAgentClamp,
   siteViewerForGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -155,8 +156,10 @@ export type SitePublishingEffects = {
    * Run `run` in the background, at most `SITE_EFFECT_CONCURRENCY` at a time;
    * the rest wait in a bounded queue (beyond it a task is dropped and logged:
    * edge copies self-heal and expire, scans and notices are best effort).
+   * Returns false when the task was dropped, so callers can release what
+   * they reserved for it.
    */
-  schedule(name: string, run: () => Promise<void>): void;
+  schedule(name: string, run: () => Promise<void>): boolean;
   /** Hostnames with an edge sync running or queued, and what it still owes. */
   edgeLabels: Map<string, { again: boolean; purge: boolean; siteIdHint: string | null }>;
 };
@@ -187,10 +190,19 @@ export function sitePublishingDispatch(
   return dispatchBySettings.get(settings) ?? null;
 }
 
+type SitePublishingEffectsOptions = {
+  fetch?: typeof fetch;
+  backoffMs?: number;
+  scanner?: SiteContentScanner;
+  /** Waiting tasks before new ones are dropped (tests fill a small queue). */
+  queueLimit?: number;
+};
+
 function createEffects(
   settings: ApiRouteDeps["settings"],
-  options: { fetch?: typeof fetch; backoffMs?: number; scanner?: SiteContentScanner } = {},
+  options: SitePublishingEffectsOptions = {},
 ): SitePublishingEffects {
+  const queueLimit = options.queueLimit ?? SITE_EFFECT_QUEUE_LIMIT;
   const pending = new Set<Promise<void>>();
   const waiting: Array<() => void> = [];
   let running = 0;
@@ -207,9 +219,9 @@ function createEffects(
       while (pending.size > 0) await Promise.allSettled([...pending]);
     },
     schedule(name, run) {
-      if (waiting.length >= SITE_EFFECT_QUEUE_LIMIT) {
+      if (running >= SITE_EFFECT_CONCURRENCY && waiting.length >= queueLimit) {
         console.warn(`[site-publishing] ${name} dropped: too many pending effects`);
-        return;
+        return false;
       }
       const task = new Promise<void>((resolve) => {
         const start = async () => {
@@ -231,6 +243,7 @@ function createEffects(
       });
       pending.add(task);
       void task.finally(() => pending.delete(task));
+      return true;
     },
   };
 }
@@ -248,7 +261,7 @@ export function sitePublishingEffects(settings: ApiRouteDeps["settings"]): SiteP
 /** Replace the effects for a settings object (tests: a fake fetch or scanner). */
 export function configureSitePublishingEffects(
   settings: ApiRouteDeps["settings"],
-  options: { fetch?: typeof fetch; backoffMs?: number; scanner?: SiteContentScanner },
+  options: SitePublishingEffectsOptions,
 ): SitePublishingEffects {
   const effects = createEffects(settings, options);
   effectsBySettings.set(settings, effects);
@@ -402,7 +415,7 @@ export function scheduleSiteEdgeSync(
       siteIdHint: options.siteIdHint ?? null,
     };
     effects.edgeLabels.set(label, entry);
-    effects.schedule("edge sync", async () => {
+    const queued = effects.schedule("edge sync", async () => {
       try {
         for (let pass = 0; pass < SITE_EDGE_SYNC_ROUNDS; pass += 1) {
           const purge = entry.purge;
@@ -421,6 +434,9 @@ export function scheduleSiteEdgeSync(
           });
       }
     });
+    // Dropped (the queue is full): release the hostname, so a later change
+    // or the self-heal can sync it again.
+    if (!queued) effects.edgeLabels.delete(label);
   }
 }
 
@@ -818,6 +834,44 @@ export async function requireSitePublicationWriter(
   }
 }
 
+export const SITE_AGENT_OTHER_SITE_MESSAGE =
+  "An agent started from a Site page cannot change another published Site";
+
+/**
+ * Whether `grant` may change a Site's content (new versions, rollback,
+ * archive, restore, audience). An agent started from a Site page may only
+ * when no publication serves the Site on its own hostname, or when it is a
+ * Site the agent was started from: it never rewrites another published Site
+ * the person can edit. Other callers are not limited here.
+ */
+export async function siteAgentMayChangeArtifact(
+  deps: SitePublishingDeps,
+  grant: AccessGrant,
+  artifactId: string,
+): Promise<boolean> {
+  const clamp = await siteAgentClamp(deps.db, grant);
+  if (!clamp?.clamped || clamp.originSiteIds.includes(artifactId)) return true;
+  const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  // Any publication counts, unpublished or taken down included: publishing
+  // it again would serve what the agent wrote.
+  return (await getSitePublication(deps.db, scope, artifactId)) === null;
+}
+
+/** `siteAgentMayChangeArtifact`, refusing with 403 `site_agent_forbidden`. */
+export async function requireSiteAgentMayChangeArtifact(
+  deps: SitePublishingDeps,
+  grant: AccessGrant,
+  artifactId: string,
+): Promise<void> {
+  if (!(await siteAgentMayChangeArtifact(deps, grant, artifactId)))
+    throw sitePublishingError(
+      403,
+      "forbidden",
+      "site_agent_forbidden",
+      SITE_AGENT_OTHER_SITE_MESSAGE,
+    );
+}
+
 /**
  * Resolve a Site for publication management. The caller must see the Site
  * (its audience); managers are the Site Data managers (owner, workspace admin,
@@ -1034,6 +1088,19 @@ export async function upsertSitePublicationForManager(
       "forbidden",
       "site_admin_required",
       "Only a workspace admin can give a Site's assistant workspace tools",
+    );
+  // Opening a Site to everyone while its tools are on for everyone gives them
+  // to people outside the workspace: that needs an admin as well.
+  const toolsAfter = tools === undefined ? (existing?.agent.tools ?? []) : (tools ?? []);
+  const everyoneToolsAfter = request.agent?.guestTools ?? existing?.agent.guestTools ?? false;
+  const opensToEveryone =
+    (request.access ?? existing?.access) === "public" && existing?.access !== "public";
+  if (opensToEveryone && everyoneToolsAfter && toolsAfter.length > 0 && !management.admin)
+    throw sitePublishingError(
+      403,
+      "forbidden",
+      "site_admin_required",
+      "Only a workspace admin can open a Site with tools to everyone",
     );
   for (const tool of tools ?? [])
     if (!SITE_AGENT_TOOL_ID.test(tool) || RESERVED_SITE_AGENT_TOOL_IDS.has(tool))

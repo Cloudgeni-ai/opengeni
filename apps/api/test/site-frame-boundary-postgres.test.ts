@@ -35,6 +35,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
 import { registerSecretTools } from "../src/mcp/secret-tools";
 import { registerSitePublicationTools } from "../src/mcp/site-publication-tools";
@@ -886,6 +887,257 @@ test("agents started from a Site do not learn or change secrets, members, connec
   }
   const search = await as(clampedAgent, "POST", "/knowledge/entries/search", {});
   expect(refusal.test(search.text)).toBe(false);
+});
+
+test("agents started from a Site leave the organization profile, machines, environments and other published Sites alone", async () => {
+  const f = await fixture();
+  const own = await f.publish("Own Site");
+  const other = await f.publish("Other Site");
+  const draft = await f.publish("Draft Site");
+  // `own` and `other` are also published on their own hostnames; `draft` is not.
+  for (const site of [own, other]) {
+    const published = await f.call(
+      "PUT",
+      `/published-artifacts/${site.siteId}/publication`,
+      {},
+      { access: "members" },
+    );
+    expect(published.status, await published.clone().text()).toBe(201);
+  }
+  const fromSite = await f.startSession(own.frame("frame-own"));
+  const plain = await f.startSession();
+  const settings = { ...f.settings, sandboxSelfhostedEnabled: true };
+  const deps = {
+    db: db.db,
+    bus: new MemoryEventBus(),
+    settings,
+    objectStorage: f.objectStorage,
+    workflowClient: new Proxy({}, { get: () => noop }),
+  } as unknown as ApiRouteDeps;
+  const tools = [
+    "company_profile_propose",
+    "company_profile_confirm",
+    "connected_machine_enroll_token",
+    "connected_machine_enable_screen_control",
+    "connected_machine_remove",
+    "rig_propose_change",
+    "rig_verify",
+    "rig_promote",
+    "artifacts_publish",
+    "artifacts_rollback",
+    "artifacts_archive",
+    "artifacts_restore",
+  ];
+  // One running turn each: the agents the MCP calls and the HTTP calls run as.
+  const clampedAgent = await f.liveAgentGrant(fromSite);
+  const plainAgent = await f.liveAgentGrant(plain);
+  const connect = async (live: AccessGrant) => {
+    const grant: AccessGrant = {
+      ...live,
+      permissions: [
+        ...live.permissions,
+        "enrollments:manage",
+        "rigs:use",
+        "rigs:manage",
+      ] as AccessGrant["permissions"],
+      metadata: { ...live.metadata, firstPartyMcpTools: tools },
+    };
+    const server = buildOpenGeniMcpServer(deps, grant);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "site-clamp-sweep", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  };
+  const errorCode = (result: Awaited<ReturnType<Client["callTool"]>>) => {
+    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+    try {
+      return (JSON.parse(text) as { error?: { code?: string } }).error?.code;
+    } catch {
+      return undefined;
+    }
+  };
+  const uuid = () => crypto.randomUUID();
+  const html = "<!doctype html><h1>Changed by an agent</h1>";
+  const writes = (siteId: string, versionId: string): Array<[string, Record<string, unknown>]> => [
+    [
+      "artifacts_publish",
+      { artifactId: siteId, expectedCurrentVersionId: versionId, html, idempotencyKey: uuid() },
+    ],
+    [
+      "artifacts_rollback",
+      {
+        artifactId: siteId,
+        versionId,
+        expectedCurrentVersionId: versionId,
+        reason: "From a Site page",
+        idempotencyKey: uuid(),
+      },
+    ],
+    [
+      "artifacts_archive",
+      {
+        artifactId: siteId,
+        expectedCurrentVersionId: versionId,
+        reason: "From a Site page",
+        idempotencyKey: uuid(),
+      },
+    ],
+    [
+      "artifacts_restore",
+      {
+        artifactId: siteId,
+        expectedCurrentVersionId: versionId,
+        reason: "From a Site page",
+        idempotencyKey: uuid(),
+      },
+    ],
+  ];
+  const workspaceWide: Array<[string, Record<string, unknown>]> = [
+    [
+      "company_profile_propose",
+      { operationId: uuid(), identity: "A robotics company.", mission: "Build safe robots." },
+    ],
+    [
+      "company_profile_confirm",
+      { operationId: uuid(), proposalReceiptId: uuid(), humanInputRequestId: uuid() },
+    ],
+    ["connected_machine_enroll_token", {}],
+    ["connected_machine_enable_screen_control", { target: uuid() }],
+    ["connected_machine_remove", { enrollmentId: uuid() }],
+    ["rig_propose_change", { rigId: uuid(), command: "echo hello" }],
+    ["rig_verify", { rigId: uuid() }],
+    ["rig_promote", { rigId: uuid(), changeId: uuid() }],
+  ];
+
+  for (const [agent, clamped] of [
+    [clampedAgent, true],
+    [plainAgent, false],
+  ] as const) {
+    const client = await connect(agent);
+    try {
+      const listed = new Set((await client.listTools()).tools.map((tool) => tool.name));
+      expect(tools.filter((tool) => !listed.has(tool))).toEqual([]);
+      // Workspace-wide writes: refused for the Site-started agent only.
+      for (const [name, args] of workspaceWide) {
+        const result = await client.callTool({ name, arguments: args });
+        expect({ name, clamped: errorCode(result) === "site_agent_clamped" }).toEqual({
+          name,
+          clamped,
+        });
+      }
+      // Another published Site: refused for the Site-started agent only.
+      for (const [name, args] of writes(other.siteId, other.versionId)) {
+        const result = await client.callTool({ name, arguments: args });
+        expect({ name, clamped: errorCode(result) === "site_agent_clamped" }).toEqual({
+          name,
+          clamped,
+        });
+      }
+      if (clamped) {
+        const [unchanged] = await shared.admin<{ current_version_id: string; status: string }[]>`
+          select current_version_id, status from workspace_artifacts where id = ${other.siteId}`;
+        expect(unchanged).toEqual({ current_version_id: other.versionId, status: "active" });
+      }
+    } finally {
+      await client.close();
+    }
+  }
+  // The Site it was started from, and a Site no publication serves, stay open.
+  const client = await connect(clampedAgent);
+  try {
+    for (const site of [own, draft]) {
+      const [name, args] = writes(site.siteId, site.versionId)[0]!;
+      const result = await client.callTool({ name, arguments: args });
+      expect({ siteId: site.siteId, isError: result.isError ?? false }).toEqual({
+        siteId: site.siteId,
+        isError: false,
+      });
+    }
+  } finally {
+    await client.close();
+  }
+  // Over HTTP: the same rule for a published Site's content, and every
+  // workspace-wide family, matched on the decoded path. Reads stay open.
+  const bearer = async (grant: AccessGrant) => {
+    const metadata = grant.metadata as {
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+    };
+    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: [...permissions, "documents:manage", "members:manage", "workspace:admin"],
+      principalKind: "agent_attempt",
+      sessionId: metadata.sessionId,
+      turnId: metadata.turnId,
+      attemptId: metadata.attemptId,
+      executionGeneration: metadata.executionGeneration,
+      exp: Math.floor(Date.now() / 1000) + 600,
+    })}`;
+  };
+  const as = async (grant: AccessGrant, method: string, path: string, body?: unknown) => {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+      method,
+      headers: { authorization: await bearer(grant), "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: response.status, text: await response.text() };
+  };
+  const clampRefusal =
+    /An agent started from a Site page cannot (create or change|change another)/u;
+  const otherSite = `/published-artifacts/${other.siteId}`;
+  const refused: Array<[string, string, unknown]> = [
+    ["POST", `${otherSite}/versions`, { html, expectedCurrentVersionId: other.versionId }],
+    [
+      "POST",
+      `${otherSite.toUpperCase().replace("/PUBLISHED-ARTIFACTS/", "/published-artifacts/")}/rollback`,
+      {},
+    ],
+    ["PATCH", `${otherSite}/status`, { status: "archived" }],
+    ["PUT", `${otherSite}/visibility`, { visibility: "private" }],
+    ["PATCH", "", { name: "Renamed from a Site" }],
+    ["DELETE", "", undefined],
+    ["PATCH", "/%73ettings", {}],
+    ["POST", "/%6Bnowledge/entries", {}],
+    ["PUT", "/company-profile", {}],
+    ["POST", "/enrollments/token", {}],
+    ["POST", `/machines/${uuid()}/update`, {}],
+    ["POST", "/rigs", {}],
+    ["PUT", "/default-rig", {}],
+    ["POST", "/webhooks", {}],
+    ["POST", "/network-routes", {}],
+    ["POST", "/browser-identities", {}],
+    ["PATCH", "/session-mcp-tool-permissions", {}],
+  ];
+  for (const [method, path, body] of refused) {
+    const route = `${method} ${path}`;
+    const result = await as(clampedAgent, method, path, body);
+    expect({ route, status: result.status, refused: clampRefusal.test(result.text) }).toEqual({
+      route,
+      status: 403,
+      refused: true,
+    });
+  }
+  // Not refused: other callers, the agent's own Site, Sites no publication
+  // serves, and writes that only read.
+  const open: Array<[AccessGrant, string, string, unknown]> = [
+    [plainAgent, "POST", `${otherSite}/versions`, {}],
+    [plainAgent, "PATCH", "", {}],
+    [plainAgent, "PATCH", "/%73ettings", {}],
+    [plainAgent, "POST", "/webhooks", {}],
+    [clampedAgent, "POST", `/published-artifacts/${own.siteId}/versions`, {}],
+    [clampedAgent, "POST", `/published-artifacts/${draft.siteId}/versions`, {}],
+    [clampedAgent, "POST", `/machines/${uuid()}/audience/preview`, {}],
+  ];
+  for (const [grant, method, path, body] of open) {
+    const route = `${grant === plainAgent ? "plain" : "clamped"} ${method} ${path}`;
+    const result = await as(grant, method, path, body);
+    expect({ route, refused: clampRefusal.test(result.text) }).toEqual({ route, refused: false });
+  }
 });
 
 test("Site pages send message text only: no approvals, answers, resources or credentials", async () => {

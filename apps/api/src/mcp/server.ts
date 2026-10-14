@@ -377,7 +377,12 @@ import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletio
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
-import { afterSiteArtifactMutation } from "../site-publishing/service";
+import {
+  afterSiteArtifactMutation,
+  SITE_AGENT_OTHER_SITE_MESSAGE,
+  siteAgentMayChangeArtifact,
+} from "../site-publishing/service";
+import { siteAgentClampRefusal, siteAgentClampedToolResult } from "./site-agent-clamp-tools";
 import {
   registerSessionAdminAccessTools,
   type SessionAdminAccessDispatch,
@@ -1136,6 +1141,9 @@ export function buildOpenGeniMcpServer(
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
+      // A Site-started agent does not propose or confirm the organization profile.
+      refuseSiteAgent: async () =>
+        await siteAgentClampRefusal(deps, grant, "the organization profile"),
       json,
     });
   }
@@ -3359,6 +3367,12 @@ function registerWorkspaceArtifactTools(
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
     await mutation(await afterSiteArtifactMutation(deps, response, { scan }));
+  // An agent started from a Site page changes only Sites no publication
+  // serves, and the Sites it was started from (the HTTP routes check the same).
+  const otherSiteRefusal = async (artifactId: string) =>
+    (await siteAgentMayChangeArtifact(deps, grant, artifactId))
+      ? null
+      : siteAgentClampedToolResult(SITE_AGENT_OTHER_SITE_MESSAGE);
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3585,6 +3599,8 @@ function registerWorkspaceArtifactTools(
       idempotencyKey,
     }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
         await siteMutation(
           await publishWorkspaceArtifactVersion(deps.db, {
@@ -3617,6 +3633,8 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
         await siteMutation(
           await rollbackWorkspaceArtifact(deps.db, {
@@ -3647,6 +3665,8 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
         await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
@@ -3677,6 +3697,8 @@ function registerWorkspaceArtifactTools(
     },
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
+      const refused = await otherSiteRefusal(artifactId);
+      if (refused) return refused;
       return json(
         await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
@@ -4363,6 +4385,8 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
+      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
+      if (refused) return refused;
       const minted = await mintEnrollToken(deps, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -4394,6 +4418,8 @@ function registerConnectedMachineTools(
       if (sessionId) {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       }
+      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
+      if (refused) return refused;
       // Personal machines belong to the person the attempt acts for.
       const attempt = sessionId ? exactAgentAttemptClaims(grant) : null;
       const resourceGrant =
@@ -4466,6 +4492,8 @@ function registerConnectedMachineTools(
       },
     },
     async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
+      const refused = await siteAgentClampRefusal(deps, grant, "Connected Machines");
+      if (refused) return refused;
       const resourceGrant =
         sessionId && exactAgentAttemptClaims(grant)
           ? {
@@ -4603,6 +4631,9 @@ function registerRigTools(
         },
       },
       async ({ rigId, command, note }) => {
+        // A Site-started agent does not change sandbox environments.
+        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
+        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
         const change = await proposeRigChangeForApi(
@@ -4684,6 +4715,9 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
+        // A Site-started agent does not change sandbox environments.
+        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
+        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         if (changeId) {
           const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
@@ -4787,6 +4821,9 @@ function registerRigTools(
         },
       },
       async ({ rigId, changeId }) => {
+        // A Site-started agent does not change sandbox environments.
+        const refused = await siteAgentClampRefusal(deps, grant, "sandbox environments");
+        if (refused) return refused;
         const rig = await requireMutableRig(rigId);
         const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
         const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };

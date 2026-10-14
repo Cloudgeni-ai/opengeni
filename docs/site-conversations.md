@@ -79,13 +79,29 @@ project, visibility, usage limit, nesting). The session then runs on a minimal
 Site profile: no vault access and the workspace defaults for everything else.
 An agent started from a Site page is also clamped (`assertNotSiteClampedAgent`):
 it cannot create or change schedules, automations, Site publications,
-workspace instructions, Skills, Knowledge or secrets, so it does not learn,
-nor workspace members, connections, integrations or settings. The
-first-party tools refuse those writes (`knowledge_*` writes,
-`instruction_policy_save`, `secret_save`, `secret_move`, `secret_delete`,
-`skill_save`, `skill_install`, `skill_publish`, `skill_remove`), and the API
-refuses the same agent's writes to those workspace route families with 403
-(`apps/api/src/site-agent-guard.ts`). Reading stays open.
+workspace instructions, Skills, Knowledge or secrets, so it does not learn.
+Nor can it change the workspace itself, its members, connections,
+integrations, webhooks, network routes or settings, the organization
+profile, Connected Machines or sandbox environments. It changes a published
+Site's content (new versions, rollback, archive, restore, audience) only for
+the Site it was started from; Sites without a publication stay open to it.
+The first-party tools refuse those writes with `site_agent_clamped`:
+
+- `knowledge_*` writes and `instruction_policy_save`;
+- `secret_save`, `secret_move` and `secret_delete`;
+- `skill_save`, `skill_install`, `skill_publish` and `skill_remove`;
+- `company_profile_propose` and `company_profile_confirm`;
+- `connected_machine_enroll_token`, `connected_machine_enable_screen_control`
+  and `connected_machine_remove`;
+- `rig_propose_change`, `rig_verify` and `rig_promote`;
+- `artifacts_publish`, `artifacts_rollback`, `artifacts_archive` and
+  `artifacts_restore` for another published Site.
+
+The API refuses the same agent's writes to those workspace route families
+with 403 (`apps/api/src/site-agent-guard.ts`), matching the percent-decoded
+path the router uses. Reading stays open. A session started from a Site page
+cannot get session admin access (409), and an agent acting for a Site page
+cannot run `admin_action_call`.
 Published Sites start their agents as `site:<siteId>` with the publication's
 own tools and limits instead (see `docs/site-runtime-api.md`).
 

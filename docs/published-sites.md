@@ -129,9 +129,10 @@ to a Site's agent. Workspace members and invited viewers get them. Everyone
 else (people who sign in but aren't in the workspace, on a public Site, and
 guests) gets them only when an admin also turns on **Let everyone use these
 tools** (`agent.guestTools`, which means tools for everyone who isn't a
-workspace member or invited; the name is kept for compatibility). A
-connection the workspace doesn't have is skipped rather than failing the
-conversation.
+workspace member or invited; the name is kept for compatibility). Opening
+such a Site to everyone (changing its access to public while those tools are
+on for everyone) also needs an admin. A connection the workspace doesn't
+have is skipped rather than failing the conversation.
 Unpublishing, taking down, or narrowing a Site's access signs all its viewers
 out (those who keep access sign in again) and cancels its running
 conversations; turning the agent off cancels the conversations only.

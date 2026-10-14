@@ -404,6 +404,8 @@ function SitePublishForm({
       }
       if (code === "site_admin_required") {
         if (request.limitProfile) setCustomError("Only a workspace admin can change limits.");
+        else if (request.access === "public")
+          setAgentError("Only a workspace admin can open a Site with tools to everyone.");
         else setAgentError("Only a workspace admin can give the agent's tools to guests.");
         return false;
       }

@@ -69,7 +69,7 @@ managers. The Site must be shared with the workspace, not "Only me".
 | Method and path | Success | Errors |
 | --- | --- | --- |
 | `GET` | 200 `SitePublication` | 404 `site_not_published` |
-| `PUT` (`UpsertSitePublicationRequest`) | 201 when it first publishes, otherwise 200 | 403 `site_manager_required`, `site_admin_required` (limit profile, new `agent.tools`, `agent.guestTools`), `site_public_disabled`; 409 `site_not_shared`, `site_archived`, `site_suspended` (status or label change while taken down), `site_taken`, `site_held`, `site_reserved`; 400 `site_model_not_allowed`, `site_tool_invalid`, `site_invalid_request` |
+| `PUT` (`UpsertSitePublicationRequest`) | 201 when it first publishes, otherwise 200 | 403 `site_manager_required`, `site_admin_required` (limit profile, new `agent.tools`, `agent.guestTools`, or access changed to `public` while `agent.guestTools` is on with tools), `site_public_disabled`; 409 `site_not_shared`, `site_archived`, `site_suspended` (status or label change while taken down), `site_taken`, `site_held`, `site_reserved`; 400 `site_model_not_allowed`, `site_tool_invalid`, `site_invalid_request` |
 | `DELETE` (unpublish) | 200 | 409 `site_suspended` |
 | `POST /takedown` (`SiteTakedownRequest`) | 200 | 403 `site_owner_or_admin_required` |
 | `POST /restore` | 200 | 403 `site_forbidden` when an admin (owner restoring) or the platform took the Site down |

@@ -26,6 +26,15 @@ export type RegisterCompanyProfileAgentAdminToolsInput = {
   db: Database;
   attempt: CompanyProfileAgentAttempt;
   authorize: () => Promise<void>;
+  /**
+   * The refusal for a caller that may not administer the organization
+   * profile even with the owner's authority (an agent started from a Site
+   * page), or null.
+   */
+  refuseSiteAgent?: () => Promise<{
+    isError: true;
+    content: Array<{ type: "text"; text: string }>;
+  } | null>;
   json: JsonResult;
   router?: Pick<ReturnType<typeof createCompanyProfileAgentAdminRouter>, "propose" | "confirm">;
 };
@@ -137,6 +146,8 @@ export function registerCompanyProfileAgentAdminTools(
     },
     async (request) => {
       await input.authorize();
+      const refused = await input.refuseSiteAgent?.();
+      if (refused) return refused;
       const parsed = AgentAuthoredCompanyProfileContent.safeParse({
         identity: request.identity,
         mission: request.mission,
@@ -185,6 +196,8 @@ export function registerCompanyProfileAgentAdminTools(
     },
     async (request) => {
       await input.authorize();
+      const refused = await input.refuseSiteAgent?.();
+      if (refused) return refused;
       try {
         return input.json(await router.confirm({ attempt: input.attempt, request }));
       } catch (error) {

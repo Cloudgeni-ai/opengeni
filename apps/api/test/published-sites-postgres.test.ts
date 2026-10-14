@@ -32,6 +32,8 @@ import type { SiteContentScanner } from "../src/site-publishing/content-scanner"
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import {
   configureSitePublishingEffects,
+  scheduleSiteEdgeSync,
+  SITE_EFFECT_CONCURRENCY,
   sitePublishingEffects,
 } from "../src/site-publishing/service";
 
@@ -1507,6 +1509,54 @@ test("edge writes hold no database lock and catch up with changes made meanwhile
   });
 }, 60_000);
 
+test("an edge sync dropped by a full queue releases its hostname", async () => {
+  const kv = new Map<string, string>();
+  const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const key = url.split("?")[0]!;
+    if (!url.includes("/storage/kv/")) return new Response("{}", { status: 200 });
+    if ((init?.method ?? "GET") === "GET")
+      return kv.has(key) ? new Response(kv.get(key)) : new Response("", { status: 404 });
+    kv.set(key, typeof init?.body === "string" ? init.body : "");
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const f = await fixture({
+    sitesCloudflareApiToken: "cf-token",
+    sitesCloudflareAccountId: "cf-account",
+    sitesCloudflareKvNamespaceId: "cf-namespace",
+  });
+  const effects = configureSitePublishingEffects(f.settings, {
+    fetch: fakeFetch,
+    backoffMs: 0,
+    queueLimit: 1,
+  });
+  const site = await f.live("Edge queue", { access: "public" });
+  await effects.flush();
+  const label = String(site.publication.label);
+  kv.clear();
+
+  // Every slot runs a blocked task and the one queue place is taken.
+  let release = () => {};
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  for (let index = 0; index <= SITE_EFFECT_CONCURRENCY; index += 1)
+    expect(effects.schedule("blocked", () => blocked)).toBe(true);
+  expect(effects.schedule("overflow", async () => undefined)).toBe(false);
+  // The edge sync is dropped, and its hostname is not left marked as syncing.
+  scheduleSiteEdgeSync(f.deps, [label]);
+  expect(effects.edgeLabels.has(label)).toBe(false);
+  release();
+  await effects.flush();
+  expect(kv.size).toBe(0);
+  // The next sync for that hostname runs.
+  scheduleSiteEdgeSync(f.deps, [label]);
+  expect(effects.edgeLabels.has(label)).toBe(true);
+  await effects.flush();
+  expect(effects.edgeLabels.has(label)).toBe(false);
+  expect(kv.size).toBe(1);
+}, 60_000);
+
 test("Site budgets hold across rotated visitors and addresses; requests are capped", async () => {
   const f = await fixture();
   const site = await f.live("Rotated", { access: "public", agent: { enabled: true } });
@@ -1665,6 +1715,37 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   const removed = await agentChange(f.owner, { tools: null });
   expect(removed.status).toBe(200);
   expect(removed.json.agent.tools).toBeNull();
+
+  // Opening a members Site whose tools an admin gave to everyone gives them
+  // to people outside the workspace: only an admin may.
+  const internal = await f.live("Internal tools", { access: "members", agent: { enabled: true } });
+  const toEveryone = await f.publication(f.admin, internal.id, "PUT", {
+    agent: { tools: ["crm"], guestTools: true },
+  });
+  expect(toEveryone.status, JSON.stringify(toEveryone.json)).toBe(200);
+  const opened = await f.publication(f.owner, internal.id, "PUT", { access: "public" });
+  expect({ status: opened.status, code: code(opened) }).toEqual({
+    status: 403,
+    code: "site_admin_required",
+  });
+  expect(opened.json.error.message).toBe(
+    "Only a workspace admin can open a Site with tools to everyone",
+  );
+  // Without tools for everyone, the owner opens it.
+  const openedWithout = await f.publication(f.owner, internal.id, "PUT", {
+    access: "public",
+    agent: { guestTools: false },
+  });
+  expect(openedWithout.status, JSON.stringify(openedWithout.json)).toBe(200);
+  expect(openedWithout.json).toMatchObject({ access: "public", agent: { guestTools: false } });
+  expect((await f.publication(f.owner, internal.id, "PUT", { access: "members" })).status).toBe(
+    200,
+  );
+  expect(
+    (await f.publication(f.admin, internal.id, "PUT", { agent: { guestTools: true } })).status,
+  ).toBe(200);
+  // An admin opens it with the tools.
+  expect((await f.publication(f.admin, internal.id, "PUT", { access: "public" })).status).toBe(200);
 }, 90_000);
 
 test("finished conversations free the Site budget; a lowered cap lowers running conversations", async () => {
