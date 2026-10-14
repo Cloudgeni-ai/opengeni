@@ -426,6 +426,37 @@ export async function getSitePublication(
   return await withRlsContext(db, scope, (tx) => publicationRow(tx, scope, siteId));
 }
 
+/**
+ * Whether an agent in `sessionId`'s session tree created the artifact: its
+ * first version records a source session with the same root session as
+ * `sessionId`. False when there is no such version or either session cannot
+ * be read (artifacts created over HTTP record no source session).
+ */
+export async function artifactCreatedInSessionTree(
+  db: Database,
+  scope: SitePublishingScope,
+  artifactId: string,
+  sessionId: string,
+): Promise<boolean> {
+  if (!UUID.test(artifactId) || !UUID.test(sessionId)) return false;
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{ same_tree: boolean }>(
+      tx,
+      sql`select source.root_session_id = agent.root_session_id as same_tree
+            from (select v.source_session_id
+                    from workspace_artifact_versions v
+                   where v.workspace_id = ${scope.workspaceId} and v.artifact_id = ${artifactId}
+                   order by v.revision asc
+                   limit 1) first_version
+            join sessions source
+              on source.workspace_id = ${scope.workspaceId} and source.id = first_version.source_session_id
+            join sessions agent
+              on agent.workspace_id = ${scope.workspaceId} and agent.id = ${sessionId}`,
+    );
+    return row?.same_tree === true;
+  });
+}
+
 /** The Site itself (any audience); callers decide whether it may be published or served. */
 export async function getPublishedSite(
   db: Database,

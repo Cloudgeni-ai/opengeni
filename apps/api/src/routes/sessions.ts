@@ -7,13 +7,17 @@ import {
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
-import { UnsupportedLatencyModeError } from "@opengeni/config";
+import { agentConfigDeploymentPolicy, UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { SessionMessageSearchRequest } from "@opengeni/contracts";
+import {
+  resolveWorkspaceAgentDefaults,
+  SessionMessageSearchRequest,
+  type AgentCapabilities,
+} from "@opengeni/contracts";
 import {
   SITE_FRAME_SESSION_CREATE_FIELDS,
   siteFrameBodyRefusal,
@@ -760,7 +764,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             },
             403,
           );
-        payload = siteFrameSessionProfile(payload);
+        payload = await siteFrameSessionProfile(deps, workspaceId, payload);
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
@@ -6352,12 +6356,19 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /**
  * The minimal Site profile of a session a Site page starts: only the allowed
- * create fields, metadata without reserved `_opengeni` keys, and no vault
- * access. Everything else (tools, servers, sandbox, resources, Skills,
- * learning, goals) is the workspace default for a plain chat, and agents
- * started from a Site stay clamped (`assertNotSiteClampedAgent`).
+ * create fields, metadata without reserved `_opengeni` keys, no vault access,
+ * and the workspace's default agent capabilities without workspace
+ * administration or browser and computer control, so the page cannot reach
+ * the viewer's Connected Machines, sandboxes or browsers. Workers it spawns
+ * only narrow that. Everything else (tools, servers, sandbox, resources,
+ * Skills, learning, goals) is the workspace default for a plain chat, and
+ * agents started from a Site stay clamped (`assertNotSiteClampedAgent`).
  */
-function siteFrameSessionProfile(payload: unknown): Record<string, unknown> {
+async function siteFrameSessionProfile(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  payload: unknown,
+): Promise<Record<string, unknown>> {
   const body = (payload ?? {}) as Record<string, unknown>;
   const profile: Record<string, unknown> = {};
   for (const field of SITE_FRAME_SESSION_CREATE_FIELDS)
@@ -6368,7 +6379,37 @@ function siteFrameSessionProfile(payload: unknown): Record<string, unknown> {
       ? Object.fromEntries(Object.entries(metadata).filter(([key]) => !key.startsWith("_opengeni")))
       : {};
   profile.vaultPolicy = { mode: "selected", vaultIds: [] };
+  profile.agent = {
+    capabilities: siteFrameCapabilities(
+      resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
+        ?.capabilities ?? "all",
+      agentConfigDeploymentPolicy(deps.settings).unavailable,
+    ),
+  };
   return profile;
+}
+
+/**
+ * A Site page's session capabilities: the workspace default with workspace
+ * administration (sandboxes, Connected Machines, `run_on`) and browser and
+ * computer control off. Capabilities this server does not offer are left to
+ * the default, so the create never fails on them.
+ */
+export function siteFrameCapabilities(
+  workspaceDefault: AgentCapabilities,
+  unavailable: Readonly<Partial<Record<string, string>>>,
+): Exclude<AgentCapabilities, string> {
+  if (typeof workspaceDefault === "string")
+    return { from: workspaceDefault, workspaceAdmin: false, browser: false };
+  const capabilities: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(workspaceDefault))
+    if (name === "from" || value === false || unavailable[name] === undefined)
+      capabilities[name] = value;
+  return {
+    ...(capabilities as Exclude<AgentCapabilities, string>),
+    workspaceAdmin: false,
+    browser: false,
+  };
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */

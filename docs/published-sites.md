@@ -132,7 +132,9 @@ per-conversation spend cap that is in place before the first model call. A
 visitor can list, read and continue only their own conversations on that
 Site, and sees a Site-safe view of them (no workspace ids, instructions,
 tools or metadata). Agents started from a Site can't create or change
-schedules, automations or Site publications, and can't read other sessions.
+schedules, automations, Site publications or workspace settings, and can't
+read other sessions; their API writes are held to an allowlist (see
+`docs/site-conversations.md`).
 Public Sites can let guests chat too; the limit profile and the deployment
 decide. Guest agents can optionally require a human check
 (`OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` with the gateway's Turnstile
@@ -145,9 +147,12 @@ to a Site's agent. Workspace members and invited viewers get them. Everyone
 else (people who sign in but aren't in the workspace, on a public Site, and
 guests) gets them only when an admin also turns on **Let everyone use these
 tools** (`agent.guestTools`, which means tools for everyone who isn't a
-workspace member or invited; the name is kept for compatibility). A
-connection the workspace doesn't have is skipped rather than failing the
-conversation.
+workspace member or invited; the name is kept for compatibility). Opening
+such a Site to everyone (changing its access to public while those tools are
+on for everyone) also needs an admin, and so does inviting people (switching
+to invited access or adding invitees) while the Site's agent has tools,
+since invited viewers always get them. A connection the workspace doesn't
+have is skipped rather than failing the conversation.
 Unpublishing, taking down, or narrowing a Site's access signs all its viewers
 out (those who keep access sign in again) and cancels its running
 conversations; turning the agent off cancels the conversations only.

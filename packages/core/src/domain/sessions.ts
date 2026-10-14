@@ -31,6 +31,7 @@ import {
   sessionCreationMetadata,
   SITE_ORIGIN_METADATA_KEY,
 } from "../site-session-origin";
+import { assertSiteAgentMayChooseCompute } from "../site-agent-clamp";
 import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
@@ -2544,6 +2545,9 @@ async function createSessionForRequestInFileScope(
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  // An agent started from a Site page keeps its workers off chosen machines
+  // and other sessions' sandboxes.
+  await assertSiteAgentMayChooseCompute(unresolvedDeps.db, grant, payload);
   // A tool whose backing workload this deployment does not run is dropped, not
   // rejected: a client echoing a full catalog must not fail on a deployment fact.
   if (payload.firstPartyMcpTools) {

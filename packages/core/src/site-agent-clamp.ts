@@ -128,7 +128,12 @@ export type SiteClampedResource =
   | "Skills"
   | "Knowledge"
   | "secrets"
-  | "workspace members, connections or settings";
+  | "workspace members, connections or settings"
+  | "the organization profile"
+  | "Connected Machines"
+  | "sandbox environments"
+  | "browser or computer sessions"
+  | "workspace settings";
 
 /** The refusal message for a Site-clamped agent. */
 export function siteClampedAgentMessage(what: SiteClampedResource): string {
@@ -136,10 +141,50 @@ export function siteClampedAgentMessage(what: SiteClampedResource): string {
 }
 
 /**
+ * The refusal when a Site-clamped agent reaches for compute beyond its own
+ * session's: `run_on`, attaching, swapping or provisioning a sandbox, or
+ * starting a worker on a chosen machine or another session's sandbox.
+ */
+export const SITE_AGENT_COMPUTE_MESSAGE =
+  "An agent started from a Site page cannot run on, attach, provision or choose sandboxes or Connected Machines";
+
+/** Fields of a session create that choose its compute, which a Site-clamped agent may not send. */
+const SITE_AGENT_COMPUTE_FIELDS = ["targetSandboxId", "workingDir"] as const;
+
+/**
+ * Refuse a Site-clamped agent's session create that chooses compute: a
+ * machine target, a self-hosted backend or another session's sandbox group.
+ * Its workers run in its own sandbox (shared) or a new managed one.
+ */
+export async function assertSiteAgentMayChooseCompute(
+  db: Database,
+  grant: AccessGrant,
+  payload: {
+    sandbox?: unknown;
+    sandboxBackend?: unknown;
+    targetSandboxId?: unknown;
+    workingDir?: unknown;
+  },
+): Promise<void> {
+  const choosesCompute =
+    SITE_AGENT_COMPUTE_FIELDS.some(
+      (field) => payload[field] !== undefined && payload[field] !== null,
+    ) ||
+    payload.sandboxBackend === "selfhosted" ||
+    (payload.sandbox !== undefined &&
+      payload.sandbox !== null &&
+      typeof payload.sandbox === "object");
+  if (!choosesCompute) return;
+  if (!(await siteAgentClamp(db, grant))?.clamped) return;
+  throw new HTTPException(403, { message: SITE_AGENT_COMPUTE_MESSAGE });
+}
+
+/**
  * Refuse a Site-clamped agent: an agent started from a Site page acts with
  * that page's reach and cannot create or change schedules, automations, Site
- * publications, workspace instructions, Skills, Knowledge, secrets, or
- * workspace members, connections and settings.
+ * publications, workspace instructions, Skills, Knowledge, secrets,
+ * workspace members, connections and settings, the organization profile,
+ * Connected Machines, sandbox environments or other workspace settings.
  */
 export async function assertNotSiteClampedAgent(
   db: Database,

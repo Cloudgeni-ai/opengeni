@@ -415,6 +415,62 @@ test("an admin-only refusal shows next to the agent's tools", async () => {
   await page.unmount();
 });
 
+test("opening a Site with tools for everyone is refused for non-admins next to the tools", async () => {
+  const withTools = published({
+    access: "members",
+    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: true },
+  });
+  const { client } = fakeClient({
+    updateSitePublication: async () => {
+      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
+    },
+  });
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withTools },
+    isAdmin: false,
+  });
+  const anyone = [...page.host.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
+    (element) => element.textContent?.includes("Anyone with the link"),
+  );
+  await act(async () => anyone!.click());
+  await act(async () => button(page.host, "Save changes")!.click());
+  await flush();
+  expect(page.host.textContent).toContain(
+    "Only a workspace admin can open a Site with tools to everyone.",
+  );
+  expect(page.published).toHaveLength(0);
+  await page.unmount();
+});
+
+test("inviting people while the agent has tools is refused for non-admins next to the invitees", async () => {
+  const withTools = published({
+    access: "members",
+    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
+  });
+  const { client } = fakeClient({
+    updateSitePublication: async () => {
+      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
+    },
+  });
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withTools },
+    isAdmin: false,
+  });
+  const invited = [...page.host.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
+    (element) => element.textContent?.includes("Invited people"),
+  );
+  await act(async () => invited!.click());
+  await act(async () => button(page.host, "Save changes")!.click());
+  await flush();
+  expect(page.host.textContent).toContain(
+    "Only a workspace admin can invite people while the agent has tools.",
+  );
+  expect(page.published).toHaveLength(0);
+  await page.unmount();
+});
+
 test("a non-admin's first publish leaves limits to the workspace default", async () => {
   const { client, calls } = fakeClient();
   const page = await renderPage({
