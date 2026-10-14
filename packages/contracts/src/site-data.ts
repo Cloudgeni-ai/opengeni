@@ -15,6 +15,16 @@ export const SiteDataAccessMode = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteDataAccessMode = z.infer<typeof SiteDataAccessMode>;
 
+/** What anonymous guests of a public published Site may do in a collection. */
+export const SiteDataGuestAccess = /* @__PURE__ */ defineSchema(() =>
+  z
+    .enum(["none", "read", "append", "own"])
+    .describe(
+      "Published Sites only: what anonymous guests may do. none (default): nothing. read: read what viewers read. append: add records and read their own. own: add, read, change and delete their own.",
+    ),
+);
+export type SiteDataGuestAccess = z.infer<typeof SiteDataGuestAccess>;
+
 const CollectionName = z
   .string()
   .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
@@ -157,6 +167,9 @@ export const SiteDataCollectionDefinitionRequest = /* @__PURE__ */ defineSchema(
       .boolean()
       .optional()
       .describe("per_viewer only: keep records private even from the Site's managers."),
+    guestAccess: SiteDataGuestAccess.optional().describe(
+      "Anonymous guests of a public published Site; omitted keeps the current rule (none for a new collection).",
+    ),
     jsonSchema: z
       .record(z.string(), z.unknown())
       .nullable()
@@ -255,6 +268,7 @@ export type SiteDataCollectionResponse = {
   name: string;
   accessMode: SiteDataAccessMode;
   privateRecords: boolean;
+  guestAccess: SiteDataGuestAccess;
   jsonSchema: Record<string, unknown> | null;
   indexedFields: string[];
   uniqueFields: string[][];

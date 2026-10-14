@@ -1094,6 +1094,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_list",
   "site_files_upload",
   "site_files_delete",
+  "site_publication_get",
+  "site_publication_update",
+  "site_hostname_check",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -19736,6 +19739,25 @@ export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =
 );
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
+/** Published Sites facts the console needs to offer publishing (from OPENGENI_SITES_*). */
+export const ClientSitesConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Sites live at `<label>.<domain>`. */
+      domain: z.string().min(1),
+      /** `public` access may be chosen. */
+      publicEnabled: z.boolean(),
+      /** Agents may run for signed-out guests of public Sites. */
+      publicAgentsEnabled: z.boolean(),
+      /** `public` means any signed-in user; there are no guests. */
+      loginOnly: z.boolean(),
+      /** Every Site is served with noindex. */
+      forceNoindex: z.boolean(),
+    })
+    .strict(),
+);
+export type ClientSitesConfig = z.infer<typeof ClientSitesConfig>;
+
 export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.discriminatedUnion("mode", [
     z.object({
@@ -21612,6 +21634,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         terminalEvents: z.boolean(),
       })
       .default({ fileSystem: false, git: false, terminalEvents: false }),
+    // Published Sites on this deployment (OPENGENI_SITES_*): null when
+    // publishing is off; absent from servers that predate published Sites.
+    sites: ClientSitesConfig.nullable().optional(),
   }),
 );
 export type ClientConfig = z.infer<typeof ClientConfig>;

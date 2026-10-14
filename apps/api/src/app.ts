@@ -82,6 +82,7 @@ import {
   ToolGatewayManifestRequest,
   type AccessGrant,
   type ClientAgentConfig,
+  type ClientSitesConfig,
   type ErrorCode,
   type FirstPartyMcpToolName,
   type Session,
@@ -342,6 +343,9 @@ import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
+import { registerSitePublishingRoutes } from "./routes/site-publishing";
+import { configuredSitesDomain } from "./site-publishing/service";
+import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
@@ -1564,6 +1568,7 @@ export function createAppComposition(deps: AppDependencies): {
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
         structuredServices: structuredServicesHint(deps.settings.sandboxBackend),
+        sites: clientSitesConfig(deps.settings),
       }),
     );
   });
@@ -2202,6 +2207,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
+  registerSitePublishingRoutes(app, routeDeps);
+  registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
@@ -4012,12 +4019,27 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/enrollments/token/exchange" ||
     // The runner authenticates this protocol with its install-key proof, not
     // a browser cookie or the product-client revision header.
-    pathname === "/v1/enrollments/renew"
+    pathname === "/v1/enrollments/renew" ||
+    // The Site gateway's signed protocol carries its own signature version (v1).
+    pathname.startsWith("/v1/site-runtime/")
   ) {
     return false;
   }
   const segments = pathname.split("/");
   return !segments.includes("mcp") && !segments.includes("codemode");
+}
+
+/** Published Sites deployment facts for the console; null while publishing is off. */
+function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
+  const domain = configuredSitesDomain(settings);
+  if (!domain) return null;
+  return {
+    domain,
+    publicEnabled: settings.sitesPublicEnabled,
+    publicAgentsEnabled: settings.sitesPublicAgentsEnabled,
+    loginOnly: settings.sitesLoginOnly,
+    forceNoindex: settings.sitesForceNoindex,
+  };
 }
 
 /** Client-safe agent-configuration projection. */
