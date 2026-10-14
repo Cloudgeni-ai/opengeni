@@ -40098,6 +40098,9 @@ export async function applyContextCompaction(
                     payload: {
                       ...input.eventPayload,
                       summaryPosition,
+                      // Where this compaction's live segment begins: a message
+                      // fork reconstructs the history live at an earlier message.
+                      replacementFromPosition: supersededFrom,
                     },
                     occurredAt: new Date(),
                   },

@@ -1542,12 +1542,16 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     expect(postCompactionHistory.every((row) => row.active)).toBe(true);
     expect(JSON.stringify(postCompactionHistory)).not.toContain("Retained answer");
     expect(JSON.stringify(postCompactionHistory)).toContain("After compaction");
-    await expect(
-      forkSessionContent(client.db, {
-        ...input,
-        operationKey: crypto.randomUUID(),
-      }),
-    ).rejects.toThrow("Session tenancy request is invalid");
+    // The original answer is now behind the compaction, yet still forks with
+    // exactly the history that was live at it, as live rows.
+    const preCompactionFork = await forkSessionContent(client.db, {
+      ...input,
+      operationKey: crypto.randomUUID(),
+    });
+    expect([
+      ...(await shared.admin`select item_ordered::text as item, active, position
+      from session_history_items where session_id = ${preCompactionFork.sessionId} order by position`),
+    ]).toEqual([...prefix]);
     expect(await forkSessionContent(client.db, input)).toEqual({ ...fork, replay: true });
   }, 180_000);
 
@@ -1616,10 +1620,10 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       where session_id = ${sourceSessionId} and position = 1`;
     await expect(fork(replyEventId)).rejects.toThrow("Session tenancy request is invalid");
     await expect(fork(userEventId)).rejects.toThrow("Session tenancy request is invalid");
-    // The refusal says why: the message's own history rows were superseded.
+    // The refusal says why: a superseded row that no recorded reset explains.
     await expect(fork(userEventId)).rejects.toMatchObject({
       constructor: SessionTenancyInvalidRequestError,
-      forkPointRefusal: "boundary_not_retained",
+      forkPointRefusal: "history_compacted",
     });
     await expect(fork(crypto.randomUUID())).rejects.toMatchObject({
       forkPointRefusal: "message_unavailable",
@@ -1684,6 +1688,153 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     await expect(fork(nextReplyEventId)).rejects.toMatchObject({
       forkPointRefusal: "history_compacted",
     });
+  }, 180_000);
+
+  test("a message from before later compactions and a clear forks with the history live then", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const admin = shared.admin;
+    let sequence = 0;
+    const messageTurn = async (position: number, question: string, answer: string) => {
+      const turnId = crypto.randomUUID();
+      const userEventId = crypto.randomUUID();
+      const replyEventId = crypto.randomUUID();
+      await admin`insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend
+      ) values (${turnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${userEventId}, ${`as-of-fork-${position}`}, 'completed', ${position}, ${question},
+        'test-model', 'medium', 'none')`;
+      for (const [offset, event] of [
+        { id: userEventId, type: "user.message", role: "user", text: question },
+        { id: replyEventId, type: "agent.message.completed", role: "assistant", text: answer },
+      ].entries()) {
+        sequence += 1;
+        await admin`insert into session_events
+          (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+          values (${event.id}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+            ${turnId}, ${sequence}, ${event.type}, ${admin.json({ text: event.text })})`;
+        await admin`insert into session_history_items
+          (account_id, workspace_id, session_id, turn_id, position, item)
+          values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId},
+            ${position + offset}, ${admin.json({ type: "message", role: event.role, content: event.text })})`;
+      }
+      return { turnId, userEventId, replyEventId };
+    };
+    // A compaction deactivates every row and, in one transaction, appends the
+    // retained user messages and the summary after them.
+    const compact = async (
+      replacementFrom: number,
+      retained: string,
+      summary: string,
+      turnId: string,
+      receipt: "legacy" | "current",
+    ) => {
+      const summaryPosition = replacementFrom + 1;
+      await admin`update session_history_items set active = false
+        where session_id = ${sourceSessionId}`;
+      await admin`insert into session_history_items
+        (account_id, workspace_id, session_id, turn_id, position, item)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, null, ${replacementFrom},
+          ${admin.json({ type: "message", role: "user", content: retained })}),
+        (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, ${summaryPosition},
+          ${admin.json({ type: "compaction", encrypted_content: summary })})`;
+      sequence += 1;
+      await admin`insert into session_events
+        (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+        values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId}, ${sequence},
+          'session.context.compacted', ${admin.json(
+            receipt === "legacy"
+              ? { summaryPosition }
+              : { summaryPosition, replacementFromPosition: replacementFrom },
+          )})`;
+    };
+    const first = await messageTurn(1, "First question", "First answer");
+    // An older receipt without replacementFromPosition.
+    await compact(3, "First question (retained)", "first-summary", first.turnId, "legacy");
+    const second = await messageTurn(5, "Second question", "Second answer");
+    await compact(7, "Second question (retained)", "second-summary", second.turnId, "current");
+    const third = await messageTurn(9, "Third question", "Third answer");
+    await admin`update session_history_items set active = false
+      where session_id = ${sourceSessionId}`;
+    await admin`insert into session_history_items
+      (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, null, 11,
+        ${admin.json({ type: "message", role: "user", content: "[context cleared]" })})`;
+    sequence += 1;
+    await admin`insert into session_events
+      (account_id, workspace_id, session_id, sequence, type, payload)
+      values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${sequence},
+        'session.context.cleared', ${admin.json({ clearedBy: "api", markerPosition: 11 })})`;
+    const fourth = await messageTurn(12, "Fourth question", "Fourth answer");
+
+    const fork = (sourceEventId: string) =>
+      forkSessionContent(client!.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId,
+        actorSubjectId: human.subjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        sourceEventId,
+        operationKey: crypto.randomUUID(),
+      });
+    const forkedHistory = async (sourceEventId: string) => {
+      const forked = await fork(sourceEventId);
+      const rows = await admin<Array<{ active: boolean; item: Record<string, unknown> }>>`
+        select active, item from session_history_items
+        where session_id = ${forked.sessionId} order by position`;
+      expect(rows).toHaveLength(forked.copiedHistoryItemCount);
+      expect(rows.every((row) => row.active)).toBe(true);
+      return rows.map((row) => String(row.item.content ?? row.item.encrypted_content));
+    };
+
+    expect(await forkedHistory(first.userEventId)).toEqual(["First question"]);
+    expect(await forkedHistory(first.replyEventId)).toEqual(["First question", "First answer"]);
+    // The legacy receipt's segment is identified by its insert transaction.
+    expect(await forkedHistory(second.userEventId)).toEqual([
+      "First question (retained)",
+      "first-summary",
+      "Second question",
+    ]);
+    expect(await forkedHistory(second.replyEventId)).toEqual([
+      "First question (retained)",
+      "first-summary",
+      "Second question",
+      "Second answer",
+    ]);
+    expect(await forkedHistory(third.replyEventId)).toEqual([
+      "Second question (retained)",
+      "second-summary",
+      "Third question",
+      "Third answer",
+    ]);
+    expect(await forkedHistory(fourth.replyEventId)).toEqual([
+      "[context cleared]",
+      "Fourth question",
+      "Fourth answer",
+    ]);
+
+    // A row still live before the segment contradicts the reset: fail closed.
+    await admin`update session_history_items set active = true
+      where session_id = ${sourceSessionId} and position = 2`;
+    await expect(fork(second.replyEventId)).rejects.toMatchObject({
+      forkPointRefusal: "history_compacted",
+    });
+    await admin`update session_history_items set active = false
+      where session_id = ${sourceSessionId} and position = 2`;
+    // Without the receipts nothing proves where a segment starts or which
+    // reset superseded the rows, and the opaque summaries are unauthenticated.
+    await admin`delete from session_events
+      where session_id = ${sourceSessionId}
+        and type in ('session.context.compacted', 'session.context.cleared')`;
+    for (const eventId of [first.replyEventId, second.replyEventId, fourth.replyEventId]) {
+      await expect(fork(eventId)).rejects.toMatchObject({
+        forkPointRefusal: "history_compacted",
+      });
+    }
   }, 180_000);
 
   test("message fork copies the exact prefix and replays the same boundary", async () => {
