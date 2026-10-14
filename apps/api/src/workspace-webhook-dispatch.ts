@@ -129,10 +129,13 @@ async function importLegacySessionUsage(deps: WorkspaceWebhookDispatchDeps): Pro
 export async function drainWorkspaceWebhookDeliveries(
   deps: WorkspaceWebhookDispatchDeps,
 ): Promise<WorkspaceWebhookBatchResult> {
+  // Usage-limit maintenance contains its own failures, so it runs first: a
+  // failing allowance pass cannot keep lost custody markers (and the tasks
+  // they park) unresolved.
+  await importLegacySessionUsage(deps);
   // Allowance rollover/expiry does not depend on webhook secrets, usage
   // readers, inference or having any pending delivery.
   await maintainWorkspaceAllowances(deps.db);
-  await importLegacySessionUsage(deps);
   const key = environmentsEncryptionKeyBytes(deps.settings);
   if (!key) return { claimed: 0, delivered: 0, failed: 0 };
   const claimId = randomUUID();
