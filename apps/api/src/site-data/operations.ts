@@ -530,7 +530,6 @@ export function siteDataImportFailure(error: unknown, imported: number): unknown
   );
 }
 
-/** Line breaks in CSV text: an upper bound on its records after the header. */
 /**
  * About how much JSON a CSV becomes once parsed: its text, plus the header
  * repeated as field names on every row.
@@ -541,6 +540,7 @@ export function csvValidationBytes(csv: string): number {
   return csv.length + csvLineBreaks(csv) * headerLength;
 }
 
+/** Line breaks in CSV text: an upper bound on its records after the header. */
 function csvLineBreaks(csv: string): number {
   let breaks = 0;
   for (let index = 0; index < csv.length; index += 1) {

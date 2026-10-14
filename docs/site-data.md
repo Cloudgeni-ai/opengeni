@@ -249,9 +249,14 @@ schema, or inserts, puts and imports, which are sized from what they carry
 and stay on the time budget). Even then it stops at the request budget plus one record and its
 compile (about 0.45 s at worst), the overrun is charged when it settles, and
 further requests are refused until the window has room again. So a Site's
-validation per minute stays within about 5 s plus 25 ms for each request in
-flight, plus the overrun of in-flight requests that reserved the whole
-budget.
+validation per minute stays within about 5 s plus up to about 75 ms for each
+request in flight (its 25 ms slack, counted at most twice when a changed
+record is re-checked, plus the reservation it already holds), plus the
+overrun of in-flight requests that reserved the whole budget. With the
+defaults that is at most about 20 s by the byte estimate (about 14 s measured
+on the costliest allowed schema) in the adversarial case where a large write
+lands between every patch's admission and its check, and about 9 s in
+practice.
 Data paths (filters, sorts, keys, increments, indexes, CSV headers) refuse
 `__proto__`, `prototype` and `constructor`.
 
