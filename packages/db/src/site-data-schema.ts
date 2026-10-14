@@ -185,9 +185,26 @@ export const siteDataRateWindows = pgTable(
   }),
 );
 
-export const siteDataValidationWindows = pgTable("site_data_validation_windows", {
-  accountId: uuid("account_id").notNull(),
-  workspaceId: uuid("workspace_id").primaryKey(),
-  windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
-  validationMicros: bigint("validation_micros", { mode: "number" }).notNull(),
-});
+export const siteDataValidationWindows = pgTable(
+  "site_data_validation_windows",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+    validationMicros: bigint("validation_micros", { mode: "number" }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.siteId] }),
+  }),
+);
+
+export const siteDataWorkspaceValidationWindows = pgTable(
+  "site_data_workspace_validation_windows",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").primaryKey(),
+    windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+    validationMicros: bigint("validation_micros", { mode: "number" }).notNull(),
+  },
+);

@@ -70,6 +70,16 @@ export type SiteDataCaller = SiteDataScope & {
 /** Each started 5 ms of schema validation counts one more write operation. */
 export const SITE_DATA_VALIDATION_MS_PER_OPERATION = 5;
 
+/** What a write's admission needs to know to reserve validation time. */
+export type SiteDataValidationAdmission = {
+  /** Collections whose records the request validates. */
+  collections?: readonly string[];
+  /** Whether the request compiles a schema itself (defining a collection with one). */
+  schema?: boolean;
+  /** Validation time to reserve: the request's budget. */
+  reserveMs: number;
+};
+
 export type SiteDataLimits = {
   recordBytesPerSite: number;
   maxRecordBytes: number;
@@ -83,6 +93,8 @@ export type SiteDataLimits = {
   viewerReadsPerMinute: number;
   /** Write operations per minute by all of a Site's managers (API and agent tools). */
   managerWritesPerMinute: number;
+  /** Schema-validation milliseconds per minute for one Site. */
+  siteValidationMsPerMinute: number;
   /** Schema-validation milliseconds per minute across all of a workspace's Sites. */
   workspaceValidationMsPerMinute: number;
 };
@@ -266,22 +278,30 @@ export interface SiteDataStore {
   /**
    * Count an attempt against the caller's and the Site's one-minute window in
    * its own committed transaction, before any work: failed attempts count too.
+   *
+   * A write that will validate records (it touches a collection with a
+   * schema, or defines one with a schema) also reserves `reserveMs` of
+   * validation time against the Site's and the workspace's validation
+   * windows in the same transaction, and is refused when either cannot take
+   * it. Other writes touch no validation window.
    */
   consumeRate(
     caller: SiteDataCaller,
     kind: "write" | "read",
     operations: number,
     limits: SiteDataLimits,
-  ): Promise<void>;
+    validation?: SiteDataValidationAdmission,
+  ): Promise<{ reservedMs: number }>;
   /**
-   * Charge schema-validation time after a write, whatever its outcome: one
-   * more operation on the caller's write windows per started 5 ms (from 1 ms;
-   * never refused, the work is done), and the time on the workspace's
-   * validation window, which consumeRate checks before every write.
+   * Settle a write's validation time, whatever its outcome: replace the
+   * reservation with the time spent on the Site's and workspace's validation
+   * windows, and add one operation per started 5 ms spent (from 1 ms) to the
+   * caller's write windows. Never refused: the work is done. Does nothing
+   * when nothing was reserved or spent.
    */
-  chargeValidation(
+  settleValidation(
     caller: SiteDataCaller,
-    validationMs: number,
+    time: { reservedMs: number; spentMs: number },
     limits: SiteDataLimits,
   ): Promise<void>;
   deleteFile(caller: SiteDataCaller, fileId: string): Promise<SiteDataStoredFile>;
@@ -830,6 +850,69 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     return row?.operations ?? 0;
   };
 
+  /** Whether any of these collections has a JSON Schema. */
+  const touchesSchema = async (tx: Database, caller: SiteDataCaller, names: readonly string[]) => {
+    const valid = [...new Set(names)].filter((name) => SITE_DATA_COLLECTION_NAME.test(name));
+    if (valid.length === 0) return false;
+    const [row] = await rawRows<{ found: boolean }>(
+      tx,
+      sql`select exists (
+          select 1 from site_data_collections
+          where workspace_id = ${caller.workspaceId} and site_id = ${caller.siteId}
+            and name in (${sql.join(
+              valid.map((name) => sql`${name}`),
+              sql`, `,
+            )})
+            and json_schema is not null
+        ) as found`,
+    );
+    return row?.found === true;
+  };
+
+  /**
+   * Add (or, with a negative amount, refund) validation time on the Site's
+   * and the workspace's current one-minute windows and return both totals. A
+   * window from an earlier minute starts over; totals never go below zero.
+   */
+  const addValidationTime = async (
+    tx: Database,
+    caller: SiteDataCaller,
+    micros: number,
+  ): Promise<[number, number]> => {
+    const [site] = await rawRows<{ validation_micros: string | number }>(
+      tx,
+      sql`insert into site_data_validation_windows
+          (account_id, workspace_id, site_id, window_started_at, validation_micros)
+        values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId},
+          date_trunc('minute', now()), greatest(0, ${micros}::bigint))
+        on conflict (workspace_id, site_id) do update set
+          validation_micros = case
+            when site_data_validation_windows.window_started_at = excluded.window_started_at
+            then least(greatest(0, site_data_validation_windows.validation_micros + ${micros}::bigint),
+              1000000000000000)
+            else excluded.validation_micros end,
+          window_started_at = excluded.window_started_at
+        returning validation_micros`,
+    );
+    const [workspace] = await rawRows<{ validation_micros: string | number }>(
+      tx,
+      sql`insert into site_data_workspace_validation_windows
+          (account_id, workspace_id, window_started_at, validation_micros)
+        values (${caller.accountId}, ${caller.workspaceId},
+          date_trunc('minute', now()), greatest(0, ${micros}::bigint))
+        on conflict (workspace_id) do update set
+          validation_micros = case
+            when site_data_workspace_validation_windows.window_started_at = excluded.window_started_at
+            then least(
+              greatest(0, site_data_workspace_validation_windows.validation_micros + ${micros}::bigint),
+              1000000000000000)
+            else excluded.validation_micros end,
+          window_started_at = excluded.window_started_at
+        returning validation_micros`,
+    );
+    return [num(site?.validation_micros), num(workspace?.validation_micros)];
+  };
+
   /** Serialize every write to one Site's data and return its totals. */
   const lockUsage = async (tx: Database, scope: SiteDataScope) => {
     await tx.execute(
@@ -1065,27 +1148,13 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
       return scoped(scope, (tx) => loadCollection(tx, scope, name));
     },
 
-    async consumeRate(caller, kind, operations, limits) {
+    async consumeRate(caller, kind, operations, limits, validation) {
       const windows: Array<[string, number, string]> =
         kind === "read"
           ? [[`read:${caller.principal}`, limits.viewerReadsPerMinute, "Too many requests."]]
           : writeWindows(caller, limits);
       // Committed on its own, before any work, so failed attempts count too.
-      await scoped(caller, async (tx) => {
-        if (kind === "write") {
-          const [spent] = await rawRows<{ validation_micros: string | number }>(
-            tx,
-            sql`select validation_micros from site_data_validation_windows
-              where workspace_id = ${caller.workspaceId}
-                and window_started_at = date_trunc('minute', now())`,
-          );
-          if (num(spent?.validation_micros) > limits.workspaceValidationMsPerMinute * 1000)
-            throw new SiteDataError(
-              "rate_limited",
-              "This workspace's Sites have used their schema-checking time for this minute. Try again in a minute.",
-              { retryAfterSeconds: 60, quota: "workspace_validation_time" },
-            );
-        }
+      return scoped(caller, async (tx) => {
         for (const [principal, limit, message] of windows) {
           const total = await countRateWindow(tx, caller, principal, operations);
           if (total > limit)
@@ -1093,29 +1162,39 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               retryAfterSeconds: 60,
             });
         }
+        if (kind !== "write" || !validation || !(validation.reserveMs > 0))
+          return { reservedMs: 0 };
+        if (!validation.schema && !(await touchesSchema(tx, caller, validation.collections ?? [])))
+          return { reservedMs: 0 };
+        const micros = Math.ceil(validation.reserveMs * 1000);
+        const [site, workspace] = await addValidationTime(tx, caller, micros);
+        if (site > limits.siteValidationMsPerMinute * 1000)
+          throw new SiteDataError(
+            "rate_limited",
+            "This Site has used its schema-checking time for this minute. Try again in a minute.",
+            { retryAfterSeconds: 60, quota: "site_validation_time" },
+          );
+        if (workspace > limits.workspaceValidationMsPerMinute * 1000)
+          throw new SiteDataError(
+            "rate_limited",
+            "This workspace's Sites have used their schema-checking time for this minute. Try again in a minute.",
+            { retryAfterSeconds: 60, quota: "workspace_validation_time" },
+          );
+        return { reservedMs: validation.reserveMs };
       });
     },
 
-    async chargeValidation(caller, validationMs, limits) {
-      if (!(validationMs > 0)) return;
-      const extra =
-        validationMs < 1 ? 0 : Math.ceil(validationMs / SITE_DATA_VALIDATION_MS_PER_OPERATION);
-      const micros = Math.min(Math.ceil(validationMs * 1000), 1_000_000_000_000);
+    async settleValidation(caller, time, limits) {
+      const reserved = Math.max(0, time.reservedMs);
+      const spent = Math.max(0, time.spentMs);
+      if (reserved === 0 && spent === 0) return;
+      const extra = spent < 1 ? 0 : Math.ceil(spent / SITE_DATA_VALIDATION_MS_PER_OPERATION);
+      const delta = Math.ceil(spent * 1000) - Math.ceil(reserved * 1000);
       await scoped(caller, async (tx) => {
-        for (const [principal] of writeWindows(caller, limits))
-          if (extra > 0) await countRateWindow(tx, caller, principal, extra);
-        await tx.execute(
-          sql`insert into site_data_validation_windows
-              (account_id, workspace_id, window_started_at, validation_micros)
-            values (${caller.accountId}, ${caller.workspaceId}, date_trunc('minute', now()), ${micros})
-            on conflict (workspace_id) do update set
-              validation_micros = case
-                when site_data_validation_windows.window_started_at = excluded.window_started_at
-                then least(site_data_validation_windows.validation_micros + excluded.validation_micros,
-                  1000000000000000)
-                else excluded.validation_micros end,
-              window_started_at = excluded.window_started_at`,
-        );
+        if (extra > 0)
+          for (const [principal] of writeWindows(caller, limits))
+            await countRateWindow(tx, caller, principal, extra);
+        await addValidationTime(tx, caller, delta);
       });
     },
 

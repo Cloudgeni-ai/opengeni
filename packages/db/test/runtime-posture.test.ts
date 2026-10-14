@@ -1569,11 +1569,11 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 0773 adds the six workspace-isolated Site Data tables with full runtime DML.
+          // 0773 adds the eight workspace-isolated Site Data tables with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
-            ? 6
+            ? 8
             : 0) +
           // 0761 adds the tenant-scoped schedule reconciliation outbox.
           (tables === FORCE_RLS_TABLES ||
@@ -1707,7 +1707,7 @@ describe("runtime database posture evaluator", () => {
         2 + // 0692 agent admin access allowance and session grants: full-DML, FORCE-RLS.
         1 + // 0696 single-use enroll-token redemptions: full-DML, FORCE-RLS.
         1 + // 0761 schedule reconciliation outbox: full-DML, FORCE-RLS.
-        6; // 0773 Site Data tables: full-DML, FORCE-RLS.
+        8; // 0773 Site Data tables: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([

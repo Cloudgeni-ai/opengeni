@@ -87,6 +87,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     siteDataSiteWritesPerMinute: 600,
     siteDataViewerReadsPerMinute: 600,
     siteDataManagerWritesPerMinute: 6_000,
+    siteDataSiteValidationMsPerMinute: 5_000,
     siteDataWorkspaceValidationMsPerMinute: 20_000,
     siteDataMaxRecordsPerCollection: 100_000,
     documentEmbeddingCreditsActivatedAt: undefined,
