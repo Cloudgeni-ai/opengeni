@@ -128,6 +128,7 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { useCapabilityToolDefaults } from "@/lib/use-capability-tool-defaults";
+import { useManualRepositoryCatalogReconciliation } from "@/lib/use-manual-repository-catalog-reconciliation";
 import { upsertWorkspace } from "@/lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
@@ -1292,6 +1293,16 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (!repositoryBuild.error) lastValidResources.current = repositoryBuild.resources;
   }, [repositoryBuild]);
+  useManualRepositoryCatalogReconciliation({
+    manualRepos,
+    selectedRepoIds,
+    selectedRepoRefs,
+    repositories: githubRepos,
+    catalogReady: githubCatalogReady,
+    setManualRepos,
+    setSelectedRepoIds,
+    setSelectedRepoRefs,
+  });
   const currentResources = repositoryBuild.resources;
   const repositoryValidationError = repositoryBuild.error;
 
