@@ -17,7 +17,16 @@ export type DesktopCapability =
   /** Connect this computer to a workspace, pause and resume it. */
   | "thisComputer"
   /** Open a URL in the default browser. */
-  | "openExternal";
+  | "openExternal"
+  /** Menu bar and keyboard commands for the web app to carry out. */
+  | "commands";
+
+/**
+ * What the app's menus and shortcuts ask the web app to do. A page that does
+ * not listen still gets the navigation ones (the bridge falls back to loading
+ * the workspace's page), so older servers keep working.
+ */
+export type DesktopCommand = "newSession" | "searchSessions" | "toggleSidebar" | "openInbox";
 
 /** One signed-in account as the web app sees it. Never carries a credential. */
 export interface DesktopAccount {
@@ -104,6 +113,10 @@ export interface DesktopBridge {
   };
   /** Open a page in the default browser. Only http(s) URLs are accepted. */
   openExternal(url: string): Promise<void>;
+  readonly commands: {
+    /** Carry out menu and shortcut commands; only the newest listener receives them. */
+    onCommand(listener: (command: DesktopCommand) => void): Unsubscribe;
+  };
   /** Follow the web app's appearance, so window materials and controls match it. */
   setAppearance(appearance: "light" | "dark" | "system"): void;
 }
@@ -138,6 +151,7 @@ export const DESKTOP_IPC = {
   computerResume: "og:computer:resume",
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
+  command: "og:command",
   appearanceSet: "og:appearance:set",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",

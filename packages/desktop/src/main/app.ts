@@ -1,4 +1,4 @@
-import { hostname, homedir } from "node:os";
+import { homedir } from "node:os";
 import { dirname } from "node:path";
 
 import {
@@ -37,6 +37,7 @@ import { LOCAL_ORIGIN } from "./local-pages";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
 import { flushMarks, mark } from "./perf";
+import { computerName } from "./computer-name";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
 import { ThisComputer } from "./this-computer";
 import { AppTray } from "./tray";
@@ -330,7 +331,7 @@ export class DesktopShell {
         challenge,
         state,
         platform: desktopPlatform(),
-        deviceName: hostname().replace(/\.local$/u, ""),
+        deviceName: await computerName(),
       }),
     );
   }
@@ -655,6 +656,14 @@ export class DesktopShell {
       openSettings:
         active?.workspaceId && !active.signedOut
           ? () => this.showAccount(active.id, `/workspaces/${active.workspaceId}/settings`)
+          : null,
+      command:
+        active && !active.signedOut
+          ? (command) => {
+              this.reveal();
+              const contents = this.window?.contentsFor(active.id);
+              if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.command, command);
+            }
           : null,
       contents: () => {
         const id = this.window?.accountId;

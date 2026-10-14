@@ -96,7 +96,9 @@ export class MainWindow {
       ...(mac
         ? {
             titleBarStyle: "hiddenInset" as const,
-            trafficLightPosition: { x: 18, y: 18 },
+            // Centred on the 56px title row: the rail's top row and every
+            // page's header share that centre line.
+            trafficLightPosition: { x: 18, y: 21 },
             vibrancy: "sidebar" as const,
             visualEffectState: "followWindow" as const,
           }

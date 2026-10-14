@@ -545,12 +545,20 @@ html[data-desktop="macos"] body {
   }
 }
 
-/* macOS draws the traffic lights over the rail's top-left corner: the brand
-   row starts after them, and a collapsed rail moves below them. */
-html[data-desktop="macos"] nav[data-collapsed="false"] [data-rail-brand] {
-  padding-left: 76px;
+/* macOS draws the traffic lights over the rail's top-left corner (they end
+   about 72px in, centred on the 56px title row). A collapsed rail is narrower
+   than they are: its toggle moves below them, and the page's title bar starts
+   after them. */
+html[data-desktop="macos"] nav[data-collapsed="true"] [data-rail-header] {
+  padding-top: 44px;
 }
 
-html[data-desktop="macos"] nav[data-collapsed="true"] [data-rail-header] {
-  padding-top: 40px;
+html[data-desktop="macos"]:has(nav[data-collapsed="true"]) [data-titlebar] {
+  padding-left: 32px;
+}
+
+/* A full-window workspace panel (maximized, or the overlay in a narrow
+   window) puts its tab row under the traffic lights. */
+html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
+  padding-left: 84px;
 }

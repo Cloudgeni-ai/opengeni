@@ -22,6 +22,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { windowControlsInPage } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 
@@ -234,14 +235,19 @@ function SettingsRail({
       }}
       header={
         <div className="flex min-w-0 flex-col gap-3">
-          <LinkShell
-            link={home}
-            aria-label="Opengeni home"
-            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
-          >
-            <BrandMark className="w-5" />
-            <Wordmark className="text-[18px]" />
-          </LinkShell>
+          {windowControlsInPage ? (
+            // The macOS window controls take this row; it still moves the window.
+            <div data-window-drag aria-hidden="true" className="h-8 shrink-0" />
+          ) : (
+            <LinkShell
+              link={home}
+              aria-label="Opengeni home"
+              className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+            >
+              <BrandMark className="w-5" />
+              <Wordmark className="text-[18px]" />
+            </LinkShell>
+          )}
           <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
             {back.link}
           </NavItem>
