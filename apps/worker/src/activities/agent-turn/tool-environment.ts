@@ -47,7 +47,11 @@ import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
-import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
+import {
+  materializeConnectorFile,
+  materializeGmailFile,
+  readGmailFileFromChannel,
+} from "../gmail-files";
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import {
   allowedFirstPartyMcpToolsForSession,
@@ -969,6 +973,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       },
     });
   };
+  const connectorFileStaging = () => {
+    if (!deps.objectStorage) throw new Error("Connector file delivery requires object storage");
+    return {
+      workspaceId: input.workspaceId,
+      storage: deps.objectStorage,
+      downloadStorage: objectStorageForSandboxDownloads(
+        runSettings,
+        deps.objectStorage,
+        deps.activeSandboxBackend ?? deps.groupBoxBackend,
+      ),
+      materialize: materializeConnectorAttachments,
+      onCleanupFailure: (key: string) =>
+        console.warn("[connector-files] Temporary transfer cleanup requires operator retry", {
+          objectKey: key,
+        }),
+    };
+  };
   const initiatingHuman = await waitForTurnOperation(
     resolveInitiatingHuman(
       db,
@@ -1045,21 +1066,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         materializeGmailFile: async (request) => {
           throwIfWorkerShuttingDown();
           throwIfTurnCancelled();
-          if (!deps.objectStorage) throw new Error("Gmail file delivery requires object storage");
-          return await materializeGmailFile(request, {
-            workspaceId: input.workspaceId,
-            storage: deps.objectStorage,
-            downloadStorage: objectStorageForSandboxDownloads(
-              runSettings,
-              deps.objectStorage,
-              deps.activeSandboxBackend ?? deps.groupBoxBackend,
-            ),
-            materialize: materializeConnectorAttachments,
-            onCleanupFailure: (key) =>
-              console.warn("[gmail] Temporary transfer cleanup requires operator retry", {
-                objectKey: key,
-              }),
-          });
+          return await materializeGmailFile(request, connectorFileStaging());
+        },
+        materializeConnectorFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          return await materializeConnectorFile(request, connectorFileStaging());
         },
         readGmailFile: async (request) => {
           throwIfWorkerShuttingDown();

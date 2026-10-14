@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import PostalMime, { addressParser, decodeWords } from "postal-mime";
 import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import { connectorAttachmentFileName } from "./connector-attachments";
 import {
   GMAIL_EXTRA_TOOLS,
   GMAIL_EXTRA_MUTATIONS,
@@ -2280,21 +2281,7 @@ function isTextBody(part: GmailPart): boolean {
     ["text/plain", "text/html"].includes(part.mimeType ?? "")
   );
 }
-function safeFileName(value: string): string {
-  let name = value
-    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/gu, "_")
-    .replace(/[ .]+$/u, "")
-    .trim();
-  if (
-    !name ||
-    name === "." ||
-    name === ".." ||
-    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name)
-  )
-    name = "attachment.bin";
-  while (Buffer.byteLength(name) > 240) name = [...name].slice(0, -1).join("");
-  return name;
-}
+const safeFileName = (value: string): string => connectorAttachmentFileName(value);
 function mailboxAddress(value: string): string {
   if (/[\r\n\u0000]/u.test(value))
     throw new GmailRestInputError("Email address contains an invalid header character");
