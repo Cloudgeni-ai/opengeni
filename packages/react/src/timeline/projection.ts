@@ -3710,6 +3710,7 @@ function rememberPendingWaitOutcome(
 
 /** Wait reasons that need a person or a policy change, not only time. */
 const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
+  "pinned_account_disabled",
   "pinned_account_ineligible",
   "model_not_allowed",
   // Only sending the work again ends it (design 5.3 decision 4).
@@ -3746,7 +3747,13 @@ function capacityWaitPresentation(
         ? [payload.error, payload.detail]
         : [payload.detail, payload.error];
     const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
-    return { turnId, label: "Waiting", detail, text: detail };
+    return {
+      turnId,
+      label:
+        stringValue(payload.waitReason) === "pinned_account_disabled" ? "Needs you" : "Waiting",
+      detail,
+      text: detail,
+    };
   }
   return {
     turnId,

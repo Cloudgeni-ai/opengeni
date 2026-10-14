@@ -115,7 +115,8 @@ import {
   useScheduleNavigation,
   type ScheduleAccess,
 } from "./schedule-parts";
-import { scheduledRunErrorText } from "@/lib/scheduled-run-error";
+import { scheduledRunErrorText, scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
+import { SchedulePausedChatNotice } from "./schedule-blocker-notice";
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
 import { ScheduleAccounts, scheduleAccountsDescription } from "./schedule-accounts";
 import { useScheduleActions } from "./use-schedule-actions";
@@ -582,6 +583,9 @@ function StatusChip({ task, latest }: { task: ScheduledTask; latest?: ScheduledT
   if (latest?.status === "failed") {
     return <StatusBadge status="failed">Last run failed</StatusBadge>;
   }
+  if (scheduledRunSkippedForPausedChat(latest)) {
+    return <StatusBadge status="paused">Last run: chat paused</StatusBadge>;
+  }
   return null;
 }
 
@@ -637,6 +641,15 @@ function Overview({
     <>
       <DetailSection className="pt-6">
         {accessNotices}
+        {scheduledRunSkippedForPausedChat(latest) ? (
+          <SchedulePausedChatNotice
+            onOpenChat={
+              latest?.sessionId && access.canReadSessionIds
+                ? () => onOpenSession(latest.sessionId!)
+                : undefined
+            }
+          />
+        ) : null}
         {latest?.status === "failed" ? (
           <Notice tone="failed" title="The last run failed" className="mb-4">
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}

@@ -1333,6 +1333,21 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
+Skip-overlap admission distinguishes effective Pause (`session_paused`) from
+busy work (`session_not_idle`) under the same session lock. The scheduler records
+`scheduled_session_paused` on the skipped occurrence, and its detail page and
+run badge explain that the chat must be resumed for future runs. This describes
+the recorded skip, not a live assertion that the chat is still paused. Opening
+the chat does not resume it, and skipped occurrences are never replayed.
+
+An explicit account pin whose allocator is disabled is classified as
+`pinned_account_disabled`, not temporary quota exhaustion. It remains a durable
+wait with actionable guidance to enable the account or change the pin; another
+healthy account is never substituted. Reconciliation of an existing waiter
+appends one new status event when the reason changes, so old waits receive the
+same guidance without rewriting previous events or model context. Unchanged
+polls add no event. Effective Pause still fences reconciliation and dispatch.
+
 Build the private manifest with a read-only query (psql variables
 `workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its
 count and scope before supplying it to the migration runner. Selection is not
