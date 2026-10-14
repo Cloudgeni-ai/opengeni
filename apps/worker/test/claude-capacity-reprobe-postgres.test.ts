@@ -878,6 +878,13 @@ describe.skipIf(!realDb)("Claude capacity waits end only the limits a refusal cl
       "user_private",
     );
     const usage = stubUsage();
+    // The administered personal read captures the platform fetch at import,
+    // so it is given an explicit transport (joined per signal, as its
+    // custody requires) that goes through the scripted usage endpoint.
+    const transport = Object.assign(
+      async (input: RequestInfo | URL, init?: RequestInit) => await globalThis.fetch(input, init),
+      { abortAndJoin: async (_signal: AbortSignal) => undefined },
+    ) as unknown as typeof fetch;
     await refreshBlockedCoreQuotaBeforeReconcile({
       provider: CLAUDE,
       db: client!.db,
@@ -885,6 +892,7 @@ describe.skipIf(!realDb)("Claude capacity waits end only the limits a refusal cl
       accountId: org.accountId,
       workspaceId: personalWorkspaceId,
       personalTurn: turn.identity,
+      fetch: transport,
     });
     // One read as the owner's own connection.
     expect(usage.authorizations).toEqual([`Bearer sk-ant-oat01-${label}`]);
