@@ -29,10 +29,11 @@
     waiting.hidden = Boolean(out || !state.pendingServer);
     byId("pending-server").textContent = state.pendingServer ?? "";
     if (out) {
-      document.title = `Can't reach ${out.server}`;
+      document.title = "Can't connect";
       byId("unreachable-server").textContent = out.server;
-      byId("unreachable-lead").textContent =
-        `Check your connection. ${state.productName} keeps trying and opens as soon as it's back.`;
+      for (const name of document.querySelectorAll(".product-name")) {
+        name.textContent = state.productName;
+      }
       // Not disabled, so the button keeps keyboard focus between tries.
       retry.setAttribute("aria-disabled", String(out.retrying));
       retry.textContent = out.retrying ? "Trying…" : "Try again";
