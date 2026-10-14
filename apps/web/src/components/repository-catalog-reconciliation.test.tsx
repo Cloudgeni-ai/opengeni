@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { createElement, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { RepositoryContextMenuBody } from "@/components/repository-picker";
 import {
@@ -22,6 +23,7 @@ import {
   flush,
   registerDom,
   renderComponent,
+  renderHook,
 } from "../../../../packages/react/test/render-hook";
 
 registerDom();
@@ -143,6 +145,60 @@ function switchFor(container: HTMLElement, fullName: string): HTMLButtonElement 
   );
 }
 
+type CatalogProps = { catalogReady: boolean; repositories: GitHubRepository[] };
+
+/** The composer's three repository states, restored before the catalog loads. */
+async function renderOpengeniRestoredWhileCatalogLoads() {
+  const restored = repositorySelectionFromResources(
+    rehydrateRepositoryResources([savedDraftResources[1]!], [], { catalogReady: false }),
+    [],
+  );
+  return await renderHook(
+    (props: CatalogProps) => {
+      const [manualRepos, setManualRepos] = useState(restored.manualRepos);
+      const [selectedRepoIds, setSelectedRepoIds] = useState(restored.selectedRepoIds);
+      const [selectedRepoRefs, setSelectedRepoRefs] = useState(restored.selectedRepoRefs);
+      useManualRepositoryCatalogReconciliation({
+        manualRepos,
+        selectedRepoIds,
+        selectedRepoRefs,
+        repositories: props.repositories,
+        catalogReady: props.catalogReady,
+        setManualRepos,
+        setSelectedRepoIds,
+        setSelectedRepoRefs,
+      });
+      return {
+        manualRepos,
+        selectedRepoIds,
+        selectedRepoRefs,
+        setManualRepos,
+        setSelectedRepoIds,
+        setSelectedRepoRefs,
+      };
+    },
+    { catalogReady: false, repositories: [] } as CatalogProps,
+  );
+}
+
+/**
+ * Apply an update the way a click handler or fetch callback does in the
+ * browser: synchronously, after the catalog-ready render committed and before
+ * React runs that render's passive effects. Pair with rerenderThroughLayout;
+ * assertions and cleanup return to `act`.
+ */
+function updateBeforePassiveEffects(update: () => void): void {
+  const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+  try {
+    flushSync(update);
+  } finally {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+}
+
+const sortedIds = (ids: Set<number>) => [...ids].sort((left, right) => left - right);
+
 describe("repository picker catalog reconciliation (OPE-804)", () => {
   test("a draft restored before the catalog loads shows the repository selected once", async () => {
     // Draft hydration runs while the GitHub catalog is unknown.
@@ -206,5 +262,40 @@ describe("repository picker catalog reconciliation (OPE-804)", () => {
     await flush();
     expect(resources).toEqual([savedDraftResources[1]!]);
     await rendered.unmount();
+  });
+
+  test("a picker toggle right after the catalog arrives is kept", async () => {
+    const hook = await renderOpengeniRestoredWhileCatalogLoads();
+    expect(hook.result.current.manualRepos).toHaveLength(1);
+
+    await hook.rerenderThroughLayout({ catalogReady: true, repositories: [benchmarks, opengeni] });
+    updateBeforePassiveEffects(() =>
+      hook.result.current.setSelectedRepoIds((current) => new Set(current).add(benchmarks.id)),
+    );
+    await flush();
+
+    expect(hook.result.current.manualRepos).toEqual([]);
+    expect(sortedIds(hook.result.current.selectedRepoIds)).toEqual(
+      sortedIds(new Set([opengeni.id, benchmarks.id])),
+    );
+    expect(hook.result.current.selectedRepoRefs).toEqual({ [opengeni.id]: "main" });
+    await hook.unmount();
+  });
+
+  test("a workspace reset right after the catalog arrives is kept", async () => {
+    const hook = await renderOpengeniRestoredWhileCatalogLoads();
+
+    await hook.rerenderThroughLayout({ catalogReady: true, repositories: [benchmarks, opengeni] });
+    updateBeforePassiveEffects(() => {
+      hook.result.current.setManualRepos([]);
+      hook.result.current.setSelectedRepoIds(new Set());
+      hook.result.current.setSelectedRepoRefs({});
+    });
+    await flush();
+
+    expect(hook.result.current.manualRepos).toEqual([]);
+    expect(sortedIds(hook.result.current.selectedRepoIds)).toEqual([]);
+    expect(hook.result.current.selectedRepoRefs).toEqual({});
+    await hook.unmount();
   });
 });

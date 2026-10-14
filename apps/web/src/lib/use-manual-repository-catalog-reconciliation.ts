@@ -1,4 +1,4 @@
-import { useEffect, type Dispatch, type SetStateAction } from "react";
+import { useLayoutEffect, type Dispatch, type SetStateAction } from "react";
 
 import { reconcileManualRepositoriesWithCatalog, type RepoDraft } from "@/lib/session-tools";
 import type { GitHubRepository } from "@/types";
@@ -9,6 +9,12 @@ import type { GitHubRepository } from "@/types";
  * same remote. Once the catalog is known, fold that row into the catalog
  * selection so the picker shows the repository checked and it is attached
  * exactly once. See reconcileManualRepositoriesWithCatalog for the rules.
+ *
+ * The fold writes plain values computed from one committed render, so it runs
+ * as a layout effect inside that commit. A passive effect would run only when
+ * the next render starts, after a picker toggle, workspace reset or draft
+ * hydration may already have queued its own update, and the older values would
+ * then overwrite that update.
  */
 export function useManualRepositoryCatalogReconciliation(input: {
   manualRepos: RepoDraft[];
@@ -30,7 +36,7 @@ export function useManualRepositoryCatalogReconciliation(input: {
     setSelectedRepoIds,
     setSelectedRepoRefs,
   } = input;
-  useEffect(() => {
+  useLayoutEffect(() => {
     const reconciled = reconcileManualRepositoriesWithCatalog(
       { manualRepos, selectedRepoIds, selectedRepoRefs },
       repositories,

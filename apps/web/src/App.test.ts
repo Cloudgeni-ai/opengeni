@@ -2646,19 +2646,35 @@ describe("GitHub repository resources", () => {
     });
 
     test("a manual URL at a different ref stays attached next to the selection", () => {
+      const releaseRow = {
+        id: 7,
+        url: "https://github.com/Cloudgeni-ai/opengeni.git",
+        ref: "release",
+        attached: true,
+      };
       const state = {
-        manualRepos: [
-          {
-            id: 7,
-            url: "https://github.com/Cloudgeni-ai/opengeni",
-            ref: "release",
-            attached: true,
-          },
-        ],
+        manualRepos: [releaseRow],
         selectedRepoIds: new Set([opengeni.id]),
         selectedRepoRefs: { [opengeni.id]: "main" },
       };
       expect(reconcileManualRepositoriesWithCatalog(state, [opengeni], true)).toBeNull();
+      // Both refs stay attached, each at its own mount path.
+      expect(
+        buildResources(
+          state.manualRepos,
+          [opengeni],
+          state.selectedRepoIds,
+          state.selectedRepoRefs,
+        ),
+      ).toEqual([
+        boundResource,
+        {
+          kind: "repository",
+          uri: releaseRow.url,
+          ref: "release",
+          mountPath: "repos/github.com/Cloudgeni-ai/opengeni.git",
+        },
+      ]);
     });
 
     test("an unselected matching manual URL becomes the selection at its own ref", () => {
