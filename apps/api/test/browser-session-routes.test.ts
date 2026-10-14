@@ -1318,6 +1318,19 @@ describe("BrowserSession route discipline", () => {
     expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("interactionControllerGone(");
   });
 
+  test("only the person's explicit end may discard a lost browser's preserved runtime", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+    );
+    const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
+    expect(route).toContain("endBrowserDiscardingLostRuntime(client");
+    // Cleanup after a failed or expired resume keeps a possibly accepted
+    // launch preserved for recovery.
+    expect(source.split("endBrowserDiscardingLostRuntime(").length - 1).toBe(1);
+    expect(source).not.toContain("discardWorkingRuntime");
+  });
+
   test("suspends only after encrypted capture and resumes only from durable authority", async () => {
     const source = await readFile(routeUrl, "utf8");
     const suspendStart = source.indexOf(

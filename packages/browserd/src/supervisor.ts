@@ -909,14 +909,21 @@ export class BrowserSupervisor {
 
   async endSession(
     reference: BrowserSessionReference,
-    options: { removeState?: boolean } = {},
+    options: {
+      removeState?: boolean;
+      /** The person explicitly ends this browser after its controller lost
+       * it: discard a preserved working runtime instead of refusing. Cleanup
+       * paths (a failed or expired resume) never set this, so a possibly
+       * accepted launch stays preserved for recovery there. */
+      discardWorkingRuntime?: boolean;
+    } = {},
   ): Promise<void> {
     return await this.finishSession(reference, options, false);
   }
 
   private async finishSession(
     reference: BrowserSessionReference,
-    options: { removeState?: boolean },
+    options: { removeState?: boolean; discardWorkingRuntime?: boolean },
     suspendForShutdown: boolean,
   ): Promise<void> {
     if (!isUuid(reference.browserSessionId)) throw new Error("browserSessionId must be a UUID");
@@ -936,10 +943,13 @@ export class BrowserSupervisor {
       // Missing memory cannot acknowledge cleanup of a possibly accepted
       // launch. Its exact binding/holder must stay addressable for cleanup,
       // unless this generation's latest launch provably never completed, or
-      // the control plane explicitly ends this exact generation and discards
-      // its state.
+      // the person explicitly ends this exact generation and discards it.
       if (workingRuntimePresent) {
-        if (options.removeState === true && !suspendForShutdown) {
+        if (
+          options.removeState === true &&
+          options.discardWorkingRuntime === true &&
+          !suspendForShutdown
+        ) {
           await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
           return;
         }

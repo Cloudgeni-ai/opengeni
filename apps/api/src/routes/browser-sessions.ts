@@ -214,6 +214,7 @@ import {
   wrapBrowserStateDataKey,
 } from "../browser-state-authority";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
+import { endBrowserDiscardingLostRuntime } from "../browser-lost-runtime-end";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
 import { interactionControlApiError } from "../http/interaction-control-error";
@@ -2641,13 +2642,10 @@ export function registerBrowserSessionRoutes(
                   controllerGeneration: binding.controllerGeneration,
                 },
                 async () =>
-                  await client.endSession(
-                    {
-                      browserSessionId,
-                      controllerGeneration: binding.controllerGeneration,
-                    },
-                    { removeState: true },
-                  ),
+                  await endBrowserDiscardingLostRuntime(client, {
+                    browserSessionId,
+                    controllerGeneration: binding.controllerGeneration,
+                  }),
               );
             } catch (error) {
               // Physical absence already satisfies an exact end. A stale live

@@ -1944,29 +1944,31 @@ describe("same-working-directory controller restart", () => {
           browserSessionId: options.browserSessionId,
           controllerGeneration: options.controllerGeneration,
         };
-        // Recovery stays preserved for anything but an explicit discarding end
-        // of this exact generation.
+        // Recovery stays preserved for anything but a person's explicit,
+        // discarding end of this exact generation. Cleanup after a failed or
+        // expired resume ends with removeState alone and must not discard it.
         await expect(supervisor.endSession(exact)).rejects.toThrow("preserved");
+        await expect(supervisor.endSession(exact, { removeState: true })).rejects.toThrow(
+          "preserved",
+        );
         await expect(
           supervisor.endSession(
             { ...exact, controllerGeneration: "controller-other" },
-            { removeState: true },
+            { removeState: true, discardWorkingRuntime: true },
           ),
         ).rejects.toThrow("preserved");
         expect(stopped).toEqual([]);
         expect(await exists(join(sessionDirectory, "working-runtime.sqlite"))).toBe(true);
 
-        await supervisor.endSession(exact, { removeState: true });
+        await supervisor.endSession(exact, { removeState: true, discardWorkingRuntime: true });
         expect(stopped).toEqual([
           { profileDirectory: join(sessionDirectory, "profile"), pid: 2001 },
         ]);
         expect(await exists(sessionDirectory)).toBe(false);
         // Ending again finds nothing, which the control plane treats as ended.
-        await expect(supervisor.endSession(exact, { removeState: true })).rejects.toMatchObject(
-          {
-            code: "resource_not_found",
-          },
-        );
+        await expect(supervisor.endSession(exact, { removeState: true })).rejects.toMatchObject({
+          code: "resource_not_found",
+        });
       } finally {
         await supervisor.close();
       }
