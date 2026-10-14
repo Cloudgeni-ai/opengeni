@@ -162,7 +162,10 @@ describe("compileSiteSql", () => {
     expect(
       problem("CREATE TRIGGER t AFTER INSERT ON '_og_requests' BEGIN DELETE FROM x; END", "script"),
     ).toBe("reserved_name");
-    expect(problem("SELECT '_og_ is a prefix', 'my _cf_ note'")).toBeNull();
+    // Any string that starts with a reserved prefix, since SQLite takes any string as a name.
+    expect(problem("SELECT * FROM '_og_x-y'")).toBe("reserved_name");
+    expect(problem("SELECT '_og_ is a prefix'")).toBe("reserved_name");
+    expect(problem("SELECT 'my _cf_ note', 'og_x', '_ogx'")).toBeNull();
     expect(problem("SELECT * FROM t WHERE a = ?")).toBe("parameter_style");
     expect(problem("SELECT * FROM t WHERE a = ?1")).toBe("parameter_style");
     expect(problem("SELECT * FROM t WHERE a = @a")).toBe("parameter_style");

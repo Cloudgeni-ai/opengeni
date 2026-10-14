@@ -722,4 +722,85 @@ describe("internal Site database route", () => {
     ]);
     await ok(await call(site, "reset", {}));
   });
+
+  test("export pages seek to their rowid instead of rescanning the table", async () => {
+    const site = "99999999-9999-4999-8999-999999999999";
+    await ok(
+      await call(site, "migrate", {
+        migrations: [migration("big", "CREATE TABLE big (id INTEGER PRIMARY KEY, v INTEGER);")],
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    await ok(
+      await call(site, "script", {
+        sql: "INSERT INTO big (v) WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3000) SELECT x FROM c;",
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    let cursor: string | null = null;
+    let rows = 0;
+    let rowsRead = 0;
+    let pages = 0;
+    do {
+      const page: SiteDbExportResponse = await ok<SiteDbExportResponse>(
+        await call(site, "export", { cursor, maxRows: 300, maxBytes: 1024 * 1024 }),
+      );
+      rows += page.tables.reduce((sum, table) => sum + table.rows.length, 0);
+      rowsRead += page.rowsRead;
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 50);
+    expect(rows).toBe(3000);
+    expect(pages).toBe(10);
+    // A few rows of overhead per page (the seek and the row that did not
+    // fit), never a rescan from the start (that read ~46,000 rows here).
+    expect(rowsRead).toBeLessThanOrEqual(3000 + 3 * pages);
+    await ok(await call(site, "reset", {}));
+  });
+
+  test("only unique and primary-key violations are conflicts", async () => {
+    const site = "12121212-1212-4121-8121-121212121212";
+    await ok(
+      await call(site, "migrate", {
+        migrations: [
+          migration(
+            "strict",
+            "CREATE TABLE strict (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, n INTEGER CHECK (n > 0));",
+          ),
+        ],
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    await ok(await run(site, "INSERT INTO strict (id, name, n) VALUES (1, 'a', 1)"));
+    const failed = async (sql: string) => (await failure(await run(site, sql))).code;
+    expect(await failed("INSERT INTO strict (id, name, n) VALUES (2, 'a', 1)")).toBe("conflict");
+    expect(await failed("INSERT INTO strict (id, name, n) VALUES (1, 'b', 1)")).toBe("conflict");
+    expect(await failed("INSERT INTO strict (id, name, n) VALUES (3, NULL, 1)")).toBe("sql_error");
+    expect(await failed("INSERT INTO strict (id, name, n) VALUES (4, 'd', 0)")).toBe("sql_error");
+    await ok(await call(site, "reset", {}));
+  });
+
+  test("reset and rebuild keep recent request ids", async () => {
+    const site = "13131313-1313-4131-8131-131313131313";
+    const seen = crypto.randomUUID();
+    await ok(await call(site, "inspect", {}, { requestId: seen }));
+    await ok(await call(site, "reset", {}));
+    expect(await failure(await call(site, "inspect", {}, { requestId: seen }))).toMatchObject({
+      code: "replayed",
+    });
+    const rebuildId = crypto.randomUUID();
+    await ok(
+      await call(
+        site,
+        "migrate",
+        { migrations: MIGRATIONS, rebuild: true, maxDatabaseBytes: MAX_DB },
+        { requestId: rebuildId },
+      ),
+    );
+    for (const requestId of [seen, rebuildId])
+      expect(await failure(await call(site, "inspect", {}, { requestId }))).toMatchObject({
+        code: "replayed",
+      });
+    await ok(await call(site, "reset", {}));
+  });
 });

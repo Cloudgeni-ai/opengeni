@@ -204,14 +204,16 @@ const INTERNAL_SQLITE =
   /SQLITE_(?:BUSY|LOCKED|IOERR|NOMEM|INTERNAL|CORRUPT|FULL|CANTOPEN|NOTADB|PROTOCOL|PERM)\b/u;
 
 /**
- * A thrown failure as a SiteDbError: constraint failures are `conflict`,
- * other SQLite errors in the statement are `sql_error`, and anything else
- * (busy, I/O, corruption, a failure without a SQLite code) is `internal`.
+ * A thrown failure as a SiteDbError: a unique or primary-key violation is
+ * `conflict` (the row already exists); other SQLite errors in the statement,
+ * including NOT NULL, CHECK, foreign-key and RAISE failures, are `sql_error`;
+ * anything else (busy, I/O, corruption, a failure without a SQLite code) is
+ * `internal`.
  */
 function toSiteDbError(error: unknown): SiteDbError {
   if (error instanceof SiteDbError) return error;
   const message = sqlErrorMessage(error);
-  if (/SQLITE_CONSTRAINT\b|constraint failed/u.test(message))
+  if (/SQLITE_CONSTRAINT_(?:UNIQUE|PRIMARYKEY)\b/u.test(message))
     return new SiteDbError("conflict", message);
   if (/SQLITE_[A-Z]+/u.test(message) && !INTERNAL_SQLITE.test(message))
     return new SiteDbError("sql_error", message);
@@ -285,10 +287,9 @@ export class SiteDatabase {
       return errorResponse("validation", "requestId must be a UUID");
     try {
       if (operation === "reset") {
-        // Check for a replay before deleting, then keep the id across the wipe.
+        // Check for a replay before deleting; recent ids survive the wipe.
         this.rememberRequest(body.requestId);
-        await this.state.storage.deleteAll();
-        this.rememberRequest(body.requestId);
+        await this.wipe();
         return Response.json(this.meter(0, 0));
       }
       if (operation === "migrate")
@@ -321,13 +322,35 @@ export class SiteDatabase {
       if (this.kv.get(requestKey(bucket - back, requestId)) !== undefined)
         throw new SiteDbError("replayed", "This request was already received");
     // Forget ids older than the buckets checked, a bounded number per request.
-    const stale = this.kv.list({
-      start: REQUEST_PREFIX,
-      end: requestKey(bucket - REQUEST_BUCKETS_CHECKED + 1, ""),
-      limit: REQUEST_PRUNE_LIMIT,
-    });
-    for (const [key] of stale) this.kv.delete(key);
+    // Collect first, then delete: never change keys while a list is open.
+    const stale = Array.from(
+      this.kv.list({
+        start: REQUEST_PREFIX,
+        end: requestKey(bucket - REQUEST_BUCKETS_CHECKED + 1, ""),
+        limit: REQUEST_PRUNE_LIMIT,
+      }),
+      ([key]) => key,
+    );
+    for (const key of stale) this.kv.delete(key);
     this.kv.put(requestKey(bucket, requestId), 1);
+  }
+
+  /**
+   * Delete the database and every record of it, keeping the request ids of
+   * the buckets still checked (this request's included) so a wipe never
+   * reopens the replay window.
+   */
+  private async wipe(): Promise<void> {
+    const bucket = Math.floor(Date.now() / REQUEST_BUCKET_MS);
+    const recent = Array.from(
+      this.kv.list({
+        start: requestKey(bucket - REQUEST_BUCKETS_CHECKED + 1, ""),
+        end: `${REQUEST_PREFIX}~`,
+      }),
+      ([key, value]) => [key, value] as const,
+    );
+    await this.state.storage.deleteAll();
+    for (const [key, value] of recent) this.kv.put(key, value);
   }
 
   private migrations(): Array<MigrationRecord & { name: string }> {
@@ -490,10 +513,7 @@ export class SiteDatabase {
       });
     }
     this.rememberRequest(body.requestId);
-    if (body.rebuild === true) {
-      await this.state.storage.deleteAll();
-      this.rememberRequest(body.requestId);
-    }
+    if (body.rebuild === true) await this.wipe();
     const applied: string[] = [];
     let rowsRead = 0;
     let rowsWritten = 0;
@@ -664,7 +684,8 @@ export class SiteDatabase {
     const out: SiteDbExportResponse["tables"] = [];
     let rowsRead = 0;
     let rowCount = 0;
-    let bytes = 0;
+    // The schema travels with every page, so it counts toward the page's bytes.
+    let bytes = utf8Length(JSON.stringify(schema));
     let nextCursor: string | null = null;
     return guarded(() => {
       for (let index = start; index < tables.length && nextCursor === null; index += 1) {
@@ -674,13 +695,17 @@ export class SiteDatabase {
         const resume = index === start ? position : null;
         if (resume && (alias === null ? resume.r !== undefined : resume.o !== undefined))
           throw new SiteDbError("validation", "Invalid export cursor");
+        // Two query texts for rowid tables, so a resumed page seeks to its
+        // rowid instead of scanning the table from the start.
         const cursor =
           alias === null
             ? this.sql.exec(`SELECT * FROM ${quoted} LIMIT -1 OFFSET ?`, resume?.o ?? 0)
-            : this.sql.exec(
-                `SELECT ${alias}, * FROM ${quoted} WHERE ?1 IS NULL OR ${alias} > ?1 ORDER BY ${alias}`,
-                resume?.r ?? null,
-              );
+            : resume?.r === undefined
+              ? this.sql.exec(`SELECT ${alias}, * FROM ${quoted} ORDER BY ${alias}`)
+              : this.sql.exec(
+                  `SELECT ${alias}, * FROM ${quoted} WHERE ${alias} > ? ORDER BY ${alias}`,
+                  resume.r,
+                );
         const columns = alias === null ? cursor.columnNames : cursor.columnNames.slice(1);
         const page = { name: table.name, columns, rows: [] as unknown[][] };
         out.push(page);

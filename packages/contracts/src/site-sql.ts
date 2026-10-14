@@ -128,13 +128,11 @@ export const SITE_SQL_READ_PRAGMAS: readonly string[] = Object.freeze([
 /**
  * Identifier prefixes Site SQL may not name: Cloudflare's own tables
  * (`_cf_`) and names kept for Opengeni (`_og_`). Quoted identifiers count,
- * and so do string literals shaped like such a name (SQLite accepts
- * `FROM '_cf_KV'`), so a value like `'_og_x'` must be passed as a parameter.
+ * and so do string literals that start with one (SQLite accepts any string
+ * as a table name, as in `FROM '_cf_KV'`), so such a value must be passed as
+ * a parameter.
  */
 export const SITE_SQL_RESERVED_PREFIXES: readonly string[] = Object.freeze(["_cf_", "_og_"]);
-
-/** A string literal that SQLite could read as a reserved table name. */
-const RESERVED_STRING = /^_(?:cf|og)_[A-Za-z0-9_]*$/iu;
 
 /**
  * Parameters the API binds from the verified viewer; a Site may never supply
@@ -555,7 +553,9 @@ export function compileSiteSql(sql: string, profile: SiteSqlProfile): SiteSqlCom
     const sig = significant(statement);
     for (const token of sig) {
       if (token.kind === "string") {
-        if (RESERVED_STRING.test(token.value))
+        // SQLite can read any string literal as a table name.
+        const value = token.value.toLowerCase();
+        if (SITE_SQL_RESERVED_PREFIXES.some((prefix) => value.startsWith(prefix)))
           return refuse(
             "reserved_name",
             `Names starting with ${SITE_SQL_RESERVED_PREFIXES.join(" or ")} are reserved (pass such a value as a parameter)`,
