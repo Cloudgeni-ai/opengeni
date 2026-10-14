@@ -750,11 +750,8 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await mobileRedeem.waitFor({ timeout: 20_000 });
     expect((await mobileRedeem.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     expect(
-      (
-        await mobileDetailed
-          .getByRole("switch", { name: "Enable Detailed account" })
-          .boundingBox()
-      )?.height ?? 0,
+      (await mobileDetailed.getByRole("switch", { name: "Enable Detailed account" }).boundingBox())
+        ?.height ?? 0,
     ).toBeGreaterThan(0);
     expect(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,

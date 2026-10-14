@@ -1024,6 +1024,9 @@ describe("connected vaults reached from another workspace", () => {
         ${team.accountId}, ${team.workspaceId}, 'organization', ${team.workspaceId}, 'Org 1P',
         'onepassword', 'read_only', ${connectionId}, 'org-vault-ref'
       )`;
-    await registryIn(personal).forVault({ source: "onepassword", providerConnectionId: connectionId });
+    await registryIn(personal).forVault({
+      source: "onepassword",
+      providerConnectionId: connectionId,
+    });
   });
 });
