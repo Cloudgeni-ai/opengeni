@@ -128,6 +128,13 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
 | `per_viewer` | own | own | read, update and delete all unless `privateRecords` (then own only) |
 | `append_only` | own | create only | read all, update, delete |
 
+On a Site [published](published-sites.md) to the public, anonymous guests
+(`guest:<visitorId>`) reach a collection only through its `guestAccess`
+rule: `none` (the default), `read` (what viewers read), `append` (create,
+and read their own) or `own` (create, read, update and delete their own).
+Members, invited people and signed-in users are viewers as above. Guest
+writes have their own rate limit.
+
 Collection JSON Schemas use a strict keyword allowlist, walked over the whole
 schema when a collection is defined: `type`, `properties`, `required`,
 `additionalProperties` (boolean or schema), `items` (one schema), `enum` (up
