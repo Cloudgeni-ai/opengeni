@@ -572,6 +572,12 @@ export const SITE_GATEWAY_SESSION_HEADER = "x-opengeni-site-session";
 export const SITE_GATEWAY_VISITOR_HEADER = "x-opengeni-site-visitor";
 export const SITE_GATEWAY_CLIENT_IP_HEADER = "x-opengeni-site-client-ip";
 export const SITE_GATEWAY_HUMAN_HEADER = "x-opengeni-site-human";
+/**
+ * Lowercase hex SHA-256 of the exact body bytes: the same value the gateway
+ * signs as `bodySha256`. When it is present the API verifies the signature
+ * before it reads the body, then checks the body against it.
+ */
+export const SITE_GATEWAY_BODY_SHA256_HEADER = "x-opengeni-gateway-body-sha256";
 /** Reject signed requests whose timestamp differs from the API clock by more. */
 export const SITE_GATEWAY_MAX_SKEW_SECONDS = 30;
 export const SITE_GATEWAY_SIGNATURE_VERSION = "v1";

@@ -181,13 +181,21 @@ request:
 - Requests that carry `Authorization`, `Proxy-Authorization`, `Cookie`,
   `X-Api-Key` or an external-actor header are refused.
 
-Bodies are capped before anything is read or verified: 4 MiB for JSON and
-25 MiB for `POST /published-artifacts/current/files` (the gateway's caps).
-A larger body returns 413 `site_request_too_large`.
+The signature headers and the timestamp are checked before the body is
+read. The gateway also sends `x-opengeni-gateway-body-sha256`, the
+lowercase hex SHA-256 it signs as `bodySha256`. With it, the API verifies
+the signature before reading the body, then refuses a body that does not
+match the hash. Without it (older gateways), the API reads the capped body
+first and verifies afterwards; once every gateway sends the header, that
+fallback can go.
+
+Bodies are capped before they are read: 4 MiB for JSON and 25 MiB for
+`POST /published-artifacts/current/files` (the gateway's caps). A larger
+body returns 413 `site_request_too_large`.
 
 A failure returns `401 site_gateway_signature_invalid`, with
 `details.reason` set to `missing_headers`, `bad_timestamp`, `skew`,
-`bad_signature` or `credentials`.
+`bad_signature`, `body_mismatch` or `credentials`.
 
 The gateway must sign the normalized path. A path with dot segments is
 normalized by the URL parser before verification, so it fails the

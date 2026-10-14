@@ -60,7 +60,10 @@ import {
 import type { PublishedSiteDataViewer } from "../site-data/service";
 import {
   precheckSiteGatewayRequest,
+  sameBodySha256,
+  signedBodySha256,
   verifySiteGatewayRequest,
+  type SiteGatewayVerification,
   type SiteGatewayFields,
 } from "../site-publishing/gateway-signature";
 import {
@@ -395,11 +398,14 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         { reason },
       );
     // The gateway signature first: nothing about the request is trusted before
-    // it. The header and clock checks run before the body is read.
-    const pre = precheckSiteGatewayRequest({ headers: context.req.raw.headers, secrets });
+    // it. The header and clock checks run before the body is read, and so does
+    // the signature when the gateway sends the signed body hash; the body
+    // read afterwards must then match that hash.
+    const headers = context.req.raw.headers;
+    const pre = precheckSiteGatewayRequest({ headers, secrets });
     if (!pre.ok) throw refuse(pre.reason);
     const suffix = url.pathname.slice(SITE_RUNTIME_API_PREFIX.length);
-    const body =
+    const readBody = async () =>
       method === "GET" || method === "HEAD"
         ? new Uint8Array()
         : await readCappedBody(
@@ -408,14 +414,27 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
               ? SITE_RUNTIME_FILE_BODY_LIMIT
               : SITE_RUNTIME_JSON_BODY_LIMIT,
           );
-    const verified = verifySiteGatewayRequest({
-      method,
-      pathWithQuery: `${url.pathname}${url.search}`,
-      headers: context.req.raw.headers,
-      body,
-      secrets,
-    });
-    if (!verified.ok) throw refuse(verified.reason);
+    const pathWithQuery = `${url.pathname}${url.search}`;
+    const signedSha256 = signedBodySha256(headers);
+    let body: Uint8Array;
+    let verified: SiteGatewayVerification;
+    if (signedSha256 !== null) {
+      verified = verifySiteGatewayRequest({
+        method,
+        pathWithQuery,
+        headers,
+        body: { sha256: signedSha256 },
+        secrets,
+      });
+      if (!verified.ok) throw refuse(verified.reason);
+      body = await readBody();
+      if (!sameBodySha256(body, signedSha256)) throw refuse("body_mismatch");
+    } else {
+      // Gateways that do not send the hash: read (capped), then verify.
+      body = await readBody();
+      verified = verifySiteGatewayRequest({ method, pathWithQuery, headers, body, secrets });
+      if (!verified.ok) throw refuse(verified.reason);
+    }
     context.header("cache-control", "no-store");
     const runtime: RuntimeRequest = {
       context,

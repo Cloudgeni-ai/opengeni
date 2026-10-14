@@ -145,7 +145,9 @@ MessagePort. The shell's bridge host matches each HTTP request with
 every `/_og/api` request (`siteGatewayCanonicalString`, HMAC-SHA256,
 `v1=<base64url>`, 30 s skew, body hash) with the host, raw site-session
 token (if any), visitor id, client IP and human-check flag, and forwards to
-`/v1/site-runtime<suffix>`. The API verifies the signature (current or
+`/v1/site-runtime<suffix>`, with the signed body hash also in
+`x-opengeni-gateway-body-sha256` so the API can verify before reading the
+body. The API verifies the signature (current or
 previous secret), resolves the host to the publication, resolves the viewer,
 enforces access and limits, and serves the operation.
 

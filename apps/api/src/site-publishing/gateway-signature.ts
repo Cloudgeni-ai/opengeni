@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   siteGatewayCanonicalString,
+  SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CLIENT_IP_HEADER,
   SITE_GATEWAY_HOST_HEADER,
   SITE_GATEWAY_HUMAN_HEADER,
@@ -38,6 +39,7 @@ export type SiteGatewayVerification =
         | "bad_timestamp"
         | "skew"
         | "bad_signature"
+        | "body_mismatch"
         | "credentials";
     };
 
@@ -106,17 +108,35 @@ export function precheckSiteGatewayRequest(input: {
   return { ok: true, secrets, signature, timestamp, host };
 }
 
+/**
+ * The signed body hash the gateway sent ahead of the body, or `null` when it
+ * sent none. A malformed value is not a hash and fails the signature.
+ */
+export function signedBodySha256(headers: Headers): string | null {
+  const value = header(headers, SITE_GATEWAY_BODY_SHA256_HEADER, 64);
+  if (value === null) return headers.has(SITE_GATEWAY_BODY_SHA256_HEADER) ? "" : null;
+  return /^[0-9a-f]{64}$/u.test(value) ? value : "";
+}
+
+/**
+ * Verify a signed request. Pass the body when it has been read, or, before
+ * reading it, the hash the gateway signed (`signedBodySha256`); the caller
+ * then checks the body it reads with `sameBodySha256`.
+ */
 export function verifySiteGatewayRequest(input: {
   method: string;
   pathWithQuery: string;
   headers: Headers;
-  body: Uint8Array;
+  body: Uint8Array | { sha256: string };
   secrets: readonly (string | undefined)[];
   nowMs?: number;
 }): SiteGatewayVerification {
   const pre = precheckSiteGatewayRequest(input);
   if (!pre.ok) return pre;
   const { secrets, signature, timestamp, host } = pre;
+  const bodySha256 = input.body instanceof Uint8Array ? sha256Hex(input.body) : input.body.sha256;
+  // A malformed signed hash never verifies.
+  if (!/^[0-9a-f]{64}$/u.test(bodySha256)) return { ok: false, reason: "bad_signature" };
   const session = header(input.headers, SITE_GATEWAY_SESSION_HEADER) ?? "";
   const visitor = header(input.headers, SITE_GATEWAY_VISITOR_HEADER) ?? "";
   const clientIp = header(input.headers, SITE_GATEWAY_CLIENT_IP_HEADER, 64) ?? "";
@@ -126,7 +146,7 @@ export function verifySiteGatewayRequest(input: {
     host,
     pathWithQuery: input.pathWithQuery,
     timestamp,
-    bodySha256: sha256Hex(input.body),
+    bodySha256,
     session,
     visitor,
     clientIp,
@@ -146,6 +166,11 @@ export function verifySiteGatewayRequest(input: {
   };
 }
 
+/** Whether `body` hashes to the signed hex digest, compared in constant time. */
+export function sameBodySha256(body: Uint8Array, signedSha256: string): boolean {
+  return sameSignature(sha256Hex(body), signedSha256);
+}
+
 /** Sign a request as the gateway does (tests and local tools). */
 export function signSiteGatewayRequest(input: {
   secret: string;
@@ -158,6 +183,8 @@ export function signSiteGatewayRequest(input: {
   clientIp?: string;
   human?: boolean;
   nowMs?: number;
+  /** Also send the signed body hash header (the gateway does). */
+  bodyHashHeader?: boolean;
 }): Record<string, string> {
   const body =
     typeof input.body === "string"
@@ -179,6 +206,7 @@ export function signSiteGatewayRequest(input: {
     ...fields,
   });
   return {
+    ...(input.bodyHashHeader ? { [SITE_GATEWAY_BODY_SHA256_HEADER]: sha256Hex(body) } : {}),
     [SITE_GATEWAY_TIMESTAMP_HEADER]: String(timestamp),
     [SITE_GATEWAY_SIGNATURE_HEADER]: siteGatewaySignature(input.secret, canonical),
     [SITE_GATEWAY_HOST_HEADER]: input.host,

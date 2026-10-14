@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_FREE_SITE_LIMITS,
+  SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_SIGNATURE_HEADER,
   SITE_GATEWAY_TIMESTAMP_HEADER,
   UNLIMITED_SITE_FLOOD_BRAKES,
@@ -11,6 +12,8 @@ import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/c
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";
 import {
   precheckSiteGatewayRequest,
+  sameBodySha256,
+  signedBodySha256,
   signSiteGatewayRequest,
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
@@ -118,6 +121,24 @@ describe("gateway signature", () => {
       ok: false,
       reason: "not_configured",
     });
+  });
+
+  test("verifies the signed body hash before the body, then the body against it", () => {
+    const headers = new Headers(signed(CURRENT, { bodyHashHeader: true }));
+    const hash = signedBodySha256(headers);
+    expect(hash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(verify(Object.fromEntries(headers), { body: { sha256: hash! } }).ok).toBe(true);
+    expect(sameBodySha256(new TextEncoder().encode('{"a":1}'), hash!)).toBe(true);
+    expect(sameBodySha256(new TextEncoder().encode('{"a":2}'), hash!)).toBe(false);
+    // A hash of another body, or no hash at all, does not verify.
+    expect(verify(signed(), { body: { sha256: "0".repeat(64) } })).toMatchObject({
+      reason: "bad_signature",
+    });
+    expect(verify(signed(), { body: { sha256: "" } })).toMatchObject({
+      reason: "bad_signature",
+    });
+    expect(signedBodySha256(new Headers(signed()))).toBeNull();
+    expect(signedBodySha256(new Headers({ [SITE_GATEWAY_BODY_SHA256_HEADER]: "ABC" }))).toBe("");
   });
 
   test("refuses signed requests that also carry app credentials", () => {
