@@ -2105,6 +2105,51 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("an existing set-aside copy is never overwritten", async () => {
+    await withInterruptedLaunchFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      await writeFile(join(sessionDirectory, "profile", "synthetic-profile-state"), "current");
+      // A copy of this generation was already set aside (for example by an
+      // earlier attempt whose session directory was later recreated).
+      const setAside = join(
+        rootDirectory,
+        "set-aside",
+        options.browserSessionId,
+        options.controllerGeneration,
+      );
+      await mkdir(join(setAside, "profile"), { recursive: true });
+      await writeFile(join(setAside, "profile", "synthetic-profile-state"), "retained earlier");
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        await expect(
+          supervisor.endSession(
+            {
+              browserSessionId: options.browserSessionId,
+              controllerGeneration: options.controllerGeneration,
+            },
+            { removeState: true, setAsideInterruptedLaunch: true },
+          ),
+        ).rejects.toThrow("preserved");
+        // Both copies stay exactly where and as they were.
+        expect(
+          await readFile(join(sessionDirectory, "profile", "synthetic-profile-state"), "utf8"),
+        ).toBe("current");
+        expect(await exists(join(sessionDirectory, "working-runtime.sqlite"))).toBe(true);
+        expect(await readFile(join(setAside, "profile", "synthetic-profile-state"), "utf8")).toBe(
+          "retained earlier",
+        );
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   test("update idle proof admits quiescent preserved sessions and blocks in-flight or unrecoverable ones", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
       const dispatched = deferred(),
