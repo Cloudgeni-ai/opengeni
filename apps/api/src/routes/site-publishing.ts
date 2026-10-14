@@ -231,7 +231,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
   // Take a Site down at once: the Site's owner or a workspace admin.
   app.post(`${base}/takedown`, async (context) => {
     requireSitesDomain(deps.settings);
-    const grant = await grantFor(context, "artifacts:read");
+    const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, SiteTakedownRequest);
     const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
     if (!management.owner && !management.admin)
@@ -268,7 +268,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.post(`${base}/restore`, async (context) => {
     requireSitesDomain(deps.settings);
-    const grant = await grantFor(context, "artifacts:read");
+    const grant = await grantFor(context, "artifacts:publish");
     const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
     if (!management.owner && !management.admin)
       throw sitePublishingError(

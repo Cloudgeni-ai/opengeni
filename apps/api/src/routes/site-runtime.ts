@@ -665,13 +665,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewerPrincipal: viewer.principal,
         limit: LIST_LIMIT,
       });
-      const sessions: unknown[] = [];
+      const listed: unknown[] = [];
       for (const conversation of owned) {
         const response = await forward("GET", `${base}/${conversation.sessionId}`);
-        if (response.ok) sessions.push(await response.json());
+        if (response.ok) listed.push(await response.json());
         else await response.body?.cancel();
       }
-      return context.json({ sessions, nextCursor: null });
+      return context.json({ sessions: listed, nextCursor: null });
     }
 
     if (id === "sessions.create") {
@@ -697,7 +697,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         await settleSiteRuntimeSpend(deps, host, conversation.sessionId);
       requireSiteRuntimeBudgets(limits, await usage(), { newConversation: true });
       const agent = host.publication.agent;
-      const tools: ToolRef[] = (agent.tools ?? [])
+      const mcpTools: ToolRef[] = (agent.tools ?? [])
         .filter((tool) => SessionMcpServerIdPattern.test(tool))
         .map((tool) => ({ kind: "mcp", id: tool, optional: true }));
       const created = await forward("POST", base, {
@@ -710,7 +710,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         agent: { capabilities: { from: "none", humanInput: false, skills: false } },
         ...(agent.model ? { model: agent.model } : {}),
         ...(agent.instructions?.trim() ? { instructions: agent.instructions.trim() } : {}),
-        ...(tools.length > 0 ? { tools } : {}),
+        ...(mcpTools.length > 0 ? { tools: mcpTools } : {}),
         metadata: {
           opengeniPublishedSite: {
             siteId: host.site.id,

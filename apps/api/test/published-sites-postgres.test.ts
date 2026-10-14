@@ -341,9 +341,9 @@ async function fixture(overrides: Partial<Settings> = {}) {
 test("publishing is off without a Sites domain", async () => {
   const f = await fixture({ sitesDomain: undefined, sitesGatewaySecret: undefined });
   const site = await f.publish("Disabled");
-  const read = await f.publication(f.owner, site.id, "GET");
-  expect(read.status).toBe(404);
-  expect(code(read)).toBe("sites_publishing_disabled");
+  const disabled = await f.publication(f.owner, site.id, "GET");
+  expect(disabled.status).toBe(404);
+  expect(code(disabled)).toBe("sites_publishing_disabled");
   expect(code(await f.publication(f.owner, site.id, "PUT", {}))).toBe("sites_publishing_disabled");
   const runtime = await f.gateway("x.sites.example.test", "GET", "/site/config");
   expect(runtime.status).toBe(404);
@@ -1122,6 +1122,19 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   );
   expect(memberTakedown.status).toBe(403);
   expect(code(memberTakedown)).toBe("site_owner_or_admin_required");
+  // Taking down and restoring change what viewers see: a read-only credential
+  // fails the artifacts:publish check before the owner-or-admin rule.
+  const readOnly = await f.person(["workspace:read", "artifacts:read"]);
+  const readOnlyTakedown = await f.publication(
+    readOnly,
+    site.id,
+    "POST",
+    { reason: "Read-only attempt" },
+    "/takedown",
+  );
+  expect(readOnlyTakedown.status).toBe(403);
+  expect(code(readOnlyTakedown)).toBeUndefined();
+  expect(JSON.stringify(readOnlyTakedown.json)).toContain("artifacts:publish");
   calls.length = 0;
   const takedown = await f.publication(
     f.admin,
@@ -1164,6 +1177,9 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect(code(republish)).toBe("site_suspended");
   expect((await f.publication(f.owner, site.id, "DELETE")).status).toBe(409);
 
+  const readOnlyRestore = await f.publication(readOnly, site.id, "POST", {}, "/restore");
+  expect(readOnlyRestore.status).toBe(403);
+  expect(code(readOnlyRestore)).toBeUndefined();
   const restored = await f.publication(f.owner, site.id, "POST", {}, "/restore");
   expect(restored.status, JSON.stringify(restored.json)).toBe(200);
   expect(restored.json).toMatchObject({ status: "active", moderation: { suspendedAt: null } });
@@ -1364,8 +1380,8 @@ test("agent tools read and change a Site's publication with the person's authori
     });
     expect(limits.isError).toBe(true);
     expect(limits.value.error.details.code).toBe("site_admin_required");
-    const read = await callTool("site_publication_get", { siteId: site.id });
-    expect(read.value).toMatchObject({ published: true, publication: { label: "agent-site" } });
+    const got = await callTool("site_publication_get", { siteId: site.id });
+    expect(got.value).toMatchObject({ published: true, publication: { label: "agent-site" } });
     // A workspace member's own view agrees.
     expect((await f.publication(f.owner, site.id, "GET")).json.hostname).toBe(
       `agent-site.${DOMAIN}`,
