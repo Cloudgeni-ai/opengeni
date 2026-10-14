@@ -29981,7 +29981,9 @@
       "OPENGENI_SITE_BRIDGE_READY": "value",
       "OPENGENI_SITE_BRIDGE_REQUEST": "value",
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
+      "OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
+      "OPENGENI_SITE_BRIDGE_VIEWER_METHOD": "value",
       "OPENGENI_TEST_REQUEST_NIL_ID": "value",
       "OPENGENI_WEBHOOK_HEADERS": "value",
       "OPENGENI_WEBHOOK_TEST_EVENT_TYPE": "value",
@@ -30015,8 +30017,10 @@
       "OpenGeniSiteBridgeResponseMessage": "type",
       "OpenGeniSiteClient": "type",
       "OpenGeniSiteClientOptions": "type",
+      "OpenGeniSiteSignInResult": "type",
       "OpenGeniSiteToolCallRequest": "type",
       "OpenGeniSiteToolCatalog": "type",
+      "OpenGeniSiteViewer": "type",
       "OpenGeniSiteWorkspaceTools": "type",
       "OpenGeniSlackBotInstallRequest": "type",
       "OpenGeniSlackBotInstallStart": "type",
@@ -31724,7 +31728,9 @@
       "OPENGENI_SITE_BRIDGE_READY": "value",
       "OPENGENI_SITE_BRIDGE_REQUEST": "value",
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
+      "OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
+      "OPENGENI_SITE_BRIDGE_VIEWER_METHOD": "value",
       "OPENGENI_SITE_LOCAL_CODEMODE_PATH": "value",
       "OpenGeniSiteBridgeCancelMessage": "type",
       "OpenGeniSiteBridgeConnectMessage": "type",
@@ -31748,8 +31754,10 @@
       "OpenGeniSiteDataWriteResult": "type",
       "OpenGeniSiteFile": "type",
       "OpenGeniSiteFiles": "type",
+      "OpenGeniSiteSignInResult": "type",
       "OpenGeniSiteToolCallRequest": "type",
       "OpenGeniSiteToolCatalog": "type",
+      "OpenGeniSiteViewer": "type",
       "OpenGeniSiteWorkspaceTools": "type",
       "sanitizeOpenGeniSiteToolCallRequest": "value",
       "sanitizeOpenGeniSiteToolInvokeRequest": "value",
@@ -31760,6 +31768,22 @@
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
       "SiteToolCallRequest": "type"
+    },
+    "@opengeni/sdk/site-bridge-host": {
+      "handleSiteBridgeRequest": "value",
+      "injectSiteBridgeBootstrap": "value",
+      "openGeniSiteBridgePortFromBootstrap": "value",
+      "SITE_BRIDGE_BOOTSTRAP_SCRIPT": "value",
+      "SiteBridgeDocumentLease": "value",
+      "siteBridgeError": "value",
+      "SiteBridgeHost": "value",
+      "SiteBridgeHostSource": "type",
+      "siteBridgeReadyMessage": "value",
+      "SiteBridgeRequestRegistry": "value",
+      "SiteBridgeRequestValue": "type",
+      "SiteBridgeToolHandlers": "type",
+      "SiteBridgeViewerHandlers": "type",
+      "SiteHttpRequest": "type"
     },
     "@opengeni/sdk/site-document": {
       "resolveSiteClientScript": "value",
@@ -36273,6 +36297,22 @@
     "SiteAuthConnectionResource": [
       "get",
       "update"
+    ],
+    "SiteBridgeDocumentLease": [
+      "close",
+      "load"
+    ],
+    "SiteBridgeHost": [
+      "close",
+      "load"
+    ],
+    "SiteBridgeRequestRegistry": [
+      "addPort",
+      "cancel",
+      "closeAll",
+      "closePort",
+      "complete",
+      "start"
     ],
     "ToolRequestError": [
       "status",
@@ -47915,6 +47955,42 @@
       ],
       "limitBytes": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ]
+    },
+    "@opengeni/sdk/site-bridge-host:SiteBridgeDocumentLease": {
+      "close": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "load": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Window\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"postMessage\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Pick\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ]
+    },
+    "@opengeni/sdk/site-bridge-host:SiteBridgeHost": {
+      "close": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "load": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Window\",\"optional\":false,\"type\":\"Identifier\"}},{\"literal\":{\"type\":\"Literal\",\"value\":\"postMessage\"},\"type\":\"TSLiteralType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Pick\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSBooleanKeyword\"}}"
+      ]
+    },
+    "@opengeni/sdk/site-bridge-host:SiteBridgeRequestRegistry": {
+      "addPort": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "cancel": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "closeAll": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "closePort": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "complete": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortController\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSVoidKeyword\"}}"
+      ],
+      "start": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"MessagePort\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortController\",\"optional\":false,\"type\":\"Identifier\"}}]}}"
       ]
     },
     "@opengeni/sdk/site:OpenGeniSiteBridgeError": {},
