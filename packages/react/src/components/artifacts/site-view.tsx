@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SiteViewer } from "@opengeni/contracts";
+import type { SiteViewer } from "@opengeni/sdk";
 
 import { loadSiteSnapshot } from "../../sites-ui";
 import {

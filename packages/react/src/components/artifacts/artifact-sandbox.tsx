@@ -7,7 +7,7 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import type { SiteViewer } from "@opengeni/contracts";
+import type { SiteViewer } from "@opengeni/sdk";
 
 import { cn } from "../../lib/cn";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
