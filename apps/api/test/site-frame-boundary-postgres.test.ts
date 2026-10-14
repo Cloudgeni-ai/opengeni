@@ -13,6 +13,7 @@ import {
   SessionAuthorizationDeniedError,
   siteAgentClamp,
   siteAgentMayReachSession,
+  siteSessionClamp,
   withSiteSessionOrigin,
   type ApiRouteDeps,
   type ObjectStorageDependency,
@@ -1169,6 +1170,36 @@ test("agents started from a Site leave the organization profile, machines, envir
     const result = await as(grant, method, path, body);
     expect({ route, refused: clampRefusal.test(result.text) }).toEqual({ route, refused: false });
   }
+});
+
+test("an agent whose own session cannot be read is clamped until it can be read", async () => {
+  const f = await fixture();
+  const plain = await f.startSession();
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const turnId = crypto.randomUUID();
+  const unreadable = new Proxy(
+    {},
+    {
+      get: () => {
+        throw new Error("database unavailable");
+      },
+    },
+  ) as never;
+  expect(await siteSessionClamp(unreadable, scope, plain, turnId)).toEqual({
+    clamped: true,
+    originSiteIds: [],
+  });
+  // Not cached: the next read of the same turn sees the plain session.
+  expect(await siteSessionClamp(db.db, scope, plain, turnId)).toEqual({
+    clamped: false,
+    originSiteIds: [],
+  });
+  // A session that does not exist is not clamped here (other checks refuse it).
+  for (const missing of [crypto.randomUUID(), "not-a-session"])
+    expect(await siteSessionClamp(db.db, scope, missing, null)).toEqual({
+      clamped: false,
+      originSiteIds: [],
+    });
 });
 
 test("agents started from a Site write only on the allowlist; other workspace writes are refused", async () => {

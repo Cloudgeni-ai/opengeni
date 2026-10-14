@@ -471,6 +471,35 @@ test("inviting people while the agent has tools is refused for non-admins next t
   await page.unmount();
 });
 
+test("opening a Site that lists invitees while the agent has tools is refused for non-admins", async () => {
+  const withTools = published({
+    access: "members",
+    invitedEmails: ["ada@example.com"],
+    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
+  });
+  const { client } = fakeClient({
+    updateSitePublication: async () => {
+      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
+    },
+  });
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withTools },
+    isAdmin: false,
+  });
+  const anyone = [...page.host.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
+    (element) => element.textContent?.includes("Anyone with the link"),
+  );
+  await act(async () => anyone!.click());
+  await act(async () => button(page.host, "Save changes")!.click());
+  await flush();
+  expect(page.host.textContent).toContain(
+    "Only a workspace admin can give the agent's tools to invited people.",
+  );
+  expect(page.published).toHaveLength(0);
+  await page.unmount();
+});
+
 test("a non-admin's first publish leaves limits to the workspace default", async () => {
   const { client, calls } = fakeClient();
   const page = await renderPage({
