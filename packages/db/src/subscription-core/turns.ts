@@ -1084,7 +1084,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
                 else jsonb_set(
                   ${cooled},
                   '{modelCooldownClaims}',
-                  (${stored}->'modelCooldownClaims' - ${input.modelId}::text) ||
+                  ((${stored}->'modelCooldownClaims') - ${input.modelId}::text) ||
                     case when ${keepClaim}
                       then jsonb_build_object(
                         ${input.modelId}::text,

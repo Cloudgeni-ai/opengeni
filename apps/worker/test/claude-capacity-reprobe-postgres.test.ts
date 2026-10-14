@@ -237,7 +237,12 @@ async function ageReading(connectionId: string) {
  * suspended): these tests exercise the re-read's authorization, not the
  * acceptance writers.
  */
-async function runningTurn(org: Org, model = MODEL, frozen?: unknown) {
+async function runningTurn(
+  org: Org,
+  model = MODEL,
+  frozen?: unknown,
+  visibility?: "user_private" | "workspace_shared",
+) {
   const session = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
     createSession(client!.db, {
       accountId: org.accountId,
@@ -249,6 +254,7 @@ async function runningTurn(org: Org, model = MODEL, frozen?: unknown) {
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
+      ...(visibility ? { visibility } : {}),
       subjectId: org.ownerSubjectId,
       createdBy: { kind: "subject" as const, subjectId: org.ownerSubjectId },
       createdByContext: {},
@@ -702,7 +708,7 @@ describe.skipIf(!realDb)("Claude capacity waits end only the limits a refusal cl
     expect(stored.modelCooldowns[MODEL]).toBe(staleReset);
     expect(await sessionStatus(parked.turn.identity)).toMatchObject({
       session_status: "waiting_capacity",
-      turn_status: "running",
+      turn_status: "waiting_capacity",
     });
     const [turn] = await shared!.admin<{ metadata: Record<string, unknown> }[]>`
       select metadata from session_turns where id = ${parked.turn.identity.turnId}::uuid`;
@@ -811,6 +817,14 @@ describe.skipIf(!realDb)("Claude capacity waits end only the limits a refusal cl
       where account_id = ${org.accountId}::uuid and subject_id = ${org.ownerSubjectId}
         and status = 'active' and revoked_at is null limit 1`;
     const personalWorkspaceId = membership!.personal_workspace_id;
+    // The organization allows personal connections.
+    await shared!.admin`delete from subscription_settings
+      where account_id = ${org.accountId}::uuid and workspace_id is null`;
+    await shared!.admin`
+      insert into subscription_settings (
+        account_id, rotation, providers, cross_provider_failover, fallback_order,
+        personal_connections_allowed, personal_fallback_allowed
+      ) values (${org.accountId}::uuid, '{}'::jsonb, '{}'::jsonb, false, '{}'::jsonb, true, false)`;
     const connectionId = crypto.randomUUID();
     const authorityId = crypto.randomUUID();
     const label = `claude-personal-${connectionId}`;
@@ -852,10 +866,17 @@ describe.skipIf(!realDb)("Claude capacity waits end only the limits a refusal cl
       claims: { [MODEL]: ["seven_day"] },
     });
     const personalOrg = { ...org, workspaceId: personalWorkspaceId };
-    const turn = await runningTurn(personalOrg, MODEL, {
-      version: 2,
-      personal: [{ provider: "claude", ownerMembershipId: membership!.id, authorityGeneration: 1 }],
-    });
+    const turn = await runningTurn(
+      personalOrg,
+      MODEL,
+      {
+        version: 2,
+        personal: [
+          { provider: "claude", ownerMembershipId: membership!.id, authorityGeneration: 1 },
+        ],
+      },
+      "user_private",
+    );
     const usage = stubUsage();
     await refreshBlockedCoreQuotaBeforeReconcile({
       provider: CLAUDE,
