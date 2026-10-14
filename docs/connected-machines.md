@@ -899,12 +899,18 @@ automatically; retrieve them explicitly through Files or attach them to a new
 message when needed.
 
 While a session keeps `/`, staging an attachment, spilled tool result or generated
-image into it still fails, but the failure the model and timeline receive names
-the filesystem-root working directory and this remedy instead of only a raw
-`mkdir: .opengeni: Read-only file system`; the original command output and exit
-code are retained. Opengeni never redirects those files to another host folder,
-so the cwd-relative `.opengeni/...` paths keep their meaning
-(`packages/runtime/src/index.ts`, `explainFilesystemRootDownloadFailure`).
+image into it usually still fails. When the turn's effective backend is a
+Connected Machine and its working directory is `/`, any failed staging command
+gets a reason that says the filesystem root is often not writable (read-only on
+macOS), that this may be why it failed, and how to fix it, followed by the
+underlying error. The model and timeline therefore no longer see only a raw
+`mkdir: .opengeni: Read-only file system`. This condition is structural (backend
+plus root), never a match on the possibly localized command output, so the
+wording stays conditional. The original command output and exit code are kept,
+and managed sandboxes keep their raw reason. Opengeni never redirects those
+files to another host folder, so the cwd-relative `.opengeni/...` paths keep
+their meaning (`packages/runtime/src/index.ts`,
+`explainConnectedMachineRootDownloadFailure`).
 
 `opengeni-agent run` is the explicit foreground alternative.
 

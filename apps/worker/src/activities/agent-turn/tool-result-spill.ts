@@ -226,6 +226,7 @@ export class ToolResultSpill {
       session as CodemodeTokenWriterSession,
       [download],
       {
+        sandboxBackend: this.deps.getSandboxFileDownloadBackend(),
         onRuntimeEvent: async (event) => {
           await publish?.([{ type: event.type, payload: event.payload }], true);
         },
