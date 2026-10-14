@@ -65,9 +65,9 @@ export function percentLeft(account: SuperGrokAccount): number | null {
   return typeof used === "number" ? Math.max(0, Math.min(100, Math.round(100 - used))) : null;
 }
 
-function accountStatus(account: SuperGrokAccount): "connected" | "paused" | "needs_reconnect" {
+function accountStatus(account: SuperGrokAccount): "connected" | "disabled" | "needs_reconnect" {
   if (needsReconnect(account)) return "needs_reconnect";
-  if (!account.allocatorEnabled) return "paused";
+  if (!account.allocatorEnabled) return "disabled";
   return "connected";
 }
 
@@ -187,8 +187,8 @@ export function SuperGrokRow({
       primary={primary}
       meta={[scopeLabel ?? scopeOf(grok, account, places), planOf(account)]}
       cells={{
-        usage: needsReconnect(account) ? null : status === "paused" ? (
-          <StatusBadge status="paused" variant="dot" />
+        usage: needsReconnect(account) ? null : status === "disabled" ? (
+          <StatusBadge status="disabled" variant="dot" />
         ) : (
           <UsageReadout
             percent={left}

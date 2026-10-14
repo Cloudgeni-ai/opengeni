@@ -951,7 +951,7 @@ function OrganizationCodexRow({
       ]}
       cells={{
         usage: reconnect ? null : !account.allocatorEnabled ? (
-          <StatusBadge status="paused" variant="dot" />
+          <StatusBadge status="disabled" variant="dot" />
         ) : (
           usage
         ),
