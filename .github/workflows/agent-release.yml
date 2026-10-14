@@ -335,6 +335,21 @@ jobs:
           )
           cp "agent/target/${{ matrix.target }}/release/opengeni-agent.exe" "${{ matrix.asset }}"
 
+      # CI runners have the Visual C++ runtime installed and an ordinary PC does
+      # not, so a binary that imports it passes every test here and then fails to
+      # start for users. Refuse to publish one.
+      - name: Check the Windows binaries run on stock Windows
+        if: matrix.kind == 'windows'
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          shipped=("${{ matrix.asset }}" "opengeni-computer-native-${{ matrix.target }}.exe")
+          for helper in "opengeni-browserd-${{ matrix.target }}.exe" "opengeni-agent-browser-${{ matrix.target }}.exe"; do
+            if [ -f "$helper" ]; then shipped+=("$helper"); fi
+          done
+          bun scripts/check-windows-binary-imports.ts "${shipped[@]}"
+
       # ---- Detect signing creds in a PRIOR step (so the gates can read them). ----
       # GitHub Actions does NOT expose a step's own `env:` to that step's `if:`, so a
       # signing step cannot gate on an env var it assigns from a secret in the same

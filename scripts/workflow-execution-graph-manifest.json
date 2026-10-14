@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "9e84537854c47a89e66f2975893463030aeb662415e768049871b78ca0647c30"
+      "sha256": "1473b4d70dbc6bef260bd16749cd6447d27d30836c5a1832b03574e9c08d208b"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "397b21065c0448aac95e8b9946d7168d7961d3291a2029826e162075f435d238"
+      "sha256": "235d8e4d131178429bf04d2ebf7316da7f3a2421123707d85d9edad6530a64d6"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -312,6 +312,12 @@
       "job": "build",
       "step": "Build interaction helpers (Windows x64)",
       "sha256": "06a7d742999d79db1ecc0acc5ddb4958817651744c7c25811848c5de6e80bde1"
+    },
+    {
+      "workflow": ".github/workflows/agent-release.yml",
+      "job": "build",
+      "step": "Check the Windows binaries run on stock Windows",
+      "sha256": "5f1e0c6b46aba5d9d35ae4800ac3bb3a1045c50f101cf37b6d017b2281aeb8f7"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -767,7 +773,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Native report delivery contracts",
-      "sha256": "f2a29e986e8d98bc124d9fbd9ea179d89787212a7ff354ec08d7b53863028b80"
+      "sha256": "95b53fcc89005377619a3e313ba02b03d7f65cb055087566248d034c99a355a7"
     },
     {
       "workflow": ".github/workflows/ci.yml",
