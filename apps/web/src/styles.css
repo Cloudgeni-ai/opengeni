@@ -15,6 +15,16 @@
 @source not "./dev/ui-kit";
 
 @custom-variant dark (&:where(.dark, .dark *));
+/* A desktop app window at least 640px wide. Desktop windows are never phones,
+   so layouts that fold into a header below 1024px on the web keep their side
+   column in the app down to its own minimum. */
+@custom-variant desktop-wide {
+  @media (min-width: 640px) {
+    &:where(html[data-desktop] *) {
+      @slot;
+    }
+  }
+}
 
 /* ---------------------------------------------------------------------------
    Design tokens
