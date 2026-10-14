@@ -10,6 +10,7 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
+  getSiteDataAgentSession,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -805,7 +806,7 @@ async function agentTools(
         WHERE id = ${session.id}`;
     });
   }
-  const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, {
+  const grant: AccessGrant = {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
     subjectId: "worker:first-party-mcp",
@@ -818,7 +819,8 @@ async function agentTools(
       executionGeneration: 1,
       firstPartyMcpTools: SITE_DATA_TOOLS,
     },
-  });
+  };
+  const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, grant);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: "site-data-test", version: "1" });
   await server.connect(serverTransport);
@@ -836,7 +838,7 @@ async function agentTools(
     }
     return { isError: result.isError === true, value };
   };
-  return { session, turnId: turn!.id, mcp, callTool };
+  return { session, turnId: turn!.id, grant, mcp, callTool };
 }
 
 test("an agent defines and feeds a collection the way a schedule would", async () => {
@@ -1050,11 +1052,27 @@ test("collection schemas use a strict keyword allowlist and stay isolated", asyn
     };
   const deep = (depth: number): Record<string, unknown> =>
     depth === 0 ? { type: "string" } : { type: "object", properties: { a: deep(depth - 1) } };
-  const wide = {
+  const strings = (count: number, prefix = "p") =>
+    Object.fromEntries(
+      Array.from({ length: count }, (_, index) => [`${prefix}${index}`, { type: "string" }]),
+    );
+  const branches = (count: number, each: () => unknown) => Array.from({ length: count }, each);
+  // Wide sibling properties are cheap; fan-out on repeated values is not.
+  const tooWide = { type: "object", properties: strings(1001) };
+  const fanOut = {
+    type: "array",
+    items: { anyOf: branches(16, () => ({ anyOf: branches(6, () => ({ type: "string" })) })) },
+  };
+  // A thousand properties make a validator too large to run optimized: fan-out counts 4×.
+  const largeFanOut = {
     type: "object",
-    properties: Object.fromEntries(
-      Array.from({ length: 101 }, (_, index) => [`p${index}`, { type: "string" }]),
-    ),
+    properties: {
+      ...strings(999, "t"),
+      list: {
+        type: "array",
+        items: { anyOf: branches(5, () => ({ anyOf: branches(4, () => ({ type: "string" })) })) },
+      },
+    },
   };
   for (const [schema, message] of [
     // (a) a reference into data keywords that hides a regex
@@ -1088,7 +1106,9 @@ test("collection schemas use a strict keyword allowlist and stay isolated", asyn
     [{ type: "object", const: { a: 1 } }, "const"],
     [{ type: "number", multipleOf: 0 }, "multipleOf"],
     [{ type: "set" }, "type"],
-    [wide, "more than 100"],
+    [tooWide, "more than 1000 properties"],
+    [fanOut, "too costly to check on repeated values (cost 673"],
+    [largeFanOut, "is large, so it is too costly"],
     [{ anyOf: Array.from({ length: 17 }, () => ({ type: "string" })) }, "more than 16 schemas"],
     [
       {
@@ -1115,6 +1135,26 @@ test("collection schemas use a strict keyword allowlist and stay isolated", asyn
         jsonSchema: { type: "object", properties: { a: deep(15) } },
       })
     ).status,
+  ).toBe(201);
+  // As wide as a CSV import: 1,000 properties, and a record that fills them.
+  const wide = await a.define(f.owner, "wide", {
+    accessMode: "shared",
+    jsonSchema: { type: "object", properties: strings(1000), required: ["p0", "p999"] },
+  });
+  expect(wide.status, JSON.stringify(wide.json).slice(0, 300)).toBe(201);
+  const full = Object.fromEntries(Array.from({ length: 1000 }, (_, index) => [`p${index}`, "v"]));
+  expect((await a.write(f.owner, [{ op: "insert", collection: "wide", data: full }])).status).toBe(
+    200,
+  );
+  expect(
+    (await a.write(f.owner, [{ op: "insert", collection: "wide", data: { p0: "v" } }])).status,
+  ).toBe(422);
+  // The same fan-out under a small schema is allowed (cost 151).
+  const { siteDataSchemaRepeatedCost } = await import("../src/site-data/service");
+  const smallFanOut = { type: "object", properties: { list: largeFanOut.properties.list } };
+  expect(siteDataSchemaRepeatedCost(smallFanOut)).toBe(151);
+  expect(
+    (await a.define(f.owner, "fan", { accessMode: "shared", jsonSchema: smallFanOut })).status,
   ).toBe(201);
   // Property names that look like keywords are fine; every allowed keyword works.
   const schema = {
@@ -1666,7 +1706,27 @@ test("uploads are refused before their body is read", async () => {
 });
 
 /** The costliest schema the allowlist accepts: 5 × 16 branches and 500 enum values per element. */
+/** The costliest schema the cost model allows: 96 failing branches on every array element. */
 function costliestSchema() {
+  const strings = (count: number) => Array.from({ length: count }, () => ({ type: "string" }));
+  return {
+    type: "object",
+    properties: {
+      v: {
+        type: "array",
+        items: {
+          anyOf: [
+            ...Array.from({ length: 15 }, () => ({ anyOf: strings(5) })),
+            { anyOf: [...strings(4), { type: "number" }] },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/** The previous flat cap's costliest schema: 5 × 16 branches with 500 enum values. */
+function previousCostliestSchema() {
   const branches = (set: number) => ({
     anyOf: [
       ...Array.from({ length: 15 }, (_branchSlot, branch) => ({
@@ -1686,41 +1746,248 @@ function costliestSchema() {
   };
 }
 
-test("worst-case validation is bounded by request size and time budget", async () => {
-  const f = await fixture();
-  const s = f.site((await f.publish("Costly")).id);
+/**
+ * Measure every compile and validation as `ms` milliseconds, whatever it
+ * really takes, so budgets and charges never depend on machine speed.
+ */
+async function withValidationClock<T>(ms: () => number, run: () => Promise<T>): Promise<T> {
+  const { siteDataValidationClock } = await import("../src/site-data/service");
+  const real = siteDataValidationClock.now;
+  let now = 0;
+  siteDataValidationClock.now = () => (now += ms());
+  try {
+    return await run();
+  } finally {
+    siteDataValidationClock.now = real;
+  }
+}
+
+/**
+ * Rate windows are wall-clock minutes. Run a block that counts against them
+ * again (on fresh fixtures) if a minute boundary fell inside it.
+ */
+async function withinOneMinute<T>(run: () => Promise<T>): Promise<T> {
+  const minute = async () =>
+    String((await shared.admin`select date_trunc('minute', now())::text as m`)[0]!.m);
+  for (let attempt = 0; ; attempt += 1) {
+    const before = await minute();
+    const result = await run();
+    if (attempt > 0 || (await minute()) === before) return result;
+  }
+}
+
+async function rateWindows(f: Fixture, siteId: string) {
+  const rows = await shared.admin<{ principal_key: string; operations: number }[]>`
+    select principal_key, operations from site_data_rate_windows
+    where workspace_id = ${f.workspace.id} and site_id = ${siteId}`;
+  return Object.fromEntries(rows.map((row) => [row.principal_key, Number(row.operations)]));
+}
+
+async function validationMicros(f: Fixture) {
+  const [row] = await shared.admin<{ validation_micros: string }[]>`
+    select validation_micros from site_data_validation_windows where workspace_id = ${f.workspace.id}`;
+  return row ? Number(row.validation_micros) : 0;
+}
+
+test("worst-case validation is bounded by the cost model, request size and time budget", async () => {
+  const { SITE_DATA_MAX_SCHEMA_REPEATED_COST, siteDataSchemaProblem, siteDataSchemaRepeatedCost } =
+    await import("../src/site-data/service");
   const schema = costliestSchema();
-  const { siteDataSchemaProblem } = await import("../src/site-data/service");
   expect(siteDataSchemaProblem(schema)).toBeNull();
-  expect(
-    (await s.define(f.owner, "rows", { accessMode: "shared", jsonSchema: schema })).status,
-  ).toBe(201);
-  // A 256 KB record of numbers: every element runs every branch and enum.
-  const record = { v: Array.from({ length: 128 * 1024 - 10 }, () => 1) };
-  // More than 4 MB of records in one request is refused before any validation.
-  const tooBig = await s.write(
-    f.owner,
-    Array.from({ length: 17 }, () => ({ op: "insert", collection: "rows", data: record })),
+  expect(siteDataSchemaRepeatedCost(schema)).toBe(577);
+  expect(siteDataSchemaRepeatedCost(schema)).toBeLessThanOrEqual(
+    SITE_DATA_MAX_SCHEMA_REPEATED_COST,
   );
-  expect(tooBig.status).toBe(413);
-  expect(tooBig.json.error.details.quota).toBe("request_bytes");
-  // The largest allowed request (16 such records, last one invalid) stops at the time budget.
-  const operations = Array.from({ length: 16 }, (_, index) => ({
-    op: "insert",
-    collection: "rows",
-    data: index === 15 ? { v: [...record.v.slice(1), "x"] } : record,
-  }));
-  const started = performance.now();
-  const costly = await s.write(f.owner, operations);
-  const elapsed = performance.now() - started;
-  expect(costly.status).toBe(422);
-  expect(costly.json.error.details.reason).toBe("validation_budget");
-  // One record past the 250 ms budget at most (about 0.3 s each locally), with slack for load.
-  expect(elapsed).toBeLessThan(4_000);
-  expect((await s.query(f.owner, { collection: "rows", count: true })).json.count).toBe(0);
-  // A single costly record still fits the budget and is stored.
-  const one = await s.write(f.owner, [{ op: "insert", collection: "rows", data: record }]);
-  expect(one.status, JSON.stringify(one.json).slice(0, 300)).toBe(200);
+  // The flat cap's costliest schema runs more checks per element and is refused now.
+  expect(siteDataSchemaProblem(previousCostliestSchema())).toContain("too costly");
+  const result = await withinOneMinute(async () => {
+    const f = await fixture();
+    const created = await f.publish("Costly");
+    const s = f.site(created.id);
+    // A 256 KB record of numbers: every element fails 95 branches before matching.
+    const record = { v: Array.from({ length: 128 * 1024 - 10 }, () => 1) };
+    let step = 0;
+    return withValidationClock(
+      () => step,
+      async () => {
+        const defined = await s.define(f.owner, "rows", {
+          accessMode: "shared",
+          jsonSchema: schema,
+        });
+        // More than 4 MB of records in one request is refused before any validation.
+        const tooBig = await s.write(
+          f.owner,
+          Array.from({ length: 17 }, () => ({ op: "insert", collection: "rows", data: record })),
+        );
+        // Each compile or record takes 100 ms: compile, record 0 (200 ms), record 1
+        // (300 ms), then record 2 is over the 250 ms budget and refused before it runs.
+        step = 100;
+        const costly = await s.write(
+          f.owner,
+          Array.from({ length: 16 }, () => ({ op: "insert", collection: "rows", data: record })),
+        );
+        const stored = (await s.query(f.owner, { collection: "rows", count: true })).json.count;
+        // One record always completes, however long it takes: 1 s compile, 1 s record.
+        step = 1_000;
+        const one = await s.write(f.owner, [{ op: "insert", collection: "rows", data: record }]);
+        step = 0;
+        return {
+          defined: defined.status,
+          tooBig,
+          costly,
+          stored,
+          one: one.status,
+          windows: await rateWindows(f, created.id),
+          micros: await validationMicros(f),
+        };
+      },
+    );
+  });
+  expect(result.defined).toBe(201);
+  expect(result.tooBig.status).toBe(413);
+  expect(result.tooBig.json.error.details.quota).toBe("request_bytes");
+  expect(result.costly.status).toBe(422);
+  expect(result.costly.json.error.details).toMatchObject({ reason: "validation_budget", index: 2 });
+  expect(result.stored).toBe(0);
+  expect(result.one).toBe(200);
+  // Managers' window: define 1, the 17-record attempt 17, the 16-record attempt 16
+  // plus 300 ms / 5 = 60, the single record 1 plus 2,000 ms / 5 = 400.
+  expect(result.windows["manager:*"]).toBe(1 + 17 + 16 + 60 + 1 + 400);
+  expect(result.micros).toBe(2_300_000);
+});
+
+test("validation time is charged to the caller's windows and to a workspace window", async () => {
+  const result = await withinOneMinute(async () => {
+    const f = await fixture({
+      siteDataViewerWritesPerMinute: 10,
+      siteDataWorkspaceValidationMsPerMinute: 1_000,
+    });
+    const a = f.site((await f.publish("Charged A")).id);
+    const b = f.site((await f.publish("Charged B")).id);
+    const jsonSchema = { type: "object", properties: { n: { type: "number" } } };
+    let step = 0;
+    return withValidationClock(
+      () => step,
+      async () => {
+        for (const site of [a, b]) {
+          await site.define(f.owner, "rows", { accessMode: "shared", jsonSchema });
+          await site.define(f.owner, "plain", { accessMode: "shared" });
+        }
+        const insert = (collection = "rows") => [{ op: "insert", collection, data: { n: 1 } }];
+        step = 100;
+        // A viewer's write that spends 200 ms counts 1 + 40 operations.
+        const viewer = await a.write(f.member, insert());
+        const viewerAgain = await a.write(f.member, insert());
+        const other = await a.write(f.third, insert());
+        // 400 ms spent so far: this write starts within the 1 s window and spends 1.2 s.
+        step = 600;
+        const heavy = await b.write(f.owner, insert());
+        step = 0;
+        const exhausted = [
+          await b.write(f.member, insert()),
+          await a.write(f.owner, insert("plain")),
+        ];
+        const read = await a.query(f.owner, { collection: "rows" });
+        // Another workspace has its own window.
+        const g = await fixture({ siteDataWorkspaceValidationMsPerMinute: 1_000 });
+        const c = g.site((await g.publish("Elsewhere")).id);
+        await c.define(g.owner, "plain", { accessMode: "shared" });
+        const elsewhere = await c.write(g.owner, insert("plain"));
+        return {
+          viewer,
+          viewerAgain,
+          other,
+          heavy,
+          exhausted,
+          read,
+          elsewhere,
+          micros: await validationMicros(f),
+        };
+      },
+    );
+  });
+  expect(result.viewer.status).toBe(200);
+  expect(result.viewerAgain.status).toBe(429);
+  expect(result.viewerAgain.json.error.message).toContain("Too many writes");
+  expect(result.other.status).toBe(200);
+  expect(result.heavy.status).toBe(200);
+  expect(result.micros).toBe(1_600_000);
+  for (const refused of result.exhausted) {
+    expect(refused.status).toBe(429);
+    expect(errorCode(refused)).toBe("rate_limited");
+    expect(refused.json.error.details.quota).toBe("workspace_validation_time");
+  }
+  expect(result.read.status).toBe(200);
+  expect(result.elsewhere.status).toBe(200);
+});
+
+test("CSV imports count against the write window before parsing", async () => {
+  // Six line breaks and an unterminated quote: parsing it would fail with 422.
+  const broken = `name\n"a\nb\nc\nd\ne\n`;
+  const result = await withinOneMinute(async () => {
+    const f = await fixture({ siteDataManagerWritesPerMinute: 5 });
+    const s = f.site((await f.publish("Import window")).id);
+    await s.define(f.owner, "rows", { accessMode: "shared" });
+    const importCsv = (csv: string) =>
+      s.request(f.owner, "POST", "/data/collections/rows/import", { format: "csv", csv });
+    const small = await importCsv("name\nx\ny");
+    // 1 + 2 used; six more would pass the window of 5, so nothing is parsed.
+    const limited = await importCsv(broken);
+    return { small, limited };
+  });
+  expect(result.small.json).toEqual({ imported: 2 });
+  expect(result.limited.status).toBe(429);
+  expect(errorCode(result.limited)).toBe("rate_limited");
+  const f = await fixture();
+  const s = f.site((await f.publish("Import parse")).id);
+  await s.define(f.owner, "rows", { accessMode: "shared" });
+  const parsed = await s.request(f.owner, "POST", "/data/collections/rows/import", {
+    format: "csv",
+    csv: broken,
+  });
+  expect(parsed.status).toBe(422);
+  expect(parsed.json.error.message).toContain("unterminated");
+});
+
+test("prevalidation checks the budget before each record after the first", async () => {
+  const { prevalidateSiteDataWrite } = await import("../src/site-data/service");
+  const schema = { type: "object", properties: { n: { type: "number" } } };
+  const access = {
+    store: { getCollection: async () => ({ jsonSchema: schema }), get: async () => null },
+    caller: {},
+    limits: { maxRecordBytes: 256 * 1024 },
+    writeOptions: { limits: {} },
+  } as never;
+  const inserts = (count: number) =>
+    Array.from({ length: count }, (_, n) => ({ op: "insert", collection: "rows", data: { n } }));
+  await withValidationClock(
+    () => 100,
+    async () => {
+      // Compile 100, record 0 → 200, record 1 → 300, record 2 refused before it runs.
+      const meter = { ms: 0 };
+      const refused = await prevalidateSiteDataWrite(access, inserts(5), { meter }).catch(
+        (error: any) => error,
+      );
+      expect(refused.details).toMatchObject({ reason: "validation_budget", index: 2 });
+      expect(meter.ms).toBe(300);
+      // One record completes even with no budget at all.
+      const single = { ms: 0 };
+      const options = await prevalidateSiteDataWrite(access, inserts(1), {
+        budgetMs: -1,
+        meter: single,
+      });
+      expect(single.ms).toBe(200);
+      // Inside the write, a record that changed is checked again on the same meter,
+      // and the same compiled validator is reused without compiling again.
+      expect(options.validate!({ ...schema }, { n: "changed" })).toContain("number");
+      expect(single.ms).toBe(300);
+      // A batch over budget refuses further checks inside the write.
+      const batch = await prevalidateSiteDataWrite(access, inserts(2), { budgetMs: 150 }).catch(
+        (error: any) => error,
+      );
+      expect(batch.details).toMatchObject({ reason: "validation_budget", index: 1 });
+    },
+  );
 });
 
 test("patch and increment results are checked before the lock, on the same budget", async () => {
@@ -1729,6 +1996,10 @@ test("patch and increment results are checked before the lock, on the same budge
     type: "object",
     properties: { name: { type: "string", maxLength: 3 }, n: { type: "number", maximum: 5 } },
   };
+  const twoInserts = [
+    { op: "insert", collection: "rows", data: { name: "a" } },
+    { op: "insert", collection: "rows", data: { name: "b" } },
+  ];
   const stored = { name: "ab", n: 1 };
   const reads: unknown[] = [];
   const store = {
@@ -1754,14 +2025,12 @@ test("patch and increment results are checked before the lock, on the same budge
   expect(options.validate!(schema, { name: "ab", n: 3 })).toBeNull();
   // A record that changed before the lock is checked again.
   expect(options.validate!(schema, { name: "abcd", n: 1 })).toContain("name");
-  // Inside the write, a spent budget refuses further checks.
-  const spent = await prevalidateSiteDataWrite(
-    access,
-    [{ op: "insert", collection: "rows", data: { name: "a" } }],
-    -1,
-  ).catch((error: any) => error);
+  // A spent budget refuses every record after the first.
+  const spent = await prevalidateSiteDataWrite(access, twoInserts, { budgetMs: -1 }).catch(
+    (error: any) => error,
+  );
   expect(spent.code).toBe("validation");
-  expect(spent.details.reason).toBe("validation_budget");
+  expect(spent.details).toMatchObject({ reason: "validation_budget", index: 1 });
 });
 
 test("managers share a per-Site write window counted before any work", async () => {
@@ -1785,7 +2054,7 @@ test("managers share a per-Site write window counted before any work", async () 
   ).toBe(200);
 });
 
-test("an unreadable agent lineage fails closed to viewer reach", async () => {
+test("an unreadable agent lineage fails closed", async () => {
   const f = await fixture();
   const created = await f.publish("Deep");
   const s = f.site(created.id);
@@ -1794,6 +2063,7 @@ test("an unreadable agent lineage fails closed to viewer reach", async () => {
   await s.write(f.owner, [{ op: "insert", collection: "habits", data: { who: "owner" } }]);
   // A chain of nested workers deeper than the lineage walk reads.
   let parent: string | undefined;
+  let root: string | undefined;
   for (let depth = 0; depth < 34; depth += 1) {
     const session = await createSession(db.db, {
       accountId: f.accountId,
@@ -1810,12 +2080,33 @@ test("an unreadable agent lineage fails closed to viewer reach", async () => {
     if (parent)
       await shared.admin.begin(async (tx) => {
         await tx`set local session_replication_role = replica`;
-        await tx`UPDATE sessions SET parent_session_id = ${parent!} WHERE id = ${session.id}`;
+        await tx`UPDATE sessions SET parent_session_id = ${parent!}, root_session_id = ${root!}
+          WHERE id = ${session.id}`;
       });
+    root ??= session.id;
     parent = session.id;
   }
   const deep = await agentTools(f, { parentSessionId: parent! });
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`UPDATE sessions SET root_session_id = ${root!} WHERE id = ${deep.session.id}`;
+  });
+  const other = await f.publish("Elsewhere");
   try {
+    // No known Site origin: an incomplete lineage reaches no Site Data at all.
+    for (const [name, args] of [
+      ["site_data_define_collection", { siteId: created.id, name: "x", accessMode: "shared" }],
+      ["site_data_query", { siteId: created.id, collection: "habits" }],
+    ] as const) {
+      const denied = await deep.callTool(name, args);
+      expect(denied.isError, JSON.stringify(denied.value)).toBe(true);
+      expect(denied.value.error.code).toBe("forbidden");
+    }
+    // The root session's Site origin is read directly, past the walk's depth cap:
+    // viewer reach on that one Site, and no management.
+    await shared.admin`UPDATE sessions SET metadata = jsonb_build_object(
+        '_opengeniSiteOrigin', jsonb_build_object('siteId', ${created.id}::text, 'title', 'Deep'))
+      WHERE id = ${root!}`;
     const define = await deep.callTool("site_data_define_collection", {
       siteId: created.id,
       name: "x",
@@ -1829,6 +2120,11 @@ test("an unreadable agent lineage fails closed to viewer reach", async () => {
     });
     expect(own.isError, JSON.stringify(own.value)).toBe(false);
     expect(own.value.records.map((record: any) => record.data.who)).toEqual(["owner"]);
+    const elsewhere = await deep.callTool("site_data_query", {
+      siteId: other.id,
+      collection: "habits",
+    });
+    expect(elsewhere.value.error.code).toBe("forbidden");
   } finally {
     await deep.mcp.close();
   }
@@ -1858,6 +2154,114 @@ test("an unreadable agent lineage fails closed to viewer reach", async () => {
     management: true,
   }).catch((error: any) => error);
   expect(missing.code).toBe("forbidden");
-  const viewer = await resolveSiteDataAccess(deps, delegated(crypto.randomUUID()), created.id);
-  expect(viewer.caller).toMatchObject({ role: "viewer", framed: true });
+  // Without a readable session there is no known Site, so no Site Data at all.
+  const unknown = await resolveSiteDataAccess(
+    deps,
+    delegated(crypto.randomUUID()),
+    created.id,
+  ).catch((error: any) => error);
+  expect(unknown.code).toBe("forbidden");
+});
+
+test("an agent's lineage is read under the production session RLS context", async () => {
+  const { withAccessGrantSessionRlsContext } = await import("../src/access-grant-rls");
+  const f = await fixture();
+  const created = await f.publish("Private agent");
+  const s = f.site(created.id);
+  await s.define(f.owner, "habits", { accessMode: "per_viewer" });
+  await s.write(f.member, [{ op: "insert", collection: "habits", data: { who: "member" } }]);
+  await s.write(f.owner, [{ op: "insert", collection: "habits", data: { who: "owner" } }]);
+  const membership = async (subjectId: string) => {
+    const [row] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${f.accountId} and subject_id = ${subjectId} limit 1`;
+    if (row) return row.id;
+    const id = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into organization_memberships(
+          id, account_id, subject_id, role, status, personal_workspace_id)
+        values (${id}, ${f.accountId}, ${subjectId}, 'member', 'active', ${f.workspace.id})`;
+    });
+    return id;
+  };
+  const makePrivate = async (sessionId: string, subjectId: string) => {
+    const membershipId = await membership(subjectId);
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update sessions set visibility = 'user_private', owner_subject_id = ${subjectId},
+          owner_organization_membership_id = ${membershipId}
+        where id = ${sessionId}`;
+    });
+  };
+  // Each call runs the way the production MCP route runs it: inside the agent
+  // attempt's session RLS context, where private sessions are visible only to
+  // their owner.
+  const call = (
+    tools: Awaited<ReturnType<typeof agentTools>>,
+    name: string,
+    args: Record<string, unknown>,
+  ) =>
+    withAccessGrantSessionRlsContext(f.deps as never, tools.grant, () =>
+      tools.callTool(name, args),
+    );
+  // The owner's own Only me session reads its lineage in full: manager reach.
+  const own = await agentTools(f);
+  await makePrivate(own.session.id, f.owner.subjectId);
+  try {
+    const all = await call(own, "site_data_query", {
+      siteId: created.id,
+      collection: "habits",
+      scope: "all",
+    });
+    expect(all.isError, JSON.stringify(all.value)).toBe(false);
+    expect(all.value.records).toHaveLength(2);
+  } finally {
+    await own.mcp.close();
+  }
+  // An Only me session started from the Site keeps the Site clamp under RLS.
+  const fromSite = await agentTools(f, {
+    metadata: { _opengeniSiteOrigin: { siteId: created.id, title: "Private agent" } },
+  });
+  await makePrivate(fromSite.session.id, f.owner.subjectId);
+  try {
+    const clamped = await call(fromSite, "site_data_query", {
+      siteId: created.id,
+      collection: "habits",
+    });
+    expect(clamped.isError, JSON.stringify(clamped.value)).toBe(false);
+    expect(clamped.value.records.map((record: any) => record.data.who)).toEqual(["owner"]);
+    const define = await call(fromSite, "site_data_define_collection", {
+      siteId: created.id,
+      name: "x",
+      accessMode: "shared",
+    });
+    expect(define.value.error.code).toBe("forbidden");
+  } finally {
+    await fromSite.mcp.close();
+  }
+  // A parent session the agent's person cannot see makes the lineage unreadable
+  // under RLS, so it fails closed instead of granting manager reach.
+  const hidden = await agentTools(f, { initiatorSubjectId: f.member.subjectId });
+  await makePrivate(hidden.session.id, f.member.subjectId);
+  const child = await agentTools(f, { parentSessionId: hidden.session.id });
+  try {
+    // The same read outside the RLS context sees the whole lineage.
+    const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+    const lineage = () => getSiteDataAgentSession(db.db, scope, child.session.id, child.turnId);
+    expect((await lineage()).complete).toBe(true);
+    expect(
+      (await withAccessGrantSessionRlsContext(f.deps as never, child.grant, lineage)).complete,
+    ).toBe(false);
+    const denied = await call(child, "site_data_query", {
+      siteId: created.id,
+      collection: "habits",
+      scope: "all",
+    });
+    expect(denied.isError, JSON.stringify(denied.value)).toBe(true);
+    expect(denied.value.error.code).toBe("forbidden");
+  } finally {
+    await child.mcp.close();
+    await hidden.mcp.close();
+  }
 });

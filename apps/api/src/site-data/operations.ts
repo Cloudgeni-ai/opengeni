@@ -28,9 +28,11 @@ import {
   siteDataFileContentType,
   siteDataFileName,
   siteDataObjectKey,
+  siteDataValidationClock,
   type SiteDataAccess,
   type SiteDataDeps,
   type SiteDataSurface,
+  type SiteDataValidationMeter,
 } from "./service";
 
 /** Shared Site Data operations for HTTP routes, the Site bridge and agent tools. */
@@ -57,12 +59,39 @@ async function consume(access: SiteDataAccess, kind: "write" | "read", operation
 }
 
 /**
- * Count the attempt, then compile touched schemas and validate new records
- * before the write takes the Site's lock.
+ * Charge the schema-validation time a request spent, whatever its outcome:
+ * extra operations on the caller's write windows and time on the workspace's
+ * validation window. A failure to charge is logged, never reported in place
+ * of the request's own result.
  */
-async function prepareWrite(access: SiteDataAccess, operations: readonly unknown[]) {
-  await consume(access, "write", operations.length);
-  return prevalidateSiteDataWrite(access, operations);
+async function chargeValidation(access: SiteDataAccess, meter: SiteDataValidationMeter) {
+  if (!(meter.ms > 0)) return;
+  try {
+    await access.store.chargeValidation(access.caller, meter.ms, access.limits);
+  } catch (error) {
+    console.warn("[site-data] could not charge validation time", {
+      siteId: access.caller.siteId,
+      validationMs: meter.ms,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Write with validation charged: `prevalidate` checks records before the
+ * Site's lock and returns the write's options; the time both spend is charged
+ * afterwards, including for refused and failed writes.
+ */
+async function meteredWrite<T>(
+  access: SiteDataAccess,
+  run: (meter: SiteDataValidationMeter) => Promise<T>,
+): Promise<T> {
+  const meter: SiteDataValidationMeter = { ms: 0 };
+  try {
+    return await run(meter);
+  } finally {
+    await chargeValidation(access, meter);
+  }
 }
 
 function logCleanupFailure(what: string, objectKey: string, error: unknown): void {
@@ -91,7 +120,14 @@ export async function defineSiteDataCollection(
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   await consume(access, "write", 1);
-  assertSiteDataSchema(definition.jsonSchema);
+  await meteredWrite(access, async (meter) => {
+    const started = siteDataValidationClock.now();
+    try {
+      assertSiteDataSchema(definition.jsonSchema);
+    } finally {
+      meter.ms += Math.max(0, siteDataValidationClock.now() - started);
+    }
+  });
   return access.store.defineCollection(
     access.caller,
     {
@@ -174,8 +210,11 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
-  const options = await prepareWrite(access, operations);
-  return access.store.write(access.caller, operations as SiteDataWriteOp[], options);
+  await consume(access, "write", operations.length);
+  return meteredWrite(access, async (meter) => {
+    const options = await prevalidateSiteDataWrite(access, operations, { meter });
+    return access.store.write(access.caller, operations as SiteDataWriteOp[], options);
+  });
 }
 
 // --- import and export -------------------------------------------------------
@@ -306,15 +345,36 @@ export async function importSiteData(
   request: SiteDataImportRequest,
 ): Promise<{ imported: number }> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
+  // Counted before parsing: at most one record per CSV line after the header.
+  await consume(
+    access,
+    "write",
+    request.format === "csv"
+      ? Math.min(SITE_DATA_IMPORT_MAX_RECORDS, csvLineBreaks(request.csv ?? ""))
+      : Math.min(SITE_DATA_IMPORT_MAX_RECORDS, request.records?.length ?? 0),
+  );
+  const imported = { count: 0 };
+  const failed = (error: unknown): never => {
+    if (error instanceof SiteDataError)
+      throw new SiteDataError(error.code, error.message, {
+        ...error.details,
+        imported: imported.count,
+      });
+    throw error;
+  };
   let records: Record<string, unknown>[];
-  if (request.format === "csv") {
-    records = siteDataCsvRecords(request.csv ?? "");
-  } else records = request.records ?? [];
-  if (records.length > SITE_DATA_IMPORT_MAX_RECORDS)
-    throw new SiteDataError(
-      "validation",
-      `Import at most ${SITE_DATA_IMPORT_MAX_RECORDS} records at a time`,
-    );
+  try {
+    if (request.format === "csv") {
+      records = siteDataCsvRecords(request.csv ?? "");
+    } else records = request.records ?? [];
+    if (records.length > SITE_DATA_IMPORT_MAX_RECORDS)
+      throw new SiteDataError(
+        "validation",
+        `Import at most ${SITE_DATA_IMPORT_MAX_RECORDS} records at a time`,
+      );
+  } catch (error) {
+    return failed(error);
+  }
   const keySegments = request.keyField ? parseSiteDataPath(request.keyField) : null;
   if (request.keyField && !keySegments)
     throw new SiteDataError("validation", `Invalid keyField: ${request.keyField}`);
@@ -327,29 +387,29 @@ export async function importSiteData(
       });
     return { op: "put", collection, key: String(key), data };
   });
-  // Counted, then every record is checked against the schema, before anything is written.
-  const options = await prepareWrite(access, operations).catch((error: unknown) => {
-    if (error instanceof SiteDataError)
-      throw new SiteDataError(error.code, error.message, { ...error.details, imported: 0 });
-    throw error;
-  });
-  let imported = 0;
-  // Each batch is atomic; a failure reports how many records were imported.
-  for (let start = 0; start < operations.length; start += SITE_DATA_MAX_BATCH) {
-    try {
-      await access.store.write(
-        access.caller,
-        operations.slice(start, start + SITE_DATA_MAX_BATCH),
-        options,
-      );
-    } catch (error) {
-      if (error instanceof SiteDataError)
-        throw new SiteDataError(error.code, error.message, { ...error.details, imported });
-      throw error;
+  return meteredWrite(access, async (meter) => {
+    // Every record is checked against the schema before anything is written.
+    const options = await prevalidateSiteDataWrite(access, operations, { meter }).catch(failed);
+    // Each batch is atomic; a failure reports how many records were imported.
+    for (let start = 0; start < operations.length; start += SITE_DATA_MAX_BATCH) {
+      await access.store
+        .write(access.caller, operations.slice(start, start + SITE_DATA_MAX_BATCH), options)
+        .catch(failed);
+      imported.count += Math.min(SITE_DATA_MAX_BATCH, operations.length - start);
     }
-    imported += Math.min(SITE_DATA_MAX_BATCH, operations.length - start);
+    return { imported: imported.count };
+  });
+}
+
+/** Line breaks in CSV text: an upper bound on its records after the header. */
+function csvLineBreaks(csv: string): number {
+  let breaks = 0;
+  for (let index = 0; index < csv.length; index += 1) {
+    const char = csv.charCodeAt(index);
+    // CR, or LF not preceded by CR.
+    if (char === 13 || (char === 10 && csv.charCodeAt(index - 1) !== 13)) breaks += 1;
   }
-  return { imported };
+  return breaks;
 }
 
 export async function exportSiteData(

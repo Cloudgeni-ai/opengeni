@@ -64,6 +64,7 @@ export function siteDataLimits(settings: ApiRouteDeps["settings"]): SiteDataLimi
     siteWritesPerMinute: settings.siteDataSiteWritesPerMinute,
     viewerReadsPerMinute: settings.siteDataViewerReadsPerMinute,
     managerWritesPerMinute: settings.siteDataManagerWritesPerMinute,
+    workspaceValidationMsPerMinute: settings.siteDataWorkspaceValidationMsPerMinute,
   };
 }
 
@@ -80,15 +81,17 @@ export function publicSiteDataLimits(limits: SiteDataLimits): SiteDataDescribeRe
 
 // JSON Schema validation with the tool gateway's Ajv posture: no coercion,
 // defaults or format assertions. Collection schemas use a strict keyword
-// allowlist (no references, regexes or conditionals), so compiling and
-// validating cost is linear in the schema and the record. Every schema is
-// compiled by its own Ajv instance, so nothing registers across tenants, and
-// the compiled validators live in a small LRU keyed by the schema's digest:
-// evicting an entry frees its Ajv.
+// allowlist (no references, regexes or conditionals), so checking a record
+// costs at most the schema's per-value cost for each value in the record.
+// Every schema is compiled by its own Ajv instance, so nothing registers
+// across tenants, and the compiled validators live in a small LRU keyed by
+// the schema's digest: evicting an entry frees its Ajv.
 
 const SCHEMA_CACHE_SIZE = 128;
 /** Most schema nodes (objects or booleans) a collection schema may have. */
-export const SITE_DATA_MAX_SCHEMA_NODES = 100;
+export const SITE_DATA_MAX_SCHEMA_NODES = 2_000;
+/** Most properties one object schema may name (CSV imports allow 1,000 columns). */
+export const SITE_DATA_MAX_SCHEMA_PROPERTIES = 1_000;
 /** Most branches one allOf, anyOf or oneOf may have. */
 export const SITE_DATA_MAX_SCHEMA_BRANCHES = 16;
 /** Most enum values a whole collection schema may list. */
@@ -97,6 +100,20 @@ export const SITE_DATA_MAX_SCHEMA_ENUM_TOTAL = 500;
 export const SITE_DATA_MAX_SCHEMA_DEPTH = 16;
 /** Most values an `enum` may list. */
 export const SITE_DATA_MAX_SCHEMA_ENUM = 100;
+/**
+ * Most checks a schema may run on each repeated value (an array element or an
+ * additional property): see siteDataSchemaRepeatedCost. A record can repeat a
+ * value up to about 128K times, so this bounds the cost of checking it.
+ */
+export const SITE_DATA_MAX_SCHEMA_REPEATED_COST = 600;
+/**
+ * Validators with more generated code than this run unoptimized, about four
+ * times slower (measured), so their repeated cost counts four times.
+ */
+export const SITE_DATA_LARGE_VALIDATOR_SOURCE = 200_000;
+const LARGE_VALIDATOR_FACTOR = 4;
+/** The repeated cost of one allOf, anyOf or oneOf branch, before its own checks. */
+const SCHEMA_BRANCH_COST = 6;
 const compiled = new Map<string, ValidateFunction>();
 /** Per-object shortcut so a batch hashes each loaded schema once. */
 const compiledByObject = new WeakMap<object, ValidateFunction>();
@@ -149,8 +166,58 @@ function scalarItems(items: unknown): boolean {
 }
 
 /**
- * Walk a collection schema against the keyword allowlist, counting nodes and
- * depth. Returns the first problem, or null when the schema is supported.
+ * The most checks a schema runs on one repeated value: an array element or an
+ * additional property's value, which a record can hold about 128K of. Each
+ * schema object costs 1, plus 1 per enum value, property and required name;
+ * an allOf, anyOf or oneOf branch costs 6 (a failed branch is the costliest
+ * check, measured). Branches apply to the same value, so their costs add;
+ * children apply to different values, so only the costliest counts. Per node:
+ *
+ * - all(n): the costliest value n's subtree checks, n's own value included;
+ * - repeated(n): the costliest value below n that sits under `items` or
+ *   `additionalProperties`.
+ *
+ * Both are upper bounds, computed in one pass over the schema.
+ */
+export function siteDataSchemaRepeatedCost(schema: unknown): number {
+  const visit = (node: unknown, branch = false): { all: number; repeated: number } => {
+    const own = branch ? SCHEMA_BRANCH_COST : 1;
+    if (!isRecordObject(node)) return { all: own, repeated: 0 };
+    let all = own;
+    let repeated = 0;
+    if (Array.isArray(node.enum)) all += node.enum.length;
+    if (Array.isArray(node.required)) all += node.required.length;
+    let childAll = 0;
+    let childRepeated = 0;
+    if (isRecordObject(node.properties))
+      for (const child of Object.values(node.properties)) {
+        all += 1;
+        const cost = visit(child);
+        childAll = Math.max(childAll, cost.all);
+        childRepeated = Math.max(childRepeated, cost.repeated);
+      }
+    for (const keyword of ["items", "additionalProperties"])
+      if (node[keyword] !== undefined && typeof node[keyword] !== "boolean") {
+        const cost = visit(node[keyword]);
+        childAll = Math.max(childAll, cost.all);
+        childRepeated = Math.max(childRepeated, cost.all);
+      }
+    for (const keyword of COMBINATORS)
+      if (Array.isArray(node[keyword]))
+        for (const child of node[keyword] as unknown[]) {
+          const cost = visit(child, true);
+          all += cost.all;
+          repeated += cost.repeated;
+        }
+    return { all: all + childAll, repeated: repeated + childRepeated };
+  };
+  return visit(schema).repeated;
+}
+
+/**
+ * Walk a collection schema against the keyword allowlist, counting nodes,
+ * properties, enum values and depth, then bound its cost per repeated value.
+ * Returns the first problem, or null when the schema is supported.
  */
 export function siteDataSchemaProblem(schema: unknown): string | null {
   let nodes = 0;
@@ -178,6 +245,8 @@ export function siteDataSchemaProblem(schema: unknown): string | null {
           return `has an invalid type at ${at}`;
       } else if (keyword === "properties") {
         if (!isRecordObject(value)) return `has properties at ${at} that are not an object`;
+        if (Object.keys(value).length > SITE_DATA_MAX_SCHEMA_PROPERTIES)
+          return `has more than ${SITE_DATA_MAX_SCHEMA_PROPERTIES} properties at ${at}`;
         for (const [name, child] of Object.entries(value)) {
           const problem = visit(child, `${where}/${name}`, depth + 1);
           if (problem) return problem;
@@ -227,15 +296,33 @@ export function siteDataSchemaProblem(schema: unknown): string | null {
     }
     return null;
   };
-  return visit(schema, "", 0);
+  const problem = visit(schema, "", 0);
+  if (problem) return problem;
+  const cost = siteDataSchemaRepeatedCost(schema);
+  return cost > SITE_DATA_MAX_SCHEMA_REPEATED_COST ? repeatedCostProblem(cost) : null;
 }
 
-function compileSiteDataSchema(schema: Record<string, unknown>): ValidateFunction {
+function repeatedCostProblem(cost: number): string {
+  return `is too costly to check on repeated values (cost ${cost}, at most ${SITE_DATA_MAX_SCHEMA_REPEATED_COST}): use fewer branches, enum values or properties under items or additionalProperties`;
+}
+
+function schemaDigest(schema: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(schema)).digest("hex");
+}
+
+/**
+ * Check a schema against the allowlist and compile it, or reuse the cached
+ * validator for the same digest. A validator too large to run optimized has
+ * its repeated cost counted four times.
+ */
+function compileSiteDataSchema(
+  schema: Record<string, unknown>,
+  digest: string = schemaDigest(schema),
+): ValidateFunction {
   const known = compiledByObject.get(schema);
   if (known) return known;
   const problem = siteDataSchemaProblem(schema);
   if (problem) throw new SiteDataError("validation", `jsonSchema ${problem}`);
-  const digest = createHash("sha256").update(JSON.stringify(schema)).digest("hex");
   let validator = compiled.get(digest);
   if (validator) compiled.delete(digest);
   else {
@@ -253,6 +340,14 @@ function compileSiteDataSchema(schema: Record<string, unknown>): ValidateFunctio
         "validation",
         `jsonSchema is not a valid JSON Schema: ${error instanceof Error ? error.message : "invalid"}`,
       );
+    }
+    if (validator.toString().length > SITE_DATA_LARGE_VALIDATOR_SOURCE) {
+      const cost = siteDataSchemaRepeatedCost(schema) * LARGE_VALIDATOR_FACTOR;
+      if (cost > SITE_DATA_MAX_SCHEMA_REPEATED_COST)
+        throw new SiteDataError(
+          "validation",
+          `jsonSchema is large, so it ${repeatedCostProblem(cost)}`,
+        );
     }
   }
   compiled.set(digest, validator);
@@ -295,8 +390,17 @@ export function assertSiteDataSchema(schema: Record<string, unknown> | null | un
 
 /** Total record JSON one write, batch or import request may carry. */
 export const SITE_DATA_MAX_REQUEST_RECORD_BYTES = 4 * 1024 * 1024;
-/** Schema validation time one request may spend, checked between records. */
+/**
+ * Schema validation time one request may spend, checked before each record
+ * after the first, so one record always completes.
+ */
 export const SITE_DATA_VALIDATION_BUDGET_MS = 250;
+
+/** The clock validation time is measured with; tests replace `now`. */
+export const siteDataValidationClock = { now: (): number => performance.now() };
+
+/** Schema compile and validation time one request spent, in milliseconds. */
+export type SiteDataValidationMeter = { ms: number };
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -344,18 +448,21 @@ function contentDigest(value: unknown): string {
  * - every insert and put record matches its collection's schema;
  * - every patch and increment result, merged from the stored record, matches
  *   too (if the record changes before the lock, the write checks it again);
- * - schema validation spends at most 250 ms per request, measured between
- *   records, yielding to the event loop after each one.
+ * - schema compiling and validation spend at most 250 ms per request, checked
+ *   before each record after the first, yielding to the event loop after each.
  *
- * Returns write options that skip re-validating the records already checked
- * against the same schema, and that keep any check left for inside the write
- * on the same time budget.
+ * Every millisecond spent, here and inside the write, is added to `meter`
+ * for the caller to charge. Returns write options that skip re-validating the
+ * records already checked, reuse this request's compiled validators, and keep
+ * any check left for inside the write on the same time budget.
  */
 export async function prevalidateSiteDataWrite(
   access: Pick<SiteDataAccess, "store" | "caller" | "limits" | "writeOptions">,
   operations: readonly unknown[],
-  budgetMs: number = SITE_DATA_VALIDATION_BUDGET_MS,
+  options: { budgetMs?: number; meter?: SiteDataValidationMeter } = {},
 ): Promise<SiteDataWriteOptions> {
+  const budgetMs = options.budgetMs ?? SITE_DATA_VALIDATION_BUDGET_MS;
+  const meter = options.meter ?? { ms: 0 };
   let requestBytes = 0;
   for (const op of operations)
     if (isRecordObject(op) && op.data !== undefined) requestBytes += jsonBytes(op.data);
@@ -366,34 +473,62 @@ export async function prevalidateSiteDataWrite(
       { quota: "request_bytes", limit: SITE_DATA_MAX_REQUEST_RECORD_BYTES },
     );
   let spentMs = 0;
+  let checked = 0;
   const overBudget = (index?: number) =>
     new SiteDataError(
       "validation",
       "Checking these records against the collection schema took too long; send fewer or smaller records per request",
       { reason: "validation_budget", budgetMs, ...(index === undefined ? {} : { index }) },
     );
-  const timed = (validator: ValidateFunction, data: Record<string, unknown>) => {
-    const started = performance.now();
+  const timed = <T>(run: () => T): T => {
+    const started = siteDataValidationClock.now();
     try {
-      return runValidator(validator, data);
+      return run();
     } finally {
-      spentMs += performance.now() - started;
+      const elapsed = Math.max(0, siteDataValidationClock.now() - started);
+      spentMs += elapsed;
+      meter.ms += elapsed;
     }
+  };
+  // This request's validators by schema digest: the write reuses them even if
+  // the shared cache evicted them meanwhile. Compiling counts as spent time.
+  const validators = new Map<string, ValidateFunction>();
+  const digests = new WeakMap<object, string>();
+  const validatorFor = (schema: Record<string, unknown>): ValidateFunction => {
+    let digest = digests.get(schema);
+    if (digest === undefined) {
+      digest = schemaDigest(schema);
+      digests.set(schema, digest);
+    }
+    let validator = validators.get(digest);
+    if (!validator) {
+      validator = timed(() => compileSiteDataSchema(schema, digest));
+      validators.set(digest, validator);
+    }
+    return validator;
+  };
+  const check = (validator: ValidateFunction, data: Record<string, unknown>) => {
+    checked += 1;
+    return timed(() => runValidator(validator, data));
   };
   const schemas = new Map<string, Record<string, unknown> | null>();
   const validated = new WeakMap<object, ValidateFunction>();
   const validatedMerges = new Map<string, ValidateFunction>();
   for (const [index, op] of operations.entries()) {
     if (!isRecordObject(op) || typeof op.collection !== "string") continue;
+    if (op.op !== "insert" && op.op !== "put" && op.op !== "patch" && op.op !== "increment")
+      continue;
     if (!schemas.has(op.collection)) {
       const collection = await access.store.getCollection(access.caller, op.collection);
       schemas.set(op.collection, collection?.jsonSchema ?? null);
     }
     const schema = schemas.get(op.collection);
     if (!schema) continue;
+    // One record always completes; later ones wait for budget.
+    if (checked > 0 && spentMs > budgetMs) throw overBudget(index);
     let validator: ValidateFunction;
     try {
-      validator = compileSiteDataSchema(schema);
+      validator = validatorFor(schema);
     } catch {
       continue; // The store reports the invalid schema.
     }
@@ -401,7 +536,7 @@ export async function prevalidateSiteDataWrite(
       if (!isRecordObject(op.data)) continue;
       // Oversized records are refused by the store's size check instead.
       if (jsonBytes(op.data) > access.limits.maxRecordBytes) continue;
-      const problem = timed(validator, op.data);
+      const problem = check(validator, op.data);
       if (problem)
         throw new SiteDataError(
           "validation",
@@ -409,16 +544,15 @@ export async function prevalidateSiteDataWrite(
           { index },
         );
       validated.set(op.data, validator);
-    } else if (op.op === "patch" || op.op === "increment") {
+    } else {
       const ref = recordRef(op);
       if (!ref) continue;
       const stored = await access.store.get(access.caller, op.collection, ref).catch(() => null);
       const merged = mergedRecord(op, stored ? stored.data : null);
       if (!merged || jsonBytes(merged) > access.limits.maxRecordBytes) continue;
       // An invalid result is left to the write, which sees the current record.
-      if (timed(validator, merged) === null) validatedMerges.set(contentDigest(merged), validator);
-    } else continue;
-    if (spentMs > budgetMs) throw overBudget(index);
+      if (check(validator, merged) === null) validatedMerges.set(contentDigest(merged), validator);
+    }
     await yieldToEventLoop();
   }
   return {
@@ -426,16 +560,17 @@ export async function prevalidateSiteDataWrite(
     validate: (schema, data) => {
       let validator: ValidateFunction;
       try {
-        validator = compileSiteDataSchema(schema);
+        validator = validatorFor(schema);
       } catch {
         return "the collection's JSON Schema is invalid";
       }
       if (validated.get(data) === validator) return null;
       if (validatedMerges.size > 0 && validatedMerges.get(contentDigest(data)) === validator)
         return null;
-      // Anything left for inside the write stays on the request's budget.
-      if (spentMs > budgetMs) throw overBudget();
-      return timed(validator, data);
+      // Anything left for inside the write stays on the request's budget; a
+      // single-operation request still completes its one record.
+      if (operations.length > 1 && checked > 0 && spentMs > budgetMs) throw overBudget();
+      return check(validator, data);
     },
   };
 }
@@ -527,9 +662,10 @@ export async function resolveSiteDataAccess(
   surface: SiteDataSurface = {},
 ): Promise<SiteDataAccess> {
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
-  // An agent whose session (or spawning lineage, or current turn) came from a
-  // Site page acts for that page: it gets the same frame clamp as the page.
-  // A lineage that cannot be read in full fails closed to viewer reach.
+  // An agent whose session (or spawning lineage, root session, or current
+  // turn) came from a Site page acts for that page: it gets the same frame
+  // clamp as the page. A lineage that cannot be read in full fails closed:
+  // viewer reach on the one Site it names, or no Site Data at all.
   const agentIds = agentSessionIds(grant);
   const agentSession = agentIds
     ? await getSiteDataAgentSession(deps.db, scope, agentIds.sessionId, agentIds.turnId)
@@ -540,17 +676,15 @@ export async function resolveSiteDataAccess(
   if (siteAgent) {
     const [origin, ...others] = agentSession.originSiteIds;
     const knownSite = origin !== undefined && others.length === 0;
-    // A known Site origin limits the agent to that Site. A Site turn without
-    // one known origin reaches no Site Data; an unreadable lineage without a
-    // known origin keeps viewer reach on the Site it names.
-    if (
-      others.length > 0 ||
-      (knownSite && origin !== siteId) ||
-      (!knownSite && agentSession.siteTurn)
-    )
+    // A known Site origin limits the agent to that Site. Without exactly one
+    // known origin (a Site turn, or a lineage that could not be read in full)
+    // the agent reaches no Site Data.
+    if (!knownSite || origin !== siteId)
       throw new SiteDataError(
         "forbidden",
-        "An agent started from a Site page can only use that Site's data",
+        agentSession.complete || knownSite
+          ? "An agent started from a Site page can only use that Site's data"
+          : "This agent's session history could not be confirmed, so it cannot use Site Data",
       );
     if (surface.management)
       throw new SiteDataError(
