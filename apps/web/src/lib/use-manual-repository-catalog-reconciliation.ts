@@ -1,7 +1,7 @@
 import { useLayoutEffect, type Dispatch, type SetStateAction } from "react";
 
 import { reconcileManualRepositoriesWithCatalog, type RepoDraft } from "@/lib/session-tools";
-import type { GitHubRepository } from "@/types";
+import type { GitHubRepository, PersonalGitHubRepositoryCatalogItem } from "@/types";
 
 /**
  * A restored draft can hold a manual row for a workspace repository: its
@@ -22,6 +22,10 @@ export function useManualRepositoryCatalogReconciliation(input: {
   selectedRepoRefs: Record<number, string>;
   repositories: GitHubRepository[];
   catalogReady: boolean;
+  /** The personal GitHub selection; a repository selected there keeps that authority. */
+  personalRepositories: PersonalGitHubRepositoryCatalogItem[];
+  selectedPersonalRepoIds: Set<string>;
+  selectedPersonalRepoRefs: Record<string, string>;
   setManualRepos: Dispatch<SetStateAction<RepoDraft[]>>;
   setSelectedRepoIds: Dispatch<SetStateAction<Set<number>>>;
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
@@ -32,6 +36,9 @@ export function useManualRepositoryCatalogReconciliation(input: {
     selectedRepoRefs,
     repositories,
     catalogReady,
+    personalRepositories,
+    selectedPersonalRepoIds,
+    selectedPersonalRepoRefs,
     setManualRepos,
     setSelectedRepoIds,
     setSelectedRepoRefs,
@@ -41,6 +48,11 @@ export function useManualRepositoryCatalogReconciliation(input: {
       { manualRepos, selectedRepoIds, selectedRepoRefs },
       repositories,
       catalogReady,
+      {
+        repositories: personalRepositories,
+        selectedRepoIds: selectedPersonalRepoIds,
+        selectedRepoRefs: selectedPersonalRepoRefs,
+      },
     );
     if (!reconciled) return;
     setManualRepos(reconciled.manualRepos);
@@ -49,7 +61,10 @@ export function useManualRepositoryCatalogReconciliation(input: {
   }, [
     catalogReady,
     manualRepos,
+    personalRepositories,
     repositories,
+    selectedPersonalRepoIds,
+    selectedPersonalRepoRefs,
     selectedRepoIds,
     selectedRepoRefs,
     setManualRepos,

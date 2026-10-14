@@ -35,6 +35,12 @@ export type RepoDraft = {
    * URL with a different mount path.
    */
   github?: { repositoryId: number; installationId: number };
+  /**
+   * An attached row open in the editor with unsaved local changes. Catalog
+   * reconciliation leaves it alone until the edit is attached or cancelled, so
+   * the catalog finishing loading never discards the edit.
+   */
+  editing?: true;
 };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
 // the old `Extract<…,"low"|…>` silently dropped `none`/`minimal`, so a deployment
@@ -602,6 +608,41 @@ export type RepositorySelectionState = {
   selectedRepoRefs: Record<number, string>;
 };
 
+/** The composer's personal GitHub selection, read-only to catalog reconciliation. */
+export type PersonalRepositorySelection = {
+  repositories: readonly PersonalGitHubRepositoryCatalogItem[];
+  selectedRepoIds: ReadonlySet<string>;
+  selectedRepoRefs: Readonly<Record<string, string>>;
+};
+
+/**
+ * The ref of the personal GitHub selection that stands for the same GitHub
+ * repository as a workspace catalog repository, or undefined when it is not
+ * selected through personal GitHub. The ref is null when it is not known yet.
+ * Personal ids are GitHub repository ids, so a restored selection matches
+ * before the personal catalog has loaded.
+ */
+function selectedPersonalCounterpartRef(
+  repository: GitHubRepository,
+  personal: PersonalRepositorySelection | undefined,
+): string | null | undefined {
+  if (!personal) return undefined;
+  const fullName = repository.fullName.toLowerCase();
+  const repositoryId = personal.selectedRepoIds.has(String(repository.id))
+    ? String(repository.id)
+    : personal.repositories.find(
+        (candidate) =>
+          personal.selectedRepoIds.has(candidate.repositoryId) &&
+          candidate.fullName.toLowerCase() === fullName,
+      )?.repositoryId;
+  if (repositoryId === undefined) return undefined;
+  const ref =
+    personal.selectedRepoRefs[repositoryId] ??
+    personal.repositories.find((candidate) => candidate.repositoryId === repositoryId)
+      ?.defaultBranch;
+  return ref?.trim() || null;
+}
+
 /**
  * Fold attached manual rows that stand for a workspace catalog repository into
  * the catalog selection, so one repository is attached once and the picker
@@ -611,6 +652,10 @@ export type RepositorySelectionState = {
  * - A match already selected at the same ref is an exact duplicate and is dropped.
  * - A match selected at a different ref keeps its row: two refs are never
  *   collapsed silently.
+ * - A repository selected through personal GitHub keeps that authority: the
+ *   workspace App copy is never selected for it. A row at the personal
+ *   selection's ref is an exact duplicate and is dropped; any other row stays.
+ * - A row open in the editor is left alone until the edit ends.
  * - A retained identity that a ready catalog no longer contains is dropped,
  *   exactly like draft hydration drops it when the catalog is already loaded.
  * - A bare row for another GitHub installation than the current selection is
@@ -621,6 +666,7 @@ export function reconcileManualRepositoriesWithCatalog(
   state: RepositorySelectionState,
   repositories: readonly GitHubRepository[],
   catalogReady: boolean,
+  personal?: PersonalRepositorySelection,
 ): RepositorySelectionState | null {
   if (!catalogReady) return null;
   let changed = false;
@@ -638,13 +684,22 @@ export function reconcileManualRepositoriesWithCatalog(
   const kept = new Set<RepoDraft>();
   for (const repo of ordered) {
     const ref = repo.ref.trim();
-    if (repo.attached === false || !repo.url.trim() || !ref) {
+    if (repo.attached === false || repo.editing || !repo.url.trim() || !ref) {
       kept.add(repo);
       continue;
     }
     const match = manualRepositoryCatalogMatch(repo, repositories);
     if (!match) {
       if (repo.github) {
+        changed = true;
+      } else {
+        kept.add(repo);
+      }
+      continue;
+    }
+    const personalRef = selectedPersonalCounterpartRef(match, personal);
+    if (personalRef !== undefined) {
+      if (personalRef === ref) {
         changed = true;
       } else {
         kept.add(repo);

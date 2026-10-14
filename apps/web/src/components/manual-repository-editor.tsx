@@ -1,5 +1,5 @@
 import { CheckIcon, Loader2Icon, PencilIcon, Trash2Icon, XIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { RepositoryRefInput } from "@/components/repository-ref-input";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,21 @@ export function ManualRepositoryEditor(props: {
   useEffect(() => {
     if (props.repository.attached === true) setEditing(false);
   }, [props.repository.attached]);
+
+  // While an attached row is open for editing, the unsaved url/ref live only
+  // here. Mark the row so catalog reconciliation does not fold it away (and
+  // unmount this editor) mid-edit; clear the mark when the edit ends or the
+  // editor goes away. Layout timing marks the row in the same commit.
+  const onUpdateRef = useRef(props.onUpdate);
+  useInsertionEffect(() => {
+    onUpdateRef.current = props.onUpdate;
+  }, [props.onUpdate]);
+  const editingAttached = editing && props.repository.attached === true && !props.mounted;
+  useLayoutEffect(() => {
+    if (!editingAttached) return;
+    onUpdateRef.current({ editing: true });
+    return () => onUpdateRef.current({ editing: undefined });
+  }, [editingAttached]);
 
   function updateDraft(patch: Partial<RepoDraft>): void {
     if (props.repository.attached === false) props.onUpdate({ ...patch, attached: false });

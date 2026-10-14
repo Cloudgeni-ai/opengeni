@@ -76,6 +76,7 @@ import {
   reasoningEffortOrder,
   selectableMcpServers,
   selectedAvailableCapabilityToolIds,
+  type RepoDraft,
 } from "./lib/session-tools";
 import {
   agentConfigFromFormState,
@@ -2739,6 +2740,149 @@ describe("GitHub repository resources", () => {
       });
       // Same outcome as hydrating against an already loaded catalog.
       expect(rehydrateRepositoryResources([boundResource], [])).toEqual([]);
+    });
+
+    test("a row open in the editor is left alone until the edit ends", () => {
+      const restored = restoreWhileCatalogUnknown([boundResource]);
+      const editing = {
+        ...restored,
+        manualRepos: restored.manualRepos.map((repo) => ({ ...repo, editing: true as const })),
+      };
+      expect(reconcileManualRepositoriesWithCatalog(editing, [opengeni], true)).toBeNull();
+      expect(reconcileManualRepositoriesWithCatalog(editing, [], true)).toBeNull();
+      expect(reconcileManualRepositoriesWithCatalog(restored, [opengeni], true)).not.toBeNull();
+    });
+
+    describe("with the same repository selected through personal GitHub", () => {
+      const personalId = String(opengeni.id);
+      const personalSelection = (ref: string | undefined, loaded = true) => ({
+        repositories: loaded
+          ? [
+              {
+                repositoryId: personalId,
+                fullName: "cloudgeni-AI/OpenGeni",
+                canonicalUrl: "https://github.com/cloudgeni-AI/OpenGeni",
+                defaultBranch: "main",
+                visibility: "private" as const,
+                private: true,
+                archived: false,
+                disabled: false,
+                permissions: {
+                  pull: true,
+                  push: true,
+                  admin: false,
+                  maintain: false,
+                  triage: false,
+                },
+                selectedAccess: "write" as const,
+              },
+            ]
+          : [],
+        selectedRepoIds: new Set([personalId]),
+        selectedRepoRefs: ref === undefined ? {} : { [personalId]: ref },
+      });
+      const bareRow = (ref: string) => ({
+        id: 3,
+        url: "https://github.com/Cloudgeni-ai/opengeni.git",
+        ref,
+        attached: true,
+      });
+      const unselected = (manualRepos: RepoDraft[]) => ({
+        manualRepos,
+        selectedRepoIds: new Set<number>(),
+        selectedRepoRefs: {},
+      });
+
+      test("an exact duplicate row is dropped without selecting the workspace App copy", () => {
+        const expected = {
+          manualRepos: [],
+          selectedRepoIds: new Set<number>(),
+          selectedRepoRefs: {},
+        };
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            unselected([bareRow("main")]),
+            [opengeni],
+            true,
+            personalSelection("main"),
+          ),
+        ).toEqual(expected);
+        // A restored personal selection matches by GitHub id before its catalog loads.
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            unselected([bareRow("main")]),
+            [opengeni],
+            true,
+            personalSelection("main", false),
+          ),
+        ).toEqual(expected);
+        // A retained workspace identity at the same ref is the same duplicate.
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            restoreWhileCatalogUnknown([boundResource]),
+            [opengeni],
+            true,
+            personalSelection("main"),
+          ),
+        ).toEqual(expected);
+        // The personal default branch stands in for an unset personal ref.
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            unselected([bareRow("main")]),
+            [opengeni],
+            true,
+            personalSelection(undefined),
+          ),
+        ).toEqual(expected);
+      });
+
+      test("a row at another or unknown ref stays and the workspace App copy stays unselected", () => {
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            unselected([bareRow("release")]),
+            [opengeni],
+            true,
+            personalSelection("main"),
+          ),
+        ).toBeNull();
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            restoreWhileCatalogUnknown([{ ...boundResource, ref: "release" }]),
+            [opengeni],
+            true,
+            personalSelection("main"),
+          ),
+        ).toBeNull();
+        // Neither the personal ref nor its catalog default is known yet.
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            unselected([bareRow("main")]),
+            [opengeni],
+            true,
+            personalSelection(undefined, false),
+          ),
+        ).toBeNull();
+      });
+
+      test("a personal selection of another repository changes nothing", () => {
+        const other = {
+          repositories: [],
+          selectedRepoIds: new Set(["42"]),
+          selectedRepoRefs: { "42": "main" },
+        };
+        expect(
+          reconcileManualRepositoriesWithCatalog(
+            unselected([bareRow("main")]),
+            [opengeni],
+            true,
+            other,
+          ),
+        ).toEqual({
+          manualRepos: [],
+          selectedRepoIds: new Set([opengeni.id]),
+          selectedRepoRefs: { [opengeni.id]: "main" },
+        });
+      });
     });
   });
 });
