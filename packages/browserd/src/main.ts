@@ -256,7 +256,10 @@ function computerBackend(
   if (value === undefined) {
     // Linux CUA owns an isolated seat. Require that explicit environment choice
     // so an upgrade cannot redirect an existing host desktop to a new seat.
-    return platform === "darwin" || (platform === "linux" && environmentMode === "isolated_linux")
+    // Windows has no working native helper, so CUA is its desktop backend.
+    return platform === "darwin" ||
+      platform === "win32" ||
+      (platform === "linux" && environmentMode === "isolated_linux")
       ? "cua"
       : "native";
   }

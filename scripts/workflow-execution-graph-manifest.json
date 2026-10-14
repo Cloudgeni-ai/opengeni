@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "1c18e243d1d82540d1439c4354f9e07f6c12a8391d68ab4b3940146a82ef220a"
+      "sha256": "82e5d6f9cc0ebaba5519ddce29d706c71faeb3a1a240c3a449c3fdc2b72ba7d9"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "572e765a05233c2e2f84a137b032c1e8c9465c64650d557550a692e3fa841811"
+      "sha256": "9e84537854c47a89e66f2975893463030aeb662415e768049871b78ca0647c30"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -183,6 +183,18 @@
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Drive a real window and verify compiled packaging",
+      "sha256": "b814d6d0e9715fd6fe796d2190bd71343896a9ad8326799beecd770a9fa22f19"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Install",
+      "sha256": "6b53200cb717e5db732d2f6094f04af1cddc07e651f9f39df6961dd57ae9b831"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
       "job": "install-smoke",
       "step": "Build the agent binary",
       "sha256": "e9513a6a0b8d0d899e23abf99c6bd6c677869ad04795f12c58cac1d535c9c697"
@@ -299,7 +311,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Windows x64)",
-      "sha256": "db7bc69a7fc8af6b65a787d7984388c06a04a6589f6f87243a5d6c49f6340d9d"
+      "sha256": "06a7d742999d79db1ecc0acc5ddb4958817651744c7c25811848c5de6e80bde1"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
