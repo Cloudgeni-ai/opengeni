@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
-import { SITE_GATEWAY_CALLBACK_PATH } from "@opengeni/contracts";
-import type { ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { SITE_GATEWAY_CALLBACK_PATH, type AccessGrant } from "@opengeni/contracts";
+import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import {
   createDb,
   createOrganizationApiKey,
+  createSession,
   createSiteViewerSession,
   createWorkspace,
   ensureExternalIdentity,
@@ -18,8 +21,10 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
+import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import { configureSitePublishingEffects } from "../src/site-publishing/service";
 
 // Published Sites run the real management, sign-in and site-runtime routes
@@ -145,8 +150,8 @@ async function fixture(overrides: Partial<Settings> = {}) {
     ],
   });
   const storage = memoryObjectStorage();
-  const appWith = (settings: Settings) =>
-    createApp({
+  const depsWith = (settings: Settings) =>
+    ({
       db: db.db,
       bus: new MemoryEventBus(),
       settings,
@@ -162,9 +167,11 @@ async function fixture(overrides: Partial<Settings> = {}) {
         triggerScheduledTask: noop,
       } as unknown as SessionWorkflowClient,
       managedAuth: null,
-    } as unknown as AppDependencies);
+    }) as unknown as AppDependencies;
+  const appWith = (settings: Settings) => createApp(depsWith(settings));
   const settings = sitesSettings(overrides);
-  const app = appWith(settings);
+  const deps = depsWith(settings);
+  const app = createApp(deps);
   const source = "example:instance";
   const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   const person = async (permissions: readonly string[]): Promise<Who> => {
@@ -310,6 +317,7 @@ async function fixture(overrides: Partial<Settings> = {}) {
   };
   return {
     app,
+    deps,
     appWith,
     settings,
     accountId,
@@ -1167,6 +1175,39 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   const [restoreAudit] = await shared.admin`select count(*)::int as n from audit_events
     where workspace_id = ${f.workspace.id} and action = 'site.publication.restore'`;
   expect(restoreAudit!.n).toBe(1);
+
+  // A platform takedown (operator script) holds against the owner and admins.
+  const platform = await moderateSiteAsPlatform(f.deps, {
+    host: site.host,
+    operator: "trust-and-safety",
+    action: "takedown",
+    reason: "Confirmed phishing",
+  });
+  expect(platform).toMatchObject({ status: "suspended", suspendedBy: "platform" });
+  const ownerRestore = await f.publication(f.owner, site.id, "POST", {}, "/restore");
+  expect(ownerRestore.status).toBe(403);
+  const adminTakedown = await f.publication(
+    f.admin,
+    site.id,
+    "POST",
+    { reason: "Again" },
+    "/takedown",
+  );
+  expect(adminTakedown.json.moderation.suspendedBy).toBe("platform");
+  expect((await f.gateway(site.host, "GET", "/site/config", { visitor: reporter })).status).toBe(
+    410,
+  );
+  const [platformAudit] = await shared.admin`select subject_id, metadata from audit_events
+    where workspace_id = ${f.workspace.id} and action = 'site.publication.takedown'
+      and subject_id = 'platform:trust-and-safety'`;
+  expect(platformAudit!.metadata).toMatchObject({ by: "platform", reason: "Confirmed phishing" });
+  expect(JSON.parse(hostRecord() ?? "null")).toMatchObject({ status: "suspended" });
+  const lifted = await moderateSiteAsPlatform(f.deps, {
+    host: site.host.split(".")[0]!,
+    operator: "trust-and-safety",
+    action: "restore",
+  });
+  expect(lifted.status).toBe("active");
 }, 60_000);
 
 test("version HTML is this Site's immutable bytes, without cookies; scanning is off by default", async () => {
@@ -1209,4 +1250,127 @@ test("version HTML is this Site's immutable bytes, without cookies; scanning is 
   const [scan] = await shared.admin`select scan_status, scan_findings from site_publications
     where site_id = ${site.id}`;
   expect(scan).toMatchObject({ scan_status: "none", scan_findings: null });
+}, 60_000);
+
+const SITE_PUBLICATION_TOOLS = [
+  "site_publication_get",
+  "site_publication_update",
+  "site_hostname_check",
+];
+
+test("agent tools read and change a Site's publication with the person's authority", async () => {
+  const f = await fixture();
+  const site = await f.publish("Agent published");
+  const session = await createSession(db.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    initialMessage: "Publish my Site",
+    resources: [],
+    tools: [],
+    metadata: {},
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const [turn] = await shared.admin<{ id: string }[]>`
+    INSERT INTO session_turns (
+      account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+      status, position, prompt, model, reasoning_effort, sandbox_backend,
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+    ) VALUES (
+      ${f.accountId}, ${f.workspace.id}, ${session.id}, gen_random_uuid(),
+      ${`site-publication-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish my Site',
+      'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${f.owner.subjectId}, '{"accepted":true}'::jsonb
+    ) RETURNING id`;
+  const attemptId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    await tx`UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${session.id}`;
+    await tx`UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) VALUES (
+        ${attemptId}, ${f.accountId}, ${f.workspace.id}, ${session.id}, ${turn!.id}, 1,
+        'running', 'site-publication-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )`;
+  });
+  const grant: AccessGrant = {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: "worker:first-party-mcp",
+    permissions: ["artifacts:read", "artifacts:publish"],
+    principalKind: "agent_attempt",
+    metadata: {
+      sessionId: session.id,
+      turnId: turn!.id,
+      attemptId,
+      executionGeneration: 1,
+      firstPartyMcpTools: SITE_PUBLICATION_TOOLS,
+    },
+  };
+  const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, grant);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({ name: "site-publication-test", version: "1" });
+  await server.connect(serverTransport);
+  await mcp.connect(clientTransport);
+  const callTool = async (name: string, args: Record<string, unknown>) => {
+    const result = await mcp.callTool({ name, arguments: args });
+    const text = (result.content as Array<{ type: string; text?: string }>).find(
+      (item) => item.type === "text",
+    )?.text;
+    let value: any = text ?? null;
+    try {
+      value = JSON.parse(text ?? "null");
+    } catch {
+      // Argument errors are plain text.
+    }
+    return { isError: result.isError === true, value };
+  };
+  try {
+    expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
+      [...SITE_PUBLICATION_TOOLS].sort(),
+    );
+    expect((await callTool("site_publication_get", { siteId: site.id })).value).toEqual({
+      published: false,
+      siteId: site.id,
+    });
+    expect((await callTool("site_hostname_check", { label: "www" })).value).toMatchObject({
+      available: false,
+      problem: "reserved",
+    });
+    expect((await callTool("site_hostname_check", { label: "agent-site" })).value.available).toBe(
+      true,
+    );
+    const published = await callTool("site_publication_update", {
+      siteId: site.id,
+      label: "agent-site",
+      access: "invited",
+      invitedEmails: ["Friend@Example.com"],
+    });
+    expect(published.isError, JSON.stringify(published.value)).toBe(false);
+    expect(published.value).toMatchObject({
+      hostname: `agent-site.${DOMAIN}`,
+      access: "invited",
+      status: "active",
+      invitedEmails: ["friend@example.com"],
+    });
+    // Limits stay with workspace admins.
+    const limits = await callTool("site_publication_update", {
+      siteId: site.id,
+      limitProfile: { kind: "unlimited" },
+    });
+    expect(limits.isError).toBe(true);
+    expect(limits.value.error.details.code).toBe("site_admin_required");
+    const read = await callTool("site_publication_get", { siteId: site.id });
+    expect(read.value).toMatchObject({ published: true, publication: { label: "agent-site" } });
+    // A workspace member's own view agrees.
+    expect((await f.publication(f.owner, site.id, "GET")).json.hostname).toBe(
+      `agent-site.${DOMAIN}`,
+    );
+  } finally {
+    await mcp.close();
+  }
 }, 60_000);

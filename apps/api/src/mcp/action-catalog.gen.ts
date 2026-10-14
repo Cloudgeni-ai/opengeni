@@ -1271,6 +1271,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/workspaces/:workspaceId/vaults/:vaultId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
@@ -2164,6 +2171,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/sessions/:sessionId/secrets",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/secrets",
@@ -2180,6 +2201,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultSummary"
     ]
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/site-hostnames/:label",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/site-limit-profile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [],
+    "response": []
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/slack-task-policy",
@@ -4970,6 +5005,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PATCH /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "PATCH /v1/workspaces/:workspaceId/vaults/:vaultId",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/vaults/:vaultId",
@@ -5242,6 +5284,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "request": [
+      "SiteTakedownRequest"
+    ],
     "response": []
   },
   {
@@ -5654,6 +5712,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [
+      "UpsertSitePublicationRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
@@ -5677,6 +5744,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultSummary"
     ]
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/site-limit-profile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [
+      "SiteLimitProfile"
+    ],
+    "response": []
   },
   {
     "id": "PUT /v1/workspaces/:workspaceId/slack-task-policy",
