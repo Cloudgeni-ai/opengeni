@@ -78,7 +78,8 @@ let settings: Settings;
 const rawKey = randomBytes(32);
 const encryptionKey = rawKey.toString("base64");
 
-async function readMcpOAuthState(referenceState: string): Promise<Record<string, unknown>> {
+/** The full signed state a short reference stands for: what older APIs sent as `state`. */
+async function readMcpOAuthFullState(referenceState: string): Promise<string> {
   const reference = readSignedState(referenceState, STATE_SECRET) as Record<string, unknown> | null;
   if (
     reference?.kind !== "mcp_oauth_reference" ||
@@ -94,8 +95,11 @@ async function readMcpOAuthState(referenceState: string): Promise<Record<string,
     workspaceId: reference.workspaceId,
   });
   if (!encrypted) throw new Error("pending MCP OAuth state missing");
-  const fullState = decryptEnvironmentValue(rawKey, encrypted);
-  const payload = readSignedState(fullState, STATE_SECRET);
+  return decryptEnvironmentValue(rawKey, encrypted);
+}
+
+async function readMcpOAuthState(referenceState: string): Promise<Record<string, unknown>> {
+  const payload = readSignedState(await readMcpOAuthFullState(referenceState), STATE_SECRET);
   if (!payload) throw new Error("pending MCP OAuth state invalid");
   return payload as Record<string, unknown>;
 }
@@ -173,7 +177,6 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: encryptionKey,
     integrationsEnabled: true,
-    integrationsOauthShortStateEnabled: true,
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
   }) as Settings;
@@ -3428,7 +3431,6 @@ describe("connections routes", () => {
 
       const callback = await publicApp(client.db, {
         webBaseUrl: "http://127.0.0.1:3000",
-        integrationsOauthShortStateEnabled: false,
       }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
@@ -3490,7 +3492,9 @@ describe("connections routes", () => {
         expect.arrayContaining([expect.objectContaining({ name: "search_documents" })]),
       );
 
-      const legacyStart = await app({ integrationsOauthShortStateEnabled: false }).request(
+      // A grant started by an API from before the short reference carries the
+      // full signed state; the callback still accepts it for its lifetime.
+      const legacyStart = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
@@ -3503,12 +3507,13 @@ describe("connections routes", () => {
       );
       expect(legacyStart.status).toBe(200);
       const legacyBody = (await legacyStart.json()) as { state: string };
-      expect(readSignedState(legacyBody.state, STATE_SECRET)).toMatchObject({
+      const legacyState = await readMcpOAuthFullState(legacyBody.state);
+      expect(readSignedState(legacyState, STATE_SECRET)).toMatchObject({
         providerDomain: "mcp.example.com",
         encryptedPkceVerifier: expect.any(String),
       });
       const legacyCallback = await publicApp(client.db).request(
-        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(legacyBody.state)}`,
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(legacyState)}`,
       );
       expect(legacyCallback.status).toBe(302);
       expect(legacyCallback.headers.get("location")).toContain("integration_oauth=success");
