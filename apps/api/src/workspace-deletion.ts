@@ -84,5 +84,5 @@ export async function deleteWorkspaceForRequest(
     },
     deleted.temporalScheduleCleanups,
   );
-  await dropSiteSqlDatabases(deps, siteSqlSites);
+  await dropSiteSqlDatabases(deps, siteSqlSites, { workspaceId: input.workspaceId });
 }

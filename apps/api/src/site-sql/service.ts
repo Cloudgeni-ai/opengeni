@@ -120,6 +120,11 @@ export const siteSqlTransport: { fetch: SiteDbFetch } = {
 export const SITE_SQL_MANAGER_CALLS_PER_MINUTE = 600;
 /** One export response stops adding rows past this many bytes and returns a next cursor. */
 export const SITE_SQL_EXPORT_MAX_BYTES = SITE_SQL_HARD_LIMITS.exportBytesPerResponse;
+/**
+ * Default size of one SQL export piece: well under the 2 MB a SQL import
+ * takes per call, so every piece of a large dump re-imports in one call.
+ */
+export const SITE_SQL_EXPORT_SQL_DEFAULT_BYTES = 1024 * 1024;
 /** Rows per export page the API asks the Durable Object for. */
 const EXPORT_PAGE_ROWS = 1_000;
 /** Most JSON bytes one insert call carries (the gateway accepts 8 MiB). */
@@ -817,13 +822,26 @@ export async function resetSiteSql(
           return [] as string[];
         }
         const migrations = await listSiteSqlMigrations(tx, resolved.scope);
-        const rebuilt = await applyMigrations(
-          gateway,
-          siteId,
-          migrations.map(migrationEntry),
-          { rebuild: true, maxDatabaseBytes: limits.storageBytesPerSite },
-          usage,
-        );
+        let rebuilt: string[];
+        try {
+          rebuilt = await applyMigrations(
+            gateway,
+            siteId,
+            migrations.map(migrationEntry),
+            { rebuild: true, maxDatabaseBytes: limits.storageBytesPerSite },
+            usage,
+          );
+        } catch (error) {
+          // The first call empties the database, so a failure on the way
+          // leaves it partly rebuilt: say so, and how to finish.
+          const failure = toSiteSqlError(error);
+          if (!(failure instanceof SiteSqlError)) throw error;
+          throw new SiteSqlError(
+            failure.code,
+            `${failure.message.replace(/\.?$/u, ".")} The database may be emptied and only partly rebuilt; run the reset again to finish rebuilding it from the migrations.`,
+            { ...failure.details, partialRebuild: true },
+          );
+        }
         await markSiteSqlRebuilt(tx, resolved.scope, usage.databaseBytes);
         return rebuilt;
       });
@@ -1083,8 +1101,10 @@ const TRIGGER = /^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\b/iu;
  * INSERT statements), `csv` (one table) or `json` (schema and rows per table).
  * SQL and JSON keep every value; CSV turns values into text. Exports work
  * whenever the gateway is configured, while Site SQL is off and past the
- * monthly row caps (they are metered as management). One response holds at
- * most `maxBytes` (16 MiB at most); a larger export comes in pieces: pass
+ * monthly row caps (they are metered as management). One response holds
+ * about `maxBytes` (16 MiB at most; by default 1 MiB for SQL, so each piece
+ * re-imports in one call, and 16 MiB otherwise); a larger export comes in
+ * pieces: pass
  * `nextCursor` back as `cursor` and append the pieces in order. Only the
  * first piece has the header (SQL schema, CSV header row, JSON schema) and
  * only the last SQL piece has the triggers, so the pieces together re-import
@@ -1111,7 +1131,13 @@ export async function exportSiteSql(
       throw new SiteSqlError("validation", `Invalid table name: ${request.table}`);
     const maxBytes = Math.max(
       1,
-      Math.min(request.maxBytes ?? SITE_SQL_EXPORT_MAX_BYTES, SITE_SQL_EXPORT_MAX_BYTES),
+      Math.min(
+        request.maxBytes ??
+          (request.format === "sql"
+            ? SITE_SQL_EXPORT_SQL_DEFAULT_BYTES
+            : SITE_SQL_EXPORT_MAX_BYTES),
+        SITE_SQL_EXPORT_MAX_BYTES,
+      ),
     );
     const resumed = typeof request.cursor === "string" && request.cursor !== "";
     const limits = await limitsFor(deps, resolved.scope);
@@ -1478,25 +1504,60 @@ export async function siteSqlSitesOfWorkspace(
   }
 }
 
+/** Workspace deletion drops this many Site databases at a time. */
+const DROP_CONCURRENCY = 4;
+/** Each drop call gets at most this long. */
+const DROP_CALL_TIMEOUT_MS = 5_000;
+/** No drop starts after this long, so a large workspace cannot hold the request. */
+const DROP_DEADLINE_MS = 20_000;
+
+export type SiteSqlDropResult = { dropped: string[]; failed: string[]; skipped: string[] };
+
 /**
  * Drop the data of Site databases whose workspace was deleted, best effort:
- * failures are logged (the data stays in its Durable Object until a later
- * sweep; see docs/site-data.md).
+ * a few at a time, each call bounded, none started after a deadline. Ids
+ * that failed or were not tried are logged in one structured line (the data
+ * stays in its Durable Object until a later sweep; see docs/site-data.md).
  */
 export async function dropSiteSqlDatabases(
   deps: { settings?: SiteSqlDeps["settings"] | undefined },
   siteIds: readonly string[],
-): Promise<void> {
-  const gateway = deps.settings ? siteSqlGatewayConfig(deps.settings) : null;
-  if (!gateway) return;
-  for (const siteId of siteIds) {
-    try {
-      await callSiteDb<SiteDbMeter>(gateway, siteId, "reset", {}, siteSqlTransport.fetch);
-    } catch (error) {
-      console.warn("[site-sql] could not drop a deleted workspace's Site database", {
-        siteId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+  context: { workspaceId?: string } = {},
+): Promise<SiteSqlDropResult> {
+  const result: SiteSqlDropResult = { dropped: [], failed: [], skipped: [] };
+  const configured = deps.settings ? siteSqlGatewayConfig(deps.settings) : null;
+  if (!configured || siteIds.length === 0) return result;
+  const gateway = {
+    ...configured,
+    timeoutMs: Math.min(configured.timeoutMs, DROP_CALL_TIMEOUT_MS),
+  };
+  const deadline = Date.now() + DROP_DEADLINE_MS;
+  const errors: Record<string, string> = {};
+  let next = 0;
+  const worker = async () => {
+    while (next < siteIds.length) {
+      const siteId = siteIds[next]!;
+      next += 1;
+      if (Date.now() >= deadline) {
+        result.skipped.push(siteId);
+        continue;
+      }
+      try {
+        await callSiteDb<SiteDbMeter>(gateway, siteId, "reset", {}, siteSqlTransport.fetch);
+        result.dropped.push(siteId);
+      } catch (error) {
+        result.failed.push(siteId);
+        errors[siteId] = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(DROP_CONCURRENCY, siteIds.length) }, worker));
+  if (result.failed.length > 0 || result.skipped.length > 0)
+    console.warn("[site-sql] Site databases left in Durable Objects after workspace deletion", {
+      workspaceId: context.workspaceId ?? null,
+      failedSiteIds: result.failed,
+      skippedSiteIds: result.skipped,
+      errors,
+    });
+  return result;
 }

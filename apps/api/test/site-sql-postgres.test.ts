@@ -986,6 +986,28 @@ test("with the flag off, export, inspect and dropping data still work", async ()
   }
 }, 120_000);
 
+test("a rebuild that fails part way says so and a second reset finishes it", async () => {
+  const f = await fixture();
+  const s = f.sql(await f.publish("Half built"));
+  await s.enable(f.owner);
+  await s.migrate(f.owner, "init", "CREATE TABLE notes (body TEXT);");
+  const original = siteSqlTransport.fetch;
+  siteSqlTransport.fetch = async (input, init) => {
+    if (String(input).endsWith("/migrate")) throw new TypeError("connection reset");
+    return original(input, init);
+  };
+  try {
+    const failed = await s.request(f.owner, "POST", "/reset", { confirm: true });
+    expect(failed.status, failed.text).toBe(503);
+    expect(failed.json.error.details).toMatchObject({ code: "unavailable", partialRebuild: true });
+    expect(failed.json.error.message).toContain("run the reset again");
+  } finally {
+    siteSqlTransport.fetch = original;
+  }
+  const again = await s.request(f.owner, "POST", "/reset", { confirm: true });
+  expect(again.json).toEqual({ applied: ["init"], droppedSchema: false });
+}, 120_000);
+
 test("large exports come in pieces that re-import as one dump, triggers last", async () => {
   const f = await fixture();
   const s = f.sql(await f.publish("Pieces"));
@@ -1148,6 +1170,17 @@ test("a deleted workspace's Site databases are dropped from their Durable Object
       scope,
     ),
   ).toEqual([]);
-  await dropSiteSqlDatabases({ settings: f.settings }, [...sites, crypto.randomUUID()]);
+  // A gateway that refuses the call leaves the database and reports it.
+  const refused = await dropSiteSqlDatabases(
+    { settings: { ...f.settings, sitesGatewaySecret: "x".repeat(48) } },
+    sites,
+    { workspaceId: f.workspace.id },
+  );
+  expect(refused).toEqual({ dropped: [], failed: [siteId], skipped: [] });
+  expect((await s.request(f.owner, "GET", "/inspect")).json.tables).toHaveLength(1);
+  const other = crypto.randomUUID();
+  const dropped = await dropSiteSqlDatabases({ settings: f.settings }, [...sites, other]);
+  expect(dropped.dropped.toSorted()).toEqual([siteId, other].toSorted());
+  expect(dropped.failed).toEqual([]);
   expect((await s.request(f.owner, "GET", "/inspect")).json.tables).toEqual([]);
 }, 120_000);
