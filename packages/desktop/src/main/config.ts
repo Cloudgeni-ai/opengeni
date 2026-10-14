@@ -2,6 +2,11 @@
 export interface DesktopAppConfig {
   /** The product's name in menus, notifications and the first-run page. */
   productName: string;
+  /**
+   * The packaged app's identifier (electron-builder's `appId`). Windows
+   * attributes notifications to the Start menu shortcut with this ID.
+   */
+  appId: string;
   /** The custom URL scheme the app registers, e.g. "opengeni". */
   scheme: string;
   /** The server the first-run page suggests, e.g. https://app.opengeni.ai. */

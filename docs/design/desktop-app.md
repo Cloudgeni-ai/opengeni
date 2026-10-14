@@ -19,11 +19,11 @@ desktop app by pointing the kit at its own web app and branding.
 | Shell | Electron (current stable, 44.x) on all three platforms. One engine, one shell. |
 | Content | The deployment's own web app, loaded from the server the account belongs to, in a desktop layout. |
 | Native code | Electron APIs first; `objc-js` for small macOS gaps; a typed native module for anything larger. |
-| Look | Inset traffic lights and standard sidebar vibrancy on macOS; the system title bar on Windows and Linux. No Liquid Glass. |
+| Look | Inset traffic lights and standard sidebar vibrancy on macOS; the page's own title row under the system caption buttons on Windows; the system title bar on Linux. No Liquid Glass. |
 | Accounts | Several accounts on several servers, each in its own isolated browser session. |
 | Local machine | "Use this computer" installs (if needed) and connects the connected-machine agent in one click, using the deployment's own signed installer. The agent keeps its own updater and service. |
 | Background | The agent keeps running after the window closes, with a menu bar / tray item and a pause control. |
-| Packaging | electron-builder: DMG (Developer ID, notarized), NSIS (Authenticode), AppImage plus deb and rpm. |
+| Packaging | electron-builder: DMG (Developer ID, notarized), NSIS (Authenticode once a signing identity exists), AppImage plus deb and rpm. |
 | Updates | electron-updater for the shell; the web content updates with the server; the agent keeps its own signed updater. |
 | Out of scope now | Global quick-ask hotkey, offline use, Mac App Store, Liquid Glass. |
 
@@ -175,7 +175,7 @@ Headless machines keep the one-line installer and need no desktop app.
 | Platform | Package | Signing | Update |
 |---|---|---|---|
 | macOS (universal) | DMG and ZIP | Developer ID, hardened runtime, notarized | electron-updater from ZIP |
-| Windows (x64, arm64) | NSIS installer | Authenticode through the existing Azure signing | electron-updater, differential |
+| Windows (x64, arm64) | NSIS installer, per user | GitHub build provenance attestations; Authenticode once a signing identity is configured | electron-updater, differential |
 | Linux (x64, arm64) | AppImage, deb, rpm | SHA-256 checksums and GitHub build provenance attestations | AppImage self-update; deb and rpm download in the app and install with the user's password |
 
 Each version is published as its own GitHub release, `desktop-v<version>`,
@@ -203,6 +203,24 @@ prefix). The signing identity is a release-time setting.
   AppArmor profile, and the AppImage falls back to running without the
   Chromium sandbox when namespaces are unavailable.
 
+### Windows notes
+
+- The page runs under the window's caption buttons (the window controls
+  overlay), as in other current Windows apps, so there is one title row. The
+  buttons are as tall as the session title bar and their glyphs follow the
+  app's appearance. The page reads the free part of that row from the
+  `titlebar-area-*` environment variables, so whatever reaches the top-right
+  corner (the session title bar or a docked workspace panel) makes room for
+  the buttons, and pages without a title bar of their own start below the
+  row, which moves the window, with content fading out beneath it.
+- One installer carries both architectures for people to download; installed
+  apps update from the installer for their own architecture. It installs per
+  user, without administrator rights.
+- The app sets its application user model ID to the packaged app id, which is
+  what Windows attributes notifications and the Start menu shortcut to.
+- Until an Authenticode identity is configured, SmartScreen warns on first
+  run; build provenance attestations still let people check a download.
+
 ## Repository layout
 
 - `packages/desktop`: the reusable kit — main-process modules (accounts,
@@ -221,7 +239,7 @@ prefix). The signing identity is a release-time setting.
    notifications, "Use this computer", tray, updater, signed
    and notarized DMG, budgets measured. About 4–6 agent-hours.
 2. Linux: AppImage, deb and rpm, Wayland and X11 checks. A few hours.
-3. Windows: NSIS, Authenticode, CUA computer use; consider a custom title bar. A few hours.
+3. Windows: NSIS, caption buttons over the page's title row, CUA computer use, Authenticode once an identity exists. A few hours.
 
 ## Risks
 

@@ -193,6 +193,8 @@ export class DesktopShell {
       return;
     }
     registerLocalScheme();
+    // Without it Windows shows no notifications for the installed app.
+    if (process.platform === "win32") app.setAppUserModelId(config.appId);
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
     } else if (!appImagePath()) {
