@@ -71,22 +71,36 @@ reservations: only already-reported usage is owed.
   owed receipts in its recovery detail; recovery writes them first and only
   then lets the turn continue. This is reported as usage state unavailable,
   never as a budget or usage-limit stop.
+  A held receipt is dropped as soon as the committed `agent.model.usage`
+  event for the same source has metered it, so a final response whose event
+  committed completes normally instead of being requested again.
 - **Attempt-authenticated single-model calls.** Admission opens a durable
   custody marker for the call in PostgreSQL before the provider request. The
-  settled receipt fills it. If the receipt cannot be written, the marker is
-  fenced and every API replica refuses that task's next call (HTTP 503
-  `session_usage_limit_unavailable`) while the owning process retries the
-  database write. A provider error or an allowance denial releases the marker.
-  An open marker older than 15 minutes also blocks new calls; after 30 minutes
-  maintenance records it as an unpriced receipt (disclosed through
-  `unpricedCalls`) so a crashed process cannot block the task forever. When an
-  API process already holds its maximum of retained receipts, it refuses new
-  task calls with the same 503 instead of dropping one.
+  settled receipt fills it. Every exit before the provider request (an
+  admission error or denial, a credential failure, a closed Claude route)
+  releases the marker, and so does a provider error. If the receipt cannot be
+  written, the marker is fenced while the owning process retries the database
+  write. A fenced marker, or an open one older than 15 minutes, blocks **every**
+  model request in that task, not only single calls: other single calls get
+  HTTP 503 `session_usage_limit_unavailable`, and a worker turn parks as
+  `recovering` (recovery reason `session_usage_custody_pending`) instead of
+  failing. A parked turn keeps its history, goal and pause state, re-checks
+  with database reads only every 30 seconds, and resumes without replaying
+  anything once the marker is filled. After 30 minutes maintenance records an
+  unfilled marker as an unpriced receipt (disclosed through `unpricedCalls`)
+  so a crashed process cannot block the task forever. When an API process
+  already holds its maximum of retained receipts, it refuses new task calls
+  with the same 503 instead of dropping one.
 - **Older workers during rollout.** A database trigger on the durable
   `agent.model.usage` event records the receipt when the writer did not, so a
   worker that predates usage limits cannot leave a limited task looking
   complete at `$0`. Workers append that event before the Insights fact, so a
   fact without its event is not a real old-writer path.
+- **Older API processes during rollout.** A single-model call served by an
+  API process that predates usage limits writes neither a receipt nor an
+  event, and the worker trigger cannot backfill it, so such calls during the
+  rollout window are not counted. Finish the API rollout before relying on a
+  limit for tasks that make single-model calls.
 
 Known limits of this design, stated rather than hidden:
 
@@ -95,9 +109,18 @@ Known limits of this design, stated rather than hidden:
   lost, so platform recovery runs it again and that response is counted);
 - a provider error after partial streaming reports no usage and is not counted;
 - a single attempt-authenticated call running longer than 15 minutes blocks
-  that task's other single-model calls until it settles;
+  every model request in that task (worker turns park as above) until it
+  settles or maintenance discloses it after 30 minutes;
 - a database outage that loses response history means platform recovery runs
-  the request again, and both calls are counted.
+  the request again, and both calls are counted;
+- a task's total is kept in whole micros up to 2^53 − 1 (about
+  $9 billion); a receipt or imported history that would pass it fails closed
+  (usage state unavailable, or the import stays `preparing` and backs off)
+  instead of wrapping;
+- a source identity longer than 1,100 bytes is recorded under a stable
+  `sha256:` digest; identities whose source key exceeds 1,024 bytes are
+  recorded by the direct writer only, because the event trigger and the
+  legacy import skip them.
 
 ## Scope of one limit
 
@@ -232,6 +255,11 @@ before creating anything (its create route answers 422
 `INVALID_SESSION_CREATE_REQUEST` naming `startMode`), so the SDK throws
 `OpenGeniSessionUsageLimitUnsupportedError` with no session started. Any other
 validation error stays an ordinary `OpenGeniApiError`.
+This refusal-before-creation holds for servers whose create schema already
+knows `startMode` (realtime only). A server old enough to have no `startMode`
+at all drops both unknown fields, so it can create and start the session
+without a limit; the SDK then throws the error below with the `sessionId`.
+Upgrade the API before an SDK sends limits to such a server.
 If a server accepts the create but does not echo the limit, `createSession`
 throws the same error carrying the created `sessionId`, and
 `setSessionUsageLimit` (client method or free function) throws it too instead
@@ -299,9 +327,15 @@ with closed-set labels only. Boundaries: `create`, `child_create`, `send`,
 `write`, `import`. Outcomes distinguish `reached`, `unavailable`,
 `accounting_failure`, `unpriced`, `recorded`, `duplicate`, `filled`,
 `source_conflict`, `source_gone`, `cas_conflict`, `preparing`, `forbidden`,
-`disabled`, `not_root`, `set`, `cleared`, `replayed`, `imported` and
-`import_failed`. No session, workspace, subject, model, prompt or amount is a
-label.
+`disabled`, `not_root`, `set`, `cleared`, `replayed`, `imported`,
+`import_failed`, `held` (a receipt write failed and the receipt stays in
+custody) and `lost_resolved` (maintenance disclosed a lost custody marker as
+unpriced). No session, workspace, subject, model, prompt or amount is a label.
+
+Each API replica's webhook pump tick runs usage-limit maintenance (the import
+and lost-marker resolution) before allowance maintenance. Usage-limit
+maintenance contains and reports its own failures, so an allowance failure
+cannot skip it.
 
 `scripts/bench-session-usage-limits.ts` measures admission and settlement on a
 disposable PostgreSQL (`OPENGENI_TEST_PG_URL`): admission reads one indexed
