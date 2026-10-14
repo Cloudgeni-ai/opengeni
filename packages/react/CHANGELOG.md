@@ -1,5 +1,208 @@
 # @opengeni/react
 
+## 2.0.0
+
+### Major Changes
+
+- 945c247: Variable Sets are replaced by vaults. Secrets live as items with fields in vaults owned by a task, a person ("Only me"), a workspace or the organization, and agents use them through `{{secret:Vault/Item/field}}` references that resolve when a tool, command or browser action runs. Existing Variable Sets were migrated to vaults with the same ids and values.
+
+  Removed: the `/variable-sets` and `/environments` routes (now 410 `variable_sets_removed`), `PUT /sessions/:sessionId/variable-sets`, the `variableSetIds`/`variableSetId`/`environmentId` request fields on sessions, forks, drafts and schedules and `defaultVariableSetIds` on rigs (now 422 when they carry a value), `OpenGeniClient` `listVariableSets`, `resolveVariableSetAttachments`, `createVariableSet`, `getVariableSet`, `getVariableSetVariable`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`, `updateSessionVariableSets` and the deprecated `*Environment*` aliases, their types, and React `useVariableSets`/`useEnvironments`.
+
+  Added: `client.vaults(workspaceId)` (vault, item, field-history, reveal, session vault policy and 1Password routes), the vault wire types, `vaultErrorCode`/`vaultErrorDetail`, `vaultPolicy` on session create and schedules, and React `useVaults`, `useVault`, `useVaultItems`, `useVaultItem`, `useVaultFieldVersions`, `useSessionSecrets` and `useVaultsApi`. Read fields that carried the old selection (`variableSetIds`, `variableSetId`, `environmentId`, `defaultVariableSetIds`) remain on responses as inert, deprecated legacy data.
+
+  This removal ships in SDK 2.0.0 without the usual 90-day deprecation window, as an explicit exception to the API compatibility policy.
+
+### Minor Changes
+
+- c69d74d: The lightbox can page through chat images. Register an element's image with `useLightboxGalleryItem(ref, entry)`; an open lightbox then shows previous/next controls, arrow-key navigation and an "N of M" counter across registered images in the same timeline, resolving each image only when it is shown.
+- c08dfcd: Connector tool rows read short. A connector tool call now shows the connector's logo (when the host passes `resolveProviderLogo`, otherwise the usual icon) and a short label such as "List issues · Done". The account is named only when the connector has more than one account in the turn ("Get issue · kari@example.com"); approval cards say "Linear" or "Linear · kari@example.com" instead of the full route label. Tool display metadata gains optional `connector` and `providerDomain` fields, and older events with the long route label show just the tool name. The model still gets the full account description.
+- 3822e5f: Turning Opengeni credits off in a workspace (`allowCreditModels: false`) now stops every credit meter, not only credit-billed models. Paid web search and web fetch are no longer offered to the agent (a call already offered is refused with a message that names the switch), knowledge search falls back to keyword results (`fallbackReason: "credits_disabled"`; `mode: "vector"` returns 403), and paid knowledge indexing waits without calling the embedding provider and resumes when credits are turned back on. The model catalog reports a credit model blocked only by the switch with the new availability reason `credits_disabled`, which the React picker labels "Opengeni credits off". Both enum values are additive; clients that do not know them keep their existing fallback.
+- 8017d94: Embedded chats no longer carry Opengeni's own defaults into your product. In `SessionConversation` and `OpenGeniChat`, live voice is now opt-in (`realtimeVoice={true}`, or `createSessionProxyHandler({ realtimeVoice: true })`, which now reports `realtimeVoice: true` in the client config), so a call never spends credits or asks for the microphone unless you turn it on. The working indicator says "Thinking…" instead of the console's playful phrases; the new `genieLoading` prop sets your own copy or visual. The session proxy accepts `visitor: true` from `resolve` for anonymous visitors: they get no attach button and their uploads are refused unless the handler sets `visitorUploads: true`. A proxy with `files: false` now also reports uploads off, so the stock composer hides the attach button it could not serve. Explicit `realtimeVoice`, `attachments`, and `files` settings keep working; the Opengeni web app is unchanged.
+- c13d080: Add canonical sparse row-height and column-width set/reset commands with live
+  spreadsheet projections and immediate, frame-coalesced drag and keyboard
+  resizing. Preserve existing dimension-free artifacts and shared artifact
+  authority, collaboration, and history.
+
+  Preserve sparse dimensions through native workbook reconciliation and verified
+  XLSX materialization, including empty-sheet geometry. Refresh all modality
+  kernel distributions together to retain their shared build identity.
+
+  Keep spreadsheet input responsive during delayed saves, retain pending cell
+  drafts when refocused, surface independent failures without unsafe overlapping
+  retries, and show server sync state separately from local command acceptance.
+
+  Center resize targets on header borders and retain valid covered cells while
+  viewport queries change. Show submitted cell input immediately without inventing
+  formula results. Support canonical worksheet renaming by double-click or F2,
+  with validated Enter/Save, Escape/Cancel, and readable pending/failure feedback.
+
+- 945490f: A connected machine can switch between This workspace and Only me in place, keeping its enrollment, sandbox id, credentials and live connection, so chats, schedules and the installed agent are not registered again. The Machines page gains **Who can use it?**, a dialog that summarizes what one confirmation does, backed by `POST .../machines/:enrollmentId/audience/preview` and `PUT .../machines/:enrollmentId/audience` (`previewMachineAudience` and `changeMachineAudience` in the SDK). Narrowing applies everything in one transaction: the owner's chats stay (shared ones stay shared, usable only by the owner) and their running attempts are re-authorized; other people's chats move off; turns that may no longer use the machine end as cancelled through the terminal `authority_change` interruption; the owner's Workspace schedules on it become Only me (or pause) and other schedules pause; and each affected person gets one inbox notice. Only a second live connection of the same computer blocks the switch. The worker reads the machine's current audience on every operation, so running sessions follow the change without a rebuild and the agent needs no restart or upgrade.
+- 0c763f2: Show who sent a message in shared chats. User message items now carry the sender recorded with the message, and `MessageTimeline` (and `SessionConversation` timeline props) accept `renderMessageSender` to draw a small label above the bubble. Nothing is drawn unless the host supplies it, so embedders that have no identity for their users, or do not want attribution, see no change. `MessageSenderLabel` renders an avatar or initials with a name. The web app names other members' messages and leaves your own unlabeled.
+- 35fb6fd: Add `useSessionModelAccount`, a provider-neutral hook for a session's model account: the shared accounts and the caller's own personal accounts it may use, choosing one (or automatic selection), and the caller's personal-fallback opt-in. The web app's session header shows the matching account menu for subscription models on the shared subscription core; Codex keeps its existing menu for now.
+
+  Provider-qualified choices and Automatic preserve other providers' bindings. The menu shows stored usage without duplicating the selected account's top summary. Personal fallback is configured separately in Models settings, not in the account dropdown. `ModelPolicyPicker` supports model-identity-only policies with `allowModelOptions={false}`.
+
+- e7f6a53: Native chat media at web parity. `@opengeni/react-native/timeline/previews` adds `createNativePreviewRenderers`: retained-file images load inline (tap for a zoomable full-screen view), and `opengeni-html` / `opengeni-site` previews render in a sandboxed web view sized to their content, with the web's animated "Preparing preview…" surface while the assistant is still writing them, plus incomplete and error states. `createWebMarkdownRenderer` gains `renderImage` and `renderInteractiveBlock`, plain image URLs load, and wide tables scroll sideways with an edge hint. `@opengeni/react/native-previews` exposes the DOM-free pieces (`inlineHtmlDocument`, `previewLoadingDocument`, `loadSiteSnapshot`, `paintPreviewLoading`).
+- 412671a: Connect a machine just for yourself. `mintEnrollToken(workspaceId, { scope: "user" })` mints a one-machine command whose machine only the signed-in person can use, in every workspace they can open; `scope: "workspace"` (the default) shares it with the workspace as before. Only a verified person can mint a personal command: someone signed in, or a credential acting as them (a personal API key, or an organization key acting `asUser`). A key, service or agent acting as itself gets `422`. The owner is always the caller, the command is single-use, and the machine is created only if that person is still a member when the command runs. A personal machine reconnects only from the workspace it was first connected from; elsewhere the command answers `409` and changes nothing. The response now says which `scope` and `allowScreenControl` it granted; an older server omits `scope` and mints a workspace command, so check it before showing a personal command. Machine cards label access as "Only me", "Workspace" or "Organization" (`machineScopeLabel`). In the web app, the Machines page and the chat's machine card share one Connect a machine dialog: choose who can use it (Only me by default), screen control (off by default) and Mac, Linux or Windows, copy one command, and the same dialog confirms the connected machine, with Use in this chat from a conversation.
+- 63bf721: Prepare a complete personal or workspace MCP connection once, with non-secret headers and protected secret-field mappings. People enter only the missing key in the conversation card; authorized agents that already have credentials use the same native Connect verification and storage lifecycle without another confirmation card.
+
+  Connection, installation and receipt writes are atomic. Exact retries do not repeat verification or create duplicate accounts. The agent path intersects frozen attempt permissions with live ownership, selection, policy and execution fences, and never makes new tools available inside an already accepted attempt. Existing OAuth and explicit account selections remain separate and unchanged.
+
+  Deploy matching API and worker packages before using direct agent setup. Historical attempt catalogs without the frozen permission snapshot do not gain new setup authority.
+
+- 945c247: Human-input cards answer `kind: "secret"` questions. The field is an uncontrolled password input read only at submit, so the value never enters React state, props or storage, and it is cleared after a successful submit and on unmount. It pairs an optional username with the password for password managers, sets `autocomplete` from the spec (`new-password` when Generate is allowed, `one-time-code` with a numeric keyboard for one-time codes), offers show/hide and Generate (filled in the browser with a `SecretsUiProvider` generator, otherwise generated by the server with Undo), shows the `looksLike` hint and a soft, non-blocking pattern warning, and has a Save to select (Only me, This task, This workspace). New `allowedSaveTo` prop on `HumanInputForm` and `HumanInputSurface`: a requested target outside it falls back to the most private allowed one with a note. Submit sends `secretAnswers` next to `answers`. Answered secret questions show "Saved to <vault> › <item>", never a value. Secret references (`{{secret:…}}`, `{{secretfile:…}}`) render as chips in Markdown prose and whole-reference inline code (never in fenced code or links), tool payloads and commands, tool row titles and approval review fields, when a `SecretsUiProvider` is mounted; malformed references stay plain text. New exports `SecretRefChip`, `SecretRefText`, `SecretAnswerChip` and `secretReferenceLabel`, and `SecretsUiProvider` from `@opengeni/react/session-ui`.
+- cb9e426: Secrets: every vault row opens again, and 1Password connections are manageable.
+
+  - Fixed vault, item and connection rows that only opened when their title or timestamp was clicked. A page-wide hit-area rule on the Secrets pages covered each row's full-width click target.
+  - Connect 1Password is a visible button on Secrets. The flow asks who can use the connection first (Only me, This workspace or the organization), links to 1Password's guide for creating a service account, and names plans in plain words.
+  - Settings › Secrets lists 1Password connections with their owner, linked vaults and any token or sync problem. A connection's page links more vaults, replaces the token in place (linked vaults keep working) and disconnects it (unlinks its vaults; nothing is deleted in 1Password). A vault's Replace token action now updates its connection instead of creating a second one.
+  - Vaults are grouped by who can use them; a vault linked from 1Password shows which account it comes from and links to it.
+  - New API routes `GET /connections/1password/service-accounts`, `PUT /connections/:connectionId/1password/token` and `DELETE /connections/:connectionId/1password`, with SDK methods `listOnePasswordConnections`, `replaceOnePasswordToken` and `disconnectOnePassword`.
+
+- 11779ba: Render per-task usage limits. The timeline shows a `session_usage_limit` stop as a neutral "Usage limit reached" row, a goal paused at the limit explains how to continue, and a refused Send keeps the draft without offering Retry. New exports: `SessionUsageLimitNotice`, `summarizeSessionUsageLimit` and related labels from `@opengeni/react/usage`.
+- 844c089: Sites can now save data. Every published Site gets persistent collections of JSON records and files that survive new versions: Site code uses `site.data` (list, get, insert, put, patch with conflict detection, delete, increment, count, batch) and `site.files` (upload, list, url, delete) from `createOpenGeniSiteClient()`, with no credentials in the Site. Each collection's access mode decides what viewers may do (shared, shared read, per viewer, append only), enforced by the server; the Site page itself always acts as a viewer, and an Only me Site's data stays its owner's. Agents and scheduled tasks manage data with new `site_data_*` and `site_files_*` tools, and the Site page has a Data tab for the people who manage the Site. Quotas, write limits, per-Site and per-workspace limits on schema-checking time, and usage metering (usage only, no charge yet) apply. Hosts opt in by giving `createSiteToolBridge` a pinned Site and `fetchResponse`; older hosts report `site_data_unsupported`.
+- 7f3f19f: Expose the stock new-conversation controller and view used by `OpenGeniChat`.
+  Keep uncertain retries tied to their original creation, preserve newer text,
+  files and model choices through native draft handoff, and support opt-in
+  voice-first creation without a synthetic prompt. The session proxy preserves
+  browser creation idempotency keys unless its server hook supplies its own.
+  Simple embeds continue to use the same one-component API.
+- ef1f78d: Subscription accounts and their usage limits no longer have to reload from scratch every time you come back to them. `useCodexAccounts` and `useSuperGrokAccounts` now share reads per `client` object: readers mounted at the same time share one request, failed reads are never served as cached data, and a pin or activation re-reads every mounted list for that workspace even when the component that made it has unmounted. New `OpenGeniProvider` prop `retainReadsAcrossMounts` (default off) keeps those reads across navigation, so a remount renders the last accounts at once and re-reads them in the background; retained reads are dropped when `client` changes or the provider unmounts. Without it nothing is served to a later mount. **Host action item:** set `retainReadsAcrossMounts` only if every signed-in person gets their own `client` object; leave it off when one client is reused across people. `useCodexAccounts().refreshUsage({ maxAgeMs })` reuses live usage readings only when every listed account was read within `maxAgeMs` and shares one provider read between concurrent callers, and the result exposes `liveUsageUpdatedAt` (the oldest account reading). No new exports.
+- 27db84b: Timeline rows for spawning an agent, messaging one, and every update one sends back now name the agent and link to its session. Agent updates inside a delivery pill render as named rows with a two-line preview and the full text on expand, and the pill says who sent them ("Update from API audit", "3 updates from API audit and Docs"). Repeated progress notes from one agent fold into its latest note. A child result still reads "Result from …", never "finished". `MessageTimeline` and `SessionConversation` accept `resolveSessionTitle` for current titles; without it, rows use the title given at spawn, then the generic labels.
+- a91718c: Workspaces can turn off Opengeni-credit models in one step. The workspace setting `allowCreditModels: false` (`PATCH /v1/workspaces/:id/settings`, SDK `updateWorkspaceSettings`) blocks every model billed in Opengeni credits, including credit models added to the catalog later. The allowlist stays as it is, whether the workspace has its own or follows its organization's. Session creation, messages, schedules, goals, child agents and the omitted-model default all honor it, and so do credit-funded live voice and voice input (where credits are billed; voice input falls back to a connected subscription) and managed video generation. Paid web search and knowledge embeddings are not affected. The model-policy responses report it as `allowCreditModels`; saving or removing an allowlist never changes it. The React live-voice control labels a model refused for this reason "Credits off".
+
+### Patch Changes
+
+- 04ebc42: A session whose next turn the runtime refused to start (an admission block, such as a rejected database claim) no longer reads as "Waiting on you" with nothing to answer. It now reads as "Stuck" in the session header, lists, hover details, sub-agent rows and the timeline divider, on the web and in the native app. The web session notice is titled "Stuck" and, for a rejected claim, says nothing is needed from the person. The native session screen shows a matching card with a Try again action (Resume), and its composer offers Send instead of Stop while the session is stuck. Session list entries now carry `admissionBlock`, and the SDK's `Session` type gains the optional `admissionBlock`. New helpers `sessionDisplayStatus` and `sessionAdmissionBlocked` return the display status `blocked`, and the native timeline messages gain `stuckTitle`, `stuckBody`, `stuckAccessBody`, `stuckRetry` and `stuckRetryFailed` for hosts that swap copy.
+- 14a9340: A person's question asked while the agent is working or waiting always gets a visible answer. `wait_for_input` is refused (as a tool error, at most twice per turn attempt; a resumed or retried attempt starts again, and the check fails open if it cannot decide) when the turn answers a person's message and the agent has not written any visible reply yet, so a status drafted only in reasoning is written out before the turn yields. `prepareAgentTools` accepts the new `inputWaitReplyGuard` option for this check.
+
+  In the timeline, a reply the agent wrote before more tool work and a wait stays visible after the "Worked for" row instead of folding into it: a turn that answers a person and ends with only progress notes keeps its first and last message visible, and the notes between them still fold.
+
+- d4c17b3: Automatic agent updates no longer close open browsers. Agents before 0.1.58 close every managed browser when they restart, so the automatic updater now leaves such a machine on its current agent while it still has a managed browser that may be open, and looks again on the usual busy backoff. The machine card shows "Update to vX postponed: open browsers would close" and notes that updating by hand closes them; "Update now" still works. Agents from 0.1.58 on keep their browsers across a restart and are updated as before.
+- d8a4e8e: The browser viewer no longer loops on ending a lost attached-device browser. A refusal (4xx) is not retried, and transient failures retry at most three times with backoff; previously a 409 was re-sent on every registry refresh, about one request per second.
+- f36484a: Let slow browser inventory reads finish when refresh events arrive. Combine pending refreshes into a trailing read, while still canceling obsolete reads when the workspace, client, or enabled state changes.
+- 5f8d2e2: A turn blocked on model subscription capacity now reads "Limit reached" on its work row, with one quiet line saying it continues automatically, instead of a long separate warning. Once the turn resumes or settles the warning is gone, and "Worked for" no longer counts the time spent waiting for capacity. The `waiting_capacity` session status label is now "Limit reached". Waits that need a person (an ineligible pinned account, a disallowed model, accounts disabled for allocation, or an account that needs reconnecting) keep their recorded reason.
+- dfee983: Show fallback text for Codex capacity waits when optional detail text is absent or empty, instead of rendering a blank notice.
+- 561c701: Chat messages now show a single newline as a line break, so an agent reply written on three lines (1, 2, 3) shows three lines instead of "1 2 3", the same as ChatGPT or GitHub comments. This applies to agent replies, progress notes, and your own messages in the Opengeni web app and in embeds that use the default `MessageTimeline` renderer. Code blocks, lists, tables, quotes, and headings render as before. Custom renderers can opt in with the new `softLineBreaks` prop on `Markdown`.
+- 7f2446f: The session workspace dock no longer polls the machine fleet for viewers who cannot read it. `<SandboxWorkspace>` and `useSandboxWorkspaceTabs` accept `machinesEnabled` (default `true`); Opengeni's web app passes the viewer's `enrollments:read` grant. A 401, 403, or 404 from the fleet read now stops the 15-second poll until the read is disabled and re-enabled or explicitly refreshed. In the web app, Organization → Billing reads workspace budgets four workspaces at a time and requests this month's usage only for workspaces the viewer belongs to, and a refused Add people candidate list is not requested again when the page remounts.
+- 4532435: Codex Apps keeps working when a workspace routes models through its organization's Codex accounts. The workspace's designated Apps account now loads, and its token refreshes persist, through the Apps designation itself instead of the model-routing pool; that authority still reaches only the designated account, owned by this workspace and its current owner. Turning Apps off (`DELETE /v1/workspaces/:workspaceId/codex/apps`) now works in every routing mode, so `apps.canDisable` is accurate.
+
+  Apps no longer posts an authorization card every time it sets up a turn. A card appears only when an Apps tool call needs one, at most once per turn, and an unusable designated account is reported with the new `tool.auth_needed` reason `designated_credential_unavailable` instead of `refresh_failed`. Clients should treat unknown reasons generically, as before.
+
+- 4f18b7e: Preserve bounded first input while an explicitly PTY-capable cold terminal acquires its viewer grant, then deliver it once at the existing negotiated readiness boundary. Plain SSE and transport downgrade fences remain unchanged.
+- c960696: Long orchestration runs no longer stack identical "Agent update / Worked for / Waited" rows. Two or more consecutive quiet cycles (routine input, work without a visible reply, a finished wait) fold into one row such as "8 updates over 5h 54m · 30 steps", with the latest wait reason under it on the web. Expanding it shows the original rows unchanged. Visible replies, people's messages and the turns they open, failed turns, approvals, live work and the current wait are never folded.
+- c9f2c11: A context compaction cut short by its own attempt's cancellation (for example a turn worker draining during a deploy) is no longer reported as a summarization failure. The worker records `session.context.compaction.skipped` with `reason: "interrupted"`, keeps any explicit `/compact` request pending for the recovered attempt, and lets the cancellation recover the same turn as before. The timeline shows "Compaction interrupted" with retry copy instead of "Couldn't compact conversation history".
+- dc38882: Focus rings on the compaction Details toggle and the image lightbox keep a visible outline in forced-colors mode, and the precompiled stylesheet no longer ships unused utilities generated from code comments and sandboxed visualization CSS.
+- fb298ad: A failed context compaction now appears once, on its timeline landmark: "Couldn’t compact conversation history" with one short recovery step and a single Details control (the provider response, rejected parameter and request ID, or the recorded error text when there is no provider rejection). The failed turn chip names the outcome instead of the raw provider text, no separate notice repeats the failure, and the landmark no longer overflows the timeline. `ContextCompactionItem` gains an optional `failureDetail` with the same turn's recorded failure text.
+- 64c4dd3: The default model picker in `SessionConversation` now disables other providers' models in a session locked to Codex remote compaction, as the API refuses them there, instead of offering them.
+- 285968f: A GitHub organization member who isn't an owner now gets a clear path instead of a dead end. Opengeni explains that an organization owner must approve and lets them send the request through GitHub. Afterward they see a calm "Waiting for your GitHub organization owner" state, and the GitHub card updates on its own once an owner connects the organization. An organization owner who approves on GitHub lands on a page explaining the one remaining step instead of an expired-link error. Published `.patch` and `.diff` files now have a "Copy command to apply these changes" button. It copies one `curl … | git apply` command that uses the existing short-lived authenticated download link, which expires in 5 minutes. `ConnectSetup` shows the owner-approval state, and `RetainedArtifactLoader` accepts an optional `{ prefer: "url" }`.
+- 121f6ed: A new chat without a goal no longer logs failed `GET .../goal` 404s in the browser console. `GET /v1/workspaces/:workspaceId/sessions/:sessionId/goal?absent=null` answers 200 `null` for a goal-less session (without the opt-in the 404 is unchanged, and a missing session is always 404). The SDK adds `findGoal`, which sends the opt-in and resolves `null`; the session proxy forwards it. `useGoal` reads through `findGoal` when the client has it (falling back to `getGoal` and its absorbed 404 otherwise), and no longer re-reads a goal-less session when the stream's opening events race the first read, so an embedded Opengeni chat makes one successful goal read per new chat. A goal set later still arrives through its `goal.*` event.
+- f3aa7f2: `recentSessionsForHome` now lists only top-level conversations, so sub-agent sessions no longer push your own recent work off the home screen.
+- 5baab79: Stop Modal boxes that only an unused browser or desktop keeps warm. After the general sandbox idle grace without use (agent tool calls, a person's input, or a visible live view's heartbeat), a saveable browser is checkpointed and suspended, other browsers and desktops are released as `idle_released`, and the box saves `/workspace` and stops. Saved browsers resume on demand, also when the desktop they were shown in has stopped.
+- 810d1d9: Add targeted current-human tool resolution and invocation without whole-workspace
+  provider discovery. Fence caller, pinned Site and selected live action policy
+  after awaited physical credential authorization. Preserve success/unknown
+  outcomes through cleanup failures, prevent stale retries on contradictory
+  transport flags, and retain Site entry pins through Codemode refresh. Preserve
+  live account authority, versioned executable-effect one-shot approval
+  bindings, optional full-definition preconditions, and explicit legacy discovery.
+  SDK calls use the targeted path by default; older APIs require explicit catalog
+  mode. Upgraded Site hosts adapt saved legacy bundles using bounded manifests.
+  Raw/local target approvals bind existing executable/configuration authority
+  instead of public catalog presentation. Retained catalog clients also veto
+  uncertain stale retries; explicit malformed pins are never silently omitted.
+  The host also separates executed stale-named provider diagnostics from legacy
+  Site retry control without rewriting saved bundles or changing success outputs.
+  Deploy rolling migration 0686 before enabling the new API and matched SDK/host.
+- ea7428d: Machine cards and the machine page now describe the agent in plain words and never contradict the health badge. A second agent process refused days ago is quiet history on the machine page instead of a red banner; only one being kept out right now shows a calm heads-up. An update postponed because the machine was busy reads as postponed with an "Update now" action, a failed update to the version already installed is not shown at all, and real failures say why and offer "Try again" only when it can help. The machine page gains an Agent panel with the build, the update action and the connection.
+- da01634: Add a provider-neutral explicit model-account choice for sessions and a person's own personal-fallback opt-in. `GET`/`PUT /v1/workspaces/{workspaceId}/sessions/{sessionId}/model-account` lists the workspace's shared accounts and the caller's own personal accounts with whether each can be chosen, and sets or clears an explicit choice; the database still decides, so a personal account is accepted only for its owner's private session or Personal workspace while personal accounts are allowed. An ownerless session lists every account as not choosable (`session_has_no_owner`). `GET`/`PATCH /v1/organizations/{organizationId}/me/model-account-preferences` reads and changes only the caller's own opt-in; turning it on wakes waiting turns so they can fall back at once. The SDK gains `getSessionModelAccount`, `setSessionModelAccount`, `getModelAccountPreferences` and `updateModelAccountPreferences`. Rolling migration 0729 adds the owner's own access to their preferences row and nothing else. `isCodexAccountEvent` in `@opengeni/react` also matches `model_account.selection.changed`.
+- 4cb80a9: Show Anthropic Opus, Sonnet and Haiku models without the redundant Claude word (`Opus 5.5`), since the maker mark already says Claude. Older names such as `Claude 3.5 Sonnet` and the Models settings pages are unchanged.
+- 9a78a48: The native app shows and changes the person's pinned chats, the same personal pins as the web. The sessions list has a Pinned section above the projects, the home list shows pins first as the web home does, and both load every pin through the pin-aware session page. A long press on a row (or its accessibility action) pins or unpins it: the row moves at once and the server's answer settles it. `SessionRow` and `SessionRowList` gain `onTogglePin`, and pinned rows show a small pin mark. `@opengeni/react` adds `applySessionPinToLists`, which moves a session between the pinned and ordinary lists and ignores pin answers older than the row shown. The native messages gain `pinned` and `pinFailed`.
+- 38b1ba1: Use Opengeni in product copy and Slack manifest defaults, add a clearly labeled staging icon, and accept both current and historical Slack installation names without rewriting saved credentials or receipts. Expose the Opengeni chat facade while preserving the existing OpenGeni export and public identifiers.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- 78c28ca: When a sandbox is gone, all of its background commands now settle at once. The reaper used to settle each retained command only after its own provider probe, at most 20 per 30-second sweep, so a box with 35 commands that Modal had already ended took 11 more minutes to clear while the session waited. The first probe that finds the exact current box missing now retires the whole box in one transaction: every command, open request, terminal and process holder is settled, the lease goes cold, and a turn waiting on the box is woken. Commands lost with their sandbox now tell the agent "`cmd` is no longer running because its sandbox was shut down or lost; whether it finished is unknown. Check its effects before running it again." instead of "result unavailable", and the session's Incoming panel shows several such results as one row with a single dismiss action.
+- d6ea462: When a model provider is overloaded or unavailable, conversations now name the affected model and provider instead of reporting a generic "upstream dependency". While Opengeni retries the same turn, a live status above the composer reads, for example, "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock) — retrying (attempt 2 of 5)…". It replaces itself on each attempt and adds no timeline rows. If every retry fails, the turn ends with "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock). Opengeni retried 5 times without success. Try again in a few minutes, or switch to another model." The web app's failure banner keeps its Retry button and suggests the model picker. Recovery events gain the optional public fields `modelLabel`, `providerLabel`, `providerCondition` and `maxProviderRecoveryCount`. `@opengeni/react` exports `ProviderRecoveryNotice` and `currentProviderRecovery`, and `SessionConversation` shows the live status automatically. Retry pacing and the five-retry budget are unchanged.
+- 5cb9c49: The collapsed queue chip in `SessionChrome` now shows the text of the latest queued message beside its Steer action, so a message sent while the agent is working is visible without opening the queue. That Steer now sends the message it shows (the latest) instead of the first in line. In the open queue list, every row keeps Steer visible; move, edit and delete still appear on hover.
+- 588b90f: Preserve restored button and link focus when a composer becomes interactive after delayed draft hydration.
+- 541a359: Keep the session-only conversation controller independent of the full provider and styled component graph.
+
+  Preserve unavailable-chat feedback and custom labels when an older session proxy refuses new conversations.
+
+- 2a19988: Buffer early ttyd terminal input until a supported sandbox's Bash Readline readiness signal. Keep old images explicitly legacy and offer a deliberate manual-input escape that clears buffered typing for startup prompts or unsupported shells. The guarantee requires the matching sandbox image; existing daemons are not restarted. Relay PTY behavior is unchanged.
+- 8f02eb2: Links are now recognisable at rest. A new `og-link` utility gives text links a quiet resting underline tinted from the link's own colour, a full-ink underline on hover, and a focus outline, because the neutral grey palette cannot mark links by colour alone. Chat markdown links (web, artifact and sandbox file links), child-session links, usage-meter and viewer retry actions use it, and so do the web app's shared link primitives (`Button` link variant, help links, setting-row links, empty-state links) and inline text links across settings, capabilities, schedules and knowledge. The precompiled stylesheet ships the utility for hosts without Tailwind.
+- 2fb5ec6: Record operator-retired child work as a visible, non-actionable parent timeline receipt, without waking the parent or creating pending execution input.
+- b9ae380: A message that arrives while the session's sandbox is being replaced no longer sits behind a bare "Recovering". The live status above the composer now says "The sandbox reached its maximum lifetime, so Opengeni is moving the workspace to a fresh sandbox…" (or that the sandbox is being saved, recovered or moved, from the recorded transition) with "The turn continues automatically as soon as the sandbox is ready." It shows no retry counter, because this wait has no retry budget. `ProviderRecoveryFacts` gains an optional `sandboxWait` flag.
+- 27287ee: Support an authenticated XLSX download action in the native spreadsheet editor, including embedded views, sync gating, progress, errors and cancellation.
+- 615480c: A turn parked on a usage limit while a startup step is still running no longer shows a chevron that opens an empty fold. Running startup steps are hidden in the work row, so only failed or cancelled steps count as details to reveal.
+- 2499dd2: A turn parked on a usage limit now reads "Usage limit reached" with the guidance "Try again after your quota resets, or switch to another model or provider." It no longer shows a running clock or promises that the work continues automatically. Waits that need a person (reconnect, disabled accounts, an ineligible pinned account) keep their recorded reason and are not labelled a limit; they also show no clock. A work row with nothing to reveal (for example a turn parked before any visible work) renders without a chevron and is not a disclosure control, and the wait guidance stays visible when the work is expanded. Approval and agent waits and the Working clock are unchanged. `TurnSummaryStatus` gains an optional `guidance` line and `TurnSummary` an optional `expandable` prop.
+- Updated dependencies [04ebc42]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [055015d]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [1756cfe]
+- Updated dependencies [40e2542]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [496ce55]
+- Updated dependencies [c08dfcd]
+- Updated dependencies [3822e5f]
+- Updated dependencies [3962da3]
+- Updated dependencies [c4dd318]
+- Updated dependencies [8017d94]
+- Updated dependencies [2be7683]
+- Updated dependencies [121f6ed]
+- Updated dependencies [5b4a738]
+- Updated dependencies [334c470]
+- Updated dependencies [96d7167]
+- Updated dependencies [0c6f5c4]
+- Updated dependencies [c13d080]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [945490f]
+- Updated dependencies [4d8eb5e]
+- Updated dependencies [8e878ac]
+- Updated dependencies [9701372]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [eb68b58]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [6960770]
+- Updated dependencies [e125c0c]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [63bf721]
+- Updated dependencies [3a4a435]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [945c247]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [5441ac9]
+- Updated dependencies [945c247]
+- Updated dependencies [cb9e426]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [7852cda]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [a51c96e]
+- Updated dependencies [7f3f19f]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [945c247]
+- Updated dependencies [c676ae8]
+- Updated dependencies [a91718c]
+  - @opengeni/sdk@2.0.0
+  - @opengeni/artifact-tool@2.0.0
+  - @opengeni/connect@2.0.0
+
 ## 1.4.4
 
 ### Patch Changes
