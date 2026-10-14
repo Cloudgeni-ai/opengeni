@@ -696,7 +696,7 @@ export class BrowserControlClient {
 
   async endSession(
     reference: PlacementBrowserSessionReference,
-    options: { removeState: boolean },
+    options: { removeState: boolean; discardWorkingRuntime?: boolean },
   ): Promise<void> {
     const binding = parseReference(reference);
     const data = await this.requestJson({
@@ -706,6 +706,8 @@ export class BrowserControlClient {
       body: {
         controllerGeneration: binding.controllerGeneration,
         removeState: options.removeState,
+        // Older controllers reject unknown keys, so send it only when set.
+        ...(options.discardWorkingRuntime ? { discardWorkingRuntime: true } : {}),
       },
     });
     if (!isRecord(data) || data.ended !== true) {
