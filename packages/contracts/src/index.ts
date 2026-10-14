@@ -21451,6 +21451,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
+    // Whether people can connect their own computers to this deployment. Absent
+    // on older servers: clients then treat it as unknown.
+    connectedMachines: z.boolean().optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.
