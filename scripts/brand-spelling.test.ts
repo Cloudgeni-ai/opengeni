@@ -23,6 +23,8 @@ const SKIPPED_PATHS = [
 ];
 
 // Prompt modules, bundled Skills, and the main agent tool-description sources.
+// `skill-library.ts` is deliberately absent: its entry provenance strings are
+// frozen records that migration 0233 pins and installations retain.
 const AGENT_FACING_SOURCE_ROOTS = [
   "packages/runtime/src/agent-instructions",
   "packages/runtime/src/bundled_artifact_skills",
@@ -34,7 +36,6 @@ const AGENT_FACING_SOURCE_ROOTS = [
   "packages/runtime/src/bundled_site_skills",
   "packages/runtime/src/bundled_video_skills",
   "packages/runtime/src/interaction-tools.ts",
-  "packages/runtime/src/skill-library.ts",
   "packages/core/src/domain/capabilities.ts",
   "apps/api/src/mcp/server.ts",
   "data/catalog/curated.json",
