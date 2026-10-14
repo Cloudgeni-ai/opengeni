@@ -21,9 +21,15 @@ each hosted field keeps encrypted **versions**.
 | Item type | `login`, `api_key`, `note`, `file`, `passkey` |
 | Field kind | `text`, `concealed`, `totp`, `file` |
 
-- **Only me** vaults belong to one organization member and are usable in every
-  workspace of that organization they can access. No admin can list or read
-  another person's Only me vault.
+- **Only me** vaults belong to one organization member. No admin can list or
+  read another person's Only me vault. Their owner sets where each one is
+  usable with "Available in": every workspace of the organization they can
+  access, or a list of them. Their Personal workspace (the vault's home)
+  always has it. A new Only me vault starts in the workspace it was created or
+  linked from (only Personal when added from there) unless the request sets
+  `availability`; `allowedWorkspaceIds: null` means every workspace. The
+  default **Private** vault is always available everywhere. Vaults created
+  before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
 - **Organization** vaults are managed with `account:admin`; their reach is set
   by "Available in" (all workspaces or a list, and optionally personal
