@@ -6,23 +6,26 @@
  * database.
  *
  * Authority (SUB-OWN-01/04, design 3.1):
- * - A new shared connection is created only by an organization
- *   administrator: on the organization route it is organization-scoped and
- *   organization-managed; on a shared workspace's route it serves and is
- *   managed by that workspace.
+ * - On the organization route an organization administrator creates an
+ *   organization-scoped, organization-managed connection. On a shared
+ *   workspace's route an organization administrator or an administrator of
+ *   that workspace (SUB-OWN-09) creates the workspace's own account: it
+ *   serves and is managed by that workspace alone, and the organization
+ *   still owns it. The 0642/0777 insert policies enforce who may create it.
  * - A reconnect (same upstream account and person) replaces the credential
  *   of the existing connection. Organization administrators may reconnect
  *   any shared connection; a workspace administrator only one their
  *   workspace manages (the core update policy enforces it). An account
  *   already connected elsewhere in the organization is never widened or
- *   taken over.
+ *   taken over, including one the caller cannot see.
  * - In a person's own Personal workspace, connect creates or reconnects that
  *   person's personal connection through the owner-scoped database writer.
- * - Only an organization administrator deletes a shared connection; a
- *   personal connection is deleted by its owner from their Personal
- *   workspace. Deletion waits for a redemption's share lock, and is refused
- *   while any workspace's redemption of the connection has an unresolved
- *   provider outcome or while a lease still names it.
+ * - An organization administrator deletes any shared connection; the
+ *   managing workspace's administrator only the workspace's own account
+ *   (migration 0777). A personal connection is deleted by its owner from
+ *   their Personal workspace. Deletion waits for a redemption's share lock,
+ *   and is refused while any workspace's redemption of the connection has an
+ *   unresolved provider outcome or while a lease still names it.
  *
  * Every credential replacement takes the connection's refresh key
  * (`subscription-refresh:<id>`) before its row lock. The provider is data:
@@ -167,6 +170,24 @@ async function isOrganizationAdministrator(tx: Database, accountId: string): Pro
 
 /** A stored `credential_format` name, as 0728's personal writer checks it. */
 const SUBSCRIPTION_CORE_CREDENTIAL_FORMAT = /^[a-z][a-z0-9_]{0,63}$/u;
+
+/** One upstream account is one shared connection per organization (SUB-OWN-08). */
+function isProviderAccountUniqueViolation(error: unknown): boolean {
+  for (
+    let current: unknown = error, depth = 0;
+    current && typeof current === "object" && depth < 4;
+    current = (current as { cause?: unknown }).cause, depth += 1
+  ) {
+    const { code, constraint_name: constraintName } = current as {
+      code?: unknown;
+      constraint_name?: unknown;
+    };
+    if (code === "23505") {
+      return constraintName === "subscription_connections_provider_owner_account_uq";
+    }
+  }
+  return false;
+}
 
 /**
  * Connect (or reconnect) one account of this provider from a completed
@@ -432,39 +453,58 @@ async function connectShared(
       version: Number(replaced[0].version),
     };
   }
-  // A new shared connection is an organization decision (SUB-OWN-01/04).
-  if (!admin) return { kind: "refused", reason: "forbidden" };
+  // A new organization account is an organization decision (SUB-OWN-01);
+  // a workspace's own account may also be its administrator's (SUB-OWN-09).
+  // The insert policies decide who may create which; anyone else is refused.
+  if (!admin && input.workspaceId === null) return { kind: "refused", reason: "forbidden" };
   const workspaceScoped = input.workspaceId !== null;
-  const [created] = await rawRows<{ id: string; version: number }>(
-    tx,
-    sql`insert into subscription_connections (
-        account_id, provider, kind, provider_account_id, account_email, label, plan_type,
+  // The id is chosen here, not returned: a workspace administrator sees a
+  // workspace-scoped connection only once its workspace link exists.
+  const createdId = crypto.randomUUID();
+  try {
+    await tx.transaction(async (savepoint) => {
+      const write = savepoint as unknown as Database;
+      await write.execute(sql`insert into subscription_connections (
+        id, account_id, provider, kind, provider_account_id, account_email, label, plan_type,
         credential_encrypted, credential_format, expires_at, last_refresh_at, status,
         ownership, connected_by_subject_id, scope_kind, allow_personal_workspaces,
         managed_by_workspace_id, provider_state, provider_subject_id
       ) values (
-        ${input.accountId}::uuid, ${providerId}, ${connectionKind}, ${input.providerAccountId},
+        ${createdId}::uuid, ${input.accountId}::uuid, ${providerId}, ${connectionKind}, ${input.providerAccountId},
         ${input.accountEmail}, ${input.label}, ${input.planType}, ${input.credentialEncrypted},
         ${credentialFormat}, ${iso(input.expiresAt)}::timestamptz, ${iso(input.lastRefreshAt)}::timestamptz, 'active', 'shared', ${connectedBySubjectId},
         ${workspaceScoped ? "workspaces" : "organization"}, ${!workspaceScoped},
         ${input.workspaceId}::uuid, ${providerState}::jsonb,
         ${input.providerSubjectId}
-      ) returning id::text as id, version`,
-  );
-  if (!created) {
-    throw new Error(`${provider.adapter.displayName} connection insert returned no row`);
-  }
-  if (input.workspaceId !== null) {
-    await tx.execute(sql`insert into subscription_connection_workspaces
+      )`);
+      if (input.workspaceId === null) return;
+      await write.execute(sql`insert into subscription_connection_workspaces
         (account_id, connection_id, workspace_id)
-      values (${input.accountId}::uuid, ${created.id}::uuid, ${input.workspaceId}::uuid)`);
-    await tx.execute(sql`insert into subscription_connection_assignment_policies (
+      values (${input.accountId}::uuid, ${createdId}::uuid, ${input.workspaceId}::uuid)`);
+      await write.execute(sql`insert into subscription_connection_assignment_policies (
         account_id, connection_id, workspace_id, inference_pool, allocator_enabled,
         allowed_model_ids, excluded_models, managed_by_workspace_id
       ) values (
-        ${input.accountId}::uuid, ${created.id}::uuid, ${input.workspaceId}::uuid, 'workspace',
+        ${input.accountId}::uuid, ${createdId}::uuid, ${input.workspaceId}::uuid, 'workspace',
         true, null, '{}'::text[], ${input.workspaceId}::uuid
       )`);
+    });
+  } catch (error) {
+    if (isSubscriptionCoreRlsRefusal(error)) return { kind: "refused", reason: "forbidden" };
+    // The upstream account is already a shared connection the caller cannot
+    // see (another workspace's own account): never widen or take it over.
+    if (isProviderAccountUniqueViolation(error)) {
+      return { kind: "refused", reason: "managed_elsewhere" };
+    }
+    throw error;
+  }
+  const [created] = await rawRows<{ id: string; version: number }>(
+    tx,
+    sql`select id::text as id, version from subscription_connections
+      where account_id = ${input.accountId}::uuid and id = ${createdId}::uuid`,
+  );
+  if (!created) {
+    throw new Error(`${provider.adapter.displayName} connection insert is not readable`);
   }
   return {
     kind: "connected",

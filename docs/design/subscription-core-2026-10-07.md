@@ -165,7 +165,11 @@ Every table is `ENABLE` + `FORCE ROW LEVEL SECURITY` and keyed by
 - Management: `managed_by_workspace_id` (delegated management). Delegated
   managers can reconnect, rename, toggle allocation and, from the managing
   workspace, choose the connection's models (migration 0702); only
-  organization administrators change scope, ownership, or delete (SUB-OWN-04).
+  organization administrators change scope or ownership (SUB-OWN-04). The
+  managing workspace's administrators may also delete the workspace's own
+  account: one that serves only that workspace and never Personal workspaces
+  (SUB-OWN-09, migration 0777); anything wider is deleted by an organization
+  administrator.
   `connected_by_subject_id` is audit only.
 - `provider_state` jsonb is adapter-owned (for example Codex reset-credit
   counts); core decisions never read it.
@@ -1772,12 +1776,19 @@ management capability. Placement reads live consent before allocating new work.
   and poll rejects another actor. Managed-cookie start/poll require the same
   browser origin. Both poll routes re-read the gate after token exchange,
   before writing. Poll writes through `connectSubscriptionCoreCodexConnection`:
-  - a new shared connection is an organization decision: only an
-    organization administrator creates one. From the organization route it
-    is organization-scoped and organization-managed; from a shared
-    workspace's route it serves and is managed by that workspace (exactly
-    the core shape the drained cutover gives a legacy workspace account),
-    with its assignment and pool policy;
+  - a new organization account is an organization decision: only an
+    organization administrator creates one, from the organization route,
+    organization-scoped and organization-managed. From a shared workspace's
+    route an organization administrator or an administrator of that
+    workspace (SUB-OWN-09) creates the workspace's own account: it serves
+    and is managed by that workspace alone and never reaches Personal
+    workspaces (exactly the core shape the drained cutover gives a legacy
+    workspace account), with its assignment and pool policy. Migration 0777's
+    insert policies admit a workspace administrator for exactly that shape;
+    the row is readable to them only once its workspace link exists, so the
+    writer chooses its id instead of returning it. The same upstream login
+    already connected as another workspace's own account, which the caller
+    cannot see, is refused as `managed_elsewhere`, never duplicated;
   - the same upstream account reconnects in place: a new credential, the next
     refresh generation, active status. An organization administrator may
     reconnect any shared connection through the organization route, a workspace administrator only one their
@@ -1806,10 +1817,13 @@ management capability. Placement reads live consent before allocating new work.
   Every credential replacement takes the connection's refresh key
   (`subscription-refresh:<id>`) before its row lock, so it waits for an
   in-flight refresh and for a redemption's `FOR SHARE`.
-- **Disconnect** (`disconnect_subscription_codex_connection`): only an
-  organization administrator deletes a shared connection (a delegated
-  manager reconnects, renames and toggles allocation but does not delete,
-  SUB-OWN-04); a personal connection is deleted by its owner from their
+- **Disconnect** (`disconnect_subscription_codex_connection`): an
+  organization administrator deletes any shared connection; a delegated
+  manager reconnects, renames and toggles allocation, and deletes only the
+  workspace's own account (SUB-OWN-04/09: managed by and serving only their
+  workspace, never Personal workspaces; the owner-run routine reads the
+  connection's links in every workspace through a policy bound to its exact
+  `connection_owner` capability). A personal connection is deleted by its owner from their
   Personal workspace, which revokes its resource authority. Deletion takes
   the refresh key and the row lock (waiting for a redemption's share lock),
   and is refused while any workspace's redemption of the connection is
