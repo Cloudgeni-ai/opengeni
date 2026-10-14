@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "7aaf97fd84c236922a11e40d55e5c5514f3e504763240f87d13a3205f6c21531"
+      "sha256": "a5ab25e03f662f3c3149969f549e42ff1689f1a8f33928efc542d16da02d84d1"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -909,9 +909,39 @@
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Build",
+      "sha256": "b8abe2668e6b9ac43ae93007e748eadeba5d114143cc73491a6db2ea25a26ea6"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Check",
+      "sha256": "61d0737ccdef48f245decc67d57030042caec7681ecdc4214c64e442c781c9ac"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Install",
+      "sha256": "910a01ec875791a5aa02602e796a6da8e22f5de91c1b3efa238b87b820f2d50e"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Packaging tools",
+      "sha256": "bc3068dff6b5a4ac2d75ae79ae528684cca4d749dc5bf5f920f250c8a6a4f00a"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Verify",
+      "sha256": "22f1b4a1b8b959438183f7fcbc25f8203a5c36425a942316fcac2c363bf4a64f"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "macos",
       "step": "Build, sign and notarize",
-      "sha256": "e70fe67111958d00505ecf193a95fecfd7f71c0232ddf4be90447fafabdeebbe"
+      "sha256": "11e368019200d64062e117b5d8e9d0db1857b587bd47ef8c8b5cf23afd240049"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -928,12 +958,6 @@
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "macos",
-      "step": "Publish",
-      "sha256": "877b204cb6ae0b59b2b4c931e30a41d4bfef053f07beaf275e6347a6cdd9d2cd"
-    },
-    {
-      "workflow": ".github/workflows/desktop-app-release.yml",
-      "job": "macos",
       "step": "Signing and notarization credentials",
       "sha256": "8b7876b21afd3846c837a596cc4ad1b022cd880719075ca7b7f03f49e80d454b"
     },
@@ -945,9 +969,39 @@
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
-      "job": "macos",
+      "job": "publish",
+      "step": "Publish",
+      "sha256": "0501f67601a2b188d07165038cb1c606cad4f67ca0177391203043f7bd53c3a1"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "version",
       "step": "Version",
-      "sha256": "5b1c734589e0bfa7cd7360559f32f094e6f42b1a93e0351a2fffd27c7131b944"
+      "sha256": "5edc42dd348682740712de0c43c77c9de025da3862b139d1360dbcc51dbd3668"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Build",
+      "sha256": "6900a898855f2935f91e189713a30a96032da5de7af4c00c4ab56959b48994d6"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Check",
+      "sha256": "24c9feeaadfd5f52ab1a3bb0aab71eabdaef29161b350225620cfd2fe2df85d0"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Install",
+      "sha256": "0e153e9a11f09aaa8c2ff94a1ed6f992b73c9bf110dec214fd85d38aead2d404"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Verify",
+      "sha256": "e558a14395a7534bb9328c859d9bf44b1847aff3d029f3db9131f90e904e4f6e"
     },
     {
       "workflow": ".github/workflows/desktop-e2e.yml",
