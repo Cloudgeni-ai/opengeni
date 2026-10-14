@@ -43,6 +43,12 @@ Continuations freeze causal-turn provenance at claim; renewals preserve snapshot
 and service principals. See
 [`workspace-integrations.md`](workspace-integrations.md).
 
+For managed repository clones, the worker stamps only the authenticated credential
+provider's declared Git configuration. The runtime clears ambient helpers before
+reapplying that helper chain; explicit native connection bindings remain separate.
+Renewable host helpers can therefore keep per-repository token selection through
+initial clone, not just subsequent sandbox commands.
+
 ---
 
 ## 3. Core invariants

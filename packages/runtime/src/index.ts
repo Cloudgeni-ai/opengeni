@@ -12145,8 +12145,30 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  repository_credential_source="${6:-connection}"',
   "  repository_git() {",
   '    if [ "$repository_credential_source" = provider ]; then',
+  // Only the worker-stamped provider configuration is eligible after the reset.
+  // Prepend in reverse order so Git sees the original helper chain, including
+  // empty entries that reset it. Values remain single argv elements, never eval.
+  '      if [ -n "${OPENGENI_PROVIDER_GIT_CONFIG_COUNT:-}" ]; then',
+  '        provider_config_count="${OPENGENI_PROVIDER_GIT_CONFIG_COUNT:-0}"',
+  '        case "$provider_config_count" in ""|*[!0-9]*) return 1 ;; esac',
+  '        [ "$provider_config_count" -le 129 ] || return 1',
+  '        while [ "$provider_config_count" -gt 0 ]; do',
+  "          provider_config_count=$((provider_config_count - 1))",
+  '          provider_config_key="$(printenv "GIT_CONFIG_KEY_$provider_config_count")" || return 1',
+  '          provider_config_key="$(printf "%s" "$provider_config_key" | tr "[:upper:]" "[:lower:]")"',
+  '          if [ "$provider_config_key" = credential.helper ]; then',
+  '            provider_config_value="$(printenv "GIT_CONFIG_VALUE_$provider_config_count" && printf .)" || return 1',
+  // printenv adds one newline; strip it plus the sentinel, not value newlines.
+  '            provider_config_value="${provider_config_value%?}"',
+  '            provider_config_value="${provider_config_value%?}"',
+  '            set -- -c "credential.helper=$provider_config_value" "$@"',
+  "          fi",
+  "        done",
+  '        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= "$@"',
+  "        return $?",
+  "      fi",
   '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
-  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ] || [ -n "${OPENGENI_PROVIDER_GIT_CONFIG_COUNT:-}" ]; then',
   // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
   // leaving its platform binding, broker route and askpass behavior intact.
   '      command git -c credential.helper= -c credential.helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper" "$@"',

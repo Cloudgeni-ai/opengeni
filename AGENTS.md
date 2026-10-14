@@ -554,6 +554,11 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
+Managed clones preserve authenticated credential-provider Git helper chains via
+worker-stamped configuration, never by inheriting ambient image helpers. Keep
+explicit native connection isolation and renewable host path selection intact;
+see `docs/workspace-integrations.md` and the real-shell provider clone tests.
+
 Immediate Modal terminal pages without process persistence remain scoped to the
 synchronous collector until routing snapshots their trusted separate streams.
 Clear these transient receipts on return or rejection; never infer full output
