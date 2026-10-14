@@ -4,6 +4,7 @@ import {
   matchSiteOperation,
   type SiteToolMethod,
 } from "@opengeni/contracts";
+import { rateLimitIp } from "./client-ip";
 import { readHuman } from "./cookies";
 import { applySecurityHeaders, jsonError } from "./headers";
 import { signedApiRequest } from "./signing";
@@ -107,13 +108,14 @@ export async function readBodyCapped(
 /**
  * The per-Site rate-limit keys. The client IP is always limited, and so is
  * the verified visitor when there is one: both must pass, so rotating or
- * dropping `__Host-og_v` never resets a client's budget.
+ * dropping `__Host-og_v` never resets a client's budget. IPv6 clients are
+ * keyed by their /64 prefix.
  */
 export function rateLimitKeys(
   site: Pick<SiteContext, "hostname" | "visitor" | "clientIp">,
   scope = "api",
 ): string[] {
-  const keys = [`${scope}:ip:${site.hostname}:${site.clientIp || "unknown"}`];
+  const keys = [`${scope}:ip:${site.hostname}:${rateLimitIp(site.clientIp)}`];
   if (site.visitor) keys.push(`${scope}:v:${site.hostname}:${site.visitor}`);
   return keys;
 }

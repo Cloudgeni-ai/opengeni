@@ -44,7 +44,7 @@ describe("gateway caches", () => {
     expect(HOST_MISS_CACHE_TTL).toBeLessThanOrEqual(10);
   });
 
-  test("Site HTML is served only to iframe loads, with a stable ETag", async () => {
+  test("Site HTML refuses requests that say they are not iframe loads, with a stable ETag", async () => {
     const load = (dest?: string) =>
       new Request("https://a-site.sites.test/_og/v/x", {
         headers: dest ? { "sec-fetch-dest": dest } : {},
@@ -52,7 +52,8 @@ describe("gateway caches", () => {
     expect(isFrameLoad(load("iframe"))).toBe(true);
     expect(isFrameLoad(load("document"))).toBe(false);
     expect(isFrameLoad(load("empty"))).toBe(false);
-    expect(isFrameLoad(load())).toBe(false);
+    // No Fetch Metadata at all (older browsers): served, still sandboxed by its CSP.
+    expect(isFrameLoad(load())).toBe(true);
     expect(await siteHtmlEtag("<p>a</p>")).toBe(await siteHtmlEtag("<p>a</p>"));
     expect(await siteHtmlEtag("<p>a</p>")).not.toBe(await siteHtmlEtag("<p>b</p>"));
     expect(await siteHtmlEtag("<p>a</p>")).toMatch(/^"[0-9a-f]{32}"$/u);

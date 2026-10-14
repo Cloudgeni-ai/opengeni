@@ -495,9 +495,11 @@ describe("site gateway in workerd", () => {
 
   test("version HTML loads only in the frame, revalidates with an ETag and is edge-cached", async () => {
     const before = htmlFetches;
-    // A top-level navigation (or no Fetch Metadata at all) goes back to the shell.
-    for (const headers of [{ "sec-fetch-dest": "document" }, {}]) {
-      const direct = await get("cache", `/_og/v/${VERSION}`, { headers });
+    // A request that says it is a top-level navigation or a fetch goes back to the shell.
+    for (const dest of ["document", "empty"]) {
+      const direct = await get("cache", `/_og/v/${VERSION}`, {
+        headers: { "sec-fetch-dest": dest },
+      });
       expect(direct.status).toBe(302);
       expect(direct.headers.get("location")).toBe("/");
       expect(await direct.text()).toBe("");
@@ -561,6 +563,34 @@ describe("site gateway in workerd", () => {
     const gone = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
     expect(gone.status).toBe(410);
     expect(await gone.text()).not.toContain("Hello Site");
+  });
+
+  test("browsers that send no Fetch Metadata still get the sandboxed Site HTML", async () => {
+    const response = await get("pub", `/_og/v/${VERSION}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
+    expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    expect(await response.text()).toContain("Hello Site");
+  });
+
+  test("IPv6 clients share one budget per /64", async () => {
+    let limited = 0;
+    for (let index = 0; index < RATE_LIMIT + 5; index += 1) {
+      const response = await get("limit", "/_og/api/site/config", {
+        headers: {
+          origin: `https://limit.${DOMAIN}`,
+          "cf-connecting-ip": `2001:db8:77:1::${(index + 1).toString(16)}`,
+        },
+      });
+      if (response.status === 429) limited += 1;
+      await response.text();
+    }
+    expect(limited).toBeGreaterThan(0);
+    const otherPrefix = await get("limit", "/_og/api/site/config", {
+      headers: { origin: `https://limit.${DOMAIN}`, "cf-connecting-ip": "2001:db8:77:2::1" },
+    });
+    expect(otherPrefix.status).toBe(200);
+    await otherPrefix.text();
   });
 
   test("a trailing-dot host redirects to the canonical host", async () => {
@@ -736,7 +766,9 @@ describe("site gateway in workerd", () => {
     expect(sent.status).toBe(200);
     const sentPage = await sent.text();
     expect(sentPage).toContain("Report sent");
-    expect(sentPage).toContain("sent to the Site&#39;s owners and to Opengeni&#39;s abuse team");
+    expect(sentPage).toContain(
+      "sent to the Site&#39;s owners and to the abuse team of this service",
+    );
     expect(sentPage).toContain(`mailto:abuse@${DOMAIN}`);
     const upstream = lastTo("/site/reports")!;
     expect(upstream.verified).toBe(true);

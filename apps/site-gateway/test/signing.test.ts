@@ -1,8 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, createHmac } from "node:crypto";
 import { siteGatewayCanonicalString, type SiteGatewaySignedFields } from "@opengeni/contracts";
-import { signGatewayFields, signedApiRequest } from "../src/signing";
-import { TEST_SECRET, verifyGatewaySignature } from "./helpers";
+import {
+  SITE_GATEWAY_BODY_SHA256_HEADER,
+  signGatewayFields,
+  signedApiRequest,
+} from "../src/signing";
+import {
+  BODY_SHA256_HEADER,
+  TEST_SECRET,
+  verifyGatewayHeaders,
+  verifyGatewaySignature,
+} from "./helpers";
 
 const fields: SiteGatewaySignedFields = {
   method: "post",
@@ -75,5 +84,33 @@ describe("gateway request signing", () => {
     expect(
       verifyGatewaySignature(TEST_SECRET, request, new Uint8Array(), Date.now() - 120_000),
     ).toBe(true);
+    expect(request.headers.get(BODY_SHA256_HEADER)).toBe(
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+  });
+
+  test("the body hash header lets the API verify before reading the body", async () => {
+    const body = new TextEncoder().encode('{"a":1}');
+    const request = await signedApiRequest(
+      { apiOrigin: "https://api.example.test", secret: TEST_SECRET },
+      { host: "a-site.sites.test", session: "", visitor: "v", clientIp: "", human: false },
+      { method: "POST", suffix: "/sessions", body },
+    );
+    expect(SITE_GATEWAY_BODY_SHA256_HEADER).toBe(BODY_SHA256_HEADER);
+    expect(request.headers.get(BODY_SHA256_HEADER)).toBe(
+      createHash("sha256").update(body).digest("hex"),
+    );
+    // Headers alone verify, without touching the body stream.
+    expect(verifyGatewayHeaders(TEST_SECRET, request)).toBe(true);
+    expect(request.bodyUsed).toBe(false);
+    // A forged hash breaks the signature; a body that doesn't match the hash fails after reading.
+    const forged = new Headers(request.headers);
+    forged.set(BODY_SHA256_HEADER, createHash("sha256").update("other").digest("hex"));
+    expect(
+      verifyGatewayHeaders(TEST_SECRET, { method: "POST", url: request.url, headers: forged }),
+    ).toBe(false);
+    expect(verifyGatewaySignature(TEST_SECRET, request, new TextEncoder().encode("{}"))).toBe(
+      false,
+    );
   });
 });

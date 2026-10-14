@@ -68,7 +68,7 @@ export async function handleReport(site: SiteContext): Promise<Response> {
       site,
       200,
       "Report sent",
-      "Thank you. Your report was sent to the Site's owners and to Opengeni's abuse team. For anything urgent, email the abuse team too.",
+      "Thank you. Your report was sent to the Site's owners and to the abuse team of this service. For anything urgent, email the abuse team too.",
       { href: `mailto:${site.config.abuseEmail}`, label: site.config.abuseEmail },
     );
   if (status === 429)
@@ -77,7 +77,7 @@ export async function handleReport(site: SiteContext): Promise<Response> {
     site,
     502,
     "Report not sent",
-    "The report could not be sent. Email Opengeni's abuse team instead.",
+    "The report could not be sent. Email the abuse team of this service instead.",
     { href: `mailto:${site.config.abuseEmail}`, label: site.config.abuseEmail },
   );
 }
