@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   macos:
+    environment: desktop-release
     runs-on: macos-26
     if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
     timeout-minutes: 60
