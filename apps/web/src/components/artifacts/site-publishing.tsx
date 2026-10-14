@@ -323,12 +323,16 @@ function SitePublishForm({
 
   const labelUnchanged = saved?.label === draft.label;
   const availability = useHostnameAvailability(client, workspaceId, draft.label, labelUnchanged);
-  const domain =
+  const reportedDomain =
     sites.domain ??
     domainFromHostname(saved?.hostname, saved?.label ?? "") ??
     (availability.state === "done"
       ? domainFromHostname(availability.result.hostname, availability.label)
       : null);
+  // Keep the suffix once known, so it doesn't vanish while a name is invalid.
+  const [lastDomain, setLastDomain] = useState<string | null>(reportedDomain);
+  if (reportedDomain && reportedDomain !== lastDomain) setLastDomain(reportedDomain);
+  const domain = reportedDomain ?? lastDomain;
   const localProblem = labelProblemMessage(draft.label);
   const remoteProblem =
     availability.state === "done" && availability.label === draft.label
