@@ -459,10 +459,10 @@ export async function importSiteData(
       : Math.min(SITE_DATA_IMPORT_MAX_RECORDS, request.records?.length ?? 0),
     {
       collections: [collection],
-      // The text to parse and check: CSV characters or the records' JSON.
+      // The JSON to check: estimated from the CSV, or the records' JSON.
       bytes:
         request.format === "csv"
-          ? (request.csv ?? "").length
+          ? csvValidationBytes(request.csv ?? "")
           : siteDataValidationBytes(request.records ?? []),
     },
   );
@@ -531,6 +531,16 @@ export function siteDataImportFailure(error: unknown, imported: number): unknown
 }
 
 /** Line breaks in CSV text: an upper bound on its records after the header. */
+/**
+ * About how much JSON a CSV becomes once parsed: its text, plus the header
+ * repeated as field names on every row.
+ */
+export function csvValidationBytes(csv: string): number {
+  const headerEnd = csv.search(/\r|\n/);
+  const headerLength = headerEnd < 0 ? csv.length : headerEnd;
+  return csv.length + csvLineBreaks(csv) * headerLength;
+}
+
 function csvLineBreaks(csv: string): number {
   let breaks = 0;
   for (let index = 0; index < csv.length; index += 1) {

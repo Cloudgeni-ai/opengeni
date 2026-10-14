@@ -2415,6 +2415,69 @@ test("a large write racing many tiny patches keeps the windows within their boun
   });
 });
 
+test("concurrent increments on a large record are never refused as grown", async () => {
+  await withinOneMinute(async () => {
+    const { f, s } = await mergeFixture();
+    await withValidationClock(
+      () => 0,
+      async () => {
+        const record = { n: 0, pad: "x".repeat(120_000) };
+        expect(
+          (await s.write(f.owner, [{ op: "put", collection: "big", key: "k120", data: record }]))
+            .status,
+        ).toBe(200);
+        // Each re-check under the lock of a record another increment changed
+        // uses what its check before the lock counted: no growth, no 409.
+        const bumps = await Promise.all(
+          Array.from({ length: 10 }, () =>
+            s.write(f.member, [{ op: "increment", collection: "big", key: "k120", field: "n" }]),
+          ),
+        );
+        expect(bumps.map((bump) => bump.status)).toEqual(Array.from({ length: 10 }, () => 200));
+        const stored = await s.get(f.owner, { collection: "big", key: "k120" });
+        expect(stored.json.record.data.n).toBe(10);
+      },
+    );
+  });
+});
+
+test("CSV imports into a collection with a schema are never refused as grown", async () => {
+  await withinOneMinute(async () => {
+    const f = await fixture();
+    const s = f.site((await f.publish("CSV schema")).id);
+    const csv = (columns: number, rows: number) => {
+      const header = Array.from({ length: columns }, (_, c) => `column_${c}`).join(",");
+      const body = Array.from({ length: rows }, (_row, r) =>
+        Array.from({ length: columns }, (_, c) => `v${r}x${c}`).join(","),
+      );
+      return `${header}\n${body.join("\n")}\n`;
+    };
+    const jsonSchema = {
+      type: "object",
+      properties: { column_0: { type: "string" }, column_1: { type: "string" } },
+    };
+    await withValidationClock(
+      () => 0,
+      async () => {
+        for (const [name, columns, rows] of [
+          ["narrow", 8, 1_000],
+          ["wide", 200, 100],
+        ] as const) {
+          expect((await s.define(f.owner, name, { accessMode: "shared", jsonSchema })).status).toBe(
+            201,
+          );
+          const imported = await s.request(f.owner, "POST", `/data/collections/${name}/import`, {
+            format: "csv",
+            csv: csv(columns, rows),
+          });
+          expect(imported.status, name).toBe(200);
+          expect(imported.json.imported, name).toBe(rows);
+        }
+      },
+    );
+  });
+});
+
 test("25 concurrent small patches on small records all succeed", async () => {
   const { f, s } = await mergeFixture();
   const patches = await Promise.all(
@@ -2768,15 +2831,28 @@ test("a record that grew past the request's reservation is refused before it is 
       const httpError = siteDataHttpError(grew);
       expect(httpError.status).toBe(409);
       expect(httpError.retryable).toBe(true);
-      // Records add up: the prevalidated 20 KB merge counted, then two more
-      // 20 KB records reach 60 ms, past 25 + 25 ms.
+      // Re-checking the merge counted before the lock uses that count first:
+      // a record that changed but did not grow is not refused, while new
+      // records add up (20 + 20 ms fit 25 + 25 ms; a third 20 KB does not).
       const many = await prevalidateSiteDataWrite(
         access,
         [{ op: "patch", collection: "rows", key: "a", data: { n: 1 } }],
         { reservedMs: 25 },
       );
       expect(many.validate!(schema, pad(20_001))).toBeNull();
-      expect(refusal(() => many.validate!(schema, pad(20_002))).details.reason).toBe("record_grew");
+      expect(many.validate!(schema, pad(20_002))).toBeNull();
+      expect(refusal(() => many.validate!(schema, pad(20_003))).details.reason).toBe("record_grew");
+      // A 40 KB record re-checked twice under the lock after one check
+      // before it (credit 40 ms, then 40 ms more) fits 40 + 25 + 25 ms.
+      stored = pad(40_000);
+      const twice = await prevalidateSiteDataWrite(
+        access,
+        [{ op: "patch", collection: "rows", key: "a", data: { n: 1 } }],
+        { reservedMs: 65 },
+      );
+      expect(twice.validate!(schema, pad(40_001))).toBeNull();
+      expect(twice.validate!(schema, pad(40_002))).toBeNull();
+      stored = pad(20_000);
       // A reservation at the budget cannot grow on a retry: the time budget applies.
       const full = await prevalidateSiteDataWrite(
         access,
@@ -2789,19 +2865,18 @@ test("a record that grew past the request's reservation is refused before it is 
         { op: "patch", collection: "rows", key: "a", data: { n: 1 } },
       ]);
       expect(none.validate!(schema, pad(200_000))).toBeNull();
-      // Records checked before the lock count too: a 100 KB insert that
-      // reserved 125 ms leaves no room for a 60 KB merge under the lock.
+      // Inserts and puts are known at admission and stay on the time budget:
+      // a 100 KB insert on a 25 ms reservation is checked, and leaves the
+      // merge's room untouched.
       const inserted = await prevalidateSiteDataWrite(
         access,
         [
           { op: "insert", collection: "rows", data: pad(100_000) },
           { op: "patch", collection: "rows", key: "a", data: { n: 1 } },
         ],
-        { reservedMs: 125 },
+        { reservedMs: 25 },
       );
-      expect(refusal(() => inserted.validate!(schema, pad(60_000))).details.reason).toBe(
-        "record_grew",
-      );
+      expect(inserted.validate!(schema, pad(20_001))).toBeNull();
       // A record that grew before the request checked it is refused there.
       stored = pad(200_000);
       const early = await prevalidateSiteDataWrite(

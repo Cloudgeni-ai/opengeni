@@ -511,14 +511,16 @@ function contentDigest(value: unknown): string {
  * are used: a schema that changed since is a retryable `conflict`
  * (reason `schema_changed`), never a compile under the Site's lock.
  *
- * With `reservedMs` (what the request reserved at admission), every record
- * it checks, before or inside the write, is counted at 1 µs per byte of
- * JSON, and a record is refused before it is checked when the request's
- * total would pass its reservation by more than 25 ms. That happens when a
- * record grew after admission (a large write landing first): a retryable
- * `conflict` (reason `record_grew`), so the retry reserves for its real size.
- * A reservation already at the budget cannot grow on a retry, so it is held
- * to the time budget instead.
+ * With `reservedMs` (what the request reserved at admission), every patch
+ * or increment result it checks is counted at 1 µs per byte of JSON, and one
+ * is refused before it is checked when the request's total would pass its
+ * reservation by more than 25 ms. That happens when a record grew after
+ * admission (a large write landing first): a retryable `conflict` (reason
+ * `record_grew`), so the retry reserves for its real size. A re-check inside
+ * the write first uses what the check before the lock already counted, so
+ * only real growth counts. Inserts, puts and imports carry their data at
+ * admission and stay on the time budget, as does a reservation already at
+ * the budget (a retry could not reserve more).
  */
 export async function prevalidateSiteDataWrite(
   access: Pick<SiteDataAccess, "store" | "caller" | "limits" | "writeOptions">,
@@ -527,25 +529,32 @@ export async function prevalidateSiteDataWrite(
 ): Promise<SiteDataWriteOptions> {
   const budgetMs = options.budgetMs ?? SITE_DATA_VALIDATION_BUDGET_MS;
   const meter = options.meter ?? { ms: 0 };
-  // What this request has checked, at the reservation's 1 µs per byte. Only
-  // a reservation below the budget is enforced: a retry could reserve more.
+  // The merged records this request has checked, at the reservation's 1 µs
+  // per byte. Only a reservation below the budget is enforced: a retry could
+  // reserve more.
   const reservedMs =
     options.reservedMs !== undefined && options.reservedMs < budgetMs
       ? options.reservedMs
       : undefined;
   let checkedMs = 0;
-  const reserveFor = (data: Record<string, unknown>) => {
+  // What the checks before the lock counted, which re-checks inside the
+  // write use first: checking the same record again is not growth.
+  let creditMs = 0;
+  const reserveForMerge = (data: Record<string, unknown>, recheck: boolean) => {
     const needMs = jsonBytes(data) * SITE_DATA_VALIDATION_RESERVE_MS_PER_BYTE;
+    const fromCredit = recheck ? Math.min(creditMs, needMs) : 0;
+    const addMs = needMs - fromCredit;
     if (
       reservedMs !== undefined &&
-      checkedMs + needMs > reservedMs + SITE_DATA_VALIDATION_RESERVE_SLACK_MS
+      checkedMs + addMs > reservedMs + SITE_DATA_VALIDATION_RESERVE_SLACK_MS
     )
       throw new SiteDataError(
         "conflict",
         "A record grew after this request reserved time to check it against the schema; send it again",
         { reason: "record_grew", retryable: true },
       );
-    checkedMs += needMs;
+    creditMs = recheck ? creditMs - fromCredit : creditMs + needMs;
+    checkedMs += addMs;
   };
   let requestBytes = 0;
   for (const op of operations)
@@ -632,7 +641,6 @@ export async function prevalidateSiteDataWrite(
       if (!isRecordObject(op.data)) return;
       // Oversized records are refused by the store's size check instead.
       if (jsonBytes(op.data) > access.limits.maxRecordBytes) return;
-      reserveFor(op.data);
       const problem = check(validator, op.data);
       if (problem)
         throw new SiteDataError(
@@ -648,7 +656,7 @@ export async function prevalidateSiteDataWrite(
       const merged = mergedRecord(op, stored ? stored.data : null);
       if (!merged || jsonBytes(merged) > access.limits.maxRecordBytes) return;
       // A record that grew since admission is sent again, not checked here.
-      reserveFor(merged);
+      reserveForMerge(merged, false);
       // An invalid result is left to the write, which sees the current record.
       if (check(validator, merged) === null) validatedMerges.set(contentDigest(merged), validator);
     }
@@ -678,11 +686,12 @@ export async function prevalidateSiteDataWrite(
       if (validated.get(data) === known) return null;
       if (validatedMerges.size > 0 && validatedMerges.get(contentDigest(data)) === known)
         return null;
-      // A record checked here must fit what the request reserved (with some
-      // slack): a merge into a record that grew after admission is sent
-      // again, reserving for its real size, instead of being checked under
-      // the Site's lock.
-      reserveFor(data);
+      // Only patch and increment results get here (inserts and puts were
+      // checked before the lock). One must fit what the request reserved,
+      // with some slack: a merge into a record that grew after admission is
+      // sent again, reserving for its real size, instead of being checked
+      // under the Site's lock.
+      reserveForMerge(data, true);
       // Anything left for inside the write stays on the request's budget; a
       // single-operation request still completes its one record.
       if (operations.length > 1 && measured > 0 && spentMs > budgetMs) throw overBudget();
