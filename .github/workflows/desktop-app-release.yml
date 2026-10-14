@@ -86,7 +86,21 @@ jobs:
 
           key_dir="$RUNNER_TEMP/asc"
           mkdir -p "$key_dir"
-          printf '%s' "$APPLE_ASC_KEY" | jq -r .private_key > "$key_dir/key.p8"
+          # The secret is the App Store Connect key JSON the agent release passes
+          # to rcodesign, whose private_key is base64 PKCS#8 DER; notarytool
+          # needs it as a PEM .p8 file. Accept an already-armored key as well.
+          private_key="$(printf '%s' "$APPLE_ASC_KEY" | jq -r .private_key)"
+          if printf '%s' "$private_key" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$private_key" > "$key_dir/key.p8"
+          else
+            {
+              echo "-----BEGIN PRIVATE KEY-----"
+              printf '%s' "$private_key" | tr -d '\n\r ' | fold -w 64
+              echo
+              echo "-----END PRIVATE KEY-----"
+            } > "$key_dir/key.p8"
+          fi
+          openssl pkey -in "$key_dir/key.p8" -noout
           {
             echo "APPLE_API_KEY=$key_dir/key.p8"
             echo "APPLE_API_KEY_ID=$(printf '%s' "$APPLE_ASC_KEY" | jq -r .key_id)"
