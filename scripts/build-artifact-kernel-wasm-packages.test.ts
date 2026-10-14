@@ -148,9 +148,9 @@ test("version automation regenerates WASM identity without forcing peer dependen
   const reactPackage = JSON.parse(reactPackageRaw) as {
     peerDependencies?: Record<string, string>;
   };
-  const artifactToolMajor = (JSON.parse(artifactToolPackageRaw) as { version: string }).version.split(
-    ".",
-  )[0];
+  const artifactToolMajor = (
+    JSON.parse(artifactToolPackageRaw) as { version: string }
+  ).version.split(".")[0];
 
   expect(rootPackage.scripts?.["changeset:version"]).toBe(
     "changeset version && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
