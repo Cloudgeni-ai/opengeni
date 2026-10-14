@@ -1893,6 +1893,18 @@ export async function stopEndedManagedBrowserProcess(
   );
 }
 
+/** Read-only proof that no process is running a browser on this exact private
+ * profile, with the same standard as an exact-directory relaunch: a complete
+ * process inventory on Linux; elsewhere absence is unproven and refused. */
+export async function assertManagedBrowserProfileUnused(profileDirectory: string): Promise<void> {
+  if (process.platform !== "linux") {
+    throw new AgentBrowserCommandError("process_failed", "exact profile absence is unproven");
+  }
+  if (await findLinuxManagedBrowserProcess(profileDirectory, null, true)) {
+    throw new AgentBrowserCommandError("process_failed", "another process owns the exact profile");
+  }
+}
+
 async function stopIdentifiedProcess(pid: number): Promise<void> {
   signalProcess(pid, "SIGTERM");
   if (await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS)) return;

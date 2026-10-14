@@ -1400,9 +1400,12 @@ describe("BrowserSession route discipline", () => {
       settle.indexOf("withBrowserPlacement("),
     );
     expect(settle).toContain("binding.placementInstanceId");
-    expect(settle.indexOf("endCapturedBrowserController(")).toBeLessThan(
+    // An interrupted launch is set aside intact, never discarded.
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeGreaterThan(-1);
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeLessThan(
       settle.indexOf("settleExpiredBrowserSessionResume(deps.db"),
     );
+    expect(settle).not.toContain("discardWorkingRuntime");
     expect(settle).toContain("expectedControllerGeneration: expired.controllerGeneration");
   });
 

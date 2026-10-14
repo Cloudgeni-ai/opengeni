@@ -218,7 +218,10 @@ import {
   wrapBrowserStateDataKey,
 } from "../browser-state-authority";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
-import { endBrowserDiscardingLostRuntime } from "../browser-lost-runtime-end";
+import {
+  endBrowserDiscardingLostRuntime,
+  endExpiredResumeSettingAsideInterruptedLaunch,
+} from "../browser-lost-runtime-end";
 import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
@@ -3710,9 +3713,14 @@ export function registerBrowserSessionRoutes(
             placement,
             requestOrigin(context, deps.settings),
           );
-          // A resident or provably never-completed launch is ended exactly; a
-          // possibly accepted launch stays preserved and refuses this resume.
-          await endCapturedBrowserController(client, browserSessionId, binding);
+          // A resident or provably never-completed launch is ended exactly; an
+          // interrupted launch whose profile no browser runs is set aside
+          // intact; a launch that completed (adoptable) or whose profile may
+          // be in use stays preserved and refuses this resume.
+          await endExpiredResumeSettingAsideInterruptedLaunch(client, {
+            browserSessionId,
+            controllerGeneration: binding.controllerGeneration,
+          });
         },
       );
     }

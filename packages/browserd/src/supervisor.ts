@@ -66,6 +66,7 @@ import {
   reapManagedBrowserProcesses,
   inspectOwnedManagedBrowserProcess,
   stopEndedManagedBrowserProcess,
+  assertManagedBrowserProfileUnused,
   type OwnedManagedBrowserProcess,
 } from "./runner";
 import {
@@ -74,6 +75,7 @@ import {
   assertWorkingRuntimeReceipt,
   boundedFailureCode,
   isAbandonedLaunchReceipt,
+  isInterruptedLaunchReceipt,
   unavailable as workingRuntimeUnavailable,
   type BrowserWorkingRuntimeAuthority,
   type BrowserWorkingRuntimeReceipt,
@@ -295,6 +297,9 @@ export type BrowserSupervisorOptions = {
   /** Stops a browser an explicitly ended, non-resident session left running;
    * tests observe the exact recorded process instead of signalling it. */
   stopEndedProcess?: typeof stopEndedManagedBrowserProcess;
+  /** Proves no process runs a browser on an exact private profile before an
+   * interrupted launch is set aside; tests supply the outcome. */
+  assertProfileUnused?: typeof assertManagedBrowserProfileUnused;
 };
 
 type Runtime = {
@@ -361,6 +366,7 @@ export class BrowserSupervisor {
   private readonly uploadDownload: typeof uploadBrowserDownload;
   private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
   private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
+  private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
@@ -403,6 +409,7 @@ export class BrowserSupervisor {
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
     this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
     this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
+    this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
   }
 
   private async createEphemeralDriver(
@@ -916,6 +923,11 @@ export class BrowserSupervisor {
        * paths (a failed or expired resume) never set this, so a possibly
        * accepted launch stays preserved for recovery there. */
       discardWorkingRuntime?: boolean;
+      /** The control plane is returning an expired resume to its checkpoint:
+       * when this generation's launch never recorded completion and no
+       * process runs its profile, move its whole session directory aside
+       * intact instead of refusing. Nothing is deleted. */
+      setAsideInterruptedLaunch?: boolean;
     } = {},
   ): Promise<void> {
     return await this.finishSession(reference, options, false);
@@ -923,7 +935,11 @@ export class BrowserSupervisor {
 
   private async finishSession(
     reference: BrowserSessionReference,
-    options: { removeState?: boolean; discardWorkingRuntime?: boolean },
+    options: {
+      removeState?: boolean;
+      discardWorkingRuntime?: boolean;
+      setAsideInterruptedLaunch?: boolean;
+    },
     suspendForShutdown: boolean,
   ): Promise<void> {
     if (!isUuid(reference.browserSessionId)) throw new Error("browserSessionId must be a UUID");
@@ -951,6 +967,14 @@ export class BrowserSupervisor {
           !suspendForShutdown
         ) {
           await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
+          return;
+        }
+        if (
+          options.removeState === true &&
+          options.setAsideInterruptedLaunch === true &&
+          !suspendForShutdown
+        ) {
+          await this.setAsideInterruptedLaunch(reference, sessionDirectory);
           return;
         }
         await this.cleanupAbandonedLaunch(
@@ -1941,6 +1965,66 @@ export class BrowserSupervisor {
       force: true,
     });
     await rm(sessionDirectory, { recursive: true, force: true });
+  }
+
+  /** Move an interrupted launch of this exact generation out of the session's
+   * path so the same browser can be restored from its checkpoint under a new
+   * generation. Only a launch that never recorded completion (no owned
+   * process) qualifies; a completed launch must be adopted instead. The move
+   * is a same-filesystem rename of the whole session directory, so its
+   * profile, journals and receipts are kept byte for byte under
+   * `set-aside/<browserSessionId>/<controllerGeneration>`. It happens only
+   * after a complete process inventory proves no browser runs that profile. */
+  private async setAsideInterruptedLaunch(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+  ): Promise<void> {
+    // The generation names the set-aside directory: one plain path segment.
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(reference.controllerGeneration) ||
+      reference.controllerGeneration.includes("..")
+    )
+      throw workingRuntimeUnavailable();
+    let latest: BrowserWorkingRuntimeReceipt | null;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        {
+          sessionDirectory,
+          browserSessionId: reference.browserSessionId,
+          controllerGeneration: reference.controllerGeneration,
+        },
+        true,
+      );
+      try {
+        latest = reader.latest();
+      } finally {
+        reader.close();
+      }
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    if (!isInterruptedLaunchReceipt(latest)) throw workingRuntimeUnavailable();
+    try {
+      await this.assertProfileUnused(join(sessionDirectory, "profile"));
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    const setAsideParent = join(this.rootDirectory, "set-aside", reference.browserSessionId);
+    await mkdir(setAsideParent, { recursive: true, mode: 0o700 });
+    await chmod(setAsideParent, 0o700);
+    const target = join(setAsideParent, reference.controllerGeneration);
+    try {
+      await lstat(target);
+      // A generation is set aside at most once; never overwrite evidence.
+      throw workingRuntimeUnavailable();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await rename(sessionDirectory, target);
+    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
+      recursive: true,
+      force: true,
+    });
   }
 
   private retireWorkingRuntime(runtime: Runtime) {
