@@ -45,6 +45,7 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "git smart-HTTP passthrough and plain-text broker errors",
   },
+  "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
   "workspace-artifacts.ts": { count: 1, userContent: true, why: "Site HTML (opaque origin)" },
   "workspace-state.ts": { count: 1, userContent: true, why: "workspace state export" },
 };
@@ -65,6 +66,8 @@ const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: n
   "routes/workspace-capture.ts": { calls: 2, withUserContentOptions: 0 },
   // Site HTML downloads; the JSON source bundle is never active markup.
   "site-uploads.ts": { calls: 2, withUserContentOptions: 1 },
+  // Site Data file downloads.
+  "site-data/operations.ts": { calls: 1, withUserContentOptions: 1 },
 };
 
 async function sourceFiles(directory: URL, prefix = ""): Promise<string[]> {
@@ -247,6 +250,7 @@ describe("user-content response headers", () => {
       "routes/workspace-state.ts",
       "routes/computer-sessions.ts",
       "routes/browser-sessions.ts",
+      "routes/site-data.ts",
     ]) {
       expect({
         path,
