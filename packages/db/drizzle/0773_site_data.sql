@@ -165,13 +165,25 @@ CREATE TABLE site_data_rate_windows (
     REFERENCES workspace_artifacts(workspace_id, id) ON DELETE CASCADE
 );
 
+-- Fixed one-minute window of schema-validation time across a workspace's Sites.
+CREATE TABLE site_data_validation_windows (
+  account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  window_started_at timestamptz NOT NULL,
+  validation_micros bigint NOT NULL CHECK (validation_micros >= 0),
+  PRIMARY KEY (workspace_id),
+  CONSTRAINT site_data_validation_windows_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE
+);
+
 DO $rls$
 DECLARE
   site_data_table text;
 BEGIN
   FOREACH site_data_table IN ARRAY ARRAY[
     'site_data_collections', 'site_data_records', 'site_data_record_values',
-    'site_data_files', 'site_data_usage', 'site_data_rate_windows'
+    'site_data_files', 'site_data_usage', 'site_data_rate_windows',
+    'site_data_validation_windows'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', site_data_table);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', site_data_table);

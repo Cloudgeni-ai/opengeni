@@ -1577,6 +1577,8 @@ const SettingsSchema = z.object({
   siteDataSiteWritesPerMinute: z.coerce.number().int().positive().default(600),
   siteDataViewerReadsPerMinute: z.coerce.number().int().positive().default(600),
   siteDataManagerWritesPerMinute: z.coerce.number().int().positive().default(6_000),
+  // Schema-validation time all of a workspace's Sites may spend per minute.
+  siteDataWorkspaceValidationMsPerMinute: z.coerce.number().int().positive().default(20_000),
   siteDataMaxRecordsPerCollection: z.coerce.number().int().positive().default(100_000),
   // Explicit commercial cutover. Existing queued revisions remain unpriced;
   // only jobs created at or after this instant may enter the paid rail.
@@ -4919,6 +4921,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     siteDataSiteWritesPerMinute: optional("OPENGENI_SITE_DATA_SITE_WRITES_PER_MINUTE"),
     siteDataViewerReadsPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_READS_PER_MINUTE"),
     siteDataManagerWritesPerMinute: optional("OPENGENI_SITE_DATA_MANAGER_WRITES_PER_MINUTE"),
+    siteDataWorkspaceValidationMsPerMinute: optional(
+      "OPENGENI_SITE_DATA_WORKSPACE_VALIDATION_MS_PER_MINUTE",
+    ),
     siteDataMaxRecordsPerCollection: optional("OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION"),
     documentEmbeddingCreditsActivatedAt: optional(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",

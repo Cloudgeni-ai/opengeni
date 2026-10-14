@@ -184,3 +184,10 @@ export const siteDataRateWindows = pgTable(
     pk: primaryKey({ columns: [table.workspaceId, table.siteId, table.principalKey] }),
   }),
 );
+
+export const siteDataValidationWindows = pgTable("site_data_validation_windows", {
+  accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").primaryKey(),
+  windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+  validationMicros: bigint("validation_micros", { mode: "number" }).notNull(),
+});

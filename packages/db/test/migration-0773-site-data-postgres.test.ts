@@ -25,6 +25,7 @@ const TABLES = [
   "site_data_record_values",
   "site_data_records",
   "site_data_usage",
+  "site_data_validation_windows",
 ];
 const limits: SiteDataLimits = {
   recordBytesPerSite: 1_000_000,
@@ -38,6 +39,7 @@ const limits: SiteDataLimits = {
   siteWritesPerMinute: 1_000,
   viewerReadsPerMinute: 1_000,
   managerWritesPerMinute: 1_000,
+  workspaceValidationMsPerMinute: 20_000,
 };
 
 let shared: SharedTestDatabase;

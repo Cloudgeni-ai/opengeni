@@ -67,6 +67,9 @@ export type SiteDataCaller = SiteDataScope & {
   framed: boolean;
 };
 
+/** Each started 5 ms of schema validation counts one more write operation. */
+export const SITE_DATA_VALIDATION_MS_PER_OPERATION = 5;
+
 export type SiteDataLimits = {
   recordBytesPerSite: number;
   maxRecordBytes: number;
@@ -80,6 +83,8 @@ export type SiteDataLimits = {
   viewerReadsPerMinute: number;
   /** Write operations per minute by all of a Site's managers (API and agent tools). */
   managerWritesPerMinute: number;
+  /** Schema-validation milliseconds per minute across all of a workspace's Sites. */
+  workspaceValidationMsPerMinute: number;
 };
 
 export type SiteDataCollectionDefinition = {
@@ -266,6 +271,17 @@ export interface SiteDataStore {
     caller: SiteDataCaller,
     kind: "write" | "read",
     operations: number,
+    limits: SiteDataLimits,
+  ): Promise<void>;
+  /**
+   * Charge schema-validation time after a write, whatever its outcome: one
+   * more operation on the caller's write windows per started 5 ms (from 1 ms;
+   * never refused, the work is done), and the time on the workspace's
+   * validation window, which consumeRate checks before every write.
+   */
+  chargeValidation(
+    caller: SiteDataCaller,
+    validationMs: number,
     limits: SiteDataLimits,
   ): Promise<void>;
   deleteFile(caller: SiteDataCaller, fileId: string): Promise<SiteDataStoredFile>;
@@ -774,6 +790,46 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     return collection;
   };
 
+  /**
+   * The write windows a caller counts against: managers share one generous
+   * window per Site, apart from viewers and Site frames, who count per person
+   * and per Site.
+   */
+  const writeWindows = (
+    caller: SiteDataCaller,
+    limits: SiteDataLimits,
+  ): Array<[string, number, string]> =>
+    caller.role === "manager" && !caller.framed
+      ? [["manager:*", limits.managerWritesPerMinute, "This Site's managers are writing too fast."]]
+      : [
+          [caller.principal, limits.viewerWritesPerMinute, "Too many writes."],
+          ["*", limits.siteWritesPerMinute, "This Site is receiving too many writes."],
+        ];
+
+  /** Add operations to one fixed one-minute window and return its total. */
+  const countRateWindow = async (
+    tx: Database,
+    caller: SiteDataCaller,
+    principal: string,
+    operations: number,
+  ) => {
+    const [row] = await rawRows<{ operations: number }>(
+      tx,
+      sql`insert into site_data_rate_windows
+          (account_id, workspace_id, site_id, principal_key, window_started_at, operations)
+        values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId}, ${principal},
+          date_trunc('minute', now()), ${operations})
+        on conflict (workspace_id, site_id, principal_key) do update set
+          operations = case
+            when site_data_rate_windows.window_started_at = excluded.window_started_at
+            then least(site_data_rate_windows.operations + excluded.operations, 1000000000)
+            else excluded.operations end,
+          window_started_at = excluded.window_started_at
+        returning operations`,
+    );
+    return row?.operations ?? 0;
+  };
+
   /** Serialize every write to one Site's data and return its totals. */
   const lockUsage = async (tx: Database, scope: SiteDataScope) => {
     await tx.execute(
@@ -1010,45 +1066,56 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async consumeRate(caller, kind, operations, limits) {
-      const manager = caller.role === "manager" && !caller.framed;
       const windows: Array<[string, number, string]> =
         kind === "read"
           ? [[`read:${caller.principal}`, limits.viewerReadsPerMinute, "Too many requests."]]
-          : manager
-            ? // Managers share one generous window per Site, apart from viewers'.
-              [
-                [
-                  "manager:*",
-                  limits.managerWritesPerMinute,
-                  "This Site's managers are writing too fast.",
-                ],
-              ]
-            : [
-                [caller.principal, limits.viewerWritesPerMinute, "Too many writes."],
-                ["*", limits.siteWritesPerMinute, "This Site is receiving too many writes."],
-              ];
+          : writeWindows(caller, limits);
       // Committed on its own, before any work, so failed attempts count too.
       await scoped(caller, async (tx) => {
-        for (const [principal, limit, message] of windows) {
-          const [row] = await rawRows<{ operations: number }>(
+        if (kind === "write") {
+          const [spent] = await rawRows<{ validation_micros: string | number }>(
             tx,
-            sql`insert into site_data_rate_windows
-                (account_id, workspace_id, site_id, principal_key, window_started_at, operations)
-              values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId}, ${principal},
-                date_trunc('minute', now()), ${operations})
-              on conflict (workspace_id, site_id, principal_key) do update set
-                operations = case
-                  when site_data_rate_windows.window_started_at = excluded.window_started_at
-                  then least(site_data_rate_windows.operations + excluded.operations, 1000000000)
-                  else excluded.operations end,
-                window_started_at = excluded.window_started_at
-              returning operations`,
+            sql`select validation_micros from site_data_validation_windows
+              where workspace_id = ${caller.workspaceId}
+                and window_started_at = date_trunc('minute', now())`,
           );
-          if ((row?.operations ?? 0) > limit)
+          if (num(spent?.validation_micros) > limits.workspaceValidationMsPerMinute * 1000)
+            throw new SiteDataError(
+              "rate_limited",
+              "This workspace's Sites have used their schema-checking time for this minute. Try again in a minute.",
+              { retryAfterSeconds: 60, quota: "workspace_validation_time" },
+            );
+        }
+        for (const [principal, limit, message] of windows) {
+          const total = await countRateWindow(tx, caller, principal, operations);
+          if (total > limit)
             throw new SiteDataError("rate_limited", `${message} Try again in a minute.`, {
               retryAfterSeconds: 60,
             });
         }
+      });
+    },
+
+    async chargeValidation(caller, validationMs, limits) {
+      if (!(validationMs > 0)) return;
+      const extra =
+        validationMs < 1 ? 0 : Math.ceil(validationMs / SITE_DATA_VALIDATION_MS_PER_OPERATION);
+      const micros = Math.min(Math.ceil(validationMs * 1000), 1_000_000_000_000);
+      await scoped(caller, async (tx) => {
+        for (const [principal] of writeWindows(caller, limits))
+          if (extra > 0) await countRateWindow(tx, caller, principal, extra);
+        await tx.execute(
+          sql`insert into site_data_validation_windows
+              (account_id, workspace_id, window_started_at, validation_micros)
+            values (${caller.accountId}, ${caller.workspaceId}, date_trunc('minute', now()), ${micros})
+            on conflict (workspace_id) do update set
+              validation_micros = case
+                when site_data_validation_windows.window_started_at = excluded.window_started_at
+                then least(site_data_validation_windows.validation_micros + excluded.validation_micros,
+                  1000000000000000)
+                else excluded.validation_micros end,
+              window_started_at = excluded.window_started_at`,
+        );
       });
     },
 
@@ -1777,7 +1844,10 @@ export async function getSiteDataSite(
 
 /** What Site Data needs to know about the session an agent acts in. */
 export type SiteDataAgentSession = {
-  /** Distinct Site origins on the session and its spawning ancestors. */
+  /**
+   * Distinct Site origins on the session, its spawning ancestors and its
+   * root session (read directly, so a lineage too deep to walk still finds it).
+   */
   originSiteIds: string[];
   /** Whether the current turn or a spawning ancestor turn arrived from a Site page. */
   siteTurn: boolean;
@@ -1844,6 +1914,13 @@ export async function getSiteDataAgentSession(
     if (!rows[0]?.found) return unknown;
     const deepest = rows[rows.length - 1]!;
     const complete = rows.every((row) => row.found) && deepest.parent_session_id === null;
+    const [root] = await rawRows<{ origin_site_id: string | null }>(
+      tx,
+      sql`select r.metadata->'_opengeniSiteOrigin'->>'siteId' as origin_site_id
+            from sessions s
+            join sessions r on r.workspace_id = s.workspace_id and r.id = s.root_session_id
+           where s.workspace_id = ${scope.workspaceId} and s.id = ${sessionId}`,
+    );
     const [run] = await rawRows<{ task_id: string }>(
       tx,
       sql`select task_id from scheduled_task_runs
@@ -1852,7 +1929,11 @@ export async function getSiteDataAgentSession(
     );
     return {
       originSiteIds: [
-        ...new Set(rows.flatMap((row) => (row.origin_site_id ? [row.origin_site_id] : []))),
+        ...new Set(
+          [...rows, ...(root ? [root] : [])].flatMap((row) =>
+            row.origin_site_id ? [row.origin_site_id] : [],
+          ),
+        ),
       ],
       siteTurn: rows.some((row) => row.turn_surface === "site"),
       scheduledTaskId: run?.task_id ?? null,
