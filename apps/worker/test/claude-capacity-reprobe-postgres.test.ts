@@ -4,8 +4,9 @@
  * resumes the turn instead of leaving it parked until the stale reset. A
  * Claude 429 leaves both an exhausted account window (response headers) and
  * a cooldown of the refused model (headers and refusal settlement); only a
- * reading that confirms availability ends either. Real PostgreSQL; only the
- * usage endpoint is stubbed, and no model is called.
+ * reading that confirms availability ends either, and a cooldown ends only
+ * when the plan windows its refusal claimed are reported below the limit.
+ * Real PostgreSQL; only the usage endpoint is stubbed, and no model is called.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -14,16 +15,20 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { parseClaudeUsageHeaders } from "@opengeni/config";
 import {
   armSubscriptionCoreCapacityWait,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  decodeSubscriptionCoreClaudeQuota,
   encryptEnvironmentValue,
   enqueueSessionTurn,
   ensureManagedAccessForUser,
   readSubscriptionCoreTurnIdentity,
   SUBSCRIPTION_CORE_CLAUDE,
+  subscriptionCoreOperationConnections,
+  subscriptionCoreProvider,
   subscriptionCoreTurns,
   withSessionRlsActorContext,
   type DbClient,
@@ -34,6 +39,7 @@ import { reconcileCoreCapacityWait } from "../src/activities/subscription-core-c
 import { CLAUDE_CORE_WAIT_BINDING } from "../src/activities/subscription-core-claude-waits";
 // The Codex seam resets every provider's probe attempts (one shared limiter).
 import { resetCodexCoreUsageProbeAttempts as resetCoreUsageProbeAttempts } from "../src/activities/subscription-core-codex-quota";
+import { refreshBlockedCoreQuotaBeforeReconcile } from "../src/activities/subscription-core-usage-recheck";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 43);
@@ -134,14 +140,25 @@ async function sharedConnection(
 /**
  * The stored row a Claude 429 left days ago: the weekly account window
  * rejected until a far reset, and the refused model cooled until then (both
- * of its product ids, as the header decoder writes them).
+ * of its product ids, as the header decoder writes them), each cooldown
+ * claiming the plan windows in `claims` (default: the weekly window; a model
+ * missing from it has no claim).
  */
 async function staleClaudeLimit(
   org: Org,
   connectionId: string,
   resetsAt: number,
-  options: { window?: boolean; cooldowns?: Record<string, number> } = {},
+  options: {
+    window?: boolean;
+    cooldowns?: Record<string, number>;
+    claims?: Record<string, readonly string[]>;
+  } = {},
 ) {
+  const cooldowns = options.cooldowns ?? { [MODEL]: resetsAt, [WORKSPACE_MODEL]: resetsAt };
+  const claims =
+    options.claims ??
+    Object.fromEntries(Object.keys(cooldowns).map((modelId) => [modelId, ["seven_day"]]));
+  const observedAt = Date.now() - 4 * DAY;
   await shared!.admin`
     insert into subscription_connection_quota (
       account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
@@ -150,15 +167,77 @@ async function staleClaudeLimit(
         options.window === false
           ? []
           : [{ id: "seven_day", status: "exhausted", resetsAt, usedPercent: 100 }],
-      modelCooldowns: options.cooldowns ?? { [MODEL]: resetsAt, [WORKSPACE_MODEL]: resetsAt },
+      modelCooldowns: cooldowns,
+      modelCooldownClaims: Object.fromEntries(
+        Object.entries(claims).map(([modelId, windowIds]) => [
+          modelId,
+          { until: cooldowns[modelId], observedAt, windowIds },
+        ]),
+      ),
       exhaustedUntil: null,
       exhaustedKind: null,
       source: "response_headers",
-    })}::jsonb, connection.refresh_generation, 1, now() - interval '4 days'
+    } as never)}::jsonb, connection.refresh_generation, 1, now() - interval '4 days'
     from subscription_connections connection where connection.id = ${connectionId}::uuid`;
 }
 
-async function runningTurn(org: Org, model = MODEL) {
+/**
+ * The quota the real header decoder writes for one refused request of the
+ * Opus model at `refusedAt` (the unified rate-limit headers of its 429, with
+ * `extra` overriding them), its reset `staleReset`.
+ */
+function refusalQuota(staleReset: number, refusedAt: Date, extra: Record<string, string>) {
+  const observation = parseClaudeUsageHeaders(
+    new Headers({
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-reset": String(staleReset / 1000),
+      "anthropic-ratelimit-unified-5h-utilization": "0.03",
+      "anthropic-ratelimit-unified-7d-utilization": "0.41",
+      ...extra,
+    }),
+    refusedAt,
+    UPSTREAM_MODEL,
+  );
+  if (!observation) throw new Error("the refusal headers did not parse");
+  return decodeSubscriptionCoreClaudeQuota({
+    observation,
+    refreshGeneration: 0,
+    upstreamModelIds: [UPSTREAM_MODEL],
+  });
+}
+
+/** Stores a quota document as the core writer stores it, observed 4 days ago. */
+async function storeQuota(org: Org, connectionId: string, quota: Record<string, unknown>) {
+  const { windows, modelCooldowns, modelCooldownClaims, exhaustedUntil, exhaustedKind, source } =
+    quota;
+  await shared!.admin`
+    insert into subscription_connection_quota (
+      account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
+    ) select ${org.accountId}::uuid, ${connectionId}::uuid, ${shared!.admin.json({
+      windows,
+      modelCooldowns,
+      ...(modelCooldownClaims ? { modelCooldownClaims } : {}),
+      exhaustedUntil,
+      exhaustedKind,
+      source,
+    } as never)}::jsonb, connection.refresh_generation, 1, now() - interval '4 days'
+    from subscription_connections connection where connection.id = ${connectionId}::uuid`;
+}
+
+/** Ages the stored reading past the per-connection re-read interval. */
+async function ageReading(connectionId: string) {
+  await shared!.admin`
+    update subscription_connection_quota set updated_at = now() - interval '4 days'
+    where connection_id = ${connectionId}::uuid`;
+}
+
+/**
+ * A claimed running turn in `org.workspaceId`. `frozen` replaces the turn's
+ * accepted subscription authority (immutable, so written with triggers
+ * suspended): these tests exercise the re-read's authorization, not the
+ * acceptance writers.
+ */
+async function runningTurn(org: Org, model = MODEL, frozen?: unknown) {
   const session = await withSessionRlsActorContext({ subjectId: org.ownerSubjectId }, () =>
     createSession(client!.db, {
       accountId: org.accountId,
@@ -193,6 +272,12 @@ async function runningTurn(org: Org, model = MODEL) {
       initiator: { kind: "subject", subjectId: org.ownerSubjectId },
     }),
   );
+  if (frozen !== undefined)
+    await shared!.admin.begin(async (admin) => {
+      await admin`set local session_replication_role = replica`;
+      await admin`update session_turns set subscription_authority = ${admin.json(frozen as never)}::jsonb
+        where id = ${turn.id}::uuid`;
+    });
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client!.db, org.workspaceId, {
     sessionId: session.id,
@@ -210,7 +295,7 @@ async function runningTurn(org: Org, model = MODEL) {
     turnId: turn.id,
   });
   if (!identity) throw new Error("accepted turn identity was not readable");
-  return { identity, attemptId };
+  return { identity, attemptId, executionGeneration: claimed.turn.executionGeneration };
 }
 
 type UsageWindow = { utilization: number; resets_at: string | null } | null;
@@ -253,6 +338,10 @@ async function storedQuota(connectionId: string) {
         source: string;
         windows: { id: string; status: string; usedPercent: number | null }[];
         modelCooldowns: Record<string, number>;
+        modelCooldownClaims?: Record<
+          string,
+          { until: number; observedAt: number; windowIds: string[] }
+        >;
       };
     }[]
   >`select quota from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
@@ -382,16 +471,22 @@ describe.skipIf(!realDb)("Claude capacity waits re-read usage before a far reset
   test.each([
     ["omits the weekly account window", { seven_day: undefined }],
     ["reports the weekly account window without a percentage", { seven_day: null }],
-    ["omits the model's family window", { seven_day_opus: undefined }],
+    ["omits the claimed family window", { seven_day_opus: undefined }],
+    // The plan has no Opus limit now, but that never shows the limit that
+    // refused the model has reset.
+    ["answers the claimed family window as null", {}],
     [
-      "reports the model's family window at the limit",
+      "reports the claimed family window at the limit",
       { seven_day_opus: { utilization: 100, resets_at: null } },
     ],
   ] as const)("a reading that %s keeps the refused model cooled", async (_case, override) => {
     const org = await organization();
     const connectionId = await sharedConnection(org);
     const staleReset = Date.now() + 2 * DAY;
-    await staleClaudeLimit(org, connectionId, staleReset, { window: false });
+    await staleClaudeLimit(org, connectionId, staleReset, {
+      window: false,
+      claims: { [MODEL]: ["seven_day_opus"], [WORKSPACE_MODEL]: ["seven_day_opus"] },
+    });
     const parked = await park(org, staleReset);
     const later = new Date(Date.now() + 6 * DAY).toISOString();
     const original = globalThis.fetch;
@@ -431,10 +526,11 @@ describe.skipIf(!realDb)("Claude capacity waits re-read usage before a far reset
     await staleClaudeLimit(org, connectionId, staleReset, {
       window: false,
       cooldowns: { [MODEL]: staleReset, [sonnet]: staleReset, "codex/gpt-5.5": staleReset },
+      claims: { [MODEL]: ["five_hour"], [sonnet]: ["seven_day_sonnet"] },
     });
     const parked = await park(org, staleReset);
-    // The Sonnet weekly window is still full, so the Sonnet cooldown stands;
-    // a model id that is not Claude's never ends.
+    // The Sonnet weekly window the Sonnet cooldown claims is still full, so
+    // it stands; a cooldown without a claim never ends early.
     stubUsage({
       seven_day_sonnet: { utilization: 100, resets_at: new Date(staleReset).toISOString() },
     });
@@ -487,5 +583,316 @@ describe.skipIf(!realDb)("Claude capacity waits re-read usage before a far reset
     expect(await reconcile(org, parked)).toEqual({ action: "resumed" });
     expect(usage.calls).toHaveLength(1);
     expect((await storedQuota(scoped)).source).toBe("response_headers");
+  });
+});
+
+describe.skipIf(!realDb)("Claude capacity waits end only the limits a refusal claimed", () => {
+  /** One usage-endpoint body: both account windows well below the limit, no Opus limit. */
+  const recovered = {
+    seven_day_opus: null,
+  } as const;
+
+  const cases: [string, Record<string, string>, boolean, number][] = [
+    [
+      "a five-hour claim the reading shows below the limit ends (control)",
+      {
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-5h-utilization": "1.0",
+      },
+      true,
+      1,
+    ],
+    [
+      "a representative claim this build does not recognize stays parked, unread",
+      { "anthropic-ratelimit-unified-representative-claim": "seven_day_new_limit" },
+      false,
+      0,
+    ],
+    ["a rejected status without a representative claim stays parked, unread", {}, false, 0],
+    [
+      "an Opus weekly claim at 100% stays parked when the reading answers it as null",
+      {
+        "anthropic-ratelimit-unified-representative-claim": "seven_day_opus",
+        "anthropic-ratelimit-unified-7d-opus-utilization": "1.0",
+      },
+      false,
+      1,
+    ],
+  ];
+  test.each(cases)("%s", async (_name, headers, resumed, reads) => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org);
+    const staleReset = Math.floor((Date.now() + 2 * DAY) / 1000) * 1000;
+    // The quota the real header decoder writes for that one 429.
+    const quota = refusalQuota(staleReset, new Date(Date.now() - 4 * DAY), headers);
+    expect(quota.modelCooldowns[MODEL]).toBe(staleReset);
+    await storeQuota(org, connectionId, quota);
+    const parked = await park(org, staleReset);
+    const usage = stubUsage(recovered);
+    const result = await reconcile(org, parked);
+    expect(usage.calls).toHaveLength(reads);
+    if (resumed) {
+      expect(result).toEqual({ action: "resumed" });
+      expect((await storedQuota(connectionId)).modelCooldowns[MODEL]).toBeUndefined();
+    } else {
+      expect(result).toMatchObject({ action: "waiting" });
+      expect((await storedQuota(connectionId)).modelCooldowns[MODEL]).toBe(staleReset);
+      expect(await sessionStatus(parked.turn.identity)).toMatchObject({
+        session_status: "waiting_capacity",
+      });
+    }
+  });
+
+  test("a header-less 429's settlement cooldown is never ended by a reading", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org);
+    const until = Date.now() + 3_600_000;
+    const later = Date.now() + 6 * DAY;
+    // An older reading below the limit, plus the cooldown the settlement
+    // writer adds for a 429 without unified headers (no claim).
+    await storeQuota(org, connectionId, {
+      windows: [
+        { id: "five_hour", usedPercent: 3, resetsAt: later, status: "ok" },
+        { id: "seven_day", usedPercent: 41, resetsAt: later, status: "ok" },
+      ],
+      modelCooldowns: { [MODEL]: until },
+      exhaustedUntil: null,
+      exhaustedKind: null,
+      source: "usage_endpoint",
+    });
+    const parked = await park(org, until);
+    const usage = stubUsage(recovered);
+    expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
+    expect(usage.calls).toHaveLength(0);
+    expect((await storedQuota(connectionId)).modelCooldowns[MODEL]).toBe(until);
+  });
+
+  test("an unexplained cooldown never loops the turn into the false-resumption stop", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org);
+    const staleReset = Math.floor((Date.now() + 2 * DAY) / 1000) * 1000;
+    // A refusal naming no limit this build recognizes, while the weekly
+    // account window was full until the same far reset.
+    const quota = refusalQuota(staleReset, new Date(Date.now() - 4 * DAY), {
+      "anthropic-ratelimit-unified-representative-claim": "seven_day_new_limit",
+      "anthropic-ratelimit-unified-7d-utilization": "1.0",
+      "anthropic-ratelimit-unified-7d-reset": String(staleReset / 1000),
+    });
+    expect(quota.windows).toContainEqual(
+      expect.objectContaining({ id: "seven_day", status: "exhausted" }),
+    );
+    expect(quota.modelCooldownClaims?.[MODEL]).toBeUndefined();
+    await storeQuota(org, connectionId, quota);
+    const parked = await park(org, staleReset);
+    const usage = stubUsage(recovered);
+    // More rechecks than the false-resumption limit (10): none resumes, so
+    // none can count toward the terminal stop.
+    for (let round = 0; round < 12; round += 1) {
+      await ageReading(connectionId);
+      resetCoreUsageProbeAttempts();
+      expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
+    }
+    // One read ended the weekly window; the cooldown it cannot explain is
+    // never read for again.
+    expect(usage.calls).toHaveLength(1);
+    const stored = await storedQuota(connectionId);
+    expect(stored.windows).toContainEqual(
+      expect.objectContaining({ id: "seven_day", status: "ok" }),
+    );
+    expect(stored.modelCooldowns[MODEL]).toBe(staleReset);
+    expect(await sessionStatus(parked.turn.identity)).toMatchObject({
+      session_status: "waiting_capacity",
+      turn_status: "running",
+    });
+    const [turn] = await shared!.admin<{ metadata: Record<string, unknown> }[]>`
+      select metadata from session_turns where id = ${parked.turn.identity.turnId}::uuid`;
+    expect(
+      (turn!.metadata.codexCapacityRecoveryV1 as { falseResumptions?: number } | undefined)
+        ?.falseResumptions ?? 0,
+    ).toBe(0);
+  });
+
+  test("a refusal's settlement keeps its own header claim; a later refusal without one drops it", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org);
+    const turn = await runningTurn(org);
+    const runtime = subscriptionCoreTurns(CLAUDE);
+    const holderId = `claude-turn:${turn.identity.sessionId}:${turn.identity.turnId}:${turn.attemptId}`;
+    expect(
+      await runtime.placeSubscriptionCoreTurn(client!.db, {
+        identity: turn.identity,
+        attemptId: turn.attemptId,
+        executionGeneration: turn.executionGeneration,
+        holderId,
+        productModelId: MODEL,
+        reasoningLevel: "medium",
+        leaseTtlMs: 60_000,
+      }),
+    ).toMatchObject({ kind: "run", connectionId });
+    const ref = { connectionId, holderId, generation: turn.executionGeneration };
+    const [connection] = await shared!.admin<{ refresh_generation: string }[]>`
+      select refresh_generation::text from subscription_connections where id = ${connectionId}::uuid`;
+    const refreshGeneration = Number(connection!.refresh_generation);
+    const staleReset = Math.floor((Date.now() + 2 * DAY) / 1000) * 1000;
+    // The refused response's headers are joined first (the refusal path
+    // joins observations before it settles).
+    const refusedAt = Date.now() - 5_000;
+    const header = refusalQuota(staleReset, new Date(refusedAt), {
+      "anthropic-ratelimit-unified-representative-claim": "five_hour",
+      "anthropic-ratelimit-unified-5h-utilization": "1.0",
+      "anthropic-ratelimit-unified-5h-reset": String(staleReset / 1000),
+    });
+    expect(
+      await runtime.applySubscriptionCoreQuotaObservation(client!.db, turn.identity, ref, {
+        ...header,
+        observedRefreshGeneration: refreshGeneration,
+        revision: 0,
+      }),
+    ).toMatchObject({ applied: true });
+    // The same 429's settlement: its retry-after rounds the deadline up.
+    expect(
+      await runtime.recordSubscriptionCoreModelCooldown(client!.db, turn.identity, ref, {
+        modelId: MODEL,
+        until: new Date(staleReset + 1_500),
+        refreshGeneration,
+        refusedAt: Date.now(),
+      }),
+    ).toBe(true);
+    // A later 429 without usage headers for the other product id: its own
+    // deadline is earlier, but it still drops the older claim.
+    expect(
+      await runtime.recordSubscriptionCoreModelCooldown(client!.db, turn.identity, ref, {
+        modelId: WORKSPACE_MODEL,
+        until: new Date(staleReset - 60_000),
+        refreshGeneration,
+        refusedAt: Date.now() + 10 * 60_000,
+      }),
+    ).toBe(true);
+    const stored = await storedQuota(connectionId);
+    expect(stored.modelCooldowns).toMatchObject({
+      [MODEL]: staleReset + 1_500,
+      [WORKSPACE_MODEL]: staleReset,
+    });
+    expect(stored.modelCooldownClaims?.[MODEL]).toEqual({
+      until: staleReset + 1_500,
+      observedAt: refusedAt,
+      windowIds: ["five_hour"],
+    });
+    expect(stored.modelCooldownClaims?.[WORKSPACE_MODEL]).toBeUndefined();
+
+    // A reading that shows the five-hour window reset ends the claimed
+    // cooldown and keeps the unexplained one.
+    const usage = stubUsage(recovered);
+    expect(
+      await subscriptionCoreOperationConnections(CLAUDE).refreshExhaustedSubscriptionCoreQuota(
+        client!.db,
+        settings,
+        {
+          kind: "workspace",
+          accountId: org.accountId,
+          workspaceId: org.workspaceId,
+          subjectId: "service:subscription-core",
+        },
+        { minIntervalMs: 0 },
+      ),
+    ).toEqual([connectionId]);
+    expect(usage.calls).toHaveLength(1);
+    const after = await storedQuota(connectionId);
+    expect(after.modelCooldowns[MODEL]).toBeUndefined();
+    expect(after.modelCooldowns[WORKSPACE_MODEL]).toBe(staleReset);
+    expect(after.modelCooldownClaims).toBeUndefined();
+  });
+
+  test("a personal Claude turn's recheck ends its owner's claimed cooldown, never an unexplained one", async () => {
+    const org = await organization();
+    const [membership] = await shared!.admin<{ id: string; personal_workspace_id: string }[]>`
+      select id::text as id, personal_workspace_id::text as personal_workspace_id
+      from organization_memberships
+      where account_id = ${org.accountId}::uuid and subject_id = ${org.ownerSubjectId}
+        and status = 'active' and revoked_at is null limit 1`;
+    const personalWorkspaceId = membership!.personal_workspace_id;
+    const connectionId = crypto.randomUUID();
+    const authorityId = crypto.randomUUID();
+    const label = `claude-personal-${connectionId}`;
+    await shared!.admin`
+      insert into organization_user_resource_authorities (
+        id, account_id, organization_membership_id, resource_kind, resource_id, generation, status
+      ) values (
+        ${authorityId}::uuid, ${org.accountId}::uuid, ${membership!.id}::uuid,
+        'subscription_connection', ${connectionId}::uuid, 1, 'active'
+      )`;
+    await shared!.admin`
+      insert into subscription_connections (
+        id, account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        owner_organization_membership_id, owner_subject_id, authority_id,
+        authority_resource_kind, authority_generation, provider_account_id,
+        provider_subject_id, provider_state, expires_at, label
+      ) values (
+        ${connectionId}::uuid, ${org.accountId}::uuid, 'claude', 'subscription',
+        ${encryptEnvironmentValue(
+          key,
+          CLAUDE.adapter.credential.encode({
+            version: 1,
+            token: `sk-ant-oat01-${label}`,
+            identity: { accountUuid: crypto.randomUUID(), deviceId: "d".repeat(64) },
+            oauth: {
+              refreshToken: `refresh-${label}`,
+              expiresAt: new Date(Date.now() + DAY).toISOString(),
+              scopes: ["user:inference", "user:profile"],
+            },
+          }),
+        )}, 'personal', 'people', ${membership!.id}::uuid, ${org.ownerSubjectId},
+        ${authorityId}::uuid, 'subscription_connection', 1, ${label}, ${label}, '{}'::jsonb,
+        ${new Date(Date.now() + DAY).toISOString()}::timestamptz, ${label}
+      )`;
+    const staleReset = Date.now() + 2 * DAY;
+    const sonnet = "organization-claude-subscription/claude-sonnet-4-6";
+    await staleClaudeLimit(org, connectionId, staleReset, {
+      cooldowns: { [MODEL]: staleReset, [sonnet]: staleReset },
+      claims: { [MODEL]: ["seven_day"] },
+    });
+    const personalOrg = { ...org, workspaceId: personalWorkspaceId };
+    const turn = await runningTurn(personalOrg, MODEL, {
+      version: 2,
+      personal: [{ provider: "claude", ownerMembershipId: membership!.id, authorityGeneration: 1 }],
+    });
+    const usage = stubUsage();
+    await refreshBlockedCoreQuotaBeforeReconcile({
+      provider: CLAUDE,
+      db: client!.db,
+      settings,
+      accountId: org.accountId,
+      workspaceId: personalWorkspaceId,
+      personalTurn: turn.identity,
+    });
+    // One read as the owner's own connection.
+    expect(usage.authorizations).toEqual([`Bearer sk-ant-oat01-${label}`]);
+    const stored = await storedQuota(connectionId);
+    expect(stored.source).toBe("usage_endpoint");
+    expect(stored.modelCooldowns[MODEL]).toBeUndefined();
+    expect(stored.modelCooldowns[sonnet]).toBe(staleReset);
+  });
+
+  test("another provider's recheck neither reads Claude nor spends Claude's probe attempt", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org);
+    const staleReset = Date.now() + 2 * DAY;
+    await staleClaudeLimit(org, connectionId, staleReset);
+    const parked = await park(org, staleReset);
+    const usage = stubUsage();
+    // The same workspace's Codex recheck (no Codex connection here) runs
+    // first, in the same worker.
+    await refreshBlockedCoreQuotaBeforeReconcile({
+      provider: subscriptionCoreProvider("codex"),
+      db: client!.db,
+      settings,
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+    });
+    expect(usage.calls).toHaveLength(0);
+    expect((await storedQuota(connectionId)).source).toBe("response_headers");
+    // Claude's own recheck still reads its connection.
+    expect(await reconcile(org, parked)).toEqual({ action: "resumed" });
+    expect(usage.calls).toHaveLength(1);
   });
 });

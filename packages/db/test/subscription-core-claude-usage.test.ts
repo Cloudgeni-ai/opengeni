@@ -14,9 +14,11 @@ import {
   setSystemTime,
   test,
 } from "bun:test";
+import { parseClaudeUsageHeaders } from "@opengeni/config";
 import { ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import type { SubscriptionCoreConnectionRead } from "@opengeni/subscriptions";
 import {
+  decodeSubscriptionCoreClaudeQuota,
   SUBSCRIPTION_CORE_CLAUDE,
   type SubscriptionCoreClaudeCredential,
 } from "../src/subscription-core-claude-adapter";
@@ -28,7 +30,7 @@ import {
   SubscriptionCoreClaudeUsageVersionMissing,
   subscriptionCoreClaudeUpstreamModelIds,
   subscriptionCoreClaudeUsageConfirmsAvailability,
-  subscriptionCoreClaudeUsageEndsModelCooldowns,
+  subscriptionCoreClaudeUsageEndsClaimedBlock,
   subscriptionCoreClaudeUsageScopeMissing,
   type SubscriptionCoreClaudeUsageReading,
   type SubscriptionCoreClaudeUsageRow,
@@ -269,7 +271,8 @@ describe("decodeQuota", () => {
   });
 });
 
-describe("early reset: availability and model cooldowns a reading ends", () => {
+describe("early reset: availability and the claimed blocks a reading ends", () => {
+  const DAY = 86_400_000;
   const window = (utilization: number) => ({
     utilization,
     resets_at: "2026-10-15T00:00:00.000Z",
@@ -277,33 +280,24 @@ describe("early reset: availability and model cooldowns a reading ends", () => {
   const read = async (body: Record<string, unknown>) =>
     await fetchSubscriptionCoreClaudeUsage(connectionRead(oauth, () => Response.json(body)).read);
   const opus = "organization-claude-subscription/claude-opus-4-6";
-  const workspaceOpus = "workspace-claude-subscription/claude-opus-4-6";
-  const sonnet = "organization-claude-subscription/claude-sonnet-4-6";
-  const haiku = "organization-claude-subscription/claude-haiku-4-5";
+  /** A block of `opus` claiming `windowIds`, observed `ago` ms before the reading. */
+  const block = (reading: SubscriptionCoreClaudeUsageReading, windowIds: string[], ago = 1_000) => ({
+    modelId: opus,
+    until: Date.parse(reading.checkedAt) + DAY,
+    claim: {
+      until: Date.parse(reading.checkedAt) + DAY,
+      observedAt: Date.parse(reading.checkedAt) - ago,
+      windowIds,
+    },
+  });
 
-  test("the adapter opts in: a usage read ends a quota exhaustion and covered cooldowns", () => {
+  test("the adapter opts in: a usage read ends a quota exhaustion and claimed blocks", () => {
     const adapter = SUBSCRIPTION_CORE_CLAUDE.adapter;
     expect(adapter.usageReadEndsQuotaExhaustion).toBe(true);
     expect(typeof adapter.usageReadConfirmsAvailability).toBe("function");
-    expect(typeof adapter.usageReadEndsModelCooldowns).toBe("function");
+    expect(typeof adapter.usageReadEndsClaimedBlock).toBe("function");
     // Readings stay partial: an omitted exhausted window is kept.
     expect(adapter.usageReadingsComplete).toBe(false);
-  });
-
-  test("explicit null windows are recorded; omitted ones are not", async () => {
-    const reading = await read({
-      five_hour: window(3),
-      seven_day: window(41),
-      seven_day_opus: null,
-    });
-    expect(reading.status).toBe("available");
-    expect(reading.noLimitWindowIds).toEqual(["seven_day_opus"]);
-    const without = await read({ five_hour: window(3), seven_day: window(41) });
-    expect(without.noLimitWindowIds).toBeUndefined();
-    // A reading without any window is unavailable and records nothing.
-    const empty = await read({ five_hour: null, seven_day: null });
-    expect(empty).toMatchObject({ status: "unavailable", observation: null });
-    expect(empty.noLimitWindowIds).toBeUndefined();
   });
 
   test("availability needs both account windows reported below the limit", async () => {
@@ -335,38 +329,106 @@ describe("early reset: availability and model cooldowns a reading ends", () => {
     }
   });
 
-  test("a cooldown ends only when the model's family window is below the limit or has no limit", async () => {
-    const ends = subscriptionCoreClaudeUsageEndsModelCooldowns(
-      await read({
-        five_hour: window(3),
-        seven_day: window(41),
-        seven_day_opus: null,
-        seven_day_sonnet: window(100),
-      }),
-    );
-    expect(ends(opus)).toBe(true);
-    expect(ends(workspaceOpus)).toBe(true);
-    // No family window limits Haiku: the account windows decide.
-    expect(ends(haiku)).toBe(true);
-    // The Sonnet weekly window is full.
-    expect(ends(sonnet)).toBe(false);
-    // Not a Claude product model.
-    expect(ends("codex/gpt-5.5")).toBe(false);
-    expect(ends("claude-opus-4-6")).toBe(false);
+  test("a block ends only when every window it claims is reported below the limit", async () => {
+    const reading = await read({
+      five_hour: window(3),
+      seven_day: window(41),
+      seven_day_opus: null,
+      seven_day_sonnet: window(12),
+    });
+    const ends = subscriptionCoreClaudeUsageEndsClaimedBlock(reading);
+    // An account-window claim recovers on a plan without an Opus limit.
+    expect(ends(block(reading, ["five_hour"]))).toBe(true);
+    expect(ends(block(reading, ["five_hour", "seven_day"]))).toBe(true);
+    expect(ends({ ...block(reading, ["seven_day"]), modelId: null })).toBe(true);
+    expect(ends(block(reading, ["seven_day_sonnet"]))).toBe(true);
+    // An explicit null (no such limit now) never clears a limit that refused.
+    expect(ends(block(reading, ["seven_day_opus"]))).toBe(false);
+    expect(ends(block(reading, ["five_hour", "seven_day_opus"]))).toBe(false);
+    // No claim, an empty or unrecognized one: kept until its own end.
+    expect(ends({ ...block(reading, ["five_hour"]), claim: null })).toBe(false);
+    expect(ends(block(reading, []))).toBe(false);
+    expect(ends(block(reading, ["seven_day_new_limit"]))).toBe(false);
+    expect(ends(block(reading, ["five_hour", "seven_day_new_limit"]))).toBe(false);
+    // A refusal observed once the reading was requested stands.
+    expect(ends(block(reading, ["five_hour"], 0))).toBe(false);
+    expect(ends(block(reading, ["five_hour"], -1_000))).toBe(false);
 
-    // A family window the reading does not name is unknown: kept.
-    const unnamed = subscriptionCoreClaudeUsageEndsModelCooldowns(
-      await read({ five_hour: window(3), seven_day: window(41), seven_day_sonnet: window(12) }),
-    );
-    expect(unnamed(opus)).toBe(false);
-    expect(unnamed(sonnet)).toBe(true);
+    // A claimed window the reading omits, or reports at the limit, stands.
+    const omitted = await read({ five_hour: window(3), seven_day: window(41) });
+    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(omitted)(block(omitted, ["seven_day_opus"]))).toBe(false);
+    const full = await read({
+      five_hour: window(3),
+      seven_day: window(41),
+      seven_day_opus: window(100),
+    });
+    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(full)(block(full, ["seven_day_opus"]))).toBe(false);
 
     // A reading that does not confirm availability ends nothing.
-    const refused = subscriptionCoreClaudeUsageEndsModelCooldowns(
-      await read({ five_hour: window(100), seven_day: window(41), seven_day_opus: null }),
+    const refused = await read({ five_hour: window(100), seven_day: window(41) });
+    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(refused)(block(refused, ["seven_day"]))).toBe(false);
+    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(null)(block(reading, ["five_hour"]))).toBe(false);
+  });
+
+  test("the header decoder claims each block's plan windows, and none for an unrecognized limit", () => {
+    const refusedAt = new Date("2026-10-11T09:00:00.000Z");
+    const reset = Math.floor(refusedAt.getTime() / 1000) + 7_200;
+    const decode = (headers: Record<string, string>, model?: string) =>
+      decodeSubscriptionCoreClaudeQuota({
+        observation: parseClaudeUsageHeaders(
+          new Headers({
+            "anthropic-ratelimit-unified-status": "rejected",
+            "anthropic-ratelimit-unified-reset": String(reset),
+            ...headers,
+          }),
+          refusedAt,
+          model,
+        )!,
+        refreshGeneration: 0,
+        upstreamModelIds: ["claude-opus-4-6", "claude-sonnet-4-6"],
+      });
+    const claim = (windowIds: string[]) => ({
+      until: reset * 1000,
+      observedAt: refusedAt.getTime(),
+      windowIds,
+    });
+    const workspaceOpus = "workspace-claude-subscription/claude-opus-4-6";
+
+    const fiveHour = decode(
+      { "anthropic-ratelimit-unified-representative-claim": "five_hour" },
+      "claude-opus-4-6",
     );
-    expect([opus, sonnet, haiku].map(refused)).toEqual([false, false, false]);
-    expect(subscriptionCoreClaudeUsageEndsModelCooldowns(null)(opus)).toBe(false);
+    expect(fiveHour.modelCooldowns[opus]).toBe(reset * 1000);
+    expect(fiveHour.modelCooldownClaims).toEqual({
+      [opus]: claim(["five_hour"]),
+      [workspaceOpus]: claim(["five_hour"]),
+    });
+
+    // A full Opus window and the refusal's own claim both explain the cooldown.
+    const both = decode(
+      {
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-7d-opus-utilization": "1.0",
+        "anthropic-ratelimit-unified-7d-opus-reset": String(reset),
+      },
+      "claude-opus-4-6",
+    );
+    expect(both.modelCooldownClaims?.[opus]).toEqual(claim(["five_hour", "seven_day_opus"]));
+
+    for (const headers of [
+      { "anthropic-ratelimit-unified-representative-claim": "seven_day_new_limit" },
+      {},
+    ]) {
+      const unclaimed = decode(headers, "claude-opus-4-6");
+      expect(unclaimed.modelCooldowns[opus]).toBe(reset * 1000);
+      expect(unclaimed.modelCooldownClaims).toBeUndefined();
+    }
+
+    // Without a model the refusal limits the connection, claimed the same way.
+    const connection = decode({ "anthropic-ratelimit-unified-representative-claim": "seven_day" });
+    expect(connection).toMatchObject({ exhaustedUntil: reset * 1000, exhaustedKind: "quota" });
+    expect(connection.exhaustedClaim).toEqual(claim(["seven_day"]));
+    expect(decode({}).exhaustedClaim).toBeUndefined();
   });
 });
 
