@@ -189,11 +189,13 @@ jobs:
           for arch in amd64 arm64; do
             deb="Opengeni-$VERSION-linux-$arch.deb"
             dpkg-deb --info "$deb" | grep -E "Package: opengeni|Version: $VERSION|Architecture: $arch"
-            dpkg-deb --contents "$deb" | grep -q './usr/share/applications/opengeni.desktop'
-            dpkg-deb --contents "$deb" | grep -q './opt/Opengeni/opengeni'
+            # List once into a file: grep -q closes the pipe early, which dpkg-deb reports as a failure.
+            dpkg-deb --contents "$deb" > "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './usr/share/applications/opengeni.desktop' "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './opt/Opengeni/opengeni' "$RUNNER_TEMP/deb-contents.txt"
             # Desktops look icons up in the standard hicolor sizes, which stop at 512.
-            dpkg-deb --contents "$deb" | grep -q './usr/share/icons/hicolor/512x512/apps/opengeni.png'
-            dpkg-deb --contents "$deb" | grep -q './usr/share/icons/hicolor/48x48/apps/opengeni.png'
+            grep -q './usr/share/icons/hicolor/512x512/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './usr/share/icons/hicolor/48x48/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
           done
           for arch in x86_64 aarch64; do
             rpm -qip "Opengeni-$VERSION-linux-$arch.rpm" | grep -E "^(Name|Version|Architecture)"
