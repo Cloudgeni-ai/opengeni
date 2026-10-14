@@ -654,6 +654,37 @@ describe("ToolGateway argument validation errors", () => {
     expect(executed).toEqual([]);
   });
 
+  test("accepts exact true and false strings where the schema needs a boolean, inside alternatives too", async () => {
+    // Per-platform input formats: every scalar arrives as a string.
+    const platformShape = (platform: string) => ({
+      type: "object",
+      properties: {
+        platform: { const: platform },
+        pid: { type: "integer" },
+        window_id: { type: "integer" },
+        include_screenshot: { type: "boolean" },
+        strict: { type: ["boolean", "null"] },
+      },
+      required: ["pid"],
+      additionalProperties: false,
+    });
+    const { callModel, executed } = gatewayFor({
+      anyOf: [platformShape("macos"), platformShape("windows")],
+    });
+    await expect(
+      callModel({
+        platform: "macos",
+        pid: "37",
+        window_id: "90",
+        include_screenshot: "false",
+        strict: "true",
+      }),
+    ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
+    expect(executed).toEqual([
+      { platform: "macos", pid: 37, window_id: 90, include_screenshot: false, strict: true },
+    ]);
+  });
+
   test("keeps rejecting strings that are not plain numbers and every other type mismatch", async () => {
     const { callModel, executed } = gatewayFor({
       type: "object",
@@ -672,8 +703,13 @@ describe("ToolGateway argument validation errors", () => {
     for (const ratio of ["1,5", "NaN", ".5", "+1"]) {
       await rejection(callModel({ ratio }));
     }
-    // Only strings become numbers: no boolean, null or number-to-string coercion.
-    await rejection(callModel({ flag: "true" }));
+    // Only the exact literals become booleans; nothing becomes a string.
+    for (const flag of ["True", "TRUE", " true", "false ", "1", "0", "", "yes", "null"]) {
+      const error = await rejection(callModel({ flag }));
+      expect(error.issues.map((issue) => issue.path)).toEqual(["flag"]);
+    }
+    await rejection(callModel({ top: "true" }));
+    await rejection(callModel({ name: true }));
     await rejection(callModel({ name: 5 }));
     // A repaired string must still satisfy the rest of the schema.
     await rejection(callModel({ top: "0" }));
