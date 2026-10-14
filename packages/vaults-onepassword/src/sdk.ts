@@ -3,6 +3,8 @@
  * tests can inject an in-memory double and so the SDK (a ~14 MB WASM core) is
  * only ever loaded through `loadOnePasswordSdk()`'s dynamic import.
  */
+import { VaultProviderError } from "@opengeni/vaults";
+
 export type SdkFieldType =
   | "Text"
   | "Concealed"
@@ -132,17 +134,43 @@ export const ONEPASSWORD_INTEGRATION_NAME = "OpenGeni";
 
 let sdkPromise: Promise<OnePasswordSdk> | null = null;
 
-/** Lazily loads the pinned SDK (WASM) once per process. */
-export function loadOnePasswordSdk(): Promise<OnePasswordSdk> {
-  sdkPromise ??= import("@1password/sdk").then(
-    (module) =>
-      ({
-        createClient: module.createClient as unknown as OnePasswordSdk["createClient"],
-        RateLimitExceededError: module.RateLimitExceededError,
-        AuthExpiredError: module.AuthExpiredError,
-      }) satisfies OnePasswordSdk,
-  );
-  return sdkPromise;
+/**
+ * Lazily loads the pinned SDK (WASM) once per process. A server that cannot
+ * load it (for example a broken image without the WASM core) reports
+ * `provider_unavailable` with a plain reason, so connecting and syncing say
+ * what is wrong instead of failing with a generic error, and the next call
+ * tries again.
+ */
+export function loadOnePasswordSdk(
+  importSdk: () => Promise<{
+    createClient: unknown;
+    RateLimitExceededError?: unknown;
+    AuthExpiredError?: unknown;
+  }> = () => import("@1password/sdk"),
+): Promise<OnePasswordSdk> {
+  const loading = (sdkPromise ??= importSdk().then(
+    (module): OnePasswordSdk => ({
+      createClient: module.createClient as OnePasswordSdk["createClient"],
+      ...(module.RateLimitExceededError
+        ? {
+            RateLimitExceededError:
+              module.RateLimitExceededError as OnePasswordSdk["RateLimitExceededError"] & {},
+          }
+        : {}),
+      ...(module.AuthExpiredError
+        ? { AuthExpiredError: module.AuthExpiredError as OnePasswordSdk["AuthExpiredError"] & {} }
+        : {}),
+    }),
+    (cause: unknown) => {
+      sdkPromise = null;
+      console.error("[vaults-onepassword] the 1Password SDK failed to load", cause);
+      throw new VaultProviderError(
+        "provider_unavailable",
+        "1Password support could not be loaded on this server. Ask whoever runs it to check the deployment.",
+      );
+    },
+  ));
+  return loading;
 }
 
 /**
