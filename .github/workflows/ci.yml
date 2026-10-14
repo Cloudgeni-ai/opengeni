@@ -339,9 +339,9 @@ jobs:
             jq -cn --argjson total "$total" \
               '[range(0; $total) | {index: ., number: (. + 1), total: $total}]'
           }
-          # PR unit shards are coverage-identical independent runners. Six is the
-          # smallest measured matrix that keeps source-byte skew off the critical path.
-          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
+          # Unit shards are coverage-identical independent runners. Eight keeps the
+          # slowest source-byte-balanced shard inside its 20-minute budget on a full run.
+          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 8)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none",engine:"chromium"}] else map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end) | add end' impact-plan.json)" >> "$GITHUB_OUTPUT"
