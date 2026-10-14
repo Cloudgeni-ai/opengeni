@@ -33,6 +33,7 @@ export type SessionTenancyFailure = {
     | "epoch_conflict"
     | "idempotency_conflict"
     | "outcome_unknown"
+    | "fork_point"
     | "other";
   message: string;
   retainAttempt: boolean;
@@ -179,6 +180,17 @@ export function isCurrentSessionTenancyTarget(
   return current.workspaceId === accepted.workspaceId && current.sessionId === accepted.sessionId;
 }
 
+const FORK_POINT_COPY: Record<string, string> = {
+  fork_point_message_unavailable:
+    "Only your messages and the agent's replies can be fork points. Choose one of those, or fork the whole session.",
+  fork_point_boundary_not_retained:
+    "This message is from before the conversation was compacted, so it can't be a fork point. Choose a more recent message, or fork the whole session.",
+  fork_point_history_compacted:
+    "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
+  fork_point_unfinished_tool_exchange:
+    "The agent was still waiting for a tool result at this message. Choose a later message, or fork the whole session.",
+};
+
 export function classifySessionTenancyFailure(error: unknown): SessionTenancyFailure {
   if (!(error instanceof OpenGeniApiError)) {
     return {
@@ -202,6 +214,16 @@ export function classifySessionTenancyFailure(error: unknown): SessionTenancyFai
   }
 
   const reason = error.details?.reason;
+  if (typeof reason === "string" && reason.startsWith("fork_point_")) {
+    return {
+      kind: "fork_point",
+      message:
+        FORK_POINT_COPY[reason] ??
+        "This message can't be used as a fork point. Choose a more recent message, or fork the whole session.",
+      retainAttempt: false,
+      reconcile: false,
+    };
+  }
   if (reason === "active_work") {
     const work = visibilityWorkFromDetails(error.details);
     return {
