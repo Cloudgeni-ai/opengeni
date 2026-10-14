@@ -65,6 +65,7 @@ import {
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
   inspectOwnedManagedBrowserProcess,
+  stopEndedManagedBrowserProcess,
   type OwnedManagedBrowserProcess,
 } from "./runner";
 import {
@@ -291,6 +292,9 @@ export type BrowserSupervisorOptions = {
   uploadDownload?: typeof uploadBrowserDownload;
   /** Read-only identity seam; tests supply generated process receipts only. */
   inspectOwnedProcess?: typeof inspectOwnedManagedBrowserProcess;
+  /** Stops a browser an explicitly ended, non-resident session left running;
+   * tests observe the exact recorded process instead of signalling it. */
+  stopEndedProcess?: typeof stopEndedManagedBrowserProcess;
 };
 
 type Runtime = {
@@ -356,6 +360,7 @@ export class BrowserSupervisor {
   ) => Promise<void>;
   private readonly uploadDownload: typeof uploadBrowserDownload;
   private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
+  private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
@@ -397,6 +402,7 @@ export class BrowserSupervisor {
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
     this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
+    this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
   }
 
   private async createEphemeralDriver(
@@ -929,8 +935,14 @@ export class BrowserSupervisor {
       }
       // Missing memory cannot acknowledge cleanup of a possibly accepted
       // launch. Its exact binding/holder must stay addressable for cleanup,
-      // unless this generation's latest launch provably never completed.
+      // unless this generation's latest launch provably never completed, or
+      // the control plane explicitly ends this exact generation and discards
+      // its state.
       if (workingRuntimePresent) {
+        if (options.removeState === true && !suspendForShutdown) {
+          await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
+          return;
+        }
         await this.cleanupAbandonedLaunch(
           reference,
           sessionDirectory,
@@ -1874,6 +1886,46 @@ export class BrowserSupervisor {
     }
     if (!abandoned) throw workingRuntimeUnavailable();
     if (!removeState) return;
+    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
+      recursive: true,
+      force: true,
+    });
+    await rm(sessionDirectory, { recursive: true, force: true });
+  }
+
+  /** An explicit end of a session this controller no longer holds in memory
+   * (it restarted, or the browser's runtime was lost), for the exact
+   * controller generation the control plane still binds. Ending discards the
+   * browser, so nothing here needs preserving for recovery: any browser still
+   * running the session's private profile is stopped by verified identity,
+   * the working runtime is retired and the session's state is removed. History
+   * that belongs to another generation stays preserved. */
+  private async retireNonResidentWorkingRuntime(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+  ): Promise<void> {
+    let journal: SqliteBrowserWorkingRuntimeJournal;
+    let latest: BrowserWorkingRuntimeReceipt | null;
+    try {
+      journal = await SqliteBrowserWorkingRuntimeJournal.open({
+        sessionDirectory,
+        browserSessionId: reference.browserSessionId,
+        controllerGeneration: reference.controllerGeneration,
+      });
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    try {
+      try {
+        latest = journal.latest();
+      } catch {
+        throw workingRuntimeUnavailable();
+      }
+      await this.stopEndedProcess(join(sessionDirectory, "profile"), latest?.process ?? null);
+      if (latest && latest.intent !== "retire") journal.retire(latest);
+    } finally {
+      journal.close();
+    }
     await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
       recursive: true,
       force: true,

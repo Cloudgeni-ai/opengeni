@@ -1294,6 +1294,30 @@ describe("BrowserSession route discipline", () => {
     expect(route).toContain("rootKey.fill(0)");
   });
 
+  test("ends a browser whose controller is gone in the control plane, fenced by its generation", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+    );
+    const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
+    const gone = route.indexOf(
+      "browserControllerGone(grant, workspaceId, record.session.placement)",
+    );
+    expect(gone).toBeGreaterThan(route.indexOf("const binding = record.session.controller"));
+    // The gone check runs before any controller dispatch, and the server-side
+    // completion keeps the bound generation so that controller stays fenced.
+    expect(gone).toBeLessThan(route.indexOf("dispatchBrowserSessionOperation"));
+    expect(gone).toBeLessThan(route.indexOf("withBrowserPlacement("));
+    const completion = route.slice(gone, route.indexOf("requireSourceSession", gone));
+    expect(completion).toContain(
+      "expectedControllerGeneration: binding?.controllerGeneration ?? null",
+    );
+    expect(completion).toContain("releaseInteractionHolder");
+    expect(completion).toContain("releaseBrowserPasskeys");
+    const helper = source.slice(source.indexOf("async function browserControllerGone"));
+    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("interactionControllerGone(");
+  });
+
   test("suspends only after encrypted capture and resumes only from durable authority", async () => {
     const source = await readFile(routeUrl, "utf8");
     const suspendStart = source.indexOf(

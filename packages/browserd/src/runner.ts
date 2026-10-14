@@ -1854,3 +1854,50 @@ async function terminateOwnedManagedBrowserProcess(
     }
   }
 }
+
+/** Stop whatever browser an explicitly ended session left running after its
+ * controller lost track of it, so the session's private profile can be
+ * removed. The recorded process is signalled only while its PID birth and
+ * exact profile still identify it, so a reused PID is never touched. On Linux
+ * any other browser still running that exact private profile is found the
+ * same way and stopped too. */
+export async function stopEndedManagedBrowserProcess(
+  profileDirectory: string,
+  recorded: OwnedManagedBrowserProcess | null,
+): Promise<void> {
+  if (recorded && (await processRunning(recorded.pid))) {
+    let birth: string | null = null;
+    try {
+      birth = await processBirth(recorded.pid);
+    } catch {
+      birth = null;
+    }
+    if (birth === recorded.birth) {
+      await assertManagedBrowserIdentity(
+        recorded.pid,
+        recorded.profileDirectory,
+        recorded.executablePath,
+      );
+      await stopIdentifiedProcess(recorded.pid);
+    }
+  }
+  if (process.platform !== "linux") return;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const survivor = await findLinuxManagedBrowserProcess(profileDirectory, null);
+    if (!survivor) return;
+    await stopIdentifiedProcess(survivor.pid);
+  }
+  throw new AgentBrowserCommandError(
+    "process_failed",
+    "a browser kept running the ended session's private profile",
+  );
+}
+
+async function stopIdentifiedProcess(pid: number): Promise<void> {
+  signalProcess(pid, "SIGTERM");
+  if (await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS)) return;
+  signalProcess(pid, "SIGKILL");
+  if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
+    throw new AgentBrowserCommandError("process_failed", "owned browser did not terminate");
+  }
+}

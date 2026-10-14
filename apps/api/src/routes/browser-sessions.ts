@@ -122,6 +122,7 @@ import {
   listAuthRuns,
   listBrowserSessions,
   listAttachedBrowserDevices,
+  interactionControllerGone,
   prepareBrowserSessionCreate,
   markEphemeralBrowserSessionLost,
   prepareExternalAuth,
@@ -2584,13 +2585,19 @@ export function registerBrowserSessionRoutes(
           operationId: request.operationId,
         });
         const binding = record.session.controller;
-        if (!binding) {
+        // A browser with no controller, or whose controller can never be
+        // reached again, ends here: nothing physical remains to clean up, and
+        // completing under the bound generation fences that controller off.
+        if (
+          !binding ||
+          (await browserControllerGone(grant, workspaceId, record.session.placement))
+        ) {
           const completed = await completeBrowserSessionEnd(deps.db, {
             accountId: grant.accountId,
             workspaceId,
             operationId: request.operationId,
             browserSessionId,
-            expectedControllerGeneration: null,
+            expectedControllerGeneration: binding?.controllerGeneration ?? null,
           });
           await releaseInteractionHolder(
             deps,
@@ -3284,6 +3291,23 @@ export function registerBrowserSessionRoutes(
     }
     throw new BrowserSessionStateError(
       "BrowserSession source placement changed during the request; retry",
+    );
+  }
+
+  /** See `interactionControllerGone`: a removed machine or a disconnected
+   * Chrome device; a managed browser on a machine that is only offline waits. */
+  async function browserControllerGone(
+    grant: AccessGrant,
+    workspaceId: string,
+    placement: InteractionPlacement | null,
+  ): Promise<boolean> {
+    if (placement?.kind !== "connected_machine" && placement?.kind !== "attached_device") {
+      return false;
+    }
+    return await interactionControllerGone(
+      deps.db,
+      await attachedBrowserViewer(deps, grant, workspaceId),
+      placement,
     );
   }
 
