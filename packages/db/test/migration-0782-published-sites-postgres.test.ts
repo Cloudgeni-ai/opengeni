@@ -38,6 +38,7 @@ import {
   revokeSiteViewerSessions,
   settleSiteRuntimeConversationSpend,
   createSiteAbuseReport,
+  SITE_ABUSE_REPORT_RETENTION_DAYS,
   readSiteHostnameEdgeState,
   type SiteRuntimeBudgetLimits,
   SiteDataError,
@@ -548,6 +549,34 @@ test("the moderation queue reads across workspaces only with the admin credentia
   } finally {
     await admin.close();
   }
+});
+
+test("resolved abuse reports are deleted after 180 days; open ones stay", async () => {
+  const a = await workspace();
+  const siteId = await site(a);
+  const report = (message: string) =>
+    createSiteAbuseReport(client.db, a, {
+      siteId,
+      hostname: "kept.sites.test",
+      category: "spam",
+      message,
+      contactEmail: null,
+      reporterPrincipal: "guest:reporter",
+    });
+  const dismissed = await report("old dismissed");
+  const actioned = await report("old actioned");
+  const open = await report("old open");
+  const recent = await report("recent dismissed");
+  await shared.admin`update site_abuse_reports set status = 'dismissed'
+    where id in (${dismissed.id}, ${recent.id})`;
+  await shared.admin`update site_abuse_reports set status = 'actioned' where id = ${actioned.id}`;
+  await shared.admin`update site_abuse_reports
+    set created_at = now() - make_interval(days => ${SITE_ABUSE_REPORT_RETENTION_DAYS + 1})
+    where id in (${dismissed.id}, ${actioned.id}, ${open.id})`;
+  await report("new");
+  const left = await shared.admin<Array<{ message: string }>>`
+    select message from site_abuse_reports where site_id = ${siteId} order by message`;
+  expect(left.map((row) => row.message)).toEqual(["new", "old open", "recent dismissed"]);
 });
 
 test("sign-in codes are single use, short lived and bound to their Site and host", async () => {

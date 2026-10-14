@@ -439,6 +439,14 @@ KV fallback entries with a TTL no longer than this setting.
 
 - Viewers report through `POST /v1/site-runtime/site/reports`. Owners and
   admins triage through the reports routes above.
+- Each reporter (signed-in session, guest visitor or client address) and
+  each client address may send
+  `OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR` reports a minute (5 by
+  default), and a Site accepts 60 a minute from everyone together, so one
+  reporter never fills a Site's cap.
+- Dismissed and actioned reports are deleted 180 days after they were made
+  (a bounded cleanup when the Site receives its next report). Open reports
+  stay until someone resolves them; a takedown actions them all.
 - Every report and flagged scan reaches the operator: a structured
   `site_abuse_notice` log line, and, when `OPENGENI_SITES_ABUSE_EMAIL` is
   set and managed email is configured, an email (at most one per Site and

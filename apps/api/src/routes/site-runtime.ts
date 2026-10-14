@@ -86,7 +86,6 @@ import {
   siteRuntimeSessionRequest,
   siteWideBudget,
   sweepSiteRuntimeReservations,
-  SITE_GUEST_IP_LIMIT_FACTOR,
   type SiteRuntimeHost,
 } from "../site-publishing/runtime";
 import {
@@ -639,8 +638,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   /**
    * Abuse reports: anyone who reaches a served Site host, rate limited per
-   * reporter, per client address and per Site. Each report also reaches the
-   * platform (a structured log line, and an email when an abuse address is set).
+   * reporter, per client address and per Site. A reporter and a client
+   * address each get the same small share (5 a minute by default) of the
+   * Site's 60, so no one reporter fills the Site's cap. Each report also
+   * reaches the platform (a structured log line, and an email when an abuse
+   * address is set).
    */
   const report = async (request: RuntimeRequest): Promise<Response> => {
     const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
@@ -654,13 +656,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const perVisitor = deps.settings.sitesReportsPerMinutePerVisitor;
     await enforceSiteRuntimeRate(deps, host, reporter, "reports", perVisitor);
     if (reporter !== address)
-      await enforceSiteRuntimeRate(
-        deps,
-        host,
-        address,
-        "reports",
-        perVisitor * SITE_GUEST_IP_LIMIT_FACTOR,
-      );
+      await enforceSiteRuntimeRate(deps, host, address, "reports", perVisitor);
     await enforceSiteRuntimeRate(
       deps,
       host,

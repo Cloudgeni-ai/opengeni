@@ -2199,6 +2199,14 @@ function toReport(row: ReportRow): SiteAbuseReportRecord {
   };
 }
 
+/** Resolved (dismissed or actioned) reports are kept this long after they were made. */
+export const SITE_ABUSE_REPORT_RETENTION_DAYS = 180;
+
+/**
+ * Record an abuse report. The write also deletes up to 20 of the Site's
+ * resolved reports older than the retention period (a bounded cleanup on the
+ * write path); open reports stay until someone resolves them.
+ */
 export async function createSiteAbuseReport(
   db: Database,
   scope: SitePublishingScope,
@@ -2220,6 +2228,14 @@ export async function createSiteAbuseReport(
           ${input.category}, ${input.message.slice(0, 4000)}, ${input.contactEmail},
           ${input.reporterPrincipal.slice(0, 300)})
         returning id, site_id, hostname, category, message, contact_email, status, created_at`,
+    );
+    await tx.execute(
+      sql`delete from site_abuse_reports where ctid = any(array(
+          select ctid from site_abuse_reports
+          where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+            and status in ('dismissed', 'actioned')
+            and created_at < now() - make_interval(days => ${SITE_ABUSE_REPORT_RETENTION_DAYS})
+          limit 20))`,
     );
     return toReport(row!);
   });
