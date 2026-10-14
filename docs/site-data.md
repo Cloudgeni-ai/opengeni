@@ -195,7 +195,10 @@ schema, or imports into one) reserves validation time on both windows in
 the same transaction that counts its rate windows, before any work. The
 reservation is sized to the request: 25 ms plus 1 µs per byte of record JSON
 it carries (for a define, the schema's JSON; for an import, the CSV text or
-the records' JSON), capped at the 250 ms request budget. 1 µs per byte is
+the records' JSON) and per stored byte of the records its patches and
+increments merge into, since those validate the whole merged record (read in
+the same admission transaction; a record that does not exist adds nothing),
+capped at the 250 ms request budget. 1 µs per byte is
 about what the costliest allowed schema needs, so a request rarely spends
 more than it reserved. If either window cannot take the reservation, the
 request gets `rate_limited` (quota `site_validation_time` or
@@ -220,13 +223,13 @@ schema never touch the validation windows, neither at admission nor
 afterwards. Because requests reserve before they start, concurrent bursts
 are bounded by the windows: with the defaults up to 200 small validating
 requests (25 ms each) can be in flight on one Site, and up to 20 of the
-largest (250 ms each), so a page that inserts many items at once with
-`Promise.all` is not refused. A request can spend more than it reserved only
-when its cost is not in the bytes it sent: a patch or increment merged into a
-larger stored record, or a cold compile of a large schema. Even then it stops
-at the request budget plus one record and its compile (about 0.45 s at
-worst), the overrun is charged when it settles, and further requests are
-refused until the window has room again. So a Site's validation per minute
+largest (250 ms each), so a page that inserts or patches many small items at
+once with `Promise.all` is not refused, while tiny patches into large records
+reserve the whole budget and stop at 20 in flight. A request can spend more
+than it reserved only when a record grew between admission and the write or a
+large schema compiles cold. Even then it stops at the request budget plus one
+record and its compile (about 0.45 s at worst), the overrun is charged when it
+settles, and further requests are refused until the window has room again. So a Site's validation per minute
 stays within about 5 s plus the overrun of the requests already in flight.
 Data paths (filters, sorts, keys, increments, indexes, CSV headers) refuse
 `__proto__`, `prototype` and `constructor`.
@@ -337,7 +340,9 @@ mode are added.
   schema cost model, validation-time charging, the per-Site and workspace
   validation windows (only validating requests are refused; schema-less writes
   touch no window row), reservation under concurrent admission,
-  request-sized reservations (25 concurrent small writes succeed), refunds
+  request-sized reservations (25 concurrent small writes succeed),
+  reservations for the stored records patches and increments merge into
+  (refused once the window is reserved; small patches unaffected), refunds
   only within the reserved minute, non-retryable partial imports, compile-only
   operations on the budget, the retryable schema-changed conflict, the budget
   order, CSV import counting, and the lineage under the production session

@@ -15,6 +15,7 @@ import {
   SITE_DATA_MAX_BATCH,
   type SiteDataFile,
   type SiteDataRecord,
+  type SiteDataTouchedRecord,
   type SiteDataValidationReservation,
   type SiteDataWriteOp,
 } from "@opengeni/db";
@@ -32,6 +33,8 @@ import {
   siteDataValidationBytes,
   siteDataValidationClock,
   siteDataValidationReservationMs,
+  SITE_DATA_VALIDATION_BUDGET_MS,
+  SITE_DATA_VALIDATION_RESERVE_MS_PER_BYTE,
   type SiteDataAccess,
   type SiteDataDeps,
   type SiteDataSurface,
@@ -66,7 +69,12 @@ async function consume(
   access: SiteDataAccess,
   kind: "write" | "read",
   operations: number,
-  validates?: { collections?: readonly string[]; schema?: boolean; bytes: number },
+  validates?: {
+    collections?: readonly string[];
+    schema?: boolean;
+    bytes: number;
+    touched?: readonly SiteDataTouchedRecord[];
+  },
 ): Promise<SiteDataValidationReservation> {
   if (kind === "read" && !access.caller.framed) return NOTHING_RESERVED;
   return access.store.consumeRate(
@@ -79,6 +87,13 @@ async function consume(
           ...(validates.collections ? { collections: validates.collections } : {}),
           ...(validates.schema !== undefined ? { schema: validates.schema } : {}),
           reserveMs: siteDataValidationReservationMs(validates.bytes),
+          ...(validates.touched?.length
+            ? {
+                touched: validates.touched,
+                reserveMsPerStoredByte: SITE_DATA_VALIDATION_RESERVE_MS_PER_BYTE,
+                maxReserveMs: SITE_DATA_VALIDATION_BUDGET_MS,
+              }
+            : {}),
         }
       : undefined,
   );
@@ -95,6 +110,19 @@ function* validatedData(operations: readonly unknown[]): Iterable<unknown> {
       ["insert", "put", "patch"].includes(String((op as { op?: unknown }).op))
     )
       yield (op as { data?: unknown }).data;
+}
+
+/** The stored records patches and increments merge into and validate whole. */
+function mergedRecords(operations: readonly unknown[]): SiteDataTouchedRecord[] {
+  const touched: SiteDataTouchedRecord[] = [];
+  for (const op of operations) {
+    if (op === null || typeof op !== "object") continue;
+    const { op: kind, collection, id, key } = op as Record<string, unknown>;
+    if ((kind !== "patch" && kind !== "increment") || typeof collection !== "string") continue;
+    if (typeof id === "string") touched.push({ collection, id });
+    else if (typeof key === "string") touched.push({ collection, key });
+  }
+  return touched;
 }
 
 /** Collections whose records these operations validate. */
@@ -283,6 +311,7 @@ export async function writeSiteData(
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),
     bytes: siteDataValidationBytes(validatedData(operations)),
+    touched: mergedRecords(operations),
   });
   return meteredWrite(access, reserved, async (meter) => {
     const options = await prevalidateSiteDataWrite(access, operations, { meter });

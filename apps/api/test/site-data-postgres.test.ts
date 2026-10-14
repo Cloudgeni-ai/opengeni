@@ -2120,6 +2120,193 @@ test("small validating requests reserve little, so many run at once", async () =
   );
 });
 
+/** Shared collections `big` (two large keyed records) and `small` (25), then a schema on both. */
+async function mergeFixture(overrides: Partial<Settings> = {}) {
+  const f = await fixture(overrides);
+  const created = await f.publish("Merges");
+  const s = f.site(created.id);
+  const jsonSchema = {
+    type: "object",
+    properties: { n: { type: "number" }, pad: { type: "string" } },
+  };
+  // Records go in before the schema, so creating them reserves nothing.
+  for (const name of ["big", "small"]) await s.define(f.owner, name, { accessMode: "shared" });
+  const big = (pad: number) => ({ n: 0, pad: "x".repeat(pad) });
+  expect(
+    (
+      await s.write(f.owner, [
+        { op: "put", collection: "big", key: "huge", data: big(255_000) },
+        { op: "put", collection: "big", key: "medium", data: big(100_000) },
+      ])
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await s.write(
+        f.owner,
+        Array.from({ length: 25 }, (_, n) => ({
+          op: "put",
+          collection: "small",
+          key: `k${n}`,
+          data: { n },
+        })),
+      )
+    ).status,
+  ).toBe(200);
+  // Compiling the schema spends nothing, so every window starts empty.
+  await withValidationClock(
+    () => 0,
+    async () => {
+      for (const name of ["big", "small"])
+        await s.define(f.owner, name, { accessMode: "shared", jsonSchema });
+    },
+  );
+  const sizes = Object.fromEntries(
+    (
+      await shared.admin<{ record_key: string; size_bytes: number }[]>`
+        select record_key, size_bytes from site_data_records
+        where site_id = ${created.id} and record_key in ('huge', 'medium')`
+    ).map((row) => [row.record_key, row.size_bytes]),
+  ) as Record<"huge" | "medium", number>;
+  return { f, s, created, sizes };
+}
+
+test("patches and increments reserve for the stored records they merge into", async () => {
+  const { resolveSiteDataAccess } = await import("../src/site-data/service");
+  const { f, created, sizes } = await mergeFixture();
+  expect(sizes.huge).toBeGreaterThan(255_000);
+  expect(sizes.medium).toBeGreaterThan(100_000);
+  const access = await resolveSiteDataAccess(f.deps as never, f.owner.grant, created.id);
+  // What the routes send for a one-op patch or increment: 25 ms for the
+  // bytes sent, plus 1 µs per stored byte, capped at 250 ms.
+  const admit = (touched: { collection: string; key?: string; id?: string }[]) =>
+    access.store
+      .consumeRate(access.caller, "write", 1, access.limits, {
+        collections: touched.map((ref) => ref.collection),
+        reserveMs: 25,
+        touched,
+        reserveMsPerStoredByte: 0.001,
+        maxReserveMs: 250,
+      })
+      .then(async (reservation) => {
+        await access.store.settleValidation(
+          access.caller,
+          { ...reservation, spentMs: 0 },
+          access.limits,
+        );
+        return reservation.reservedMs;
+      });
+  // A tiny patch into a 256 KB record reserves the whole budget.
+  expect(await admit([{ collection: "big", key: "huge" }])).toBe(250);
+  // An increment into a 100 KB record reserves for its size.
+  expect(await admit([{ collection: "big", key: "medium" }])).toBeCloseTo(
+    25 + sizes.medium / 1000,
+    3,
+  );
+  // Small and missing records add little or nothing.
+  expect(await admit([{ collection: "small", key: "k1" }])).toBeLessThan(25.1);
+  expect(await admit([{ collection: "big", key: "missing" }])).toBe(25);
+  expect(await admit([{ collection: "big", id: crypto.randomUUID() }])).toBe(25);
+  // Several merges add up, still within the cap.
+  expect(
+    await admit([
+      { collection: "big", key: "medium" },
+      { collection: "big", key: "medium" },
+    ]),
+  ).toBeCloseTo(25 + (2 * sizes.medium) / 1000, 3);
+  expect(
+    await admit([
+      { collection: "big", key: "medium" },
+      { collection: "big", key: "huge" },
+    ]),
+  ).toBe(250);
+  expect(await validationMicros(f, created.id)).toBe(0);
+});
+
+test("the routes reserve for merged records, refusing what the window cannot take", async () => {
+  await withinOneMinute(async () => {
+    // A 240 ms window: a merge into the 256 KB record needs 250 ms and the
+    // 100 KB one about 125 ms; small records need about 25 ms.
+    const { f, s } = await mergeFixture({ siteDataSiteValidationMsPerMinute: 240 });
+    let step = 0;
+    await withValidationClock(
+      () => step,
+      async () => {
+        const patchHuge = await s.write(f.member, [
+          { op: "patch", collection: "big", key: "huge", data: { n: 1 } },
+        ]);
+        expect(patchHuge.status).toBe(429);
+        expect(patchHuge.json.error.details.quota).toBe("site_validation_time");
+        const bumpHuge = await s.write(f.member, [
+          { op: "increment", collection: "big", key: "huge", field: "n" },
+        ]);
+        expect(bumpHuge.status).toBe(429);
+        // An increment into the 100 KB record fits (about 125 ms); a request
+        // with three (25 + 3 × 100 ms, capped at 250 ms) does not.
+        const bumpMedium = await s.write(f.member, [
+          { op: "increment", collection: "big", key: "medium", field: "n" },
+        ]);
+        expect(bumpMedium.status).toBe(200);
+        const bumpThrice = await s.write(
+          f.member,
+          Array.from({ length: 3 }, () => ({
+            op: "increment",
+            collection: "big",
+            key: "medium",
+            field: "n",
+          })),
+        );
+        expect(bumpThrice.status).toBe(429);
+        const patchSmall = await s.write(f.member, [
+          { op: "patch", collection: "small", key: "k0", data: { n: 100 } },
+        ]);
+        expect(patchSmall.status).toBe(200);
+      },
+    );
+  });
+});
+
+test("concurrent tiny patches into large records stop at the window", async () => {
+  const { resolveSiteDataAccess } = await import("../src/site-data/service");
+  await withinOneMinute(async () => {
+    // The default 5 s Site window holds 20 reservations of 250 ms.
+    const { f, created } = await mergeFixture();
+    const access = await resolveSiteDataAccess(f.deps as never, f.member.grant, created.id);
+    // Thirty one-op patches into the 256 KB record admitted at once, held
+    // open: only twenty get in, so at most 5 s is reserved, and each stops at
+    // its budget plus one record.
+    const results = await Promise.all(
+      Array.from({ length: 30 }, () =>
+        access.store
+          .consumeRate(access.caller, "write", 1, access.limits, {
+            collections: ["big"],
+            reserveMs: 25,
+            touched: [{ collection: "big", key: "huge" }],
+            reserveMsPerStoredByte: 0.001,
+            maxReserveMs: 250,
+          })
+          .then(
+            (reservation) => reservation.reservedMs,
+            (error: any) => error.details?.quota as string,
+          ),
+      ),
+    );
+    expect(results.filter((reserved) => reserved === 250)).toHaveLength(20);
+    expect(results.filter((reserved) => reserved === "site_validation_time")).toHaveLength(10);
+    expect(await validationMicros(f, created.id)).toBe(5_000_000);
+  });
+});
+
+test("25 concurrent small patches on small records all succeed", async () => {
+  const { f, s } = await mergeFixture();
+  const patches = await Promise.all(
+    Array.from({ length: 25 }, (_, n) =>
+      s.write(f.member, [{ op: "patch", collection: "small", key: `k${n}`, data: { n: n + 1 } }]),
+    ),
+  );
+  expect(patches.map((patch) => patch.status)).toEqual(Array.from({ length: 25 }, () => 200));
+});
+
 test("a reservation is refunded only in the minute it was taken from", async () => {
   const { resolveSiteDataAccess } = await import("../src/site-data/service");
   await withinOneMinute(async () => {

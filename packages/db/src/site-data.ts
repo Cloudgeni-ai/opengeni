@@ -76,9 +76,21 @@ export type SiteDataValidationAdmission = {
   collections?: readonly string[];
   /** Whether the request compiles a schema itself (defining a collection with one). */
   schema?: boolean;
-  /** Validation time to reserve, sized to the request and capped at its budget. */
+  /** Validation time to reserve for what the request sends, capped at its budget. */
   reserveMs: number;
+  /**
+   * Stored records the request merges into and then validates whole
+   * (patches and increments). Their stored size, in collections with a
+   * schema, adds `reserveMsPerStoredByte` per byte to the reservation, up to
+   * `maxReserveMs`; a record that does not exist adds nothing.
+   */
+  touched?: readonly SiteDataTouchedRecord[];
+  reserveMsPerStoredByte?: number;
+  maxReserveMs?: number;
 };
+
+/** A stored record a write merges into: its collection and id or key. */
+export type SiteDataTouchedRecord = { collection: string } & SiteDataRecordRef;
 
 /**
  * Validation time a write reserved at admission, and the one-minute window
@@ -881,6 +893,51 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
   };
 
   /**
+   * The stored size of the records a write merges into, in collections with
+   * a schema, found as the write will find them (a key in a per-viewer
+   * collection is the caller's own). Reads only sizes, and stops once
+   * `enough` bytes are found.
+   */
+  const touchedStoredBytes = async (
+    tx: Database,
+    caller: SiteDataCaller,
+    touched: readonly SiteDataTouchedRecord[],
+    enough: number,
+  ): Promise<number> => {
+    const collections = new Map<string, SiteDataCollection | null>();
+    let bytes = 0;
+    for (const ref of touched) {
+      if (bytes >= enough) break;
+      if (typeof ref.collection !== "string" || !SITE_DATA_COLLECTION_NAME.test(ref.collection))
+        continue;
+      if (!collections.has(ref.collection))
+        collections.set(ref.collection, await loadCollection(tx, caller, ref.collection));
+      const collection = collections.get(ref.collection);
+      if (!collection?.jsonSchema) continue;
+      let rows: Array<{ size_bytes: number }> = [];
+      if (ref.id !== undefined) {
+        if (typeof ref.id !== "string" || !UUID.test(ref.id)) continue;
+        rows = await rawRows<{ size_bytes: number }>(
+          tx,
+          sql`select size_bytes from site_data_records
+            where workspace_id = ${caller.workspaceId} and collection_id = ${collection.id}
+              and id = ${ref.id}`,
+        );
+      } else if (typeof ref.key === "string") {
+        const scope = siteDataScopedPerViewer(collection.accessMode) ? caller.principal : "";
+        rows = await rawRows<{ size_bytes: number }>(
+          tx,
+          sql`select size_bytes from site_data_records
+            where workspace_id = ${caller.workspaceId} and collection_id = ${collection.id}
+              and key_scope = ${scope} and record_key = ${ref.key}`,
+        );
+      }
+      bytes += num(rows[0]?.size_bytes);
+    }
+    return bytes;
+  };
+
+  /**
    * Add (or, with a negative amount, refund) validation time on the Site's
    * and the workspace's current one-minute windows and return both totals
    * and the current window's start (epoch seconds). A window from an earlier
@@ -1186,7 +1243,21 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           return { reservedMs: 0, windowStartedAt: null };
         if (!validation.schema && !(await touchesSchema(tx, caller, validation.collections ?? [])))
           return { reservedMs: 0, windowStartedAt: null };
-        const micros = Math.ceil(validation.reserveMs * 1000);
+        // Patches and increments validate the whole merged record: reserve
+        // for the stored records they touch too, within the request's cap.
+        let reserveMs = validation.reserveMs;
+        const perByte = validation.reserveMsPerStoredByte ?? 0;
+        const maxMs = validation.maxReserveMs ?? reserveMs;
+        if (validation.touched?.length && perByte > 0 && reserveMs < maxMs) {
+          const stored = await touchedStoredBytes(
+            tx,
+            caller,
+            validation.touched,
+            (maxMs - reserveMs) / perByte,
+          );
+          reserveMs = Math.min(maxMs, reserveMs + stored * perByte);
+        }
+        const micros = Math.ceil(reserveMs * 1000);
         const [site, workspace, windowStartedAt] = await addValidationTime(tx, caller, micros);
         if (site > limits.siteValidationMsPerMinute * 1000)
           throw new SiteDataError(
@@ -1200,7 +1271,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
             "This workspace's Sites have used their schema-checking time for this minute. Try again in a minute.",
             { retryAfterSeconds: 60, quota: "workspace_validation_time" },
           );
-        return { reservedMs: validation.reserveMs, windowStartedAt };
+        return { reservedMs: reserveMs, windowStartedAt };
       });
     },
 
