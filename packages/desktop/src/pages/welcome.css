@@ -140,7 +140,8 @@ summary:focus-visible {
   opacity: 0.85;
 }
 
-.primary:disabled {
+.primary:disabled,
+.primary[aria-disabled="true"] {
   opacity: 0.5;
 }
 
