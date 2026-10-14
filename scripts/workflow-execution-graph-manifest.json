@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "c76914433946598242a0c824903b7733a8611452e679073fd257a2941a913bf5"
+      "sha256": "e412a8a2768584f86441486ce191b7138ab67b9c979419b99ad1d2491d385b5a"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -899,7 +899,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "macos",
       "step": "Build, sign and notarize",
-      "sha256": "c946d49ef95ef546e252d30307c93237af8cb03b68c6ad289a34cc382434b188"
+      "sha256": "e70fe67111958d00505ecf193a95fecfd7f71c0232ddf4be90447fafabdeebbe"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -923,7 +923,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "macos",
       "step": "Signing and notarization credentials",
-      "sha256": "0d65dbebe1cd12fb2d3f911a2b539a39977e6d83e6351b1cd5ef9ad58997fd98"
+      "sha256": "d4ab6209ae0110daac3d8db41c1421e9ecc8f368471e8870260c4a44052f804a"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
