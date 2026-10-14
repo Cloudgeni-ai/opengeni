@@ -7,6 +7,7 @@ import { testSettings } from "@opengeni/testing";
 import { verifyCredentialProviderRequest } from "@opengeni/sdk";
 import {
   credentialProviderRequestBody,
+  withGitCredentialHelper,
   workspaceCredentialProviderResolver,
 } from "../src/activities/workspace-credential-provider";
 import {
@@ -46,6 +47,36 @@ const row = {
 afterEach(() => mock.restore());
 
 describe("worker integration adapter without PostgreSQL", () => {
+  test("stamps only complete bounded provider Git configuration, never a supplied stamp", () => {
+    expect(
+      withGitCredentialHelper({
+        status: "ok",
+        environment: { OPENGENI_PROVIDER_GIT_CONFIG_COUNT: "99" },
+      }).environment?.OPENGENI_PROVIDER_GIT_CONFIG_COUNT,
+    ).toBe("0");
+    for (const count of ["-1", "2oops", "129", "01"]) {
+      expect(() =>
+        withGitCredentialHelper({ status: "ok", environment: { GIT_CONFIG_COUNT: count } }),
+      ).toThrow("Invalid provider Git configuration count");
+    }
+    expect(() =>
+      withGitCredentialHelper({
+        status: "ok",
+        environment: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "credential.helper" },
+      }),
+    ).toThrow("Incomplete provider Git configuration");
+    const result = withGitCredentialHelper({
+      status: "ok",
+      git: [{ host: "github.com", password: "fixture" }],
+      environment: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "credential.helper",
+        GIT_CONFIG_VALUE_0: "",
+      },
+    });
+    expect(result.environment?.OPENGENI_PROVIDER_GIT_CONFIG_COUNT).toBe("2");
+    expect(result.environment?.GIT_CONFIG_VALUE_0).toBe("");
+  });
   test.each(["human", "service", "agent"] as const)(
     "signs the exact %s initiator context without treating it as human authority",
     async (kind) => {
