@@ -64,6 +64,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path === "/v1/config/client") {
     return true;
   }
+  // The Site gateway authenticates every site-runtime call with its own
+  // signature, which the routes verify before anything else.
+  if (path === "/v1/site-runtime" || path.startsWith("/v1/site-runtime/")) {
+    return true;
+  }
   // The web error beacon must count failures before sign-in. Its payload is a
   // closed, content-free report and the route bounds its own admission.
   if (c.req.method === "POST" && path === CLIENT_ERRORS_PATH) {

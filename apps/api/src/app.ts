@@ -340,6 +340,8 @@ import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
+import { registerSitePublishingRoutes } from "./routes/site-publishing";
+import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
@@ -2195,6 +2197,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerSiteDataRoutes(app, routeDeps);
+  registerSitePublishingRoutes(app, routeDeps);
+  registerSiteRuntimeRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
@@ -4004,7 +4008,9 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/enrollments/token/exchange" ||
     // The runner authenticates this protocol with its install-key proof, not
     // a browser cookie or the product-client revision header.
-    pathname === "/v1/enrollments/renew"
+    pathname === "/v1/enrollments/renew" ||
+    // The Site gateway's signed protocol (OGSG1) carries its own version.
+    pathname.startsWith("/v1/site-runtime/")
   ) {
     return false;
   }
