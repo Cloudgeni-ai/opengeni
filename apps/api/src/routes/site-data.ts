@@ -15,6 +15,7 @@ import { SiteDataError } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import {
   defineSiteDataCollection,
   deleteSiteDataCollection,
@@ -231,7 +232,7 @@ export function registerSiteDataRoutes(app: Hono, deps: ApiRouteDeps): void {
       headers: {
         "Content-Type": format === "csv" ? "text/csv; charset=utf-8" : "application/json",
         "Content-Disposition": `attachment; filename="${name}.${format}"`,
-        "X-Content-Type-Options": "nosniff",
+        ...USER_CONTENT_SECURITY_HEADERS,
         "X-OpenGeni-Export-Truncated": exported.truncated ? "true" : "false",
       },
     });

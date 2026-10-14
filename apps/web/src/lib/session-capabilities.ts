@@ -141,7 +141,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "workspace",
     name: "Workspace operations",
-    description: "Use sandboxes, sandbox environments, variables, schedules, and artifacts.",
+    description: "Use sandboxes, sandbox environments, variables, schedules, artifacts, and Site Data.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("sandbox") ||
@@ -154,6 +154,8 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("scheduled_") ||
       tool.startsWith("artifacts_") ||
       tool.startsWith("editable_artifact_") ||
+      tool.startsWith("site_data_") ||
+      tool.startsWith("site_files_") ||
       tool.startsWith("capability_") ||
       tool === "custom_mcp_setup_request",
   },
