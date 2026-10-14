@@ -74,6 +74,7 @@ import {
   type SubscriptionCoreCredentialRefreshWriter,
   type SubscriptionCoreFetch,
   type SubscriptionCoreStoredQuotaRow,
+  type SubscriptionCoreUsageMergeOptions,
 } from "./operations";
 import {
   memoByProvider,
@@ -160,6 +161,7 @@ type Access = {
   record(
     tx: Database,
     observation: SubscriptionQuota,
+    options?: SubscriptionCoreUsageMergeOptions,
   ): Promise<{ applied: boolean; recovered: boolean }>;
 };
 
@@ -274,7 +276,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
             return rows.length > 0;
           },
         },
-        async record(tx, observation) {
+        async record(tx, observation, options) {
           const connection = await credentialRow(tx);
           if (!connection) return { applied: false, recovered: false };
           const refreshGeneration = Number(connection.refresh_generation);
@@ -291,6 +293,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
             row ?? null,
             refreshGeneration,
             observation,
+            options,
           );
           if (!write) return { applied: false, recovered: false };
           await tx.execute(
@@ -385,7 +388,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
             return marked?.marked === true;
           },
         },
-        async record(tx, observation) {
+        async record(tx, observation, options) {
           // Fenced on the generation and on the revision merged from. The
           // other paths merge under the quota row lock; this one merges from
           // the owner reader, so a reading that raced another quota write
@@ -401,6 +404,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
               row,
               refreshGeneration,
               observation,
+              options,
             );
             if (!write) break;
             const [recorded] = await rawRows<{ recorded: boolean }>(
@@ -667,7 +671,12 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
         ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
       });
       if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
-      const recorded = await scoped.scoped(db, (tx) => scoped.record(tx, quota)).catch(() => null);
+      const options = {
+        confirmsAvailability: provider.adapter.usageReadConfirmsAvailability?.(response),
+      };
+      const recorded = await scoped
+        .scoped(db, (tx) => scoped.record(tx, quota, options))
+        .catch(() => null);
       return {
         kind: "read",
         response,

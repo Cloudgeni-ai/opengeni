@@ -1602,7 +1602,9 @@ effective admission gate. An active goal adds an optional id/version fence; it
 does not own the waiter or the turn.
 
 The workflow waits for the earliest authoritative provider reset or a bounded
-value-free metadata refresh. Capacity-affecting writes increment a
+recheck. A provider whose usage read can end an exhaustion early (Codex,
+SuperGrok) rechecks on a 1 to 15 minute backoff and re-reads usage for the
+exhausted connections the turn may use before re-evaluating. Capacity-affecting writes increment a
 same-transaction wake revision before a best-effort Temporal signal.
 Duplicate/lost signals are harmless: row-locked re-evaluation is the sole
 resume writer, and unobserved revisions repair commit-to-signal loss after

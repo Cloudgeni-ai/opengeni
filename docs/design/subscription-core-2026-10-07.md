@@ -4637,13 +4637,18 @@ SuperGrok on the core:
   OpenAI can reset a limit before the reset `/wham/usage` reported, and a
   waiter that slept until that stale reset stayed parked for days after
   capacity was back. The Codex adapter declares
-  `usageReadEndsQuotaExhaustion` (its usage reading is complete, so a
-  reading below the limit also ends a refusal's stored quota deadline), and
-  its binding's `refreshBeforeReconcile` re-reads usage through the same
-  core probe as the usage refresh route. Each connection is re-read at most
-  once per 30 minutes (`CODEX_CORE_USAGE_RECHECK_MIN_INTERVAL_MS`, measured
-  from the stored quota's last write) however many waiters recheck, so an
-  early reset resumes a parked turn within about 45 minutes. The waiter
+  `usageReadEndsQuotaExhaustion`; its `usageReadConfirmsAvailability` limits
+  that to readings that confirm the account may serve
+  (`codexUsageConfirmsQuotaAvailable`: not `allowed: false` and no spent
+  feature limit), so only those end a refusal's stored quota deadline. Its
+  binding's `refreshBeforeReconcile` re-reads usage through the same core
+  probe as the usage refresh route, for connections whose stored reading is
+  at least 30 minutes old (`CODEX_CORE_USAGE_RECHECK_MIN_INTERVAL_MS`), so
+  an early reset resumes a parked turn within about 45 minutes. A probe
+  that stores nothing (an endpoint error, or no windows) leaves that age
+  unchanged, so each worker also attempts one probe scope (a workspace's
+  shared pool, or one owner's personal connections) at most every 5
+  minutes (`CODEX_CORE_USAGE_PROBE_ATTEMPT_INTERVAL_MS`). The waiter
   vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
   conformance suite checks that the two agree.
 - Compaction: X1b adds no compaction change. A compaction turn whose

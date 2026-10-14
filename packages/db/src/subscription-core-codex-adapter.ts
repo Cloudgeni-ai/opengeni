@@ -19,6 +19,7 @@ import {
   CODEX_REFRESH_FALLBACK_MS,
   CODEX_REFRESH_WINDOW_MS,
   CodexReloginRequired,
+  codexUsageConfirmsQuotaAvailable,
   fetchCodexUsage,
   normalizeCodexUsage,
   parseIdToken,
@@ -201,9 +202,14 @@ export function subscriptionCoreCodexAdapter(
     // /wham/usage reports every Codex limit window (today's merge replaces them).
     usageReadingsComplete: true,
     // It is also authoritative for the limit itself: OpenAI can reset a limit
-    // before the reset it reported, and a reading below the limit then ends a
-    // refusal's stored quota deadline too.
+    // before the reset it reported, and a reading that confirms the account
+    // may serve again ends a refusal's stored quota deadline too.
     usageReadEndsQuotaExhaustion: true,
+    // Not every reading below the limit does: the response may still say the
+    // account is refused (`allowed: false`) or that a feature limit is spent,
+    // and the refusal may have come from that limit.
+    usageReadConfirmsAvailability: (response) =>
+      codexUsageConfirmsQuotaAvailable(response as CodexUsagePayload),
   };
 }
 

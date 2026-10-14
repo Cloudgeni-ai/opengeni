@@ -198,6 +198,16 @@ export type SubscriptionCoreStoredQuotaRow = {
   quota_updated_at: Date | string | null;
 };
 
+/** How one usage reading may change a stored quota beyond its windows. */
+export type SubscriptionCoreUsageMergeOptions = {
+  /**
+   * The adapter's `usageReadConfirmsAvailability` for the response that was
+   * decoded (undefined: the adapter has none). False: the reading never ends
+   * a stored quota exhaustion.
+   */
+  confirmsAvailability?: boolean | undefined;
+};
+
 /** The quota write one usage observation makes. */
 export type SubscriptionCoreUsageObservationWrite = {
   /** The quota document to store. */
@@ -782,6 +792,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     scope: Extract<SubscriptionCoreOperationScope, { kind: "workspace" }>,
     connectionId: string,
     observation: SubscriptionQuota,
+    options: SubscriptionCoreUsageMergeOptions = {},
   ): Promise<{ applied: boolean; recovered: boolean }> {
     const access = await withOperationScope(db, scope, async (tx) => {
       if (!(await cutoverEnabled(tx, scope.accountId))) return { applied: false, recovered: false };
@@ -806,6 +817,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
         row ?? null,
         refreshGeneration,
         observation,
+        options,
       );
       if (!write) return { applied: false, recovered: false };
       await tx.execute(
@@ -837,6 +849,7 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     row: SubscriptionCoreStoredQuotaRow | null,
     refreshGeneration: number,
     observation: SubscriptionQuota,
+    options: SubscriptionCoreUsageMergeOptions = {},
   ): SubscriptionCoreUsageObservationWrite | null {
     const current = row ? decodeSubscriptionQuota(row) : null;
     const observed = applyQuotaObservation({ refreshGeneration, quota: current }, observation, {
@@ -845,9 +858,11 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     if (!observed || observed === current) return null;
     // An authoritative usage read below the limit ends a quota exhaustion
     // (adapter opt-in; the caller holds the row, and the write bumps its
-    // revision). An at-limit read without a known reset is not below the limit.
+    // revision). An at-limit read without a known reset is not below the limit,
+    // and neither is a reading the adapter says does not confirm availability.
     const next =
       provider.adapter.usageReadEndsQuotaExhaustion === true &&
+      options.confirmsAvailability !== false &&
       observation.source === "usage_endpoint" &&
       observation.exhaustedUntil === null &&
       observation.exhaustedKind === null &&

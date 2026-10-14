@@ -26,6 +26,7 @@ import {
   type SubscriptionCoreTurnIdentity,
 } from "@opengeni/db";
 import { reconcileCoreCodexCapacityWait } from "../src/activities/subscription-core-codex-waits";
+import { resetCodexCoreUsageProbeAttempts } from "../src/activities/subscription-core-codex-quota";
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const key = Buffer.alloc(32, 41);
@@ -185,7 +186,11 @@ async function runningTurn(org: Org) {
 }
 
 /** `/wham/usage` as the provider answers after an early reset: one weekly window at 55%. */
-function stubEarlyResetUsage(resetsAt: number, usedPercent = 55): string[] {
+function stubEarlyResetUsage(
+  resetsAt: number,
+  usedPercent = 55,
+  overrides: { allowed?: boolean; additionalLimitPercent?: number } = {},
+): string[] {
   const calls: string[] = [];
   const original = globalThis.fetch;
   const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
@@ -198,7 +203,7 @@ function stubEarlyResetUsage(resetsAt: number, usedPercent = 55): string[] {
     return Response.json({
       plan_type: "pro",
       rate_limit: {
-        allowed: usedPercent < 100,
+        allowed: overrides.allowed ?? usedPercent < 100,
         limit_reached: usedPercent >= 100,
         primary_window: {
           used_percent: usedPercent,
@@ -207,6 +212,22 @@ function stubEarlyResetUsage(resetsAt: number, usedPercent = 55): string[] {
         },
         secondary_window: null,
       },
+      ...(overrides.additionalLimitPercent === undefined
+        ? {}
+        : {
+            additional_limits: [
+              {
+                limit_name: "feature",
+                metered_feature: "feature",
+                primary_window: {
+                  used_percent: overrides.additionalLimitPercent,
+                  limit_window_seconds: 18_000,
+                  reset_at: Math.floor(resetsAt / 1000),
+                },
+                secondary_window: null,
+              },
+            ],
+          }),
     });
   }) as typeof fetch);
   restoreFetch = () => fetchSpy.mockRestore();
@@ -360,6 +381,9 @@ describe.skipIf(!realDb)("Codex capacity waits re-read usage before a far reset"
     const usageCalls = stubEarlyResetUsage(staleReset, 100);
     expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
     expect(usageCalls).toHaveLength(1);
+    // Across workers (no in-process attempt record), the stored reading's age
+    // alone keeps the connection from being read again.
+    resetCodexCoreUsageProbeAttempts();
     expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
     expect(usageCalls).toHaveLength(1);
     expect(await sessionStatus(parked.turn.identity)).toMatchObject({
@@ -377,5 +401,52 @@ describe.skipIf(!realDb)("Codex capacity waits re-read usage before a far reset"
     expect(await reconcile(org, parked)).toEqual({ action: "resumed" });
     expect(usageCalls).toHaveLength(1);
     expect(await storedQuota(connectionId)).toMatchObject({ exhaustedUntil: null });
+  });
+
+  test.each([
+    ["the account is still refused", { allowed: false }],
+    ["a feature limit is spent", { additionalLimitPercent: 100 }],
+  ] as const)(
+    "a reading below the limit keeps a refusal's deadline when %s",
+    async (_case, overrides) => {
+      const org = await organization();
+      const connectionId = await sharedConnection(org);
+      const refusalDeadline = Date.now() + 2 * DAY;
+      await staleWeeklyExhaustion(org, connectionId, refusalDeadline, true);
+      const parked = await park(org, refusalDeadline);
+      const usageCalls = stubEarlyResetUsage(Date.now() + 6 * DAY, 40, overrides);
+      expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
+      expect(usageCalls).toHaveLength(1);
+      // The reading is stored (so the interval holds), the refusal stands.
+      expect(await storedQuota(connectionId)).toMatchObject({
+        exhaustedUntil: refusalDeadline,
+        exhaustedKind: "quota",
+        windows: [{ id: "secondary", usedPercent: 40 }],
+      });
+      resetCodexCoreUsageProbeAttempts();
+      expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
+      expect(usageCalls).toHaveLength(1);
+    },
+  );
+
+  test("a probe that stores nothing is not repeated by every recheck in this worker", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org);
+    const staleReset = Date.now() + 2 * DAY;
+    await staleWeeklyExhaustion(org, connectionId, staleReset);
+    const parked = await park(org, staleReset);
+    const calls: string[] = [];
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+      input: RequestInfo | URL,
+    ) => {
+      calls.push(input instanceof Request ? input.url : String(input));
+      return new Response("unavailable", { status: 503 });
+    }) as typeof fetch);
+    restoreFetch = () => fetchSpy.mockRestore();
+    expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
+    const afterFirst = calls.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
+    expect(calls).toHaveLength(afterFirst);
   });
 });
