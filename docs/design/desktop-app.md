@@ -97,8 +97,14 @@ hardware:
 | Window visible, cold start | ≤ 300 ms |
 | Usable with cached sessions, cold start | ≤ 800 ms |
 | Warm start | ≤ 200 ms |
-| Memory with one account open, idle | ≤ 250 MB |
+| Memory with one account open, idle (private footprint, below) | ≤ 250 MB |
 | Idle CPU | ≈ 0% |
+
+Memory is the private footprint of all of the app's processes, the figure each
+system's monitor reports: physical footprint on macOS (Activity Monitor),
+private bytes on Windows, and private dirty pages plus swap on Linux. Summed
+resident sizes are not used, because every process maps the same shared
+framework pages and they would be counted once per process.
 
 ## Accounts and sign-in
 

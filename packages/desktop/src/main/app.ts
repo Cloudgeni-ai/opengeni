@@ -38,7 +38,7 @@ import { installAppImageIntegration } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
-import { flushMarks, mark } from "./perf";
+import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { computerName } from "./computer-name";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
@@ -91,12 +91,14 @@ function errorMessage(caught: unknown, fallback: string): string {
   return caught instanceof Error && caught.message ? caught.message : fallback;
 }
 
-/** Memory in use by every process of the app, in megabytes. */
-function appMemoryMb(): number {
-  const kilobytes = app
-    .getAppMetrics()
-    .reduce((sum, metric) => sum + metric.memory.workingSetSize, 0);
-  return Math.round(kilobytes / 1024);
+/** Records the app's memory once the first page has loaded, and again once it has settled. */
+async function recordMemory(): Promise<void> {
+  const loaded = await privateMemoryMb(app.getAppMetrics());
+  const loadedMarks = loaded === null ? {} : { loadedMemoryMb: loaded };
+  flushMarks(loadedMarks);
+  await new Promise((resolve) => setTimeout(resolve, 15_000));
+  const idle = await privateMemoryMb(app.getAppMetrics());
+  flushMarks(idle === null ? loadedMarks : { ...loadedMarks, idleMemoryMb: idle });
 }
 
 /** The path a person was on, when it is one the app reopens: a workspace or a session. */
@@ -304,13 +306,8 @@ export class DesktopShell {
       active && !active.signedOut ? window.showAccount(this.target(active)) : window.showWelcome();
     contents.once("did-finish-load", () => {
       mark("content-loaded");
-      const loadedMb = appMemoryMb();
-      flushMarks({ loadedMemoryMb: loadedMb });
-      // Idle memory is read once the page has settled.
-      setTimeout(
-        () => flushMarks({ loadedMemoryMb: loadedMb, idleMemoryMb: appMemoryMb() }),
-        15_000,
-      );
+      flushMarks();
+      if (measuring()) void recordMemory();
     });
     window.reveal();
     mark("window-shown");
