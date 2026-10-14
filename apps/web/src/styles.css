@@ -552,9 +552,10 @@ html[data-desktop="windows"] {
 }
 
 /* Whatever reaches the corner makes room for the buttons: the session's title
-   bar, or the tab row of a workspace panel docked beside it. */
-html[data-desktop="windows"]:not(:has([data-workspace-surface]:not([role="dialog"]))) [data-titlebar],
-html[data-desktop="windows"] [data-workspace-surface] [data-dock-chrome] > :first-child {
+   bar, or the tab row of a full-window workspace panel (maximized, or the
+   overlay in a narrow window). */
+html[data-desktop="windows"] [data-titlebar],
+html[data-desktop="windows"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
   padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
 }
 
