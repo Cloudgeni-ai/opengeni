@@ -57,7 +57,7 @@ import {
 } from "@/components/ui/setting-row";
 import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
-import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { UsageMeterGroup, UsageReadout, usageResets } from "@/components/ui/usage-meter";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
@@ -964,7 +964,8 @@ function CodexRow({
   onOpen: () => void;
 }) {
   const live = codex.usageMap[account.id];
-  const weekly = codexUsageReadings(live?.usage, codex.now)[0]!;
+  const readings = codexUsageReadings(live?.usage, codex.now);
+  const weekly = readings[0]!;
   const status = attentionStatus(account, codex.now);
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const resets = codex.overviewMap[account.id]?.resetCredits.availableCount;
@@ -994,7 +995,7 @@ function CodexRow({
               percent={loadingUsage ? null : weekly.percent}
               loading={loadingUsage}
               window="this week"
-              resetsLabel={weekly.resetsLabel}
+              resets={usageResets(readings, weekly.label)}
               fallback={
                 live?.status === "error" || (!live && codex.usageError)
                   ? "Usage unavailable"

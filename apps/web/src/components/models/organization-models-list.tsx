@@ -74,7 +74,7 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageReadout } from "@/components/ui/usage-meter";
+import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
 import { billingClassForModel } from "@/lib/model-policy";
 import { accountKey, type GatewayId } from "@/lib/models-route";
 
@@ -773,13 +773,18 @@ export function possessive(name: string): string {
 
 /** Cached weekly usage an account carries, for a row with no live reading. */
 function cachedCodexUsage(account: CodexAccount): ReactNode {
-  const weekly = codexUsageReadings(
+  const readings = codexUsageReadings(
     { weekly: account.weekly ?? null, fiveHour: account.fiveHour ?? null },
     Date.now(),
-  )[0]!;
+  );
+  const weekly = readings[0]!;
   if (weekly.percent === null) return null;
   return (
-    <UsageReadout percent={weekly.percent} window="this week" resetsLabel={weekly.resetsLabel} />
+    <UsageReadout
+      percent={weekly.percent}
+      window="this week"
+      resets={usageResets(readings, weekly.label)}
+    />
   );
 }
 

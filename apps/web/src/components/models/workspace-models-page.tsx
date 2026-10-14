@@ -118,7 +118,7 @@ import { ListRow, RowList } from "@/components/ui/list-row";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRowGroup } from "@/components/ui/setting-row";
-import { UsageReadout } from "@/components/ui/usage-meter";
+import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
 import { useAppContext } from "@/context";
 import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
 import {
@@ -1346,9 +1346,14 @@ function codexUsageReadout(
 ): ReactNode {
   const live = codex.usageMap[accountId];
   if (!live?.usage) return null;
-  const weekly = codexUsageReadings(live.usage, codex.now)[0]!;
+  const readings = codexUsageReadings(live.usage, codex.now);
+  const weekly = readings[0]!;
   return weekly.percent === null ? null : (
-    <UsageReadout percent={weekly.percent} window="this week" resetsLabel={weekly.resetsLabel} />
+    <UsageReadout
+      percent={weekly.percent}
+      window="this week"
+      resets={usageResets(readings, weekly.label)}
+    />
   );
 }
 

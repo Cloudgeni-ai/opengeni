@@ -248,7 +248,9 @@ export function codexUsageReading(
   return {
     label,
     percent: Math.round(Math.min(100, Math.max(0, window.remaining))),
-    ...(reset ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
+    ...(reset
+      ? { resetsLabel: formatAbsoluteTime(reset, { now }), resetsAt: reset.getTime() }
+      : {}),
   };
 }
 
