@@ -511,7 +511,7 @@ export const SITE_SQL_HARD_LIMITS = Object.freeze({
 });
 
 /**
- * Effective Site SQL limits for one Site. Null means no OpenGeni cap (the
+ * Effective Site SQL limits for one Site. Null means no Opengeni cap (the
  * hard limits still hold).
  */
 export type SiteSqlLimits = {
@@ -570,7 +570,7 @@ export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
       .min(1)
       .max(SITE_SQL_MAX_NAMED_LENGTH)
       .describe(
-        "Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement (WITH allowed, not recursive). Use :name parameters; :viewer, :viewer_kind and :viewer_signed_in are bound by OpenGeni from the signed-in viewer.",
+        "Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement (WITH allowed, not recursive). Use :name parameters; :viewer, :viewer_kind and :viewer_signed_in are bound by Opengeni from the signed-in viewer.",
       ),
     audience: SiteSqlQueryAudience.optional().describe(
       "everyone (including anonymous guests of public Sites), signed_in (default) or managers.",

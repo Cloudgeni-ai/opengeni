@@ -696,7 +696,7 @@ export async function inspectSiteSql(
 // Running SQL
 // ---------------------------------------------------------------------------
 
-/** The values OpenGeni binds for `:viewer`, `:viewer_kind` and `:viewer_signed_in`. */
+/** The values Opengeni binds for `:viewer`, `:viewer_kind` and `:viewer_signed_in`. */
 export function siteSqlPrincipalParams(
   access: Pick<SiteDataAccess, "caller" | "subjectId">,
   guest: boolean,
@@ -722,7 +722,7 @@ function bindParams(
     if (isSiteSqlPrincipalParam(key))
       throw new SiteSqlError(
         "validation",
-        `:${key} is set by OpenGeni from the signed-in viewer; do not send it`,
+        `:${key} is set by Opengeni from the signed-in viewer; do not send it`,
         { param: key },
       );
     if (!known.has(key))
@@ -732,7 +732,7 @@ function bindParams(
   for (const name of names) {
     if (isSiteSqlPrincipalParam(name)) {
       if (!Object.hasOwn(principal, name))
-        throw new SiteSqlError("validation", `:${name} is reserved for OpenGeni`, { param: name });
+        throw new SiteSqlError("validation", `:${name} is reserved for Opengeni`, { param: name });
       bound[name] = principal[name]!;
     } else if (Object.hasOwn(given, name)) bound[name] = given[name]!;
     else if (options.requireAll)
@@ -938,7 +938,7 @@ export async function exportSiteSql(
         const schema = siteSqlSchemaStatements(page.schema);
         if (request.format === "sql") {
           lines.push(
-            `-- OpenGeni Site SQL export of Site ${siteId}, ${json.exportedAt}`,
+            `-- Opengeni Site SQL export of Site ${siteId}, ${json.exportedAt}`,
             "-- Schema",
             ...schema,
             "-- Data",

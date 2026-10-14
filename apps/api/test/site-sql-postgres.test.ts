@@ -318,7 +318,7 @@ test("owners define a schema and named queries; Site pages run them as viewers",
   expect(code(await s.migrate(f.owner, "create_votes", "SELECT 1"))).toBe("conflict");
   expect(code(await s.migrate(f.owner, "attach", "ATTACH DATABASE 'x' AS y"))).toBe("validation");
 
-  // Named queries: one statement, parameters only; :viewer is bound by OpenGeni.
+  // Named queries: one statement, parameters only; :viewer is bound by Opengeni.
   for (const [name, definition] of [
     [
       "cast",

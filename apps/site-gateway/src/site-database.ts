@@ -4,7 +4,7 @@
  * (docs/design/published-sites-2026-10-14.md, PR B).
  *
  * It is reachable only through the gateway's signed internal route
- * (`src/site-db.ts`), which the OpenGeni API calls after it has authorized
+ * (`src/site-db.ts`), which the Opengeni API calls after it has authorized
  * the caller, applied limits and resolved named queries from Postgres. The
  * object still re-checks every statement with `compileSiteSql`, binds values
  * only as parameters, runs each call in one transaction, bounds rows and

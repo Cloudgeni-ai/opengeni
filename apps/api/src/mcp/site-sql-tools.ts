@@ -116,7 +116,7 @@ export function registerSiteSqlTools(
     "site_sql_define_query",
     {
       description:
-        'Create, replace or delete a named query a Site page runs with site.sql.run(name, params). Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement with :name parameters; pages pass values only, never SQL. :viewer (the viewer\'s principal, such as user:<id> or guest:<id>), :viewer_kind and :viewer_signed_in are bound by OpenGeni, so a query can keep rows per viewer: e.g. INSERT INTO votes (voter, choice) VALUES (:viewer, :choice). audience: everyone (including anonymous guests of public Sites), signed_in (default) or managers (agents and the console only). Set action to "delete" to remove the query.',
+        'Create, replace or delete a named query a Site page runs with site.sql.run(name, params). Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement with :name parameters; pages pass values only, never SQL. :viewer (the viewer\'s principal, such as user:<id> or guest:<id>), :viewer_kind and :viewer_signed_in are bound by Opengeni, so a query can keep rows per viewer: e.g. INSERT INTO votes (voter, choice) VALUES (:viewer, :choice). audience: everyone (including anonymous guests of public Sites), signed_in (default) or managers (agents and the console only). Set action to "delete" to remove the query.',
       inputSchema: contractToolInput(
         z4.object({
           siteId: SiteIdInput,
