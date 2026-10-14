@@ -192,7 +192,10 @@ export function limitSummary(limits: SiteLimits): { label: string; value: string
   return [
     {
       label: "Conversations",
-      value: count(limits.conversationsPerVisitorPerDay, "per visitor a day"),
+      value: [
+        count(limits.conversationsPerVisitorPerDay, "per visitor a day"),
+        count(limits.conversationsPerSitePerDay, "per Site a day"),
+      ].join(", "),
     },
     { label: "Messages", value: count(limits.turnsPerConversation, "per conversation") },
     {
@@ -221,7 +224,7 @@ export const CUSTOM_LIMIT_FIELDS: readonly {
   money: boolean;
 }[] = [
   { key: "conversationsPerVisitorPerDay", label: "Conversations per visitor a day", money: false },
-  { key: "conversationsPerSitePerDay", label: "Conversations per day (whole Site)", money: false },
+  { key: "conversationsPerSitePerDay", label: "Conversations per Site a day", money: false },
   { key: "turnsPerConversation", label: "Messages per conversation", money: false },
   { key: "agentMicrosPerConversation", label: "Spend per conversation", money: true },
   { key: "agentMicrosPerVisitorPerDay", label: "Spend per visitor a day", money: true },
@@ -251,6 +254,8 @@ export type SitePublishDraft = {
   agentEnabled: boolean;
   /** null uses the workspace default model. */
   agentModel: string | null;
+  /** Guests' conversations get the agent's workspace tools. */
+  guestTools: boolean;
   profile: SiteLimitProfileKind;
   /** Custom fields as typed. */
   custom: Record<(typeof CUSTOM_LIMIT_FIELDS)[number]["key"], string>;
@@ -270,6 +275,7 @@ export function draftFromPublication(
     invitedEmails: publication?.invitedEmails ?? [],
     agentEnabled: publication?.agent.enabled ?? false,
     agentModel: publication?.agent.model ?? null,
+    guestTools: publication?.agent.guestTools ?? false,
     profile: publication?.limitProfile.kind ?? "free",
     custom: Object.fromEntries(
       CUSTOM_LIMIT_FIELDS.map((field) => [field.key, limitFieldText(base[field.key], field.money)]),
@@ -299,7 +305,7 @@ export function customOverrides(
 export function publicationRequest(
   draft: SitePublishDraft,
   saved: SitePublication | null,
-  options: { publish: boolean },
+  options: { publish: boolean; canChangeLimits?: boolean },
 ): UpsertSitePublicationRequest {
   const request: UpsertSitePublicationRequest = {};
   if (!saved || saved.label !== draft.label) request.label = draft.label;
@@ -307,22 +313,27 @@ export function publicationRequest(
   const emails = draft.access === "invited" ? draft.invitedEmails : (saved?.invitedEmails ?? []);
   if (!saved ? emails.length > 0 : !sameList(saved.invitedEmails, emails))
     request.invitedEmails = emails;
+  const guestToolsChanged = (saved?.agent.guestTools ?? false) !== draft.guestTools;
   if (
     !saved ||
     saved.agent.enabled !== draft.agentEnabled ||
-    (draft.agentEnabled && saved.agent.model !== draft.agentModel)
+    (draft.agentEnabled && saved.agent.model !== draft.agentModel) ||
+    guestToolsChanged
   )
     request.agent = {
       enabled: draft.agentEnabled,
       ...(draft.agentEnabled ? { model: draft.agentModel } : {}),
+      ...(guestToolsChanged ? { guestTools: draft.guestTools } : {}),
     };
   const custom = draft.profile === "custom" ? customOverrides(draft) : null;
   const overrides = custom && "overrides" in custom ? custom.overrides : null;
+  // Only workspace admins change limits; everyone else keeps the current ones.
   if (
-    !saved ||
-    saved.limitProfile.kind !== draft.profile ||
-    (draft.profile === "custom" &&
-      JSON.stringify(saved.limitProfile.overrides ?? {}) !== JSON.stringify(overrides ?? {}))
+    options.canChangeLimits !== false &&
+    (!saved ||
+      saved.limitProfile.kind !== draft.profile ||
+      (draft.profile === "custom" &&
+        JSON.stringify(saved.limitProfile.overrides ?? {}) !== JSON.stringify(overrides ?? {})))
   )
     request.limitProfile = { kind: draft.profile, overrides };
   if (!saved || saved.noindex !== draft.noindex) request.noindex = draft.noindex;

@@ -119,6 +119,25 @@ describe("Site publishing helpers", () => {
     ).toEqual({ status: "active" });
   });
 
+  test("sends guest tools only when they change, and limits only from admins", () => {
+    const withTools = {
+      ...saved,
+      agent: { ...saved.agent, enabled: true, tools: ["linear"], guestTools: false },
+    };
+    const draft = { ...draftFromPublication(withTools, "x"), guestTools: true };
+    expect(publicationRequest(draft, withTools, { publish: false })).toEqual({
+      agent: { enabled: true, model: null, guestTools: true },
+    });
+    const first = draftFromPublication(null, "team-crm-4k9x");
+    expect(
+      publicationRequest(first, null, { publish: true, canChangeLimits: false }),
+    ).not.toHaveProperty("limitProfile");
+    const custom = { ...draftFromPublication(saved, "x"), profile: "custom" as const };
+    expect(publicationRequest(custom, saved, { publish: false, canChangeLimits: false })).toEqual(
+      {},
+    );
+  });
+
   test("custom limits parse dollars to micro-USD and empty to no limit", () => {
     expect(parseLimitField("0.05", true)).toBe(50_000);
     expect(parseLimitField("$2", true)).toBe(2_000_000);
@@ -146,7 +165,7 @@ describe("Site publishing helpers", () => {
 
   test("shows the key numbers of a profile", () => {
     expect(limitSummary(knownLimits("free", null, {})!)).toEqual([
-      { label: "Conversations", value: "10 per visitor a day" },
+      { label: "Conversations", value: "10 per visitor a day, 50 per Site a day" },
       { label: "Messages", value: "20 per conversation" },
       {
         label: "Agent spend",
