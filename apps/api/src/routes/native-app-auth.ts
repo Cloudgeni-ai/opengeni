@@ -17,6 +17,7 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
+import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
 
 // Native app sign-in (RFC 8252 shape: authorization code + PKCE over a custom
@@ -32,13 +33,30 @@ const CODE_IDENTIFIER_PREFIX = "opengeni-native-app-code:";
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/u;
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/u;
 const MANAGED_PROVIDERS = ["credential", "google", "github"] as const;
+export const NATIVE_APP_PLATFORMS = ["ios", "android", "macos", "windows", "linux"] as const;
+type NativeAppPlatform = (typeof NATIVE_APP_PLATFORMS)[number];
+const PLATFORM_LABELS: Record<NativeAppPlatform, string> = {
+  ios: "iOS",
+  android: "Android",
+  macos: "macOS",
+  windows: "Windows",
+  linux: "Linux",
+};
+
+/** The device label shown in the person's signed-in sessions. */
+export function nativeAppSessionUserAgent(
+  platform: NativeAppPlatform,
+  deviceName: string | null,
+): string {
+  return `Opengeni app (${PLATFORM_LABELS[platform]}${deviceName ? `; ${deviceName}` : ""})`;
+}
 
 const AuthorizeBody = z.object({
   redirectUri: z.string().min(1).max(512),
   codeChallenge: z.string().regex(PKCE_CHALLENGE),
   codeChallengeMethod: z.literal("S256"),
   state: z.string().min(8).max(256).optional(),
-  platform: z.enum(["ios", "android"]),
+  platform: z.enum(NATIVE_APP_PLATFORMS),
   deviceName: z.string().trim().min(1).max(80).optional(),
 });
 
@@ -61,7 +79,7 @@ const StoredGrant = z.object({
   providerId: z.enum(MANAGED_PROVIDERS),
   redirectUri: z.string(),
   codeChallenge: z.string().regex(PKCE_CHALLENGE),
-  platform: z.enum(["ios", "android"]),
+  platform: z.enum(NATIVE_APP_PLATFORMS),
   deviceName: z.string().nullable(),
 });
 
@@ -177,10 +195,9 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     ) {
       return context.json({ error: "invalid_grant" }, 400);
     }
-    const platform = grant.platform === "ios" ? "iOS" : "Android";
     const session = await runManagedAuthProvider(grant.providerId, () =>
       authContext.internalAdapter.createSession(grant.userId, false, {
-        userAgent: `Opengeni app (${platform}${grant.deviceName ? `; ${grant.deviceName}` : ""})`,
+        userAgent: nativeAppSessionUserAgent(grant.platform, grant.deviceName),
       }),
     );
     if (!session?.token || new Date(session.expiresAt).getTime() <= Date.now()) {
@@ -207,6 +224,36 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
       await deps.db.execute(sql`delete from auth_sessions where id = ${authSessionId}`);
     }
     return context.json({ signedOut: true });
+  });
+
+  // A desktop app shows the deployment's own web app. It signs that window in
+  // with the same device session, so the window is an ordinary first-party web
+  // session and signing the device out ends both. The bearer is required: an
+  // ambient browser request can never mint this cookie.
+  app.post(`${base}/web-session`, async (context) => {
+    const auth = deps.managedAuth;
+    if (!auth) throw new HTTPException(404);
+    if (deps.settings.managedAuthSessionSetMode === "broker") {
+      throw new HTTPException(409, {
+        message: "This deployment signs browser windows in through login session sets",
+      });
+    }
+    const credential = bearer(context.req.header("authorization"));
+    if (!credential?.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) {
+      throw new HTTPException(401, { message: "Native app credential required" });
+    }
+    const session = await getNativeAppManagedSession(auth, credential, deps.db).catch(() => null);
+    if (typeof session?.session?.id !== "string") {
+      throw new HTTPException(401, { message: "Sign in again" });
+    }
+    for (const cookie of await managedAuthSessionCookieHeaders(
+      auth,
+      credential.slice(NATIVE_APP_CREDENTIAL_PREFIX.length),
+      context.req.header("cookie") ?? null,
+    )) {
+      context.header("set-cookie", cookie, { append: true });
+    }
+    return context.json({ signedIn: true });
   });
 
   // Push registration belongs to the app session that registered it: signing

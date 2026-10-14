@@ -2304,6 +2304,13 @@ describe("GET /v1/config/client", () => {
     ).not.toHaveProperty("source");
     expect(JSON.stringify(config)).not.toContain("openrouter-client-config-secret");
   });
+
+  test("tells clients whether this deployment accepts connected machines", async () => {
+    const enabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: true }));
+    expect(enabled.connectedMachines).toBe(true);
+    const disabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: false }));
+    expect(disabled.connectedMachines).toBe(false);
+  });
 });
 
 describe("managed session-set route ownership", () => {

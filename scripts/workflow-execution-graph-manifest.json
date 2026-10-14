@@ -29,6 +29,10 @@
       "sha256": "eefc69afb4a4e480515828d34069a8c7159c5c71b5db19f2c4a0924244757ba3"
     },
     {
+      "path": ".github/workflows/desktop-app-release.yml",
+      "sha256": "c76914433946598242a0c824903b7733a8611452e679073fd257a2941a913bf5"
+    },
+    {
       "path": ".github/workflows/desktop-e2e.yml",
       "sha256": "1e91ea9240f054e85160a461fd40bf92d1480709c0cf77ac41a41f0b4dbe815c"
     },
@@ -890,6 +894,48 @@
       "job": "deprecate",
       "step": "Install dependencies",
       "sha256": "d4d8249940209553aac5a8bfba42fe6d8023806d37f3042bfd080c271d851584"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Build, sign and notarize",
+      "sha256": "c946d49ef95ef546e252d30307c93237af8cb03b68c6ad289a34cc382434b188"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Check",
+      "sha256": "72037d5aceb14e9e18c6cfb2e3fc3cf2bceb9032628a5b7880493c647a479d8f"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Install",
+      "sha256": "80703888d15e71ca6f9e33e11446af0122f1df8cc12e22d876770edf090939ee"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Publish",
+      "sha256": "e15c224ed6bbaddcd2d4ab5cc2bad4320d36e3869d9732071abca52a0e64f3bc"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Signing and notarization credentials",
+      "sha256": "0d65dbebe1cd12fb2d3f911a2b539a39977e6d83e6351b1cd5ef9ad58997fd98"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Verify",
+      "sha256": "dc4a624a3538c56c0fd5162ae9c67d6bb63a46e4c160c9762da38277bdbf079e"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Version",
+      "sha256": "5b1c734589e0bfa7cd7360559f32f094e6f42b1a93e0351a2fffd27c7131b944"
     },
     {
       "workflow": ".github/workflows/desktop-e2e.yml",

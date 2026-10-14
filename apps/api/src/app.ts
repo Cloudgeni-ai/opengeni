@@ -1481,6 +1481,7 @@ export function createAppComposition(deps: AppDependencies): {
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
+        connectedMachines: deps.settings.sandboxSelfhostedEnabled,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel,

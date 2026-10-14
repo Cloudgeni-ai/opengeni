@@ -1,0 +1,113 @@
+# Build, sign, notarize and publish the Opengeni desktop app.
+#
+# A tag desktop-v<version> (or a manual run) builds the macOS app as a universal
+# DMG and ZIP signed with the Developer ID certificate and notarized with the
+# App Store Connect key. It publishes a versioned release desktop-v<version>
+# and refreshes the fixed desktop-stable release the installed apps read their
+# updates from (see apps/desktop/electron-builder.yml).
+name: desktop-app-release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without the desktop-v prefix), e.g. 0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-app-release
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    runs-on: macos-26
+    if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${REF_NAME#desktop-v}"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "Not a version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: |
+          bun test ./packages/desktop/test
+          (cd packages/desktop && bun run typecheck)
+          (cd apps/desktop && bun run typecheck)
+
+      - name: Signing and notarization credentials
+        env:
+          APPLE_ASC_KEY: ${{ secrets.APPLE_ASC_KEY }}
+        run: |
+          key_dir="$RUNNER_TEMP/asc"
+          mkdir -p "$key_dir"
+          printf '%s' "$APPLE_ASC_KEY" | jq -r .private_key > "$key_dir/key.p8"
+          {
+            echo "APPLE_API_KEY=$key_dir/key.p8"
+            echo "APPLE_API_KEY_ID=$(printf '%s' "$APPLE_ASC_KEY" | jq -r .key_id)"
+            echo "APPLE_API_ISSUER=$(printf '%s' "$APPLE_ASC_KEY" | jq -r .issuer_id)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize
+        working-directory: apps/desktop
+        env:
+          OPENGENI_DESKTOP_VERSION: ${{ steps.v.outputs.version }}
+          CSC_LINK: ${{ secrets.APPLE_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          bun scripts/build.ts --production
+          bunx electron-builder --mac --publish never
+
+      - name: Verify
+        working-directory: apps/desktop/release
+        run: |
+          app="$(find . -maxdepth 2 -name 'Opengeni.app' -type d | head -1)"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose "$app"
+          xcrun stapler validate "$app"
+          ls -la
+
+      - name: Publish
+        working-directory: apps/desktop/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          files=(Opengeni-"$VERSION"-mac.dmg Opengeni-"$VERSION"-mac.zip Opengeni-"$VERSION"-mac.zip.blockmap latest-mac.yml)
+          tag="desktop-v$VERSION"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --title "Opengeni desktop $VERSION" --latest=false \
+              --notes "Opengeni for macOS $VERSION. Download the DMG, open it and drag Opengeni to Applications."
+          fi
+          gh release upload "$tag" "${files[@]}" --clobber
+          if ! gh release view desktop-stable >/dev/null 2>&1; then
+            gh release create desktop-stable --target "$GITHUB_SHA" --title "Opengeni desktop (update feed)" --latest=false \
+              --notes "The update feed installed Opengeni desktop apps read. Downloads are on the desktop-v releases."
+          fi
+          gh release upload desktop-stable "${files[@]}" --clobber

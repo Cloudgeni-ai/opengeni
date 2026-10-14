@@ -68,7 +68,7 @@ import {
   type KnowledgeSearch,
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
-import type { NativeSignInSearch } from "@/lib/native-sign-in-context";
+import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
 import {
   parseAgentParam,
   parseServiceAccountParam,
@@ -99,6 +99,7 @@ import {
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
 } from "@/lib/workspace-navigation-preference";
+import { installDesktopShell } from "@/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -332,9 +333,7 @@ const nativeSignInRoute = createRoute({
       ...text("code_challenge"),
       ...text("state"),
       ...text("device_name"),
-      ...(search.platform === "ios" || search.platform === "android"
-        ? { platform: search.platform }
-        : {}),
+      ...(isNativeAppPlatform(search.platform) ? { platform: search.platform } : {}),
     };
   },
   component: NativeSignIn,
@@ -851,6 +850,7 @@ const router = createRouter({
   ...ROUTER_PENDING_OPTIONS,
   ...routerErrorOptions(() => appRoutePattern()),
 });
+installDesktopShell((path) => router.history.push(path));
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {

@@ -26,6 +26,7 @@
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",
     "@opengeni/connect": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/desktop": "workspace:*",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@pierre/diffs": "1.2.11",
