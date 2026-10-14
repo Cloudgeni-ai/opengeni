@@ -168,7 +168,7 @@ export function providerPrimaryFieldId(
 /**
  * Deterministic mirror projection. Items are ordered by provider name then
  * external id before de-duplication, so the same provider state always yields
- * the same OpenGeni names; field names are de-duplicated within each item.
+ * the same Opengeni names; field names are de-duplicated within each item.
  */
 export function planProviderMirror(
   items: readonly ProviderItemMeta[],

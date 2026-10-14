@@ -398,7 +398,7 @@ Send: the primary click starts or ends the call, while the disclosure holds the
 supported realtime-model choice, connection status, recovery actions, and dev
 diagnostics. Realtime-model choice is intentionally independent from the
 ordinary session model and remembers the user's last workspace choice. The
-catalog groups OpenGeni-managed Gateway, Connected Codex, and workspace-owned
+catalog groups Opengeni-managed Gateway, Connected Codex, and workspace-owned
 Gateway models; unconfigured credentials remain visible but disabled.
 The owner operation and browser proof are
 scoped to session storage and never rendered or logged. Reload replays that
@@ -585,7 +585,7 @@ turn.
 That same exact calling-turn boundary supplies an agent-spawned child's omitted
 model and reasoning effort. Explicit child values may override them. A
 Codex-subscription manager therefore keeps its external billing path for workers
-by default instead of falling back to the deployment's OpenGeni-credit model.
+by default instead of falling back to the deployment's Opengeni-credit model.
 Omitted latency mode instead defaults to `standard` for every fresh session;
 `fast` and `priority` require an explicit, model-supported selection. The initial
 policy records this default as `deployment`, not `continuation`. Keyed replay
@@ -1044,7 +1044,7 @@ and failures prevent downstream preparation without bypassing execution fences.
 
 An explicitly empty effective first-party permission ceiling is zero delegated
 authority. Before eager/deferred preparation, runtime omits only remote
-OpenGeni-delegated MCP matches; it neither signs an empty token nor pads the
+Opengeni-delegated MCP matches; it neither signs an empty token nor pads the
 grant. Empty broad tool selection is silent; requested first-party tools and
 dedicated `files`/`docs` stay unavailable with the existing `insufficient_scope`
 advisory. External-host, local-registration, connection-backed and

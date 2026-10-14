@@ -1031,7 +1031,7 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   chat** (the same attach path as the list). Closing the dialog stops the watch;
 - once a machine with a screen is reachable (the chat's own machine first),
   offers the
-  [OpenGeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
+  [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
   stops after ten minutes or when the inventory is not readable.
@@ -1090,13 +1090,13 @@ per-attempt admission `run_on` uses. When computer input is refused because
 screen control is off, the error names that tool.
 
 macOS also needs Screen Recording, Accessibility and Input Monitoring for
-OpenGeni. Mac agents report all three without prompting, on Hello and on each
+Opengeni. Mac agents report all three without prompting, on Hello and on each
 desktop heartbeat, as `runtime.macPermissions` in the machine list; older agents
 report only a missing Screen Recording grant, as `desktopUnavailableReason`.
 `POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings` with
 `pane: screen_recording | accessibility | input_monitoring` opens that System
 Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
-nothing; the person switches OpenGeni on there. The chat card walks the missing
+nothing; the person switches Opengeni on there. The chat card walks the missing
 permissions in that order, from what the Mac reports.
 
 ### Change who can use a machine

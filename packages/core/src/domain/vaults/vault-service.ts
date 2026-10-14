@@ -423,7 +423,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
    * Values never live in both stores' databases at once: each field is read
    * from the source (service-side, unaudited like other internal copies),
    * written to the target through its own path, and a move then archives the
-   * source so the old item stays recoverable. OpenGeni-to-OpenGeni moves keep
+   * source so the old item stays recoverable. Opengeni-to-Opengeni moves keep
    * the single-statement database move, which preserves the item id.
    */
   async function moveAcrossProviders(input: {

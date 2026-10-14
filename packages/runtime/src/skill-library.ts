@@ -102,7 +102,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     sourceCommit: "e9734c4aa062e0421a68acb5650bd5bf33ce2e10",
     sourceUrl:
       "https://github.com/Cloudgeni-ai/opengeni/tree/e9734c4aa062e0421a68acb5650bd5bf33ce2e10/packages/runtime/src/bundled_hashicorp_terraform_skills/checkov",
-    provenance: "OpenGeni-authored guidance; reviewed immutable opt-in entry.",
+    provenance: "Opengeni-authored guidance; reviewed immutable opt-in entry.",
     license: "Apache-2.0",
     documentationUrl: "https://www.checkov.io/",
     compatibility: Object.freeze({
@@ -122,7 +122,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     sourceUrl:
       "https://github.com/firecrawl/anydoc/tree/4e3089b1ed43404241a303109f81e2c7933040b2/skills/convert-documents-to-markdown",
     provenance:
-      "OpenGeni-authored guidance adapted for the pinned Firecrawl AnyDoc runtime; reviewed immutable opt-in entry.",
+      "Opengeni-authored guidance adapted for the pinned Firecrawl AnyDoc runtime; reviewed immutable opt-in entry.",
     license: "MIT",
     documentationUrl: "https://github.com/firecrawl/anydoc/tree/v0.1.8",
     compatibility: Object.freeze({
@@ -160,7 +160,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     sourceCommit: "e9734c4aa062e0421a68acb5650bd5bf33ce2e10",
     sourceUrl:
       "https://github.com/Cloudgeni-ai/opengeni/tree/e9734c4aa062e0421a68acb5650bd5bf33ce2e10/packages/runtime/src/bundled_hashicorp_terraform_skills/social-media-marketing",
-    provenance: "OpenGeni-authored guidance; reviewed immutable opt-in entry.",
+    provenance: "Opengeni-authored guidance; reviewed immutable opt-in entry.",
     license: "Apache-2.0",
     documentationUrl:
       "https://github.com/Cloudgeni-ai/opengeni/blob/e9734c4aa062e0421a68acb5650bd5bf33ce2e10/docs/social-connectors.md",

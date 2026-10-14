@@ -2447,7 +2447,7 @@ export class OpenGeniClient {
   }
 
   /** Open one macOS Privacy & Security pane on a connected Mac, so the person
-   * only has to flip the permission for OpenGeni. */
+   * only has to flip the permission for Opengeni. */
   async openMachinePrivacySettings(
     workspaceId: string,
     enrollmentId: string,

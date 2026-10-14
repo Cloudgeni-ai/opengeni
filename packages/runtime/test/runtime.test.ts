@@ -7550,7 +7550,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("an ordinary inner extractor may own OpenGeni-looking custom-data keys", async () => {
+  test("an ordinary inner extractor may own Opengeni-looking custom-data keys", async () => {
     const fullResult = {
       content: [{ type: "text" as const, text: "caller-owned marker content" }],
       isError: false,

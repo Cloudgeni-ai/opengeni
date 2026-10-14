@@ -742,7 +742,7 @@ and never block leaving the step. It never writes workspace settings or requires
 `workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
 accept still complete immediately. The step does not widen
 `POST /v1/auth/organization-onboarding`, invitation accept, or any worker
-surface. Empty OpenGeni-credit create and failed-session paths prompt the
+surface. Empty Opengeni-credit create and failed-session paths prompt the
 owner to buy credits or connect a model instead of a dead-end toast.
 
 ### Additional organization creation (0399)

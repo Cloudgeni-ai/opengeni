@@ -153,7 +153,7 @@ does not use Opengeni's Drizzle handle: `apps/api/src/auth/managed-auth.ts`
 constructs its own `new Pool({ connectionString })` and hands it to `betterAuth`.
 Every sign-up, sign-in, OAuth link, unlink, and token refresh runs on a
 connection that never executes `set_config('opengeni.*', …)` and has no code path
-by which it could. The one OpenGeni-side read,
+by which it could. The one Opengeni-side read,
 `synchronizeCanonicalHumanLoginBindings`, runs inside Better Auth's
 `session.create.before` hook — strictly before any `managed_accounts` row has
 been discovered for the request.

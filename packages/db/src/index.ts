@@ -6300,7 +6300,7 @@ export async function applyCreditDebitUpToBalance(
 }
 
 /**
- * Settle an already-consumed, OpenGeni-funded resource for its full cost.
+ * Settle an already-consumed, Opengeni-funded resource for its full cost.
  * Admission happens before use; an in-flight operation can take the account
  * below zero. Future grants and purchased top-ups net against that balance.
  * Never use this helper to admit a new operation or for externally paid use.

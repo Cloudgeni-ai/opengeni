@@ -152,7 +152,7 @@ searched in one response or loaded together through `names`.
 ```
 
 Identity. The legacy text opened with two identity statements (the contract's
-generic line and the template's OpenGeni line). The default identity keeps the
+generic line and the template's Opengeni line). The default identity keeps the
 more specific one and adds the contract's collaboration and voice sentences,
 so replacing the identity replaces all of them together.
 
@@ -160,7 +160,7 @@ so replacing the identity replaces all of them together.
 - You are an agent for the current workspace.
 ```
 
-Precedence. New: embedder instructions must beat OpenGeni's style defaults
+Precedence. New: embedder instructions must beat Opengeni's style defaults
 without being able to switch off the runtime or safety rules.
 
 ```diff

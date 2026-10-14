@@ -111,7 +111,7 @@ export type EnsureTerminalServerResult = {
  * Exported (pure, side-effect-free) so the ensureTerminalServer unit test can
  * assert the exact command sequence without a live box. Mirrors
  * buildDisplayStackScript. A ttyd process is sandbox-group-global, not
- * OpenGeni-session-specific, so it must never inherit the box-global legacy
+ * Opengeni-session-specific, so it must never inherit the box-global legacy
  * Codemode pointer. Session-scoped interactive exec/PTY uses Channel A; the
  * shared ttyd shell fails closed for Codemode until that stream plane itself is
  * session-isolated.
