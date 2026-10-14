@@ -125,6 +125,12 @@ describe("a wait cannot end a person's turn without a visible reply", () => {
     expect(INPUT_WAIT_REPLY_REFUSAL).toContain("reasoning is not shown");
   });
 
+  test("the refusal says a reply drafted in thinking does not count", () => {
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("thinking or reasoning block does not count");
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("normal assistant text block");
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("same response");
+  });
+
   test("machine-started and agent-relayed turns may wait silently", async () => {
     for (const source of ["goal", "system", "scheduled_task", "compaction"] as const) {
       expect(await refusal({ ...human, source }, false)).toBeNull();
