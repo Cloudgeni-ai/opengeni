@@ -1,3 +1,4 @@
+import { SITE_GATEWAY_LOGOUT_PATH } from "@opengeni/contracts";
 import { SITE_ABUSE_CATEGORIES } from "./report-categories";
 import { applySecurityHeaders, newNonce, pageCsp, type SecurityOptions } from "./headers";
 
@@ -80,7 +81,7 @@ export function messagePage(
 
 export function reportFormPage(
   security: Security,
-  init: { title: string; token: string; headers?: HeadersInit; error?: string },
+  init: { title: string; abuseEmail: string; token: string; headers?: HeadersInit; error?: string },
 ): Response {
   const options = SITE_ABUSE_CATEGORIES.map(
     (category) => `<option value="${category.value}">${escapeHtml(category.label)}</option>`,
@@ -91,8 +92,20 @@ export function reportFormPage(
     status: init.error ? 400 : 200,
     title: "Report this Site",
     ...(init.headers ? { headers: init.headers } : {}),
-    body: `<h1>Report this Site</h1><p>Tell us what is wrong with “${escapeHtml(init.title)}”. Reports go to the people who run this service.</p>${
+    body: `<h1>Report this Site</h1><p>Tell us what is wrong with “${escapeHtml(init.title)}”. Reports go to the Site's owners and to Opengeni's abuse team. You can also email <a href="mailto:${escapeHtml(init.abuseEmail)}">${escapeHtml(init.abuseEmail)}</a>.</p>${
       init.error ? `<p role="alert">${escapeHtml(init.error)}</p>` : ""
     }<form method="post" action="/_og/report"><input type="hidden" name="token" value="${escapeHtml(init.token)}"><label for="category">Reason</label><select id="category" name="category" required>${options}</select><label for="message">Details</label><textarea id="message" name="message" maxlength="4000"></textarea><label for="contactEmail">Your email (optional)</label><input id="contactEmail" name="contactEmail" type="email" maxlength="320" autocomplete="email"><button type="submit">Send report</button></form>`,
+  });
+}
+
+/** GET /_og/auth/logout: a script-free confirmation; signing out is a same-origin POST. */
+export function logoutConfirmPage(security: Security, returnPath: string): Response {
+  const action = `${SITE_GATEWAY_LOGOUT_PATH}?return=${encodeURIComponent(returnPath)}`;
+  return page({
+    ...security,
+    noindex: true,
+    status: 200,
+    title: "Sign out",
+    body: `<h1>Sign out of this Site?</h1><p>You can sign in again at any time.</p><form method="post" action="${escapeHtml(action)}"><button type="submit">Sign out</button></form>`,
   });
 }

@@ -163,23 +163,26 @@ export async function readLogin(
 // Human check (optional Turnstile)
 // ---------------------------------------------------------------------------
 
+/** Proof bound to the Site host and the visitor, so it is never valid on another Site. */
 export async function humanCookie(
   secret: string,
+  host: string,
   visitor: string,
   now = Date.now(),
 ): Promise<string> {
   const expiresAt = Math.floor(now / 1000) + HUMAN_COOKIE_MAX_AGE;
   return serializeCookie(
     SITE_HUMAN_COOKIE,
-    await signValue(secret, "human", `${visitor}~${expiresAt}`),
+    await signValue(secret, "human", `${host.toLowerCase()}~${visitor}~${expiresAt}`),
     HUMAN_COOKIE_MAX_AGE,
   );
 }
 
-/** True when the human cookie is valid, unexpired and minted for this visitor. */
+/** True when the human cookie is valid, unexpired and minted for this host and visitor. */
 export async function readHuman(
   secret: string,
   cookies: Map<string, string>,
+  host: string,
   visitor: string | null,
   now = Date.now(),
 ): Promise<boolean> {
@@ -187,8 +190,10 @@ export async function readHuman(
   if (!value || !visitor) return false;
   const payload = await verifyValue(secret, "human", value);
   if (!payload) return false;
-  const [id, expiresAt] = payload.split("~");
-  return id === visitor && Number(expiresAt) > Math.floor(now / 1000);
+  const [boundHost, id, expiresAt] = payload.split("~");
+  return (
+    boundHost === host.toLowerCase() && id === visitor && Number(expiresAt) > Math.floor(now / 1000)
+  );
 }
 
 // ---------------------------------------------------------------------------

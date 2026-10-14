@@ -1,6 +1,6 @@
 import type { SiteViewer } from "@opengeni/contracts";
 import { sha256Hex } from "./crypto";
-import { edgeCache, internalCacheKey } from "./edge-cache";
+import { edgeCache, edgeCacheKey } from "./edge-cache";
 import { UpstreamError } from "./host-map";
 import { signedApiRequest } from "./signing";
 import { siteCaller, type SiteContext } from "./site-context";
@@ -42,7 +42,12 @@ function viewerFrom(value: unknown): SiteViewer | null {
 export async function probeAccess(site: SiteContext): Promise<AccessProbe> {
   if (!site.session) return { kind: "signin" };
   const cache = edgeCache();
-  const key = internalCacheKey(`/access/${await sha256Hex(`${site.hostname}\n${site.session}`)}`);
+  // Keyed on the host-map generation: a new record (access change, takedown)
+  // never reuses an earlier confirmation.
+  const key = edgeCacheKey(site.hostname, "access", [
+    site.record.generation,
+    await sha256Hex(`${site.hostname}\n${site.session}`),
+  ]);
   if (cache) {
     const hit = await cache.match(key);
     if (hit) return { kind: "ok", viewer: viewerFrom(await hit.json().catch(() => null)) };

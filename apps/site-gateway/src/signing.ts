@@ -61,12 +61,14 @@ export async function signedApiRequest(
   const body = init.body && init.body.byteLength > 0 ? init.body : null;
   const timestamp = Math.floor((init.now ?? Date.now()) / 1000);
   const human = caller.human ? "1" : "";
+  // Sign exactly the host value that is sent.
+  const host = caller.host.toLowerCase();
   const signature = await signGatewayFields(config.secret, {
     method,
     pathWithQuery,
     timestamp,
     bodySha256: await sha256Hex(body ?? ""),
-    host: caller.host,
+    host,
     session: caller.session,
     visitor: caller.visitor,
     clientIp: caller.clientIp,
@@ -75,7 +77,7 @@ export async function signedApiRequest(
   const headers = new Headers(init.headers);
   headers.set(SITE_GATEWAY_TIMESTAMP_HEADER, String(timestamp));
   headers.set(SITE_GATEWAY_SIGNATURE_HEADER, signature);
-  headers.set(SITE_GATEWAY_HOST_HEADER, caller.host.toLowerCase());
+  headers.set(SITE_GATEWAY_HOST_HEADER, host);
   if (caller.session) headers.set(SITE_GATEWAY_SESSION_HEADER, caller.session);
   if (caller.visitor) headers.set(SITE_GATEWAY_VISITOR_HEADER, caller.visitor);
   if (caller.clientIp) headers.set(SITE_GATEWAY_CLIENT_IP_HEADER, caller.clientIp);

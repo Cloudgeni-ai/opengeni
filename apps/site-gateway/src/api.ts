@@ -104,24 +104,40 @@ export async function readBodyCapped(
   return body;
 }
 
-/** The per-Site rate-limit key: the verified visitor, else the client IP. */
-export function rateLimitKey(site: Pick<SiteContext, "hostname" | "visitor" | "clientIp">): string {
-  return site.visitor
-    ? `v:${site.hostname}:${site.visitor}`
-    : `ip:${site.hostname}:${site.clientIp || "unknown"}`;
+/**
+ * The per-Site rate-limit keys. The client IP is always limited, and so is
+ * the verified visitor when there is one: both must pass, so rotating or
+ * dropping `__Host-og_v` never resets a client's budget.
+ */
+export function rateLimitKeys(
+  site: Pick<SiteContext, "hostname" | "visitor" | "clientIp">,
+  scope = "api",
+): string[] {
+  const keys = [`${scope}:ip:${site.hostname}:${site.clientIp || "unknown"}`];
+  if (site.visitor) keys.push(`${scope}:v:${site.hostname}:${site.visitor}`);
+  return keys;
 }
 
-/** Apply the edge flood brake. A failing binding never blocks traffic; the API enforces real limits. */
+/**
+ * Apply the edge flood brake to every key; all must pass. A failing binding
+ * never blocks traffic; the API enforces the real limits.
+ */
 export async function underRateLimit(
   site: SiteContext,
-  key = rateLimitKey(site),
+  keys: readonly string[] = rateLimitKeys(site),
 ): Promise<boolean> {
-  if (!site.config.rateLimiter) return true;
-  try {
-    return (await site.config.rateLimiter.limit({ key })).success;
-  } catch {
-    return true;
-  }
+  const limiter = site.config.rateLimiter;
+  if (!limiter) return true;
+  const results = await Promise.all(
+    keys.map(async (key) => {
+      try {
+        return (await limiter.limit({ key })).success;
+      } catch {
+        return true;
+      }
+    }),
+  );
+  return results.every(Boolean);
 }
 
 /**
@@ -179,7 +195,7 @@ export async function handleApi(site: SiteContext): Promise<Response> {
     if (value !== null) headers.set(name, value);
   }
   const human = site.config.turnstile
-    ? await readHuman(site.config.secret, site.cookies, site.visitor)
+    ? await readHuman(site.config.secret, site.cookies, site.hostname, site.visitor)
     : false;
   const upstreamRequest = await signedApiRequest(site.config, siteCaller(site, human), {
     method,

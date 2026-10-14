@@ -85,8 +85,9 @@ describe("optional Turnstile human check", () => {
     expect(cookie).toStartWith("__Host-og_h=");
     expect(cookie).toContain("Max-Age=3600");
     const cookies = parseCookies(cookie.split(";")[0]!);
-    expect(await readHuman(TEST_SECRET, cookies, "visitor-1")).toBe(true);
-    expect(await readHuman(TEST_SECRET, cookies, "visitor-2")).toBe(false);
+    expect(await readHuman(TEST_SECRET, cookies, HOST, "visitor-1")).toBe(true);
+    expect(await readHuman(TEST_SECRET, cookies, HOST, "visitor-2")).toBe(false);
+    expect(await readHuman(TEST_SECRET, cookies, "other-docs.sites.test", "visitor-1")).toBe(false);
   });
 
   test("failed, foreign-host, cross-origin and visitor-less checks are refused", async () => {

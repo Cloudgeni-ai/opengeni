@@ -66,14 +66,17 @@ describe("gateway cookies", () => {
     expect(readSession(new Map([["__Host-og_session", `${"t".repeat(40)} x`]]))).toBe(null);
   });
 
-  test("human proof is bound to the visitor and expires", async () => {
-    const cookies = jar(await humanCookie(TEST_SECRET, "visitor-a"));
-    expect(await readHuman(TEST_SECRET, cookies, "visitor-a")).toBe(true);
-    expect(await readHuman(TEST_SECRET, cookies, "visitor-b")).toBe(false);
-    expect(await readHuman(TEST_SECRET, cookies, null)).toBe(false);
-    expect(await readHuman(TEST_SECRET, cookies, "visitor-a", Date.now() + 2 * 3600_000)).toBe(
-      false,
-    );
+  test("human proof is bound to the host and visitor and expires", async () => {
+    const host = "a-site.sites.test";
+    const cookies = jar(await humanCookie(TEST_SECRET, host, "visitor-a"));
+    expect(await readHuman(TEST_SECRET, cookies, host, "visitor-a")).toBe(true);
+    expect(await readHuman(TEST_SECRET, cookies, "A-Site.sites.test", "visitor-a")).toBe(true);
+    expect(await readHuman(TEST_SECRET, cookies, "other-site.sites.test", "visitor-a")).toBe(false);
+    expect(await readHuman(TEST_SECRET, cookies, host, "visitor-b")).toBe(false);
+    expect(await readHuman(TEST_SECRET, cookies, host, null)).toBe(false);
+    expect(
+      await readHuman(TEST_SECRET, cookies, host, "visitor-a", Date.now() + 2 * 3600_000),
+    ).toBe(false);
   });
 
   test("form tokens are bound to purpose, host and visitor", async () => {

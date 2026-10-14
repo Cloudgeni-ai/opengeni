@@ -46,6 +46,14 @@ describe("gateway request signing", () => {
       false,
     );
     expect(verifyGatewaySignature(`${TEST_SECRET}x`, request, received)).toBe(false);
+    // The host is sent and signed in the same lowercase form.
+    const mixed = await signedApiRequest(
+      { apiOrigin: "https://api.example.test", secret: TEST_SECRET },
+      { host: "Team-4K9X.Sites.Test", session: "", visitor: "", clientIp: "", human: false },
+      { method: "GET", suffix: "/host" },
+    );
+    expect(mixed.headers.get("x-opengeni-site-host")).toBe("team-4k9x.sites.test");
+    expect(verifyGatewaySignature(TEST_SECRET, mixed, new Uint8Array(0))).toBe(true);
     const tampered = new Headers(request.headers);
     tampered.set("x-opengeni-site-visitor", "someone-else");
     expect(
