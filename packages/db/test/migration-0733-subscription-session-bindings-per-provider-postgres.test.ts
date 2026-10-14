@@ -403,6 +403,7 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_data_usage",
       "site_data_validation_windows",
       "site_data_workspace_validation_windows",
+      "site_hostname_holds",
       "site_hostnames",
       "site_limit_profiles",
       "site_publications",
