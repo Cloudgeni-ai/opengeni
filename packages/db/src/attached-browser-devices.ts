@@ -780,3 +780,54 @@ export async function getAttachedBrowserDevice(
     CONSISTENT_READ,
   );
 }
+
+/** Where a browser or computer's controller runs, as far as ending it needs. */
+export type InteractionControllerPlacement =
+  | { kind: "connected_machine"; sandboxId: string }
+  | { kind: "attached_device"; deviceId: string }
+  | { kind: string };
+
+/** True when a browser or computer's controller can never be reached again,
+ * so ending it completes in the control plane:
+ *  - on a Connected Machine that was removed (revoked); that machine can no
+ *    longer run or keep it;
+ *  - in a person's own Chrome whose device is disconnected, or whose machine
+ *    was removed. Such a session holds no Opengeni process or profile; the
+ *    tabs it opened stay with the person as ordinary tabs.
+ * A machine that is only offline still holds its sessions' processes and
+ * private profiles, so it is not gone. Both checks go through the viewer's
+ * own owner-aware machine listing: a machine hidden from them is never gone. */
+export async function interactionControllerGone(
+  db: Database,
+  viewer: AttachedBrowserViewer,
+  placement: InteractionControllerPlacement | null,
+): Promise<boolean> {
+  if (placement && "sandboxId" in placement && placement.kind === "connected_machine") {
+    const sandboxId = placement.sandboxId;
+    return await withRlsContext(db, viewer, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, viewer.subjectId);
+      const rows = await rawRows<{ id: string }>(
+        scopedDb,
+        sql`select value->>'id' as id
+          from list_scoped_enrollments(
+            ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'revoked') value
+          where value->>'sandboxId' = ${sandboxId}
+          limit 1`,
+      );
+      return rows.length > 0;
+    });
+  }
+  if (placement && "deviceId" in placement && placement.kind === "attached_device") {
+    try {
+      const device = await getAttachedBrowserDevice(db, {
+        ...viewer,
+        deviceId: placement.deviceId,
+      });
+      return device.state !== "connected";
+    } catch (error) {
+      if (error instanceof AttachedBrowserDeviceNotFoundError) return false;
+      throw error;
+    }
+  }
+  return false;
+}

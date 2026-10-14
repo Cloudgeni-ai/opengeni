@@ -1924,6 +1924,55 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("an explicit end of a browser this controller lost stops its exact process and removes its state", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      // The controller that launched the browser is gone (agent restart): a
+      // fresh supervisor holds nothing in memory for this session.
+      const stopped: Array<{ profileDirectory: string; pid: number | null }> = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        stopEndedProcess: async (profileDirectory, recorded) => {
+          stopped.push({ profileDirectory, pid: recorded?.pid ?? null });
+        },
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        // Recovery stays preserved for anything but an explicit discarding end
+        // of this exact generation.
+        await expect(supervisor.endSession(exact)).rejects.toThrow("preserved");
+        await expect(
+          supervisor.endSession(
+            { ...exact, controllerGeneration: "controller-other" },
+            { removeState: true },
+          ),
+        ).rejects.toThrow("preserved");
+        expect(stopped).toEqual([]);
+        expect(await exists(join(sessionDirectory, "working-runtime.sqlite"))).toBe(true);
+
+        await supervisor.endSession(exact, { removeState: true });
+        expect(stopped).toEqual([
+          { profileDirectory: join(sessionDirectory, "profile"), pid: 2001 },
+        ]);
+        expect(await exists(sessionDirectory)).toBe(false);
+        // Ending again finds nothing, which the control plane treats as ended.
+        await expect(supervisor.endSession(exact, { removeState: true })).rejects.toMatchObject(
+          {
+            code: "resource_not_found",
+          },
+        );
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   test("update idle proof admits quiescent preserved sessions and blocks in-flight or unrecoverable ones", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
       const dispatched = deferred(),
