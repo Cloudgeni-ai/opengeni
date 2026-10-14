@@ -1,6 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
 import { EventEmitter } from "node:events";
 
+import { electronStub } from "./electron-stub";
+
 const calls: string[] = [];
 
 class FakeUpdater extends EventEmitter {
@@ -17,19 +19,7 @@ class FakeUpdater extends EventEmitter {
 }
 const autoUpdater = new FakeUpdater();
 
-class FakeNotification extends EventEmitter {
-  static isSupported() {
-    return false;
-  }
-}
-
-// Bun's module mocks are shared across test files: keep what menu.test needs too.
-mock.module("electron", () => ({
-  app: { isPackaged: true },
-  Menu: { buildFromTemplate: (template: unknown) => template },
-  dialog: { showMessageBox: async () => ({ response: 0 }) },
-  Notification: FakeNotification,
-}));
+mock.module("electron", () => electronStub);
 mock.module("electron-updater", () => ({ autoUpdater }));
 
 const { AppUpdates, updateNeedsPassword } = await import("../src/main/updates");
