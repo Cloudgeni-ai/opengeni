@@ -110,13 +110,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   the page's own requests and for agents it starts or messages directly.
   Indirect paths that run with the viewer's general API authority (for
   example a schedule or automation the page creates, whose agents are not
-  Site-started) are not clamped yet; they are tracked in
-  [OPE-801](https://linear.app/cloudgeni/issue/OPE-801). So is one direct
-  path: a page on Site B can message an existing session that was started
-  from Site A. Site turns record only `surface = 'site'`, not which Site sent
+  Site-started) are not clamped yet; they are planned follow-up work. So is
+  one direct path: a page on Site B can message an existing session that was
+  started from Site A. Site turns record only `surface = 'site'`, not which Site sent
   them, so that agent keeps viewer reach on Site A (never management, and
   nothing on Site B). Recording the sending Site on each Site turn needs
-  changes on every turn-insert path and is part of OPE-801.
+  changes on every turn-insert path and is part of that follow-up.
 - The Site HTTP channel reaches only the current Site's data:
   `siteSessionPath` refuses `/published-artifacts/<id>/data|files` for every
   explicit id on every host, and hosts not bound to a published Site (inline
@@ -397,6 +396,6 @@ mode are added.
   principals; live updates.
 - Clamp indirect paths from Site HTML (schedules, automations and other
   agents created with the viewer's authority), and record which Site sent
-  each Site turn: [OPE-801](https://linear.app/cloudgeni/issue/OPE-801).
+  each Site turn.
 - Stamp the Site origin onto child sessions at creation so the lineage check
   is one lookup instead of a bounded walk.

@@ -9,12 +9,20 @@ import {
 
 type Call = { method: string; url: string; body?: unknown; authorization?: string };
 
-function fakeStore(statuses: ItemStatus[], upload: Record<string, unknown> = { uploadState: "SUCCEEDED", crxVersion: "1.2.3" }) {
+function fakeStore(
+  statuses: ItemStatus[],
+  upload: Record<string, unknown> = { uploadState: "SUCCEEDED", crxVersion: "1.2.3" },
+) {
   const calls: Call[] = [];
   const queue = [...statuses];
   const fetch: FetchLike = async (url, init) => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
-    calls.push({ method: init?.method ?? "GET", url, body: init?.body, authorization: headers.authorization });
+    calls.push({
+      method: init?.method ?? "GET",
+      url,
+      body: init?.body,
+      authorization: headers.authorization,
+    });
     if (url.endsWith(":fetchStatus")) {
       const next = queue.length > 1 ? queue.shift()! : queue[0]!;
       return Response.json(next);
@@ -44,11 +52,17 @@ function options(fetch: FetchLike, overrides: Partial<PublishOptions> = {}): Pub
 }
 
 const published = (version: string): ItemStatus => ({
-  publishedItemRevisionStatus: { state: "PUBLISHED", distributionChannels: [{ crxVersion: version }] },
+  publishedItemRevisionStatus: {
+    state: "PUBLISHED",
+    distributionChannels: [{ crxVersion: version }],
+  },
 });
 const pending = (version: string, live = "1.2.2"): ItemStatus => ({
   ...published(live),
-  submittedItemRevisionStatus: { state: "PENDING_REVIEW", distributionChannels: [{ crxVersion: version }] },
+  submittedItemRevisionStatus: {
+    state: "PENDING_REVIEW",
+    distributionChannels: [{ crxVersion: version }],
+  },
 });
 
 describe("publishToStore", () => {
@@ -80,26 +94,40 @@ describe("publishToStore", () => {
 
   test("refuses to replace another pending version unless asked", async () => {
     const store = fakeStore([pending("1.2.1"), pending("1.2.3")]);
-    await expect(publishToStore(options(store.fetch))).rejects.toThrow(/1\.2\.1 is already PENDING_REVIEW/);
+    await expect(publishToStore(options(store.fetch))).rejects.toThrow(
+      /1\.2\.1 is already PENDING_REVIEW/,
+    );
     expect(store.calls).toHaveLength(1);
     const replacing = fakeStore([pending("1.2.1"), pending("1.2.3")]);
-    expect((await publishToStore(options(replacing.fetch, { cancelPending: true }))).kind).toBe("submitted");
+    expect((await publishToStore(options(replacing.fetch, { cancelPending: true }))).kind).toBe(
+      "submitted",
+    );
     expect(replacing.calls[1]!.url.endsWith(":cancelSubmission")).toBe(true);
   });
 
   test("waits for an asynchronous upload and rejects a failed one", async () => {
     const store = fakeStore(
-      [published("1.2.2"), { lastAsyncUploadState: "IN_PROGRESS" }, { lastAsyncUploadState: "SUCCEEDED" }, pending("1.2.3")],
+      [
+        published("1.2.2"),
+        { lastAsyncUploadState: "IN_PROGRESS" },
+        { lastAsyncUploadState: "SUCCEEDED" },
+        pending("1.2.3"),
+      ],
       { uploadState: "IN_PROGRESS" },
     );
     expect((await publishToStore(options(store.fetch))).kind).toBe("submitted");
-    const failing = fakeStore([published("1.2.2"), { lastAsyncUploadState: "FAILED" }], { uploadState: "IN_PROGRESS" });
+    const failing = fakeStore([published("1.2.2"), { lastAsyncUploadState: "FAILED" }], {
+      uploadState: "IN_PROGRESS",
+    });
     await expect(publishToStore(options(failing.fetch))).rejects.toThrow(/state FAILED/);
     expect(failing.calls.some((call) => call.url.endsWith(":publish"))).toBe(false);
   });
 
   test("rejects a ZIP whose manifest version differs", async () => {
-    const store = fakeStore([published("1.2.2")], { uploadState: "SUCCEEDED", crxVersion: "9.9.9" });
+    const store = fakeStore([published("1.2.2")], {
+      uploadState: "SUCCEEDED",
+      crxVersion: "9.9.9",
+    });
     await expect(publishToStore(options(store.fetch))).rejects.toThrow(/parsed version 9\.9\.9/);
     expect(store.calls.some((call) => call.url.endsWith(":publish"))).toBe(false);
   });
@@ -110,9 +138,15 @@ describe("federatedAccessToken", () => {
     const calls: Call[] = [];
     const fetch: FetchLike = async (url, init) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
-      calls.push({ method: init?.method ?? "GET", url, body: init?.body, authorization: headers.authorization });
+      calls.push({
+        method: init?.method ?? "GET",
+        url,
+        body: init?.body,
+        authorization: headers.authorization,
+      });
       if (url.startsWith("https://github.example/")) return Response.json({ value: "oidc" });
-      if (url === "https://sts.googleapis.com/v1/token") return Response.json({ access_token: "federated" });
+      if (url === "https://sts.googleapis.com/v1/token")
+        return Response.json({ access_token: "federated" });
       return Response.json({ accessToken: "cws" });
     };
     const token = await federatedAccessToken({
@@ -123,7 +157,8 @@ describe("federatedAccessToken", () => {
       serviceAccount: "publisher@example.iam.gserviceaccount.com",
     });
     expect(token).toBe("cws");
-    const audience = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/g";
+    const audience =
+      "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/g";
     expect(new URL(calls[0]!.url).searchParams.get("audience")).toBe(audience);
     expect(calls[0]!.authorization).toBe("Bearer request");
     expect(JSON.parse(String(calls[1]!.body))).toMatchObject({ audience, subjectToken: "oidc" });
@@ -131,6 +166,8 @@ describe("federatedAccessToken", () => {
       "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/publisher%40example.iam.gserviceaccount.com:generateAccessToken",
     );
     expect(calls[2]!.authorization).toBe("Bearer federated");
-    expect(JSON.parse(String(calls[2]!.body)).scope).toEqual(["https://www.googleapis.com/auth/chromewebstore"]);
+    expect(JSON.parse(String(calls[2]!.body)).scope).toEqual([
+      "https://www.googleapis.com/auth/chromewebstore",
+    ]);
   });
 });
