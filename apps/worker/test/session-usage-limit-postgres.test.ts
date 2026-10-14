@@ -13,14 +13,17 @@ import {
 import {
   acceptSessionApprovalDecision,
   bootstrapWorkspace,
+  checkSessionUsageLimitAdmission,
   createDb,
   createSession,
+  fenceSessionUsageReceipt,
   getActiveSessionHistoryItemsPaged,
   getSession,
   getSessionGoal,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
+  maintainSessionUsageLimits,
   readSessionUsageLimit,
   setSessionUsageLimitInTransaction,
   withWorkspaceSubjectSessionActivityRls,
@@ -674,13 +677,26 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
   });
   const original = opengeniDb.settleSessionUsageReceipt;
   // The task meter's database path is down for this session (every receipt
-  // write fails); everything else keeps working.
+  // write fails), and the call's billing write failed too, so its durable
+  // usage event carries no price for the event meter to record.
   const settle = spyOn(opengeniDb, "settleSessionUsageReceipt").mockImplementation(
     async (db, input) => {
       if (input.sessionId === session.id) throw connectionClosed();
       return await original(db, input);
     },
   );
+  const originalUsage = opengeniDb.recordUsageEvent;
+  let usageFailures = 0;
+  const usageWrite = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(async (db, input) => {
+    if (
+      String(input.sourceResourceId ?? "").includes(`dbfail-${session.id}`) &&
+      usageFailures === 0
+    ) {
+      usageFailures++;
+      throw connectionClosed();
+    }
+    return await originalUsage(db, input);
+  });
   const attemptId = crypto.randomUUID();
   let thrown: unknown;
   try {
@@ -697,7 +713,9 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
     thrown = error;
   } finally {
     settle.mockRestore();
+    usageWrite.mockRestore();
   }
+  expect(usageFailures).toBe(1);
   // Stopped before the next request: never admitted on an undercount.
   expect(scripted.calls).toBe(1);
   expect((thrown as { type?: string } | undefined)?.type).toBe(
@@ -759,3 +777,197 @@ test("F1/AC13: a persistent receipt failure stops before the next request, the r
     coverage: "complete",
   });
 });
+
+test("re-review N3: a final response whose direct receipt write keeps failing completes once; its committed usage event already recorded the exact receipt", async () => {
+  resetSessionUsageReceiptCustodyForTests();
+  const ctx = await fixture();
+  const session = await startSession(ctx, { message: "Answer directly" });
+  await setLimit(ctx, session.id, 1_000_000);
+  const scripted = new ScriptedModel([
+    { id: `final-${session.id}`, inputTokens: 100, output: [assistantMessage("done")] },
+    { inputTokens: 100, output: [assistantMessage("must never be requested")] },
+  ]);
+  const original = opengeniDb.settleSessionUsageReceipt;
+  let directFailures = 0;
+  const settle = spyOn(opengeniDb, "settleSessionUsageReceipt").mockImplementation(
+    async (db, input) => {
+      if (input.sessionId === session.id) {
+        directFailures++;
+        throw connectionClosed();
+      }
+      return await original(db, input);
+    },
+  );
+  let result: Awaited<ReturnType<typeof runTurn>>;
+  try {
+    result = await runTurn(ctx, session.id, scripted);
+  } finally {
+    settle.mockRestore();
+  }
+  expect(directFailures).toBe(1);
+  // One request, a normal completion: no recovery, so no second request.
+  expect(result.status).toBe("idle");
+  expect(scripted.calls).toBe(1);
+  expect(heldSessionUsageReceiptCount(session.id)).toBe(0);
+  expect(await receipts(session.id)).toEqual([
+    expect.objectContaining({
+      source_id: expect.stringContaining(`final-${session.id}`),
+      amount_micros: "100",
+      pricing_source: "configured_list_price",
+    }),
+  ]);
+  expect(await usage(ctx, session.id)).toMatchObject({ usedMicros: 100, pricedCalls: 1 });
+  const types = (await events(ctx, session.id)).map((event) => event.type);
+  expect(types).toContain("turn.completed");
+  expect(types).not.toContain("turn.recovery.requested");
+  expect(types).not.toContain("turn.failed");
+});
+
+/** A runtime whose tool emulates a sandbox single model call that leaves a marker owed. */
+function custodyMarkerRuntime(
+  scripted: ScriptedModel,
+  ctx: Ctx,
+  sessionId: string,
+  sourceId: string,
+  leave: "fenced" | "overdue",
+): OpenGeniRuntime {
+  const base = scriptedRuntime(scripted);
+  return {
+    ...base,
+    buildAgent: (...args) => {
+      const agent = base.buildAgent(...args);
+      const index = agent.tools.findIndex((t) => (t as { name?: string }).name === "local_fixture");
+      agent.tools.splice(
+        index,
+        1,
+        tool({
+          name: "local_fixture",
+          description: "Offline: a single model call whose receipt is still owed",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          strict: false,
+          execute: async () => {
+            const admitted = await checkSessionUsageLimitAdmission(app.db, {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              sessionId,
+              runtime: true,
+              openSourceId: sourceId,
+            });
+            expect(admitted.allowed).toBe(true);
+            if (leave === "fenced") {
+              await fenceSessionUsageReceipt(app.db, {
+                accountId: ctx.accountId,
+                workspaceId: ctx.workspaceId,
+                sessionId,
+                sourceId,
+              });
+            } else {
+              // Its owner died: the open marker is past the overdue window.
+              await shared.admin`update opengeni_private.session_usage_limit_receipts
+                set recorded_at = now() - interval '16 minutes'
+                where source_id = ${sourceId}`;
+            }
+            return "local result";
+          },
+        }),
+      );
+      return agent;
+    },
+  };
+}
+
+async function runWith(
+  ctx: Ctx,
+  sessionId: string,
+  runtime: OpenGeniRuntime,
+  attemptId: string = crypto.randomUUID(),
+) {
+  const activities = createActivityTestHarness({
+    settings: settingsFor("priced"),
+    db: app.db,
+    bus: new MemoryEventBus(),
+    runtime,
+  });
+  return await activities.runAgentTurn({
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+}
+
+for (const leave of ["fenced", "overdue"] as const) {
+  test(`re-review N1: a ${leave} single-call marker found mid-turn parks the turn as recovering (not failed), keeps history and goal, and continues without replay once resolved`, async () => {
+    resetSessionUsageReceiptCustodyForTests();
+    const ctx = await fixture();
+    const session = await startSession(ctx, { goal: "Finish the task" });
+    await setLimit(ctx, session.id, 1_000_000);
+    const sourceId = `model_call:custody-${leave}-${crypto.randomUUID()}`;
+    const scripted = new ScriptedModel([
+      paidToolCall(`custody-${session.id}`),
+      { inputTokens: 100, output: [assistantMessage("done")] },
+      { inputTokens: 100, output: [assistantMessage("must never be requested")] },
+    ]);
+    const runtime = custodyMarkerRuntime(scripted, ctx, session.id, sourceId, leave);
+    const first = await runWith(ctx, session.id, runtime);
+    expect(first.status).toBe("recovering");
+    expect((first as { continueDelayMs?: number }).continueDelayMs).toBeGreaterThan(0);
+    expect(scripted.calls).toBe(1);
+    expect(await getSession(app.db, ctx.workspaceId, session.id)).toMatchObject({
+      status: "recovering",
+    });
+    const parked = await events(ctx, session.id);
+    expect(parked.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(parked.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      { reason: "session_usage_custody_pending" },
+    );
+    expect(await getSessionGoal(app.db, ctx.workspaceId, session.id)).toMatchObject({
+      status: "active",
+    });
+    const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, session.id);
+    expect(JSON.stringify(history)).toContain("local result");
+    // While the marker is still owed, the replacement attempt re-checks
+    // admission at claim (database reads only), sends no request and parks
+    // the same turn again with the bounded delay; it is never failed.
+    const waiting = await runWith(ctx, session.id, runtime);
+    expect(waiting).toMatchObject({ status: "recovering", continueDelayMs: 30_000 });
+    expect(await getSession(app.db, ctx.workspaceId, session.id)).toMatchObject({
+      status: "recovering",
+    });
+    expect(scripted.calls).toBe(1);
+    if (leave === "fenced") {
+      // The owner fills its receipt.
+      await opengeniDb.settleSessionUsageReceipt(app.db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: session.id,
+        sourceId,
+        turnId: null,
+        amountMicros: 50,
+        pricingSource: "configured_list_price",
+        model: "scripted-model",
+      });
+    } else {
+      // Maintenance discloses the dead owner's call as unpriced.
+      await shared.admin`update opengeni_private.session_usage_limit_receipts
+        set recorded_at = now() - interval '31 minutes' where source_id = ${sourceId}`;
+      const maintained = await maintainSessionUsageLimits(app.db, { limit: 50, budget: 50 });
+      expect(maintained.resolvedLost).toBeGreaterThanOrEqual(1);
+    }
+    const resumed = await runWith(ctx, session.id, runtime);
+    expect(resumed.status).toBe("idle");
+    // Exactly the one request that was blocked: nothing replayed.
+    expect(scripted.calls).toBe(2);
+    expect(await usage(ctx, session.id)).toMatchObject(
+      leave === "fenced"
+        ? { usedMicros: 250, pricedCalls: 3, unpricedCalls: 0 }
+        : { usedMicros: 200, pricedCalls: 2, unpricedCalls: 1, coverage: "partial" },
+    );
+    const timeline = (await events(ctx, session.id)).map((event) => event.type);
+    expect(timeline).not.toContain("turn.failed");
+    expect(timeline).toContain("turn.completed");
+  });
+}

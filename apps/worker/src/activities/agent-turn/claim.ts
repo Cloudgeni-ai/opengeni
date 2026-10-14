@@ -17,6 +17,7 @@ import {
   getHumanInputResumeForEvent,
   getInteractionInterventionResumeForEvent,
   installOrReadTurnExecutionPolicyForAttempt,
+  requestSessionTurnRecovery,
   requireSession,
   type AppendEventInput,
   type ApiIntegrationRuntime,
@@ -85,6 +86,11 @@ import {
   sessionUsageLimitStopEvents,
   type AllowanceRefusal,
 } from "./admission";
+import {
+  SESSION_USAGE_CUSTODY_PENDING,
+  SESSION_USAGE_CUSTODY_RECHECK_MS,
+  sessionUsageCustodyPending,
+} from "./session-usage-custody";
 import { providerRecoveryCountFromMetadata, isWorkerShutdownCancellation } from "./errors";
 import { throwIfTurnOperationCancelled, waitForTurnOperation } from "./sandbox-provision";
 import type { SessionUsageLimitReachedRefusal, TurnExecutionPolicyV1 } from "@opengeni/contracts";
@@ -553,6 +559,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // the local credit read). Unset port → today's local-ledger path.
   let allowanceRefusal: AllowanceRefusal | null = null;
   let sessionUsageLimitRefusal: SessionUsageLimitReachedRefusal | null = null;
+  let sessionUsageCustodyWait = false;
   try {
     await waitForTurnOperation(
       ensureRunAllowed(
@@ -577,6 +584,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       recordSessionUsageLimitEvent(observability, "claim", "reached");
     } else if (error instanceof AllowanceExhaustedError) {
       allowanceRefusal = error.refusal;
+    } else if (sessionUsageCustodyPending(error)) {
+      // An earlier single call's receipt is still owed: wait, not a failure.
+      sessionUsageCustodyWait = true;
+      recordSessionUsageLimitEvent(observability, "claim", "unavailable");
     } else {
       throw error;
     }
@@ -831,6 +842,36 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     control.turnMetricOutcome = "completed";
     control.activityStatus = "idle";
     return { exit: claimedResult({ status: "idle" }) };
+  }
+  if (sessionUsageCustodyWait) {
+    // Nothing has run in this attempt. Park the same turn as recovering so
+    // its replacement attempt re-checks admission after a bounded delay; the
+    // turn, its history and an active goal are unchanged, and no request
+    // was sent, so nothing can be replayed.
+    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: attempt.turnId!,
+      triggerEventId: attempt.triggerEventId!,
+      attemptId: input.attemptId,
+      reason: SESSION_USAGE_CUSTODY_PENDING,
+      detail: {
+        code: SESSION_USAGE_CUSTODY_PENDING,
+        retryable: true,
+        continueDelayMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
+      },
+    });
+    if (recovery.action !== "recovering") {
+      return { exit: claimedResult({ status: "cancelled" }) };
+    }
+    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+    control.turnMetricOutcome = "recovering";
+    control.activityStatus = "recovering";
+    return {
+      exit: claimedResult({
+        status: "recovering",
+        continueDelayMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
+      }),
+    };
   }
   if (
     !(await eventing.settle({

@@ -56,6 +56,11 @@ import { createTurnHistorySink } from "./history-sink";
 
 import { BudgetExhaustedError, sessionUsageLimitStopEvents } from "./admission";
 import {
+  SESSION_USAGE_CUSTODY_PENDING,
+  SESSION_USAGE_CUSTODY_RECHECK_MS,
+  sessionUsageCustodyPending,
+} from "./session-usage-custody";
+import {
   automaticRecoveryUnavailableFailure,
   providerRecoveryExhaustedFailure,
   withModelRoutePresentation,
@@ -396,6 +401,70 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // and continue the SAME logical turn in a fresh attempt. That next attempt
   // starts from the committed pointer and establishes its route normally.
   const routeTransitionCode = sandboxRouteTransitionCode(error);
+  // An earlier single model call in this task still owes its usage receipt
+  // (a fenced custody marker, or an open one past the overdue window). This
+  // is a wait for the owner to fill it or for maintenance to disclose it as
+  // unpriced, never a turn failure: keep the turn and its durable history,
+  // park it as recovering, and let the replacement attempt re-check
+  // admission (database reads only) with the workflow's bounded backoff.
+  // The blocked request was never sent, so nothing is replayed.
+  if (
+    sessionUsageCustodyPending(error) &&
+    recoveryTurnId &&
+    attempt.triggerEventId &&
+    eventing.publish &&
+    eventing.turnStartedPublished
+  ) {
+    recordSessionUsageLimitEvent(observability, "between_calls", "unavailable");
+    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    try {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: input.attemptId,
+        reason: SESSION_USAGE_CUSTODY_PENDING,
+        detail: {
+          code: SESSION_USAGE_CUSTODY_PENDING,
+          retryable: true,
+          continueDelayMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
+        },
+      });
+    } catch (recoveryError) {
+      const postClaimRecovery = postClaimDatabaseRecoveryFailure({
+        error: recoveryError,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        executionGeneration: attempt.executionGeneration,
+      });
+      if (postClaimRecovery) {
+        control.activityStatus = "recovering";
+        control.turnMetricOutcome = "recovering";
+        control.activityError = error;
+        throw postClaimRecovery;
+      }
+      throw recoveryError;
+    }
+    if (recovery.action === "stale") {
+      acknowledgeLostAttemptOwnership();
+      control.activityStatus = "cancelled";
+      control.turnMetricOutcome = "cancelled";
+      return claimedResult({ status: "cancelled" });
+    }
+    if (recovery.action === "recovering") {
+      acknowledgeRecoveryQuiescence();
+      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.activityError = error;
+      return claimedResult({
+        status: "recovering",
+        continueDelayMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
+      });
+    }
+  }
   if (routeTransitionCode && recoveryTurnId && eventing.publish && eventing.turnStartedPublished) {
     try {
       await flushRuntimeBatcher();

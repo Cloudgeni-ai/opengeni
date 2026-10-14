@@ -35,9 +35,21 @@ type Scope = { accountId: string; workspaceId: string };
 /** The state could not be read or written. Callers must block new model requests, never assume unlimited. */
 export class SessionUsageLimitUnavailableError extends Error {
   readonly code = "session_usage_limit_unavailable";
-  constructor(message = "Session usage limit state is unavailable", options?: { cause?: unknown }) {
-    super(message, options);
+  /**
+   * `custody_pending`: an earlier single model call in the task tree still
+   * owes its receipt (a fenced marker, or an open one past the overdue
+   * window). Not a database outage: the owner fills it or maintenance
+   * discloses it as unpriced, after which admission proceeds.
+   * `not_found`: the task for a runtime request could not be resolved.
+   */
+  readonly reason: "unavailable" | "custody_pending" | "not_found";
+  constructor(
+    message = "Session usage limit state is unavailable",
+    options?: { cause?: unknown; reason?: "unavailable" | "custody_pending" | "not_found" },
+  ) {
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause });
     this.name = "SessionUsageLimitUnavailableError";
+    this.reason = options?.reason ?? "unavailable";
   }
 }
 
@@ -266,13 +278,16 @@ export async function checkSessionUsageLimitAdmission(
   const read = await readSessionUsageLimit(db, input);
   if (read.outcome !== "ok") {
     if (input.runtime === true) {
-      throw new SessionUsageLimitUnavailableError("The task for this model request was not found");
+      throw new SessionUsageLimitUnavailableError("The task for this model request was not found", {
+        reason: "not_found",
+      });
     }
     return { allowed: true, state: null };
   }
   if (read.fenced === true) {
     throw new SessionUsageLimitUnavailableError(
       "Usage from an earlier model request in this task is not recorded yet",
+      { reason: "custody_pending" },
     );
   }
   const refusal = sessionUsageLimitRefusal(read.state);

@@ -1,5 +1,5 @@
 import type { HeldSessionUsageReceipt } from "@opengeni/core";
-import { settleSessionUsageReceipt } from "@opengeni/db";
+import { settleSessionUsageReceipt, SessionUsageLimitUnavailableError } from "@opengeni/db";
 import type { TurnActivityServices as ActivityServices } from "../types";
 
 /**
@@ -27,6 +27,28 @@ const MAX_HELD_SESSIONS = 4096;
 const FLUSH_DELAYS_MS = [0, 250, 1_000];
 
 const held = new Map<string, Entry>();
+
+/** Recovery reason and detail code for a task whose earlier single-call receipt is still owed. */
+export const SESSION_USAGE_CUSTODY_PENDING = "session_usage_custody_pending";
+/**
+ * How long a parked turn waits before its replacement attempt re-checks
+ * admission (database reads only). An owner fills its receipt within
+ * seconds; a dead owner's marker is disclosed by maintenance after 30
+ * minutes, so a task waits at most about 60 rechecks.
+ */
+export const SESSION_USAGE_CUSTODY_RECHECK_MS = 30_000;
+
+/** A fenced or overdue custody marker (not a database outage) refused the next model request. */
+export function sessionUsageCustodyPending(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof SessionUsageLimitUnavailableError) {
+      return current.reason === "custody_pending";
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 export function holdSessionUsageReceipt(scope: Scope, receipt: HeldSessionUsageReceipt): void {
   let entry = held.get(receipt.sessionId);
@@ -60,6 +82,34 @@ export function heldSessionUsageReceiptCount(sessionId?: string): number {
   let count = 0;
   for (const entry of held.values()) count += entry.receipts.size;
   return count;
+}
+
+/**
+ * The `agent.model.usage` event for a held receipt committed. Its appending
+ * transaction meters the same source identity through the database trigger
+ * (or, for a root still preparing, leaves the event for the bounded import),
+ * and a trigger failure would have rolled the event back. When the event
+ * carries exactly the held amount, the receipt is therefore durable and the
+ * hold is dropped, so completion does not stop for a write that is already
+ * done. A different or unknown event amount keeps the hold: only the direct
+ * write can record (or fill) that value.
+ */
+export function releaseHeldSessionUsageReceiptMeteredByEvent(input: {
+  sessionId: string;
+  sourceId: string;
+  amountMicros: number | null;
+  pricingSource: string | null;
+}): boolean {
+  const entry = held.get(input.sessionId);
+  const receipt = entry?.receipts.get(input.sourceId);
+  if (!entry || !receipt) return false;
+  if (receipt.amountMicros !== input.amountMicros) return false;
+  if (receipt.amountMicros !== null && receipt.pricingSource !== input.pricingSource) return false;
+  entry.receipts.delete(input.sourceId);
+  if (entry.receipts.size === 0 && held.get(input.sessionId) === entry) {
+    held.delete(input.sessionId);
+  }
+  return true;
 }
 
 /** Write receipts with their original identities; throws the last database error. */
