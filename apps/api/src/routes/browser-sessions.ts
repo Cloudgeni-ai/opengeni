@@ -1,3 +1,4 @@
+import { attachedBrowserViewer } from "../attached-browser-viewer";
 import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
@@ -271,8 +272,7 @@ export function registerBrowserSessionRoutes(
     return context.json(
       AttachedBrowserDeviceListResponse.parse(
         await listAttachedBrowserDevices(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
+          ...(await attachedBrowserViewer(deps, grant, workspaceId)),
           includeDisconnected,
         }),
       ),
@@ -287,8 +287,7 @@ export function registerBrowserSessionRoutes(
       return context.json(
         AttachedBrowserDevice.parse(
           await getAttachedBrowserDevice(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
+            ...(await attachedBrowserViewer(deps, grant, workspaceId)),
             deviceId,
           }),
         ),
@@ -2692,20 +2691,17 @@ export function registerBrowserSessionRoutes(
   ): Promise<T> {
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
+      // Personal machines are controlled only for their owner, as everywhere else.
+      const viewer = await attachedBrowserViewer(deps, grant, sourceSession.workspaceId);
       const device = await getAttachedBrowserDevice(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
+        ...viewer,
         deviceId: expectedPlacement.deviceId,
       });
       if (device.state !== "connected") {
         recordAttachedBrowserUnavailable(deps.observability, "disconnected");
         throw new BrowserSessionStateError("Attached browser is disconnected");
       }
-      const enrollment = await getLiveEnrollmentConnection(
-        deps.db,
-        sourceSession.workspaceId,
-        device.enrollmentId,
-      );
+      const enrollment = await getLiveEnrollmentConnection(deps.db, viewer, device.enrollmentId);
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         recordAttachedBrowserUnavailable(deps.observability, "machine_unavailable");
         throw new BrowserSessionStateError("Attached browser machine is unavailable");

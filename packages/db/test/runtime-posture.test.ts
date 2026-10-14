@@ -1569,17 +1569,17 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 0779 adds the five workspace-isolated Site SQL tables with full runtime DML.
+          // 0783 adds the five workspace-isolated Site SQL tables with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 5
             : 0) +
-          // 0778 adds the nine workspace-isolated published Sites tables with full runtime DML.
+          // 0782 adds the ten published Sites tables (FORCE RLS, full runtime DML).
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
-            ? 9
+            ? 10
             : 0) +
           // 0776 adds the eight workspace-isolated Site Data tables with full runtime DML.
           (tables === FORCE_RLS_TABLES ||
@@ -1720,8 +1720,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0696 single-use enroll-token redemptions: full-DML, FORCE-RLS.
         1 + // 0761 schedule reconciliation outbox: full-DML, FORCE-RLS.
         8 + // 0776 Site Data tables: full-DML, FORCE-RLS.
-        9 + // 0778 published Sites tables: full-DML, FORCE-RLS.
-        5; // 0779 Site SQL tables: full-DML, FORCE-RLS.
+        10 + // 0782 published Sites tables: full-DML, FORCE-RLS.
+        5; // 0783 Site SQL tables: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([

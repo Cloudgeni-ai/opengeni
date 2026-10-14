@@ -358,13 +358,13 @@ export async function requireSessionAuthorization(
     throw new SessionAuthorizationDeniedError("forbidden");
   }
   // An agent started from a Site page acts with that page's reach: it may
-  // message, steer or control only sessions that act for the same Site (its
-  // own lineage, or another session that Site started), never a session a
-  // person started elsewhere. Indistinguishable from a missing session.
+  // read, message, steer or control only sessions that act for the same Site
+  // (its own lineage, or another session that Site started), never a session
+  // a person started elsewhere. Reads count too: a transcript is data the
+  // Site page must not reach. Indistinguishable from a missing session.
   if (
     actor.kind === "agent_attempt" &&
     target.sessionId !== actor.callerSessionId &&
-    !input.operation.endsWith(".read") &&
     !(await siteAgentMayReachSession(
       deps.db,
       { accountId: grant.accountId, workspaceId: grant.workspaceId },

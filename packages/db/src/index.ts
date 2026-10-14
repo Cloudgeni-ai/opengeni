@@ -40,6 +40,7 @@ import {
 } from "./connection-metadata";
 export {
   getConnectionMetadata,
+  getProviderConnectionHomeWorkspace,
   listConnectionsMetadata,
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";

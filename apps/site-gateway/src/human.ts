@@ -58,6 +58,6 @@ export async function handleHumanCheck(
     );
   const headers = applySecurityHeaders(new Headers(), security);
   headers.set("Cache-Control", "no-store");
-  headers.append("Set-Cookie", await humanCookie(site.config.secret, site.visitor));
+  headers.append("Set-Cookie", await humanCookie(site.config.secret, site.hostname, site.visitor));
   return new Response(null, { status: 204, headers });
 }

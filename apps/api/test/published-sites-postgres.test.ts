@@ -25,7 +25,10 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
-import { configureSitePublishingEffects } from "../src/site-publishing/service";
+import {
+  configureSitePublishingEffects,
+  sitePublishingEffects,
+} from "../src/site-publishing/service";
 
 // Published Sites run the real management, sign-in and site-runtime routes
 // against PostgreSQL as the restricted application role. The gateway is played
@@ -759,9 +762,10 @@ test("access modes: members, invited, public guests, login-only and public off",
   });
   expect((await f.authorize(outsider, invited.host)).status).toBe(403);
   expect((await f.publication(f.owner, invited.id, "PUT", { invitedEmails: [] })).status).toBe(200);
+  // Narrowing access revokes the Site's viewer sessions at once.
   const uninvited = await f.gateway(invited.host, "GET", "/site/config", { session: token });
-  expect(uninvited.status).toBe(403);
-  expect(code(uninvited)).toBe("site_access_denied");
+  expect(uninvited.status).toBe(401);
+  expect(code(uninvited)).toBe("site_sign_in_required");
 
   // Public Sites: guests by visitor id, and any signed-in person.
   const visitor = visitorId();
@@ -1126,7 +1130,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
     backoffMs: 0,
     scanner,
   });
-  const site = await f.live("Reported", { access: "public" });
+  const site = await f.live("Reported", { access: "public", agent: { enabled: true } });
   await effects.flush();
   const hostRecord = () =>
     [...kv.entries()].find(
@@ -1205,6 +1209,14 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect(readOnlyTakedown.status).toBe(403);
   expect(code(readOnlyTakedown)).toBeUndefined();
   expect(JSON.stringify(readOnlyTakedown.json)).toContain("artifacts:publish");
+  // A signed-in member is talking to the Site's assistant when it is taken down.
+  const memberToken = await f.signIn(f.member, site.host);
+  const conversation = await f.gateway(site.host, "POST", "/sessions", {
+    session: memberToken,
+    body: { initialMessage: "Hello" },
+  });
+  expect(conversation.status, JSON.stringify(conversation.json)).toBe(202);
+  const conversationId = String(conversation.json.id);
   calls.length = 0;
   const takedown = await f.publication(
     f.admin,
@@ -1250,7 +1262,24 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   const readOnlyRestore = await f.publication(readOnly, site.id, "POST", {}, "/restore");
   expect(readOnlyRestore.status).toBe(403);
   expect(code(readOnlyRestore)).toBeUndefined();
-  const restored = await f.publication(f.owner, site.id, "POST", {}, "/restore");
+  // The takedown revoked every viewer session and cancelled the running conversation.
+  const [revoked] = await shared.admin`select count(*)::int as n from site_viewer_sessions
+    where site_id = ${site.id} and revoked_at is null`;
+  expect(revoked!.n).toBe(0);
+  const [cancelled] = await shared.admin`select status from sessions where id = ${conversationId}`;
+  expect(cancelled!.status).toBe("cancelled");
+  // A label cannot move away from a takedown.
+  const relabel = await f.publication(f.owner, site.id, "PUT", {
+    label: `moved-${randomBytes(4).toString("hex")}`,
+  });
+  expect(relabel.status).toBe(409);
+  expect(code(relabel)).toBe("site_suspended");
+
+  // Only a workspace admin restores an admin takedown.
+  const ownerRestoreOfAdmin = await f.publication(f.owner, site.id, "POST", {}, "/restore");
+  expect(ownerRestoreOfAdmin.status).toBe(403);
+  expect(code(ownerRestoreOfAdmin)).toBe("site_forbidden");
+  const restored = await f.publication(f.admin, site.id, "POST", {}, "/restore");
   expect(restored.status, JSON.stringify(restored.json)).toBe(200);
   expect(restored.json).toMatchObject({ status: "active", moderation: { suspendedAt: null } });
   expect((await f.gateway(site.host, "GET", "/site/config", { visitor: reporter })).status).toBe(
@@ -1261,10 +1290,20 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   const [restoreAudit] = await shared.admin`select count(*)::int as n from audit_events
     where workspace_id = ${f.workspace.id} and action = 'site.publication.restore'`;
   expect(restoreAudit!.n).toBe(1);
+  // The owner restores their own takedown.
+  const ownerTakedown = await f.publication(
+    f.owner,
+    site.id,
+    "POST",
+    { reason: "Pausing it" },
+    "/takedown",
+  );
+  expect(ownerTakedown.json.moderation.suspendedBy).toBe("owner");
+  expect((await f.publication(f.owner, site.id, "POST", {}, "/restore")).status).toBe(200);
 
   // A platform takedown (operator script) holds against the owner and admins.
   const platform = await moderateSiteAsPlatform(f.deps, {
-    host: site.host,
+    host: `${site.host}.`,
     operator: "trust-and-safety",
     action: "takedown",
     reason: "Confirmed phishing",
@@ -1272,6 +1311,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect(platform).toMatchObject({ status: "suspended", suspendedBy: "platform" });
   const ownerRestore = await f.publication(f.owner, site.id, "POST", {}, "/restore");
   expect(ownerRestore.status).toBe(403);
+  expect((await f.publication(f.admin, site.id, "POST", {}, "/restore")).status).toBe(403);
   const adminTakedown = await f.publication(
     f.admin,
     site.id,
@@ -1288,12 +1328,219 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
       and subject_id = 'platform:trust-and-safety'`;
   expect(platformAudit!.metadata).toMatchObject({ by: "platform", reason: "Confirmed phishing" });
   expect(JSON.parse(hostRecord() ?? "null")).toMatchObject({ status: "suspended" });
-  const lifted = await moderateSiteAsPlatform(f.deps, {
-    host: site.host.split(".")[0]!,
-    operator: "trust-and-safety",
-    action: "restore",
+  // The operator finds a Site by id too; that lookup reads across workspaces
+  // and so needs the migrations (admin) credential.
+  await expect(
+    moderateSiteAsPlatform(f.deps, {
+      host: site.id,
+      operator: "trust-and-safety",
+      action: "restore",
+    }),
+  ).rejects.toBeDefined();
+  const adminDb = createDb(shared.adminUrl);
+  try {
+    const lifted = await moderateSiteAsPlatform(
+      { ...f.deps, db: adminDb.db },
+      { host: site.id, operator: "trust-and-safety", action: "restore" },
+    );
+    expect(lifted.status).toBe("active");
+  } finally {
+    await adminDb.close();
+  }
+  expect((await f.gateway(site.host, "GET", "/site/config", { visitor: reporter })).status).toBe(
+    200,
+  );
+}, 60_000);
+
+test("Site budgets hold across rotated visitors and addresses; requests are capped", async () => {
+  const f = await fixture();
+  const site = await f.live("Rotated", { access: "public", agent: { enabled: true } });
+  const setLimits = async (overrides: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, site.id, "PUT", {
+      limitProfile: { kind: "custom", overrides },
+    });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  };
+  let address = 0;
+  /** A start from a fresh visitor id on a fresh client address: the rotating attacker. */
+  const start = async () => {
+    const who = { visitor: visitorId(), clientIp: `192.0.2.${(address += 1)}` };
+    const result = await f.gateway(site.host, "POST", "/sessions", {
+      ...who,
+      body: { initialMessage: "Hi" },
+    });
+    return { ...result, ...who };
+  };
+  const reservation = async (sessionId: string) => {
+    const [row] = await shared.admin`select limit_micros, reserved_micros
+      from site_runtime_conversations where session_id = ${sessionId}`;
+    return { limit: Number(row!.limit_micros), reserved: Number(row!.reserved_micros) };
+  };
+
+  // Each start reserves its whole cap against the Site's month in one
+  // transaction: the third gets what is left, the fourth is refused.
+  await setLimits({ agentMicrosPerSitePerMonth: 50_000 });
+  const first = await start();
+  expect(first.status, JSON.stringify(first.json)).toBe(202);
+  expect(await reservation(first.json.id)).toEqual({ limit: 20_000, reserved: 20_000 });
+  expect((await start()).status).toBe(202);
+  const third = await start();
+  expect(third.status).toBe(202);
+  expect(await reservation(third.json.id)).toEqual({ limit: 10_000, reserved: 10_000 });
+  // The session's own usage limit was set when it was created.
+  const inspected = await f.api(
+    f.owner,
+    "GET",
+    `/v1/workspaces/${f.workspace.id}/sessions/${third.json.id}`,
+  );
+  expect(inspected.json.usageLimit).toMatchObject({ limitMicros: 10_000 });
+  const fourth = await start();
+  expect(fourth.status).toBe(429);
+  expect(fourth.json.error.details).toMatchObject({
+    code: "site_budget_exhausted",
+    budget: "agent_micros_per_site_per_month",
   });
-  expect(lifted.status).toBe("active");
+  // Starts per Site per day hold whatever the money budget.
+  await setLimits({ agentMicrosPerSitePerMonth: 10_000_000, conversationsPerSitePerDay: 3 });
+  const perDay = await start();
+  expect(perDay.status).toBe(429);
+  expect(perDay.json.error.details.budget).toBe("conversations_per_site_per_day");
+  const [counted] = await shared.admin`select count(*)::int as n from site_runtime_conversations
+    where site_id = ${site.id}`;
+  expect(counted!.n).toBe(3);
+
+  // Guests see a Site-safe projection of their own conversation, and event
+  // pages are monitoring reads whatever the query asks for.
+  const own = { visitor: first.visitor, clientIp: first.clientIp };
+  const got = await f.gateway(site.host, "GET", `/sessions/${first.json.id}`, own);
+  expect(got.status, JSON.stringify(got.json)).toBe(200);
+  expect(got.json.id).toBe(first.json.id);
+  for (const key of [
+    "accountId",
+    "workspaceId",
+    "instructions",
+    "metadata",
+    "createdBy",
+    "tools",
+    "sandboxId",
+  ])
+    expect({ key, present: key in got.json }).toEqual({ key, present: false });
+  const listed = await f.gateway(site.host, "GET", "/sessions", own);
+  expect(listed.json).toMatchObject({ pinned: [], nextCursor: null });
+  expect(Object.keys(listed.json.sessions[0]).sort()).toEqual(Object.keys(got.json).sort());
+  const events = await f.gateway(
+    site.host,
+    "GET",
+    `/sessions/${first.json.id}/events?mode=forensic&payloadMode=full`,
+    own,
+  );
+  expect(events.status, JSON.stringify(events.json)).toBe(200);
+  expect(events.headers.get("x-opengeni-event-mode")).toBe("monitoring");
+  expect(events.headers.get("x-opengeni-payload-mode")).toBe("summary");
+
+  // Rate limits: per visitor, and per client address for guests so that
+  // fresh visitor ids do not reset them (four visitors' worth per address).
+  const rated = await f.live("Rated", { access: "public" });
+  expect(
+    (
+      await f.publication(f.admin, rated.id, "PUT", {
+        limitProfile: { kind: "custom", overrides: { requestsPerMinutePerVisitor: 2 } },
+      })
+    ).status,
+  ).toBe(200);
+  const view = (visitor: string, clientIp: string) =>
+    f.gateway(rated.host, "GET", "/site/config", { visitor, clientIp });
+  const repeat = visitorId();
+  expect((await view(repeat, "203.0.113.1")).status).toBe(200);
+  expect((await view(repeat, "203.0.113.2")).status).toBe(200);
+  const limited = await view(repeat, "203.0.113.3");
+  expect(limited.status).toBe(429);
+  expect(code(limited)).toBe("site_rate_limited");
+  const fromOneAddress: number[] = [];
+  for (let index = 0; index < 9; index += 1)
+    fromOneAddress.push((await view(visitorId(), "203.0.113.9")).status);
+  expect(fromOneAddress).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 429]);
+  expect((await view(visitorId(), "203.0.113.10")).status).toBe(200);
+
+  // Bodies are capped before they are read or verified.
+  const huge = await f.gateway(rated.host, "POST", "/site/reports", {
+    visitor: visitorId(),
+    body: { category: "spam", message: "x".repeat(4 * 1024 * 1024) },
+  });
+  expect(huge.status).toBe(413);
+  expect(code(huge)).toBe("site_request_too_large");
+
+  // Workspace tools act with shared connections: only an admin gives them.
+  const agentChange = (who: Who, agent: Record<string, unknown>) =>
+    f.publication(who, site.id, "PUT", { agent });
+  for (const agent of [{ tools: ["crm"] }, { guestTools: true }]) {
+    const refused = await agentChange(f.owner, agent);
+    expect({ agent, status: refused.status, code: code(refused) }).toEqual({
+      agent,
+      status: 403,
+      code: "site_admin_required",
+    });
+  }
+  for (const tool of ["bad id!", "opengeni"]) {
+    const invalid = await agentChange(f.admin, { tools: [tool] });
+    expect({ tool, status: invalid.status, code: code(invalid) }).toEqual({
+      tool,
+      status: 400,
+      code: "site_tool_invalid",
+    });
+  }
+  const given = await agentChange(f.admin, { tools: ["crm"] });
+  expect(given.status, JSON.stringify(given.json)).toBe(200);
+  expect(given.json.agent).toMatchObject({ tools: ["crm"], guestTools: false });
+  // Tools are optional references: a connection the workspace does not have
+  // (or no longer has) is skipped, never a failed conversation. Which viewers
+  // get them is unit-tested with siteAgentToolRefs.
+  await setLimits({ agentMicrosPerSitePerMonth: 10_000_000, conversationsPerSitePerDay: 10 });
+  expect((await start()).status).toBe(202);
+  const memberStart = await f.gateway(site.host, "POST", "/sessions", {
+    session: await f.signIn(f.member, site.host),
+    body: { initialMessage: "Hi" },
+  });
+  expect(memberStart.status, JSON.stringify(memberStart.json)).toBe(202);
+  // The owner keeps or removes them, but cannot add more.
+  expect((await agentChange(f.owner, { tools: ["crm"], instructions: "Be brief." })).status).toBe(
+    200,
+  );
+  expect((await agentChange(f.owner, { tools: ["crm", "billing"] })).status).toBe(403);
+  const removed = await agentChange(f.owner, { tools: null });
+  expect(removed.status).toBe(200);
+  expect(removed.json.agent.tools).toBeNull();
+}, 90_000);
+
+test("abuse reports and flagged scans reach the platform, at most once an hour per Site", async () => {
+  const sent: Array<{ kind: string; to: string; subject: string }> = [];
+  const transport = {
+    sender: "sites@example.test",
+    idempotency: { scope: "test", retentionSeconds: 86_400 },
+    send: async (message: { kind: string; to: string; subject: string }) => {
+      sent.push({ kind: message.kind, to: message.to, subject: message.subject });
+      return { status: "sent" as const, providerMessageId: null };
+    },
+  };
+  const f = await fixture({ sitesAbuseEmail: "abuse@example.test" });
+  const on = createApp({ ...f.deps, managedEmailTransport: transport } as AppDependencies);
+  const site = await f.live("Abused", { access: "public" });
+  for (let index = 0; index < 5; index += 1) {
+    const reported = await f.gateway(site.host, "POST", "/site/reports", {
+      visitor: visitorId(),
+      body: { category: "spam" },
+      on,
+    });
+    expect(reported.status).toBe(201);
+  }
+  await sitePublishingEffects(f.settings).flush();
+  expect(sent).toEqual([
+    {
+      kind: "site_abuse_notice",
+      to: "abuse@example.test",
+      subject: `[Opengeni Sites] An abuse report: ${site.host}`,
+    },
+  ]);
 }, 60_000);
 
 test("a viewer's own conversation serves the composer draft, queue and human-input operations", async () => {
@@ -1466,9 +1713,22 @@ test("version HTML is this Site's immutable bytes, without cookies; scanning is 
   const after = (await f.gateway(site.host, "GET", `/host?host=${site.host}`)).json;
   expect(after.versionId).not.toBe(site.versionId);
   expect(after.generation).toBeGreaterThan(before.generation);
-  // Old versions of this Site stay readable by id (immutable).
+  // The replaced version stays readable for pages already open, for ten minutes.
+  const oldVersion = () =>
+    f.gateway(site.host, "GET", `/versions/${site.versionId}/html`, { visitor });
+  expect((await oldVersion()).status).toBe(200);
+  // Age the publish event (artifact events are immutable, so past their trigger).
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update workspace_artifact_events
+      set created_at = created_at - interval '11 minutes'
+      where artifact_id = ${site.id} and from_version_id = ${site.versionId}`;
+  });
+  const expired = await oldVersion();
+  expect(expired.status).toBe(404);
+  expect(code(expired)).toBe("site_version_not_found");
   expect(
-    (await f.gateway(site.host, "GET", `/versions/${site.versionId}/html`, { visitor })).status,
+    (await f.gateway(site.host, "GET", `/versions/${after.versionId}/html`, { visitor })).status,
   ).toBe(200);
 
   // Without a scanner configured nothing is scanned or recorded.
@@ -1483,8 +1743,25 @@ const SITE_PUBLICATION_TOOLS = [
   "site_hostname_check",
 ];
 
+const SITE_ARTIFACT_TOOLS = [
+  "artifacts_publish",
+  "artifacts_rollback",
+  "artifacts_archive",
+  "artifacts_restore",
+];
+
 test("agent tools read and change a Site's publication with the person's authority", async () => {
   const f = await fixture();
+  const scanned: string[] = [];
+  const effects = configureSitePublishingEffects(f.settings, {
+    scanner: {
+      name: "web_risk",
+      scanHtml: async (html) => {
+        scanned.push(html);
+        return { status: "clean", findings: [] };
+      },
+    },
+  });
   const site = await f.publish("Agent published");
   const session = await createSession(db.db, {
     accountId: f.accountId,
@@ -1533,7 +1810,7 @@ test("agent tools read and change a Site's publication with the person's authori
       turnId: turn!.id,
       attemptId,
       executionGeneration: 1,
-      firstPartyMcpTools: SITE_PUBLICATION_TOOLS,
+      firstPartyMcpTools: [...SITE_PUBLICATION_TOOLS, ...SITE_ARTIFACT_TOOLS],
     },
   };
   const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, grant);
@@ -1556,7 +1833,7 @@ test("agent tools read and change a Site's publication with the person's authori
   };
   try {
     expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
-      [...SITE_PUBLICATION_TOOLS].sort(),
+      [...SITE_PUBLICATION_TOOLS, ...SITE_ARTIFACT_TOOLS].sort(),
     );
     expect((await callTool("site_publication_get", { siteId: site.id })).value).toEqual({
       published: false,
@@ -1595,6 +1872,60 @@ test("agent tools read and change a Site's publication with the person's authori
     expect((await f.publication(f.owner, site.id, "GET")).json.hostname).toBe(
       `agent-site.${DOMAIN}`,
     );
+
+    // The artifact tools keep a published Site in step exactly as the API
+    // routes do: each change advances the generation (and resyncs the edge),
+    // and a version that becomes current is scanned.
+    await effects.flush();
+    expect(scanned).toHaveLength(1);
+    const generation = async () =>
+      Number(
+        (
+          await shared.admin`select generation from site_publications where site_id = ${site.id}`
+        )[0]!.generation,
+      );
+    let seen = await generation();
+    const advanced = async () => {
+      const now = await generation();
+      const moved = now > seen;
+      seen = now;
+      return moved;
+    };
+    const newVersion = await callTool("artifacts_publish", {
+      artifactId: site.id,
+      expectedCurrentVersionId: site.versionId,
+      html: "<!doctype html><h1>By the agent</h1>",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(newVersion.isError, JSON.stringify(newVersion.value)).toBe(false);
+    const secondVersion = String(newVersion.value.version.id);
+    expect(await advanced()).toBe(true);
+    await effects.flush();
+    expect(scanned.at(-1)).toContain("By the agent");
+    const rolledBack = await callTool("artifacts_rollback", {
+      artifactId: site.id,
+      versionId: site.versionId,
+      expectedCurrentVersionId: secondVersion,
+      reason: "Back to the first version",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(rolledBack.isError, JSON.stringify(rolledBack.value)).toBe(false);
+    expect(await advanced()).toBe(true);
+    await effects.flush();
+    expect(scanned).toHaveLength(3);
+    expect(scanned.at(-1)).toContain("<h1>Agent published</h1>");
+    for (const tool of ["artifacts_archive", "artifacts_restore"]) {
+      const changed = await callTool(tool, {
+        artifactId: site.id,
+        expectedCurrentVersionId: site.versionId,
+        reason: "Status change by the agent",
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(changed.isError, JSON.stringify(changed.value)).toBe(false);
+      expect({ tool, advanced: await advanced() }).toEqual({ tool, advanced: true });
+    }
+    await effects.flush();
+    expect(scanned).toHaveLength(3);
   } finally {
     await mcp.close();
   }

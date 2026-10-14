@@ -3,7 +3,7 @@ import { SITE_SQL_HARD_LIMITS } from "@opengeni/contracts";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 /**
- * Site SQL definitions in Postgres (migration 0779): whether the owner turned
+ * Site SQL definitions in Postgres (migration 0783): whether the owner turned
  * a Site's Cloudflare database on, its ordered migrations, its named queries,
  * its usage counters (site_sql_usage, apart from the database row so Site
  * page calls never wait on a migration's lock) and its call windows. The rows

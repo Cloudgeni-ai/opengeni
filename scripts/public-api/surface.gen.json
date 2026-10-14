@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "bun run public-api:refresh",
-  "sdkMajor": 1,
+  "sdkMajor": 2,
   "routes": [
     {
       "method": "GET",
@@ -24760,6 +24760,7 @@
         "$.overrides.agentModels": "array? null",
         "$.overrides.agentModels[]": "string",
         "$.overrides.agentsEnabled": "boolean?",
+        "$.overrides.conversationsPerSitePerDay": "integer? null",
         "$.overrides.conversationsPerVisitorPerDay": "integer? null",
         "$.overrides.guestAgentsEnabled": "boolean?",
         "$.overrides.guestWritesPerMinute": "integer? null",
@@ -30808,6 +30809,7 @@
       "SiteDataWriteResponse": "type",
       "SiteDataWriteResultResponse": "type",
       "SiteEmbeddedAgent": "type",
+      "SiteEmbeddedAgentChanges": "type",
       "SiteHostnameAvailability": "type",
       "SiteHostnameAvailabilityProblem": "type",
       "SiteLimitProfile": "type",

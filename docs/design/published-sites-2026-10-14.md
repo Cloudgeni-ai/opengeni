@@ -91,8 +91,12 @@ URL-prefix boundary rather than an operation allowlist.
     (host map set to `suspended`, edge cache purged, audit event); platform
     admins can too. Reports go to Postgres and the abuse contact
     `abuse@<sites domain>` (forwarded to support by Cloudflare Email Routing,
-    configured with the account). A pluggable content scanner interface has a
-    Google Web Risk implementation that is disabled without a key.
+    configured with the account). Reports and flagged scans also reach the
+    operator: a structured `site_abuse_notice` log line, an email to
+    `OPENGENI_SITES_ABUSE_EMAIL` through managed email when configured, and
+    a cross-workspace queue script (`scripts/operator/site-moderation-queue.ts`).
+    A pluggable content scanner interface has a Google Web Risk
+    implementation that is disabled without a key.
 12. **Cloud-agnostic API.** Nothing in the API depends on Azure or on
     Cloudflare being present. Edge sync (KV writes, cache purge) is optional
     and a no-op when its settings are unset; the gateway falls back to the
@@ -127,7 +131,9 @@ URL-prefix boundary rather than an operation allowlist.
 5. `GET /_og/v/<versionId>` is served from the edge cache after the same
    host and access check; on a miss the gateway fetches signed
    `GET /v1/site-runtime/versions/<versionId>/html` (only the host's current
-   or rollback-eligible versions) and caches it as immutable.
+   version, or one a publish or rollback replaced within the last ten
+   minutes so already open pages keep loading) and caches it per host and
+   generation.
 
 ### Site calls
 
@@ -158,8 +164,8 @@ budgets are checked before each new conversation and message.
 
 ## OPE-801: operation allowlist and provenance
 
-- `SITE_OPERATIONS` in `packages/contracts/src/site-publishing.ts` is the
-  single allowlist. The console bridge (`siteSessionPath`,
+- `SITE_OPERATIONS` in `packages/contracts/src/site-operations.ts` (zod-free,
+  re-exported from the contracts index) is the single allowlist. The console bridge (`siteSessionPath`,
   `createSiteToolBridge`), Codemode's Site proxy and the gateway shell all
   use it; anything else is refused before any request is made.
 - Every route that starts or messages an agent (session create, send,
@@ -169,7 +175,10 @@ budgets are checked before each new conversation and message.
   inline HTML is attributed too. Site-surface turns record which Site.
 - A Site may message only sessions that it originated; a page on Site B
   cannot send to a session started from Site A.
-- A Site-clamped agent cannot create or change schedules or automations.
+- A Site-clamped agent cannot create or change schedules, automations or
+  Site publications, and reads, messages, steers or controls only sessions
+  acting for its own Site. Site pages cannot change publications either,
+  nor choose tools or authority in a session create body.
 - `docs/agent-session-authority.md` and `AGENTS.md` describe the allowlist
   correctly.
 
@@ -180,16 +189,24 @@ global hostname index:
 
 - `site_publications`: one per Site; label, access, status, noindex, agent
   settings, limit profile, invited emails, suspension fields, generation.
+  Generations come from one global sequence, so they rise across hostnames
+  (a moved label or a tombstone always outranks older edge records).
 - `site_hostnames`: label to Site, globally unique, with `released_at` for
-  the 30-day hold. Gateway host lookups use a narrow `SECURITY DEFINER`
-  resolver (or the api_keys-style hash GUC policy) instead of disabling RLS.
+  the 30-day hold. Gateway host lookups use the api_keys-style
+  transaction-local GUC "lane" policy (one named label visible at a time)
+  instead of disabling RLS; there is no `SECURITY DEFINER` resolver.
+- `site_hostname_holds`: labels of platform takedowns, held for the
+  platform with no foreign keys, so deleting a Site or workspace does not
+  free them.
 - `site_auth_codes` (hash, host, challenge, redirect, subject, 60 s TTL,
   single use) and `site_viewer_sessions` (token hash, Site, subject, idle and
   absolute expiry, revocation).
 - `site_limit_profiles`: workspace-level default profile (Site-level lives on
   the publication).
 - `site_runtime_conversations`: session id, Site, viewer principal, created
-  at; used for ownership and per-visitor counts.
+  at, the conversation's cap and its reserved spend; used for ownership and
+  for reserving each conversation's cap against the visitor-day, Site-day
+  and Site-month budgets in one transaction.
 - `site_runtime_usage` / rate windows: per Site per visitor per window
   counters and per day/month spend, maintained without expensive queries.
 - `site_abuse_reports` and takedown audit events (existing `audit_events`).

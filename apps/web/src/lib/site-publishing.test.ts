@@ -27,7 +27,7 @@ const saved: SitePublication = {
   access: "members",
   status: "active",
   noindex: true,
-  agent: { enabled: false, model: null, instructions: null, tools: null },
+  agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
   limitProfile: { kind: "free", overrides: null },
   effectiveLimits: { ...DEFAULT_FREE_SITE_LIMITS },
   invitedEmails: [],
@@ -135,6 +135,7 @@ describe("Site publishing helpers", () => {
       kind: "custom",
       overrides: {
         conversationsPerVisitorPerDay: 10,
+        conversationsPerSitePerDay: 50,
         turnsPerConversation: 5,
         agentMicrosPerConversation: 20_000,
         agentMicrosPerVisitorPerDay: 200_000,

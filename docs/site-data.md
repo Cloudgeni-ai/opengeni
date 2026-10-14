@@ -380,7 +380,7 @@ database is turned off; turning a Site's database off keeps its data.
 
 ### Definitions in Postgres
 
-Migration `0779_site_sql.sql` adds five workspace-owned FORCE-RLS tables,
+Migration `0783_site_sql.sql` adds five workspace-owned FORCE-RLS tables,
 keyed and cascading like Site Data:
 
 - `site_sql_databases`: one row per Site that ever turned Site SQL on:
@@ -639,7 +639,7 @@ answered; a metering failure is logged and does not fail the call.
   `apps/site-gateway/test/site-database.test.ts` (request-id expiry and
   pruning, repeated column names),
   `packages/sdk/test/site-sql.test.ts` (`site.sql.run` over the bridge),
-  `packages/db/test/migration-0779-site-sql-postgres.test.ts` (FORCE RLS and
+  `packages/db/test/migration-0783-site-sql-postgres.test.ts` (FORCE RLS and
   cascades) and `apps/api/test/site-sql-postgres.test.ts` (routes and tools on
   Postgres against the real gateway Worker in Miniflare: audiences, guests,
   principal parameters, limits and metering, export and import round trips).

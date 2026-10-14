@@ -15,7 +15,11 @@ import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
-import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
+import {
+  currentSiteSessionOrigin,
+  isVerifiedDelegatedHumanAuthorization,
+  withSiteSessionOrigin,
+} from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import {
   createRealtimeVoiceBilling,
@@ -736,6 +740,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           },
         ),
       );
+      // A Site page (or an agent it started) may start a conversation, but not
+      // choose its tools, servers, permissions or vault access: only the Site
+      // itself, running its published agent as `site:<siteId>`, does that.
+      const siteOrigin = origin ?? currentSiteSessionOrigin();
+      if (
+        siteOrigin &&
+        grant.subjectId !== `site:${siteOrigin.siteId}` &&
+        siteRequestedSessionTools(payload)
+      )
+        return c.json(
+          {
+            code: "SITE_SESSION_TOOLS_FORBIDDEN",
+            message:
+              "A Site page cannot choose tools, MCP servers, connections, permissions or vault access for a session",
+          },
+          403,
+        );
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
       session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
@@ -6322,6 +6343,29 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
     return undefined;
   }
   return Math.floor(sequence);
+}
+
+/** Session create fields that choose tools or authority, refused from Site pages. */
+const SITE_REFUSED_SESSION_FIELDS = [
+  "tools",
+  "mcpServers",
+  "firstPartyMcpTools",
+  "firstPartyMcpPermissions",
+  "mcpApprovalPolicies",
+  "vaultPolicy",
+  "connectionAccounts",
+] as const;
+
+function siteRequestedSessionTools(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const body = payload as Record<string, unknown>;
+  return SITE_REFUSED_SESSION_FIELDS.some((field) => {
+    const value = body[field];
+    if (value === undefined || value === null) return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === "object") return Object.keys(value).length > 0;
+    return true;
+  });
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */

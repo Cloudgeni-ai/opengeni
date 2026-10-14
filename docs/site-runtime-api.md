@@ -32,11 +32,12 @@ forceNoindex }`. It is `null` when `OPENGENI_SITES_DOMAIN` is unset.
 | `OPENGENI_SITES_PUBLIC_AGENTS_ENABLED` | `true` | Allows agents for signed-out guests |
 | `OPENGENI_SITES_LOGIN_ONLY` | `false` | `public` means any signed-in Opengeni user, and there are no guests |
 | `OPENGENI_SITES_FORCE_NOINDEX` | `false` | Forces `noindex` on every Site |
-| `OPENGENI_SITES_ABUSE_EMAIL` | unset | Abuse contact shown in `SiteRuntimeConfig` and takedown pages |
-| `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` | `false` | A guest agent start needs the gateway's human header |
+| `OPENGENI_SITES_ABUSE_EMAIL` | unset (`abuse@<domain>` shown) | Abuse contact shown in `SiteRuntimeConfig` and takedown pages; also where operator notices are emailed |
+| `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` | `false` | A guest agent start needs the gateway's human header (recommended for public Sites with guest agents) |
 | `OPENGENI_SITES_FREE_REQUESTS_PER_MINUTE_PER_VISITOR` | 120 | Free limit |
 | `OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE` | 30 | Free limit |
 | `OPENGENI_SITES_FREE_CONVERSATIONS_PER_VISITOR_PER_DAY` | 10 | Free limit |
+| `OPENGENI_SITES_FREE_CONVERSATIONS_PER_SITE_PER_DAY` | 50 | Free limit, every visitor together (unlimited still stops at 10000) |
 | `OPENGENI_SITES_FREE_TURNS_PER_CONVERSATION` | 20 | Free limit |
 | `OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION` | 20000 | Free limit (USD micros) |
 | `OPENGENI_SITES_FREE_AGENT_MICROS_PER_VISITOR_PER_DAY` | 200000 | Free limit |
@@ -68,12 +69,17 @@ managers. The Site must be shared with the workspace, not "Only me".
 | Method and path | Success | Errors |
 | --- | --- | --- |
 | `GET` | 200 `SitePublication` | 404 `site_not_published` |
-| `PUT` (`UpsertSitePublicationRequest`) | 201 when it first publishes, otherwise 200 | 403 `site_manager_required`, `site_admin_required` (limit profile), `site_public_disabled`; 409 `site_not_shared`, `site_archived`, `site_suspended`, `site_taken`, `site_held`; 400 `site_model_not_allowed`, `site_invalid_request` |
+| `PUT` (`UpsertSitePublicationRequest`) | 201 when it first publishes, otherwise 200 | 403 `site_manager_required`, `site_admin_required` (limit profile, new `agent.tools`, `agent.guestTools`), `site_public_disabled`; 409 `site_not_shared`, `site_archived`, `site_suspended` (status or label change while taken down), `site_taken`, `site_held`, `site_reserved`; 400 `site_model_not_allowed`, `site_tool_invalid`, `site_invalid_request` |
 | `DELETE` (unpublish) | 200 | 409 `site_suspended` |
 | `POST /takedown` (`SiteTakedownRequest`) | 200 | 403 `site_owner_or_admin_required` |
-| `POST /restore` | 200 | 403 when the platform took the Site down |
+| `POST /restore` | 200 | 403 `site_forbidden` when an admin (owner restoring) or the platform took the Site down |
 | `GET /reports?status=` | 200 list | |
 | `PATCH /reports/:reportId` | 200 | 404 `site_report_not_found` |
+
+Every changing route (`PUT`, `DELETE`, takedown, restore, report status and
+`PUT site-limit-profile`), and the `site_publication_update` tool, refuses
+a request made from a Site page (403 `site_page_forbidden`) and an agent
+started from a Site page (403 `site_agent_forbidden`).
 
 Other management routes:
 
@@ -95,20 +101,39 @@ Hostnames:
   may reuse it.
 - Unpublishing keeps the label so that publishing again gets the same
   address.
+- The label of a taken-down Site cannot change. A platform takedown also
+  holds the label for the platform (`site_hostname_holds`, with no foreign
+  keys, so deleting the Site or its workspace does not free it); only
+  `site-takedown.ts --release-hold` lifts it.
+- Global lookups go through a transaction-local hostname "lane" setting
+  that a row-level security policy matches (the `api_keys` pattern), not a
+  `SECURITY DEFINER` function.
 
 Takedown:
 
 - A takedown sets the status to `suspended` at once, actions the open
-  reports, records an audit event, writes the edge host map and purges the
-  edge cache.
-- The owner or a workspace admin can restore their own takedown.
+  reports, records an audit event, revokes the Site's viewer sessions,
+  cancels its running agent conversations (in-flight turns and queued
+  messages), writes the edge host map and purges the edge cache.
+  Unpublishing and narrowing access (a narrower mode or a removed
+  invitation) do the same for sessions and conversations; turning the agent
+  off cancels the conversations.
+- An owner's takedown is restored by the owner or an admin; an admin's
+  takedown only by an admin.
 - Only the operator script can lift a platform takedown:
   `bun scripts/operator/site-takedown.ts --host <label> --operator <name> --reason "..."`
-  takes a Site down, and adding `--restore` lifts it. Opengeni has no
-  platform-admin API.
+  takes a Site down (`--site-id <id>` finds it by id), and adding
+  `--restore` lifts it. Opengeni has no platform-admin API. The script
+  revokes viewer sessions but has no in-process session dispatch, so
+  running conversations end on their caps and site-runtime refuses them
+  further work.
 
 Agent tools: `site_publication_get`, `site_publication_update` and
 `site_hostname_check` call the same service with the person's authority.
+The artifact tools (`artifacts_publish`, `artifacts_rollback`,
+`artifacts_archive`, `artifacts_restore`) run the same publication hook as
+the API routes: a published Site's generation advances, the edge resyncs,
+and a version that becomes current is scanned.
 
 ## Viewer sign-in
 
@@ -120,7 +145,8 @@ Agent tools: `site_publication_get`, `site_publication_update` and
    `200 { redirectTo, site }`.
    - The API checks access: `members` needs a workspace member; `invited`
      needs a member or a verified email on the invite list; `public` accepts
-     any user.
+     any user. Without managed sign-in a user may have no verified email
+     (the viewer's `email` is `null`), so they cannot match an invitation.
    - `redirectUri` must be exactly `https://<that host>/_og/auth/callback`.
    - Errors: 403 `site_person_required` or `site_access_denied`, 404,
      400 and 429.
@@ -150,6 +176,10 @@ request:
 - Requests that carry `Authorization`, `Proxy-Authorization`, `Cookie`,
   `X-Api-Key` or an external-actor header are refused.
 
+Bodies are capped before anything is read or verified: 4 MiB for JSON and
+25 MiB for `POST /published-artifacts/current/files` (the gateway's caps).
+A larger body returns 413 `site_request_too_large`.
+
 A failure returns `401 site_gateway_signature_invalid`, with
 `details.reason` set to `missing_headers`, `bad_timestamp`, `skew`,
 `bad_signature` or `credentials`.
@@ -160,7 +190,8 @@ signature.
 
 ### Host and viewer
 
-- **Host.** The signed host must name an active publication. A missing host
+- **Host.** The signed host (a trailing dot is ignored) must name an active
+  publication. A missing host
   returns 404 `site_not_found`. An unpublished or suspended host returns
   410 `site_unavailable` with `{ status }`.
 - **Viewer, in order:**
@@ -172,24 +203,26 @@ signature.
 
   A signed-in viewer who has lost access gets 403 `site_access_denied`.
 - **Rates.** Every call counts against the visitor's requests per minute.
-  Going over returns 429 `site_rate_limited` with `{ bucket,
-  retryAfterSeconds }`.
+  Guests are also counted per signed client address, at four times the
+  visitor limit, so minting new visitor ids does not reset their limits;
+  both must pass. Going over returns 429 `site_rate_limited` with
+  `{ bucket, retryAfterSeconds }`.
 
 ### Routes
 
 | Method and suffix | Result |
 | --- | --- |
 | `GET /host` | `SiteHostMapRecord` for the signed host (the gateway's fallback on a KV miss), or 404 `site_not_found`. An optional `host` query must equal the signed host |
-| `GET /versions/:versionId/html` | The immutable HTML of a version of this Site, with a sandbox CSP, `private, max-age=31536000, immutable` and an ETag. 404 `site_version_not_found` for another Site's version |
+| `GET /versions/:versionId/html` | The immutable HTML of the Site's current version, or of a version a publish or rollback replaced in the last 10 minutes (pages already open), with a sandbox CSP and an ETag. 404 `site_version_not_found` for any other version, of this Site or another |
 | `POST /auth/exchange` | `SiteAuthExchangeResponse`. 400 `site_auth_code_invalid` (wrong verifier, host or redirect URI, expired, or already used) |
 | `POST /auth/logout` | 200 `{ revoked }`, even when the Site no longer exists |
-| `POST /site/reports` | 201. Rate limited per visitor |
+| `POST /site/reports` | 201. Rate limited per reporter, per client address and per Site |
 | `POST /tools/:method` | 403 `site_tools_unavailable` (direct tools need a person's session in the console) |
 | `SITE_OPERATIONS` suffixes | Served for the viewer, as below. Anything else returns 404 `site_operation_unsupported` |
 
-A Site may roll back to any of its versions, so the version route serves
-every version of the same Site. Version ids are random UUIDs. To make old
-content unreachable, unpublish the Site or take it down.
+Old versions stop being served ten minutes after they are replaced, so
+content removed by a new version or a rollback does not stay reachable by
+version id.
 
 Operations:
 
@@ -215,12 +248,29 @@ Operations:
       (OPE-801 `SiteSessionOrigin`). The call runs inside
       `withSiteSessionOrigin` and carries the Site and version headers, which
       the Site frame guard validates again.
-    - It is capped with a per-conversation session usage limit.
-    - The conversation is recorded as owned by this Site and this viewer.
+    - Its workspace tools are the publication's `agent.tools` for signed-in
+      viewers, and for guests only when `agent.guestTools` is on. They are
+      optional references, so an unknown connection is skipped.
+    - The create body may not choose tools, MCP servers, first-party tools
+      or permissions, approval policies, vault policy or connection
+      accounts for any other caller acting from a Site page: the session
+      routes return 403 `SITE_SESSION_TOOLS_FORBIDDEN`.
+    - It is capped with a per-conversation session usage limit, set in the
+      create transaction (the host actor `site:<siteId>`), so the first
+      turn is capped.
+    - The conversation is recorded as owned by this Site and this viewer
+      before the session is created, with a session id derived from the
+      viewer's idempotency key; a retry returns the same conversation.
   - **Other operations** (list, get, events, stream, send, steer, control,
     queue, queue items, composer draft, human input) work only on the
     viewer's own conversations on this Site. Any other conversation returns
     404 `site_conversation_not_found`.
+  - **Site-safe views.** `get`, `list` and `create` return a projection
+    without account or workspace ids, instructions, tools or policies,
+    metadata, creator, sandbox ids or diagnostics. Query parameters are
+    allowlisted: event pages are always `mode=monitoring` with summarized
+    payloads (`payloadMode=summary`, or `none`), streams accept only `after`
+    and `transport`, the queue takes none and human input only `status`.
   - **Streams** resume after the gateway-forwarded `Last-Event-ID` when the
     query has no `after`.
   - **Composer drafts** are text only. A draft or submit with resources,
@@ -233,18 +283,29 @@ Operations:
   - **Queue items** (move, edit, steer, delete) are forwarded with the
     API's own request schemas. Steering a queued message also passes the
     agent and spend checks; the message was already counted when sent.
-  - **Budgets.** Create and send check the turns per conversation, the
-    conversations per visitor per day, the spend per visitor per day and
-    the spend per Site per month. Over budget returns 429
-    `site_budget_exhausted` with `{ budget }`.
+  - **Budgets.** A start reserves the conversation's whole spend cap
+    against the visitor's day, the Site's day and the Site's month, and
+    counts the conversation against the visitor's and the Site's starts per
+    day, in one transaction that refuses when any is over. A Site-wide
+    refusal first settles stale reservations and retries once. Sending,
+    steering and resuming re-check the turn count and top the reservation
+    up to the conversation's cap. Settling (on reads and later starts)
+    brings counted spend up to the session's actual usage and releases what
+    an idle conversation no longer needs. Over budget returns 429
+    `site_budget_exhausted` with `{ budget }`: `conversations_per_visitor_per_day`,
+    `conversations_per_site_per_day`, `turns_per_conversation`,
+    `agent_micros_per_conversation`, `agent_micros_per_visitor_per_day` or
+    `agent_micros_per_site_per_month`.
   - **Unavailable agents** return 403 `site_agents_unavailable` with a
     `reason` of `agent_disabled`, `public_agents_disabled`,
     `guest_agents_disabled` or `usage_limits_disabled`.
   - **Human check.** When `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` is on, a
     guest agent start without the human header (`1`) returns 403
-    `site_human_check_required`.
-  - If the usage cap cannot be applied, the new session is cancelled and
-    the call returns 503 `site_conversation_failed`.
+    `site_human_check_required`. It is optional (Turnstile is optional), but
+    recommended for public Sites that allow guest agents.
+  - If the session cannot be created, its reservation is released; if a
+    session appears that the conversation record does not track, it is
+    cancelled and the call returns 502 `site_conversation_failed`.
 
 ## Limits and metering
 
@@ -259,8 +320,10 @@ defaults from settings.
 - The flood brakes apply under every profile.
 
 Counters are single-row upserts in `site_runtime_rate_windows` (per minute)
-and `site_runtime_usage` (per day and month). Concurrent requests can
-overshoot a budget by a request or two.
+and `site_runtime_usage` (per day and month). Rate windows can overshoot by
+a request or two under concurrency; agent budgets cannot, because starts
+and top-ups are conditional reservations. Old rate windows, usage rows and
+expired viewer sessions are deleted in small batches on the write path.
 
 Agent spend is billed to the organization through the normal session usage
 ledger. Sign-ins, reports and Site Data use are recorded as usage-only
@@ -275,9 +338,12 @@ the following after the database commit:
 - It writes the Site's `SiteHostMapRecord` to KV under `host:<hostname>`
   through the REST API, with `expiration_ttl` set to
   `OPENGENI_SITES_HOST_MAP_TTL_SECONDS`.
-- It never replaces a record with a higher `generation`. A released label
-  gets an `unpublished` tombstone.
-- On takedown, it purges the host from the zone cache.
+- It never replaces a record with a higher `generation`. Generations come
+  from one database sequence shared by every hostname, so a moved label or
+  a tombstone always outranks what was written before. A released label
+  gets an `unpublished` tombstone. The gateway keys its caches on host and
+  generation.
+- On takedown and unpublish, it purges the host from the zone cache.
 
 Failures are retried three times with backoff and logged. They never block
 or roll back the database write.
@@ -285,20 +351,29 @@ or roll back the database write.
 KV has no compare-and-set. The generation check is read-then-write, so two
 concurrent writers can briefly leave an older record.
 
-**Staleness bound.** If sync fails or is not configured, a stale host record
-lives at most `OPENGENI_SITES_HOST_MAP_TTL_SECONDS` plus the gateway's 60
-second edge cache, which is 360 seconds by default. The gateway should write
-its own KV fallback entries with a TTL no longer than this setting. Data,
-file, tool and agent calls are not affected by this window, because the API
-re-checks the publication and the viewer's access on every runtime call. A
-takedown therefore stops them at once. The window applies only to the
-gateway shell and cached version HTML, and the takedown cache purge shortens
-it when a zone id is set.
+**Staleness bound.** The API refuses a suspended or unpublished Site on the
+very next site-runtime call: data, file, tool, agent and version calls are
+re-checked every time. The edge copies lag: a KV write takes up to about 60
+seconds to reach other Cloudflare locations, the gateway caches host lookups
+for up to 60 seconds and access checks for 30 seconds, and a cache purge
+(when a zone id is set) clears cached shells. If sync fails, is not
+configured or is lost (the after-commit sync runs in process, so a restart
+can drop a pending write), the record expires after
+`OPENGENI_SITES_HOST_MAP_TTL_SECONDS`, and the next signed host lookup for
+the label resyncs a stale record. A missed sync is corrected within the TTL
+plus 60 seconds (360 seconds by default). The gateway should write its own
+KV fallback entries with a TTL no longer than this setting.
 
 ## Abuse and scanning
 
 - Viewers report through `POST /v1/site-runtime/site/reports`. Owners and
   admins triage through the reports routes above.
+- Every report and flagged scan reaches the operator: a structured
+  `site_abuse_notice` log line, and, when `OPENGENI_SITES_ABUSE_EMAIL` is
+  set and managed email is configured, an email (at most one per Site and
+  kind per hour, best effort). `bun scripts/operator/site-moderation-queue.ts`
+  lists open reports and flagged scans across workspaces (it needs the
+  migrations credential).
 - After a version is published, the content scanner checks the URLs found
   in its HTML.
   - The default scanner is `none`, which records nothing.

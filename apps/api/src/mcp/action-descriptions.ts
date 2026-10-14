@@ -51,7 +51,7 @@ const RULES: Rule[] = [
     method: "PATCH",
     pattern: /\/(codex|claude|supergrok)\/accounts\/:accountId\/allocator$/,
     text: ({ provider }) =>
-      `Turn "Use for new work" on or off for a ${provider} account (pause or resume it). Paused accounts aren't picked for new chats or schedules; running work continues. Send the current allocator version.`,
+      `Turn "Enable account" on or off for a ${provider} account (enable or disable it, sometimes called pause or resume). Disabled accounts aren't picked for new chats or schedules; running work continues. Send the current allocator version.`,
   },
   {
     method: "PATCH",

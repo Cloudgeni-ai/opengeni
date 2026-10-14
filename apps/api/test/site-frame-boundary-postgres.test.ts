@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AccessGrant } from "@opengeni/contracts";
 import { SITE_NO_ORIGIN_ID } from "@opengeni/contracts/site-session-http";
 import {
@@ -11,6 +14,7 @@ import {
   siteAgentClamp,
   siteAgentMayReachSession,
   withSiteSessionOrigin,
+  type ApiRouteDeps,
   type ObjectStorageDependency,
   type SessionWorkflowClient,
   type SiteSessionOrigin,
@@ -31,6 +35,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
+import { registerSitePublicationTools } from "../src/mcp/site-publication-tools";
+import { resolveSiteManagement } from "../src/site-publishing/service";
 
 // OPE-801: Site pages reach only the SITE_OPERATIONS allowlist and only their
 // own Site's sessions, everything they start records which Site, and agents
@@ -118,7 +124,13 @@ async function fixture() {
     keyHash: createHash("sha256").update(token).digest("hex"),
     permissions: [...permissions, "workspace:admin", "members:manage", "account:admin"],
   });
-  const settings = testSettings({ productAccessMode: "configured", sandboxBackend: "none" });
+  const settings = testSettings({
+    productAccessMode: "configured",
+    sandboxBackend: "none",
+    // Published Sites on, so their management routes are reachable.
+    sitesDomain: "sites.example.test",
+    sitesGatewaySecret: "c".repeat(40),
+  });
   const objectStorage = memoryObjectStorage();
   // Every workflow call is a no-op: these tests only check what is admitted.
   const workflowClient = new Proxy({}, { get: () => noop }) as unknown as SessionWorkflowClient;
@@ -221,6 +233,40 @@ async function fixture() {
       metadata: { sessionId, ...(turn ? { turnId: turn.id } : {}) },
     };
   };
+  /** An agent grant with a running turn and attempt, as the worker's first-party MCP sees it. */
+  const liveAgentGrant = async (sessionId: string): Promise<AccessGrant> => {
+    const [turn] = await shared.admin<{ id: string }[]>`
+      insert into session_turns (
+        account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend,
+        execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      ) values (
+        ${accountId}, ${workspace.id}, ${sessionId}, gen_random_uuid(),
+        ${`frame-wf-${crypto.randomUUID()}`}, 'running',
+        (select coalesce(max(position), 0) + 1 from session_turns where session_id = ${sessionId}),
+        'Agent work', 'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${identity.subjectId},
+        '{"accepted":true}'::jsonb
+      ) returning id`;
+    const attemptId = crypto.randomUUID();
+    await shared.admin.begin(async (tx) => {
+      await tx`update sessions set active_turn_id = ${turn!.id} where id = ${sessionId}`;
+      await tx`update session_turns set active_attempt_id = ${attemptId} where id = ${turn!.id}`;
+      await tx`insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${accountId}, ${workspace.id}, ${sessionId}, ${turn!.id}, 1,
+          'running', 'frame-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
+          '{}'::jsonb
+        )`;
+    });
+    return {
+      ...grant,
+      principalKind: "agent_attempt",
+      metadata: { sessionId, turnId: turn!.id, attemptId, executionGeneration: 1 },
+    };
+  };
   return {
     app,
     settings,
@@ -237,6 +283,7 @@ async function fixture() {
     sessionRow,
     turns,
     agentGrant,
+    liveAgentGrant,
   };
 }
 
@@ -416,6 +463,23 @@ test("a tool a Site page called acts only on that Site's sessions", async () => 
       );
   // Reads keep the viewer's ordinary authorization.
   await expect(authorize(originB, fromA, "session.read")).resolves.toBeDefined();
+  // An agent a Site started reads only sessions acting for the same Site:
+  // another session's transcript is data its page must not reach.
+  const otherFromA = await f.startSession(siteA.frame("frame-a2"));
+  const fromAAgent = await f.liveAgentGrant(fromA);
+  const plainAgent = await f.liveAgentGrant(plain);
+  const agentRead = (agent: AccessGrant, sessionId: string) =>
+    requireSessionAuthorization({ db: db.db }, agent, {
+      sessionId,
+      operation: "session.read",
+      surface: "first_party_mcp",
+    });
+  await expect(agentRead(fromAAgent, fromA)).resolves.toBeDefined();
+  await expect(agentRead(fromAAgent, otherFromA)).resolves.toBeDefined();
+  await expect(agentRead(fromAAgent, plain)).rejects.toBeInstanceOf(
+    SessionAuthorizationDeniedError,
+  );
+  await expect(agentRead(plainAgent, fromA)).resolves.toBeDefined();
   // Without a Site origin nothing changes.
   await expect(
     requireSessionAuthorization({ db: db.db }, f.grant, {
@@ -585,4 +649,125 @@ test("a schedule created from a Site records the Site; another Site cannot chang
     body: JSON.stringify({}),
   });
   expect(outside.status).not.toBe(403);
+});
+
+test("Site pages and agents started from them cannot change Site publications", async () => {
+  const f = await fixture();
+  const site = await f.publish("Site A");
+  const fromSite = await f.startSession(site.frame("frame-a"));
+  const plain = await f.startSession();
+  const deps = {
+    db: db.db,
+    settings: f.settings,
+    objectStorage: f.objectStorage,
+  } as unknown as ApiRouteDeps;
+  const origin: SiteSessionOrigin = {
+    siteId: site.siteId,
+    title: "Site A",
+    versionId: site.versionId,
+  };
+  const clamped = await f.agentGrant(fromSite);
+  const refusedWith = (code: string) => ({ status: 403, details: { code } });
+
+  // The check every publication change runs first.
+  await expect(
+    resolveSiteManagement(deps, clamped, site.siteId, { mutate: true }),
+  ).rejects.toMatchObject(refusedWith("site_agent_forbidden"));
+  await expect(
+    withSiteSessionOrigin(origin, () =>
+      resolveSiteManagement(deps, f.grant, site.siteId, { mutate: true }),
+    ),
+  ).rejects.toMatchObject(refusedWith("site_page_forbidden"));
+  // People, and agents no Site started, still manage their Sites.
+  await expect(
+    resolveSiteManagement(deps, f.grant, site.siteId, { mutate: true }),
+  ).resolves.toMatchObject({ manager: true });
+  await expect(
+    resolveSiteManagement(deps, await f.liveAgentGrant(plain), site.siteId, { mutate: true }),
+  ).resolves.toMatchObject({ manager: true });
+  // A Site-started agent is refused before anything else, live attempt or not.
+  await expect(
+    resolveSiteManagement(deps, await f.liveAgentGrant(fromSite), site.siteId, { mutate: true }),
+  ).rejects.toMatchObject(refusedWith("site_agent_forbidden"));
+
+  // The agent tool refuses a Site-started agent.
+  const server = new McpServer({ name: "site-publication-clamp", version: "1" });
+  registerSitePublicationTools(
+    server,
+    deps,
+    clamped,
+    async () => undefined,
+    (value) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] }),
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({ name: "site-publication-clamp", version: "1" });
+  await server.connect(serverTransport);
+  await mcp.connect(clientTransport);
+  try {
+    const result = await mcp.callTool({
+      name: "site_publication_update",
+      arguments: { siteId: site.siteId, access: "members" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+    expect(JSON.parse(text).error.details.code).toBe("site_agent_forbidden");
+  } finally {
+    await mcp.close();
+  }
+
+  // Every publication route: a framed page never reaches it (the frame
+  // allowlist), and a request inside a Site origin is refused by the route.
+  const publication = `/published-artifacts/${site.siteId}/publication`;
+  const routes: Array<[string, string, unknown]> = [
+    ["PUT", publication, { access: "members" }],
+    ["DELETE", publication, undefined],
+    ["POST", `${publication}/takedown`, { reason: "From a Site page" }],
+    ["POST", `${publication}/restore`, {}],
+    ["PUT", "/site-limit-profile", { kind: "free" }],
+  ];
+  // The workspace limit profile is an admin route: the admin credential calls it.
+  const as = (path: string, frame: Record<string, string>, method: string, body: unknown) =>
+    path === "/site-limit-profile"
+      ? f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+          method,
+          headers: { ...f.service, ...frame },
+          body: JSON.stringify(body),
+        })
+      : f.call(method, path, frame, body);
+  for (const [method, path, body] of routes) {
+    const framed = await as(path, site.frame("frame-a"), method, body);
+    expect({ route: `${method} ${path}`, status: framed.status }).toEqual({
+      route: `${method} ${path}`,
+      status: 404,
+    });
+    const inOrigin = await withSiteSessionOrigin(origin, () => as(path, {}, method, body));
+    const json = (await inOrigin.json()) as { error?: { details?: { code?: string } } };
+    expect({
+      route: `${method} ${path}`,
+      status: inOrigin.status,
+      code: json.error?.details?.code,
+    }).toEqual({ route: `${method} ${path}`, status: 403, code: "site_page_forbidden" });
+  }
+  const [published] = await shared.admin<{ n: number }[]>`
+    select count(*)::int as n from site_publications where site_id = ${site.siteId}`;
+  expect(published!.n).toBe(0);
+  // Outside a Site the same person publishes.
+  expect((await f.call("PUT", publication, {}, { access: "members" })).status).toBe(201);
+
+  // A Site page may start a conversation, but not choose its tools or authority.
+  for (const extra of [
+    { tools: [{ kind: "mcp", id: "crm" }] },
+    { firstPartyMcpTools: ["sessions_list"] },
+    { vaultPolicy: { mode: "all" } },
+  ]) {
+    const response = await f.call("POST", "/sessions", site.frame("frame-a"), {
+      initialMessage: "Hello from a page",
+      sandboxBackend: "none",
+      ...extra,
+    });
+    expect({ extra, status: response.status }).toEqual({ extra, status: 403 });
+    expect(((await response.json()) as { code?: string }).code).toBe(
+      "SITE_SESSION_TOOLS_FORBIDDEN",
+    );
+  }
 });

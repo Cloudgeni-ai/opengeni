@@ -15,15 +15,16 @@ shared contracts: `packages/contracts/src/site-publishing.ts`.
 | `/robots.txt` | Disallow-all when the Site or deployment is noindex; otherwise disallows `/_og/` only |
 | `/_og/auth/login` | Mints state and a PKCE S256 verifier in `__Host-og_login` (10 minutes) and redirects to `${APP_ORIGIN}/site-auth/authorize` |
 | `/_og/auth/callback` | Verifies state, exchanges the code with signed `POST /v1/site-runtime/auth/exchange`, sets `__Host-og_session`, returns to a same-host relative path |
-| `/_og/auth/logout` | Signed `POST /v1/site-runtime/auth/logout` (best effort) and clears the session |
-| `/_og/v/<versionId>` | Immutable Site HTML with the bridge bootstrap, the Site sandbox CSP and `frame-ancestors 'self'`; edge-cached per Site and version after the access check |
+| `/_og/auth/logout` | GET shows a script-free confirmation; the same-origin POST calls signed `POST /v1/site-runtime/auth/logout` (best effort) and clears the session |
+| `/_og/v/<versionId>` | Site HTML with the bridge bootstrap, the Site sandbox CSP and `frame-ancestors 'self'`, only for `Sec-Fetch-Dest: iframe` (anything else is redirected to `/`). `Cache-Control: private, no-cache` with an ETag; the current version is edge-cached for 60 seconds per host, generation, Site and version, after the access check |
 | `/_og/api/*` | Same-origin Site calls: re-checked against `matchSiteOperation` and `SITE_TOOL_METHODS`, rate-limited, size-capped, signed and forwarded to `${API_ORIGIN}/v1/site-runtime<suffix>`; SSE streams through |
-| `/_og/report` | Script-free abuse report form, posting a `SiteAbuseReportRequest` to signed `POST /v1/site-runtime/site/reports` (same-origin plus a form token) |
+| `/_og/report` | Script-free abuse report form, posting a `SiteAbuseReportRequest` to signed `POST /v1/site-runtime/site/reports` (same-origin plus a form token); reports go to the Site's owners and the abuse team, and the pages show `ABUSE_EMAIL` |
 | `/_og/human` | Turnstile verification (only when both Turnstile values are set) |
 | `/_og/internal/site-db/<siteId>/<operation>` | Site SQL (optional per-Site storage): signed `POST` from the API only (see below), forwarded to the Site's `SiteDatabase` Durable Object; 404 without the `SITE_DB` binding |
 | anything else (GET) | The shell page: nonce'd bridge-host script, a full-viewport sandboxed iframe (`allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals`, never `allow-same-origin`) on `/_og/v/<versionId>`, and a Report link |
 
-Unknown, unpublished or version-less hosts get a neutral 404; suspended Sites
+A trailing-dot host (`<site>.<domain>.`) is redirected to the canonical
+host. Unknown, unpublished or version-less hosts get a neutral 404; suspended Sites
 get a 410 takedown page with the abuse contact. Members and invited Sites (and
 every Site when `LOGIN_ONLY` is set) need a site session the API confirms
 through `GET /v1/site-runtime/site/config`; without one the visitor goes to
@@ -65,8 +66,8 @@ Bindings:
 
 | Binding | Kind | Use |
 | --- | --- | --- |
-| `HOST_MAP` | KV namespace | Host-map records at `siteHostMapKey(host)`, written by the API's edge sync; the gateway reads with `cacheTtl` 60 and writes back API lookups for 5 minutes, never over a newer generation |
-| `RATE_LIMITER` | Rate limiting (`[[ratelimits]]`) | Per-Site flood brake for `/_og/api/*` and reports, keyed by verified visitor or client IP; 429 on limit |
+| `HOST_MAP` | KV namespace | Host-map records at `siteHostMapKey(host)`, written by the API's edge sync; the gateway reads with `cacheTtl` 60 and writes back API lookups for 5 minutes after a fresh (uncached) read, only when strictly newer than the stored generation, so a suspension is never overwritten by an older record |
+| `RATE_LIMITER` | Rate limiting (`[[ratelimits]]`) | Per-Site flood brake for `/_og/api/*` and reports. Every request is limited on the client IP (`CF-Connecting-IP`) and, when present, also on the verified visitor; both must pass, so rotating `__Host-og_v` doesn't reset a budget. 429 on limit |
 | `SITE_DB` | Durable Object namespace, class `SiteDatabase` (`[[migrations]] tag = "v1"`, `new_sqlite_classes`) | Optional per-Site SQLite storage (Site SQL); bound for local development, commented out in the staging and production placeholders |
 
 `wrangler.toml` holds the local development configuration at the top level.
@@ -122,10 +123,35 @@ All are `__Host-` cookies (`Secure; HttpOnly; SameSite=Lax; Path=/`, no
 - `__Host-og_v`: anonymous visitor id, `<128-bit id>.<HMAC>`; only a verified id is forwarded.
 - `__Host-og_session`: opaque site-session token from the auth exchange; the API validates it.
 - `__Host-og_login`: signed state, PKCE verifier and return path for 10 minutes.
-- `__Host-og_h`: signed, visitor-bound human proof for 1 hour (Turnstile only).
+- `__Host-og_h`: signed human proof bound to the Site host and visitor, for 1 hour (Turnstile only).
 
 Inbound cookies and `Authorization` are never forwarded, and API
 `Set-Cookie` headers are dropped.
+
+## Caching and takedown latency
+
+The gateway's colo caches (`caches.default`) are keyed by URLs on the real
+Site host under `/_og/cache/`, so a Cloudflare purge by hostname drops them.
+Entries that depend on the host-map record also carry its `generation`, so a
+new record never reads an older entry:
+
+| Cache | Key | Lifetime |
+| --- | --- | --- |
+| Host map | KV `host:<hostname>` | KV `cacheTtl` 60 seconds per colo; write-back entries expire after 5 minutes |
+| No such host | host | 10 seconds |
+| Access confirmation (members, invited, login-only) | host, generation, session hash | 30 seconds |
+| Current version HTML | host, generation, Site, version | 60 seconds |
+| Browser copy of version HTML | `private, no-cache` plus ETag | revalidated on every load |
+
+What a takedown (or unpublish, or an access change) looks like in practice:
+
+- Site API calls through `/_og/api` stop as soon as the API refuses them; the API checks its own database on every call.
+- New loads of the Site HTML stop within 60 seconds, or immediately where the API's purge by hostname has run, because an expired or purged entry is fetched from the API again.
+- The takedown page replaces the shell once a colo sees the new KV record: KV propagation (usually within a minute) plus up to 60 seconds of `cacheTtl`, so up to about 2 minutes in the worst case.
+- A tab that already has the Site open keeps its loaded document until it reloads, but its API calls fail.
+
+A first publish appears within about 10 seconds at a colo that recently looked
+the name up and found nothing.
 
 ## Local development
 
@@ -152,7 +178,8 @@ bun run typecheck
 
 `test/worker.miniflare.test.ts` builds the Worker, runs it in workerd through
 Miniflare with KV and a rate limiter, and points it at a fake site-runtime API
-on `127.0.0.1:18790` that verifies every gateway signature independently.
+on an ephemeral loopback port (set `SITE_GATEWAY_TEST_API_PORT` to pin one)
+that verifies every gateway signature independently.
 `test/site-db.miniflare.test.ts` runs the `SiteDatabase` Durable Object in
 workerd: signatures, secret rotation, skew and replay, statement refusals,
 limits, migrations, rebuild, export and import. `test/site-database.test.ts`

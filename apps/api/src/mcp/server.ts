@@ -379,6 +379,7 @@ import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletio
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
+import { afterSiteArtifactMutation } from "../site-publishing/service";
 import {
   registerSessionAdminAccessTools,
   type SessionAdminAccessDispatch,
@@ -3368,6 +3369,10 @@ function registerWorkspaceArtifactTools(
       });
   const mutation = async (response: WorkspaceArtifactMutationResponse) =>
     await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  // A published Site follows its Site here exactly as through the API routes:
+  // the same hook resyncs the edge and scans a version that became current.
+  const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
+    await mutation(await afterSiteArtifactMutation(deps, response, { scan }));
   const prepare = (
     html: string | undefined,
     source?: {
@@ -3595,7 +3600,7 @@ function registerWorkspaceArtifactTools(
     }) => {
       await authorize();
       return json(
-        await mutation(
+        await siteMutation(
           await publishWorkspaceArtifactVersion(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3605,6 +3610,7 @@ function registerWorkspaceArtifactTools(
             ...(await prepare(html, source, requestedTools, uploadId)),
             ...provenance(idempotencyKey, "artifacts_publish"),
           }),
+          true,
         ),
       );
     },
@@ -3626,7 +3632,7 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await mutation(
+        await siteMutation(
           await rollbackWorkspaceArtifact(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3635,6 +3641,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_rollback"),
           }),
+          true,
         ),
       );
     },
@@ -3655,7 +3662,7 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await mutation(
+        await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3664,6 +3671,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_archive"),
           }),
+          false,
         ),
       );
     },
@@ -3684,7 +3692,7 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await mutation(
+        await siteMutation(
           await setWorkspaceArtifactStatus(deps.db, {
             artifactId,
             viewer: await siteViewerForGrant(deps.db, grant),
@@ -3693,6 +3701,7 @@ function registerWorkspaceArtifactTools(
             reason,
             ...provenance(idempotencyKey, "artifacts_restore"),
           }),
+          false,
         ),
       );
     },

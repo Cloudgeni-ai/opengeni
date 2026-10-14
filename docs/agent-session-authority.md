@@ -169,7 +169,7 @@ Authority never widens down a tree or through a side door:
   own SDK requests keep a workspace prefix boundary (`siteHostWorkspacePath`)
   under that ceiling, and the configured tool families narrow it further.
 - Site code is held to the `SITE_OPERATIONS` allowlist
-  (`packages/contracts/src/site-publishing.ts`, method plus exact path shape):
+  (`packages/contracts/src/site-operations.ts`, method plus exact path shape):
   `siteSessionPath` enforces it in the console bridge, the in-Site SDK and a
   Codemode preview, and `apps/api/src/site-frame-guard.ts` enforces it again
   for every request a host marks as a Site frame. A frame lists only its own
@@ -177,8 +177,8 @@ Authority never widens down a tree or through a side door:
   Site (or, without a published Site, its own mounted frame) started; anything
   else is a 404. Sessions, turns and schedules started from a Site record
   which Site (`_opengeniSiteOrigin`), and an agent started from a Site cannot
-  create or change schedules or automations, nor message sessions outside its
-  Site.
+  create or change schedules, automations or Site publications, nor read,
+  message, steer or control sessions outside its Site.
 - A session-scoped grant without a signed `firstPartyMcpTools` claim registers
   no first-party tools.
 

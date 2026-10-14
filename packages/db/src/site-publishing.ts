@@ -2,12 +2,17 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 /**
- * Published Sites storage (migration 0778). Every read and write runs in the
+ * Published Sites storage (migration 0782). Every read and write runs in the
  * Site's workspace RLS context, except the hostname lane: a label lookup that
- * names exactly one row of `site_hostnames` through the
- * `opengeni.site_hostname_label` setting (the api_keys hash pattern). The API
+ * names exactly one row of `site_hostnames` (and of `site_hostname_holds`)
+ * through the `opengeni.site_hostname_label` setting (the api_keys hash
+ * pattern; a row-level policy, not a SECURITY DEFINER function). The API
  * decides who may do what; these functions enforce shapes, uniqueness, the
- * release hold and single use.
+ * release hold, platform holds, single use and the spend reservations.
+ *
+ * Everything that claims, releases or publishes one hostname runs under a
+ * transaction advisory lock on that label, so edge writes for a hostname
+ * happen in generation order.
  */
 
 export type SitePublishingScope = { accountId: string; workspaceId: string };
@@ -16,6 +21,7 @@ export type SitePublishingErrorCode =
   | "not_found"
   | "taken"
   | "held"
+  | "reserved"
   | "conflict"
   | "forbidden"
   | "validation";
@@ -54,6 +60,8 @@ export type SitePublicationRecord = {
     model: string | null;
     instructions: string | null;
     tools: string[] | null;
+    /** Anonymous guests' conversations get `tools` too (an admin's opt-in). */
+    guestTools: boolean;
   };
   /** The Site's own profile; null inherits the workspace default. */
   limitProfile: StoredSiteLimitProfile | null;
@@ -96,6 +104,16 @@ export type SiteHostnameRecord = {
   releasedAt: Date | null;
 };
 
+/** A platform hold: a taken-down label no workspace may claim. */
+export type SiteHostnameHoldRecord = {
+  label: string;
+  siteId: string;
+  workspaceId: string;
+  reason: string;
+  heldBy: string;
+  createdAt: Date;
+};
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const LABEL = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/u;
 /** The database floor for the release hold; settings may only lengthen it. */
@@ -129,6 +147,7 @@ type PublicationRow = {
   agent_model: string | null;
   agent_instructions: string | null;
   agent_tools: unknown;
+  agent_guest_tools: boolean;
   limit_profile_kind: SiteLimitProfileKindValue | null;
   limit_overrides: unknown;
   invited_emails: unknown;
@@ -163,6 +182,7 @@ function toPublication(row: PublicationRow): SitePublicationRecord {
       model: row.agent_model,
       instructions: row.agent_instructions,
       tools,
+      guestTools: row.agent_guest_tools,
     },
     limitProfile: row.limit_profile_kind
       ? {
@@ -216,38 +236,117 @@ async function setHostnameLane(tx: Database, label: string): Promise<void> {
 }
 
 /**
- * Find a hostname row by label across every workspace (the hostname lane).
- * Only the named row is visible; nothing else about any workspace is.
+ * Serialize work on one hostname for the rest of the transaction: claims,
+ * releases, platform holds and edge sync all take it.
  */
+async function lockHostnameLabel(tx: Database, label: string): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`opengeni.site_hostname:${label}`}, 0))`,
+  );
+}
+
+type HoldRow = {
+  label: string;
+  site_id: string;
+  workspace_id: string;
+  reason: string;
+  held_by: string;
+  created_at: unknown;
+};
+
+function toHold(row: HoldRow): SiteHostnameHoldRecord {
+  return {
+    label: row.label,
+    siteId: row.site_id,
+    workspaceId: row.workspace_id,
+    reason: row.reason,
+    heldBy: row.held_by,
+    createdAt: date(row.created_at),
+  };
+}
+
+/** Read the hostname row and platform hold of the label the lane names (lane already set). */
+async function laneState(
+  tx: Database,
+  label: string,
+): Promise<{ hostname: SiteHostnameRecord | null; hold: SiteHostnameHoldRecord | null }> {
+  const [row] = await rawRows<HostnameRow>(
+    tx,
+    sql`select label, account_id, workspace_id, site_id, created_at, released_at
+      from site_hostnames where label = ${label}`,
+  );
+  const [hold] = await rawRows<HoldRow>(
+    tx,
+    sql`select label, site_id, workspace_id, reason, held_by, created_at
+      from site_hostname_holds where label = ${label}`,
+  );
+  return { hostname: row ? toHostname(row) : null, hold: hold ? toHold(hold) : null };
+}
+
+/**
+ * Find a hostname row and its platform hold by label across every workspace
+ * (the hostname lane). Only the named rows are visible; nothing else about
+ * any workspace is.
+ */
+export async function findSiteHostnameState(
+  db: Database,
+  label: string,
+): Promise<{ hostname: SiteHostnameRecord | null; hold: SiteHostnameHoldRecord | null }> {
+  if (!LABEL.test(label)) return { hostname: null, hold: null };
+  return await db.transaction(async (raw) => {
+    const tx = raw as unknown as Database;
+    await setHostnameLane(tx, label);
+    return await laneState(tx, label);
+  });
+}
+
+/** Find a hostname row by label across every workspace (the hostname lane). */
 export async function findSiteHostname(
   db: Database,
   label: string,
 ): Promise<SiteHostnameRecord | null> {
-  if (!LABEL.test(label)) return null;
+  return (await findSiteHostnameState(db, label)).hostname;
+}
+
+/**
+ * Lift a platform hold by label (operator only: the Site and workspace may
+ * be gone). Returns whether a hold existed.
+ */
+export async function liftSiteHostnameHold(db: Database, label: string): Promise<boolean> {
+  if (!LABEL.test(label)) return false;
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
+    await lockHostnameLabel(tx, label);
     await setHostnameLane(tx, label);
-    const [row] = await rawRows<HostnameRow>(
+    const rows = await rawRows<{ label: string }>(
       tx,
-      sql`select label, account_id, workspace_id, site_id, created_at, released_at
-        from site_hostnames where label = ${label}`,
+      sql`delete from site_hostname_holds where label = ${label} returning label`,
     );
-    return row ? toHostname(row) : null;
+    return rows.length > 0;
   });
 }
 
 /** Whether `label` may be claimed by `siteId` in this workspace. */
 export type SiteHostnameClaimCheck =
   | { available: true }
-  | { available: false; problem: "taken" | "held" };
+  | { available: false; problem: "taken" | "held" | "reserved" };
 
 function claimCheck(
   existing: SiteHostnameRecord | null,
+  hold: SiteHostnameHoldRecord | null,
   scope: SitePublishingScope,
   siteId: string | null,
   holdDays: number,
   now: Date,
 ): SiteHostnameClaimCheck {
+  // A platform hold reserves the label for good, except for the live row of
+  // the Site that holds it (its own label, frozen while taken down).
+  const ownLive =
+    existing !== null &&
+    existing.releasedAt === null &&
+    existing.workspaceId === scope.workspaceId &&
+    existing.siteId === siteId;
+  if (hold && !ownLive) return { available: false, problem: "reserved" };
   if (!existing) return { available: true };
   if (existing.workspaceId === scope.workspaceId) {
     if (existing.releasedAt !== null) return { available: true };
@@ -256,8 +355,8 @@ function claimCheck(
       : { available: false, problem: "taken" };
   }
   if (existing.releasedAt === null) return { available: false, problem: "taken" };
-  const hold = Math.max(holdDays, SITE_HOSTNAME_MIN_HOLD_DAYS) * 86_400_000;
-  return existing.releasedAt.getTime() + hold > now.getTime()
+  const holdMs = Math.max(holdDays, SITE_HOSTNAME_MIN_HOLD_DAYS) * 86_400_000;
+  return existing.releasedAt.getTime() + holdMs > now.getTime()
     ? { available: false, problem: "held" }
     : { available: true };
 }
@@ -271,11 +370,13 @@ export async function checkSiteHostnameClaim(
   holdDays: number,
   now: Date = new Date(),
 ): Promise<SiteHostnameClaimCheck> {
-  return claimCheck(await findSiteHostname(db, label), scope, siteId, holdDays, now);
+  const state = await findSiteHostnameState(db, label);
+  return claimCheck(state.hostname, state.hold, scope, siteId, holdDays, now);
 }
 
 const PUBLICATION_COLUMNS = sql`site_id, account_id, workspace_id, label, access, status, noindex,
-  agent_enabled, agent_model, agent_instructions, agent_tools, limit_profile_kind, limit_overrides,
+  agent_enabled, agent_model, agent_instructions, agent_tools, agent_guest_tools, limit_profile_kind,
+  limit_overrides,
   invited_emails, suspended_at, suspended_by, suspended_reason, suspended_by_subject, generation,
   edge_synced_generation, scan_status, scan_findings, scanned_version_id, scanned_at, created_by,
   updated_by, created_at, updated_at`;
@@ -311,7 +412,15 @@ export async function getPublishedSite(
   siteId: string,
 ): Promise<PublishedSiteRecord | null> {
   if (!UUID.test(siteId)) return null;
-  return await withRlsContext(db, scope, async (tx) => {
+  return await withRlsContext(db, scope, (tx) => siteRow(tx, scope, siteId));
+}
+
+async function siteRow(
+  tx: Database,
+  scope: SitePublishingScope,
+  siteId: string,
+): Promise<PublishedSiteRecord | null> {
+  {
     const [row] = await rawRows<{
       id: string;
       account_id: string;
@@ -341,7 +450,7 @@ export async function getPublishedSite(
           currentVersionId: row.current_version_id,
         }
       : null;
-  });
+  }
 }
 
 /** A version of this Site (never another Site's), with its stored content key. */
@@ -379,7 +488,41 @@ export async function getPublishedSiteVersion(
   });
 }
 
-/** Claim `label` for `siteId` inside the caller's transaction; throws taken or held. */
+/**
+ * A version a published Site may still serve: its current version, or one
+ * that a publish or rollback replaced within `graceSeconds` (pages already
+ * open keep loading their assets). Any other version, even of this Site, is
+ * not served.
+ */
+export async function getServableSiteVersion(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { siteId: string; versionId: string; currentVersionId: string; graceSeconds: number },
+): Promise<{
+  id: string;
+  contentKey: string;
+  contentSha256: string | null;
+  sizeBytes: number;
+} | null> {
+  if (!UUID.test(input.siteId) || !UUID.test(input.versionId)) return null;
+  if (input.versionId !== input.currentVersionId) {
+    const replaced = await withRlsContext(db, scope, async (tx) =>
+      rawRows<{ one: number }>(
+        tx,
+        sql`select 1 as one from workspace_artifact_events
+          where workspace_id = ${scope.workspaceId} and artifact_id = ${input.siteId}
+            and from_version_id = ${input.versionId}
+            and type in ('published', 'rolled_back')
+            and created_at > now() - make_interval(secs => ${Math.max(0, input.graceSeconds)})
+          limit 1`,
+      ),
+    );
+    if (replaced.length === 0) return null;
+  }
+  return await getPublishedSiteVersion(db, scope, input.siteId, input.versionId);
+}
+
+/** Claim `label` for `siteId` inside the caller's transaction; throws taken, held or reserved. */
 async function claimLabel(
   tx: Database,
   scope: SitePublishingScope,
@@ -388,6 +531,7 @@ async function claimLabel(
   holdDays: number,
 ): Promise<void> {
   if (!LABEL.test(label)) throw new SitePublishingError("validation", "Invalid hostname label");
+  await lockHostnameLabel(tx, label);
   // The lane setting is transaction-local: on an error the transaction aborts
   // and takes it along, so it is cleared only on success.
   await setHostnameLane(tx, label);
@@ -410,13 +554,20 @@ async function claimInLane(
     );
     const existing = row ? toHostname(row) : null;
     const now = row ? date(row.now) : new Date();
-    const check = claimCheck(existing, scope, siteId, holdDays, now);
+    const [hold] = await rawRows<HoldRow>(
+      tx,
+      sql`select label, site_id, workspace_id, reason, held_by, created_at
+        from site_hostname_holds where label = ${label}`,
+    );
+    const check = claimCheck(existing, hold ? toHold(hold) : null, scope, siteId, holdDays, now);
     if (!check.available)
       throw new SitePublishingError(
         check.problem,
         check.problem === "held"
           ? "This name was released recently and is held for its previous owner"
-          : "This name is already taken",
+          : check.problem === "reserved"
+            ? "This name is reserved"
+            : "This name is already taken",
       );
     if (existing && existing.workspaceId === scope.workspaceId) {
       if (existing.siteId === siteId && existing.releasedAt === null) return;
@@ -493,8 +644,22 @@ export async function upsertSitePublication(
         "forbidden",
         "This Site was taken down; restore it before publishing it again",
       );
+    // A taken-down Site keeps its hostname: moving it would put the same Site
+    // back online under a new name.
+    if (
+      existing?.status === "suspended" &&
+      changes.label !== undefined &&
+      changes.label !== existing.label
+    )
+      throw new SitePublishingError(
+        "forbidden",
+        "This Site was taken down; its hostname cannot change until it is restored",
+      );
     const label = changes.label ?? existing?.label ?? input.defaultLabel;
     const previousLabel = existing && existing.label !== label ? existing.label : null;
+    // Both hostnames, in one global order (no deadlocks between two moves).
+    for (const name of [label, previousLabel].filter((n): n is string => n !== null).sort())
+      if (LABEL.test(name)) await lockHostnameLabel(tx, name);
     // Release the previous label first: a Site holds one active label at a
     // time. A refused claim rolls the release back with everything else.
     if (previousLabel)
@@ -529,21 +694,24 @@ export async function upsertSitePublication(
           sql`update site_publications set label = ${label}, access = ${access}, status = ${status},
               noindex = ${noindex}, agent_enabled = ${agent.enabled}, agent_model = ${agent.model},
               agent_instructions = ${agent.instructions}, agent_tools = ${toolsJson}::jsonb,
+              agent_guest_tools = ${agent.guestTools},
               limit_profile_kind = ${limitProfile?.kind ?? null},
               limit_overrides = ${overridesJson}::jsonb,
               invited_emails = ${JSON.stringify(invited)}::jsonb,
-              generation = generation + 1, updated_by = ${input.actor}, updated_at = now()
+              generation = nextval('site_host_generation_seq'), updated_by = ${input.actor},
+              updated_at = now()
             where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
             returning ${PUBLICATION_COLUMNS}`,
         )
       : await rawRows<PublicationRow>(
           tx,
           sql`insert into site_publications (site_id, account_id, workspace_id, label, access, status,
-              noindex, agent_enabled, agent_model, agent_instructions, agent_tools, limit_profile_kind,
-              limit_overrides, invited_emails, created_by, updated_by)
+              noindex, agent_enabled, agent_model, agent_instructions, agent_tools, agent_guest_tools,
+              limit_profile_kind, limit_overrides, invited_emails, created_by, updated_by)
             values (${input.siteId}, ${scope.accountId}, ${scope.workspaceId}, ${label}, ${access},
               ${status}, ${noindex}, ${agent.enabled}, ${agent.model}, ${agent.instructions},
-              ${toolsJson}::jsonb, ${limitProfile?.kind ?? null}, ${overridesJson}::jsonb,
+              ${toolsJson}::jsonb, ${agent.guestTools}, ${limitProfile?.kind ?? null},
+              ${overridesJson}::jsonb,
               ${JSON.stringify(invited)}::jsonb, ${input.actor}, ${input.actor})
             returning ${PUBLICATION_COLUMNS}`,
         );
@@ -552,7 +720,7 @@ export async function upsertSitePublication(
 }
 
 function defaultAgent(): SitePublicationRecord["agent"] {
-  return { enabled: true, model: null, instructions: null, tools: null };
+  return { enabled: true, model: null, instructions: null, tools: null, guestTools: false };
 }
 
 function stripUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
@@ -561,7 +729,12 @@ function stripUndefined<T extends Record<string, unknown>>(value: T): Partial<T>
   ) as Partial<T>;
 }
 
-/** Take a Site down at once. A platform takedown is never replaced by an owner's. */
+/**
+ * Take a Site down at once. A platform takedown is never replaced by an
+ * owner's or admin's, and also places a platform hold on the label: no
+ * workspace may claim it while the hold lasts, even after the Site or its
+ * workspace is deleted.
+ */
 export async function suspendSitePublication(
   db: Database,
   scope: SitePublishingScope,
@@ -574,7 +747,8 @@ export async function suspendSitePublication(
     if (!existing) throw new SitePublishingError("not_found", "Site not published");
     if (
       existing.status === "suspended" &&
-      existing.suspendedBy === "platform" &&
+      (existing.suspendedBy === "platform" ||
+        (existing.suspendedBy === "admin" && input.by === "owner")) &&
       input.by !== "platform"
     )
       return existing;
@@ -582,16 +756,33 @@ export async function suspendSitePublication(
       tx,
       sql`update site_publications set status = 'suspended', suspended_at = now(),
           suspended_by = ${input.by}, suspended_reason = ${input.reason.slice(0, 2000)},
-          suspended_by_subject = ${input.subject}, generation = generation + 1,
+          suspended_by_subject = ${input.subject},
+          generation = nextval('site_host_generation_seq'),
           updated_by = ${input.subject}, updated_at = now()
         where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
         returning ${PUBLICATION_COLUMNS}`,
     );
+    if (input.by === "platform") {
+      await lockHostnameLabel(tx, existing.label);
+      await setHostnameLane(tx, existing.label);
+      await tx.execute(
+        sql`insert into site_hostname_holds (label, site_id, workspace_id, reason, held_by)
+          values (${existing.label}, ${siteId}, ${scope.workspaceId},
+            ${input.reason.trim().slice(0, 2000) || "Taken down"}, ${input.subject.slice(0, 300)})
+          on conflict (label) do update set site_id = excluded.site_id,
+            workspace_id = excluded.workspace_id, reason = excluded.reason,
+            held_by = excluded.held_by`,
+      );
+      await setHostnameLane(tx, "");
+    }
     return toPublication(row!);
   });
 }
 
-/** Restore a taken-down Site; only the platform restores a platform takedown. */
+/**
+ * Restore a taken-down Site. Only the platform restores a platform takedown
+ * (and lifts its hostname hold); an owner cannot lift an admin's takedown.
+ */
 export async function restoreSitePublication(
   db: Database,
   scope: SitePublishingScope,
@@ -609,14 +800,26 @@ export async function restoreSitePublication(
         "forbidden",
         "This Site was taken down by the platform; contact support to restore it",
       );
+    if (existing.suspendedBy === "admin" && input.by === "owner")
+      throw new SitePublishingError(
+        "forbidden",
+        "A workspace admin took this Site down; only a workspace admin can restore it",
+      );
     const [row] = await rawRows<PublicationRow>(
       tx,
       sql`update site_publications set status = 'active', suspended_at = null, suspended_by = null,
-          suspended_reason = null, suspended_by_subject = null, generation = generation + 1,
+          suspended_reason = null, suspended_by_subject = null,
+          generation = nextval('site_host_generation_seq'),
           updated_by = ${input.subject}, updated_at = now()
         where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
         returning ${PUBLICATION_COLUMNS}`,
     );
+    if (input.by === "platform") {
+      await lockHostnameLabel(tx, existing.label);
+      await setHostnameLane(tx, existing.label);
+      await tx.execute(sql`delete from site_hostname_holds where label = ${existing.label}`);
+      await setHostnameLane(tx, "");
+    }
     return toPublication(row!);
   });
 }
@@ -631,7 +834,8 @@ export async function bumpSitePublicationGeneration(
   return await withRlsContext(db, scope, async (tx) => {
     const [row] = await rawRows<PublicationRow>(
       tx,
-      sql`update site_publications set generation = generation + 1, updated_at = now()
+      sql`update site_publications set generation = nextval('site_host_generation_seq'),
+          updated_at = now()
         where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
         returning ${PUBLICATION_COLUMNS}`,
     );
@@ -652,6 +856,64 @@ export async function markSitePublicationEdgeSynced(
         set edge_synced_generation = greatest(edge_synced_generation, ${generation})
         where workspace_id = ${scope.workspaceId} and site_id = ${siteId}`,
     );
+  });
+}
+
+/** What the edge should hold for one hostname, read under that hostname's lock. */
+export type SiteHostnameEdgeState = {
+  label: string;
+  /** The hostname row (live or released), or null when no row exists. */
+  hostname: SiteHostnameRecord | null;
+  hold: SiteHostnameHoldRecord | null;
+  /** The live Site that owns this label, with its publication. */
+  live: { publication: SitePublicationRecord; site: PublishedSiteRecord } | null;
+  /** A fresh generation for a tombstone when no Site is live on the label. */
+  tombstoneGeneration: number | null;
+};
+
+/**
+ * Run `fn` with the edge state of one hostname while holding that hostname's
+ * advisory lock, so edge writes for a hostname land in generation order:
+ * a claim, release, takedown or another sync waits until `fn` returns. The
+ * live Site is read in the workspace that owns the label, wherever it moved.
+ * `fn` must not write to the database through another connection.
+ */
+export async function withSiteHostnameEdgeState<T>(
+  db: Database,
+  label: string,
+  fn: (state: SiteHostnameEdgeState) => Promise<T>,
+): Promise<T> {
+  if (!LABEL.test(label)) throw new SitePublishingError("validation", "Invalid hostname label");
+  return await db.transaction(async (raw) => {
+    const tx = raw as unknown as Database;
+    await lockHostnameLabel(tx, label);
+    await setHostnameLane(tx, label);
+    const { hostname, hold } = await laneState(tx, label);
+    await setHostnameLane(tx, "");
+    let live: SiteHostnameEdgeState["live"] = null;
+    if (hostname && hostname.releasedAt === null) {
+      const scope = { accountId: hostname.accountId, workspaceId: hostname.workspaceId };
+      live = await withRlsContext(
+        tx,
+        scope,
+        async (scoped) => {
+          const publication = await publicationRow(scoped, scope, hostname.siteId);
+          const site = await siteRow(scoped, scope, hostname.siteId);
+          return publication && site && publication.label === label ? { publication, site } : null;
+        },
+        undefined,
+        "none",
+      );
+    }
+    let tombstoneGeneration: number | null = null;
+    if (!live) {
+      const [next] = await rawRows<{ generation: string | number }>(
+        tx,
+        sql`select nextval('site_host_generation_seq') as generation`,
+      );
+      tombstoneGeneration = Number(next!.generation);
+    }
+    return await fn({ label, hostname, hold, live, tombstoneGeneration });
   });
 }
 
@@ -767,6 +1029,14 @@ export async function createSiteViewerSession(
   input: SiteViewerIdentity & { siteId: string; tokenHash: string; absoluteSeconds: number },
 ): Promise<SiteViewerSessionRecord> {
   return await withRlsContext(db, scope, async (tx) => {
+    // Bounded cleanup on the write path: this Site's expired or long-revoked sessions.
+    await tx.execute(
+      sql`delete from site_viewer_sessions where ctid = any(array(
+          select ctid from site_viewer_sessions
+          where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+            and (expires_at < now() or revoked_at < now() - interval '1 day')
+          limit 100))`,
+    );
     const [row] = await rawRows<{ id: string; expires_at: unknown }>(
       tx,
       sql`insert into site_viewer_sessions (account_id, workspace_id, site_id, token_hash, subject_id,
@@ -852,6 +1122,25 @@ export async function revokeSiteViewerSession(
   });
 }
 
+/** Revoke every live site-session of a Site (takedown, unpublish, narrower access). */
+export async function revokeSiteViewerSessions(
+  db: Database,
+  scope: SitePublishingScope,
+  siteId: string,
+): Promise<number> {
+  if (!UUID.test(siteId)) return 0;
+  return await withRlsContext(db, scope, async (tx) => {
+    const rows = await rawRows<{ id: string }>(
+      tx,
+      sql`update site_viewer_sessions set revoked_at = now()
+        where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
+          and revoked_at is null and expires_at > now()
+        returning id`,
+    );
+    return rows.length;
+  });
+}
+
 /** Whether the subject holds a membership in this workspace (re-checked on every runtime call). */
 export async function isSiteWorkspaceMember(
   db: Database,
@@ -916,7 +1205,11 @@ export type SiteRuntimeConversationRecord = {
   versionId: string | null;
   turns: number;
   meteredMicros: number;
+  /** The conversation's own spend cap, fixed at start (its session usage limit). */
+  limitMicros: number | null;
+  reservedMicros: number;
   createdAt: Date;
+  updatedAt: Date;
 };
 
 type ConversationRow = {
@@ -926,8 +1219,17 @@ type ConversationRow = {
   version_id: string | null;
   turns: number;
   metered_micros: string | number;
+  limit_micros: string | number | null;
+  reserved_micros: string | number;
+  reserved_day: unknown;
+  reserved_month: unknown;
   created_at: unknown;
+  updated_at: unknown;
 };
+
+const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, version_id, turns,
+  metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
+  reserved_month::text as reserved_month, created_at, updated_at`;
 
 function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
   return {
@@ -937,23 +1239,11 @@ function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
     versionId: row.version_id,
     turns: Number(row.turns),
     meteredMicros: Number(row.metered_micros),
+    limitMicros: row.limit_micros === null ? null : Number(row.limit_micros),
+    reservedMicros: Number(row.reserved_micros),
     createdAt: date(row.created_at),
+    updatedAt: date(row.updated_at),
   };
-}
-
-export async function insertSiteRuntimeConversation(
-  db: Database,
-  scope: SitePublishingScope,
-  input: { sessionId: string; siteId: string; viewerPrincipal: string; versionId: string | null },
-): Promise<void> {
-  await withRlsContext(db, scope, async (tx) => {
-    await tx.execute(
-      sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
-          viewer_principal, version_id)
-        values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
-          ${input.viewerPrincipal}, ${input.versionId})`,
-    );
-  });
 }
 
 /** The conversation when it belongs to this Site and viewer; null otherwise. */
@@ -966,8 +1256,7 @@ export async function getOwnedSiteRuntimeConversation(
   return await withRlsContext(db, scope, async (tx) => {
     const [row] = await rawRows<ConversationRow>(
       tx,
-      sql`select session_id, site_id, viewer_principal, version_id, turns, metered_micros, created_at
-        from site_runtime_conversations
+      sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
           and site_id = ${input.siteId} and viewer_principal = ${input.viewerPrincipal}`,
     );
@@ -984,8 +1273,7 @@ export async function listOwnedSiteRuntimeConversations(
     (
       await rawRows<ConversationRow>(
         tx,
-        sql`select session_id, site_id, viewer_principal, version_id, turns, metered_micros, created_at
-          from site_runtime_conversations
+        sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
           where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
             and viewer_principal = ${input.viewerPrincipal}
           order by created_at desc limit ${Math.max(1, Math.min(input.limit, 100))}`,
@@ -994,31 +1282,66 @@ export async function listOwnedSiteRuntimeConversations(
   );
 }
 
-/**
- * Count one viewer message in a conversation when it is under `maxTurns`
- * (null: no cap). Returns false when the cap is reached.
- */
-export async function admitSiteRuntimeConversationTurn(
+/** The Site's conversations that still hold a spend reservation, oldest activity first. */
+export async function listReservedSiteRuntimeConversations(
   db: Database,
   scope: SitePublishingScope,
-  input: { sessionId: string; maxTurns: number | null },
-): Promise<boolean> {
-  return await withRlsContext(db, scope, async (tx) => {
-    const rows = await rawRows<{ turns: number }>(
-      tx,
-      sql`update site_runtime_conversations set turns = turns + 1, updated_at = now()
-        where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
-          ${input.maxTurns === null ? sql`` : sql`and turns < ${input.maxTurns}`}
-        returning turns`,
-    );
-    return rows.length === 1;
-  });
+  input: { siteId: string; limit: number },
+): Promise<SiteRuntimeConversationRecord[]> {
+  return await withRlsContext(db, scope, async (tx) =>
+    (
+      await rawRows<ConversationRow>(
+        tx,
+        sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
+          where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+            and reserved_micros > 0
+          order by updated_at asc limit ${Math.max(1, Math.min(input.limit, 100))}`,
+      )
+    ).map(toConversation),
+  );
+}
+
+/** Statuses of a session that may still run or queue agent work. */
+const ACTIVE_SESSION_STATUSES = [
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+];
+
+/**
+ * The Site's conversations whose session may still be working, among those
+ * active in the last two days (bounded: at most `limit`, newest first).
+ */
+export async function listActiveSiteRuntimeConversations(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { siteId: string; limit: number },
+): Promise<string[]> {
+  if (!UUID.test(input.siteId)) return [];
+  return await withRlsContext(db, scope, async (tx) =>
+    (
+      await rawRows<{ session_id: string }>(
+        tx,
+        sql`select c.session_id from site_runtime_conversations c
+          join sessions s on s.workspace_id = c.workspace_id and s.id = c.session_id
+          where c.workspace_id = ${scope.workspaceId} and c.site_id = ${input.siteId}
+            and c.updated_at > now() - interval '2 days'
+            and s.status in (${sql.join(
+              ACTIVE_SESSION_STATUSES.map((status) => sql`${status}`),
+              sql`, `,
+            )})
+          order by c.updated_at desc limit ${Math.max(1, Math.min(input.limit, 500))}`,
+      )
+    ).map((row) => row.session_id),
+  );
 }
 
 export type SiteRuntimeUsageSnapshot = {
-  visitorDay: { conversations: number; agentMicros: number };
-  siteDay: { conversations: number; agentMicros: number };
-  siteMonth: { conversations: number; agentMicros: number };
+  visitorDay: { conversations: number; agentMicros: number; reservedMicros: number };
+  siteDay: { conversations: number; agentMicros: number; reservedMicros: number };
+  siteMonth: { conversations: number; agentMicros: number; reservedMicros: number };
 };
 
 /** The Site-wide principal key in usage windows. */
@@ -1037,15 +1360,10 @@ export async function readSiteRuntimeUsage(
 ): Promise<SiteRuntimeUsageSnapshot> {
   const periods = periodStarts(input.now ?? new Date());
   return await withRlsContext(db, scope, async (tx) => {
-    const rows = await rawRows<{
-      principal_key: string;
-      period: "day" | "month";
-      period_start: unknown;
-      conversations: number;
-      agent_micros: string | number;
-    }>(
+    const rows = await rawRows<UsageRow & { principal_key: string; period: "day" | "month" }>(
       tx,
-      sql`select principal_key, period, period_start::text as period_start, conversations, agent_micros
+      sql`select principal_key, period, period_start::text as period_start, conversations,
+          agent_micros, reserved_micros
         from site_runtime_usage
         where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
           and principal_key in (${input.viewerPrincipal}, ${SITE_RUNTIME_SITE_PRINCIPAL})`,
@@ -1060,6 +1378,7 @@ export async function readSiteRuntimeUsage(
       return {
         conversations: row ? Number(row.conversations) : 0,
         agentMicros: row ? Number(row.agent_micros) : 0,
+        reservedMicros: row ? Number(row.reserved_micros) : 0,
       };
     };
     return {
@@ -1070,115 +1389,422 @@ export async function readSiteRuntimeUsage(
   });
 }
 
-async function addUsage(
+type UsageRow = {
+  period_start: unknown;
+  conversations: number;
+  agent_micros: string | number;
+  reserved_micros: string | number;
+};
+
+type UsageWindow = {
+  principal: string;
+  period: "day" | "month";
+  periodStart: string;
+  conversations: number;
+  agentMicros: number;
+  reservedMicros: number;
+};
+
+/**
+ * Lock one usage window row for this transaction, creating it or rolling it
+ * to the current period first (a new period starts from zero, reservations
+ * included). Locks are always taken visitor-day, Site-day, Site-month.
+ */
+async function lockUsageWindow(
   tx: Database,
   scope: SitePublishingScope,
   siteId: string,
   principal: string,
   period: "day" | "month",
   periodStart: string,
-  conversations: number,
-  micros: number,
-): Promise<void> {
-  await tx.execute(
+): Promise<UsageWindow> {
+  const [row] = await rawRows<UsageRow>(
+    tx,
     sql`insert into site_runtime_usage (account_id, workspace_id, site_id, principal_key, period,
-        period_start, conversations, agent_micros)
+        period_start, conversations, agent_micros, reserved_micros)
       values (${scope.accountId}, ${scope.workspaceId}, ${siteId}, ${principal}, ${period},
-        ${periodStart}::date, ${conversations}, ${micros})
+        ${periodStart}::date, 0, 0, 0)
       on conflict (workspace_id, site_id, principal_key, period) do update set
-        conversations = case
-          when site_runtime_usage.period_start = excluded.period_start
-            then site_runtime_usage.conversations + excluded.conversations
-          when site_runtime_usage.period_start > excluded.period_start
-            then site_runtime_usage.conversations
-          else excluded.conversations end,
-        agent_micros = case
-          when site_runtime_usage.period_start = excluded.period_start
-            then site_runtime_usage.agent_micros + excluded.agent_micros
-          when site_runtime_usage.period_start > excluded.period_start
-            then site_runtime_usage.agent_micros
-          else excluded.agent_micros end,
+        conversations = case when site_runtime_usage.period_start < excluded.period_start
+          then 0 else site_runtime_usage.conversations end,
+        agent_micros = case when site_runtime_usage.period_start < excluded.period_start
+          then 0 else site_runtime_usage.agent_micros end,
+        reserved_micros = case when site_runtime_usage.period_start < excluded.period_start
+          then 0 else site_runtime_usage.reserved_micros end,
         period_start = greatest(site_runtime_usage.period_start, excluded.period_start),
-        updated_at = now()`,
+        updated_at = now()
+      returning period_start::text as period_start, conversations, agent_micros, reserved_micros`,
+  );
+  return {
+    principal,
+    period,
+    periodStart: String(row!.period_start).slice(0, 10),
+    conversations: Number(row!.conversations),
+    agentMicros: Number(row!.agent_micros),
+    reservedMicros: Number(row!.reserved_micros),
+  };
+}
+
+/** Add to a locked window's counters (only while it is still in `periodStart`). */
+async function adjustUsageWindow(
+  tx: Database,
+  scope: SitePublishingScope,
+  siteId: string,
+  window: { principal: string; period: "day" | "month"; periodStart: string },
+  change: { conversations?: number; agentMicros?: number; reservedMicros?: number },
+): Promise<void> {
+  const conversations = Math.trunc(change.conversations ?? 0);
+  const micros = Math.trunc(change.agentMicros ?? 0);
+  const reserved = Math.trunc(change.reservedMicros ?? 0);
+  if (conversations === 0 && micros === 0 && reserved === 0) return;
+  await tx.execute(
+    sql`update site_runtime_usage set
+        conversations = greatest(0, conversations + ${conversations}),
+        agent_micros = greatest(0, agent_micros + ${micros}),
+        reserved_micros = greatest(0, reserved_micros + ${reserved}),
+        updated_at = now()
+      where workspace_id = ${scope.workspaceId} and site_id = ${siteId}
+        and principal_key = ${window.principal} and period = ${window.period}
+        and period_start = ${window.periodStart}::date`,
   );
 }
 
-/** Count a new conversation for the viewer (day) and the Site (day and month). */
-export async function countSiteRuntimeConversationStart(
+/** The budgets a reservation is checked against (the Site's effective limits). */
+export type SiteRuntimeBudgetLimits = {
+  conversationsPerVisitorPerDay: number | null;
+  conversationsPerSitePerDay: number | null;
+  turnsPerConversation: number | null;
+  agentMicrosPerConversation: number | null;
+  agentMicrosPerVisitorPerDay: number | null;
+  agentMicrosPerSitePerMonth: number | null;
+};
+
+export type SiteRuntimeBudget =
+  | "conversations_per_visitor_per_day"
+  | "conversations_per_site_per_day"
+  | "turns_per_conversation"
+  | "agent_micros_per_conversation"
+  | "agent_micros_per_visitor_per_day"
+  | "agent_micros_per_site_per_month";
+
+export type SiteRuntimeReservation =
+  | { ok: true; limitMicros: number | null; reservedMicros: number }
+  | { ok: false; budget: SiteRuntimeBudget };
+
+/** A conversation is not started on less than this (or its cap, when smaller). */
+export const SITE_RUNTIME_MIN_RESERVATION_MICROS = 1_000;
+
+const remaining = (limit: number | null, window: UsageWindow) =>
+  limit === null ? Number.POSITIVE_INFINITY : limit - window.agentMicros - window.reservedMicros;
+
+/**
+ * Start a conversation: in one transaction, count the start against the
+ * visitor's and the Site's daily starts, and reserve its whole spend cap in
+ * the visitor's day and the Site's day and month, refusing when any budget
+ * would be exceeded. The cap is the per-conversation limit, lowered to what
+ * the budgets still have; it becomes the session's usage limit, so settled
+ * plus reserved spend never exceeds a budget whoever the visitors are.
+ * The conversation row records the owner (Site and viewer) before the
+ * session exists; `releaseSiteRuntimeConversationStart` undoes all of it.
+ */
+export async function reserveSiteRuntimeConversationStart(
   db: Database,
   scope: SitePublishingScope,
-  input: { siteId: string; viewerPrincipal: string; now?: Date },
-): Promise<void> {
+  input: {
+    sessionId: string;
+    siteId: string;
+    viewerPrincipal: string;
+    versionId: string | null;
+    limits: SiteRuntimeBudgetLimits;
+    now?: Date;
+  },
+): Promise<SiteRuntimeReservation> {
+  if (!UUID.test(input.sessionId) || !UUID.test(input.siteId))
+    throw new SitePublishingError("validation", "Invalid conversation");
   const periods = periodStarts(input.now ?? new Date());
-  await withRlsContext(db, scope, async (tx) => {
-    await addUsage(tx, scope, input.siteId, input.viewerPrincipal, "day", periods.day, 1, 0);
-    await addUsage(tx, scope, input.siteId, SITE_RUNTIME_SITE_PRINCIPAL, "day", periods.day, 1, 0);
-    await addUsage(
+  const { limits } = input;
+  return await withRlsContext(db, scope, async (tx) => {
+    const visitorDay = await lockUsageWindow(
+      tx,
+      scope,
+      input.siteId,
+      input.viewerPrincipal,
+      "day",
+      periods.day,
+    );
+    const siteDay = await lockUsageWindow(
+      tx,
+      scope,
+      input.siteId,
+      SITE_RUNTIME_SITE_PRINCIPAL,
+      "day",
+      periods.day,
+    );
+    const siteMonth = await lockUsageWindow(
       tx,
       scope,
       input.siteId,
       SITE_RUNTIME_SITE_PRINCIPAL,
       "month",
       periods.month,
-      1,
-      0,
     );
+    if (
+      limits.conversationsPerVisitorPerDay !== null &&
+      visitorDay.conversations >= limits.conversationsPerVisitorPerDay
+    )
+      return { ok: false, budget: "conversations_per_visitor_per_day" } as const;
+    if (
+      limits.conversationsPerSitePerDay !== null &&
+      siteDay.conversations >= limits.conversationsPerSitePerDay
+    )
+      return { ok: false, budget: "conversations_per_site_per_day" } as const;
+    const cap = limits.agentMicrosPerConversation;
+    const floor =
+      cap === null ? 1 : Math.max(1, Math.min(cap, SITE_RUNTIME_MIN_RESERVATION_MICROS));
+    const visitorLeft = remaining(limits.agentMicrosPerVisitorPerDay, visitorDay);
+    if (visitorLeft < floor)
+      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
+    const siteLeft = remaining(limits.agentMicrosPerSitePerMonth, siteMonth);
+    if (siteLeft < floor) return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
+    const reserve =
+      cap === null ? 0 : Math.max(0, Math.floor(Math.min(cap, visitorLeft, siteLeft)));
+    const limitMicros = cap === null ? null : reserve;
+    await tx.execute(
+      sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
+          viewer_principal, version_id, turns, limit_micros, reserved_micros, reserved_day,
+          reserved_month)
+        values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
+          ${input.viewerPrincipal}, ${input.versionId}, 1, ${limitMicros}, ${reserve},
+          ${periods.day}::date, ${periods.month}::date)`,
+    );
+    for (const window of [visitorDay, siteDay, siteMonth])
+      await adjustUsageWindow(tx, scope, input.siteId, window, {
+        conversations: 1,
+        reservedMicros: reserve,
+      });
+    // Bounded cleanup on the write path: usage rows of earlier periods.
+    await tx.execute(
+      sql`delete from site_runtime_usage where ctid = any(array(
+          select ctid from site_runtime_usage
+          where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+            and ((period = 'day' and period_start < ${periods.day}::date - 1)
+              or (period = 'month' and period_start < (${periods.month}::date - interval '1 month')::date))
+          limit 100))`,
+    );
+    return { ok: true, limitMicros, reservedMicros: reserve } as const;
+  });
+}
+
+/**
+ * Undo a conversation start whose session was never created: release its
+ * reservation, uncount the start and forget the conversation.
+ */
+export async function releaseSiteRuntimeConversationStart(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { sessionId: string },
+): Promise<void> {
+  if (!UUID.test(input.sessionId)) return;
+  await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<ConversationRow>(
+      tx,
+      sql`delete from site_runtime_conversations
+        where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
+        returning ${CONVERSATION_COLUMNS}`,
+    );
+    if (!row) return;
+    const reserved = Number(row.reserved_micros);
+    const day = String(row.reserved_day ?? "").slice(0, 10);
+    const month = String(row.reserved_month ?? "").slice(0, 10);
+    const windows = [
+      { principal: row.viewer_principal, period: "day" as const, periodStart: day },
+      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "day" as const, periodStart: day },
+      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "month" as const, periodStart: month },
+    ];
+    for (const window of windows)
+      if (window.periodStart)
+        await adjustUsageWindow(tx, scope, row.site_id, window, {
+          conversations: -1,
+          reservedMicros: -reserved,
+        });
+  });
+}
+
+/**
+ * Admit agent work in an existing conversation (a new message when
+ * `newTurn`, else steering, resuming or running a queued message): under the
+ * turn cap and its own spend cap, and top its reservation back up to what
+ * the conversation may still spend, refusing when a budget cannot hold it.
+ */
+export async function reserveSiteRuntimeConversationWork(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { sessionId: string; limits: SiteRuntimeBudgetLimits; newTurn: boolean; now?: Date },
+): Promise<SiteRuntimeReservation> {
+  if (!UUID.test(input.sessionId)) throw new SitePublishingError("not_found", "Not found");
+  const periods = periodStarts(input.now ?? new Date());
+  const { limits } = input;
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<ConversationRow>(
+      tx,
+      sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
+        where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
+        for update`,
+    );
+    if (!row) throw new SitePublishingError("not_found", "Conversation not found");
+    const conversation = toConversation(row);
+    if (
+      input.newTurn &&
+      limits.turnsPerConversation !== null &&
+      conversation.turns >= limits.turnsPerConversation
+    )
+      return { ok: false, budget: "turns_per_conversation" } as const;
+    const cap =
+      conversation.limitMicros === null
+        ? limits.agentMicrosPerConversation
+        : limits.agentMicrosPerConversation === null
+          ? conversation.limitMicros
+          : Math.min(conversation.limitMicros, limits.agentMicrosPerConversation);
+    if (cap !== null && conversation.meteredMicros >= cap)
+      return { ok: false, budget: "agent_micros_per_conversation" } as const;
+    const target = cap === null ? 0 : cap - conversation.meteredMicros;
+    const visitorDay = await lockUsageWindow(
+      tx,
+      scope,
+      conversation.siteId,
+      conversation.viewerPrincipal,
+      "day",
+      periods.day,
+    );
+    const siteDay = await lockUsageWindow(
+      tx,
+      scope,
+      conversation.siteId,
+      SITE_RUNTIME_SITE_PRINCIPAL,
+      "day",
+      periods.day,
+    );
+    const siteMonth = await lockUsageWindow(
+      tx,
+      scope,
+      conversation.siteId,
+      SITE_RUNTIME_SITE_PRINCIPAL,
+      "month",
+      periods.month,
+    );
+    const reservedDay = String(row.reserved_day ?? "").slice(0, 10);
+    const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
+    // A reservation counted in an earlier period vanished when that window rolled.
+    const dayDelta = target - (reservedDay === periods.day ? conversation.reservedMicros : 0);
+    const monthDelta = target - (reservedMonth === periods.month ? conversation.reservedMicros : 0);
+    // A message spends at least something: an exhausted budget refuses it even
+    // when this conversation's reservation already covers it.
+    if (remaining(limits.agentMicrosPerVisitorPerDay, visitorDay) - Math.max(0, dayDelta) < 0)
+      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
+    if (remaining(limits.agentMicrosPerSitePerMonth, siteMonth) - Math.max(0, monthDelta) < 0)
+      return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
+    if (
+      limits.agentMicrosPerVisitorPerDay !== null &&
+      visitorDay.agentMicros >= limits.agentMicrosPerVisitorPerDay
+    )
+      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
+    if (
+      limits.agentMicrosPerSitePerMonth !== null &&
+      siteMonth.agentMicros >= limits.agentMicrosPerSitePerMonth
+    )
+      return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
+    await adjustUsageWindow(tx, scope, conversation.siteId, visitorDay, {
+      reservedMicros: dayDelta,
+    });
+    await adjustUsageWindow(tx, scope, conversation.siteId, siteDay, { reservedMicros: dayDelta });
+    await adjustUsageWindow(tx, scope, conversation.siteId, siteMonth, {
+      reservedMicros: monthDelta,
+    });
+    await tx.execute(
+      sql`update site_runtime_conversations set reserved_micros = ${target},
+          reserved_day = ${periods.day}::date, reserved_month = ${periods.month}::date,
+          turns = turns + ${input.newTurn ? 1 : 0}, updated_at = now()
+        where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
+    );
+    return { ok: true, limitMicros: cap, reservedMicros: target } as const;
   });
 }
 
 /**
  * Bring a conversation's counted spend up to `usedMicros` (its session usage
- * so far) and add the difference to the viewer's day and the Site's day and
- * month. Never counts the same micro twice; spend never goes down.
+ * so far): add the difference to the viewer's day and the Site's day and
+ * month, and release that much of its reservation. When the session is
+ * `idle` (no turn running or queued) the whole reservation is released, but
+ * only if no work was admitted since `expected` was read. Never counts the
+ * same micro twice; spend never goes down. Returns the spend added.
  */
 export async function settleSiteRuntimeConversationSpend(
   db: Database,
   scope: SitePublishingScope,
-  input: { sessionId: string; usedMicros: number; now?: Date },
+  input: {
+    sessionId: string;
+    usedMicros: number;
+    idle?: boolean;
+    /** The conversation as read before the session status (guards the idle release). */
+    expected?: Pick<SiteRuntimeConversationRecord, "turns" | "reservedMicros">;
+    now?: Date;
+  },
 ): Promise<number> {
+  if (!UUID.test(input.sessionId)) return 0;
   const periods = periodStarts(input.now ?? new Date());
+  const used = Math.max(0, Math.floor(input.usedMicros));
   return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{
-      site_id: string;
-      viewer_principal: string;
-      delta: string | number;
-    }>(
+    const [row] = await rawRows<ConversationRow>(
       tx,
-      sql`with previous as (
-          select metered_micros from site_runtime_conversations
-          where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
-          for update
-        )
-        update site_runtime_conversations c
-          set metered_micros = ${Math.max(0, Math.floor(input.usedMicros))}, updated_at = now()
-        from previous
-        where c.workspace_id = ${scope.workspaceId} and c.session_id = ${input.sessionId}
-          and previous.metered_micros < ${Math.max(0, Math.floor(input.usedMicros))}
-        returning c.site_id, c.viewer_principal,
-          (${Math.max(0, Math.floor(input.usedMicros))} - previous.metered_micros) as delta`,
+      sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
+        where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
+        for update`,
     );
     if (!row) return 0;
-    const delta = Number(row.delta);
-    await addUsage(tx, scope, row.site_id, row.viewer_principal, "day", periods.day, 0, delta);
-    await addUsage(
-      tx,
-      scope,
-      row.site_id,
-      SITE_RUNTIME_SITE_PRINCIPAL,
-      "day",
-      periods.day,
-      0,
-      delta,
-    );
-    await addUsage(
-      tx,
-      scope,
-      row.site_id,
-      SITE_RUNTIME_SITE_PRINCIPAL,
-      "month",
-      periods.month,
-      0,
-      delta,
+    const conversation = toConversation(row);
+    const delta = Math.max(0, used - conversation.meteredMicros);
+    const unchanged =
+      input.expected === undefined ||
+      (input.expected.turns === conversation.turns &&
+        input.expected.reservedMicros === conversation.reservedMicros);
+    const release =
+      input.idle && unchanged
+        ? conversation.reservedMicros
+        : Math.min(conversation.reservedMicros, delta);
+    if (delta === 0 && release === 0) return 0;
+    const reservedDay = String(row.reserved_day ?? "").slice(0, 10);
+    const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
+    const windows = [
+      { principal: conversation.viewerPrincipal, period: "day" as const, reservedIn: reservedDay },
+      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "day" as const, reservedIn: reservedDay },
+      {
+        principal: SITE_RUNTIME_SITE_PRINCIPAL,
+        period: "month" as const,
+        reservedIn: reservedMonth,
+      },
+    ];
+    for (const window of windows) {
+      const current = await lockUsageWindow(
+        tx,
+        scope,
+        conversation.siteId,
+        window.principal,
+        window.period,
+        periods[window.period],
+      );
+      // Spend lands in the current period; the release only in the period the
+      // reservation was counted in (gone if that window has rolled since).
+      await adjustUsageWindow(tx, scope, conversation.siteId, current, {
+        agentMicros: delta,
+        reservedMicros: current.periodStart === window.reservedIn ? -release : 0,
+      });
+    }
+    await tx.execute(
+      sql`update site_runtime_conversations set metered_micros = ${Math.max(
+        used,
+        conversation.meteredMicros,
+      )}, reserved_micros = ${conversation.reservedMicros - release}, updated_at = now()
+        where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
     );
     return delta;
   });
@@ -1200,6 +1826,8 @@ export async function consumeSiteRuntimeRate(
     bucket: SiteRuntimeRateBucket;
     limit: number;
     now?: Date;
+    /** Force (or skip) the stale-window cleanup; by default it runs on about 1% of calls. */
+    sweep?: boolean;
   },
 ): Promise<{ allowed: boolean; retryAfterSeconds: number }> {
   const now = input.now ?? new Date();
@@ -1223,6 +1851,15 @@ export async function consumeSiteRuntimeRate(
             excluded.window_started_at)
         returning operations`,
     );
+    // Bounded cleanup on the write path, now and then: this Site's stale windows.
+    if (input.sweep ?? Math.random() < 0.01)
+      await tx.execute(
+        sql`delete from site_runtime_rate_windows where ctid = any(array(
+            select ctid from site_runtime_rate_windows
+            where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+              and window_started_at < now() - interval '10 minutes'
+            limit 100))`,
+      );
     const allowed = Number(row!.operations) <= cap;
     return {
       allowed,
@@ -1231,6 +1868,151 @@ export async function consumeSiteRuntimeRate(
         : Math.max(1, Math.ceil((window.getTime() + 60_000 - now.getTime()) / 1000)),
     };
   });
+}
+
+// --- platform moderation (global read) ------------------------------------------------
+
+const READ_ONLY = { accessMode: "read only" } as const;
+
+export type SiteModerationQueueItem = {
+  kind: "report" | "flagged_scan";
+  accountId: string;
+  workspaceId: string;
+  siteId: string;
+  label: string | null;
+  status: SitePublicationStatusValue | null;
+  /** Report category, or the scanner's finding count for a flagged scan. */
+  detail: string;
+  message: string | null;
+  contactEmail: string | null;
+  reportId: string | null;
+  at: Date;
+};
+
+/**
+ * The platform's moderation queue across every workspace: open abuse reports
+ * and publications whose last content scan was flagged, newest first. For
+ * operator tooling only: it reads with row security off in a read-only
+ * transaction and refuses unless the connection's role is a superuser or
+ * bypasses RLS (the migrations or admin credential), so the application role
+ * can never run it.
+ */
+export async function listSiteModerationQueue(
+  db: Database,
+  input: { limit: number },
+): Promise<SiteModerationQueueItem[]> {
+  const limit = Math.max(1, Math.min(input.limit, 500));
+  return await db.transaction(async (raw) => {
+    const tx = raw as unknown as Database;
+    await tx.execute(sql`set local statement_timeout = '10s'`);
+    const [role] = await rawRows<{ global: boolean }>(
+      tx,
+      sql`select (rolsuper or rolbypassrls) as global from pg_roles where rolname = current_user`,
+    );
+    if (!role?.global)
+      throw new SitePublishingError(
+        "forbidden",
+        "The moderation queue needs the migrations or admin database credential",
+      );
+    await tx.execute(sql`set local row_security = off`);
+    const reports = await rawRows<{
+      account_id: string;
+      workspace_id: string;
+      site_id: string;
+      label: string | null;
+      status: SitePublicationStatusValue | null;
+      category: string;
+      message: string;
+      contact_email: string | null;
+      id: string;
+      created_at: unknown;
+    }>(
+      tx,
+      sql`select r.account_id, r.workspace_id, r.site_id, p.label, p.status, r.category, r.message,
+          r.contact_email, r.id, r.created_at
+        from site_abuse_reports r
+        left join site_publications p on p.workspace_id = r.workspace_id and p.site_id = r.site_id
+        where r.status = 'open' order by r.created_at desc limit ${limit}`,
+    );
+    const flagged = await rawRows<{
+      account_id: string;
+      workspace_id: string;
+      site_id: string;
+      label: string;
+      status: SitePublicationStatusValue;
+      findings: unknown;
+      scanned_at: unknown;
+    }>(
+      tx,
+      sql`select account_id, workspace_id, site_id, label, status, scan_findings as findings,
+          scanned_at
+        from site_publications where scan_status = 'flagged'
+        order by scanned_at desc limit ${limit}`,
+    );
+    const items: SiteModerationQueueItem[] = [
+      ...reports.map((row) => ({
+        kind: "report" as const,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        siteId: row.site_id,
+        label: row.label,
+        status: row.status,
+        detail: row.category,
+        message: row.message,
+        contactEmail: row.contact_email,
+        reportId: row.id,
+        at: date(row.created_at),
+      })),
+      ...flagged.map((row) => {
+        const findings = row.findings === null ? [] : jsonValue<unknown[]>(row.findings);
+        return {
+          kind: "flagged_scan" as const,
+          accountId: row.account_id,
+          workspaceId: row.workspace_id,
+          siteId: row.site_id,
+          label: row.label,
+          status: row.status,
+          detail: `${Array.isArray(findings) ? findings.length : 0} finding(s)`,
+          message: null,
+          contactEmail: null,
+          reportId: null,
+          at: nullableDate(row.scanned_at) ?? new Date(0),
+        };
+      }),
+    ];
+    return items.sort((a, b) => b.at.getTime() - a.at.getTime()).slice(0, limit);
+  }, READ_ONLY);
+}
+
+/**
+ * Find a publication by Site id across every workspace (operator tooling,
+ * same global-read rules as the moderation queue).
+ */
+export async function findSitePublicationGlobally(
+  db: Database,
+  siteId: string,
+): Promise<{ accountId: string; workspaceId: string; label: string } | null> {
+  if (!UUID.test(siteId)) return null;
+  return await db.transaction(async (raw) => {
+    const tx = raw as unknown as Database;
+    const [role] = await rawRows<{ global: boolean }>(
+      tx,
+      sql`select (rolsuper or rolbypassrls) as global from pg_roles where rolname = current_user`,
+    );
+    if (!role?.global)
+      throw new SitePublishingError(
+        "forbidden",
+        "Finding a Site by id needs the migrations or admin database credential",
+      );
+    await tx.execute(sql`set local row_security = off`);
+    const [row] = await rawRows<{ account_id: string; workspace_id: string; label: string }>(
+      tx,
+      sql`select account_id, workspace_id, label from site_publications where site_id = ${siteId}`,
+    );
+    return row
+      ? { accountId: row.account_id, workspaceId: row.workspace_id, label: row.label }
+      : null;
+  }, READ_ONLY);
 }
 
 // --- abuse reports ----------------------------------------------------------------

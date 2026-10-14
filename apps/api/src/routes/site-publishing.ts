@@ -48,11 +48,13 @@ import {
   requireSitesDomain,
   resolveSiteManagement,
   runSitePublishing,
+  requireSitePublicationWriter,
   scheduleSiteEdgeSync,
   siteHostnameAvailability,
   sitePublicationView,
   sitePublishingError,
   siteServable,
+  stopSiteViewers,
   upsertSitePublicationForManager,
 } from "../site-publishing/service";
 import { effectiveSiteAccess, signedInSiteViewerKind } from "../site-publishing/viewer";
@@ -186,7 +188,9 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     requireSitesDomain(deps.settings);
     const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, UpsertSitePublicationRequest);
-    const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
+    const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
+      mutate: true,
+    });
     const result = await runSitePublishing(() =>
       upsertSitePublicationForManager(deps, grant, management, request),
     );
@@ -197,7 +201,9 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.delete(base, async (context) => {
     requireSitesDomain(deps.settings);
     const grant = await grantFor(context, "artifacts:publish");
-    const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
+    const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
+      mutate: true,
+    });
     requireSiteManager(management);
     const existing = await getSitePublication(deps.db, management.scope, management.record.id);
     if (!existing)
@@ -224,7 +230,14 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         defaults: { access: existing.access, noindex: existing.noindex },
       }),
     );
-    scheduleSiteEdgeSync(deps, management.scope, management.record.id, { purge: true });
+    if (existing.status === "active")
+      await stopSiteViewers(deps, management.scope, management.record.id, {
+        reason: "unpublished",
+      });
+    scheduleSiteEdgeSync(deps, [result.publication.label], {
+      siteIdHint: management.record.id,
+      purge: true,
+    });
     return context.json(await sitePublicationView(deps, management.scope, result.publication));
   });
 
@@ -233,7 +246,9 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     requireSitesDomain(deps.settings);
     const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, SiteTakedownRequest);
-    const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
+    const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
+      mutate: true,
+    });
     if (!management.owner && !management.admin)
       throw sitePublishingError(
         403,
@@ -241,7 +256,8 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         "site_owner_or_admin_required",
         "Only the Site's owner or a workspace admin can take it down",
       );
-    const by = management.owner ? "owner" : "admin";
+    // An admin's takedown (even of their own Site) is one only an admin restores.
+    const by = management.admin ? "admin" : "owner";
     const publication = await runSitePublishing(() =>
       suspendSitePublication(deps.db, management.scope, management.record.id, {
         by,
@@ -262,14 +278,20 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
       targetId: management.record.id,
       metadata: { by, label: publication.label, reason: request.reason.slice(0, 2000) },
     });
-    scheduleSiteEdgeSync(deps, management.scope, management.record.id, { purge: true });
+    await stopSiteViewers(deps, management.scope, management.record.id, { reason: "takedown" });
+    scheduleSiteEdgeSync(deps, [publication.label], {
+      siteIdHint: management.record.id,
+      purge: true,
+    });
     return context.json(await sitePublicationView(deps, management.scope, publication));
   });
 
   app.post(`${base}/restore`, async (context) => {
     requireSitesDomain(deps.settings);
     const grant = await grantFor(context, "artifacts:publish");
-    const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
+    const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
+      mutate: true,
+    });
     if (!management.owner && !management.admin)
       throw sitePublishingError(
         403,
@@ -277,7 +299,8 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         "site_owner_or_admin_required",
         "Only the Site's owner or a workspace admin can restore it",
       );
-    const by = management.owner ? "owner" : "admin";
+    // An owner cannot lift an admin's takedown (the database refuses it too).
+    const by = management.admin ? "admin" : "owner";
     const publication = await runSitePublishing(() =>
       restoreSitePublication(deps.db, management.scope, management.record.id, {
         by,
@@ -293,7 +316,10 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
       targetId: management.record.id,
       metadata: { by, label: publication.label },
     });
-    scheduleSiteEdgeSync(deps, management.scope, management.record.id, { purge: true });
+    scheduleSiteEdgeSync(deps, [publication.label], {
+      siteIdHint: management.record.id,
+      purge: true,
+    });
     return context.json(await sitePublicationView(deps, management.scope, publication));
   });
 
@@ -319,7 +345,9 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     requireSitesDomain(deps.settings);
     const grant = await grantFor(context, "artifacts:publish");
     const request = await body(context, ReportStatusRequest);
-    const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
+    const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
+      mutate: true,
+    });
     requireSiteManager(management);
     const reportId = ReportIdParam.safeParse(context.req.param("reportId"));
     const report = reportId.success
@@ -386,6 +414,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         "site_admin_required",
         "Only a workspace admin can change Site limits",
       );
+    await requireSitePublicationWriter(deps, grant);
     const request = await body(context, SiteLimitProfile);
     const stored = await putWorkspaceSiteLimitProfile(
       deps.db,
@@ -458,7 +487,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
       );
     const rate = await consumeSiteRuntimeRate(deps.db, scope, {
       siteId: site.id,
-      principal: `user:${person.subjectId}`,
+      principal: person.subjectId,
       bucket: "sign_in",
       limit: SIGN_IN_PER_MINUTE,
     });

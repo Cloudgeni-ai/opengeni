@@ -1,5 +1,5 @@
 import type { SiteAbuseReportRequest } from "@opengeni/contracts";
-import { underRateLimit } from "./api";
+import { rateLimitKeys, underRateLimit } from "./api";
 import { formToken, mintVisitor, verifyFormToken } from "./cookies";
 import { utf8 } from "./crypto";
 import { messagePage, reportFormPage } from "./pages";
@@ -41,7 +41,7 @@ export async function handleReport(site: SiteContext): Promise<Response> {
   if (message.length > 4000) return await reportForm(site, "Shorten the details.");
   if (contactEmail && (contactEmail.length > 320 || !EMAIL.test(contactEmail)))
     return await reportForm(site, "Enter a valid email address or leave it empty.");
-  if (!(await underRateLimit(site, `report:${site.hostname}:${site.visitor}`)))
+  if (!(await underRateLimit(site, rateLimitKeys(site, "report"))))
     return messagePage(site, 429, "Too many reports", "Please wait a minute and try again.");
   const report: SiteAbuseReportRequest = {
     category,
@@ -68,7 +68,8 @@ export async function handleReport(site: SiteContext): Promise<Response> {
       site,
       200,
       "Report sent",
-      "Thank you. The report reached the people who run this service.",
+      "Thank you. Your report was sent to the Site's owners and to Opengeni's abuse team. For anything urgent, email the abuse team too.",
+      { href: `mailto:${site.config.abuseEmail}`, label: site.config.abuseEmail },
     );
   if (status === 429)
     return messagePage(site, 429, "Too many reports", "Please wait a minute and try again.");
@@ -76,7 +77,8 @@ export async function handleReport(site: SiteContext): Promise<Response> {
     site,
     502,
     "Report not sent",
-    `The report could not be sent. Email ${site.config.abuseEmail} instead.`,
+    "The report could not be sent. Email Opengeni's abuse team instead.",
+    { href: `mailto:${site.config.abuseEmail}`, label: site.config.abuseEmail },
   );
 }
 
@@ -92,6 +94,7 @@ async function reportForm(site: SiteContext, error?: string): Promise<Response> 
   for (const cookie of cookies) headers.append("Set-Cookie", cookie);
   return reportFormPage(site, {
     title: site.record.title,
+    abuseEmail: site.config.abuseEmail,
     token: await formToken(site.config.secret, "report", site.hostname, visitor),
     headers,
     ...(error ? { error } : {}),

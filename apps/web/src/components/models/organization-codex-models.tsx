@@ -43,6 +43,7 @@ import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, OrganizationCodexUsage } from "./codex-account-usage";
+import { EnableAccountRow } from "./subscription-account-ui";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -154,7 +155,7 @@ function OrgCodexAccountDetail({
           reconnect ? (
             <StatusBadge status="needs_reconnect" variant="outline" />
           ) : !account.allocatorEnabled ? (
-            <StatusBadge status="paused" variant="outline" />
+            <StatusBadge status="disabled" variant="outline" />
           ) : null
         }
         meta={[
@@ -208,18 +209,12 @@ function OrgCodexAccountDetail({
         </DetailSection>
         <DetailSection title="Settings">
           <SettingRowGroup className="-my-3">
-            <SettingRow
-              label="Use for new work"
-              description="When off, no workspace picks this account for new chats or schedules. Work already running continues."
-              control={
-                <Switch
-                  aria-label={`Use ${name} for new work`}
-                  checked={account.allocatorEnabled}
-                  pending={codex.working === `allocator:${account.id}`}
-                  disabled={codex.busy}
-                  onCheckedChange={(next) => void codex.setAllocator(account, next)}
-                />
-              }
+            <EnableAccountRow
+              name={name}
+              checked={account.allocatorEnabled}
+              pending={codex.working === `allocator:${account.id}`}
+              disabled={codex.busy}
+              onCheckedChange={(next) => void codex.setAllocator(account, next)}
             />
             <SettingRow
               label="Use extra credits"

@@ -1,4 +1,4 @@
-import { hostname, homedir } from "node:os";
+import { homedir } from "node:os";
 import { dirname } from "node:path";
 
 import {
@@ -8,6 +8,7 @@ import {
   nativeTheme,
   net,
   Notification,
+  powerMonitor,
   safeStorage,
   session,
   type IpcMainEvent,
@@ -37,10 +38,12 @@ import { LOCAL_ORIGIN } from "./local-pages";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
 import { flushMarks, mark } from "./perf";
+import { retryDelayMs } from "./reachability";
+import { computerName } from "./computer-name";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
 import { ThisComputer } from "./this-computer";
 import { AppTray } from "./tray";
-import { startUpdates } from "./updates";
+import { AppUpdates } from "./updates";
 import { MainWindow, openExternalSafely } from "./window";
 
 type SdkModule = typeof import("@opengeni/sdk");
@@ -50,6 +53,19 @@ interface PendingSignIn {
   verifier: string;
   baseUrl: string;
 }
+
+/** The account the window should show while its server is out of reach. */
+interface Unreachable {
+  accountId: string;
+  /** Tries so far, for the backoff. */
+  attempt: number;
+  retrying: boolean;
+  /** The next try, or the watchdog of the one in progress. */
+  timer: NodeJS.Timeout | null;
+}
+
+/** A try that never reports back counts as failed after this long. */
+const RETRY_WATCHDOG_MS = 30_000;
 
 function desktopPlatform(): DesktopPlatform {
   if (process.platform === "darwin") return "macos";
@@ -92,8 +108,14 @@ export class DesktopShell {
   private readonly computer: ThisComputer;
   private readonly inbox: InboxNotifier;
   private tray: AppTray | null = null;
+  private updates: AppUpdates | null = null;
   private quitting = false;
   private readonly lastPaths = new Map<string, string>();
+  /** Accounts whose page didn't load, with the address to try again. */
+  private readonly failedLoads = new Map<string, string>();
+  private unreachable: Unreachable | null = null;
+  /** The welcome page is adding an account, so an unreachable one doesn't take it over. */
+  private addingAccount = false;
   private readonly redirectUri: string;
 
   constructor(private readonly config: DesktopAppConfig) {
@@ -187,6 +209,7 @@ export class DesktopShell {
     this.registerIpc();
     this.openWindow();
     app.on("activate", () => this.reveal());
+    powerMonitor.on("resume", () => this.retryUnreachable());
     app.on("before-quit", () => {
       this.quitting = true;
     });
@@ -195,11 +218,21 @@ export class DesktopShell {
     });
     // Everything below waits until the window is up.
     setTimeout(() => {
+      if (this.config.updates && app.isPackaged) {
+        this.updates = new AppUpdates(
+          this.config.productName,
+          this.config.updates,
+          app.getVersion(),
+          () => Menu.setApplicationMenu(this.menu()),
+          () => {
+            this.quitting = true;
+          },
+        );
+        this.updates.start();
+      }
       Menu.setApplicationMenu(this.menu());
       this.inbox.start();
       void this.refreshTray();
-      if (this.config.updates && app.isPackaged)
-        startUpdates(this.config.productName, this.config.updates);
     }, 0);
   }
 
@@ -214,12 +247,17 @@ export class DesktopShell {
     const window = new MainWindow(this.config, app.getPath("userData"), {
       navigated: (accountId, url) => this.rememberPath(accountId, url),
       crashed: (accountId) => this.window?.reload(accountId),
+      loadFailed: (accountId, url) => this.loadFailed(accountId, url),
+      loaded: (accountId) => this.loaded(accountId),
       closed: () => {
         this.window = null;
+        this.failedLoads.clear();
+        this.clearUnreachable();
       },
       focused: () => {
         this.computer.invalidate();
         void this.inbox.poll();
+        this.retryUnreachable();
       },
     });
     this.window = window;
@@ -270,16 +308,95 @@ export class DesktopShell {
     if (!account) return;
     if (!this.window) this.openWindow();
     this.store.setActive(accountId);
+    this.addingAccount = false;
     if (account.signedOut) {
+      this.clearUnreachable();
       this.welcomeError = `Sign in again to ${serverLabel(account.baseUrl)}.`;
       this.window?.showWelcome();
       this.pushWelcome();
+    } else if (this.failedLoads.has(accountId)) {
+      // Its page didn't load: keep the welcome page up and try again now.
+      if (path) this.failedLoads.set(accountId, new URL(path, account.baseUrl).toString());
+      this.showUnreachable(accountId);
+      this.retryUnreachable();
     } else {
+      this.clearUnreachable();
       this.window?.showAccount(this.target(account), path);
       this.window?.closeWelcome();
     }
     this.window?.reveal();
     this.accountsChanged();
+  }
+
+  // --- Reachability -------------------------------------------------------------------------------
+
+  private loadFailed(accountId: string, url: string): void {
+    this.failedLoads.set(accountId, url);
+    if (this.store.snapshot().activeId === accountId) this.showUnreachable(accountId);
+  }
+
+  private loaded(accountId: string): void {
+    this.failedLoads.delete(accountId);
+    if (this.unreachable?.accountId !== accountId) return;
+    this.clearUnreachable();
+    const account = this.store.get(accountId);
+    if (!account || account.signedOut || this.addingAccount) return;
+    if (this.store.snapshot().activeId !== accountId) return;
+    this.window?.showAccount(this.target(account));
+    this.window?.closeWelcome();
+  }
+
+  /** Stand in for the account with the welcome page, which says so and keeps trying. */
+  private showUnreachable(accountId: string): void {
+    const account = this.store.get(accountId);
+    if (!account || account.signedOut || this.addingAccount || this.pending) return;
+    if (this.unreachable?.accountId === accountId) {
+      this.unreachable.retrying = false;
+    } else {
+      this.clearUnreachable();
+      this.unreachable = { accountId, attempt: 0, retrying: false, timer: null };
+    }
+    this.welcomeError = null;
+    this.window?.showWelcome();
+    this.pushWelcome();
+    this.scheduleRetry();
+  }
+
+  private scheduleRetry(): void {
+    const state = this.unreachable;
+    if (!state) return;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(() => this.retryUnreachable(), retryDelayMs(state.attempt));
+  }
+
+  /** Try the unreachable account again now, unless a try is already under way. */
+  private retryUnreachable(): void {
+    const state = this.unreachable;
+    if (!state || state.retrying) return;
+    const account = this.store.get(state.accountId);
+    if (!account) {
+      this.clearUnreachable();
+      return;
+    }
+    if (state.timer) clearTimeout(state.timer);
+    state.retrying = true;
+    state.attempt += 1;
+    state.timer = setTimeout(() => {
+      if (this.unreachable !== state || !state.retrying) return;
+      state.retrying = false;
+      this.pushWelcome();
+      this.scheduleRetry();
+    }, RETRY_WATCHDOG_MS);
+    this.pushWelcome();
+    const url =
+      this.failedLoads.get(state.accountId) ??
+      new URL(this.target(account).initialPath, account.baseUrl).toString();
+    this.window?.retry(state.accountId, url);
+  }
+
+  private clearUnreachable(): void {
+    if (this.unreachable?.timer) clearTimeout(this.unreachable.timer);
+    this.unreachable = null;
   }
 
   // --- Links --------------------------------------------------------------------------------------
@@ -330,7 +447,7 @@ export class DesktopShell {
         challenge,
         state,
         platform: desktopPlatform(),
-        deviceName: hostname().replace(/\.local$/u, ""),
+        deviceName: await computerName(),
       }),
     );
   }
@@ -426,9 +543,11 @@ export class DesktopShell {
     this.store.update(accountId, { signedOut: true });
     this.clients.delete(accountId);
     this.inbox.forget(accountId);
-    if (this.window?.accountId === accountId) {
+    const wasUnreachable = this.unreachable?.accountId === accountId;
+    if (wasUnreachable) this.clearUnreachable();
+    if (this.window?.accountId === accountId || wasUnreachable) {
       this.welcomeError = `Sign in again to ${serverLabel(account.baseUrl)}.`;
-      this.window.showWelcome();
+      this.window?.showWelcome();
       this.pushWelcome();
     }
     this.accountsChanged();
@@ -439,6 +558,8 @@ export class DesktopShell {
     await client?.signOutNativeApp().catch(() => undefined);
     this.inbox.forget(accountId);
     this.clients.delete(accountId);
+    this.failedLoads.delete(accountId);
+    if (this.unreachable?.accountId === accountId) this.clearUnreachable();
     this.window?.removeAccount(accountId);
     await session
       .fromPartition(`persist:account-${accountId}`)
@@ -532,7 +653,15 @@ export class DesktopShell {
       pendingServer: this.pending ? serverLabel(this.pending.baseUrl) : null,
       error: this.welcomeError,
       canCancel: this.store.snapshot().accounts.some((account) => !account.signedOut),
+      unreachable: this.unreachableState(),
     };
+  }
+
+  private unreachableState(): WelcomeState["unreachable"] {
+    const state = this.unreachable;
+    const account = state ? this.store.get(state.accountId) : null;
+    if (!state || !account) return null;
+    return { server: serverLabel(account.baseUrl), retrying: state.retrying };
   }
 
   private registerIpc(): void {
@@ -598,6 +727,10 @@ export class DesktopShell {
       this.senderWelcome(event);
       return this.beginSignIn(String(serverUrl ?? ""));
     });
+    ipcMain.handle(DESKTOP_IPC.welcomeRetry, (event) => {
+      this.senderWelcome(event);
+      this.retryUnreachable();
+    });
     ipcMain.handle(DESKTOP_IPC.welcomeCancel, (event) => {
       this.senderWelcome(event);
       this.pending = null;
@@ -611,6 +744,8 @@ export class DesktopShell {
   private addAccount(): void {
     this.pending = null;
     this.welcomeError = null;
+    this.addingAccount = true;
+    this.clearUnreachable();
     this.window?.showWelcome();
     this.pushWelcome();
   }
@@ -656,6 +791,17 @@ export class DesktopShell {
         active?.workspaceId && !active.signedOut
           ? () => this.showAccount(active.id, `/workspaces/${active.workspaceId}/settings`)
           : null,
+      command:
+        active && !active.signedOut
+          ? (command) => {
+              this.reveal();
+              const contents = this.window?.contentsFor(active.id);
+              if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.command, command);
+            }
+          : null,
+      updates: this.updates
+        ? { state: this.updates.menuState, run: () => this.updates?.menuAction() }
+        : null,
       contents: () => {
         const id = this.window?.accountId;
         return id

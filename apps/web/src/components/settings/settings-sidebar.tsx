@@ -22,6 +22,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { desktopBridge, windowControlsInPage } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
 
@@ -39,11 +40,15 @@ import { SettingsActionsSlotContext } from "./settings-header-actions";
  * Pages inside the shell drop their header icon; the settings rail gives context.
  */
 
-/** Rail 240px beside the content; one column with a header row below 1024px. */
+/**
+ * Rail 240px beside the content; one column with a header row below 1024px. In
+ * the desktop app the rail stays down to 640px and matches the main rail's
+ * width, so moving between sessions and settings keeps the page edge still.
+ */
 export const SETTINGS_SHELL_CLASS =
-  "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1";
+  "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1 desktop-wide:grid-cols-[18rem_minmax(0,1fr)] desktop-wide:grid-rows-1";
 
-const NARROW_QUERY = "(max-width: 1023px)";
+const NARROW_QUERY = desktopBridge ? "(max-width: 639px)" : "(max-width: 1023px)";
 
 export interface SettingsRailItem {
   id: string;
@@ -234,14 +239,19 @@ function SettingsRail({
       }}
       header={
         <div className="flex min-w-0 flex-col gap-3">
-          <LinkShell
-            link={home}
-            aria-label="Opengeni home"
-            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
-          >
-            <BrandMark className="w-5" />
-            <Wordmark className="text-[18px]" />
-          </LinkShell>
+          {windowControlsInPage ? (
+            // The macOS window controls take this row; it still moves the window.
+            <div data-window-drag aria-hidden="true" className="h-8 shrink-0" />
+          ) : (
+            <LinkShell
+              link={home}
+              aria-label="Opengeni home"
+              className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+            >
+              <BrandMark className="w-5" />
+              <Wordmark className="text-[18px]" />
+            </LinkShell>
+          )}
           <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
             {back.link}
           </NavItem>
@@ -362,7 +372,7 @@ export function SettingsShell({
               {layout === "page" ? (
                 // A full page keeps its own scroller but starts its title at the
                 // same height as every other settings page.
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8 desktop-wide:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
                   {children}
                 </div>
               ) : (
@@ -370,7 +380,7 @@ export function SettingsShell({
                   width="standard"
                   // Pages that bring their own ContentPage (a detail page) join this
                   // scroller instead of nesting a second scroller and gutter.
-                  className="pb-16 lg:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
+                  className="pb-16 lg:pt-8 desktop-wide:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
                 >
                   {body}
                 </ContentPage>

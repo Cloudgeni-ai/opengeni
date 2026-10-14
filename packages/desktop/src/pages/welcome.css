@@ -103,6 +103,12 @@ h1 {
   line-height: 1.45;
 }
 
+.lead strong {
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 form {
   display: flex;
   flex-direction: column;
@@ -140,7 +146,8 @@ summary:focus-visible {
   opacity: 0.85;
 }
 
-.primary:disabled {
+.primary:disabled,
+.primary[aria-disabled="true"] {
   opacity: 0.5;
 }
 

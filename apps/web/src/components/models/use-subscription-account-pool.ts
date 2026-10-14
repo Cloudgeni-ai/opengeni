@@ -195,8 +195,8 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
             `allocator:${account.id}`,
             () => input.operations.allocator(account, allocatorEnabled),
             allocatorEnabled
-              ? `${subscriptionAccountName(account)} is used for new work again`
-              : `${subscriptionAccountName(account)} won't be used for new work`,
+              ? `${subscriptionAccountName(account)} enabled`
+              : `${subscriptionAccountName(account)} disabled`,
           )
         : Promise.resolve(),
     rename: (account: Account, label: string) =>

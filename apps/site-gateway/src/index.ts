@@ -77,8 +77,21 @@ export async function handleRequest(
   // any host the Worker serves and never looks up a Site host.
   if (isSiteDbInternalPath(url.pathname))
     return await handleSiteDbInternal(request, url, env, config);
-  const hostname = url.hostname.toLowerCase();
-  if (!parseSiteHostname(hostname, config.sitesDomain)) return plain(404, "Not found.\n");
+  const requestHost = url.hostname.toLowerCase();
+  if (!parseSiteHostname(requestHost, config.sitesDomain)) return plain(404, "Not found.\n");
+  // `<site>.<domain>.` is the same DNS name but another browser origin (and
+  // another cookie jar): send it to the canonical host.
+  if (requestHost.endsWith(".")) {
+    url.hostname = requestHost.replace(/\.+$/u, "");
+    return new Response(null, {
+      status: 308,
+      headers: applySecurityHeaders(new Headers({ Location: url.toString() }), {
+        noindex: true,
+        hsts: false,
+      }),
+    });
+  }
+  const hostname = requestHost;
   if (!config.development && url.protocol !== "https:") {
     url.protocol = "https:";
     return new Response(null, { status: 308, headers: { Location: url.toString() } });

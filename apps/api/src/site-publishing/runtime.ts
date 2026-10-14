@@ -1,37 +1,43 @@
 import { createHash } from "node:crypto";
 import {
-  OPENGENI_API_CONTRACT_HEADER,
-  OPENGENI_API_CONTRACT_REVISION,
   parseSiteHostname,
-  signDelegatedAccessToken,
   siteHostname,
-  type Permission,
   type SiteLimitProfileKind,
   type SiteLimits,
 } from "@opengeni/contracts";
-import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
 import { sessionUsageLimitsProducerEnabled, type ApiRouteDeps } from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
   findSiteHostname,
   findSiteViewerSession,
   getPublishedSite,
+  getSession,
   getSitePublication,
   isSiteWorkspaceMember,
+  listReservedSiteRuntimeConversations,
   readSessionUsageLimit,
   recordUsageEvent,
-  setSessionUsageLimitInTransaction,
+  releaseSiteRuntimeConversationStart,
   settleSiteRuntimeConversationSpend,
   withRlsContext,
-  withWorkspaceSessionActivityRls,
   type PublishedSiteRecord,
   type SitePublicationRecord,
   type SitePublishingScope,
+  type SiteRuntimeBudget,
+  type SiteRuntimeBudgetLimits,
+  type SiteRuntimeConversationRecord,
   type SiteRuntimeRateBucket,
+  type SiteRuntimeReservation,
 } from "@opengeni/db";
 import type { SiteGatewayFields } from "./gateway-signature";
 import { effectiveSiteLimits, sourceSiteLimitProfile } from "./limits";
-import { siteLimitInputs, sitePublishingError, siteServable } from "./service";
+import {
+  siteLimitInputs,
+  sitePublishingError,
+  siteServable,
+  siteServiceSessionRequest,
+  SITE_RUNTIME_AGENT_PERMISSIONS,
+} from "./service";
 import {
   effectiveSiteAccess,
   signedInSiteViewerKind,
@@ -64,6 +70,7 @@ export async function findSiteRuntimeHost(
   domain: string,
   host: string,
 ): Promise<SiteRuntimeHost | null> {
+  // parseSiteHostname lowercases and drops a port and one trailing dot.
   const label = parseSiteHostname(host, domain);
   if (!label) return null;
   const record = await findSiteHostname(deps.db, label);
@@ -175,6 +182,39 @@ export async function siteRuntimeLimitProfile(
   };
 }
 
+/** A guest's client address may carry this many visitors' worth of traffic. */
+export const SITE_GUEST_IP_LIMIT_FACTOR = 4;
+
+/**
+ * A viewer's per-minute bucket. Guests are also counted per signed client
+ * address (`ip:<address>`, `SITE_GUEST_IP_LIMIT_FACTOR` times the visitor
+ * limit), so minting new visitor ids does not reset their limits; both must
+ * pass.
+ */
+export async function enforceSiteRuntimeViewerRate(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+  viewer: SiteRuntimeViewer,
+  fields: Pick<SiteGatewayFields, "clientIp">,
+  bucket: SiteRuntimeRateBucket,
+  limit: number | null,
+): Promise<void> {
+  await enforceSiteRuntimeRate(deps, host, viewer.principal, bucket, limit);
+  if (viewer.kind === "guest" && limit !== null)
+    await enforceSiteRuntimeRate(
+      deps,
+      host,
+      siteClientAddressPrincipal(fields),
+      bucket,
+      limit * SITE_GUEST_IP_LIMIT_FACTOR,
+    );
+}
+
+/** The rate principal of the signed client address (`ip:unknown` when the gateway sent none). */
+export function siteClientAddressPrincipal(fields: Pick<SiteGatewayFields, "clientIp">): string {
+  return `ip:${fields.clientIp.trim().slice(0, 64) || "unknown"}`;
+}
+
 /** Count one operation in a per-minute bucket; 429 with Retry-After past `limit` (null: no limit). */
 export async function enforceSiteRuntimeRate(
   deps: SiteRuntimeDeps,
@@ -205,13 +245,7 @@ export async function enforceSiteRuntimeRate(
 
 // --- agents ---------------------------------------------------------------------
 
-/** The authority site-runtime agent sessions run with: sessions only, nothing else. */
-export const SITE_RUNTIME_AGENT_PERMISSIONS: readonly Permission[] = Object.freeze([
-  "workspace:read",
-  "sessions:read",
-  "sessions:create",
-  "sessions:control",
-]);
+export { SITE_RUNTIME_AGENT_PERMISSIONS };
 
 /** A short display label for the viewer, recorded as the end user of the agent's work. */
 export function siteRuntimeViewerLabel(viewer: SiteRuntimeViewer): string {
@@ -258,17 +292,68 @@ function budgetExhausted(budget: string, message: string) {
   return sitePublishingError(429, "limit_exceeded", "site_budget_exhausted", message, { budget });
 }
 
+const BUDGET_MESSAGES: Record<SiteRuntimeBudget, string> = {
+  conversations_per_visitor_per_day:
+    "You have started as many conversations as this Site allows today",
+  conversations_per_site_per_day:
+    "This Site's assistant has started as many conversations as it allows today",
+  turns_per_conversation: "This conversation has reached its message limit; start a new one",
+  agent_micros_per_conversation: "This conversation has reached its budget; start a new one",
+  agent_micros_per_visitor_per_day:
+    "You have used this Site's assistant as much as it allows today",
+  agent_micros_per_site_per_month: "This Site's assistant has reached its budget for this month",
+};
+
+/** The 429 for a refused reservation. */
+export function siteBudgetExhausted(budget: SiteRuntimeBudget) {
+  return budgetExhausted(budget, BUDGET_MESSAGES[budget]);
+}
+
+/** The budgets a conversation start or message is reserved against. */
+export function siteRuntimeBudgetLimits(limits: SiteLimits): SiteRuntimeBudgetLimits {
+  return {
+    conversationsPerVisitorPerDay: limits.conversationsPerVisitorPerDay,
+    conversationsPerSitePerDay: limits.conversationsPerSitePerDay,
+    turnsPerConversation: limits.turnsPerConversation,
+    agentMicrosPerConversation: limits.agentMicrosPerConversation,
+    agentMicrosPerVisitorPerDay: limits.agentMicrosPerVisitorPerDay,
+    agentMicrosPerSitePerMonth: limits.agentMicrosPerSitePerMonth,
+  };
+}
+
+/** Whether a refusal is a Site-wide budget (stale reservations of others may free it). */
+export function siteWideBudget(result: SiteRuntimeReservation): boolean {
+  return !result.ok && result.budget === "agent_micros_per_site_per_month";
+}
+
+const IDLE_SESSION_STATUSES = new Set(["idle", "failed", "cancelled"]);
+/** A start whose session has not appeared after this long failed before its create committed. */
+const ABANDONED_START_MS = 10 * 60_000;
+
 /**
- * Bring a conversation's counted spend up to its session usage so far. A read
- * failure leaves the counters as they are; the session's own usage limit still
- * caps the conversation.
+ * Bring a conversation's counted spend up to its session usage so far and
+ * release what it no longer needs reserved (all of it once the session is
+ * idle). A start whose session never appeared is released entirely. A read
+ * failure leaves the counters as they are; the session's own usage limit
+ * still caps the conversation.
  */
 export async function settleSiteRuntimeSpend(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
-  sessionId: string,
+  conversation: Pick<SiteRuntimeConversationRecord, "sessionId" | "turns" | "reservedMicros"> &
+    Partial<Pick<SiteRuntimeConversationRecord, "createdAt">>,
 ): Promise<number | null> {
+  const { sessionId } = conversation;
   try {
+    const session = await getSession(deps.db, host.scope.workspaceId, sessionId);
+    if (session === null) {
+      if (
+        conversation.createdAt &&
+        Date.now() - conversation.createdAt.getTime() > ABANDONED_START_MS
+      )
+        await releaseSiteRuntimeConversationStart(deps.db, host.scope, { sessionId });
+      return null;
+    }
     const read = await readSessionUsageLimit(deps.db, {
       ...host.scope,
       sessionId,
@@ -276,7 +361,12 @@ export async function settleSiteRuntimeSpend(
     });
     const used = read.outcome === "ok" ? read.state.usedMicros : null;
     if (used === null) return null;
-    await settleSiteRuntimeConversationSpend(deps.db, host.scope, { sessionId, usedMicros: used });
+    await settleSiteRuntimeConversationSpend(deps.db, host.scope, {
+      sessionId,
+      usedMicros: used,
+      idle: session !== null && IDLE_SESSION_STATUSES.has(session.status),
+      expected: { turns: conversation.turns, reservedMicros: conversation.reservedMicros },
+    });
     return used;
   } catch (error) {
     console.warn("[site-runtime] could not settle conversation spend", {
@@ -287,106 +377,23 @@ export async function settleSiteRuntimeSpend(
   }
 }
 
-/** The viewer's day and the Site's month budgets, before a new conversation or message. */
-export function requireSiteRuntimeBudgets(
-  limits: SiteLimits,
-  usage: {
-    visitorDay: { conversations: number; agentMicros: number };
-    siteMonth: { agentMicros: number };
-  },
-  options: { newConversation: boolean },
-): void {
-  if (
-    options.newConversation &&
-    limits.conversationsPerVisitorPerDay !== null &&
-    usage.visitorDay.conversations >= limits.conversationsPerVisitorPerDay
-  )
-    throw budgetExhausted(
-      "conversations_per_visitor_per_day",
-      "You have started as many conversations as this Site allows today",
-    );
-  if (
-    limits.agentMicrosPerVisitorPerDay !== null &&
-    usage.visitorDay.agentMicros >= limits.agentMicrosPerVisitorPerDay
-  )
-    throw budgetExhausted(
-      "agent_micros_per_visitor_per_day",
-      "You have used this Site's assistant as much as it allows today",
-    );
-  if (
-    limits.agentMicrosPerSitePerMonth !== null &&
-    usage.siteMonth.agentMicros >= limits.agentMicrosPerSitePerMonth
-  )
-    throw budgetExhausted(
-      "agent_micros_per_site_per_month",
-      "This Site's assistant has reached its budget for this month",
-    );
-}
-
-export function requireSiteRuntimeConversationBudget(
-  limits: SiteLimits,
-  meteredMicros: number,
-): void {
-  if (
-    limits.agentMicrosPerConversation !== null &&
-    meteredMicros >= limits.agentMicrosPerConversation
-  )
-    throw budgetExhausted(
-      "agent_micros_per_conversation",
-      "This conversation has reached its budget; start a new one",
-    );
-}
-
-export function siteTurnsExhausted() {
-  return budgetExhausted(
-    "turns_per_conversation",
-    "This conversation has reached its message limit; start a new one",
-  );
-}
+/** Reservations swept per refusal before one retry. */
+const STALE_RESERVATION_SWEEP = 20;
 
 /**
- * Cap a new conversation with its own task usage limit (the effective
- * per-conversation budget). Session create refuses limits from service
- * principals, so site-runtime, the trusted server here, sets it right after
- * create as the host actor `site:<siteId>`. The initial turn is admitted per
- * model call against the limit; the limit lands before the first call in
- * practice, and the Site budgets are checked again on every message.
+ * Settle the Site's oldest reserved conversations (idle ones release their
+ * whole reservation), so a Site-wide budget held by finished conversations
+ * frees up. Bounded per call.
  */
-export async function applySiteRuntimeConversationLimit(
+export async function sweepSiteRuntimeReservations(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
-  sessionId: string,
-  limitMicros: number | null,
-): Promise<boolean> {
-  if (limitMicros === null) return true;
-  try {
-    const result = await withWorkspaceSessionActivityRls(
-      deps.db,
-      host.scope.workspaceId,
-      async (tx) =>
-        await setSessionUsageLimitInTransaction(tx, {
-          accountId: host.scope.accountId,
-          workspaceId: host.scope.workspaceId,
-          sessionId,
-          limitMicros,
-          expectedVersion: 0,
-          operationId: `site-runtime:${sessionId}`,
-          actor: { type: "host", subjectId: `site:${host.site.id}` },
-          producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
-        }),
-    );
-    if (result.outcome === "ok" || result.outcome === "replayed") return true;
-    console.warn("[site-runtime] could not cap a conversation", {
-      siteId: host.site.id,
-      outcome: result.outcome,
-    });
-  } catch (error) {
-    console.warn("[site-runtime] could not cap a conversation", {
-      siteId: host.site.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  return false;
+): Promise<void> {
+  for (const conversation of await listReservedSiteRuntimeConversations(deps.db, host.scope, {
+    siteId: host.site.id,
+    limit: STALE_RESERVATION_SWEEP,
+  }))
+    await settleSiteRuntimeSpend(deps, host, conversation);
 }
 
 /** Usage-only metering for Site runtime events (agent spend is metered by the session itself). */
@@ -433,37 +440,12 @@ export async function siteRuntimeSessionRequest(
   viewer: SiteRuntimeViewer,
   input: { origin: string; method: string; path: string; body?: unknown },
 ): Promise<Request> {
-  const secret = resolveFirstPartyDelegationSecret(deps.settings);
-  if (!secret)
-    throw sitePublishingError(
-      503,
-      "upstream_unavailable",
-      "site_agents_unavailable",
-      "Site assistants are not configured on this deployment",
-      { reason: "delegation_unconfigured" },
-    );
-  const token = await signDelegatedAccessToken(secret, {
-    accountId: host.scope.accountId,
-    workspaceId: host.scope.workspaceId,
-    subjectId: `site:${host.site.id}`,
-    subjectLabel: `${siteRuntimeViewerLabel(viewer)} on ${host.hostname}`.slice(0, 250),
-    permissions: [...SITE_RUNTIME_AGENT_PERMISSIONS],
-    principalKind: "service",
-    exp: Math.floor(Date.now() / 1000) + 60,
-  });
-  const headers = new Headers({
-    authorization: `Bearer ${token}`,
-    accept: "application/json",
-    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-    "x-opengeni-site-id": host.site.id,
-    "x-opengeni-site-version": host.versionId,
-  });
-  if (input.body !== undefined) headers.set("content-type", "application/json");
-  return new Request(new URL(input.path, input.origin), {
-    method: input.method,
-    headers,
-    ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
-  });
+  return await siteServiceSessionRequest(
+    deps,
+    host.scope,
+    { id: host.site.id, versionId: host.versionId },
+    { ...input, label: `${siteRuntimeViewerLabel(viewer)} on ${host.hostname}` },
+  );
 }
 
 /** A forwarded response without cookies (site-runtime never sets any). */

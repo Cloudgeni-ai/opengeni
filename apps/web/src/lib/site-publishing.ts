@@ -165,6 +165,7 @@ export function knownLimits(
       requestsPerMinutePerVisitor: UNLIMITED_SITE_FLOOD_BRAKES.requestsPerMinutePerVisitor,
       guestWritesPerMinute: null,
       conversationsPerVisitorPerDay: null,
+      conversationsPerSitePerDay: UNLIMITED_SITE_FLOOD_BRAKES.conversationsPerSitePerDay,
       turnsPerConversation: null,
       agentMicrosPerConversation: UNLIMITED_SITE_FLOOD_BRAKES.agentMicrosPerConversation,
       agentMicrosPerVisitorPerDay: null,
@@ -210,6 +211,7 @@ export const CUSTOM_LIMIT_FIELDS: readonly {
   key: keyof Pick<
     SiteLimits,
     | "conversationsPerVisitorPerDay"
+    | "conversationsPerSitePerDay"
     | "turnsPerConversation"
     | "agentMicrosPerConversation"
     | "agentMicrosPerVisitorPerDay"
@@ -219,6 +221,7 @@ export const CUSTOM_LIMIT_FIELDS: readonly {
   money: boolean;
 }[] = [
   { key: "conversationsPerVisitorPerDay", label: "Conversations per visitor a day", money: false },
+  { key: "conversationsPerSitePerDay", label: "Conversations per day (whole Site)", money: false },
   { key: "turnsPerConversation", label: "Messages per conversation", money: false },
   { key: "agentMicrosPerConversation", label: "Spend per conversation", money: true },
   { key: "agentMicrosPerVisitorPerDay", label: "Spend per visitor a day", money: true },

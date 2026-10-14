@@ -16,7 +16,7 @@ import {
 } from "./cookies";
 import { base64url, randomToken, sha256, timingSafeEqual, utf8 } from "./crypto";
 import { applySecurityHeaders } from "./headers";
-import { messagePage } from "./pages";
+import { logoutConfirmPage, messagePage } from "./pages";
 import { safeReturnPath } from "./return-path";
 import { signedApiRequest } from "./signing";
 import { isSameOriginRequest, siteCaller, type SiteContext } from "./site-context";
@@ -150,14 +150,16 @@ export async function handleCallback(site: SiteContext): Promise<Response> {
 }
 
 /**
- * /_og/auth/logout: revoke the site session at the API (best effort) and
- * clear it. POST must be same-origin; GET is allowed for plain links.
+ * /_og/auth/logout: GET only shows a confirmation form, so a link or an
+ * embedded image can never sign anyone out. The same-origin POST revokes the
+ * site session at the API (best effort) and clears it.
  */
 export async function handleLogout(site: SiteContext): Promise<Response> {
   const method = site.request.method;
-  if (method !== "GET" && method !== "POST")
-    return messagePage(site, 405, "Not allowed", "Use the sign-out link.");
-  if (method === "POST" && !isSameOriginRequest(site.request, site.siteOrigin))
+  const returnPath = safeReturnPath(site.url.searchParams.get("return")) ?? "/";
+  if (method === "GET" || method === "HEAD") return logoutConfirmPage(site, returnPath);
+  if (method !== "POST") return messagePage(site, 405, "Not allowed", "Use the sign-out button.");
+  if (!isSameOriginRequest(site.request, site.siteOrigin))
     return messagePage(site, 403, "Not allowed", "Sign out from this Site's own page.");
   if (site.session) {
     try {
@@ -172,7 +174,6 @@ export async function handleLogout(site: SiteContext): Promise<Response> {
       // The cookie is cleared regardless; the API session expires on its own.
     }
   }
-  const returnPath = safeReturnPath(site.url.searchParams.get("return")) ?? "/";
   return redirect(site, `${site.siteOrigin}${returnPath}`, 303, [
     clearCookie(SITE_SESSION_COOKIE),
     clearCookie(SITE_HUMAN_COOKIE),

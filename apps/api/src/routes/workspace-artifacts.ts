@@ -45,7 +45,10 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { userContentDispositionHeaders } from "../http/user-content";
-import { notifySitePublicationChanged } from "../site-publishing/service";
+import {
+  afterSiteArtifactMutation,
+  notifySitePublicationChanged,
+} from "../site-publishing/service";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -179,21 +182,14 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
   // retained-output API. The product route remains simply `/artifacts`.
   const base = "/v1/workspaces/:workspaceId/published-artifacts";
   // A published Site follows its Site: a new version, rollback, archive or
-  // restore advances its host map (after commit, never blocking the change).
-  // Recorded before the response so the next host lookup sees the change.
+  // restore advances its host map (after commit, never blocking the change),
+  // through the same hook the agent artifact tools run. Recorded before the
+  // response so the next host lookup sees the change; publish and rollback
+  // scan the version that became current.
   const publishedSiteChanged = async <T extends WorkspaceArtifactMutationResponse>(
     result: T,
-    newVersion = false,
-  ): Promise<T> => {
-    if (!result.replayed)
-      await notifySitePublicationChanged(
-        deps,
-        { accountId: result.artifact.accountId, workspaceId: result.artifact.workspaceId },
-        result.artifact.id,
-        newVersion ? { scanVersionId: result.version.id } : {},
-      );
-    return result;
-  };
+    scan = false,
+  ): Promise<T> => await afterSiteArtifactMutation(deps, result, { scan });
 
   app.post(`${base}/uploads`, async (context) => {
     const grant = await requireAccessGrant(
@@ -503,6 +499,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
               reason: request.reason,
               ...provenance(grant.subjectId, request.idempotencyKey),
             }),
+            true,
           ),
         ),
       );

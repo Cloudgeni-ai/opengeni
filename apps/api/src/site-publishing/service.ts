@@ -1,23 +1,32 @@
 import { randomBytes } from "node:crypto";
 import {
   normalizeSitesDomain,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  signDelegatedAccessToken,
   siteHostname,
   siteHostnameLabelProblem,
   SITE_HOSTNAME_PROBLEM_MESSAGES,
   suggestSiteHostnameLabel,
   type ErrorCode,
+  type Permission,
   type SiteHostMapRecord,
   type SiteHostnameAvailability,
   type SitePublication,
   type UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
 import type { AccessGrant } from "@opengeni/contracts";
-import { hasLiteralPermission, siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  assertNotSiteClampedAgent,
+  currentSiteSessionOrigin,
+  hasLiteralPermission,
+  siteViewerForGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   bumpSitePublicationGeneration,
   checkSiteHostnameClaim,
   countOpenSiteAbuseReports,
-  getPublishedSite,
   getPublishedSiteVersion,
   getSiteDataSite,
   getSitePublication,
@@ -25,15 +34,22 @@ import {
   markSitePublicationEdgeSynced,
   readSiteRuntimeUsage,
   recordSitePublicationScan,
+  getPublishedSite,
+  listActiveSiteRuntimeConversations,
+  revokeSiteViewerSessions,
   SitePublishingError,
   SITE_RUNTIME_SITE_PRINCIPAL,
   upsertSitePublication,
+  withSiteHostnameEdgeState,
   type PublishedSiteRecord,
   type SiteDataSite,
+  type SiteHostnameEdgeState,
   type SitePublicationRecord,
   type SitePublishingScope,
   type StoredSiteLimitProfile,
 } from "@opengeni/db";
+import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
+import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
 import { siteDataRole } from "../site-data/service";
 import { createSiteContentScanner, type SiteContentScanner } from "./content-scanner";
@@ -46,7 +62,8 @@ import { effectiveSiteLimits, sourceSiteLimitProfile } from "./limits";
  * the edge copies are rebuildable and written after commit, never blocking it.
  */
 
-export type SitePublishingDeps = Pick<ApiRouteDeps, "db" | "settings" | "objectStorage">;
+export type SitePublishingDeps = Pick<ApiRouteDeps, "db" | "settings" | "objectStorage"> &
+  Partial<Pick<ApiRouteDeps, "managedEmailTransport">>;
 
 // --- configuration -------------------------------------------------------------
 
@@ -93,6 +110,7 @@ const PUBLIC_CODE: Record<SitePublishingError["code"], ErrorCode> = {
   not_found: "not_found",
   taken: "conflict",
   held: "conflict",
+  reserved: "conflict",
   conflict: "conflict",
   forbidden: "forbidden",
   validation: "validation_failed",
@@ -101,6 +119,7 @@ const STATUS: Record<SitePublishingError["code"], number> = {
   not_found: 404,
   taken: 409,
   held: 409,
+  reserved: 409,
   conflict: 409,
   forbidden: 403,
   validation: 400,
@@ -135,6 +154,25 @@ export type SitePublishingEffects = {
 };
 
 const effectsBySettings = new WeakMap<object, SitePublishingEffects>();
+const dispatchBySettings = new WeakMap<object, (request: Request) => Promise<Response>>();
+
+/**
+ * The app's in-process dispatch, registered with the site-runtime routes, so
+ * publication changes can cancel a Site's conversations through the ordinary
+ * session routes. Without it (the operator script) cancellation is skipped.
+ */
+export function setSitePublishingDispatch(
+  settings: ApiRouteDeps["settings"],
+  dispatch: (request: Request) => Promise<Response>,
+): void {
+  dispatchBySettings.set(settings, dispatch);
+}
+
+export function sitePublishingDispatch(
+  settings: ApiRouteDeps["settings"],
+): ((request: Request) => Promise<Response>) | null {
+  return dispatchBySettings.get(settings) ?? null;
+}
 
 function createEffects(
   settings: ApiRouteDeps["settings"],
@@ -198,16 +236,12 @@ export function siteHostMapRecord(
   domain: string,
   publication: SitePublicationRecord,
   site: PublishedSiteRecord,
-  label = publication.label,
 ): SiteHostMapRecord {
-  const current = label === publication.label;
   const status =
-    !current || (publication.status === "active" && !siteServable(site))
-      ? "unpublished"
-      : publication.status;
+    publication.status === "active" && !siteServable(site) ? "unpublished" : publication.status;
   return {
     v: 1,
-    hostname: siteHostname(label, domain),
+    hostname: siteHostname(publication.label, domain),
     siteId: publication.siteId,
     status,
     access: publication.access,
@@ -220,41 +254,114 @@ export function siteHostMapRecord(
 }
 
 /**
- * After commit: write the Site's host-map record (and a tombstone for a
- * released previous label), and purge the host's edge cache on a takedown.
- * A no-op without edge settings; failures are retried and logged.
+ * The host-map record a hostname should have now: the live Site's, else a
+ * tombstone (unpublished, no version) with a fresh generation, so it replaces
+ * whatever the edge holds for that hostname. Null when no Site is known.
+ */
+export function siteHostnameEdgeRecord(
+  settings: ApiRouteDeps["settings"],
+  domain: string,
+  state: SiteHostnameEdgeState,
+  siteIdHint: string | null,
+): SiteHostMapRecord | null {
+  if (state.live)
+    return siteHostMapRecord(settings, domain, state.live.publication, state.live.site);
+  const siteId = state.hostname?.siteId ?? state.hold?.siteId ?? siteIdHint;
+  if (!siteId || state.tombstoneGeneration === null) return null;
+  return {
+    v: 1,
+    hostname: siteHostname(state.label, domain),
+    siteId,
+    status: state.hold ? "suspended" : "unpublished",
+    access: "members",
+    versionId: null,
+    title: "",
+    noindex: true,
+    generation: state.tombstoneGeneration,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/** Labels whose edge copy is being rewritten now (no duplicate self-heal work). */
+const recentHeals = new Map<string, number>();
+
+/**
+ * Sync one hostname to the edge under its lock: write the live Site's record
+ * or a tombstone, purge the edge cache when asked, then record the
+ * generation the edge holds. A no-op without edge settings.
+ */
+export async function syncSiteHostnameEdge(
+  deps: SitePublishingDeps,
+  label: string,
+  options: { purge?: boolean; siteIdHint?: string | null } = {},
+): Promise<"synced" | "skipped" | "disabled"> {
+  const domain = configuredSitesDomain(deps.settings);
+  const effects = sitePublishingEffects(deps.settings);
+  if (!domain || (!effects.edgeSync.kvEnabled && !effects.edgeSync.purgeEnabled)) return "disabled";
+  const synced = await withSiteHostnameEdgeState(deps.db, label, async (state) => {
+    const record = siteHostnameEdgeRecord(deps.settings, domain, state, options.siteIdHint ?? null);
+    if (!record) return null;
+    const put = await effects.edgeSync.putHostRecord(record);
+    if (options.purge) await effects.edgeSync.purgeHost(record.hostname);
+    return state.live && put !== "disabled"
+      ? {
+          scope: {
+            accountId: state.live.publication.accountId,
+            workspaceId: state.live.publication.workspaceId,
+          },
+          siteId: state.live.publication.siteId,
+          generation: state.live.publication.generation,
+        }
+      : null;
+  });
+  // Recorded after the hostname lock is released (it is a separate write).
+  if (synced)
+    await markSitePublicationEdgeSynced(deps.db, synced.scope, synced.siteId, synced.generation);
+  return synced ? "synced" : "skipped";
+}
+
+/**
+ * After commit: rewrite the edge copy of each hostname (the Site's label and
+ * a released previous one), and purge their edge cache when asked
+ * (takedown, unpublish). A no-op without edge settings; failures are retried
+ * and logged, and a missed sync heals on the next host lookup. Lost if the
+ * process stops first: the KV TTL then bounds how long the edge stays stale.
  */
 export function scheduleSiteEdgeSync(
   deps: SitePublishingDeps,
-  scope: SitePublishingScope,
-  siteId: string,
-  options: { previousLabel?: string | null; purge?: boolean } = {},
+  labels: ReadonlyArray<string | null | undefined>,
+  options: { purge?: boolean; siteIdHint?: string | null } = {},
 ): void {
   const domain = configuredSitesDomain(deps.settings);
   const effects = sitePublishingEffects(deps.settings);
   if (!domain || (!effects.edgeSync.kvEnabled && !effects.edgeSync.purgeEnabled)) return;
+  const unique = [...new Set(labels.filter((label): label is string => Boolean(label)))];
+  if (unique.length === 0) return;
   effects.schedule("edge sync", async () => {
-    const [publication, site] = await Promise.all([
-      getSitePublication(deps.db, scope, siteId),
-      getPublishedSite(deps.db, scope, siteId),
-    ]);
-    if (!publication || !site) return;
-    const record = siteHostMapRecord(deps.settings, domain, publication, site);
-    const results = [await effects.edgeSync.putHostRecord(record)];
-    if (options.previousLabel)
-      results.push(
-        await effects.edgeSync.putHostRecord(
-          siteHostMapRecord(deps.settings, domain, publication, site, options.previousLabel),
-        ),
-      );
-    if (options.purge) {
-      await effects.edgeSync.purgeHost(record.hostname);
-      if (options.previousLabel)
-        await effects.edgeSync.purgeHost(siteHostname(options.previousLabel, domain));
-    }
-    if (results.every((result) => result !== "disabled"))
-      await markSitePublicationEdgeSynced(deps.db, scope, siteId, publication.generation);
+    for (const label of unique) await syncSiteHostnameEdge(deps, label, options);
   });
+}
+
+/**
+ * Self-heal: the edge copy of a live hostname is behind its publication
+ * (a sync was lost or failed). Schedules one sync per hostname at most every
+ * 30 seconds per process.
+ */
+export function healSiteEdgeIfStale(
+  deps: SitePublishingDeps,
+  publication: Pick<
+    SitePublicationRecord,
+    "label" | "generation" | "edgeSyncedGeneration" | "siteId"
+  >,
+): void {
+  if (publication.edgeSyncedGeneration >= publication.generation) return;
+  const effects = sitePublishingEffects(deps.settings);
+  if (!effects.edgeSync.kvEnabled) return;
+  const now = Date.now();
+  if ((recentHeals.get(publication.label) ?? 0) > now - 30_000) return;
+  if (recentHeals.size > 10_000) recentHeals.clear();
+  recentHeals.set(publication.label, now);
+  scheduleSiteEdgeSync(deps, [publication.label], { siteIdHint: publication.siteId });
 }
 
 /**
@@ -283,13 +390,26 @@ export function scheduleSiteContentScan(
       status: result.status,
       findings: result.findings,
     });
+    const domain = configuredSitesDomain(deps.settings);
+    const publication =
+      result.status === "flagged" && domain
+        ? await getSitePublication(deps.db, scope, siteId)
+        : null;
+    if (publication && domain)
+      notifySiteAbuse(deps, {
+        scope,
+        siteId,
+        hostname: siteHostname(publication.label, domain),
+        kind: "flagged_scan",
+        detail: `${result.findings.length} finding(s) in version ${versionId}`,
+      });
   });
 }
 
 /**
  * A Site changed outside publishing (new version, rollback, archive, audience):
- * advance its publication generation and resync the edge. A no-op when the
- * Site is not published. Never throws.
+ * advance its publication generation and resync the edge, and scan a newly
+ * current version. A no-op when the Site is not published. Never throws.
  */
 export async function notifySitePublicationChanged(
   deps: SitePublishingDeps,
@@ -301,7 +421,13 @@ export async function notifySitePublicationChanged(
   try {
     const publication = await bumpSitePublicationGeneration(deps.db, scope, siteId);
     if (!publication) return;
-    scheduleSiteEdgeSync(deps, scope, siteId);
+    // Archived or made private: the Site is no longer served, so its viewers stop too.
+    if (publication.status === "active") {
+      const site = await getPublishedSite(deps.db, scope, siteId);
+      if (!site || !siteServable(site))
+        await stopSiteViewers(deps, scope, siteId, { reason: "unpublished" });
+    }
+    scheduleSiteEdgeSync(deps, [publication.label], { siteIdHint: siteId });
     if (options.scanVersionId && publication.status === "active")
       scheduleSiteContentScan(deps, scope, siteId, options.scanVersionId);
   } catch (error) {
@@ -310,6 +436,247 @@ export async function notifySitePublicationChanged(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+/**
+ * The one hook every Site artifact mutation runs, from the API routes and
+ * the agent tools alike (publish, rollback, archive, restore): a published
+ * Site follows its Site. `scan` scans the version that became current
+ * (publish and rollback). Replays changed nothing and do nothing.
+ */
+export async function afterSiteArtifactMutation<
+  T extends {
+    replayed?: boolean;
+    artifact: { id: string; accountId: string; workspaceId: string };
+    version?: { id: string } | null;
+  },
+>(deps: SitePublishingDeps, result: T, options: { scan?: boolean } = {}): Promise<T> {
+  if (!result.replayed)
+    await notifySitePublicationChanged(
+      deps,
+      { accountId: result.artifact.accountId, workspaceId: result.artifact.workspaceId },
+      result.artifact.id,
+      options.scan && result.version ? { scanVersionId: result.version.id } : {},
+    );
+  return result;
+}
+
+// --- the Site's own principal ---------------------------------------------------------
+
+/** The authority Site agent sessions run with: sessions only, nothing else. */
+export const SITE_RUNTIME_AGENT_PERMISSIONS: readonly Permission[] = Object.freeze([
+  "workspace:read",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+]);
+
+/**
+ * A request to an ordinary session route as the Site's service principal
+ * (`site:<siteId>`), with a 60-second delegated token carrying only session
+ * permissions, for in-process dispatch. The Site headers ride along so the
+ * API's Site frame guard and provenance see which Site acts.
+ */
+export async function siteServiceSessionRequest(
+  deps: Pick<SitePublishingDeps, "settings">,
+  scope: SitePublishingScope,
+  site: { id: string; versionId: string | null },
+  input: { origin: string; method: string; path: string; body?: unknown; label: string },
+): Promise<Request> {
+  const secret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (!secret)
+    throw sitePublishingError(
+      503,
+      "upstream_unavailable",
+      "site_agents_unavailable",
+      "Site assistants are not configured on this deployment",
+      { reason: "delegation_unconfigured" },
+    );
+  const token = await signDelegatedAccessToken(secret, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    subjectId: `site:${site.id}`,
+    subjectLabel: input.label.slice(0, 250),
+    permissions: [...SITE_RUNTIME_AGENT_PERMISSIONS],
+    principalKind: "service",
+    exp: Math.floor(Date.now() / 1000) + 60,
+  });
+  const headers = new Headers({
+    authorization: `Bearer ${token}`,
+    accept: "application/json",
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    "x-opengeni-site-id": site.id,
+  });
+  if (site.versionId) headers.set("x-opengeni-site-version", site.versionId);
+  if (input.body !== undefined) headers.set("content-type", "application/json");
+  return new Request(new URL(input.path, input.origin), {
+    method: input.method,
+    headers,
+    ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+  });
+}
+
+/** Conversations cancelled per stop (newest activity first); the rest end on their own caps. */
+const STOP_CONVERSATIONS_LIMIT = 200;
+
+/**
+ * Stop a Site's viewers after a takedown, unpublish or narrower access:
+ * revoke every site-session now, and after commit cancel the Site's agent
+ * conversations that may still be working (in-flight turns and queued
+ * messages), as the Site itself through the ordinary control route. The
+ * gateway refuses new work at once regardless: every site-runtime call
+ * re-checks the publication. Without an in-process dispatch (the operator
+ * script) the cancellation is skipped and logged; per-conversation caps
+ * still bound what running turns can spend.
+ */
+export async function stopSiteViewers(
+  deps: SitePublishingDeps,
+  scope: SitePublishingScope,
+  siteId: string,
+  options: { revokeSessions?: boolean; cancelConversations?: boolean; reason: string },
+): Promise<{ revokedSessions: number }> {
+  let revokedSessions = 0;
+  if (options.revokeSessions !== false) {
+    try {
+      revokedSessions = await revokeSiteViewerSessions(deps.db, scope, siteId);
+    } catch (error) {
+      console.warn("[site-publishing] could not revoke viewer sessions", {
+        siteId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (options.cancelConversations === false) return { revokedSessions };
+  const dispatch = sitePublishingDispatch(deps.settings);
+  if (!dispatch) {
+    console.warn("[site-publishing] conversation cancel skipped: no in-process dispatch", {
+      siteId,
+    });
+    return { revokedSessions };
+  }
+  const effects = sitePublishingEffects(deps.settings);
+  const origin = deps.settings.publicBaseUrl ?? "http://localhost";
+  effects.schedule("cancel conversations", async () => {
+    const sessionIds = await listActiveSiteRuntimeConversations(deps.db, scope, {
+      siteId,
+      limit: STOP_CONVERSATIONS_LIMIT,
+    });
+    if (sessionIds.length === 0) return;
+    // The Site acts with its own origin (a Site and one of its versions).
+    const versionId = (await getPublishedSite(deps.db, scope, siteId))?.currentVersionId ?? null;
+    if (!versionId) {
+      console.warn("[site-publishing] conversation cancel skipped: the Site has no version", {
+        siteId,
+      });
+      return;
+    }
+    const operation = crypto.randomUUID();
+    for (const sessionId of sessionIds) {
+      try {
+        const response = await dispatch(
+          await siteServiceSessionRequest(
+            deps,
+            scope,
+            { id: siteId, versionId },
+            {
+              origin,
+              method: "POST",
+              path: `/v1/workspaces/${scope.workspaceId}/sessions/${sessionId}/control`,
+              body: {
+                action: "cancel",
+                clientEventId: `site-stop:${operation}:${sessionId}`.slice(0, 200),
+                reason: options.reason.slice(0, 500),
+              },
+              label: "Published Site",
+            },
+          ),
+        );
+        if (!response.ok)
+          console.warn("[site-publishing] could not cancel a Site conversation", {
+            siteId,
+            sessionId,
+            status: response.status,
+            body: (await response.text().catch(() => "")).slice(0, 300),
+          });
+        else await response.body?.cancel().catch(() => undefined);
+      } catch (error) {
+        console.warn("[site-publishing] could not cancel a Site conversation", {
+          siteId,
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  });
+  return { revokedSessions };
+}
+
+// --- reaching the platform -----------------------------------------------------------
+
+const abuseNoticeHours = new Map<string, number>();
+
+/**
+ * Tell the platform about an abuse report or a flagged content scan: always a
+ * structured log line (`site_abuse_notice`), and, when OPENGENI_SITES_ABUSE_EMAIL
+ * is set, an email through the deployment's managed email transport (at most
+ * one per Site per hour, best effort, after the request). The operator's
+ * cross-workspace queue (`scripts/operator/site-moderation-queue.ts`) lists
+ * everything open.
+ */
+export function notifySiteAbuse(
+  deps: SitePublishingDeps,
+  input: {
+    scope: SitePublishingScope;
+    siteId: string;
+    hostname: string;
+    kind: "report" | "flagged_scan";
+    detail: string;
+  },
+): void {
+  console.warn(
+    JSON.stringify({
+      event: "site_abuse_notice",
+      kind: input.kind,
+      accountId: input.scope.accountId,
+      workspaceId: input.scope.workspaceId,
+      siteId: input.siteId,
+      hostname: input.hostname,
+      detail: input.detail.slice(0, 200),
+    }),
+  );
+  const to = deps.settings.sitesAbuseEmail;
+  const transport = deps.managedEmailTransport;
+  if (!to || !transport) return;
+  const hour = Math.floor(Date.now() / 3_600_000);
+  const key = `${input.siteId}:${input.kind}`;
+  if (abuseNoticeHours.get(key) === hour) return;
+  if (abuseNoticeHours.size > 10_000) abuseNoticeHours.clear();
+  abuseNoticeHours.set(key, hour);
+  const what = input.kind === "report" ? "An abuse report" : "A flagged content scan";
+  const text = [
+    `${what} for the published Site https://${input.hostname}/`,
+    `Site: ${input.siteId}`,
+    `Workspace: ${input.scope.workspaceId}`,
+    `Detail: ${input.detail.slice(0, 200)}`,
+    "",
+    "List open items with scripts/operator/site-moderation-queue.ts; take a Site down with scripts/operator/site-takedown.ts.",
+  ].join("\n");
+  sitePublishingEffects(deps.settings).schedule("abuse notice", async () => {
+    const result = await transport.send({
+      kind: "site_abuse_notice",
+      from: transport.sender,
+      to,
+      subject: `[Opengeni Sites] ${what}: ${input.hostname}`.slice(0, 200),
+      text,
+      html: `<pre>${text.replace(/[&<>]/gu, (c) => (c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"))}</pre>`,
+      idempotencyKey: `site-abuse-notice:${key}:${hour}`,
+    });
+    if (result.status !== "sent")
+      console.warn("[site-publishing] abuse notice email not sent", {
+        siteId: input.siteId,
+        status: result.status,
+      });
+  });
 }
 
 // --- management ------------------------------------------------------------------
@@ -325,15 +692,49 @@ export type SiteManagement = {
 };
 
 /**
+ * Publication changes come from people and their own agents, never from a
+ * Site page: refuse a request that carries a validated Site origin (a Site or
+ * frame page reaching the API through a host) and an agent started from a
+ * Site page, or acting in a turn one sent (the Site clamp).
+ */
+export async function requireSitePublicationWriter(
+  deps: SitePublishingDeps,
+  grant: AccessGrant,
+): Promise<void> {
+  if (currentSiteSessionOrigin())
+    throw sitePublishingError(
+      403,
+      "forbidden",
+      "site_page_forbidden",
+      "A Site page cannot change Site publications",
+    );
+  try {
+    await assertNotSiteClampedAgent(deps.db, grant, "Site publications");
+  } catch (error) {
+    if (error instanceof HTTPException && error.status === 403)
+      throw sitePublishingError(
+        403,
+        "forbidden",
+        "site_agent_forbidden",
+        "An agent started from a Site page cannot change Site publications",
+      );
+    throw error;
+  }
+}
+
+/**
  * Resolve a Site for publication management. The caller must see the Site
  * (its audience); managers are the Site Data managers (owner, workspace admin,
  * an agent acting for one, or a person-less key with artifacts:publish).
+ * `mutate` callers must also pass `requireSitePublicationWriter`.
  */
 export async function resolveSiteManagement(
   deps: SitePublishingDeps,
   grant: AccessGrant,
   siteId: string,
+  options: { mutate?: boolean } = {},
 ): Promise<SiteManagement> {
+  if (options.mutate) await requireSitePublicationWriter(deps, grant);
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   const viewer = await siteViewerForGrant(deps.db, grant);
   const site = await getSiteDataSite(deps.db, scope, viewer, siteId);
@@ -465,7 +866,9 @@ export async function siteHostnameAvailability(
         message:
           check.problem === "held"
             ? "This name was released recently and is held for its previous owner."
-            : "This name is already taken.",
+            : check.problem === "reserved"
+              ? "This name is reserved."
+              : "This name is already taken.",
       };
 }
 
@@ -484,7 +887,11 @@ export async function upsertSitePublicationForManager(
   requireSiteManager(management);
   const { scope, record } = management;
   const existing = await getSitePublication(deps.db, scope, record.id);
-  if (existing?.status === "suspended" && request.status !== undefined)
+  if (
+    existing?.status === "suspended" &&
+    (request.status !== undefined ||
+      (request.label !== undefined && request.label !== existing.label))
+  )
     throw sitePublishingError(
       409,
       "conflict",
@@ -517,6 +924,29 @@ export async function upsertSitePublicationForManager(
       "site_admin_required",
       "Only a workspace admin can change a Site's limits",
     );
+  // Workspace tools act with the workspace's shared connections for whoever
+  // views the Site: only a workspace admin may give them to the Site's agent
+  // (or to guests). Anyone who manages the Site may keep or remove them.
+  const tools = request.agent?.tools;
+  const currentTools = new Set(existing?.agent.tools ?? []);
+  const addsTools = (tools ?? []).some((tool) => !currentTools.has(tool));
+  const grantsGuestTools =
+    request.agent?.guestTools === true && existing?.agent.guestTools !== true;
+  if ((addsTools || grantsGuestTools) && !management.admin)
+    throw sitePublishingError(
+      403,
+      "forbidden",
+      "site_admin_required",
+      "Only a workspace admin can give a Site's assistant workspace tools",
+    );
+  for (const tool of tools ?? [])
+    if (!SITE_AGENT_TOOL_ID.test(tool) || RESERVED_SITE_AGENT_TOOL_IDS.has(tool))
+      throw sitePublishingError(
+        400,
+        "validation_failed",
+        "site_tool_invalid",
+        `"${tool.slice(0, 80)}" is not a workspace tool connection a Site's assistant can use`,
+      );
   const limitProfile =
     request.limitProfile === undefined
       ? undefined
@@ -558,7 +988,12 @@ export async function upsertSitePublicationForManager(
             ...(request.agent.instructions !== undefined
               ? { instructions: request.agent.instructions }
               : {}),
-            ...(request.agent.tools !== undefined ? { tools: request.agent.tools } : {}),
+            ...(request.agent.tools !== undefined
+              ? { tools: request.agent.tools ? [...new Set(request.agent.tools)] : null }
+              : {}),
+            ...(request.agent.guestTools !== undefined
+              ? { guestTools: request.agent.guestTools }
+              : {}),
           },
         }
       : {}),
@@ -591,8 +1026,43 @@ export async function upsertSitePublicationForManager(
     }
   }
   const { publication, created, previousLabel } = result!;
-  scheduleSiteEdgeSync(deps, scope, record.id, { previousLabel });
+  const stopping = existing ? siteAccessNarrowed(existing, publication) : null;
+  if (stopping)
+    await stopSiteViewers(deps, scope, record.id, {
+      reason: stopping,
+      revokeSessions: stopping !== "agent_disabled",
+    });
+  scheduleSiteEdgeSync(deps, [publication.label, previousLabel], {
+    siteIdHint: record.id,
+    purge: stopping === "unpublished",
+  });
   if (publication.status === "active" && (created || existing?.status !== "active"))
     scheduleSiteContentScan(deps, scope, record.id, record.currentVersionId);
   return { publication: await sitePublicationView(deps, scope, publication), created };
 }
+
+const ACCESS_RANK = { members: 0, invited: 1, public: 2 } as const;
+
+/**
+ * Why a publication change must stop current viewers, or null: unpublished,
+ * a narrower access mode, a removed invitation, or the assistant turned off
+ * (conversations only).
+ */
+export function siteAccessNarrowed(
+  before: Pick<SitePublicationRecord, "status" | "access" | "invitedEmails" | "agent">,
+  after: Pick<SitePublicationRecord, "status" | "access" | "invitedEmails" | "agent">,
+): "unpublished" | "access_narrowed" | "agent_disabled" | null {
+  if (before.status === "active" && after.status !== "active") return "unpublished";
+  if (ACCESS_RANK[after.access] < ACCESS_RANK[before.access]) return "access_narrowed";
+  if (after.access === "invited") {
+    const kept = new Set(after.invitedEmails);
+    if (before.invitedEmails.some((email) => !kept.has(email))) return "access_narrowed";
+  }
+  if (before.agent.enabled && !after.agent.enabled) return "agent_disabled";
+  return null;
+}
+
+/** MCP server ids (the session tool reference format). */
+const SITE_AGENT_TOOL_ID = /^[A-Za-z0-9_-]{1,200}$/u;
+/** The first-party server is never a Site agent's tool: it is the workspace itself. */
+const RESERVED_SITE_AGENT_TOOL_IDS = new Set(["opengeni"]);

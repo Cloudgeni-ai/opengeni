@@ -1,8 +1,9 @@
-import type { SiteAuthAuthorizeRequest, SiteAuthAuthorizeResponse } from "@opengeni/sdk";
+import type { SiteAuthAuthorizeRequest } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobeIcon, LockKeyholeIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { LoadingPanel } from "@/components/common";
 import { ConsentFrame } from "@/components/organization-access/mcp-consent-page";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -13,29 +14,32 @@ import { useAppContext } from "@/context";
 import { apiErrorFacts, userErrorText } from "@/lib/api-error";
 import { useNativeSignInContext } from "@/lib/native-sign-in-context";
 import {
+  isFramedWindow,
   safeSiteRedirect,
   siteAuthCancelUrl,
   siteAuthRequest,
   type SiteAuthSearch,
 } from "@/lib/site-auth";
+import { sitesClientConfig } from "@/lib/site-publishing";
 
 /* ----------------------------------------------------------------------------
    /site-auth/authorize: a published Site asks the signed-in person to open
    it as themselves. The page shows which Site and which account, with one
-   action. Continue hands the Site's gateway a one-time code bound to its
-   host and PKCE challenge; the gateway redeems it server-to-server for a
-   session that works only on that Site. No credential reaches the Site.
+   action. Continue asks the API for a one-time code bound to the Site's host
+   and PKCE challenge and hands it to the Site's gateway, which redeems it
+   server-to-server for a session that works only on that Site. Nothing is
+   minted before Continue, the page never renders inside another page, and
+   it only ever navigates to a Site under the deployment's Sites domain.
    -------------------------------------------------------------------------- */
 
-/** A minted code lives 60 seconds; mint a fresh one when it is older than this. */
-const CODE_FRESH_MS = 40_000;
-
-type SiteAuthClient = Pick<OpenGeniBrowserClient, "authorizeSiteViewer">;
+type SiteAuthClient = Pick<OpenGeniBrowserClient, "authorizeSiteViewer" | "getClientConfig">;
 
 type Phase =
-  | { kind: "checking" }
-  | { kind: "ready"; response: SiteAuthAuthorizeResponse; at: number }
+  | { kind: "idle" }
+  | { kind: "continuing" }
+  /** The API confirmed the Site and refused this account. */
   | { kind: "denied" }
+  | { kind: "unavailable" }
   | { kind: "failed"; message: string };
 
 export function SiteAuthorizeRoute({ search }: { search: SiteAuthSearch }) {
@@ -58,12 +62,13 @@ export function SiteAuthorizeRoute({ search }: { search: SiteAuthSearch }) {
 
 /** Deployments without managed sign-in reach this page through the ordinary app. */
 function SiteAuthorizeWithAppContext({ search }: { search: SiteAuthSearch }) {
-  const { client, authSession } = useAppContext();
+  const { client, authSession, clientConfig } = useAppContext();
   return (
     <SiteAuthorizePage
       client={client}
       email={authSession?.user?.email ?? "your account"}
       search={search}
+      sitesDomain={sitesClientConfig(clientConfig).domain ?? null}
     />
   );
 }
@@ -72,38 +77,72 @@ function assignLocation(url: string) {
   window.location.assign(url);
 }
 
+/** The Sites domain from the client config, when the caller doesn't already know it. */
+function useSitesDomain(
+  client: SiteAuthClient,
+  known: string | null | undefined,
+  skip: boolean,
+): { state: "loading" } | { state: "ready"; domain: string | null } {
+  const [loaded, setLoaded] = useState<string | null | undefined>(undefined);
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  useEffect(() => {
+    if (known !== undefined || skip) return;
+    let current = true;
+    void clientRef.current
+      .getClientConfig()
+      .then((config) => sitesClientConfig(config).domain ?? null)
+      .catch(() => null)
+      .then((domain) => {
+        if (current) setLoaded(domain);
+      });
+    return () => {
+      current = false;
+    };
+  }, [known, skip]);
+  const domain = known !== undefined ? known : loaded;
+  return domain === undefined ? { state: "loading" } : { state: "ready", domain };
+}
+
 export function SiteAuthorizePage({
   client,
   email,
   search,
+  sitesDomain,
   onUseAnotherAccount,
   navigate = assignLocation,
+  isFramed = isFramedWindow,
 }: {
   client: SiteAuthClient;
   email: string;
   search: SiteAuthSearch;
+  /** Known Sites domain; when omitted, the page reads it from the client config. */
+  sitesDomain?: string | null | undefined;
   onUseAnotherAccount?: (() => void) | undefined;
   navigate?: (url: string) => void;
+  isFramed?: () => boolean;
 }) {
-  const request = useMemo(() => siteAuthRequest(search), [search]);
-  const [phase, setPhase] = useState<Phase>({ kind: "checking" });
-  const [leaving, setLeaving] = useState(false);
-  const clientRef = useRef(client);
-  clientRef.current = client;
+  const framed = useMemo(() => isFramed(), [isFramed]);
+  const domain = useSitesDomain(client, sitesDomain, framed);
+  const request = useMemo(
+    () => (domain.state === "ready" ? siteAuthRequest(search, domain.domain) : null),
+    [domain, search],
+  );
+  const [phase, setPhase] = useState<Phase>({ kind: "idle" });
 
-  // Ask first, so the page names the Site and says at once when this account
-  // can't open it. The code goes nowhere until Continue.
-  useEffect(() => {
-    if (!request) return;
-    let current = true;
-    setPhase({ kind: "checking" });
-    void authorize(clientRef.current, request).then((next) => {
-      if (current) setPhase(next);
-    });
-    return () => {
-      current = false;
-    };
-  }, [request]);
+  if (framed)
+    return (
+      <ConsentFrame>
+        <EmptyState
+          variant="page"
+          icon={<LockKeyholeIcon />}
+          title="Open this page in its own tab"
+          description="For your safety, sign-in to a Site can't be shown inside another page."
+        />
+      </ConsentFrame>
+    );
+
+  if (domain.state === "loading") return <LoadingPanel />;
 
   if (!request)
     return (
@@ -117,13 +156,27 @@ export function SiteAuthorizePage({
       </ConsentFrame>
     );
 
+  if (phase.kind === "unavailable")
+    return (
+      <ConsentFrame>
+        <EmptyState
+          variant="page"
+          icon={<GlobeIcon />}
+          title="This Site isn't available"
+          description={`There is no published Site at ${request.host}.`}
+        />
+      </ConsentFrame>
+    );
+
   const anotherAccount = onUseAnotherAccount ? (
     <Button type="button" variant="ghost" onClick={onUseAnotherAccount}>
       Use another account
     </Button>
   ) : null;
 
-  if (phase.kind === "denied")
+  if (phase.kind === "denied") {
+    // The API answered for this Site, so its callback is a real Site to return to.
+    const back = siteAuthCancelUrl(request, domain.domain);
     return (
       <ConsentFrame>
         <FormPage
@@ -131,46 +184,45 @@ export function SiteAuthorizePage({
           title="You can't open this Site"
           description={`${email} doesn't have access to ${request.host}. Ask the Site's owner to invite this email, or use another account.`}
           submitLabel="Back to the Site"
+          submitDisabled={!back}
           cancelLabel={null}
           footerStart={anotherAccount}
           onSubmit={() => {
-            navigate(siteAuthCancelUrl(request));
+            if (back) navigate(back);
             return false;
           }}
         />
       </ConsentFrame>
     );
+  }
 
-  const title = phase.kind === "ready" ? phase.response.site.title : request.host;
   return (
     <ConsentFrame>
       <FormPage
         leading={<LogoTile icon={<GlobeIcon />} />}
-        title={`Continue to ${title}`}
+        title={`Continue to ${request.host}`}
         description="The Site sees your name and email. It can't use your account anywhere else."
         submitLabel="Continue"
         pendingLabel="Continuing…"
-        pending={leaving}
-        submitDisabled={phase.kind === "checking"}
+        pending={phase.kind === "continuing"}
         onCancel={() => {
-          setLeaving(true);
-          navigate(siteAuthCancelUrl(request));
+          // Nothing has confirmed this Site yet, so Cancel stays in Opengeni.
+          navigate("/");
         }}
         footerStart={anotherAccount}
         onSubmit={async () => {
-          // A code older than its lifetime would fail at the gateway, and a
-          // failed check is retried: either way, mint another.
-          const fresh =
-            phase.kind === "ready" && Date.now() - phase.at < CODE_FRESH_MS
-              ? phase
-              : await authorize(client, request);
-          if (fresh.kind !== "ready") {
-            setPhase(fresh);
+          // The one-time code is minted only now, and used at once.
+          setPhase({ kind: "continuing" });
+          const next = await authorize(client, request);
+          if (next.kind !== "ready") {
+            setPhase(next);
             return false;
           }
-          const target = safeSiteRedirect(fresh.response.redirectTo, request);
-          if (!target) throw new Error("The Site's sign-in link isn't valid. Open the Site again.");
-          setLeaving(true);
+          const target = safeSiteRedirect(next.redirectTo, request, domain.domain);
+          if (!target) {
+            setPhase({ kind: "idle" });
+            throw new Error("The Site's sign-in link isn't valid. Open the Site again.");
+          }
           navigate(target);
           return false;
         }}
@@ -193,13 +245,16 @@ export function SiteAuthorizePage({
 async function authorize(
   client: SiteAuthClient,
   request: SiteAuthAuthorizeRequest,
-): Promise<Phase> {
+): Promise<
+  { kind: "ready"; redirectTo: string } | Exclude<Phase, { kind: "idle" | "continuing" }>
+> {
   try {
     const response = await client.authorizeSiteViewer(request);
-    return { kind: "ready", response, at: Date.now() };
+    return { kind: "ready", redirectTo: response.redirectTo };
   } catch (error) {
     const { status, code } = apiErrorFacts(error);
     if (code === "site_access_denied" || status === 403) return { kind: "denied" };
+    if (code === "site_not_found" || status === 404) return { kind: "unavailable" };
     return { kind: "failed", message: userErrorText(error, "Couldn't reach the Site. Try again.") };
   }
 }
