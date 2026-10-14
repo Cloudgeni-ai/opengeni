@@ -549,7 +549,8 @@ Spell the product **Opengeni** (lowercase g) in prose, prompts, Skills, tool
 descriptions and UI copy. Keep functional spellings unchanged: code identifiers
 (`OpenGeniClient`), header and user-agent tokens (`X-OpenGeni-*`,
 `OpenGeni-Signature`), persisted or wire values, released changelogs, immutable
-migrations and digest-pinned curated Skills. `scripts/brand-spelling.test.ts`
+migrations, digest-pinned curated Skills and the frozen skill-library
+provenance strings that migration 0233 pins. `scripts/brand-spelling.test.ts`
 guards agent-facing prose.
 
 Site build/edit shortcuts use ordinary session defaults and user prompts. Site
