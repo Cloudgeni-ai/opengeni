@@ -495,6 +495,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   site_sql_migrate: "artifacts",
   site_sql_define_query: "artifacts",
   site_sql_query: "artifacts",
+  site_sql_run: "artifacts",
   site_sql_execute: "artifacts",
   site_sql_export: "artifacts",
   site_sql_import: "artifacts",

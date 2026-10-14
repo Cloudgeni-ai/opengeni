@@ -539,14 +539,23 @@ PUT `/settings`, POST|PUT|DELETE `/queries/:name`, POST `/migrations`, `/query`,
 | `site_sql_migrate`      | append a named schema migration and apply every missing one            |
 | `site_sql_define_query` | create, replace or delete a named query                                |
 | `site_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
+| `site_sql_run`          | one named query with params, as a Site page runs it (`site.sql.run`)    |
 | `site_sql_execute`      | one write statement (schema changes go through migrations)             |
 | `site_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
 | `site_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
 | `site_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
 
-Every route and tool needs the manager role on the Site; read tools also
-need `artifacts:read` and the rest `artifacts:publish`. The tools are only
+Every route and tool except `site_sql_run` needs the manager role on the
+Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
+`site_sql_run` needs `artifacts:read` and applies the query's audience to the
+agent as to a page viewer (managers run every query). The tools are only
 registered when the gateway origin and secret are configured.
+
+An agent started from a Site page (its session, spawning lineage or current
+turn came from the page) gets the page's reach, as with Site Data: every
+management tool and route refuses it (`forbidden`), and `site_sql_run` runs
+only the named queries the page itself could run, on that Site only, with
+`:viewer` bound to the agent's person.
 
 Exports come in pieces: one response holds about `maxBytes` (16 MiB at most;
 the HTTP route defaults to 1 MiB for SQL, so every piece re-imports in one

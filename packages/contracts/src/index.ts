@@ -1103,6 +1103,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_sql_migrate",
   "site_sql_define_query",
   "site_sql_query",
+  "site_sql_run",
   "site_sql_execute",
   "site_sql_export",
   "site_sql_import",

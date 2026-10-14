@@ -284,6 +284,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   site_sql_migrate: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_sql_define_query: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_sql_query: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_sql_run: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_sql_execute: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_sql_export: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_sql_import: { sessionRequired: true, allOf: ["artifacts:publish"] },

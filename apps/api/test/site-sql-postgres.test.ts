@@ -629,7 +629,13 @@ test("published hosts run named queries as the verified viewer; guests only ever
   const gateway = async (
     method: string,
     path: string,
-    options: { body?: unknown; visitor?: string; session?: string } = {},
+    options: {
+      body?: unknown;
+      visitor?: string;
+      session?: string;
+      clientIp?: string;
+      sentBody?: string;
+    } = {},
   ) => {
     const pathWithQuery = `/v1/site-runtime${path}`;
     const body = options.body === undefined ? "" : JSON.stringify(options.body);
@@ -641,16 +647,22 @@ test("published hosts run named queries as the verified viewer; guests only ever
       body,
       ...(options.visitor ? { visitor: options.visitor } : {}),
       ...(options.session ? { session: options.session } : {}),
-      clientIp: "198.51.100.7",
+      clientIp: options.clientIp ?? "198.51.100.7",
     });
+    // `sentBody` replaces the signed body on the wire (a tampered request).
+    const sent = options.sentBody ?? body;
     const response = await f.app.request(pathWithQuery, {
       method,
-      headers: { ...signed, ...(body ? { "content-type": "application/json" } : {}) },
-      ...(body ? { body } : {}),
+      headers: { ...signed, ...(sent ? { "content-type": "application/json" } : {}) },
+      ...(sent ? { body: sent } : {}),
     });
     return { status: response.status, json: (await response.json().catch(() => null)) as any };
   };
-  const run = (name: string, params: Record<string, unknown>, who: Record<string, string>) =>
+  const run = (
+    name: string,
+    params: Record<string, unknown>,
+    who: { visitor?: string; session?: string; clientIp?: string; sentBody?: string },
+  ) =>
     gateway("POST", `/published-artifacts/current/sql/queries/${name}`, {
       body: { params },
       ...who,
@@ -736,6 +748,31 @@ test("published hosts run named queries as the verified viewer; guests only ever
     else expect(signed.status, JSON.stringify(signed.json)).toBe(200);
   }
   expect(addressFlooded?.json.error.details).toMatchObject({ bucket: "guest_writes" });
+  // IPv6 clients count per /64: new addresses in the same /64 share one budget.
+  let prefixFlooded: Awaited<ReturnType<typeof run>> | null = null;
+  for (let attempt = 0; attempt < 12 && !prefixFlooded; attempt += 1) {
+    const fresh = {
+      visitor: randomBytes(18).toString("base64url"),
+      clientIp: `2001:db8:7:1:${(attempt + 1).toString(16)}::${attempt + 2}`,
+    };
+    const signed = await run("sign_guestbook", { note: `v6 ${attempt}` }, fresh);
+    if (signed.status === 429) prefixFlooded = signed;
+    else expect(signed.status, JSON.stringify(signed.json)).toBe(200);
+  }
+  expect(prefixFlooded?.json.error.details).toMatchObject({ bucket: "guest_writes" });
+
+  // sql.run goes through the gateway signature like every site-runtime call:
+  // a body that is not the signed one is refused before anything runs.
+  const tampered = await run(
+    "results",
+    { poll: "lunch" },
+    {
+      ...guest,
+      sentBody: JSON.stringify({ params: { poll: "dinner" } }),
+    },
+  );
+  expect(tampered.status, JSON.stringify(tampered.json)).toBe(401);
+  expect(tampered.json.error.details).toMatchObject({ reason: "body_mismatch" });
 
   // The publication's limit profile decides the Site SQL limits.
   expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
@@ -777,22 +814,33 @@ const SQL_TOOLS = [
   "site_sql_migrate",
   "site_sql_define_query",
   "site_sql_query",
+  "site_sql_run",
   "site_sql_execute",
   "site_sql_export",
   "site_sql_import",
   "site_sql_reset",
 ];
 
-test("an agent acting for the owner manages Site SQL with the tools", async () => {
-  const f = await fixture();
-  const siteId = await f.publish("Agent dashboard");
+/**
+ * An agent attempt acting for the owner with the Site SQL tools. `metadata`
+ * (a Site origin), `surface` and `parentSessionId` make it an agent started
+ * from a Site page.
+ */
+async function agentTools(
+  f: Awaited<ReturnType<typeof fixture>>,
+  options: {
+    metadata?: Record<string, unknown>;
+    surface?: string | null;
+    parentSessionId?: string;
+  } = {},
+) {
   const session = await createSession(db.db, {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
     initialMessage: "Build a dashboard",
     resources: [],
     tools: [],
-    metadata: {},
+    metadata: options.metadata ?? {},
     model: "gpt-5.6-sol",
     reasoningEffort: "medium",
     latencyMode: "standard",
@@ -802,11 +850,12 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context, surface
     ) VALUES (
       ${f.accountId}, ${f.workspace.id}, ${session.id}, gen_random_uuid(),
       ${`site-sql-wf-${crypto.randomUUID()}`}, 'running', 0, 'Build a dashboard',
-      'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${f.owner.subjectId}, '{"accepted":true}'::jsonb
+      'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${f.owner.subjectId}, '{"accepted":true}'::jsonb,
+      ${options.surface ?? null}
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (tx) => {
@@ -822,6 +871,13 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
         'running', 'site-sql-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
       )`;
   });
+  if (options.parentSessionId) {
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`UPDATE sessions SET parent_session_id = ${options.parentSessionId!}
+        WHERE id = ${session.id}`;
+    });
+  }
   const grant: AccessGrant = {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
@@ -854,6 +910,13 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
     }
     return { isError: result.isError === true, value };
   };
+  return { session, grant, mcp, callTool };
+}
+
+test("an agent acting for the owner manages Site SQL with the tools", async () => {
+  const f = await fixture();
+  const siteId = await f.publish("Agent dashboard");
+  const { grant, mcp, callTool } = await agentTools(f);
   try {
     expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
       [...SQL_TOOLS].sort(),
@@ -892,6 +955,10 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
       sql: "SELECT day, visits FROM metrics ORDER BY day DESC LIMIT :limit",
       audience: "everyone",
     });
+    // The agent runs a named query as a page would.
+    expect((await ok("site_sql_run", { name: "recent", params: { limit: 1 } })).rows).toEqual([
+      { day: "2026-10-14", visits: 13 },
+    ]);
     const inspected = await ok("site_sql_inspect", {});
     expect(inspected.database.tables[0]).toMatchObject({ name: "metrics", rowCount: 2 });
     expect(inspected.queries[0]).toMatchObject({ name: "recent", params: ["limit"] });
@@ -928,6 +995,111 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
       (bare as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
     ).filter((name) => name.startsWith("site_sql_")),
   ).toEqual([]);
+}, 120_000);
+
+test("agents started from a Site page run only the queries the page could", async () => {
+  const f = await fixture();
+  const siteId = await f.publish("Notes");
+  const otherId = await f.publish("Other notes");
+  for (const id of [siteId, otherId]) {
+    const s = f.sql(id);
+    expect((await s.enable(f.owner)).status).toBe(200);
+    expect(
+      (await s.migrate(f.owner, "init", "CREATE TABLE notes (who TEXT NOT NULL, note TEXT);"))
+        .status,
+    ).toBe(201);
+    for (const [name, definition] of [
+      [
+        "add",
+        { sql: "INSERT INTO notes (who, note) VALUES (:viewer, :note)", audience: "signed_in" },
+      ],
+      ["mine", { sql: "SELECT note FROM notes WHERE who = :viewer ORDER BY rowid" }],
+      ["everything", { sql: "SELECT who, note FROM notes ORDER BY rowid", audience: "managers" }],
+    ] as const)
+      expect((await s.define(f.owner, name, definition)).status).toBe(201);
+  }
+  const s = f.sql(siteId);
+  expect((await s.run(f.member, "add", { note: "member" })).status).toBe(200);
+  const origin = { _opengeniSiteOrigin: { siteId, title: "Notes" } };
+
+  const checkClamped = async (agent: Awaited<ReturnType<typeof agentTools>>, note: string) => {
+    // Every management tool refuses an agent started from the page.
+    for (const [tool, args] of [
+      ["site_sql_inspect", {}],
+      ["site_sql_enable", { enabled: false }],
+      ["site_sql_migrate", { name: "more", sql: "CREATE TABLE more (a);" }],
+      ["site_sql_define_query", { name: "x", sql: "SELECT 1 AS one" }],
+      ["site_sql_query", { sql: "SELECT * FROM notes" }],
+      ["site_sql_execute", { sql: "DELETE FROM notes" }],
+      ["site_sql_export", { format: "json" }],
+      ["site_sql_import", { format: "json", table: "notes", rows: [{ who: "x", note: "y" }] }],
+      ["site_sql_reset", { confirm: true }],
+    ] as const) {
+      const refused = await agent.callTool(tool, { siteId, ...args });
+      expect({ tool, isError: refused.isError, code: refused.value?.error?.code }).toEqual({
+        tool,
+        isError: true,
+        code: "forbidden",
+      });
+    }
+    // Named queries run with the page's reach: :viewer is the agent's person.
+    const added = await agent.callTool("site_sql_run", {
+      siteId,
+      name: "add",
+      params: { note },
+    });
+    expect(added.isError, JSON.stringify(added.value)).toBe(false);
+    expect(added.value.rowsWritten).toBe(1);
+    const mine = await agent.callTool("site_sql_run", { siteId, name: "mine" });
+    expect(mine.isError, JSON.stringify(mine.value)).toBe(false);
+    expect(mine.value.rows.map((row: { note: string }) => row.note)).toContain(note);
+    expect(mine.value.rows.map((row: { note: string }) => row.note)).not.toContain("member");
+    // Managers-only queries stay out of reach, as on the page.
+    const everything = await agent.callTool("site_sql_run", { siteId, name: "everything" });
+    expect(everything.isError).toBe(true);
+    expect(everything.value.error.code).toBe("forbidden");
+    // Another Site is out of reach.
+    const elsewhere = await agent.callTool("site_sql_run", { siteId: otherId, name: "mine" });
+    expect(elsewhere.isError).toBe(true);
+    expect(elsewhere.value.error.code).toBe("forbidden");
+  };
+
+  // A session the page created.
+  const fromPage = await agentTools(f, { metadata: origin });
+  try {
+    await checkClamped(fromPage, "from the page");
+  } finally {
+    await fromPage.mcp.close();
+  }
+  // A worker spawned by that session inherits the clamp through its lineage.
+  const worker = await agentTools(f, { parentSessionId: fromPage.session.id });
+  try {
+    await checkClamped(worker, "from a worker");
+  } finally {
+    await worker.mcp.close();
+  }
+  // A message the page sent into a session without a Site origin reaches no Site SQL.
+  const sent = await agentTools(f, { surface: "site" });
+  try {
+    const refused = await sent.callTool("site_sql_run", { siteId, name: "mine" });
+    expect(refused.isError).toBe(true);
+    expect(refused.value.error.code).toBe("forbidden");
+  } finally {
+    await sent.mcp.close();
+  }
+  // The same owner's agent outside any Site keeps manager reach.
+  const plain = await agentTools(f);
+  try {
+    const everything = await plain.callTool("site_sql_run", { siteId, name: "everything" });
+    expect(everything.isError, JSON.stringify(everything.value)).toBe(false);
+    expect(everything.value.rows.map((row: { note: string }) => row.note)).toEqual([
+      "member",
+      "from the page",
+      "from a worker",
+    ]);
+  } finally {
+    await plain.mcp.close();
+  }
 }, 120_000);
 
 /** Calls the API makes to the gateway while `fn` runs: the operation and its JSON body. */

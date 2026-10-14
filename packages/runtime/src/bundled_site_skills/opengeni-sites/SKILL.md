@@ -451,6 +451,7 @@ keyset.
 
 Owner tools: `site_sql_inspect` (tables, migrations, pending migrations,
 queries, usage, limits), `site_sql_query` (one read-only statement),
+`site_sql_run` (one named query with params, exactly as the page runs it),
 `site_sql_execute` (one write), `site_sql_export` (`sql`, `csv` for one table,
 or `json`; works while the database is off; returns at most `maxBytes`,
 512 KB by default: while `nextCursor` is set, call again with it as `cursor`

@@ -4,6 +4,7 @@ import {
   SiteSqlImportRequest,
   SiteSqlQueryDefinitionRequest,
   SiteSqlResetRequest,
+  SiteSqlRunRequest,
   SiteSqlStatementRequest,
   type AccessGrant,
 } from "@opengeni/contracts";
@@ -18,6 +19,7 @@ import {
   inspectSiteSql,
   migrateSiteSql,
   resetSiteSql,
+  runSiteSqlQuery,
   runSiteSqlStatement,
   setSiteSqlSettings,
   SiteSqlError,
@@ -39,9 +41,12 @@ const SITE_SQL_TOOL_EXPORT_MAX_BYTES = 2 * 1024 * 1024;
 /**
  * First-party Site SQL tools: optional per-Site Cloudflare storage (one SQLite
  * database per Site). Only the Site's managers (its owner, a workspace admin,
- * or an agent acting for them) can use them; Site pages call named queries
- * with site.sql.run. The tools act with the agent's own authority, through
- * the same service as the HTTP routes.
+ * or an agent acting for them) can manage it; Site pages call named queries
+ * with site.sql.run, and so can agents with site_sql_run. The tools act with
+ * the agent's own authority, through the same service as the HTTP routes. An
+ * agent started from a Site page gets that page's reach (resolveSiteDataAccess):
+ * every management tool refuses it, and site_sql_run runs only the named
+ * queries the page itself could run, on that Site.
  */
 export function registerSiteSqlTools(
   server: McpServer,
@@ -198,6 +203,28 @@ export function registerSiteSqlTools(
           },
           "read",
         ),
+    ),
+  );
+
+  server.registerTool(
+    "site_sql_run",
+    {
+      description:
+        "Run one of a Site's named queries by name, as a Site page does with site.sql.run(name, params). The query's audience applies to you as it would to the page's viewer; :viewer and the other principal parameters are bound from you, not from params. Use site_sql_inspect to list the queries.",
+      inputSchema: contractToolInput(
+        z4.object({
+          siteId: SiteIdInput,
+          name: NameInput.describe("The named query, as defined with site_sql_define_query."),
+          ...SiteSqlRunRequest.shape,
+        }),
+      ),
+    },
+    call(
+      (args: {
+        siteId: string;
+        name: string;
+        params?: Record<string, string | number | boolean | null> | undefined;
+      }) => runSiteSqlQuery(deps, grant, args.siteId, args.name, args.params ?? {}),
     ),
   );
 
