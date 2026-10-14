@@ -92,6 +92,10 @@ holds the rows. `src/site-db.ts` serves the internal route the API calls:
 - `no-store`, no cookies; another method, a bad path, a query string, a body
   over 8 MB or a bad signature is refused before the Durable Object is
   touched. Outside development the route needs https.
+- `migrate` takes an optional `position` per migration (its Postgres
+  ordinal), so the API can send only the missing ones in bounded calls;
+  `inspect` takes `migrationsOnly`; every `export` page carries the schema,
+  so the API can end a dump (triggers last) on whichever page finishes it.
 
 The API has already authorized the caller, applied limits and resolved
 named queries; the Durable Object still re-checks every statement with

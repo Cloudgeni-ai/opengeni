@@ -508,7 +508,14 @@ export const SITE_SQL_HARD_LIMITS = Object.freeze({
   storageBytesPerSite: 5 * 1024 * 1024 * 1024,
   exportBytesPerCall: 4 * 1024 * 1024,
   importRowsPerCall: 5_000,
+  /** UTF-8 bytes of SQL all of a Site's migrations hold together, so a rebuild fits in bounded calls. */
+  migrationBytesPerSite: 6 * 1024 * 1024,
+  /** Bytes one export call returns at most; follow nextCursor for the rest. */
+  exportBytesPerResponse: 16 * 1024 * 1024,
 });
+
+/** Response header of the HTTP export: the cursor of the next piece, when there is one. */
+export const SITE_SQL_EXPORT_NEXT_CURSOR_HEADER = "X-OpenGeni-Export-Next-Cursor";
 
 /**
  * Effective Site SQL limits for one Site. Null means no Opengeni cap (the
@@ -552,8 +559,10 @@ export type SiteSqlParams = z.infer<typeof SiteSqlParams>;
 /**
  * Who may run a named query from a Site page:
  * - everyone: every viewer, including anonymous guests of public Sites;
- * - signed_in: viewers who are signed in (workspace members, invited people
- *   and, on public Sites, any signed-in user);
+ * - signed_in: viewers signed in as a person (workspace members, invited
+ *   people and, on public Sites, any signed-in user). Callers with no person
+ *   behind them (service keys, agents and schedules acting on their own) are
+ *   refused unless they manage the Site;
  * - managers: only the Site's managers, through agent tools and the console's
  *   Data view; Site pages cannot run it.
  */
@@ -573,7 +582,7 @@ export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
         "Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement (WITH allowed, not recursive). Use :name parameters; :viewer, :viewer_kind and :viewer_signed_in are bound by Opengeni from the signed-in viewer.",
       ),
     audience: SiteSqlQueryAudience.optional().describe(
-      "everyone (including anonymous guests of public Sites), signed_in (default) or managers.",
+      "everyone (including anonymous guests of public Sites), signed_in (default: viewers signed in as a person) or managers.",
     ),
     description: z.string().max(2000).optional().describe("What the query is for."),
     maxRows: z
@@ -778,8 +787,14 @@ export type SiteSqlMigrateResponse = {
 export type SiteSqlImportResponse = {
   /** Rows inserted (csv, json) or data statements run (sql). */
   imported: number;
-  /** The migration a sql import recorded for its schema statements, if any. */
+  /** The migration a sql import recorded for its schema statements (before the data), if any. */
   migration: string | null;
+  /**
+   * Every migration a sql import recorded, in order: its schema statements
+   * before the data, then its triggers after the data (so they do not fire
+   * on imported rows).
+   */
+  migrations: string[];
   rowsWritten: number;
 };
 
@@ -831,11 +846,22 @@ export type SiteDbRunRequest = SiteDbBase & {
 export type SiteDbScriptRequest = SiteDbBase & { sql: string; maxDatabaseBytes: number };
 
 export type SiteDbMigrateRequest = SiteDbBase & {
-  migrations: Array<{ name: string; sql: string; checksum: string }>;
-  /** Delete everything first, then apply every migration (rebuild from Postgres). */
+  /**
+   * Migrations to apply in order; ones already applied (same checksum) are
+   * skipped. `position` is the migration's ordinal in Postgres, so the
+   * database keeps the order when the API sends only the missing ones.
+   */
+  migrations: Array<{ name: string; sql: string; checksum: string; position?: number }>;
+  /**
+   * Delete everything first, then apply these migrations (the first call of
+   * a rebuild from Postgres; later calls send the rest without it).
+   */
   rebuild?: boolean;
   maxDatabaseBytes: number;
 };
+
+/** Inspect; `migrationsOnly` skips the tables (and their row counts). */
+export type SiteDbInspectRequest = SiteDbBase & { migrationsOnly?: boolean };
 
 export type SiteDbInsertRequest = SiteDbBase & {
   table: string;
@@ -877,6 +903,7 @@ export type SiteDbRunResponse = SiteDbMeter & {
 export type SiteDbMigrateResponse = SiteDbMeter & { applied: string[] };
 
 export type SiteDbExportResponse = SiteDbMeter & {
+  /** The whole database schema, on every page. */
   schema: SiteDbSchemaEntry[];
   /** Row values in column order; blobs as `{ "$base64": "..." }`. */
   tables: Array<{ name: string; columns: string[]; rows: unknown[][] }>;

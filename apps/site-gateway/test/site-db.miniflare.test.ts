@@ -350,7 +350,9 @@ describe("internal Site database route", () => {
       cursor = page.nextCursor;
     } while (cursor && pages.length < 10);
     expect(pages[0]!.schema.map((entry) => entry.name)).toEqual(["votes", "votes_choice", "notes"]);
-    expect(pages.slice(1).every((page) => page.schema.length === 0)).toBe(true);
+    // Every page carries the schema, so the API can end a dump on any page.
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.every((page) => page.schema.length === pages[0]!.schema.length)).toBe(true);
     const rowsByTable = new Map<string, unknown[][]>();
     for (const page of pages)
       for (const table of page.tables)
@@ -377,6 +379,14 @@ describe("internal Site database route", () => {
     });
     expect(inspect.indexes.map((entry) => entry.name)).toEqual(["votes_choice"]);
     expect(inspect.migrations.map((entry) => entry.name)).toEqual(["create_votes", "create_notes"]);
+    const migrationsOnly = await ok<SiteDbInspectResponse>(
+      await call(SITE, "inspect", { migrationsOnly: true }),
+    );
+    expect(migrationsOnly.tables).toEqual([]);
+    expect(migrationsOnly.migrations.map((entry) => entry.name)).toEqual([
+      "create_votes",
+      "create_notes",
+    ]);
   });
 
   test("each Site has its own database", async () => {
@@ -402,5 +412,37 @@ describe("internal Site database route", () => {
     const inspect = await ok<SiteDbInspectResponse>(await call(SITE, "inspect", {}));
     expect(inspect.tables).toEqual([]);
     expect(inspect.migrations).toEqual([]);
+    // Migrations sent in separate calls keep their Postgres positions.
+    const [first, second] = MIGRATIONS;
+    await ok(
+      await call(SITE, "migrate", {
+        migrations: [{ ...first!, position: 1 }],
+        rebuild: true,
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    const added = await ok<{ applied: string[] }>(
+      await call(SITE, "migrate", {
+        migrations: [{ ...second!, position: 2 }],
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    expect(added.applied).toEqual(["create_notes"]);
+    const positioned = await ok<SiteDbInspectResponse>(
+      await call(SITE, "inspect", { migrationsOnly: true }),
+    );
+    expect(positioned.migrations.map((entry) => entry.name)).toEqual([
+      "create_votes",
+      "create_notes",
+    ]);
+    expect(
+      await failure(
+        await call(SITE, "migrate", {
+          migrations: [{ ...second!, position: -1 }],
+          maxDatabaseBytes: MAX_DB,
+        }),
+      ),
+    ).toMatchObject({ code: "validation" });
+    await ok(await call(SITE, "reset", {}));
   });
 });

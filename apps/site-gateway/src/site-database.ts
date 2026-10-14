@@ -25,6 +25,7 @@ import {
   type SiteDbExportRequest,
   type SiteDbExportResponse,
   type SiteDbInsertRequest,
+  type SiteDbInspectRequest,
   type SiteDbInspectResponse,
   type SiteDbMeter,
   type SiteDbMigrateRequest,
@@ -205,7 +206,7 @@ export class SiteDatabase {
         case "export":
           return Response.json(this.export(body as SiteDbExportRequest));
         case "inspect":
-          return Response.json(this.inspect());
+          return Response.json(this.inspect(body as SiteDbInspectRequest));
       }
     } catch (error) {
       if (error instanceof SiteDbError) return errorResponse(error.code, error.message);
@@ -340,9 +341,16 @@ export class SiteDatabase {
         !isRecord(migration) ||
         typeof migration.name !== "string" ||
         typeof migration.sql !== "string" ||
-        typeof migration.checksum !== "string"
+        typeof migration.checksum !== "string" ||
+        (migration.position !== undefined &&
+          (typeof migration.position !== "number" ||
+            !Number.isInteger(migration.position) ||
+            migration.position < 0))
       )
-        throw new SiteDbError("validation", "Each migration needs a name, sql and checksum");
+        throw new SiteDbError(
+          "validation",
+          "Each migration needs a name, sql and checksum (and an optional whole-number position)",
+        );
       const compiled = compileSiteSql(migration.sql, "script");
       if (!compiled.ok)
         throw new SiteDbError("validation", `Migration ${migration.name}: ${compiled.message}`);
@@ -351,6 +359,7 @@ export class SiteDatabase {
       return {
         name: migration.name,
         checksum: migration.checksum,
+        position: migration.position,
         statements: compiled.statements,
       };
     });
@@ -363,7 +372,8 @@ export class SiteDatabase {
     const applied: string[] = [];
     let rowsRead = 0;
     let rowsWritten = 0;
-    for (const [position, migration] of migrations.entries()) {
+    for (const [index, migration] of migrations.entries()) {
+      const position = migration.position ?? index;
       const existing = this.sql
         .exec("SELECT checksum FROM _og_migrations WHERE name = ?", migration.name)
         .toArray()[0];
@@ -539,7 +549,9 @@ export class SiteDatabase {
         rowsRead += cursor.rowsRead;
       }
       return {
-        schema: position ? [] : schema,
+        // The schema is small and comes with every page, so the API can finish
+        // a dump (triggers last) from whichever page ends it.
+        schema,
         tables: out,
         nextCursor,
         ...this.meter(rowsRead, 0),
@@ -547,10 +559,11 @@ export class SiteDatabase {
     });
   }
 
-  private inspect(): SiteDbInspectResponse {
+  private inspect(body: SiteDbInspectRequest): SiteDbInspectResponse {
+    const migrationsOnly = body.migrationsOnly === true;
     return guarded(() => {
       let rowsRead = 0;
-      const schema = this.schema();
+      const schema = migrationsOnly ? [] : this.schema();
       const tables = schema
         .filter((entry) => entry.type === "table" || entry.type === "view")
         .map((entry) => {
