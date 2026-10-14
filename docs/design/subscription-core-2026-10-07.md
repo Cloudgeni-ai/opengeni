@@ -1126,7 +1126,10 @@ always stays after them.
   The next check is the earliest reset placement knows (authoritative); else
   the earliest end of a health quarantine, if sooner than the bounded
   control-plane backoff (1 minute doubling to 15). A check never calls the
-  provider; it only evaluates placement.
+  provider; it only evaluates placement. (Amended 2026-10-14: OpenAI can
+  reset a Codex limit before the reset it reported, so Codex waiters now
+  recheck on the bounded backoff and re-read `/wham/usage` before each
+  reconcile; see "Waits that can end before their reset" under X1b.)
 - **Reconcile.** Two steps. Placement is evaluated for the exact accepted
   turn without leasing or writing (`evaluateSubscriptionCoreCodexPlacement`),
   then the waiter is settled under the session row locks: `run` makes the
@@ -4630,8 +4633,17 @@ SuperGrok on the core:
   organization would sleep until the end of the credit period after credits
   were back. The personal probe receives that exact identity as
   `personalTurn`; ownerless or shared-only accepted work cannot borrow a
-  person's connection. Codex
-  waiters are unchanged: they sleep until an authoritative reset. The waiter
+  person's connection. Codex waiters do the same (amended 2026-10-14):
+  OpenAI can reset a limit before the reset `/wham/usage` reported, and a
+  waiter that slept until that stale reset stayed parked for days after
+  capacity was back. The Codex adapter declares
+  `usageReadEndsQuotaExhaustion` (its usage reading is complete, so a
+  reading below the limit also ends a refusal's stored quota deadline), and
+  its binding's `refreshBeforeReconcile` re-reads usage through the same
+  core probe as the usage refresh route. Each connection is re-read at most
+  once per 30 minutes (`CODEX_CORE_USAGE_RECHECK_MIN_INTERVAL_MS`, measured
+  from the stored quota's last write) however many waiters recheck, so an
+  early reset resumes a parked turn within about 45 minutes. The waiter
   vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
   conformance suite checks that the two agree.
 - Compaction: X1b adds no compaction change. A compaction turn whose
@@ -5873,7 +5885,7 @@ like C1a.
   (only a Claude core waiter), then the legacy Claude waiter. Compaction
   never parks (C1a). The shared conformance suite runs its session-wait
   scenarios for both Claude subjects.
-  A Claude core waiter sleeps until its stored reset, as Codex's does
+  A Claude core waiter sleeps until its stored reset
   (`recheckBeforeReset: false`): the Claude adapter reads no usage that can
   end an exhaustion early (its quota comes from response headers, so it
   does not declare `usageReadEndsQuotaExhaustion`), and its wait binding has

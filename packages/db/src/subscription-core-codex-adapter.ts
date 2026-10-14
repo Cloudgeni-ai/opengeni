@@ -200,6 +200,10 @@ export function subscriptionCoreCodexAdapter(
     },
     // /wham/usage reports every Codex limit window (today's merge replaces them).
     usageReadingsComplete: true,
+    // It is also authoritative for the limit itself: OpenAI can reset a limit
+    // before the reset it reported, and a reading below the limit then ends a
+    // refusal's stored quota deadline too.
+    usageReadEndsQuotaExhaustion: true,
   };
 }
 
