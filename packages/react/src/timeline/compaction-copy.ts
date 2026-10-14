@@ -3,6 +3,18 @@ import type { ContextCompactionItem } from "./types";
 /** Headline for a compaction that could not produce a checkpoint. */
 export const COMPACTION_FAILURE_TITLE = "Couldn’t compact conversation history";
 
+/**
+ * Headline for a compaction cut short by its own attempt's cancellation (for
+ * example a worker restarting during a deploy). Not a failure: the recovered
+ * attempt checks again and compacts if the history still needs it.
+ */
+export const COMPACTION_INTERRUPTED_TITLE = "Compaction interrupted";
+
+/** Headline for a settled `skipped` compaction landmark. */
+export function compactionSkipTitle(reason: string | null): string {
+  return reason === "interrupted" ? COMPACTION_INTERRUPTED_TITLE : COMPACTION_FAILURE_TITLE;
+}
+
 /** Why a definitive provider rejection repeats; shown behind Details. */
 export const COMPACTION_REJECTION_NOTE =
   "The provider rejects this request the same way until the conversation changes.";
@@ -25,6 +37,8 @@ export function compactionSkipSubtitle(
       return "Checkpoint exceeds this model's context budget. Chat history is unchanged.";
     case "replacement_unchanged":
       return "Checkpoint made no progress";
+    case "interrupted":
+      return "It will retry if still needed. Chat history is unchanged.";
     case "summarization_failed":
       return providerRejection
         ? "Chat history is unchanged. If your next message fails too, start a new session."

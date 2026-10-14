@@ -334,6 +334,40 @@ describe("context compaction rendering", () => {
       await r.unmount();
     }
   });
+
+  test("a compaction cut short by worker shutdown reads as interrupted, not failed", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("turn.started", {}),
+          timelineEvent("session.context.compaction.started", {
+            trigger: "proactive",
+            implementation: "responses_compaction_v2",
+            estimatedTokensBefore: 291_549,
+          }),
+          timelineEvent("session.context.compaction.skipped", { reason: "interrupted" }),
+          timelineEvent("turn.recovery.requested", { reason: "worker_shutdown" }),
+        ]}
+        status="recovering"
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Compaction interrupted"),
+      );
+      expect(status?.textContent).toContain("Compaction interrupted · Auto");
+      expect(status?.textContent).toContain(
+        "It will retry if still needed. Chat history is unchanged.",
+      );
+      expect(status?.className).not.toContain("og-status-failed");
+      expect(r.container.textContent).not.toContain("Couldn’t compact conversation history");
+      expect(r.container.querySelector("[data-og-compaction-details]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
 });
 
 describe("structured human-input history", () => {

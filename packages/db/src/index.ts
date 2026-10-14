@@ -40254,7 +40254,13 @@ export async function recordSkippedContextCompaction(
       | "replacement_not_smaller"
       | "replacement_exceeds_model_budget"
       | "replacement_unchanged"
-      | "summarization_failed";
+      | "summarization_failed"
+      /**
+       * The attempt was cancelled (worker shutdown or another activity
+       * cancellation) while the checkpoint request was in flight. Not a
+       * provider or summarizer failure; the recovered attempt re-evaluates.
+       */
+      | "interrupted";
     /**
      * When false, record the visible skip even if no operator `/compact` is
      * pending (auto/overflow paths that already emitted `compaction.started`).

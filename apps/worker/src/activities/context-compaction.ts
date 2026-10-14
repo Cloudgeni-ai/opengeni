@@ -297,6 +297,44 @@ export async function settleFailedContextCompactionLandmark(
   return settled;
 }
 
+/**
+ * After `compaction.started`, record that the checkpoint request was cut short
+ * by the attempt's own cancellation (graceful worker shutdown, or any other
+ * activity cancellation) rather than by a provider or summarizer failure.
+ *
+ * Unlike {@link settleFailedContextCompactionLandmark}, this never consumes an
+ * operator `/compact` request: the recovered attempt of the same turn
+ * re-evaluates, exactly as when a Pause has already fenced the attempt. A
+ * fence rejection is not an error here: the control that closed the attempt
+ * owns the outcome, so the caller's cancellation must keep propagating.
+ */
+export async function settleInterruptedContextCompactionLandmark(
+  db: Database,
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+  options: {
+    publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+  } = {},
+): Promise<{ recorded: boolean; events: SessionEvent[] }> {
+  const skipped = await recordSkippedContextCompaction(db, {
+    ...scope,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    reason: "interrupted",
+    requirePendingRequest: false,
+    clearRequestedCompaction: false,
+  });
+  if (!skipped.recorded) return { recorded: false, events: [] };
+  await options.publishLiveEvents?.(skipped.events);
+  return { recorded: true, events: skipped.events };
+}
+
 function prependCompactionEvents(
   prefix: SessionEvent[],
   outcome: MaybeCompactResult,
