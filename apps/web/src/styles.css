@@ -502,3 +502,64 @@ body {
 .capability-search-section > section {
   margin-top: 0;
 }
+
+/* ---------------------------------------------------------------------------
+   Desktop app (html[data-desktop="macos" | "windows" | "linux"])
+   The desktop shell shows this app in a native window: title areas drag the
+   window, and on macOS the rail lets the window's sidebar material through.
+   --------------------------------------------------------------------------- */
+html[data-desktop] [data-window-drag] {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+html[data-desktop] [data-window-drag] :is(a, button, input, select, textarea, label, summary, [role="button"], [role="menuitem"], [role="tab"], [contenteditable], [tabindex]) {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* A thin strip along the top of the canvas drags the window on pages without
+   a header of their own. */
+html[data-desktop] [data-canvas] {
+  position: relative;
+}
+
+html[data-desktop] [data-canvas]::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 60;
+  height: 10px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+html[data-desktop="macos"],
+html[data-desktop="macos"] body {
+  background-color: transparent;
+}
+
+@layer components {
+  html[data-desktop="macos"] .og-rail-glow {
+    background:
+      radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal-quiet), transparent 85%),
+      radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach-quiet), transparent 85%),
+      color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+  }
+}
+
+/* Windows and Linux draw the window controls over the top-right corner. */
+html[data-desktop="windows"] [data-canvas],
+html[data-desktop="linux"] [data-canvas] {
+  padding-top: env(titlebar-area-height, 0px);
+}
+
+/* macOS draws the traffic lights over the rail's top-left corner: the brand
+   row starts after them, and a collapsed rail moves below them. */
+html[data-desktop="macos"] nav[data-collapsed="false"] [data-rail-brand] {
+  padding-left: 76px;
+}
+
+html[data-desktop="macos"] nav[data-collapsed="true"] [data-rail-header] {
+  padding-top: 40px;
+}

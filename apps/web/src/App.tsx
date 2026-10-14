@@ -99,6 +99,7 @@ import {
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
 } from "@/lib/workspace-navigation-preference";
+import { installDesktopShell } from "@/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -849,6 +850,7 @@ const router = createRouter({
   ...ROUTER_PENDING_OPTIONS,
   ...routerErrorOptions(() => appRoutePattern()),
 });
+installDesktopShell((path) => router.history.push(path));
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {

@@ -41,8 +41,10 @@ export function RailHeader() {
     </Tooltip>
   ) : null;
   return (
-    <div className="flex shrink-0 flex-col gap-3 pt-3">
+    <div data-rail-header className="flex shrink-0 flex-col gap-3 pt-3">
       <div
+        data-rail-brand
+        data-window-drag
         className={cn(
           "flex h-8 min-w-0 items-center gap-2",
           rail.collapsed ? "justify-center px-2" : "justify-between px-2",

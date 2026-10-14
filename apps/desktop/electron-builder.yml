@@ -6,7 +6,7 @@ productName: Opengeni
 copyright: Copyright © Opengeni
 directories:
   output: release
-  buildResources: build
+  buildResources: resources
 files:
   - dist/**
   - "!dist/**/*.map"
@@ -40,11 +40,11 @@ mac:
       arch: [universal]
     - target: zip
       arch: [universal]
-  icon: build/icon.png
+  icon: resources/icon.png
   hardenedRuntime: true
   gatekeeperAssess: false
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.plist
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
   minimumSystemVersion: "12.0"
   extendInfo:
     NSMicrophoneUsageDescription: Opengeni uses the microphone when you dictate or talk to an agent.
@@ -59,7 +59,7 @@ win:
   target:
     - target: nsis
       arch: [x64, arm64]
-  icon: build/icon.png
+  icon: resources/icon.png
 nsis:
   oneClick: true
   perMachine: false
@@ -72,7 +72,7 @@ linux:
       arch: [x64, arm64]
     - target: rpm
       arch: [x64, arm64]
-  icon: build/icon.png
+  icon: resources/icon.png
   category: Development
   executableName: opengeni
   artifactName: Opengeni-${version}-linux-${arch}.${ext}
