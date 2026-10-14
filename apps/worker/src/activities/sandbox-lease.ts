@@ -104,6 +104,7 @@ import {
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
 import {
+  SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
   sandboxArchiveCaptureTimeoutMs,
   sandboxDeadlineMandatoryCaptureLeadMs,
   sandboxWarmRateMicrosPerSecond,
@@ -447,6 +448,9 @@ export async function awaitProviderCaptureWithLatePublication<T>(input: {
   publishLate: (value: T) => Promise<void>;
   observeLateFailure: (error: unknown) => void;
   observeLatePublicationFailure: (error: unknown) => void;
+  /** Called once the detached late path has fully settled (after publication
+   * or failure handling), never on the in-budget path. */
+  onLateSettled?: () => void;
 }): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutError = input.timeoutError;
@@ -464,9 +468,17 @@ export async function awaitProviderCaptureWithLatePublication<T>(input: {
     // durable archive publication: never provider teardown or a cold commit from
     // an activity Temporal has already rejected. A replaced claim fences this
     // callback; Modal candidates then flow to artifact-ledger GC.
+    const settled = () => {
+      try {
+        input.onLateSettled?.();
+      } catch {
+        // Settlement bookkeeping cannot surface as an unhandled rejection.
+      }
+    };
     void input.capture
       .then(input.publishLate, input.observeLateFailure)
-      .catch(input.observeLatePublicationFailure);
+      .catch(input.observeLatePublicationFailure)
+      .then(settled, settled);
     throw error;
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -542,6 +554,70 @@ type SandboxDrainCaptureAttempt = {
 
 class SandboxDrainRecoveryDeferredError extends Error {
   readonly name = "SandboxDrainRecoveryDeferredError";
+}
+
+/** The abort reason of a drain capture stopped at its snapshot budget. Local
+ * host-backed reads reject with it at their next chunk, which is the physical
+ * end of the capture; a provider-native persist call ignores it once started. */
+export class SandboxDrainCaptureStoppedError extends Error {
+  readonly name = "SandboxDrainCaptureStoppedError";
+
+  constructor(
+    public readonly sandboxGroupId: string,
+    public readonly leaseEpoch: number,
+    public readonly timeoutMs: number,
+  ) {
+    super(
+      `sandbox ${sandboxGroupId} epoch ${leaseEpoch} drain workspace capture was stopped ` +
+        `at its ${timeoutMs}ms budget`,
+    );
+  }
+}
+
+/**
+ * Drain captures still physically running in this worker, keyed by exact lease
+ * epoch and provider instance. A parallel-read provider (Docker, for one) lets
+ * the next attempt replace an unpublished claim at once, and a capture that
+ * outlived its budget keeps running for late publication. Without this, every
+ * retry started another full read of the same workspace while the earlier ones
+ * were still reading and spooling it. The durable claim fences publication
+ * across workers; this fences physical work inside one. An entry older than the
+ * longest durable capture window no longer defers, so a provider call that
+ * never settles cannot pin the lease to this worker forever.
+ */
+const settlingDrainCaptures = new Map<string, { startedAtMs: number }>();
+
+type DrainCaptureIdentity = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string | null;
+};
+
+function drainCaptureKey(lease: DrainCaptureIdentity & { instanceId: string }): string {
+  return JSON.stringify([lease.sandboxGroupId, lease.leaseEpoch, lease.instanceId]);
+}
+
+/** True while this worker still runs (or publishes, or removes the spool of)
+ * a drain capture of this exact lease epoch and instance. */
+export function sandboxDrainCaptureSettlingInProcess(
+  lease: DrainCaptureIdentity,
+  nowMs = Date.now(),
+): boolean {
+  if (!lease.instanceId) return false;
+  const entry = settlingDrainCaptures.get(
+    drainCaptureKey({ ...lease, instanceId: lease.instanceId }),
+  );
+  return entry !== undefined && nowMs - entry.startedAtMs < SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS;
+}
+
+function trackSettlingDrainCapture(lease: DrainCaptureIdentity): () => void {
+  if (!lease.instanceId) return () => undefined;
+  const key = drainCaptureKey({ ...lease, instanceId: lease.instanceId });
+  const entry = { startedAtMs: Date.now() };
+  settlingDrainCaptures.set(key, entry);
+  return () => {
+    if (settlingDrainCaptures.get(key) === entry) settlingDrainCaptures.delete(key);
+  };
 }
 
 /** Stable UUID per logical operation + Temporal attempt. Attempt one uses the
@@ -3861,6 +3937,20 @@ async function terminateDrainableBox(
   }
 
   const captureTimeoutMs = attempt.captureTimeoutMs;
+  if (
+    managedProvider &&
+    !lease.archiveCapture?.publishedAt &&
+    sandboxDrainCaptureSettlingInProcess(lease)
+  ) {
+    // An earlier attempt's capture is still reading, publishing late, or
+    // removing its spool in this worker. Keep its claim (replacing it would
+    // fence that late publication) and do not start a second physical capture
+    // of the same workspace; retry once it has settled. An already published
+    // archive still resumes teardown immediately.
+    throw new SandboxDrainRecoveryDeferredError(
+      `sandbox ${row.sandboxGroupId} epoch ${row.leaseEpoch} still has a workspace capture settling in this worker`,
+    );
+  }
   let captureClaim:
     | NonNullable<
         Extract<Awaited<ReturnType<typeof claimWorkspaceArchiveCapture>>, { status: "claimed" }>
@@ -4762,17 +4852,41 @@ export async function terminateProviderBox(
           resolveModalCheckpointProviderBindingForSession(settings, session),
         )
       : null;
+  // Physical capture bookkeeping for this worker: released once the capture
+  // and its spool are settled, or by the late path that inherits them.
+  let releaseSettlingCapture: () => void = () => undefined;
   try {
     if (captureDisposition !== "archive_published" && session?.persistWorkspace) {
+      releaseSettlingCapture = trackSettlingDrainCapture(lease);
+      // Stop local reads at the same budget as the caller's wait. A host-backed
+      // spool capture rejects at its next chunk and removes its spool, so a
+      // retry never overlaps it; a provider-native persist call that already
+      // started ignores the signal and keeps the late publication below.
+      const captureAbort = new AbortController();
+      const captureAbortTimer = setTimeout(
+        () =>
+          captureAbort.abort(
+            new SandboxDrainCaptureStoppedError(
+              lease.sandboxGroupId,
+              lease.leaseEpoch,
+              settings.sandboxSnapshotTimeoutMs,
+            ),
+          ),
+        settings.sandboxSnapshotTimeoutMs,
+      );
+      captureAbortTimer.unref?.();
       const capture = captureWorkspaceArchiveForStorage(
         session,
         Date.now(),
         {
           requestId: providerCaptureRequestId ?? randomUUID(),
           strategy: liveCapturePolicy.strategy,
+          signal: captureAbort.signal,
         },
         diskBackedArchives,
       );
+      const stopCaptureAbortTimer = () => clearTimeout(captureAbortTimer);
+      void capture.then(stopCaptureAbortTimer, stopCaptureAbortTimer);
       verifiedArchive = await awaitProviderCaptureWithLatePublication({
         capture,
         timeoutMs: settings.sandboxSnapshotTimeoutMs,
@@ -4815,9 +4929,13 @@ export async function terminateProviderBox(
           void releaseAfterCaptureFailure();
           warnCaptureFailure("sandbox reaper: timed-out provider capture later failed", error);
         },
+        onLateSettled: () => releaseSettlingCapture(),
       });
     }
   } catch (error) {
+    // Every rejection except the caller's own timeout means the capture has
+    // settled; a timed-out capture is released by its late path instead.
+    if (!(error instanceof SandboxProviderCaptureTimeoutError)) releaseSettlingCapture();
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
       observability.info("sandbox reaper: box gone during workspace capture", {
         ...logIdentity,
@@ -4859,7 +4977,11 @@ export async function terminateProviderBox(
         checkpointBinding,
       ));
     } finally {
-      await disposeWorkspaceArchive(verifiedArchive);
+      try {
+        await disposeWorkspaceArchive(verifiedArchive);
+      } finally {
+        releaseSettlingCapture();
+      }
     }
     if (!wrote) {
       observability.info(
