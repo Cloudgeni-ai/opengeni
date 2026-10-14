@@ -8,6 +8,7 @@ import type {
   ComputerActionCommand,
   ComputerObservation,
 } from "@opengeni/contracts";
+import { ExistingComputerEnvironmentAllocator } from "../src/computer-environment";
 import { ComputerSupervisor } from "../src/computer-supervisor";
 import { createCuaComputerDriver } from "../src/cua/factory";
 
@@ -62,6 +63,8 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
         rootDirectory: join(root, "controller"),
         displaceExistingSessions: true,
         createDriver: createCuaComputerDriver,
+        // Mirrors the agent entrypoint: the existing Windows seat is used only with CUA.
+        environmentAllocator: new ExistingComputerEnvironmentAllocator({ allowWindows: true }),
       });
       const session = await supervisor.createSession(reference);
       expect(session.adapter).toBe("opengeni.cua.windows.v1");
