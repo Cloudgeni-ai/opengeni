@@ -40,7 +40,10 @@ describe("agents that predate secret values", () => {
 
   test("every device dispatch that carries secret values checks the controller first", () => {
     const sources = {
-      computer: readFileSync(new URL("../src/routes/computer-sessions.ts", import.meta.url), "utf8"),
+      computer: readFileSync(
+        new URL("../src/routes/computer-sessions.ts", import.meta.url),
+        "utf8",
+      ),
       browser: readFileSync(new URL("../src/routes/browser-sessions.ts", import.meta.url), "utf8"),
     };
     const expected = { computer: 2, browser: 1 };
