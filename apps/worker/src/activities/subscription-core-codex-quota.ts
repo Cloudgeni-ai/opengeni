@@ -6,6 +6,7 @@ import {
   type SubscriptionCoreTurnIdentity,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
+import { subscriptionPersonalAuthorityForProviderV2 } from "@opengeni/contracts";
 
 const CORE_SUBSCRIPTION_SERVICE_SUBJECT = "service:subscription-core";
 
@@ -13,7 +14,7 @@ const CORE_SUBSCRIPTION_SERVICE_SUBJECT = "service:subscription-core";
  * A stored Codex exhaustion is re-read at most this often per connection,
  * however many waiters recheck: each waiter rechecks on the bounded backoff
  * (at most every 15 minutes), so a parked turn sees an early provider reset
- * within about 45 minutes instead of at a stale reset days away.
+ * within about 50 minutes instead of at a stale reset days away.
  */
 export const CODEX_CORE_USAGE_RECHECK_MIN_INTERVAL_MS = 30 * 60_000;
 
@@ -101,7 +102,10 @@ export async function refreshExhaustedCodexCoreQuota(input: {
   if (
     personal &&
     claimProbeAttempt(
-      `${input.accountId}:${input.workspaceId}:personal:${personal.sessionOwnerMembershipId}`,
+      `${input.accountId}:${input.workspaceId}:personal:${personal.sessionOwnerMembershipId}:${
+        subscriptionPersonalAuthorityForProviderV2(personal.acceptedAuthorityV2, "codex")
+          ?.authorityGeneration ?? "none"
+      }`,
       now,
     )
   ) {

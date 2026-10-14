@@ -449,4 +449,40 @@ describe.skipIf(!realDb)("Codex capacity waits re-read usage before a far reset"
     expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
     expect(calls).toHaveLength(afterFirst);
   });
+
+  test("a reading that says the account is still refused keeps an exhausted window it omits", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org);
+    const staleReset = Date.now() + 2 * DAY;
+    await staleWeeklyExhaustion(org, connectionId, staleReset);
+    const parked = await park(org, staleReset);
+    // Only a five-hour window, below the limit, and `allowed: false`.
+    const original = globalThis.fetch;
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.includes("/wham/usage")) return await original(input, init);
+      return Response.json({
+        plan_type: "pro",
+        rate_limit: {
+          allowed: false,
+          limit_reached: false,
+          primary_window: {
+            used_percent: 40,
+            limit_window_seconds: 18_000,
+            reset_at: Math.floor((Date.now() + 3_600_000) / 1000),
+          },
+          secondary_window: null,
+        },
+      });
+    }) as typeof fetch);
+    restoreFetch = () => fetchSpy.mockRestore();
+    expect(await reconcile(org, parked)).toMatchObject({ action: "waiting" });
+    const quota = await storedQuota(connectionId);
+    expect(quota.windows).toContainEqual(
+      expect.objectContaining({ id: "secondary", status: "exhausted", resetsAt: staleReset }),
+    );
+  });
 });

@@ -852,8 +852,14 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     options: SubscriptionCoreUsageMergeOptions = {},
   ): SubscriptionCoreUsageObservationWrite | null {
     const current = row ? decodeSubscriptionQuota(row) : null;
+    // A reading below the limit that does not confirm availability ends
+    // nothing: it is merged as partial, so an exhausted window it omits keeps
+    // running too. (A reading at the limit replaces the windows as usual.)
+    const endsNothing =
+      options.confirmsAvailability === false &&
+      !observation.windows.some((window) => window.status === "exhausted");
     const observed = applyQuotaObservation({ refreshGeneration, quota: current }, observation, {
-      usageReadingsComplete: provider.adapter.usageReadingsComplete === true,
+      usageReadingsComplete: provider.adapter.usageReadingsComplete === true && !endsNothing,
     });
     if (!observed || observed === current) return null;
     // An authoritative usage read below the limit ends a quota exhaustion

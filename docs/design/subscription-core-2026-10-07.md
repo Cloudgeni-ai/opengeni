@@ -4644,7 +4644,7 @@ SuperGrok on the core:
   binding's `refreshBeforeReconcile` re-reads usage through the same core
   probe as the usage refresh route, for connections whose stored reading is
   at least 30 minutes old (`CODEX_CORE_USAGE_RECHECK_MIN_INTERVAL_MS`), so
-  an early reset resumes a parked turn within about 45 minutes. A probe
+  an early reset resumes a parked turn within about 50 minutes. A probe
   that stores nothing (an endpoint error, or no windows) leaves that age
   unchanged, so each worker also attempts one probe scope (a workspace's
   shared pool, or one owner's personal connections) at most every 5
