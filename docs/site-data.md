@@ -391,8 +391,12 @@ keyed and cascading like Site Data:
   its high-water mark (storage growth is metered past the mark, so calls
   finishing out of order never count the same bytes twice).
 - `site_sql_migrations`: the ordered, append-only schema migrations (name,
-  SQL, checksum). The Durable Object records which ones it applied, so
-  `migrate` and `reset` can replay the missing ones on an empty database.
+  SQL, SHA-256 checksum). The Durable Object records which ones it applied
+  (name, the checksum it recomputes from the SQL, position) in the same
+  transaction as the migration, so `migrate` and `reset` can replay the
+  missing ones on an empty database. It refuses a migration whose SQL does
+  not match its checksum, one applied before with different SQL, and one
+  positioned before a migration it already applied (rebuild to fix the order).
   A Site's migrations hold at most 6 MiB of SQL together (2M characters
   each); past that `migrate` returns `quota_exceeded`
   (`migration_bytes_per_site`). Load data with imports, not migrations.
@@ -418,15 +422,28 @@ statement on the API and again inside the Durable Object. It tokenizes the
 SQL (strings, quoted identifiers, comments, blobs), splits statements, and
 refuses `ATTACH`/`DETACH`, `VACUUM` (including `VACUUM INTO`),
 `load_extension`, transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT` ...),
-any PRAGMA write and every PRAGMA except the schema readers, `?`, `?NNN`,
-`@name` and `$name` parameters (only `:name`), more than 100 parameters, and
-names starting with `_cf_` or `_og_`. Three profiles decide the rest:
+any PRAGMA write and every PRAGMA except the schema readers (also as
+`pragma_*` table functions, so `pragma_table_info(...)` works and
+`pragma_compile_options` does not), `?`, `?NNN`, `@name`, `$name` and
+`#name` parameters (only `:name`), more than 100 parameters, and names
+starting with `_cf_` or `_og_`, quoted or not. String literals shaped like
+such a name (`'_og_x'`) are refused too, because SQLite reads
+`FROM '_cf_KV'` as a table name; pass such a value as a parameter. Three
+profiles decide the rest:
 
 | Profile  | Used for                  | Rules                                                                 |
 | -------- | ------------------------- | --------------------------------------------------------------------- |
-| `named`  | named queries Sites call  | exactly one SELECT/INSERT/UPDATE/DELETE/REPLACE (WITH allowed, not recursive); no schema changes, PRAGMA or EXPLAIN; 16K characters |
-| `agent`  | `site_sql_query`/`execute` | exactly one statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration); 64K characters |
-| `script` | migrations and SQL imports | up to 2,000 statements, run in one transaction; 2M characters         |
+| `named`  | named queries Sites call  | exactly one SELECT/INSERT/UPDATE/DELETE/REPLACE (WITH allowed, not recursive: no `RECURSIVE`, and no WITH table that names itself or uses UNION, INTERSECT or EXCEPT, at any nesting level); no schema changes, PRAGMA or EXPLAIN; 16K characters |
+| `agent`  | `site_sql_query`/`execute` | exactly one read or write statement; read-only PRAGMA and EXPLAIN allowed; schema changes refused (use a migration) here and in the Durable Object; 64K characters |
+| `script` | migrations and SQL imports | up to 2,000 statements, run in one transaction; schema changes allowed; 2M characters |
+
+Statement boundaries are never guessed. A `CREATE TRIGGER` body starts at
+the first `BEGIN` outside a `CASE`; inside it `CASE ... END` nests, an
+unquoted `BEGIN` is refused, and the `END` that closes it must be followed by
+`;` or the end of the SQL. Quote identifiers named `begin`, `end` or
+`recursive` (`"begin"`), which SQLite allows unquoted but the checker
+refuses rather than misread. A WITH table's name never decides the
+statement kind: `WITH replace AS (...) SELECT ...` is a read.
 
 Values are always bound as parameters, never spliced into SQL.
 
@@ -475,14 +492,28 @@ the body hash and the timestamp, with empty session, visitor, client IP and
 human fields, HMAC-SHA256 with `OPENGENI_SITES_GATEWAY_SECRET`. The gateway
 accepts the current or previous secret (`GATEWAY_SECRET_PREVIOUS`) within
 30 seconds, forwards to the Durable Object and adds nothing else. Every
-request carries a fresh id the Durable Object refuses to replay. Site pages
-never call this route; it has no cookies and returns 404 when `SITE_DB` is
-not bound.
+request carries a fresh id the Durable Object refuses to replay. The
+timestamp, skew, viewer fields and signature header are checked before the
+body is read. Site pages never call this route; it has no cookies and
+returns 404 when `SITE_DB` is not bound.
 
 The Durable Object runs each call in one transaction, rolls back a read that
-wrote and any write that would grow the database past the Site's storage cap,
-cuts results at the row and response-size limits (`truncated: true`), and
-reports rows read, rows written and the database size, which the API meters.
+wrote and any change that leaves the database above the Site's storage cap
+and larger than before (deleting or shrinking stays possible over the cap),
+cuts results at the row and response-size limits in UTF-8 bytes
+(`truncated: true`; a write with `RETURNING` still runs to completion and
+only the extra rows are dropped), and reports rows read, rows written and the
+database size, which the API meters. Repeated result column names come back
+as `a`, `a_2`, `a_3` ... Constraint failures (unique, not null, foreign key,
+`RAISE`) are `conflict`; other SQLite errors in the statement are
+`sql_error`; busy, I/O or corruption failures are internal errors the API
+reports as `unavailable`.
+
+Its own bookkeeping (request ids seen in the last few minutes, migrations
+applied) is in the Durable Object's key-value storage, which workerd keeps in
+`_cf_KV` and refuses to user SQL, so no statement or trigger can read or
+change it. Request ids are kept in one-minute buckets for three minutes and
+each request deletes at most 256 older ones.
 
 ### Owner tools and routes
 
@@ -605,6 +636,8 @@ answered; a metering failure is logged and does not fail the call.
   checker and its refusals), `apps/site-gateway/test/site-db.miniflare.test.ts`
   (the `SiteDatabase` Durable Object in workerd: signatures, previous secret,
   skew, replay, refusals, limits, migrations, rebuild, export and import),
+  `apps/site-gateway/test/site-database.test.ts` (request-id expiry and
+  pruning, repeated column names),
   `packages/sdk/test/site-sql.test.ts` (`site.sql.run` over the bridge),
   `packages/db/test/migration-0779-site-sql-postgres.test.ts` (FORCE RLS and
   cascades) and `apps/api/test/site-sql-postgres.test.ts` (routes and tools on

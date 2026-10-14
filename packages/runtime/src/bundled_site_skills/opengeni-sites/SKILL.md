@@ -408,10 +408,11 @@ Site HTML never sends SQL:
    CREATE INDEX, ALTER TABLE). Migrations are append-only and replayed when the
    database is rebuilt; schema changes only go through migrations.
 3. `site_sql_define_query` for every query the page runs: exactly one
-   SELECT, INSERT, UPDATE, DELETE or REPLACE (WITH allowed, not recursive),
-   `:name` parameters only, and an `audience`: `everyone` (guests of public
-   Sites too), `signed_in` (default; viewers signed in as a person) or
-   `managers` (never from the page).
+   SELECT, INSERT, UPDATE, DELETE or REPLACE (WITH allowed but not recursive:
+   a WITH table may not name itself or use UNION/INTERSECT/EXCEPT; put a
+   UNION in the main query instead), `:name` parameters only, and an
+   `audience`: `everyone` (guests of public Sites too), `signed_in` (default;
+   viewers signed in as a person) or `managers` (never from the page).
 
 `:viewer` (the viewer's stable id, such as `user:<id>` or `guest:<visitor>`),
 `:viewer_kind` and `:viewer_signed_in` are bound by Opengeni from the signed-in
@@ -439,7 +440,8 @@ const { rows, truncated } = await site.sql.run<{ choice: string; votes: number }
 Rows are untrusted input: render them as text. Handle `OpenGeniSiteSqlError`
 codes: `forbidden` (audience; `details.reason: "sign_in_required"` for guests),
 `not_found` (no such query), `validation` (missing or unknown params),
-`conflict` (a unique key), `sql_error`, `rate_limited`, `quota_exceeded`,
+`conflict` (a unique, not-null or foreign-key constraint), `sql_error`,
+`rate_limited`, `quota_exceeded`,
 `disabled` (the owner turned the database off), `unavailable` and
 `site_sql_unsupported` (a host or local preview without Site SQL; test the
 published Site). Results stop at the query's row cap (1,000 rows and 1 MB by
@@ -461,7 +463,9 @@ format (CSV turns values into text). Keep migrations to schema: a Site's
 migrations hold at most 6 MB of SQL, so load data with `site_sql_import`.
 Statements may not
 use ATTACH, VACUUM, load_extension, transactions or PRAGMA writes, or name
-tables starting with `_cf_` or `_og_`.
+tables starting with `_cf_` or `_og_` (even as a string such as `'_og_x'`;
+bind such values as parameters). Quote columns named `begin`, `end` or
+`recursive` (`"begin"`); the checker refuses them unquoted.
 
 ## Authoring, preview, and viewer access
 
