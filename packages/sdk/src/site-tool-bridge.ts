@@ -1,4 +1,10 @@
-import { SITE_FRAME_HEADER, siteRequestHeaders } from "@opengeni/contracts/site-session-http";
+import {
+  SITE_FRAME_HEADER,
+  SITE_FRAME_ID_HEADER,
+  SITE_ID_HEADER,
+  SITE_VERSION_HEADER,
+  siteRequestHeaders,
+} from "@opengeni/contracts/site-session-http";
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
@@ -59,9 +65,15 @@ export type CreateSiteToolBridgeOptions = {
 
 /** Host-side bridge for the opaque Site frame. Supply an authenticated transport;
  * the server independently checks live viewer access and the exact Site version.
- * Recreate on actor/version change. Never take these pinned fields from HTML. */
+ * Recreate on actor/version change. Never take these pinned fields from HTML.
+ *
+ * `fetch` forwards only the `SITE_OPERATIONS` allowlist (`siteSessionPath`);
+ * every other route is refused before a request is made. Each bridge is one
+ * frame: it mints a frame id, so a frame without a published Site reaches only
+ * the sessions it started. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
   const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
+  const frameId = crypto.randomUUID();
   const targeted =
     input.workspaceTools.$targetProtocol === 1 &&
     input.workspaceTools.$resolve &&
@@ -172,11 +184,13 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
               input.artifactId,
             );
             const headers = siteRequestHeaders(message.headers);
-            // Host-set marker: the API treats every bridged request as a Site frame.
+            // Host-set marker: the API treats every bridged request as a Site frame,
+            // limited to SITE_OPERATIONS and to this frame's own sessions.
             headers.set(SITE_FRAME_HEADER, "1");
+            headers.set(SITE_FRAME_ID_HEADER, frameId);
             if (input.artifactId) {
-              headers.set("x-opengeni-site-id", input.artifactId);
-              headers.set("x-opengeni-site-version", input.siteVersionId);
+              headers.set(SITE_ID_HEADER, input.artifactId);
+              headers.set(SITE_VERSION_HEADER, input.siteVersionId);
             }
 
             return input.fetchResponse!(path, {
