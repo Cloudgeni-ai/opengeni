@@ -172,8 +172,12 @@ Headless machines keep the one-line installer and need no desktop app.
 | Windows (x64, arm64) | NSIS installer | Authenticode through the existing Azure signing | electron-updater, differential |
 | Linux (x64, arm64) | AppImage, deb, rpm | Signed checksums | AppImage self-update; deb and rpm through the package manager |
 
-Releases are published to GitHub Releases next to the agent releases, with
-stable and beta channels. The signing identity is a release-time setting.
+Each version is published as its own GitHub release, `desktop-v<version>`,
+next to the agent releases. Releases in the repository are immutable once
+published, so the workflow fills a draft and then publishes it, and installed
+apps look up the newest stable `desktop-v` tag and read that release's update
+files. Products configure their own feed (a fixed URL or a repository and tag
+prefix). The signing identity is a release-time setting.
 
 ## Repository layout
 

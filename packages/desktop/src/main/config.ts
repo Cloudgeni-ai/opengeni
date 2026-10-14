@@ -19,6 +19,17 @@ export interface DesktopAppConfig {
   background: { light: string; dark: string };
   /** Connect this computer through the server's agent installer. */
   thisComputer: boolean;
-  /** Check for and install app updates (packaged builds only). */
-  updates: boolean;
+  /** Where packaged builds look for app updates, or false for none. */
+  updates: DesktopUpdateFeed | false;
 }
+
+/** Where the app finds its update files (`latest-mac.yml` and the like). */
+export type DesktopUpdateFeed =
+  /** A fixed directory URL that always holds the newest update files. */
+  | { url: string }
+  /**
+   * The newest stable release of a public GitHub repository whose tag starts
+   * with `tagPrefix`, e.g. `desktop-v1.2.3`. Suits repositories whose
+   * releases are immutable, where no fixed feed release can be refreshed.
+   */
+  | { githubRepository: string; tagPrefix: string };

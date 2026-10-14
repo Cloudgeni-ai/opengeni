@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "e74a416572020a65a9a4f94a9ce3fef167f779a9ee5e2377b61b4453c780efe4"
+      "sha256": "382bf6646647bc2601b72ee7808ef0939ff60b1b33b0ca3ea67030d57b5524e8"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -917,7 +917,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "macos",
       "step": "Publish",
-      "sha256": "e15c224ed6bbaddcd2d4ab5cc2bad4320d36e3869d9732071abca52a0e64f3bc"
+      "sha256": "877b204cb6ae0b59b2b4c931e30a41d4bfef053f07beaf275e6347a6cdd9d2cd"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",

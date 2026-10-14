@@ -16,6 +16,7 @@ import {
 import { diffInbox, inboxItemPath, notificationPlan, plainText } from "../src/main/inbox-model";
 import { localFile, localPageUrl } from "../src/main/local-pages";
 import { nativeSignInUrl, parseSignInCallback, pkcePair } from "../src/main/pkce";
+import { newestReleaseTag, resolveUpdateFeedUrl } from "../src/main/update-feed";
 import { createHash } from "node:crypto";
 
 const cipher = {
@@ -296,5 +297,46 @@ describe("local pages", () => {
     expect(localFile("/app/pages", "app://local/notes.txt")).toBeNull();
     expect(localFile("/app/pages", "app://elsewhere/welcome.html")).toBeNull();
     expect(localFile("/app/pages", "https://local/welcome.html")).toBeNull();
+  });
+});
+
+describe("update feed", () => {
+  test("picks the highest stable release tag with the prefix", () => {
+    expect(
+      newestReleaseTag(
+        [
+          "desktop-v0.9.0",
+          "desktop-v0.10.0",
+          "desktop-v1.0.0-beta.1",
+          "agent-v9.0.0",
+          "desktop-vx",
+        ],
+        "desktop-v",
+      ),
+    ).toBe("desktop-v0.10.0");
+    expect(newestReleaseTag(["agent-v1.0.0"], "desktop-v")).toBeNull();
+  });
+
+  test("reads the newest release's files, or a fixed feed as is", async () => {
+    const requested: string[] = [];
+    const fakeFetch = (async (input: string | URL | Request) => {
+      requested.push(String(input));
+      return Response.json([
+        { ref: "refs/tags/desktop-v0.1.0" },
+        { ref: "refs/tags/desktop-v0.2.1" },
+      ]);
+    }) as typeof fetch;
+    expect(
+      await resolveUpdateFeedUrl(
+        { githubRepository: "example/app", tagPrefix: "desktop-v" },
+        fakeFetch,
+      ),
+    ).toBe("https://github.com/example/app/releases/download/desktop-v0.2.1");
+    expect(requested).toEqual([
+      "https://api.github.com/repos/example/app/git/matching-refs/tags/desktop-v",
+    ]);
+    expect(await resolveUpdateFeedUrl({ url: "https://updates.example.com/app" })).toBe(
+      "https://updates.example.com/app",
+    );
   });
 });

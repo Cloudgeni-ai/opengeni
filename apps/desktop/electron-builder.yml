@@ -29,11 +29,11 @@ electronFuses:
   onlyLoadAppFromAsar: true
   loadBrowserProcessSpecificV8Snapshot: false
   grantFileProtocolExtraPrivileges: false
-# The update feed is one fixed release that every desktop release refreshes, so
-# the app never confuses itself with the repository's other releases.
+# A publish target makes electron-builder write latest-mac.yml. The app sets its
+# real feed at runtime: the newest desktop-v release (see src/main.ts).
 publish:
   provider: generic
-  url: https://github.com/Cloudgeni-ai/opengeni/releases/download/desktop-stable
+  url: https://github.com/Cloudgeni-ai/opengeni/releases
 mac:
   category: public.app-category.productivity
   artifactName: Opengeni-${version}-mac.${ext}

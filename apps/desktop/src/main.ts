@@ -18,5 +18,5 @@ createDesktopApp({
   ),
   background: { light: "#ffffff", dark: "#202020" },
   thisComputer: true,
-  updates: true,
+  updates: { githubRepository: "Cloudgeni-ai/opengeni", tagPrefix: "desktop-v" },
 });
