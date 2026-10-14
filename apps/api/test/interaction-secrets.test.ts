@@ -249,6 +249,69 @@ describe("resolveInteractionSecretValues", () => {
   test("native desktop arguments are scanned deeply", () => {
     expect(collectStringsDeep({ text: "a", nested: [{ b: "c" }, 1, null] })).toEqual(["a", "c"]);
   });
+
+  test("a controller guard refuses before any reference is used", async () => {
+    const reference = "{" + "{secret:Email code/password}}";
+    const base = port({ "Email code/password": "424242" });
+    const resolved: string[] = [];
+    const spied: InteractionSecretsPort = {
+      ...base,
+      async resolverFor(principal) {
+        const resolver = await base.resolverFor(principal);
+        if (!resolver) return resolver;
+        return {
+          ...resolver,
+          enabled: resolver.enabled,
+          resolve: async (references, context) => {
+            resolved.push(...references.map((entry) => entry.raw));
+            return await resolver.resolve(references, context);
+          },
+        };
+      },
+    };
+    const refusal = new ApiHttpError(422, {
+      code: "validation_failed",
+      message: "controller cannot accept secret values",
+    });
+    let guardCalls = 0;
+    const guard = async () => {
+      guardCalls += 1;
+      throw refusal;
+    };
+    const refused = await httpError(
+      resolveInteractionSecretValues({
+        port: spied,
+        grant: agentGrant,
+        texts: [reference],
+        use,
+        beforeResolve: guard,
+      }),
+    );
+    expect(refused).toBe(refusal);
+    expect(guardCalls).toBe(1);
+    expect(resolved).toEqual([]);
+
+    // Literal text and human callers never consult the controller.
+    for (const call of [
+      { grant: agentGrant, texts: ["no reference here"] },
+      { grant: humanGrant, texts: [reference] },
+    ]) {
+      expect(
+        await resolveInteractionSecretValues({ port: spied, use, beforeResolve: guard, ...call }),
+      ).toBeUndefined();
+    }
+    expect(guardCalls).toBe(1);
+
+    // A guard that accepts lets resolution proceed as before.
+    const values = await resolveInteractionSecretValues({
+      port: spied,
+      grant: agentGrant,
+      texts: [reference],
+      use,
+      beforeResolve: async () => undefined,
+    });
+    expect(Object.values(values ?? {})).toEqual(["424242"]);
+  });
 });
 
 describe("syncBrowserPasskeys", () => {
