@@ -507,6 +507,7 @@ import {
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./site-data";
+export * from "./site-publishing";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
 export * from "./site-sql";
