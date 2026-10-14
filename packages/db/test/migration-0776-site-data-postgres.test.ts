@@ -1,4 +1,4 @@
-// Migration 0773: Site Data. The six site_data_* tables are workspace-owned,
+// Migration 0776: Site Data. The six site_data_* tables are workspace-owned,
 // FORCE RLS and reachable by the application role only inside a workspace
 // context; data follows its Site and is removed with the workspace.
 import { afterAll, beforeAll, expect, test } from "bun:test";
@@ -48,7 +48,7 @@ let shared: SharedTestDatabase;
 let client: DbClient;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("migration-0773-site-data");
+  const acquired = await acquireSharedTestDatabase("migration-0776-site-data");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });

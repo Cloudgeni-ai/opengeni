@@ -25,7 +25,7 @@ managers. There is no Site server, no live push, and no per-Site SQL.
 
 Postgres implements the backend-neutral `SiteDataStore` interface
 (`packages/db/src/site-data.ts`); another backend can implement the same
-contract. Migration `0773_site_data.sql` adds a self-contained table set, all
+contract. Migration `0776_site_data.sql` adds a self-contained table set, all
 workspace-owned with FORCE RLS through `opengeni_private.workspace_rls_visible`
 and DML granted to the runtime role, so it could move to its own database:
 
@@ -348,7 +348,7 @@ mode are added.
   order, CSV import counting, and the lineage under the production session
   RLS context. Budgets and charges use an injected validation clock, never
   wall-clock timing.
-- `packages/db/test/migration-0773-site-data-postgres.test.ts`: FORCE RLS,
+- `packages/db/test/migration-0776-site-data-postgres.test.ts`: FORCE RLS,
   the application role without context, a mismatched tenant context with no
   tenant filter, the record-to-collection Site key, and workspace cascade.
 - `packages/contracts/test/site-session-http.test.ts`: only `current` Site

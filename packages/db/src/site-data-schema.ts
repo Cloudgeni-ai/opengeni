@@ -15,7 +15,7 @@ import {
 import { sql } from "drizzle-orm";
 
 // Site Data. Foreign keys, checks, FORCE RLS and grants are owned
-// by migration 0773. This leaf intentionally does not import schema.ts,
+// by migration 0776. This leaf intentionally does not import schema.ts,
 // avoiding a cycle. All access goes through site-data-postgres.ts.
 
 export const siteDataCollections = pgTable(
