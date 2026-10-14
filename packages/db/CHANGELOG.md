@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 2.0.1
+
+### Patch Changes
+
+- @opengeni/codemode@2.0.1
+- @opengeni/codex@2.0.1
+- @opengeni/config@2.0.1
+- @opengeni/contracts@2.0.1
+- @opengeni/network@2.0.1
+- @opengeni/observability@2.0.1
+- @opengeni/subscriptions@2.0.1
+- @opengeni/xai-subscription@2.0.1
+
 ## 2.0.0
 
 ### Minor Changes

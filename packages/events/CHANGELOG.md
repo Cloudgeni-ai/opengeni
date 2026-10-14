@@ -1,5 +1,12 @@
 # @opengeni/events
 
+## 2.0.1
+
+### Patch Changes
+
+- @opengeni/db@2.0.1
+- @opengeni/contracts@2.0.1
+
 ## 2.0.0
 
 ### Patch Changes

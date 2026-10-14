@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 2.0.1
+
+### Patch Changes
+
+- @opengeni/codex@2.0.1
+- @opengeni/contracts@2.0.1
+- @opengeni/xai-subscription@2.0.1
+
 ## 2.0.0
 
 ### Minor Changes

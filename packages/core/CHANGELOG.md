@@ -1,5 +1,22 @@
 # @opengeni/core
 
+## 2.0.1
+
+### Patch Changes
+
+- @opengeni/runtime@2.0.1
+- @opengeni/db@2.0.1
+- @opengeni/documents@2.0.1
+- @opengeni/events@2.0.1
+- @opengeni/capabilities@2.0.1
+- @opengeni/codex@2.0.1
+- @opengeni/config@2.0.1
+- @opengeni/contracts@2.0.1
+- @opengeni/network@2.0.1
+- @opengeni/observability@2.0.1
+- @opengeni/storage@2.0.1
+- @opengeni/vaults@2.0.1
+
 ## 2.0.0
 
 ### Minor Changes
