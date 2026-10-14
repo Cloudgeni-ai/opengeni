@@ -57,6 +57,8 @@ export type ArtifactReturnSearch = {
   sort?: "newest" | "title";
   status?: "archived";
   browse?: boolean;
+  /** A Site's own sub-page: `publish` is Publish to web. */
+  view?: "publish";
 };
 
 export function artifactReturnSearch(search: Record<string, unknown>): ArtifactReturnSearch {
@@ -81,5 +83,6 @@ export function artifactReturnSearch(search: Record<string, unknown>): ArtifactR
     sort: search.sort === "newest" || search.sort === "title" ? search.sort : undefined,
     status: search.status === "archived" ? "archived" : undefined,
     browse: search.browse === true ? true : undefined,
+    view: search.view === "publish" ? "publish" : undefined,
   };
 }

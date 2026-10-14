@@ -2950,12 +2950,13 @@ export function RootRouteComponent() {
         )}
       </SignedOutPage>
     </Suspense>
-  ) : /^\/native-sign-in\/?$/.test(pathname) &&
+  ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (
-    // A phone app is signed in by the person, not by a workspace grant, so
-    // approval renders before the access and onboarding gates.
+    // A phone app, and a published Site's viewer, are signed in by the person,
+    // not by a workspace grant (an invited viewer may belong to no
+    // organization), so approval renders before the access and onboarding gates.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />
     ) : (
