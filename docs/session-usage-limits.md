@@ -120,7 +120,16 @@ Known limits of this design, stated rather than hidden:
 - a source identity longer than 1,100 bytes is recorded under a stable
   `sha256:` digest; identities whose source key exceeds 1,024 bytes are
   recorded by the direct writer only, because the event trigger and the
-  legacy import skip them.
+  legacy import skip them;
+- a source key PostgreSQL cannot store as given (NUL, a lone UTF-16
+  surrogate, or the lossless codec's own prefix) is recorded under its stored
+  lossless encoding, the same identity the event trigger meters, and a held
+  receipt for such a key is never treated as already metered by its event. A
+  key containing NUL still fails its turn, because its usage event cannot be
+  stored, but the usage is recorded;
+- an owed receipt carried in exact-attempt recovery detail supports source
+  ids of at most 1,024 characters; a longer owed id, from a provider response
+  id near the receipt bound, is not supported on that recovery path.
 
 ## Scope of one limit
 
