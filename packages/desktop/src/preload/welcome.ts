@@ -21,4 +21,7 @@ const bridge: DesktopWelcomeBridge = {
 };
 
 contextBridge.exposeInMainWorld(DESKTOP_WELCOME_GLOBAL, bridge);
-document.documentElement.dataset.platform = process.platform;
+// The preload runs before the document exists.
+window.addEventListener("DOMContentLoaded", () => {
+  document.documentElement.dataset.platform = process.platform;
+});

@@ -14,6 +14,7 @@ import {
   parseServiceRunning,
 } from "../src/main/agent-cli";
 import { diffInbox, inboxItemPath, notificationPlan, plainText } from "../src/main/inbox-model";
+import { localFile, localPageUrl } from "../src/main/local-pages";
 import { nativeSignInUrl, parseSignInCallback, pkcePair } from "../src/main/pkce";
 import { createHash } from "node:crypto";
 
@@ -144,14 +145,14 @@ describe("native sign-in", () => {
 
 describe("agent command line", () => {
   test("finds the installer's agent paths", () => {
-    expect(agentBinaryCandidates("darwin", "/Users/p", {})).toEqual([
-      "/Users/p/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
-      "/Users/p/.local/bin/opengeni-agent",
+    expect(agentBinaryCandidates("darwin", "/Users/user", {})).toEqual([
+      "/Users/user/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+      "/Users/user/.local/bin/opengeni-agent",
     ]);
-    expect(agentBinaryCandidates("linux", "/home/p", {})).toEqual([
-      "/home/p/.local/bin/opengeni-agent",
+    expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
+      "/home/user/.local/bin/opengeni-agent",
     ]);
-    expect(agentBinaryCandidates("win32", "C:/Users/p", { LOCALAPPDATA: "C:/L" })[0]).toContain(
+    expect(agentBinaryCandidates("win32", "C:/Users/user", { LOCALAPPDATA: "C:/L" })[0]).toContain(
       "opengeni-agent.exe",
     );
   });
@@ -283,5 +284,17 @@ describe("inbox notifications", () => {
     expect(plainText("Use **this** [link](https://x) and `code`\n- one\n- two")).toBe(
       "Use this link and code\n• one\n• two",
     );
+  });
+});
+
+describe("local pages", () => {
+  test("serve only page files inside the pages directory", () => {
+    expect(localFile("/app/pages", localPageUrl("welcome.html"))).toBe("/app/pages/welcome.html");
+    expect(localFile("/app/pages", "app://local/welcome.css?x=1")).toBe("/app/pages/welcome.css");
+    expect(localFile("/app/pages", "app://local/../main.mjs")).toBeNull();
+    expect(localFile("/app/pages", "app://local/..%2Fsecrets.html")).toBeNull();
+    expect(localFile("/app/pages", "app://local/notes.txt")).toBeNull();
+    expect(localFile("/app/pages", "app://elsewhere/welcome.html")).toBeNull();
+    expect(localFile("/app/pages", "https://local/welcome.html")).toBeNull();
   });
 });

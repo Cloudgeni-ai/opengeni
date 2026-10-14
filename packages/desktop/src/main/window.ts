@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   BaseWindow,
@@ -15,6 +15,7 @@ import {
 } from "electron";
 
 import type { DesktopAppConfig } from "./config";
+import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
 
 const MIN_SIZE = { width: 720, height: 520 };
 const DEFAULT_SIZE = { width: 1280, height: 860 };
@@ -89,6 +90,9 @@ export class MainWindow {
       title: config.productName,
       show: false,
       backgroundColor: mac ? "#00000000" : dark ? config.background.dark : config.background.light,
+      // macOS: the page runs under an inset title bar with sidebar material.
+      // Windows and Linux keep the system title bar, so the window follows the
+      // desktop's own theme and controls.
       ...(mac
         ? {
             titleBarStyle: "hiddenInset" as const,
@@ -96,10 +100,7 @@ export class MainWindow {
             vibrancy: "sidebar" as const,
             visualEffectState: "followWindow" as const,
           }
-        : {
-            titleBarStyle: "hidden" as const,
-            titleBarOverlay: this.overlay(),
-          }),
+        : { autoHideMenuBar: true }),
     });
     this.window.on("resize", () => {
       this.layout();
@@ -108,11 +109,6 @@ export class MainWindow {
     this.window.on("move", () => this.scheduleSave());
     this.window.on("focus", () => this.events.focused());
     this.window.on("closed", () => this.events.closed());
-    if (!mac) {
-      nativeTheme.on("updated", () => {
-        if (!this.window.isDestroyed()) this.window.setTitleBarOverlay(this.overlay());
-      });
-    }
   }
 
   /** Show the window right away; the theme background is already painted. */
@@ -219,7 +215,7 @@ export class MainWindow {
       });
       this.welcome.setBackgroundColor("#00000000");
       this.guardNavigation(this.welcome.webContents, null);
-      void this.welcome.webContents.loadFile(this.config.welcomePagePath);
+      void this.welcome.webContents.loadURL(localPageUrl(basename(this.config.welcomePagePath)));
     }
     this.present(this.welcome);
     this.shownAccountId = null;
@@ -302,7 +298,8 @@ export class MainWindow {
 
   /** Only the account's own server loads in its view; everything else opens in the browser. */
   private guardNavigation(contents: WebContents, baseUrl: string | null): void {
-    const stays = (url: string) => (baseUrl ? sameOrigin(url, baseUrl) : url.startsWith("file:"));
+    const stays = (url: string) =>
+      baseUrl ? sameOrigin(url, baseUrl) : url.startsWith(`${LOCAL_ORIGIN}/`);
     contents.on("will-navigate", (event, url) => {
       if (stays(url)) return;
       event.preventDefault();
@@ -358,15 +355,6 @@ export class MainWindow {
     }
     while (template.at(-1)?.type === "separator") template.pop();
     if (template.length > 0) Menu.buildFromTemplate(template).popup();
-  }
-
-  private overlay(): Electron.TitleBarOverlayOptions {
-    const dark = nativeTheme.shouldUseDarkColors;
-    return {
-      color: "#00000000",
-      symbolColor: dark ? "#e6e6e6" : "#1f1f1f",
-      height: 44,
-    };
   }
 
   private boundsFile(): string {

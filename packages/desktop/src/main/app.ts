@@ -1,4 +1,5 @@
 import { hostname, homedir } from "node:os";
+import { dirname } from "node:path";
 
 import {
   app,
@@ -32,6 +33,8 @@ import { AccountStore, type StoredAccount } from "./accounts";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
+import { LOCAL_ORIGIN } from "./local-pages";
+import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
 import { flushMarks, mark } from "./perf";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
@@ -56,6 +59,14 @@ function desktopPlatform(): DesktopPlatform {
 
 function errorMessage(caught: unknown, fallback: string): string {
   return caught instanceof Error && caught.message ? caught.message : fallback;
+}
+
+/** Memory in use by every process of the app, in megabytes. */
+function appMemoryMb(): number {
+  const kilobytes = app
+    .getAppMetrics()
+    .reduce((sum, metric) => sum + metric.memory.workingSetSize, 0);
+  return Math.round(kilobytes / 1024);
 }
 
 /** The path a person was on, when it is one the app reopens: a workspace or a session. */
@@ -87,6 +98,12 @@ export class DesktopShell {
 
   constructor(private readonly config: DesktopAppConfig) {
     this.redirectUri = `${config.scheme}://auth/callback`;
+    // Linux desktops without a keyring (minimal window managers, remote
+    // desktops) still sign in: the credential is then protected by the
+    // owner-only file permissions alone, as command-line tools do.
+    if (process.platform === "linux" && !safeStorage.isEncryptionAvailable()) {
+      safeStorage.setUsePlainTextEncryption(true);
+    }
     this.store = new AccountStore(app.getPath("userData"), {
       available: () => safeStorage.isEncryptionAvailable(),
       encrypt: (plain) => safeStorage.encryptString(plain),
@@ -137,6 +154,7 @@ export class DesktopShell {
       app.quit();
       return;
     }
+    registerLocalScheme();
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
     } else {
@@ -158,6 +176,7 @@ export class DesktopShell {
     if (launchUrl) queued.push(launchUrl);
     void app.whenReady().then(() => {
       mark("ready");
+      serveLocalPages(dirname(config.welcomePagePath));
       shell = new DesktopShell(config);
       shell.start();
       for (const url of queued.splice(0)) shell.handleUrl(url);
@@ -213,15 +232,18 @@ export class DesktopShell {
       }
     });
     const active = this.store.active();
-    if (active && !active.signedOut) {
-      const contents = window.showAccount(this.target(active));
-      contents.once("did-finish-load", () => {
-        mark("content-loaded");
-        flushMarks();
-      });
-    } else {
-      window.showWelcome();
-    }
+    const contents =
+      active && !active.signedOut ? window.showAccount(this.target(active)) : window.showWelcome();
+    contents.once("did-finish-load", () => {
+      mark("content-loaded");
+      const loadedMb = appMemoryMb();
+      flushMarks({ loadedMemoryMb: loadedMb });
+      // Idle memory is read once the page has settled.
+      setTimeout(
+        () => flushMarks({ loadedMemoryMb: loadedMb, idleMemoryMb: appMemoryMb() }),
+        15_000,
+      );
+    });
     window.reveal();
     mark("window-shown");
   }
@@ -476,7 +498,15 @@ export class DesktopShell {
   }
 
   private senderWelcome(event: IpcMainInvokeEvent): void {
-    if (!this.window?.isWelcome(event.sender)) throw new Error("Not allowed");
+    const frame = event.senderFrame;
+    if (
+      !this.window?.isWelcome(event.sender) ||
+      !frame ||
+      frame !== event.sender.mainFrame ||
+      !frame.url.startsWith(`${LOCAL_ORIGIN}/`)
+    ) {
+      throw new Error("Not allowed");
+    }
   }
 
   private accountsSnapshot(): DesktopAccountsSnapshot {
