@@ -39,13 +39,6 @@ export type ArtifactSandboxProps = {
 };
 
 /**
- * The frame's viewer props. `PublishedHtmlArtifactFrame` gains `viewer` with
- * the published-Sites bridge additions; until then this typed object carries
- * it so hosts can already pass the signed-in member.
- */
-type SiteFrameViewerProps = { viewer?: SiteViewer };
-
-/**
  * The Site/preview frame chrome shared by the console and embedding hosts:
  * title, version and tool badges, live status, reload, and a full-screen mode
  * that escapes the host's scroll containers through the modal top layer.
@@ -184,7 +177,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         {...(props.theme ? { theme: props.theme } : {})}
         {...(!focused && props.height ? { style: { height: props.height } } : {})}
         {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
-        {...((props.viewer ? { viewer: props.viewer } : {}) satisfies SiteFrameViewerProps)}
+        {...(props.viewer ? { viewer: props.viewer } : {})}
         className={cn(
           "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
           props.fill && "h-0 min-h-0 flex-1",
