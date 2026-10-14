@@ -29,7 +29,7 @@ import { EmailChipsInput } from "@/components/ui/email-chips-input";
 import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
+import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Section } from "@/components/ui/section";
@@ -840,6 +840,10 @@ function SiteAgentModelField({
   );
 }
 
+const reportRowLeading = (size: LogoTileSize) => (
+  <LogoTile size={size} icon={<FlagIcon />} name="Report" />
+);
+
 function SiteReports({
   client,
   workspaceId,
@@ -909,7 +913,7 @@ function SiteReports({
             {reports.map((report) => (
               <ListRow
                 key={report.id}
-                leading={(size) => <LogoTile size={size} icon={<FlagIcon />} name="Report" />}
+                leading={reportRowLeading}
                 title={abuseCategoryLabel(report.category)}
                 description={report.message || undefined}
                 meta={[

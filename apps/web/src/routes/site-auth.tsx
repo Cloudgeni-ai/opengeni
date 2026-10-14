@@ -68,12 +68,16 @@ function SiteAuthorizeWithAppContext({ search }: { search: SiteAuthSearch }) {
   );
 }
 
+function assignLocation(url: string) {
+  window.location.assign(url);
+}
+
 export function SiteAuthorizePage({
   client,
   email,
   search,
   onUseAnotherAccount,
-  navigate = (url) => window.location.assign(url),
+  navigate = assignLocation,
 }: {
   client: SiteAuthClient;
   email: string;
