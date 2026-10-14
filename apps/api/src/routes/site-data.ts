@@ -48,7 +48,7 @@ export function siteDataHttpError(error: SiteDataError): ApiHttpError {
   return new ApiHttpError(SITE_DATA_ERROR_STATUS[error.code], {
     code: PUBLIC_CODE[error.code],
     message: error.message,
-    retryable: error.code === "rate_limited",
+    retryable: error.code === "rate_limited" || error.details.retryable === true,
     outcomeUnknown: false,
     details: { ...error.details, code: error.code },
   });

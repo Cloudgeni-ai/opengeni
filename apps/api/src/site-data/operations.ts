@@ -29,6 +29,7 @@ import {
   siteDataFileName,
   siteDataObjectKey,
   siteDataValidationClock,
+  SITE_DATA_VALIDATION_BUDGET_MS,
   type SiteDataAccess,
   type SiteDataDeps,
   type SiteDataSurface,
@@ -52,25 +53,66 @@ const FILE_URL_SECONDS = 300;
  * refused attempts count too. Writes always count: viewers and Site frames
  * per person and per Site, managers in one generous window per Site. Reads
  * count only for Site frames.
+ *
+ * A write that will validate (`validates`: the collections whose records it
+ * checks, or a schema it defines) also reserves the request's validation
+ * budget on the Site's and workspace's validation windows in the same
+ * transaction; it returns what was reserved, for meteredWrite to settle.
  */
-async function consume(access: SiteDataAccess, kind: "write" | "read", operations: number) {
-  if (kind === "read" && !access.caller.framed) return;
-  await access.store.consumeRate(access.caller, kind, Math.max(1, operations), access.limits);
+async function consume(
+  access: SiteDataAccess,
+  kind: "write" | "read",
+  operations: number,
+  validates?: { collections?: readonly string[]; schema?: boolean },
+): Promise<number> {
+  if (kind === "read" && !access.caller.framed) return 0;
+  const admitted = await access.store.consumeRate(
+    access.caller,
+    kind,
+    Math.max(1, operations),
+    access.limits,
+    validates ? { ...validates, reserveMs: SITE_DATA_VALIDATION_BUDGET_MS } : undefined,
+  );
+  return admitted.reservedMs;
+}
+
+/** Collections whose records these operations validate. */
+function validatedCollections(operations: readonly unknown[]): string[] {
+  const names = new Set<string>();
+  for (const op of operations)
+    if (
+      op !== null &&
+      typeof op === "object" &&
+      typeof (op as { collection?: unknown }).collection === "string" &&
+      ["insert", "put", "patch", "increment"].includes(String((op as { op?: unknown }).op))
+    )
+      names.add((op as { collection: string }).collection);
+  return [...names];
 }
 
 /**
- * Charge the schema-validation time a request spent, whatever its outcome:
- * extra operations on the caller's write windows and time on the workspace's
- * validation window. A failure to charge is logged, never reported in place
- * of the request's own result.
+ * Settle the validation time a request reserved against what it spent,
+ * whatever its outcome: refund or charge the difference on the validation
+ * windows and add operations for the time spent to the caller's write
+ * windows. Nothing reserved and nothing spent touches nothing. A failure to
+ * settle is logged, never reported in place of the request's own result.
  */
-async function chargeValidation(access: SiteDataAccess, meter: SiteDataValidationMeter) {
-  if (!(meter.ms > 0)) return;
+async function settleValidation(
+  access: SiteDataAccess,
+  reservedMs: number,
+  meter: SiteDataValidationMeter,
+) {
+  if (!(reservedMs > 0) && !(meter.ms > 0)) return;
   try {
-    await access.store.chargeValidation(access.caller, meter.ms, access.limits);
+    await access.store.settleValidation(
+      access.caller,
+      { reservedMs, spentMs: meter.ms },
+      access.limits,
+    );
   } catch (error) {
-    console.warn("[site-data] could not charge validation time", {
+    console.warn("[site-data] could not settle validation time", {
       siteId: access.caller.siteId,
+      reservedMs,
       validationMs: meter.ms,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -78,19 +120,19 @@ async function chargeValidation(access: SiteDataAccess, meter: SiteDataValidatio
 }
 
 /**
- * Write with validation charged: `prevalidate` checks records before the
- * Site's lock and returns the write's options; the time both spend is charged
- * afterwards, including for refused and failed writes.
+ * Run a write whose validation time is metered, then settle it against the
+ * reservation, including for refused and failed writes.
  */
 async function meteredWrite<T>(
   access: SiteDataAccess,
+  reservedMs: number,
   run: (meter: SiteDataValidationMeter) => Promise<T>,
 ): Promise<T> {
   const meter: SiteDataValidationMeter = { ms: 0 };
   try {
     return await run(meter);
   } finally {
-    await chargeValidation(access, meter);
+    await settleValidation(access, reservedMs, meter);
   }
 }
 
@@ -119,15 +161,19 @@ export async function defineSiteDataCollection(
   definition: SiteDataCollectionDefinitionRequest,
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
-  await consume(access, "write", 1);
-  await meteredWrite(access, async (meter) => {
-    const started = siteDataValidationClock.now();
-    try {
-      assertSiteDataSchema(definition.jsonSchema);
-    } finally {
-      meter.ms += Math.max(0, siteDataValidationClock.now() - started);
-    }
-  });
+  const hasSchema = definition.jsonSchema !== undefined && definition.jsonSchema !== null;
+  const reserved = await consume(access, "write", 1, { schema: hasSchema });
+  // Only a schema is checked and metered; defining without one touches no
+  // validation window.
+  if (hasSchema)
+    await meteredWrite(access, reserved, async (meter) => {
+      const started = siteDataValidationClock.now();
+      try {
+        assertSiteDataSchema(definition.jsonSchema);
+      } finally {
+        meter.ms += Math.max(0, siteDataValidationClock.now() - started);
+      }
+    });
   return access.store.defineCollection(
     access.caller,
     {
@@ -210,8 +256,10 @@ export async function writeSiteData(
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
-  await consume(access, "write", operations.length);
-  return meteredWrite(access, async (meter) => {
+  const reserved = await consume(access, "write", operations.length, {
+    collections: validatedCollections(operations),
+  });
+  return meteredWrite(access, reserved, async (meter) => {
     const options = await prevalidateSiteDataWrite(access, operations, { meter });
     return access.store.write(access.caller, operations as SiteDataWriteOp[], options);
   });
@@ -346,12 +394,13 @@ export async function importSiteData(
 ): Promise<{ imported: number }> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   // Counted before parsing: at most one record per CSV line after the header.
-  await consume(
+  const reserved = await consume(
     access,
     "write",
     request.format === "csv"
       ? Math.min(SITE_DATA_IMPORT_MAX_RECORDS, csvLineBreaks(request.csv ?? ""))
       : Math.min(SITE_DATA_IMPORT_MAX_RECORDS, request.records?.length ?? 0),
+    { collections: [collection] },
   );
   const imported = { count: 0 };
   const failed = (error: unknown): never => {
@@ -362,32 +411,33 @@ export async function importSiteData(
       });
     throw error;
   };
-  let records: Record<string, unknown>[];
-  try {
-    if (request.format === "csv") {
-      records = siteDataCsvRecords(request.csv ?? "");
-    } else records = request.records ?? [];
-    if (records.length > SITE_DATA_IMPORT_MAX_RECORDS)
-      throw new SiteDataError(
-        "validation",
-        `Import at most ${SITE_DATA_IMPORT_MAX_RECORDS} records at a time`,
-      );
-  } catch (error) {
-    return failed(error);
-  }
-  const keySegments = request.keyField ? parseSiteDataPath(request.keyField) : null;
-  if (request.keyField && !keySegments)
-    throw new SiteDataError("validation", `Invalid keyField: ${request.keyField}`);
-  const operations: SiteDataWriteOp[] = records.map((data, index) => {
-    if (!keySegments) return { op: "insert", collection, data };
-    const key = readSiteDataPath(data, keySegments);
-    if ((typeof key !== "string" && typeof key !== "number") || String(key).length === 0)
-      throw new SiteDataError("validation", `Record ${index + 1} has no ${request.keyField}`, {
-        index,
-      });
-    return { op: "put", collection, key: String(key), data };
-  });
-  return meteredWrite(access, async (meter) => {
+  // Everything after admission settles the reservation, including parse errors.
+  return meteredWrite(access, reserved, async (meter) => {
+    let records: Record<string, unknown>[];
+    try {
+      if (request.format === "csv") {
+        records = siteDataCsvRecords(request.csv ?? "");
+      } else records = request.records ?? [];
+      if (records.length > SITE_DATA_IMPORT_MAX_RECORDS)
+        throw new SiteDataError(
+          "validation",
+          `Import at most ${SITE_DATA_IMPORT_MAX_RECORDS} records at a time`,
+        );
+    } catch (error) {
+      return failed(error);
+    }
+    const keySegments = request.keyField ? parseSiteDataPath(request.keyField) : null;
+    if (request.keyField && !keySegments)
+      throw new SiteDataError("validation", `Invalid keyField: ${request.keyField}`);
+    const operations: SiteDataWriteOp[] = records.map((data, index) => {
+      if (!keySegments) return { op: "insert", collection, data };
+      const key = readSiteDataPath(data, keySegments);
+      if ((typeof key !== "string" && typeof key !== "number") || String(key).length === 0)
+        throw new SiteDataError("validation", `Record ${index + 1} has no ${request.keyField}`, {
+          index,
+        });
+      return { op: "put", collection, key: String(key), data };
+    });
     // Every record is checked against the schema before anything is written.
     const options = await prevalidateSiteDataWrite(access, operations, { meter }).catch(failed);
     // Each batch is atomic; a failure reports how many records were imported.

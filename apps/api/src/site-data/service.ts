@@ -64,6 +64,7 @@ export function siteDataLimits(settings: ApiRouteDeps["settings"]): SiteDataLimi
     siteWritesPerMinute: settings.siteDataSiteWritesPerMinute,
     viewerReadsPerMinute: settings.siteDataViewerReadsPerMinute,
     managerWritesPerMinute: settings.siteDataManagerWritesPerMinute,
+    siteValidationMsPerMinute: settings.siteDataSiteValidationMsPerMinute,
     workspaceValidationMsPerMinute: settings.siteDataWorkspaceValidationMsPerMinute,
   };
 }
@@ -114,7 +115,8 @@ export const SITE_DATA_LARGE_VALIDATOR_SOURCE = 200_000;
 const LARGE_VALIDATOR_FACTOR = 4;
 /** The repeated cost of one allOf, anyOf or oneOf branch, before its own checks. */
 const SCHEMA_BRANCH_COST = 6;
-const compiled = new Map<string, ValidateFunction>();
+/** Validators by schema digest; a schema that failed to compile keeps its error. */
+const compiled = new Map<string, ValidateFunction | SiteDataError>();
 /** Per-object shortcut so a batch hashes each loaded schema once. */
 const compiledByObject = new WeakMap<object, ValidateFunction>();
 
@@ -310,50 +312,62 @@ function schemaDigest(schema: Record<string, unknown>): string {
   return createHash("sha256").update(JSON.stringify(schema)).digest("hex");
 }
 
-/**
- * Check a schema against the allowlist and compile it, or reuse the cached
- * validator for the same digest. A validator too large to run optimized has
- * its repeated cost counted four times.
- */
-function compileSiteDataSchema(
-  schema: Record<string, unknown>,
-  digest: string = schemaDigest(schema),
-): ValidateFunction {
-  const known = compiledByObject.get(schema);
-  if (known) return known;
+/** Check a schema against the allowlist and cost model, then compile it. */
+function buildSiteDataValidator(schema: Record<string, unknown>): ValidateFunction {
   const problem = siteDataSchemaProblem(schema);
   if (problem) throw new SiteDataError("validation", `jsonSchema ${problem}`);
-  let validator = compiled.get(digest);
-  if (validator) compiled.delete(digest);
-  else {
-    try {
-      validator = new Ajv({
-        allErrors: false,
-        coerceTypes: false,
-        strict: false,
-        useDefaults: false,
-        validateFormats: false,
-        addUsedSchema: false,
-      }).compile(schema);
-    } catch (error) {
+  let validator: ValidateFunction;
+  try {
+    validator = new Ajv({
+      allErrors: false,
+      coerceTypes: false,
+      strict: false,
+      useDefaults: false,
+      validateFormats: false,
+      addUsedSchema: false,
+    }).compile(schema);
+  } catch (error) {
+    throw new SiteDataError(
+      "validation",
+      `jsonSchema is not a valid JSON Schema: ${error instanceof Error ? error.message : "invalid"}`,
+    );
+  }
+  // A validator too large to run optimized has its repeated cost counted four times.
+  if (validator.toString().length > SITE_DATA_LARGE_VALIDATOR_SOURCE) {
+    const cost = siteDataSchemaRepeatedCost(schema) * LARGE_VALIDATOR_FACTOR;
+    if (cost > SITE_DATA_MAX_SCHEMA_REPEATED_COST)
       throw new SiteDataError(
         "validation",
-        `jsonSchema is not a valid JSON Schema: ${error instanceof Error ? error.message : "invalid"}`,
+        `jsonSchema is large, so it ${repeatedCostProblem(cost)}`,
       );
-    }
-    if (validator.toString().length > SITE_DATA_LARGE_VALIDATOR_SOURCE) {
-      const cost = siteDataSchemaRepeatedCost(schema) * LARGE_VALIDATOR_FACTOR;
-      if (cost > SITE_DATA_MAX_SCHEMA_REPEATED_COST)
-        throw new SiteDataError(
-          "validation",
-          `jsonSchema is large, so it ${repeatedCostProblem(cost)}`,
-        );
+  }
+  return validator;
+}
+
+/**
+ * The validator for a schema: from the cache by content digest (checked
+ * before anything else, so a hit skips the allowlist walk), or checked and
+ * compiled. A schema that fails is cached too, and fails again at once.
+ */
+function compileSiteDataSchema(schema: Record<string, unknown>, digest?: string): ValidateFunction {
+  const known = compiledByObject.get(schema);
+  if (known) return known;
+  const key = digest ?? schemaDigest(schema);
+  let result = compiled.get(key);
+  if (result !== undefined) compiled.delete(key);
+  else {
+    try {
+      result = buildSiteDataValidator(schema);
+    } catch (error) {
+      if (!(error instanceof SiteDataError)) throw error;
+      result = error;
     }
   }
-  compiled.set(digest, validator);
+  compiled.set(key, result);
   while (compiled.size > SCHEMA_CACHE_SIZE) compiled.delete(compiled.keys().next().value!);
-  compiledByObject.set(schema, validator);
-  return validator;
+  if (result instanceof SiteDataError) throw result;
+  compiledByObject.set(schema, result);
+  return result;
 }
 
 /** Compiled validators currently cached (for tests). */
@@ -448,13 +462,17 @@ function contentDigest(value: unknown): string {
  * - every insert and put record matches its collection's schema;
  * - every patch and increment result, merged from the stored record, matches
  *   too (if the record changes before the lock, the write checks it again);
- * - schema compiling and validation spend at most 250 ms per request, checked
- *   before each record after the first, yielding to the event loop after each.
+ * - schema compiling and validation spend at most 250 ms per request: once
+ *   anything was compiled or checked, each later operation is refused before
+ *   it runs when the budget is spent, and the event loop gets a turn after
+ *   every compile or check, even for a skipped record.
  *
  * Every millisecond spent, here and inside the write, is added to `meter`
- * for the caller to charge. Returns write options that skip re-validating the
- * records already checked, reuse this request's compiled validators, and keep
- * any check left for inside the write on the same time budget.
+ * for the caller to settle. Returns write options that skip re-validating
+ * the records already checked and keep any check left for inside the write on
+ * the same budget. Inside the write only this request's compiled validators
+ * are used: a schema that changed since is a retryable `conflict`
+ * (reason `schema_changed`), never a compile under the Site's lock.
  */
 export async function prevalidateSiteDataWrite(
   access: Pick<SiteDataAccess, "store" | "caller" | "limits" | "writeOptions">,
@@ -473,7 +491,8 @@ export async function prevalidateSiteDataWrite(
       { quota: "request_bytes", limit: SITE_DATA_MAX_REQUEST_RECORD_BYTES },
     );
   let spentMs = 0;
-  let checked = 0;
+  // Compiles and validations measured so far.
+  let measured = 0;
   const overBudget = (index?: number) =>
     new SiteDataError(
       "validation",
@@ -482,6 +501,7 @@ export async function prevalidateSiteDataWrite(
     );
   const timed = <T>(run: () => T): T => {
     const started = siteDataValidationClock.now();
+    measured += 1;
     try {
       return run();
     } finally {
@@ -490,52 +510,62 @@ export async function prevalidateSiteDataWrite(
       meter.ms += elapsed;
     }
   };
-  // This request's validators by schema digest: the write reuses them even if
-  // the shared cache evicted them meanwhile. Compiling counts as spent time.
-  const validators = new Map<string, ValidateFunction>();
+  // This request's validators (or compile errors) by schema digest. The write
+  // reuses them even if the shared cache evicted them meanwhile, and never
+  // compiles under the Site's lock. Compiling counts as spent time.
+  const validators = new Map<string, ValidateFunction | SiteDataError>();
   const digests = new WeakMap<object, string>();
-  const validatorFor = (schema: Record<string, unknown>): ValidateFunction => {
+  const digestOf = (schema: Record<string, unknown>) => {
     let digest = digests.get(schema);
     if (digest === undefined) {
       digest = schemaDigest(schema);
       digests.set(schema, digest);
     }
+    return digest;
+  };
+  const validatorFor = (schema: Record<string, unknown>): ValidateFunction => {
+    const digest = digestOf(schema);
     let validator = validators.get(digest);
-    if (!validator) {
-      validator = timed(() => compileSiteDataSchema(schema, digest));
+    if (validator === undefined) {
+      validator = timed(() => {
+        try {
+          return compileSiteDataSchema(schema, digest);
+        } catch (error) {
+          if (error instanceof SiteDataError) return error;
+          throw error;
+        }
+      });
       validators.set(digest, validator);
     }
+    if (validator instanceof SiteDataError) throw validator;
     return validator;
   };
-  const check = (validator: ValidateFunction, data: Record<string, unknown>) => {
-    checked += 1;
-    return timed(() => runValidator(validator, data));
-  };
+  const check = (validator: ValidateFunction, data: Record<string, unknown>) =>
+    timed(() => runValidator(validator, data));
   const schemas = new Map<string, Record<string, unknown> | null>();
   const validated = new WeakMap<object, ValidateFunction>();
   const validatedMerges = new Map<string, ValidateFunction>();
-  for (const [index, op] of operations.entries()) {
-    if (!isRecordObject(op) || typeof op.collection !== "string") continue;
-    if (op.op !== "insert" && op.op !== "put" && op.op !== "patch" && op.op !== "increment")
-      continue;
-    if (!schemas.has(op.collection)) {
-      const collection = await access.store.getCollection(access.caller, op.collection);
-      schemas.set(op.collection, collection?.jsonSchema ?? null);
+  const prevalidate = async (index: number, op: Record<string, unknown>) => {
+    const collection = op.collection as string;
+    if (!schemas.has(collection)) {
+      const loaded = await access.store.getCollection(access.caller, collection);
+      schemas.set(collection, loaded?.jsonSchema ?? null);
     }
-    const schema = schemas.get(op.collection);
-    if (!schema) continue;
-    // One record always completes; later ones wait for budget.
-    if (checked > 0 && spentMs > budgetMs) throw overBudget(index);
+    const schema = schemas.get(collection);
+    if (!schema) return;
+    // Once anything was compiled or checked, every later operation waits for
+    // budget: one operation always completes.
+    if (measured > 0 && spentMs > budgetMs) throw overBudget(index);
     let validator: ValidateFunction;
     try {
       validator = validatorFor(schema);
     } catch {
-      continue; // The store reports the invalid schema.
+      return; // The write reports the invalid schema.
     }
     if (op.op === "insert" || op.op === "put") {
-      if (!isRecordObject(op.data)) continue;
+      if (!isRecordObject(op.data)) return;
       // Oversized records are refused by the store's size check instead.
-      if (jsonBytes(op.data) > access.limits.maxRecordBytes) continue;
+      if (jsonBytes(op.data) > access.limits.maxRecordBytes) return;
       const problem = check(validator, op.data);
       if (problem)
         throw new SiteDataError(
@@ -546,31 +576,43 @@ export async function prevalidateSiteDataWrite(
       validated.set(op.data, validator);
     } else {
       const ref = recordRef(op);
-      if (!ref) continue;
-      const stored = await access.store.get(access.caller, op.collection, ref).catch(() => null);
+      if (!ref) return;
+      const stored = await access.store.get(access.caller, collection, ref).catch(() => null);
       const merged = mergedRecord(op, stored ? stored.data : null);
-      if (!merged || jsonBytes(merged) > access.limits.maxRecordBytes) continue;
+      if (!merged || jsonBytes(merged) > access.limits.maxRecordBytes) return;
       // An invalid result is left to the write, which sees the current record.
       if (check(validator, merged) === null) validatedMerges.set(contentDigest(merged), validator);
     }
-    await yieldToEventLoop();
+  };
+  for (const [index, op] of operations.entries()) {
+    if (!isRecordObject(op) || typeof op.collection !== "string") continue;
+    if (op.op !== "insert" && op.op !== "put" && op.op !== "patch" && op.op !== "increment")
+      continue;
+    const before = measured;
+    await prevalidate(index, op);
+    // Yield after any compile or check, even when the record was skipped.
+    if (measured > before) await yieldToEventLoop();
   }
   return {
     ...access.writeOptions,
     validate: (schema, data) => {
-      let validator: ValidateFunction;
-      try {
-        validator = validatorFor(schema);
-      } catch {
-        return "the collection's JSON Schema is invalid";
-      }
-      if (validated.get(data) === validator) return null;
-      if (validatedMerges.size > 0 && validatedMerges.get(contentDigest(data)) === validator)
+      const known = validators.get(digestOf(schema));
+      // The schema changed after the request was checked: never compile under
+      // the Site's lock; the caller retries against the new schema.
+      if (known === undefined)
+        throw new SiteDataError(
+          "conflict",
+          "The collection's schema changed while this request was being checked; send it again",
+          { reason: "schema_changed", retryable: true },
+        );
+      if (known instanceof SiteDataError) return "the collection's JSON Schema is invalid";
+      if (validated.get(data) === known) return null;
+      if (validatedMerges.size > 0 && validatedMerges.get(contentDigest(data)) === known)
         return null;
       // Anything left for inside the write stays on the request's budget; a
       // single-operation request still completes its one record.
-      if (operations.length > 1 && checked > 0 && spentMs > budgetMs) throw overBudget();
-      return check(validator, data);
+      if (operations.length > 1 && measured > 0 && spentMs > budgetMs) throw overBudget();
+      return check(known, data);
     },
   };
 }

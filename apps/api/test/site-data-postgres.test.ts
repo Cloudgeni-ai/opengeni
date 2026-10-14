@@ -623,64 +623,69 @@ test("batches are atomic and queries filter, sort, count and page", async () => 
 });
 
 test("quotas and write limits are enforced", async () => {
-  const f = await fixture({
-    siteDataMaxRecordBytes: 200,
-    // Each record is charged its JSON plus 512 bytes.
-    siteDataRecordBytesPerSite: 3_000,
-    siteDataMaxCollectionsPerSite: 2,
-    siteDataViewerWritesPerMinute: 3,
-    siteDataMaxFileBytes: 64,
-    siteDataFileBytesPerSite: 100,
-  });
-  const s = f.site((await f.publish("Small")).id);
-  await s.define(f.owner, "a", { accessMode: "shared" });
-  await s.define(f.owner, "b", { accessMode: "shared" });
-  const third = await s.define(f.owner, "c", { accessMode: "shared" });
-  expect(third.status).toBe(413);
-  expect(third.json.error.details).toMatchObject({ code: "quota_exceeded", quota: "collections" });
+  await withinOneMinute(async () => {
+    const f = await fixture({
+      siteDataMaxRecordBytes: 200,
+      // Each record is charged its JSON plus 512 bytes.
+      siteDataRecordBytesPerSite: 3_000,
+      siteDataMaxCollectionsPerSite: 2,
+      siteDataViewerWritesPerMinute: 3,
+      siteDataMaxFileBytes: 64,
+      siteDataFileBytesPerSite: 100,
+    });
+    const s = f.site((await f.publish("Small")).id);
+    await s.define(f.owner, "a", { accessMode: "shared" });
+    await s.define(f.owner, "b", { accessMode: "shared" });
+    const third = await s.define(f.owner, "c", { accessMode: "shared" });
+    expect(third.status).toBe(413);
+    expect(third.json.error.details).toMatchObject({
+      code: "quota_exceeded",
+      quota: "collections",
+    });
 
-  const large = await s.write(f.owner, [
-    { op: "insert", collection: "a", data: { text: "x".repeat(300) } },
-  ]);
-  expect(large.status).toBe(413);
-  expect(large.json.error.details.quota).toBe("record_bytes");
-  for (let index = 0; index < 4; index += 1)
-    await s.write(f.owner, [{ op: "insert", collection: "a", data: { text: "y".repeat(120) } }]);
-  const full = await s.write(f.owner, [
-    { op: "insert", collection: "a", data: { text: "z".repeat(120) } },
-  ]);
-  expect(full.status).toBe(413);
-  expect(full.json.error.details.quota).toBe("site_record_bytes");
+    const large = await s.write(f.owner, [
+      { op: "insert", collection: "a", data: { text: "x".repeat(300) } },
+    ]);
+    expect(large.status).toBe(413);
+    expect(large.json.error.details.quota).toBe("record_bytes");
+    for (let index = 0; index < 4; index += 1)
+      await s.write(f.owner, [{ op: "insert", collection: "a", data: { text: "y".repeat(120) } }]);
+    const full = await s.write(f.owner, [
+      { op: "insert", collection: "a", data: { text: "z".repeat(120) } },
+    ]);
+    expect(full.status).toBe(413);
+    expect(full.json.error.details.quota).toBe("site_record_bytes");
 
-  // Viewers get a per-minute write window; managers are bounded by quotas.
-  const r = f.site((await f.publish("Busy")).id);
-  await r.define(f.owner, "b", { accessMode: "shared" });
-  const statuses: number[] = [];
-  for (let index = 0; index < 4; index += 1)
-    statuses.push(
-      (await r.write(f.member, [{ op: "insert", collection: "b", data: { n: index } }])).status,
-    );
-  expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
-  expect(statuses[3]).toBe(429);
+    // Viewers get a per-minute write window; managers are bounded by quotas.
+    const r = f.site((await f.publish("Busy")).id);
+    await r.define(f.owner, "b", { accessMode: "shared" });
+    const statuses: number[] = [];
+    for (let index = 0; index < 4; index += 1)
+      statuses.push(
+        (await r.write(f.member, [{ op: "insert", collection: "b", data: { n: index } }])).status,
+      );
+    expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
+    expect(statuses[3]).toBe(429);
 
-  const tooBig = await s.request(f.owner, "POST", "/files?name=big.png", new Uint8Array(100), {
-    "content-type": "image/png",
+    const tooBig = await s.request(f.owner, "POST", "/files?name=big.png", new Uint8Array(100), {
+      "content-type": "image/png",
+    });
+    expect(tooBig.status).toBe(413);
+    const first = await s.request(f.owner, "POST", "/files?name=a.png", PNG, {
+      "content-type": "image/png",
+    });
+    expect(first.status, JSON.stringify(first.json)).toBe(201);
+    const blob = new Uint8Array(60);
+    const second = await s.request(f.owner, "POST", "/files?name=b.bin", blob, {
+      "content-type": "application/octet-stream",
+    });
+    expect(second.status, JSON.stringify(second.json)).toBe(201);
+    const overflow = await s.request(f.owner, "POST", "/files?name=c.bin", blob, {
+      "content-type": "application/octet-stream",
+    });
+    expect(overflow.status).toBe(413);
+    expect(overflow.json.error.details.quota).toBe("site_file_bytes");
   });
-  expect(tooBig.status).toBe(413);
-  const first = await s.request(f.owner, "POST", "/files?name=a.png", PNG, {
-    "content-type": "image/png",
-  });
-  expect(first.status, JSON.stringify(first.json)).toBe(201);
-  const blob = new Uint8Array(60);
-  const second = await s.request(f.owner, "POST", "/files?name=b.bin", blob, {
-    "content-type": "application/octet-stream",
-  });
-  expect(second.status, JSON.stringify(second.json)).toBe(201);
-  const overflow = await s.request(f.owner, "POST", "/files?name=c.bin", blob, {
-    "content-type": "application/octet-stream",
-  });
-  expect(overflow.status).toBe(413);
-  expect(overflow.json.error.details.quota).toBe("site_file_bytes");
 });
 
 test("files upload, list, download and delete with shared and private scope", async () => {
@@ -1253,10 +1258,12 @@ test("new records are validated before the write takes the Site's lock", async (
     { op: "insert", collection: "rows", data: valid },
   ]);
   // In the write, the same record against the same schema is not checked again;
-  // anything else (a merged patch, a changed schema) still is.
+  // a merged patch still is, and a changed schema is a retryable conflict.
   expect(options.validate!({ ...schema }, valid)).toBeNull();
   expect(options.validate!(schema, { name: "toolong" })).toContain("name");
-  expect(options.validate!({ type: "object", required: ["other"] }, valid)).toContain("other");
+  expect(() => options.validate!({ type: "object", required: ["other"] }, valid)).toThrow(
+    "schema changed",
+  );
 });
 
 test("only personless keys and people who manage the Site are managers", async () => {
@@ -1378,68 +1385,71 @@ test("the workspace total is shared across its Sites", async () => {
 });
 
 test("rate windows count attempts before any work, and uploads check before storing", async () => {
-  const f = await fixture({
-    siteDataViewerWritesPerMinute: 2,
-    siteDataViewerReadsPerMinute: 2,
-    siteDataFileBytesPerSite: 20,
-  });
-  const created = await f.publish("Limits");
-  const s = f.site(created.id);
-  const frame = { "x-opengeni-site-id": created.id };
-  await s.define(f.owner, "news", { accessMode: "shared_read" });
-  await s.define(f.owner, "notes", { accessMode: "shared" });
-  // Refused writes count: two forbidden attempts use the viewer's window.
-  for (let index = 0; index < 2; index += 1)
+  await withinOneMinute(async () => {
+    const f = await fixture({
+      siteDataViewerWritesPerMinute: 2,
+      siteDataViewerReadsPerMinute: 2,
+      siteDataFileBytesPerSite: 20,
+    });
+    const created = await f.publish("Limits");
+    const s = f.site(created.id);
+    const frame = { "x-opengeni-site-id": created.id };
+    await s.define(f.owner, "news", { accessMode: "shared_read" });
+    await s.define(f.owner, "notes", { accessMode: "shared" });
+    // Refused writes count: two forbidden attempts use the viewer's window.
+    for (let index = 0; index < 2; index += 1)
+      expect(
+        (await s.write(f.member, [{ op: "insert", collection: "news", data: { i: index } }]))
+          .status,
+      ).toBe(403);
+    const limited = await s.write(f.member, [
+      { op: "insert", collection: "notes", data: { ok: true } },
+    ]);
+    expect(limited.status).toBe(429);
+    expect(errorCode(limited)).toBe("rate_limited");
+    // Another viewer has their own window.
     expect(
-      (await s.write(f.member, [{ op: "insert", collection: "news", data: { i: index } }])).status,
-    ).toBe(403);
-  const limited = await s.write(f.member, [
-    { op: "insert", collection: "notes", data: { ok: true } },
-  ]);
-  expect(limited.status).toBe(429);
-  expect(errorCode(limited)).toBe("rate_limited");
-  // Another viewer has their own window.
-  expect(
-    (await s.write(f.third, [{ op: "insert", collection: "notes", data: { ok: true } }])).status,
-  ).toBe(200);
-  // An upload over the window never reaches storage.
-  const before = f.objects.size;
-  const throttled = await s.request(f.member, "POST", "/files?name=a.png", PNG, {
-    "content-type": "image/png",
-    ...frame,
+      (await s.write(f.third, [{ op: "insert", collection: "notes", data: { ok: true } }])).status,
+    ).toBe(200);
+    // An upload over the window never reaches storage.
+    const before = f.objects.size;
+    const throttled = await s.request(f.member, "POST", "/files?name=a.png", PNG, {
+      "content-type": "image/png",
+      ...frame,
+    });
+    expect(throttled.status).toBe(429);
+    // An upload over the quota never reaches storage either.
+    const tooMuch = await s.request(f.owner, "POST", "/files?name=b.bin", new Uint8Array(30), {
+      "content-type": "application/octet-stream",
+    });
+    expect(tooMuch.status).toBe(413);
+    expect(tooMuch.json.error.details.quota).toBe("site_file_bytes");
+    expect(f.objects.size).toBe(before);
+    // A body without Content-Length is cut off at the per-file cap while streaming.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let index = 0; index < 20; index += 1) controller.enqueue(new Uint8Array(1024 * 1024));
+        controller.close();
+      },
+    });
+    const streamed = await f.app.request(
+      `/v1/workspaces/${f.workspace.id}/published-artifacts/${created.id}/files?name=big.bin`,
+      {
+        method: "POST",
+        headers: { ...f.owner.headers, "content-type": "application/octet-stream" },
+        body: stream,
+        duplex: "half",
+      } as RequestInit,
+    );
+    expect(streamed.status).toBe(413);
+    expect(f.objects.size).toBe(before);
+    // Site frames get a generous read window; reads outside a frame are not windowed.
+    const reads: number[] = [];
+    for (let index = 0; index < 3; index += 1)
+      reads.push((await s.query(f.third, { collection: "notes" }, frame)).status);
+    expect(reads).toEqual([200, 200, 429]);
+    expect((await s.query(f.third, { collection: "notes" })).status).toBe(200);
   });
-  expect(throttled.status).toBe(429);
-  // An upload over the quota never reaches storage either.
-  const tooMuch = await s.request(f.owner, "POST", "/files?name=b.bin", new Uint8Array(30), {
-    "content-type": "application/octet-stream",
-  });
-  expect(tooMuch.status).toBe(413);
-  expect(tooMuch.json.error.details.quota).toBe("site_file_bytes");
-  expect(f.objects.size).toBe(before);
-  // A body without Content-Length is cut off at the per-file cap while streaming.
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      for (let index = 0; index < 20; index += 1) controller.enqueue(new Uint8Array(1024 * 1024));
-      controller.close();
-    },
-  });
-  const streamed = await f.app.request(
-    `/v1/workspaces/${f.workspace.id}/published-artifacts/${created.id}/files?name=big.bin`,
-    {
-      method: "POST",
-      headers: { ...f.owner.headers, "content-type": "application/octet-stream" },
-      body: stream,
-      duplex: "half",
-    } as RequestInit,
-  );
-  expect(streamed.status).toBe(413);
-  expect(f.objects.size).toBe(before);
-  // Site frames get a generous read window; reads outside a frame are not windowed.
-  const reads: number[] = [];
-  for (let index = 0; index < 3; index += 1)
-    reads.push((await s.query(f.third, { collection: "notes" }, frame)).status);
-  expect(reads).toEqual([200, 200, 429]);
-  expect((await s.query(f.third, { collection: "notes" })).status).toBe(200);
 });
 
 test("CSV exports neutralize formulas and cap their columns", async () => {
@@ -1665,47 +1675,48 @@ test("a person-less scheduled task keeps one principal across runs", async () =>
 });
 
 test("uploads are refused before their body is read", async () => {
-  const f = await fixture({ siteDataViewerWritesPerMinute: 1, siteDataFileBytesPerSite: 64 });
-  const created = await f.publish("Intake");
-  const privateSite = await f.publish("Mine", "private");
-  let pulls = 0;
-  const watched = () =>
-    new ReadableStream<Uint8Array>(
-      {
-        pull(controller) {
-          pulls += 1;
-          controller.enqueue(new Uint8Array(1024));
-          if (pulls > 1000) controller.close();
+  await withinOneMinute(async () => {
+    const f = await fixture({ siteDataViewerWritesPerMinute: 1, siteDataFileBytesPerSite: 64 });
+    const created = await f.publish("Intake");
+    const privateSite = await f.publish("Mine", "private");
+    let pulls = 0;
+    const watched = () =>
+      new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulls += 1;
+            controller.enqueue(new Uint8Array(1024));
+            if (pulls > 1000) controller.close();
+          },
         },
-      },
-      { highWaterMark: 0 },
-    );
-  const upload = (siteId: string, who: Who, headers: Record<string, string> = {}) =>
-    f.app.request(
-      `/v1/workspaces/${f.workspace.id}/published-artifacts/${siteId}/files?name=a.bin`,
-      {
-        method: "POST",
-        headers: { ...who.headers, "content-type": "application/octet-stream", ...headers },
-        body: watched(),
-        duplex: "half",
-      } as RequestInit,
-    );
-  // Not visible to the viewer (Only me Site): refused unread.
-  expect((await upload(privateSite.id, f.member)).status).toBe(404);
-  expect(pulls).toBe(0);
-  // Over the declared quota: refused unread.
-  expect((await upload(created.id, f.owner, { "content-length": "1000000" })).status).toBe(413);
-  expect(pulls).toBe(0);
-  // Over the viewer's write window: refused unread.
-  const first = await f.site(created.id).request(f.member, "POST", "/files?name=a.png", PNG, {
-    "content-type": "image/png",
+        { highWaterMark: 0 },
+      );
+    const upload = (siteId: string, who: Who, headers: Record<string, string> = {}) =>
+      f.app.request(
+        `/v1/workspaces/${f.workspace.id}/published-artifacts/${siteId}/files?name=a.bin`,
+        {
+          method: "POST",
+          headers: { ...who.headers, "content-type": "application/octet-stream", ...headers },
+          body: watched(),
+          duplex: "half",
+        } as RequestInit,
+      );
+    // Not visible to the viewer (Only me Site): refused unread.
+    expect((await upload(privateSite.id, f.member)).status).toBe(404);
+    expect(pulls).toBe(0);
+    // Over the declared quota: refused unread.
+    expect((await upload(created.id, f.owner, { "content-length": "1000000" })).status).toBe(413);
+    expect(pulls).toBe(0);
+    // Over the viewer's write window: refused unread.
+    const first = await f.site(created.id).request(f.member, "POST", "/files?name=a.png", PNG, {
+      "content-type": "image/png",
+    });
+    expect(first.status).toBe(201);
+    expect((await upload(created.id, f.member)).status).toBe(429);
+    expect(pulls).toBe(0);
   });
-  expect(first.status).toBe(201);
-  expect((await upload(created.id, f.member)).status).toBe(429);
-  expect(pulls).toBe(0);
 });
 
-/** The costliest schema the allowlist accepts: 5 × 16 branches and 500 enum values per element. */
 /** The costliest schema the cost model allows: 96 failing branches on every array element. */
 function costliestSchema() {
   const strings = (count: number) => Array.from({ length: count }, () => ({ type: "string" }));
@@ -1764,14 +1775,21 @@ async function withValidationClock<T>(ms: () => number, run: () => Promise<T>): 
 
 /**
  * Rate windows are wall-clock minutes. Run a block that counts against them
- * again (on fresh fixtures) if a minute boundary fell inside it.
+ * (creating its own fixtures) once more if a minute boundary fell inside it,
+ * whether it returned or failed, so no result depends on when it ran.
  */
 async function withinOneMinute<T>(run: () => Promise<T>): Promise<T> {
   const minute = async () =>
     String((await shared.admin`select date_trunc('minute', now())::text as m`)[0]!.m);
   for (let attempt = 0; ; attempt += 1) {
     const before = await minute();
-    const result = await run();
+    let result: T;
+    try {
+      result = await run();
+    } catch (error) {
+      if (attempt > 0 || (await minute()) === before) throw error;
+      continue;
+    }
     if (attempt > 0 || (await minute()) === before) return result;
   }
 }
@@ -1783,10 +1801,24 @@ async function rateWindows(f: Fixture, siteId: string) {
   return Object.fromEntries(rows.map((row) => [row.principal_key, Number(row.operations)]));
 }
 
-async function validationMicros(f: Fixture) {
-  const [row] = await shared.admin<{ validation_micros: string }[]>`
-    select validation_micros from site_data_validation_windows where workspace_id = ${f.workspace.id}`;
-  return row ? Number(row.validation_micros) : 0;
+/** Validation time on the workspace's window, or on one Site's. */
+async function validationMicros(f: Fixture, siteId?: string) {
+  const rows = siteId
+    ? await shared.admin<{ validation_micros: string }[]>`
+        select validation_micros from site_data_validation_windows
+        where workspace_id = ${f.workspace.id} and site_id = ${siteId}`
+    : await shared.admin<{ validation_micros: string }[]>`
+        select validation_micros from site_data_workspace_validation_windows
+        where workspace_id = ${f.workspace.id}`;
+  return rows[0] ? Number(rows[0].validation_micros) : 0;
+}
+
+async function validationRows(f: Fixture) {
+  const [row] = await shared.admin<{ sites: number; workspaces: number }[]>`
+    select
+      (select count(*)::int from site_data_validation_windows where workspace_id = ${f.workspace.id}) as sites,
+      (select count(*)::int from site_data_workspace_validation_windows where workspace_id = ${f.workspace.id}) as workspaces`;
+  return row!;
 }
 
 test("worst-case validation is bounded by the cost model, request size and time budget", async () => {
@@ -1839,6 +1871,7 @@ test("worst-case validation is bounded by the cost model, request size and time 
           one: one.status,
           windows: await rateWindows(f, created.id),
           micros: await validationMicros(f),
+          siteMicros: await validationMicros(f, created.id),
         };
       },
     );
@@ -1853,16 +1886,19 @@ test("worst-case validation is bounded by the cost model, request size and time 
   // Managers' window: define 1, the 17-record attempt 17, the 16-record attempt 16
   // plus 300 ms / 5 = 60, the single record 1 plus 2,000 ms / 5 = 400.
   expect(result.windows["manager:*"]).toBe(1 + 17 + 16 + 60 + 1 + 400);
+  // Reservations were all replaced by the time spent: 300 ms + 2,000 ms.
   expect(result.micros).toBe(2_300_000);
+  expect(result.siteMicros).toBe(2_300_000);
 });
 
-test("validation time is charged to the caller's windows and to a workspace window", async () => {
+test("validation windows refuse only requests that would validate", async () => {
   const result = await withinOneMinute(async () => {
     const f = await fixture({
       siteDataViewerWritesPerMinute: 10,
-      siteDataWorkspaceValidationMsPerMinute: 1_000,
+      siteDataSiteValidationMsPerMinute: 1_000,
     });
-    const a = f.site((await f.publish("Charged A")).id);
+    const created = await f.publish("Charged A");
+    const a = f.site(created.id);
     const b = f.site((await f.publish("Charged B")).id);
     const jsonSchema = { type: "object", properties: { n: { type: "number" } } };
     let step = 0;
@@ -1878,30 +1914,59 @@ test("validation time is charged to the caller's windows and to a workspace wind
         // A viewer's write that spends 200 ms counts 1 + 40 operations.
         const viewer = await a.write(f.member, insert());
         const viewerAgain = await a.write(f.member, insert());
-        const other = await a.write(f.third, insert());
-        // 400 ms spent so far: this write starts within the 1 s window and spends 1.2 s.
-        step = 600;
-        const heavy = await b.write(f.owner, insert());
+        // Another viewer has their own window (and spends nothing here).
         step = 0;
-        const exhausted = [
-          await b.write(f.member, insert()),
-          await a.write(f.owner, insert("plain")),
+        const other = await a.write(f.third, insert());
+        const keyed = await a.write(f.owner, [
+          { op: "put", collection: "rows", key: "k", data: { n: 1 } },
+        ]);
+        // 200 ms settled so far: this write reserves within the 1 s window and spends 1.2 s.
+        step = 600;
+        const heavy = await a.write(f.owner, insert());
+        step = 0;
+        const siteMicros = await validationMicros(f, created.id);
+        // The Site's window is spent: requests that would validate are refused,
+        // for a viewer whose own window still has room too...
+        const refused = [
+          await a.write(f.owner, insert()),
+          await a.write(f.third, insert()),
+          await a.define(f.owner, "typed", { accessMode: "shared", jsonSchema }),
+          await a.request(f.owner, "POST", "/data/collections/rows/import", {
+            format: "json",
+            records: [{ n: 2 }],
+          }),
         ];
-        const read = await a.query(f.owner, { collection: "rows" });
-        // Another workspace has its own window.
-        const g = await fixture({ siteDataWorkspaceValidationMsPerMinute: 1_000 });
-        const c = g.site((await g.publish("Elsewhere")).id);
-        await c.define(g.owner, "plain", { accessMode: "shared" });
-        const elsewhere = await c.write(g.owner, insert("plain"));
+        // ...and everything else goes through, so a manager can remove the schema.
+        const upload = await a.request(f.owner, "POST", "/files?name=a.bin", new Uint8Array(8), {
+          "content-type": "application/octet-stream",
+        });
+        const allowed = [
+          await a.write(f.owner, insert("plain")),
+          await a.write(f.owner, [{ op: "delete", collection: "rows", key: "k" }]),
+          upload,
+          await a.request(f.owner, "DELETE", `/files/${upload.json?.file?.id ?? upload.json?.id}`),
+          await a.define(f.owner, "loose", { accessMode: "shared" }),
+          await a.request(f.owner, "POST", "/data/collections/plain/reset", { confirm: true }),
+          await a.request(f.owner, "DELETE", "/data/collections/loose?confirm=true"),
+          await a.define(f.owner, "rows", { accessMode: "shared", jsonSchema: null }),
+        ];
+        // Without its schema the collection takes writes again.
+        allowed.push(await a.write(f.owner, insert()));
+        // Another Site has its own window.
+        const elsewhere = await b.write(f.owner, insert());
         return {
           viewer,
           viewerAgain,
           other,
+          keyed,
           heavy,
-          exhausted,
-          read,
+          siteMicros,
+          refused,
+          allowed,
           elsewhere,
-          micros: await validationMicros(f),
+          workspaceMicros: await validationMicros(f),
+          windows: await rateWindows(f, created.id),
+          memberPrincipal: `user:${f.member.subjectId}`,
         };
       },
     );
@@ -1909,16 +1974,227 @@ test("validation time is charged to the caller's windows and to a workspace wind
   expect(result.viewer.status).toBe(200);
   expect(result.viewerAgain.status).toBe(429);
   expect(result.viewerAgain.json.error.message).toContain("Too many writes");
+  expect(result.windows[result.memberPrincipal]).toBe(1 + 40);
   expect(result.other.status).toBe(200);
+  expect(result.keyed.status).toBe(200);
   expect(result.heavy.status).toBe(200);
-  expect(result.micros).toBe(1_600_000);
-  for (const refused of result.exhausted) {
-    expect(refused.status).toBe(429);
-    expect(errorCode(refused)).toBe("rate_limited");
-    expect(refused.json.error.details.quota).toBe("workspace_validation_time");
+  // 200 + 0 + 1,200 ms settled; every reservation was replaced by the time spent.
+  expect(result.siteMicros).toBe(1_400_000);
+  for (const refused of result.refused) {
+    expect(refused.status, JSON.stringify(refused.json)).toBe(429);
+    expect(refused.json.error.details.quota).toBe("site_validation_time");
   }
-  expect(result.read.status).toBe(200);
+  for (const allowed of result.allowed)
+    expect(allowed.status, JSON.stringify(allowed.json)).toBeLessThan(300);
   expect(result.elsewhere.status).toBe(200);
+  expect(result.workspaceMicros).toBe(1_400_000);
+});
+
+test("the workspace validation window is a ceiling across its Sites", async () => {
+  const result = await withinOneMinute(async () => {
+    const f = await fixture({ siteDataWorkspaceValidationMsPerMinute: 1_000 });
+    const a = f.site((await f.publish("Ceiling A")).id);
+    const b = f.site((await f.publish("Ceiling B")).id);
+    const jsonSchema = { type: "object", properties: { n: { type: "number" } } };
+    let step = 0;
+    return withValidationClock(
+      () => step,
+      async () => {
+        for (const site of [a, b]) {
+          await site.define(f.owner, "rows", { accessMode: "shared", jsonSchema });
+          await site.define(f.owner, "plain", { accessMode: "shared" });
+        }
+        const insert = (collection = "rows") => [{ op: "insert", collection, data: { n: 1 } }];
+        step = 600;
+        const heavy = await a.write(f.owner, insert());
+        step = 0;
+        const refused = await b.write(f.member, insert());
+        const plain = await b.write(f.member, insert("plain"));
+        // Another workspace has its own ceiling.
+        const g = await fixture({ siteDataWorkspaceValidationMsPerMinute: 1_000 });
+        const c = g.site((await g.publish("Elsewhere")).id);
+        await c.define(g.owner, "rows", { accessMode: "shared", jsonSchema });
+        const elsewhere = await c.write(g.owner, insert());
+        return { heavy, refused, plain, elsewhere };
+      },
+    );
+  });
+  expect(result.heavy.status).toBe(200);
+  expect(result.refused.status).toBe(429);
+  expect(errorCode(result.refused)).toBe("rate_limited");
+  expect(result.refused.json.error.details.quota).toBe("workspace_validation_time");
+  expect(result.plain.status).toBe(200);
+  expect(result.elsewhere.status).toBe(200);
+});
+
+test("admission reserves the budget, so concurrent requests cannot overshoot", async () => {
+  const { resolveSiteDataAccess } = await import("../src/site-data/service");
+  await withinOneMinute(async () => {
+    const f = await fixture({ siteDataSiteValidationMsPerMinute: 1_000 });
+    const created = await f.publish("Reserved");
+    const s = f.site(created.id);
+    await withValidationClock(
+      () => 0,
+      async () => {
+        await s.define(f.owner, "rows", {
+          accessMode: "shared",
+          jsonSchema: { type: "object", properties: { n: { type: "number" } } },
+        });
+        await s.define(f.owner, "plain", { accessMode: "shared" });
+      },
+    );
+    const access = await resolveSiteDataAccess(f.deps as never, f.owner.grant, created.id);
+    const admit = (collections: string[] = ["rows"]) =>
+      access.store
+        .consumeRate(access.caller, "write", 1, access.limits, { collections, reserveMs: 250 })
+        .then(
+          (admitted) => admitted.reservedMs,
+          (error: any) => error.code as string,
+        );
+    // Six requests in flight at once: four reservations of 250 ms fill the 1 s window.
+    const results = await Promise.all(Array.from({ length: 6 }, () => admit()));
+    expect(results.filter((reserved) => reserved === 250)).toHaveLength(4);
+    expect(results.filter((reserved) => reserved === "rate_limited")).toHaveLength(2);
+    expect(await validationMicros(f, created.id)).toBe(1_000_000);
+    // Settling charges what was spent, to the microsecond...
+    await access.store.settleValidation(
+      access.caller,
+      { reservedMs: 250, spentMs: 0.5 },
+      access.limits,
+    );
+    expect(await validationMicros(f, created.id)).toBe(750_500);
+    // ...so 750.5 ms + another 250 ms reservation no longer fits in 1 s.
+    expect(await admit()).toBe("rate_limited");
+    // A request that spent nothing refunds its whole reservation.
+    await access.store.settleValidation(
+      access.caller,
+      { reservedMs: 250, spentMs: 0 },
+      access.limits,
+    );
+    expect(await validationMicros(f, created.id)).toBe(500_500);
+    // 500.5 ms + 250 fits once; a second would reach 1,000.5 ms.
+    expect(await admit()).toBe(250);
+    expect(await admit()).toBe("rate_limited");
+    // Collections without a schema reserve nothing.
+    expect(await admit(["plain"])).toBe(0);
+  });
+});
+
+test("writes without a schema touch no validation window", async () => {
+  const f = await fixture();
+  const s = f.site((await f.publish("Plain")).id);
+  await s.define(f.owner, "plain", { accessMode: "shared" });
+  expect(
+    (await s.write(f.member, [{ op: "insert", collection: "plain", data: { n: 1 } }])).status,
+  ).toBe(200);
+  expect(
+    (await s.write(f.owner, [{ op: "put", collection: "plain", key: "k", data: { n: 2 } }])).status,
+  ).toBe(200);
+  const imported = await s.request(f.owner, "POST", "/data/collections/plain/import", {
+    format: "csv",
+    csv: "n\n3\n",
+  });
+  expect(imported.json).toEqual({ imported: 1 });
+  expect(await validationRows(f)).toEqual({ sites: 0, workspaces: 0 });
+});
+
+test("compiles count toward the budget even when no record is checked", async () => {
+  const { prevalidateSiteDataWrite, assertSiteDataSchema } =
+    await import("../src/site-data/service");
+  const schemaFor = (name: string) => ({ type: "object", title: name });
+  const store = {
+    getCollection: async (_caller: unknown, name: string) => ({ jsonSchema: schemaFor(name) }),
+    // Every record is missing: nothing is validated, only compiled.
+    get: async () => null,
+  };
+  const access = {
+    store,
+    caller: {},
+    limits: { maxRecordBytes: 256 * 1024 },
+    writeOptions: { limits: {} },
+  } as never;
+  const patch = (collection: string) => ({ op: "patch", collection, key: "gone", data: { a: 1 } });
+  await withValidationClock(
+    () => 300,
+    async () => {
+      const meter = { ms: 0 };
+      const refused = await prevalidateSiteDataWrite(access, [patch("a"), patch("b")], {
+        meter,
+      }).catch((error: any) => error);
+      expect(refused.details).toMatchObject({ reason: "validation_budget", index: 1 });
+      // Only the first compile ran.
+      expect(meter.ms).toBe(300);
+    },
+  );
+  // Within a request, a schema that fails to compile is tried once.
+  const broken = { type: "object", properties: { a: { type: "string", pattern: "^(a+)+$" } } };
+  const brokenAccess = {
+    ...(access as object),
+    store: { getCollection: async () => ({ jsonSchema: broken }), get: async () => null },
+  } as never;
+  await withValidationClock(
+    () => 10,
+    async () => {
+      const meter = { ms: 0 };
+      const inserts = Array.from({ length: 3 }, () => ({
+        op: "insert",
+        collection: "rows",
+        data: { a: "x" },
+      }));
+      const options = await prevalidateSiteDataWrite(brokenAccess, inserts, { meter });
+      expect(meter.ms).toBe(10);
+      expect(options.validate!(broken, { a: "x" })).toContain("invalid");
+    },
+  );
+  // Across requests, the shared cache keeps the failure: the same error comes back.
+  const first = (() => {
+    try {
+      assertSiteDataSchema({ ...broken });
+    } catch (error) {
+      return error;
+    }
+  })();
+  const second = (() => {
+    try {
+      assertSiteDataSchema({ ...broken });
+    } catch (error) {
+      return error;
+    }
+  })();
+  expect((first as any).code).toBe("validation");
+  expect(second).toBe(first);
+});
+
+test("a schema that changed before the lock is a retryable conflict, never compiled there", async () => {
+  const { prevalidateSiteDataWrite } = await import("../src/site-data/service");
+  const before = { type: "object", properties: { n: { type: "number" } } };
+  const after = { type: "object", properties: { n: { type: "string" } } };
+  const access = {
+    store: { getCollection: async () => ({ jsonSchema: before }), get: async () => null },
+    caller: {},
+    limits: { maxRecordBytes: 256 * 1024 },
+    writeOptions: { limits: {} },
+  } as never;
+  const data = { n: 1 };
+  const options = await prevalidateSiteDataWrite(access, [
+    { op: "insert", collection: "rows", data },
+  ]);
+  // The same schema (another object with the same content) is fine.
+  expect(options.validate!({ ...before }, data)).toBeNull();
+  const changed = (() => {
+    try {
+      return options.validate!(after, data);
+    } catch (error) {
+      return error;
+    }
+  })() as any;
+  expect(changed.code).toBe("conflict");
+  expect(changed.details).toMatchObject({ reason: "schema_changed", retryable: true });
+  // Over HTTP a conflict is a 409.
+  const { siteDataHttpError } = await import("../src/routes/site-data");
+  const httpError = siteDataHttpError(changed);
+  expect(httpError.status).toBe(409);
+  expect(httpError.retryable).toBe(true);
 });
 
 test("CSV imports count against the write window before parsing", async () => {
@@ -2034,24 +2310,29 @@ test("patch and increment results are checked before the lock, on the same budge
 });
 
 test("managers share a per-Site write window counted before any work", async () => {
-  const f = await fixture({ siteDataManagerWritesPerMinute: 3, siteDataViewerWritesPerMinute: 50 });
-  const created = await f.publish("Busy");
-  const s = f.site(created.id);
-  expect((await s.define(f.owner, "rows", { accessMode: "shared" })).status).toBe(201);
-  expect(
-    (await s.write(f.owner, [{ op: "insert", collection: "rows", data: { i: 1 } }])).status,
-  ).toBe(200);
-  // A refused attempt counts too.
-  expect((await s.write(f.owner, [{ op: "insert", collection: "nope", data: {} }])).status).toBe(
-    404,
-  );
-  const limited = await s.write(f.admin, [{ op: "insert", collection: "rows", data: { i: 2 } }]);
-  expect(limited.status).toBe(429);
-  expect(errorCode(limited)).toBe("rate_limited");
-  // Viewers keep their own windows.
-  expect(
-    (await s.write(f.member, [{ op: "insert", collection: "rows", data: { i: 3 } }])).status,
-  ).toBe(200);
+  await withinOneMinute(async () => {
+    const f = await fixture({
+      siteDataManagerWritesPerMinute: 3,
+      siteDataViewerWritesPerMinute: 50,
+    });
+    const created = await f.publish("Busy");
+    const s = f.site(created.id);
+    expect((await s.define(f.owner, "rows", { accessMode: "shared" })).status).toBe(201);
+    expect(
+      (await s.write(f.owner, [{ op: "insert", collection: "rows", data: { i: 1 } }])).status,
+    ).toBe(200);
+    // A refused attempt counts too.
+    expect((await s.write(f.owner, [{ op: "insert", collection: "nope", data: {} }])).status).toBe(
+      404,
+    );
+    const limited = await s.write(f.admin, [{ op: "insert", collection: "rows", data: { i: 2 } }]);
+    expect(limited.status).toBe(429);
+    expect(errorCode(limited)).toBe("rate_limited");
+    // Viewers keep their own windows.
+    expect(
+      (await s.write(f.member, [{ op: "insert", collection: "rows", data: { i: 3 } }])).status,
+    ).toBe(200);
+  });
 });
 
 test("an unreadable agent lineage fails closed", async () => {
