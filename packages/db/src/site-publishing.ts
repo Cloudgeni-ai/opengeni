@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 /**
- * Published Sites storage (migration 0778). Every read and write runs in the
+ * Published Sites storage (migration 0782). Every read and write runs in the
  * Site's workspace RLS context, except the hostname lane: a label lookup that
  * names exactly one row of `site_hostnames` (and of `site_hostname_holds`)
  * through the `opengeni.site_hostname_label` setting (the api_keys hash

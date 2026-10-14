@@ -1,4 +1,4 @@
-// Migration 0778: published Sites. Nine workspace-owned FORCE RLS tables plus
+// Migration 0782: published Sites. Nine workspace-owned FORCE RLS tables plus
 // the platform's hostname holds; the only cross-tenant read is the hostname
 // lane, which shows exactly the rows whose label the transaction names.
 // Labels are globally unique, a released label is held for its workspace, and
@@ -64,7 +64,7 @@ let shared: SharedTestDatabase;
 let client: DbClient;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("migration-0778-published-sites");
+  const acquired = await acquireSharedTestDatabase("migration-0782-published-sites");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });

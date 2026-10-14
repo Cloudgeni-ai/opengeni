@@ -425,7 +425,7 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
       "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
       ...missing0735Routines,
-      // Nor Site Data (0776) or published Sites (0778), whose tables the runtime and
+      // Nor Site Data (0776) or published Sites (0782), whose tables the runtime and
       // protected contracts list.
       `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
       `protected tables are missing: ${SITE_DATA_TABLES.join(", ")}`,

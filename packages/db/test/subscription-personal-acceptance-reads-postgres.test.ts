@@ -620,7 +620,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ),
       "session usage limit capability has unsafe owner or direct runtime privileges",
     );
-    // 0776 (Site Data) and 0778 (published Sites): their tables are in the runtime
+    // 0776 (Site Data) and 0782 (published Sites): their tables are in the runtime
     // and protected contracts.
     const siteDataTables = [
       "site_abuse_reports",
