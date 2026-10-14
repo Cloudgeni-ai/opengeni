@@ -8,9 +8,13 @@
  * the caller, applied limits and resolved named queries from Postgres. The
  * object still re-checks every statement with `compileSiteSql`, binds values
  * only as parameters, runs each call in one transaction, bounds rows and
- * response size, rolls back a read that wrote and any write that would
- * exceed the storage cap, and reports rows read and written plus the database
- * size so the API can meter them.
+ * response size, rolls back a read that wrote and any write that would grow
+ * the database past the storage cap, and reports rows read and written plus
+ * the database size so the API can meter them.
+ *
+ * Its own bookkeeping (request ids seen, migrations applied) lives in the
+ * Durable Object's key-value storage, which workerd keeps in `_cf_KV` and
+ * refuses to user SQL, so no statement or trigger can read or change it.
  */
 import {
   compileSiteSql,
@@ -52,19 +56,59 @@ export type SqlStorage = {
   exec(query: string, ...bindings: unknown[]): SqlStorageCursor;
   readonly databaseSize: number;
 };
+/** The synchronous key-value API of SQLite-backed Durable Objects (`ctx.storage.kv`). */
+export type SyncKvStorage = {
+  get<T = unknown>(key: string): T | undefined;
+  put(key: string, value: unknown): void;
+  delete(key: string): boolean;
+  list<T = unknown>(options?: {
+    prefix?: string;
+    start?: string;
+    end?: string;
+    limit?: number;
+  }): Iterable<[string, T]>;
+};
 export type DurableObjectStateLike = {
   storage: {
     sql: SqlStorage;
+    kv: SyncKvStorage;
     transactionSync<T>(closure: () => T): T;
     deleteAll(): Promise<void>;
   };
   blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T>;
 };
 
-/** Requests older than this are refused by the signature check; ids are kept a little longer. */
-const REQUEST_ID_RETENTION_MS = 120_000;
+/**
+ * Request ids are kept in one-minute buckets (`rq:<minute>:<id>`) and checked
+ * against the current and two previous minutes, longer than the 30 s the
+ * signature check allows either way. Each request deletes a bounded number of
+ * older ids, so the set stays small.
+ */
+const REQUEST_BUCKET_MS = 60_000;
+const REQUEST_BUCKETS_CHECKED = 3;
+const REQUEST_PRUNE_LIMIT = 256;
+const REQUEST_PREFIX = "rq:";
+const MIGRATION_PREFIX = "mig:";
 const ROW_COUNT_CAP = 100_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+type MigrationRecord = { checksum: string; appliedAt: string; position: number };
+
+function requestKey(bucket: number, requestId: string): string {
+  return `${REQUEST_PREFIX}${String(bucket).padStart(12, "0")}:${requestId.toLowerCase()}`;
+}
+
+const utf8 = new TextEncoder();
+
+/** UTF-8 bytes of a string, which is what a response carries. */
+function utf8Length(text: string): number {
+  return utf8.encode(text).byteLength;
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", utf8.encode(text)));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 class SiteDbError extends Error {
   constructor(
@@ -84,6 +128,7 @@ const STATUS: Record<SiteDbErrorCode, number> = {
   too_large: 413,
   unauthorized: 401,
   not_found: 404,
+  internal: 500,
 };
 
 function errorResponse(code: SiteDbErrorCode, message: string): Response {
@@ -114,10 +159,36 @@ function jsonValue(value: SqlStorageValue): unknown {
   return value instanceof ArrayBuffer ? siteSqlBlobValue(new Uint8Array(value)) : value;
 }
 
+/**
+ * Result column names as object keys: a repeated name gets `_2`, `_3`, ...
+ * (skipping names already taken), so `SELECT 1 AS a, 2 AS a` keeps both.
+ */
+export function uniqueColumnNames(names: readonly string[]): string[] {
+  const taken = new Set(names);
+  const used = new Set<string>();
+  return names.map((name) => {
+    if (!used.has(name)) {
+      used.add(name);
+      return name;
+    }
+    let suffix = 2;
+    while (taken.has(`${name}_${suffix}`) || used.has(`${name}_${suffix}`)) suffix += 1;
+    const unique = `${name}_${suffix}`;
+    used.add(unique);
+    return unique;
+  });
+}
+
+/** One result row; own properties only, so a column named `__proto__` is kept as data. */
 function rowObject(columns: string[], values: SqlStorageValue[]): SiteSqlRow {
   const row: SiteSqlRow = {};
   columns.forEach((column, index) => {
-    row[column] = jsonValue(values[index] ?? null);
+    Object.defineProperty(row, column, {
+      value: jsonValue(values[index] ?? null),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   });
   return row;
 }
@@ -128,13 +199,32 @@ function sqlErrorMessage(error: unknown): string {
   return message.replace(/^Error:\s*/u, "").slice(0, 500);
 }
 
-/** Run `fn`, turning SQLite failures into `sql_error`. */
+/** SQLite result codes that are the database's trouble, not the statement's. */
+const INTERNAL_SQLITE =
+  /SQLITE_(?:BUSY|LOCKED|IOERR|NOMEM|INTERNAL|CORRUPT|FULL|CANTOPEN|NOTADB|PROTOCOL|PERM)\b/u;
+
+/**
+ * A thrown failure as a SiteDbError: constraint failures are `conflict`,
+ * other SQLite errors in the statement are `sql_error`, and anything else
+ * (busy, I/O, corruption, a failure without a SQLite code) is `internal`.
+ */
+function toSiteDbError(error: unknown): SiteDbError {
+  if (error instanceof SiteDbError) return error;
+  const message = sqlErrorMessage(error);
+  if (/SQLITE_CONSTRAINT\b|constraint failed/u.test(message))
+    return new SiteDbError("conflict", message);
+  if (/SQLITE_[A-Z]+/u.test(message) && !INTERNAL_SQLITE.test(message))
+    return new SiteDbError("sql_error", message);
+  console.error("site-gateway: Site database internal error", error);
+  return new SiteDbError("internal", "The Site database failed; try again");
+}
+
+/** Run `fn`, turning thrown failures into SiteDbErrors. */
 function guarded<T>(fn: () => T): T {
   try {
     return fn();
   } catch (error) {
-    if (error instanceof SiteDbError) throw error;
-    throw new SiteDbError("sql_error", sqlErrorMessage(error));
+    throw toSiteDbError(error);
   }
 }
 
@@ -161,15 +251,24 @@ function decodeCursor(cursor: string): CursorPosition {
   throw new SiteDbError("validation", "Invalid export cursor");
 }
 
+/** Run a statement to completion (a write with RETURNING must finish before commit). */
+function drain(cursor: SqlStorageCursor): SqlStorageCursor {
+  for (const _ of cursor.raw()) {
+    // discard
+  }
+  return cursor;
+}
+
 export class SiteDatabase {
   private readonly sql: SqlStorage;
-  private bookkeeping = false;
+  private readonly kv: SyncKvStorage;
 
   constructor(
     private readonly state: DurableObjectStateLike,
     _env: unknown,
   ) {
     this.sql = state.storage.sql;
+    this.kv = state.storage.kv;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -189,7 +288,6 @@ export class SiteDatabase {
         // Check for a replay before deleting, then keep the id across the wipe.
         this.rememberRequest(body.requestId);
         await this.state.storage.deleteAll();
-        this.bookkeeping = false;
         this.rememberRequest(body.requestId);
         return Response.json(this.meter(0, 0));
       }
@@ -209,41 +307,51 @@ export class SiteDatabase {
           return Response.json(this.inspect(body as SiteDbInspectRequest));
       }
     } catch (error) {
-      if (error instanceof SiteDbError) return errorResponse(error.code, error.message);
-      return errorResponse("sql_error", sqlErrorMessage(error));
+      const failure = toSiteDbError(error);
+      return errorResponse(failure.code, failure.message);
     }
   }
 
-  // --- bookkeeping ---------------------------------------------------------
+  // --- bookkeeping (key-value storage, out of reach of user SQL) ----------
 
-  private ensureBookkeeping(): void {
-    if (this.bookkeeping) return;
-    this.sql.exec(
-      "CREATE TABLE IF NOT EXISTS _og_requests (id TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID",
-    );
-    this.sql.exec(
-      "CREATE TABLE IF NOT EXISTS _og_migrations (name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL, position INTEGER NOT NULL)",
-    );
-    this.bookkeeping = true;
+  /** Refuse a request id seen in the last few minutes (the API signs each request once). */
+  private rememberRequest(requestId: string): void {
+    const bucket = Math.floor(Date.now() / REQUEST_BUCKET_MS);
+    for (let back = 0; back < REQUEST_BUCKETS_CHECKED; back += 1)
+      if (this.kv.get(requestKey(bucket - back, requestId)) !== undefined)
+        throw new SiteDbError("replayed", "This request was already received");
+    // Forget ids older than the buckets checked, a bounded number per request.
+    const stale = this.kv.list({
+      start: REQUEST_PREFIX,
+      end: requestKey(bucket - REQUEST_BUCKETS_CHECKED + 1, ""),
+      limit: REQUEST_PRUNE_LIMIT,
+    });
+    for (const [key] of stale) this.kv.delete(key);
+    this.kv.put(requestKey(bucket, requestId), 1);
   }
 
-  /** Refuse a request id seen within the retention window (the API signs each request once). */
-  private rememberRequest(requestId: string): void {
-    this.ensureBookkeeping();
-    const now = Date.now();
-    this.sql.exec("DELETE FROM _og_requests WHERE at < ?", now - REQUEST_ID_RETENTION_MS);
-    const seen = this.sql.exec("SELECT 1 FROM _og_requests WHERE id = ?", requestId).toArray();
-    if (seen.length > 0) throw new SiteDbError("replayed", "This request was already received");
-    this.sql.exec("INSERT INTO _og_requests (id, at) VALUES (?, ?)", requestId, now);
+  private migrations(): Array<MigrationRecord & { name: string }> {
+    return Array.from(
+      this.kv.list<MigrationRecord>({ prefix: MIGRATION_PREFIX }),
+      ([key, value]) => ({
+        name: key.slice(MIGRATION_PREFIX.length),
+        ...value,
+      }),
+    ).sort((a, b) => a.position - b.position || a.appliedAt.localeCompare(b.appliedAt));
   }
 
   private meter(rowsRead: number, rowsWritten: number): SiteDbMeter {
     return { rowsRead, rowsWritten, databaseBytes: this.sql.databaseSize };
   }
 
-  /** Inside a transaction: refuse (and so roll back) growth past the cap. */
-  private checkSize(rowsWritten: number, maxDatabaseBytes: number): void {
-    if (rowsWritten > 0 && this.sql.databaseSize > maxDatabaseBytes)
+  /**
+   * Inside a transaction: refuse (and so roll back) a change that leaves the
+   * database above the cap and larger than before. A change that keeps or
+   * shrinks the size is allowed even over the cap, so data can be deleted.
+   */
+  private checkSize(sizeBefore: number, maxDatabaseBytes: number): void {
+    const size = this.sql.databaseSize;
+    if (size > maxDatabaseBytes && size > sizeBefore)
       throw new SiteDbError(
         "quota_exceeded",
         `This Site's database would exceed its ${maxDatabaseBytes} byte storage limit`,
@@ -280,23 +388,30 @@ export class SiteDatabase {
     if (body.expect === "read" && statement.kind !== "read")
       throw new SiteDbError("validation", "This query is defined as a read");
     const bindings = siteSqlBindings(statement, params as Record<string, SiteSqlValue>);
+    const read = statement.kind === "read";
     return guarded(() =>
       this.state.storage.transactionSync(() => {
+        const sizeBefore = this.sql.databaseSize;
         const cursor = this.sql.exec(statement.sql, ...bindings);
-        const columns = cursor.columnNames;
+        const columns = uniqueColumnNames(cursor.columnNames);
         const rows: SiteSqlRow[] = [];
         let bytes = 64;
         let truncated = false;
         for (const values of cursor.raw()) {
+          // A read stops at the cap; a write (RETURNING) runs to completion
+          // so it can commit, and the rows past the cap are dropped.
+          if (truncated) continue;
           if (rows.length >= maxRows) {
             truncated = true;
-            break;
+            if (read) break;
+            continue;
           }
           const row = rowObject(columns, values);
-          const size = JSON.stringify(row).length + 1;
+          const size = utf8Length(JSON.stringify(row)) + 1;
           if (bytes + size > maxResponseBytes) {
             truncated = true;
-            break;
+            if (read) break;
+            continue;
           }
           rows.push(row);
           bytes += size;
@@ -304,7 +419,7 @@ export class SiteDatabase {
         const { rowsRead, rowsWritten } = cursor;
         if (body.expect === "read" && rowsWritten > 0)
           throw new SiteDbError("validation", "A read query tried to write; nothing was changed");
-        this.checkSize(rowsWritten, maxDatabaseBytes);
+        if (!read) this.checkSize(sizeBefore, maxDatabaseBytes);
         return { columns, rows, truncated, ...this.meter(rowsRead, rowsWritten) };
       }),
     );
@@ -319,14 +434,15 @@ export class SiteDatabase {
       throw new SiteDbError("validation", "Scripts cannot use parameters");
     return guarded(() =>
       this.state.storage.transactionSync(() => {
+        const sizeBefore = this.sql.databaseSize;
         let rowsRead = 0;
         let rowsWritten = 0;
         for (const statement of compiled.statements) {
-          const cursor = this.sql.exec(statement.sql);
+          const cursor = drain(this.sql.exec(statement.sql));
           rowsRead += cursor.rowsRead;
           rowsWritten += cursor.rowsWritten;
         }
-        this.checkSize(Math.max(rowsWritten, 1), maxDatabaseBytes);
+        this.checkSize(sizeBefore, maxDatabaseBytes);
         return this.meter(rowsRead, rowsWritten);
       }),
     );
@@ -336,15 +452,18 @@ export class SiteDatabase {
     if (!Array.isArray(body.migrations))
       throw new SiteDbError("validation", "Give the migrations in order");
     const maxDatabaseBytes = this.maxDatabaseBytes(body.maxDatabaseBytes);
-    const migrations = body.migrations.map((migration) => {
+    const migrations = [];
+    for (const migration of body.migrations as unknown[]) {
       if (
         !isRecord(migration) ||
         typeof migration.name !== "string" ||
+        migration.name.length === 0 ||
+        migration.name.length > 256 ||
         typeof migration.sql !== "string" ||
         typeof migration.checksum !== "string" ||
         (migration.position !== undefined &&
           (typeof migration.position !== "number" ||
-            !Number.isInteger(migration.position) ||
+            !Number.isSafeInteger(migration.position) ||
             migration.position < 0))
       )
         throw new SiteDbError(
@@ -356,27 +475,32 @@ export class SiteDatabase {
         throw new SiteDbError("validation", `Migration ${migration.name}: ${compiled.message}`);
       if (compiled.paramNames.length > 0)
         throw new SiteDbError("validation", `Migration ${migration.name} cannot use parameters`);
-      return {
+      // The checksum is recomputed here, so the record always matches the SQL that ran.
+      const checksum = await sha256Hex(migration.sql);
+      if (checksum !== migration.checksum.toLowerCase())
+        throw new SiteDbError(
+          "validation",
+          `Migration ${migration.name}: the checksum does not match its SQL (SHA-256 of the UTF-8 text)`,
+        );
+      migrations.push({
         name: migration.name,
-        checksum: migration.checksum,
-        position: migration.position,
+        checksum,
+        position: migration.position as number | undefined,
         statements: compiled.statements,
-      };
-    });
+      });
+    }
     this.rememberRequest(body.requestId);
     if (body.rebuild === true) {
       await this.state.storage.deleteAll();
-      this.bookkeeping = false;
       this.rememberRequest(body.requestId);
     }
     const applied: string[] = [];
     let rowsRead = 0;
     let rowsWritten = 0;
-    for (const [index, migration] of migrations.entries()) {
-      const position = migration.position ?? index;
-      const existing = this.sql
-        .exec("SELECT checksum FROM _og_migrations WHERE name = ?", migration.name)
-        .toArray()[0];
+    let highest = this.migrations().reduce((top, entry) => Math.max(top, entry.position), -1);
+    for (const migration of migrations) {
+      const key = `${MIGRATION_PREFIX}${migration.name}`;
+      const existing = this.kv.get<MigrationRecord>(key);
       if (existing) {
         if (existing.checksum !== migration.checksum)
           throw new SiteDbError(
@@ -385,23 +509,32 @@ export class SiteDatabase {
           );
         continue;
       }
+      const position = migration.position ?? highest + 1;
+      if (position < highest)
+        throw new SiteDbError(
+          "conflict",
+          `Migration ${migration.name} comes before migrations already applied (applied now: ${applied.join(", ") || "none"}); rebuild the database to apply it in order`,
+        );
       try {
         guarded(() =>
           this.state.storage.transactionSync(() => {
+            const sizeBefore = this.sql.databaseSize;
+            let read = 0;
             let written = 0;
             for (const statement of migration.statements) {
-              const cursor = this.sql.exec(statement.sql);
-              rowsRead += cursor.rowsRead;
+              const cursor = drain(this.sql.exec(statement.sql));
+              read += cursor.rowsRead;
               written += cursor.rowsWritten;
             }
-            this.checkSize(Math.max(written, 1), maxDatabaseBytes);
-            this.sql.exec(
-              "INSERT INTO _og_migrations (name, checksum, applied_at, position) VALUES (?, ?, ?, ?)",
-              migration.name,
-              migration.checksum,
-              new Date().toISOString(),
+            this.checkSize(sizeBefore, maxDatabaseBytes);
+            // Recorded in the same transaction: applied and recorded, or neither.
+            const record: MigrationRecord = {
+              checksum: migration.checksum,
+              appliedAt: new Date().toISOString(),
               position,
-            );
+            };
+            this.kv.put(key, record);
+            rowsRead += read;
             rowsWritten += written;
           }),
         );
@@ -413,6 +546,7 @@ export class SiteDatabase {
           );
         throw error;
       }
+      highest = Math.max(highest, position);
       applied.push(migration.name);
     }
     return { applied, ...this.meter(rowsRead, rowsWritten) };
@@ -451,23 +585,26 @@ export class SiteDatabase {
       .join(", ")}) VALUES (${body.columns.map(() => "?").join(", ")})`;
     return guarded(() =>
       this.state.storage.transactionSync(() => {
+        const sizeBefore = this.sql.databaseSize;
         let rowsRead = 0;
         let rowsWritten = 0;
         for (const row of body.rows) {
-          const cursor = this.sql.exec(
-            statement,
-            ...row.map((value) => (typeof value === "boolean" ? (value ? 1 : 0) : value)),
+          const cursor = drain(
+            this.sql.exec(
+              statement,
+              ...row.map((value) => (typeof value === "boolean" ? (value ? 1 : 0) : value)),
+            ),
           );
           rowsRead += cursor.rowsRead;
           rowsWritten += cursor.rowsWritten;
         }
-        this.checkSize(rowsWritten, maxDatabaseBytes);
+        this.checkSize(sizeBefore, maxDatabaseBytes);
         return this.meter(rowsRead, rowsWritten);
       }),
     );
   }
 
-  /** User schema objects, oldest first; bookkeeping, Cloudflare and SQLite internals excluded. */
+  /** User schema objects, oldest first; Cloudflare, Opengeni and SQLite internals excluded. */
   private schema(): SiteDbSchemaEntry[] {
     return this.sql
       .exec(
@@ -480,6 +617,22 @@ export class SiteDatabase {
         table: String(entry.tbl),
         sql: typeof entry.sql === "string" ? entry.sql : null,
       }));
+  }
+
+  /**
+   * How to page through a table: by the first of rowid, _rowid_ and oid that
+   * no column shadows, or by OFFSET for WITHOUT ROWID tables and tables whose
+   * columns take all three names.
+   */
+  private rowidAlias(table: SiteDbSchemaEntry): string | null {
+    if (/\bWITHOUT\s+ROWID\b/iu.test(table.sql ?? "")) return null;
+    const columns = new Set(
+      this.sql
+        .exec(`PRAGMA table_xinfo(${quoteSiteSqlIdentifier(table.name)})`)
+        .toArray()
+        .map((column) => String(column.name).toLowerCase()),
+    );
+    return ["rowid", "_rowid_", "oid"].find((alias) => !columns.has(alias)) ?? null;
   }
 
   private export(body: SiteDbExportRequest): SiteDbExportResponse {
@@ -517,26 +670,32 @@ export class SiteDatabase {
       for (let index = start; index < tables.length && nextCursor === null; index += 1) {
         const table = tables[index]!;
         const quoted = quoteSiteSqlIdentifier(table.name);
-        const withoutRowid = /\bWITHOUT\s+ROWID\b/iu.test(table.sql ?? "");
+        const alias = this.rowidAlias(table);
         const resume = index === start ? position : null;
-        const cursor = withoutRowid
-          ? this.sql.exec(`SELECT * FROM ${quoted} LIMIT -1 OFFSET ?`, resume?.o ?? 0)
-          : this.sql.exec(
-              `SELECT rowid, * FROM ${quoted} WHERE rowid > ? ORDER BY rowid`,
-              resume?.r ?? Number.MIN_SAFE_INTEGER,
-            );
-        const columns = withoutRowid ? cursor.columnNames : cursor.columnNames.slice(1);
+        if (resume && (alias === null ? resume.r !== undefined : resume.o !== undefined))
+          throw new SiteDbError("validation", "Invalid export cursor");
+        const cursor =
+          alias === null
+            ? this.sql.exec(`SELECT * FROM ${quoted} LIMIT -1 OFFSET ?`, resume?.o ?? 0)
+            : this.sql.exec(
+                `SELECT ${alias}, * FROM ${quoted} WHERE ?1 IS NULL OR ${alias} > ?1 ORDER BY ${alias}`,
+                resume?.r ?? null,
+              );
+        const columns = alias === null ? cursor.columnNames : cursor.columnNames.slice(1);
         const page = { name: table.name, columns, rows: [] as unknown[][] };
         out.push(page);
         let offset = resume?.o ?? 0;
-        let lastRowid = resume?.r ?? Number.MIN_SAFE_INTEGER;
+        let lastRowid = resume?.r ?? null;
         for (const values of cursor.raw()) {
-          const rowid = withoutRowid ? null : (values[0] as number);
-          const row = (withoutRowid ? values : values.slice(1)).map(jsonValue);
-          const size = JSON.stringify(row).length + 1;
+          const row = (alias === null ? values : values.slice(1)).map(jsonValue);
+          const size = utf8Length(JSON.stringify(row)) + 1;
           if (rowCount >= maxRows || (bytes + size > maxBytes && rowCount > 0)) {
             nextCursor = encodeCursor(
-              withoutRowid ? { t: table.name, o: offset } : { t: table.name, r: lastRowid },
+              alias === null
+                ? { t: table.name, o: offset }
+                : lastRowid === null
+                  ? { t: table.name }
+                  : { t: table.name, r: lastRowid },
             );
             break;
           }
@@ -544,7 +703,7 @@ export class SiteDatabase {
           rowCount += 1;
           bytes += size;
           offset += 1;
-          if (rowid !== null) lastRowid = rowid;
+          if (alias !== null) lastRowid = values[0] as number;
         }
         rowsRead += cursor.rowsRead;
       }
@@ -593,15 +752,11 @@ export class SiteDatabase {
             rowCountCapped: rowCount > ROW_COUNT_CAP,
           };
         });
-      this.ensureBookkeeping();
-      const migrations = this.sql
-        .exec("SELECT name, checksum, applied_at FROM _og_migrations ORDER BY position, applied_at")
-        .toArray()
-        .map((row) => ({
-          name: String(row.name),
-          checksum: String(row.checksum),
-          appliedAt: String(row.applied_at),
-        }));
+      const migrations = this.migrations().map(({ name, checksum, appliedAt }) => ({
+        name,
+        checksum,
+        appliedAt,
+      }));
       return {
         tables,
         indexes: schema.filter((entry) => entry.type === "index" || entry.type === "trigger"),

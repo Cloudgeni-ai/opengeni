@@ -37,6 +37,8 @@ type Signed = {
   headers?: Record<string, string>;
   method?: string;
   tamper?: boolean;
+  requestId?: string;
+  instance?: Miniflare;
 };
 
 async function call(
@@ -46,7 +48,7 @@ async function call(
   options: Signed = {},
 ) {
   const path = `/_og/internal/site-db/${siteId}/${operation}`;
-  const body = JSON.stringify({ requestId: crypto.randomUUID(), ...payload });
+  const body = JSON.stringify({ requestId: options.requestId ?? crypto.randomUUID(), ...payload });
   const method = options.method ?? "POST";
   const timestamp = options.timestamp ?? Math.floor(Date.now() / 1000);
   const canonical = siteGatewayCanonicalString({
@@ -66,7 +68,7 @@ async function call(
     .update(canonical)
     .digest("base64url")}`;
   const url = `${ORIGIN}${path}`;
-  return await mf!.dispatchFetch(url, {
+  return await (options.instance ?? mf!).dispatchFetch(url, {
     method,
     headers: {
       "content-type": "application/json",
@@ -102,20 +104,26 @@ function run(siteId: string, sql: string, params: Record<string, unknown> = {}, 
   });
 }
 
+function checksum(sql: string): string {
+  return createHash("sha256").update(sql, "utf8").digest("hex");
+}
+
+function migration(name: string, sql: string, position?: number) {
+  return { name, sql, checksum: checksum(sql), ...(position === undefined ? {} : { position }) };
+}
+
 const MIGRATIONS = [
-  {
-    name: "create_votes",
-    sql: "CREATE TABLE votes (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, choice TEXT NOT NULL, UNIQUE(owner)); CREATE INDEX votes_choice ON votes (choice);",
-    checksum: "c1",
-  },
-  {
-    name: "create_notes",
-    sql: "CREATE TABLE notes (k TEXT PRIMARY KEY, body BLOB) WITHOUT ROWID;",
-    checksum: "c2",
-  },
+  migration(
+    "create_votes",
+    "CREATE TABLE votes (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, choice TEXT NOT NULL, UNIQUE(owner)); CREATE INDEX votes_choice ON votes (choice);",
+  ),
+  migration("create_notes", "CREATE TABLE notes (k TEXT PRIMARY KEY, body BLOB) WITHOUT ROWID;"),
 ];
 
-async function startWorker(bindings: Record<string, string> = {}): Promise<void> {
+async function startWorker(
+  bindings: Record<string, string> = {},
+  options: { siteDb?: boolean } = {},
+): Promise<Miniflare> {
   const buildDir = mkdtempSync(join(tmpdir(), "site-gateway-db-test-"));
   try {
     const build = await Bun.build({
@@ -126,7 +134,7 @@ async function startWorker(bindings: Record<string, string> = {}): Promise<void>
       naming: "worker.js",
     });
     if (!build.success) throw new AggregateError(build.logs, "Worker build failed");
-    mf = new Miniflare({
+    const instance = new Miniflare({
       modules: true,
       scriptPath: join(buildDir, "worker.js"),
       modulesRoot: buildDir,
@@ -140,16 +148,19 @@ async function startWorker(bindings: Record<string, string> = {}): Promise<void>
         ENVIRONMENT: "production",
         ...bindings,
       },
-      durableObjects: { SITE_DB: { className: "SiteDatabase", useSQLite: true } },
+      ...(options.siteDb === false
+        ? {}
+        : { durableObjects: { SITE_DB: { className: "SiteDatabase", useSQLite: true } } }),
     });
-    await mf.ready;
+    await instance.ready;
+    return instance;
   } finally {
     rmSync(buildDir, { recursive: true, force: true });
   }
 }
 
 beforeAll(async () => {
-  await startWorker();
+  mf = await startWorker();
 }, 60_000);
 
 afterAll(async () => {
@@ -168,6 +179,15 @@ describe("internal Site database route", () => {
     });
     expect((await inspect({ tamper: true })).status).toBe(401);
     expect((await inspect({ timestamp: Math.floor(Date.now() / 1000) - 120 })).status).toBe(401);
+    // 30 s either way, with either secret.
+    const now = Math.floor(Date.now() / 1000);
+    for (const secret of [TEST_SECRET, PREVIOUS_SECRET]) {
+      expect((await inspect({ secret, timestamp: now - 20 })).status).toBe(200);
+      expect((await inspect({ secret, timestamp: now + 20 })).status).toBe(200);
+      expect((await inspect({ secret, timestamp: now - 45 })).status).toBe(401);
+      expect((await inspect({ secret, timestamp: now + 45 })).status).toBe(401);
+    }
+    expect((await inspect({ timestamp: now + 3_600 })).status).toBe(401);
     // A viewer field never travels on an internal request.
     expect((await inspect({ headers: { [SITE_GATEWAY_VISITOR_HEADER]: "v" } })).status).toBe(401);
     const unsigned = await mf!.dispatchFetch(`${ORIGIN}${siteDbInternalPath(SITE, "inspect")}`, {
@@ -178,8 +198,21 @@ describe("internal Site database route", () => {
     expect(unsigned.status).toBe(401);
     expect((await call(SITE, "drop", {})).status).toBe(404);
     expect((await call("not-a-uuid", "inspect", {})).status).toBe(404);
+    // Site ids are lowercase UUIDs; another spelling would name another object.
+    const lettered = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+    expect((await call(lettered, "inspect", {})).status).toBe(200);
+    expect((await call(lettered.toUpperCase(), "inspect", {})).status).toBe(404);
     expect((await call(SITE, "inspect", {}, { method: "GET" })).status).toBe(405);
   });
+
+  test("without the SITE_DB binding the route does not exist", async () => {
+    const bare = await startWorker({}, { siteDb: false });
+    try {
+      expect((await call(SITE, "inspect", {}, { instance: bare })).status).toBe(404);
+    } finally {
+      await bare.dispose();
+    }
+  }, 60_000);
 
   test("a replayed request id is refused", async () => {
     const requestId = crypto.randomUUID();
@@ -199,14 +232,26 @@ describe("internal Site database route", () => {
       await call(SITE, "migrate", { migrations: MIGRATIONS, maxDatabaseBytes: MAX_DB }),
     );
     expect(again.applied).toEqual([]);
-    const changed = [{ ...MIGRATIONS[0]!, checksum: "other" }];
+    const changed = [migration("create_votes", "CREATE TABLE votes2 (a);")];
     expect(
       await failure(await call(SITE, "migrate", { migrations: changed, maxDatabaseBytes: MAX_DB })),
     ).toMatchObject({ status: 409, code: "conflict" });
-    const refused = [{ name: "bad", sql: "ATTACH 'x' AS y", checksum: "c" }];
+    // The checksum is recomputed from the SQL.
+    const mislabelled = [{ ...migration("other", "CREATE TABLE other (a);"), checksum: "c1" }];
+    expect(
+      await failure(
+        await call(SITE, "migrate", { migrations: mislabelled, maxDatabaseBytes: MAX_DB }),
+      ),
+    ).toMatchObject({ status: 422, code: "validation" });
+    const refused = [migration("bad", "ATTACH 'x' AS y")];
     expect(
       await failure(await call(SITE, "migrate", { migrations: refused, maxDatabaseBytes: MAX_DB })),
     ).toMatchObject({ status: 422, code: "validation" });
+    // Bookkeeping lives in key-value storage, not in tables user SQL can reach.
+    const master = await ok<SiteDbRunResponse>(
+      await run(SITE, "SELECT name FROM sqlite_master ORDER BY name", {}, { profile: "agent" }),
+    );
+    expect(master.rows.map((row) => row.name)).not.toContainEqual(expect.stringMatching(/^_og_/u));
   });
 
   test("named queries bind parameters, meter rows and stay in one transaction", async () => {
@@ -241,14 +286,18 @@ describe("internal Site database route", () => {
     expect(read.rows[0]).toEqual({ choice: "blue", n: 3 });
     expect(read.rowsRead).toBeGreaterThan(0);
     expect(read.rowsWritten).toBe(0);
-    // A unique violation rolls the statement back as a SQL error.
+    // A unique violation rolls the statement back as a conflict.
     expect(
       await failure(
         await run(SITE, "INSERT INTO votes (owner, choice) VALUES (:viewer, 'x')", {
           viewer: "user:ada",
         }),
       ),
-    ).toMatchObject({ status: 422, code: "sql_error" });
+    ).toMatchObject({ status: 409, code: "conflict" });
+    expect(await failure(await run(SITE, "SELECT * FROM nope"))).toMatchObject({
+      status: 422,
+      code: "sql_error",
+    });
   });
 
   test("the statement allowlist holds inside the Durable Object", async () => {
@@ -260,12 +309,48 @@ describe("internal Site database route", () => {
       "SELECT load_extension('x')",
       "DROP TABLE votes",
       "SELECT * FROM votes WHERE owner = ?",
+      "SELECT * FROM votes WHERE owner = #owner",
       "SELECT * FROM _og_migrations",
+      "SELECT * FROM '_og_migrations'",
+      "SELECT * FROM '_cf_KV'",
+      "SELECT * FROM pragma_compile_options",
+      "WITH c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
     ])
       expect(await failure(await run(SITE, sql))).toMatchObject({
         status: 422,
         code: "validation",
       });
+    const schemaChange = await failure(
+      await run(SITE, "CREATE TABLE sneaky (a)", {}, { profile: "agent" }),
+    );
+    expect(schemaChange).toMatchObject({ status: 422, code: "validation" });
+    expect(schemaChange.message).toContain("site_sql_migrate");
+    expect(
+      await failure(
+        await call(SITE, "script", {
+          sql: "CREATE TRIGGER t1 AFTER INSERT ON votes BEGIN DELETE FROM '_og_requests'; END;",
+          maxDatabaseBytes: MAX_DB,
+        }),
+      ),
+    ).toMatchObject({ code: "validation" });
+    expect(
+      await failure(
+        await call(SITE, "script", {
+          sql: "CREATE TRIGGER t2 AFTER INSERT ON votes BEGIN UPDATE votes SET begin = 1; END; INSERT INTO votes (owner, choice) VALUES ('t', 't'); PRAGMA foreign_keys = OFF;",
+          maxDatabaseBytes: MAX_DB,
+        }),
+      ),
+    ).toMatchObject({ code: "validation" });
+    // A WITH table named like a statement keyword is still a read.
+    const named = await ok<SiteDbRunResponse>(
+      await run(
+        SITE,
+        "WITH replace AS (SELECT 1 AS n) SELECT n FROM replace",
+        {},
+        { expect: "read" },
+      ),
+    );
+    expect(named.rows).toEqual([{ n: 1 }]);
     expect(
       await failure(await run(SITE, "DELETE FROM votes", {}, { expect: "read" })),
     ).toMatchObject({ code: "validation" });
@@ -444,5 +529,197 @@ describe("internal Site database route", () => {
       ),
     ).toMatchObject({ code: "validation" });
     await ok(await call(SITE, "reset", {}));
+  });
+
+  test("a reset keeps its request id across the wipe", async () => {
+    const requestId = crypto.randomUUID();
+    await ok(await call(SITE, "reset", {}, { requestId }));
+    expect(await failure(await call(SITE, "reset", {}, { requestId }))).toMatchObject({
+      status: 409,
+      code: "replayed",
+    });
+    expect(await failure(await call(SITE, "inspect", {}, { requestId }))).toMatchObject({
+      code: "replayed",
+    });
+  });
+
+  test("migrations keep their order and a failed one leaves nothing behind", async () => {
+    const site = "55555555-5555-4555-8555-555555555555";
+    const first = migration("m1", "CREATE TABLE a (x);", 1);
+    const third = migration("m3", "CREATE TABLE c (x);", 3);
+    await ok(await call(site, "migrate", { migrations: [first, third], maxDatabaseBytes: MAX_DB }));
+    // A migration positioned before one already applied cannot run out of order.
+    const middle = migration("m2", "CREATE TABLE b (x);", 2);
+    const outOfOrder = await failure(
+      await call(site, "migrate", { migrations: [middle], maxDatabaseBytes: MAX_DB }),
+    );
+    expect(outOfOrder).toMatchObject({ status: 409, code: "conflict" });
+    expect(outOfOrder.message).toContain("rebuild");
+    // A migration that fails part way rolls back its statements and its record.
+    const broken = migration("m4", "CREATE TABLE d (x); INSERT INTO missing VALUES (1);", 4);
+    const failed = await failure(
+      await call(site, "migrate", { migrations: [broken], maxDatabaseBytes: MAX_DB }),
+    );
+    expect(failed).toMatchObject({ status: 422, code: "sql_error" });
+    expect(failed.message).toContain("m4");
+    const inspect = await ok<SiteDbInspectResponse>(await call(site, "inspect", {}));
+    expect(inspect.tables.map((table) => table.name)).toEqual(["a", "c"]);
+    expect(inspect.migrations.map((entry) => entry.name)).toEqual(["m1", "m3"]);
+    expect(inspect.migrations[0]!.checksum).toBe(first.checksum);
+    const fixed = migration("m4", "CREATE TABLE d (x);", 4);
+    const applied = await ok<{ applied: string[] }>(
+      await call(site, "migrate", { migrations: [fixed], maxDatabaseBytes: MAX_DB }),
+    );
+    expect(applied.applied).toEqual(["m4"]);
+    // Rebuilding applies them all in order.
+    const rebuilt = await ok<{ applied: string[] }>(
+      await call(site, "migrate", {
+        migrations: [first, middle, third, fixed],
+        rebuild: true,
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    expect(rebuilt.applied).toEqual(["m1", "m2", "m3", "m4"]);
+    await ok(await call(site, "reset", {}));
+  });
+
+  test("writes with RETURNING finish past the row and response caps", async () => {
+    const site = "66666666-6666-4666-8666-666666666666";
+    await ok(
+      await call(site, "migrate", {
+        migrations: [migration("items", "CREATE TABLE items (id INTEGER PRIMARY KEY, v TEXT);")],
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    const list = JSON.stringify(Array.from({ length: 6 }, (_, i) => `v${i}`));
+    const capped = await ok<SiteDbRunResponse>(
+      await run(
+        site,
+        "INSERT INTO items (v) SELECT value FROM json_each(:list) RETURNING id",
+        { list },
+        { maxRows: 2 },
+      ),
+    );
+    expect(capped.rows).toHaveLength(2);
+    expect(capped.truncated).toBe(true);
+    const bytes = await ok<SiteDbRunResponse>(
+      await run(
+        site,
+        "UPDATE items SET v = v || '!' RETURNING id, v",
+        {},
+        { maxResponseBytes: 100 },
+      ),
+    );
+    expect(bytes.truncated).toBe(true);
+    const count = await ok<SiteDbRunResponse>(
+      await run(site, "SELECT count(*) AS n, sum(v LIKE '%!') AS changed FROM items"),
+    );
+    expect(count.rows).toEqual([{ n: 6, changed: 6 }]);
+    // Scripts run every statement to completion too.
+    await ok(
+      await call(site, "script", {
+        sql: "INSERT INTO items (v) VALUES ('a'), ('b') RETURNING id; SELECT * FROM items;",
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    // Response size counts UTF-8 bytes: 100 two-byte characters do not fit in 200 bytes.
+    const wide = await ok<SiteDbRunResponse>(
+      await run(site, "SELECT :s AS s", { s: "é".repeat(100) }, { maxResponseBytes: 200 }),
+    );
+    expect(wide.rows).toEqual([]);
+    expect(wide.truncated).toBe(true);
+    await ok(await call(site, "reset", {}));
+  });
+
+  test("repeated and __proto__ column names keep their values", async () => {
+    const result = await ok<SiteDbRunResponse>(
+      await run(OTHER_SITE, 'SELECT 1 AS a, 2 AS a, 3 AS a_2, 4 AS "__proto__"'),
+    );
+    expect(result.columns).toEqual(["a", "a_3", "a_2", "__proto__"]);
+    const row = result.rows[0]!;
+    expect(Object.keys(row)).toEqual(["a", "a_3", "a_2", "__proto__"]);
+    expect([row.a, row.a_3, row.a_2]).toEqual([1, 2, 3]);
+    expect(Object.getOwnPropertyDescriptor(row, "__proto__")?.value).toBe(4);
+  });
+
+  test("the storage cap allows writes that do not grow the database", async () => {
+    const site = "77777777-7777-4777-8777-777777777777";
+    await ok(
+      await call(site, "migrate", {
+        migrations: [migration("blobs", "CREATE TABLE blobs (id INTEGER PRIMARY KEY, v TEXT);")],
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    const filled = await ok<SiteDbRunResponse>(
+      await run(site, "INSERT INTO blobs (v) SELECT hex(randomblob(2000)) FROM json_each(:list)", {
+        list: JSON.stringify(Array.from({ length: 50 }, (_, i) => i)),
+      }),
+    );
+    const cap = Math.floor(filled.databaseBytes / 2);
+    // Over the cap now: growing is refused, deleting and shrinking updates are not.
+    expect(
+      await failure(
+        await run(
+          site,
+          "INSERT INTO blobs (v) SELECT hex(randomblob(4000)) FROM json_each(:list)",
+          { list: JSON.stringify(Array.from({ length: 50 }, (_, i) => i)) },
+          { maxDatabaseBytes: cap },
+        ),
+      ),
+    ).toMatchObject({ code: "quota_exceeded" });
+    await ok(
+      await run(site, "UPDATE blobs SET v = 'x' WHERE id <= 10", {}, { maxDatabaseBytes: cap }),
+    );
+    await ok(await run(site, "DELETE FROM blobs WHERE id > 25", {}, { maxDatabaseBytes: cap }));
+    await ok(await call(site, "reset", {}));
+  });
+
+  test("export pages through tables whose columns shadow rowid", async () => {
+    const site = "88888888-8888-4888-8888-888888888888";
+    await ok(
+      await call(site, "migrate", {
+        migrations: [
+          migration(
+            "shadows",
+            "CREATE TABLE one (rowid TEXT, v INTEGER); CREATE TABLE every (rowid TEXT, _rowid_ TEXT, oid TEXT);",
+          ),
+        ],
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    await ok(
+      await call(site, "script", {
+        sql: "INSERT INTO one VALUES ('z', 1), ('a', 2), ('m', 3), ('b', 4); INSERT INTO every VALUES ('1', '2', '3'), ('4', '5', '6'), ('7', '8', '9');",
+        maxDatabaseBytes: MAX_DB,
+      }),
+    );
+    const rows = new Map<string, unknown[][]>();
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const page: SiteDbExportResponse = await ok<SiteDbExportResponse>(
+        await call(site, "export", { cursor, maxRows: 1, maxBytes: 1024 * 1024 }),
+      );
+      for (const table of page.tables) {
+        rows.set(table.name, [...(rows.get(table.name) ?? []), ...table.rows]);
+        expect(table.columns).toEqual(
+          table.name === "one" ? ["rowid", "v"] : ["rowid", "_rowid_", "oid"],
+        );
+      }
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 20);
+    expect(rows.get("one")).toEqual([
+      ["z", 1],
+      ["a", 2],
+      ["m", 3],
+      ["b", 4],
+    ]);
+    expect(rows.get("every")).toEqual([
+      ["1", "2", "3"],
+      ["4", "5", "6"],
+      ["7", "8", "9"],
+    ]);
+    await ok(await call(site, "reset", {}));
   });
 });

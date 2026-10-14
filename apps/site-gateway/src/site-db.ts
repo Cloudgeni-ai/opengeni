@@ -61,6 +61,28 @@ export function parseSiteDbPath(
 }
 
 /**
+ * The checks that need no body: a fresh timestamp (30 s either way), no
+ * viewer fields and a signature header. Run before the body is read, so a
+ * stale or unsigned request costs nothing. `now` is milliseconds.
+ */
+export function precheckSiteDbSignature(request: Request, now = Date.now()): number | null {
+  const timestampHeader = request.headers.get(SITE_GATEWAY_TIMESTAMP_HEADER) ?? "";
+  if (!/^\d{1,12}$/u.test(timestampHeader)) return null;
+  const timestamp = Number(timestampHeader);
+  if (Math.abs(Math.floor(now / 1000) - timestamp) > SITE_GATEWAY_MAX_SKEW_SECONDS) return null;
+  // Internal requests carry no viewer: any viewer field makes the request invalid.
+  for (const header of [
+    SITE_GATEWAY_SESSION_HEADER,
+    SITE_GATEWAY_VISITOR_HEADER,
+    SITE_GATEWAY_CLIENT_IP_HEADER,
+    SITE_GATEWAY_HUMAN_HEADER,
+  ])
+    if (request.headers.has(header)) return null;
+  if (!request.headers.get(SITE_GATEWAY_SIGNATURE_HEADER)) return null;
+  return timestamp;
+}
+
+/**
  * Verify an API -> gateway signature against the current or previous secret.
  * Exported for tests; `now` is milliseconds.
  */
@@ -71,18 +93,8 @@ export async function verifySiteDbSignature(
   body: Uint8Array<ArrayBuffer>,
   now = Date.now(),
 ): Promise<boolean> {
-  const timestampHeader = request.headers.get(SITE_GATEWAY_TIMESTAMP_HEADER) ?? "";
-  if (!/^\d{1,12}$/u.test(timestampHeader)) return false;
-  const timestamp = Number(timestampHeader);
-  if (Math.abs(Math.floor(now / 1000) - timestamp) > SITE_GATEWAY_MAX_SKEW_SECONDS) return false;
-  // Internal requests carry no viewer: any viewer field makes the request invalid.
-  for (const header of [
-    SITE_GATEWAY_SESSION_HEADER,
-    SITE_GATEWAY_VISITOR_HEADER,
-    SITE_GATEWAY_CLIENT_IP_HEADER,
-    SITE_GATEWAY_HUMAN_HEADER,
-  ])
-    if (request.headers.has(header)) return false;
+  const timestamp = precheckSiteDbSignature(request, now);
+  if (timestamp === null) return false;
   const received = request.headers.get(SITE_GATEWAY_SIGNATURE_HEADER) ?? "";
   const fields = {
     method: request.method,
@@ -120,6 +132,9 @@ export async function handleSiteDbInternal(
     return jsonError(404, { code: "not_found", message: "Not found" }, security);
   if (request.method !== "POST")
     return jsonError(405, { code: "method_not_allowed", message: "Use POST" }, security);
+  const unauthorized = () =>
+    jsonError(401, { code: "unauthorized", message: "Invalid or expired signature" }, security);
+  if (precheckSiteDbSignature(request) === null) return unauthorized();
   const body = await readBodyCapped(request, MAX_SITE_DB_BODY_BYTES);
   if (body === "too_large")
     return jsonError(
@@ -128,12 +143,7 @@ export async function handleSiteDbInternal(
       security,
     );
   const secrets = [config.secret, ...(config.previousSecret ? [config.previousSecret] : [])];
-  if (!(await verifySiteDbSignature(secrets, request, url, body)))
-    return jsonError(
-      401,
-      { code: "unauthorized", message: "Invalid or expired signature" },
-      security,
-    );
+  if (!(await verifySiteDbSignature(secrets, request, url, body))) return unauthorized();
   const stub = namespace.get(namespace.idFromName(target.siteId));
   let response: Response;
   try {

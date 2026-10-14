@@ -101,6 +101,12 @@ The API has already authorized the caller, applied limits and resolved
 named queries; the Durable Object still re-checks every statement with
 `compileSiteSql`, binds values only as parameters, runs each call in one
 transaction, bounds rows and response size and enforces the storage cap.
+Its bookkeeping (request ids seen, migrations applied with the checksum it
+recomputes) is in the Durable Object's key-value storage (`ctx.storage.kv`),
+which workerd keeps in `_cf_KV` and refuses to user SQL, so no statement or
+trigger can touch it; there are no bookkeeping tables in the database.
+The route checks the timestamp, skew and signature header before reading
+the body.
 Site pages never reach the route: `site.sql.run` goes through `/_og/api` to
 the API, which calls back here. The route works on any host the Worker
 serves; deployments should point the API's
@@ -149,7 +155,8 @@ Miniflare with KV and a rate limiter, and points it at a fake site-runtime API
 on `127.0.0.1:18790` that verifies every gateway signature independently.
 `test/site-db.miniflare.test.ts` runs the `SiteDatabase` Durable Object in
 workerd: signatures, secret rotation, skew and replay, statement refusals,
-limits, migrations, rebuild, export and import.
+limits, migrations, rebuild, export and import. `test/site-database.test.ts`
+covers request-id expiry and pruning with a fake clock.
 
 ## What the API serves for the gateway
 
