@@ -157,6 +157,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("editable_artifact_") ||
       tool.startsWith("site_data_") ||
       tool.startsWith("site_files_") ||
+      tool.startsWith("site_sql_") ||
       tool.startsWith("capability_") ||
       tool === "custom_mcp_setup_request",
   },

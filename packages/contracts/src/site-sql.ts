@@ -575,7 +575,7 @@ export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
     audience: SiteSqlQueryAudience.optional().describe(
       "everyone (including anonymous guests of public Sites), signed_in (default) or managers.",
     ),
-    description: z.string().max(2000).optional(),
+    description: z.string().max(2000).optional().describe("What the query is for."),
     maxRows: z
       .number()
       .int()
