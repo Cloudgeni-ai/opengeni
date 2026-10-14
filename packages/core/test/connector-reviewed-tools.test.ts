@@ -14,7 +14,7 @@ test("Slack permissions use the runtime identity matcher instead of hosted disco
       },
     };
     expect(reviewedConnectorToolCatalog(config, OPENGENI_SLACK_REST_USER_SCOPES, {})).toHaveLength(
-      9,
+      10,
     );
     expect(reviewedConnectorToolCatalog(config, ["users:read,chat:write"], {})).toHaveLength(3);
     expect(

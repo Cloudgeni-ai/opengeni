@@ -223,6 +223,7 @@ import {
   ConnectorAttachmentTransferError,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializer,
+  type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
   wrapAttemptToolDefinitions,
@@ -247,6 +248,7 @@ export {
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorAttachmentMaterializer,
   type ConnectorAttachmentTransferProjectionOptions,
+  type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 export {
   GMAIL_REST_API_BASE,
@@ -4638,6 +4640,8 @@ export type PrepareToolsOptions = {
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
   materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
   readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
+  /** Private host callback that materializes exact bytes a reviewed connector downloaded. */
+  materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -5191,6 +5195,9 @@ export async function prepareAgentTools(
               ? { materializeGmailFile: options.materializeGmailFile }
               : {}),
             ...(options.readGmailFile ? { readGmailFile: options.readGmailFile } : {}),
+            ...(options.materializeConnectorFile
+              ? { materializeConnectorFile: options.materializeConnectorFile }
+              : {}),
             ...(settings.gmailWatchTopicName
               ? { watchTopicName: settings.gmailWatchTopicName }
               : {}),

@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Published Sites (OPE-802): a workspace Site served on its own hostname
+-- Published Sites: a workspace Site served on its own hostname
 -- under the configured Sites domain, to members, invited people or the
 -- public, through the Site gateway and the narrow site-runtime API.
 --

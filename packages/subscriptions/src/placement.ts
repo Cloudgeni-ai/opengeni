@@ -316,6 +316,11 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
     ) {
       return wait("pinned_account_ineligible", null);
     }
+    if (
+      connectionIneligibility(input, bound, session.preferredModelId).includes("allocator_disabled")
+    ) {
+      return wait("pinned_account_disabled", null);
+    }
     const at = servableAgainAt(input, bound, session.preferredModelId);
     return wait("pinned_account_unavailable", typeof at === "number" ? at : null);
   }

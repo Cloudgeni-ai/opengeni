@@ -315,6 +315,8 @@ export type AccountSwitchReason =
 
 export type WaitReason =
   | "pinned_account_unavailable"
+  /** Allocation was explicitly switched off; a person must enable it or change the pin. */
+  | "pinned_account_disabled"
   /** The explicit choice can never serve this work until a person changes something (D-24). */
   | "pinned_account_ineligible"
   | "no_eligible_capacity"

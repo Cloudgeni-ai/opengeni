@@ -11,6 +11,10 @@ export * from "./connected-machine-audience";
 import { sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 import {
+  subscriptionCapacityWaitReasonText,
+  subscriptionCapacityWaitNeedsAction,
+} from "@opengeni/subscriptions";
+import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
 } from "./human-input-secret-answers";
@@ -25147,10 +25151,61 @@ export async function reconcileSubscriptionCoreCapacityWait(
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
           );
           if (!row) return { action: "stale", events: [] } as const;
+          const changedReasonText =
+            waiter.waitReason !== waitEvaluation.waitReason
+              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
+              : null;
+          let changedReasonEvents: SessionEvent[] = [];
+          if (changedReasonText) {
+            const insertedReasonEvents = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 1,
+                    type: vocabulary.waitingEventType,
+                    turnId: blockedTurn.id,
+                    turnGeneration: blockedTurn.executionGeneration,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                    payload: {
+                      ...vocabulary.waitingPayload,
+                      code: "subscription_capacity_unavailable",
+                      error: changedReasonText,
+                      waitReason: waitEvaluation.waitReason,
+                      actionRequired: subscriptionCapacityWaitNeedsAction(
+                        waitEvaluation.waitReason,
+                      ),
+                      waiterId: waiter.waiterId,
+                      generation: waiter.generation,
+                      resetKind: scheduled.resetKind,
+                      earliestResetAt: waitEvaluation.earliestResetAt?.toISOString() ?? null,
+                      nextCheckAt: nextCheckAt.toISOString(),
+                    },
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            await tx
+              .update(schema.sessions)
+              .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.id, input.sessionId),
+                ),
+              );
+            changedReasonEvents = insertedReasonEvents.map(mapEvent);
+          }
           return {
             action: "waiting",
             waiter: mapSubscriptionCoreCodexWaiter(row),
-            events: [],
+            events: changedReasonEvents,
           } as const;
         }
 
@@ -40101,6 +40156,9 @@ export async function applyContextCompaction(
                     payload: {
                       ...input.eventPayload,
                       summaryPosition,
+                      // Where this compaction's live segment begins: a message
+                      // fork reconstructs the history live at an earlier message.
+                      replacementFromPosition: supersededFrom,
                     },
                     occurredAt: new Date(),
                   },
@@ -81514,7 +81572,9 @@ export type AddSessionSystemUpdateInput = {
 
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
   | { added: false; reason: "session_cancelled" }
-  | (RequireIdleSession extends true ? { added: false; reason: "session_not_idle" } : never)
+  | (RequireIdleSession extends true
+      ? { added: false; reason: "session_not_idle" } | { added: false; reason: "session_paused" }
+      : never)
   | {
       added: boolean;
       reason: "added" | "duplicate";
@@ -81556,7 +81616,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
     tx: Database,
     wakeEventId: string | null,
     updateId: string | null,
-    rejectionReason: "session_cancelled" | "session_not_idle" | null,
+    rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
   ) => Promise<void>,
   options: {
     /**
@@ -81669,8 +81729,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
           if (replayed) {
             return replayed;
           }
-          await mutateSource(tx as unknown as Database, null, null, "session_not_idle");
-          return { added: false, reason: "session_not_idle" } as const;
+          const reason =
+            effectiveControl.state !== "active" ? "session_paused" : "session_not_idle";
+          await mutateSource(tx as unknown as Database, null, null, reason);
+          return { added: false, reason } as const;
         }
         const prepared = await options.prepareSource?.(tx as unknown as Database, input.sessionId);
         if ((prepared?.events?.length ?? 0) > 0) {

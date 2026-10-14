@@ -19,6 +19,7 @@ import {
   resourceMountPathCollisionKey,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
+import { parseCanonicalGitHubRepositoryUrl } from "@opengeni/contracts/github-repository";
 
 export type RepoDraft = {
   id: number;
@@ -26,6 +27,20 @@ export type RepoDraft = {
   ref: string;
   expectedCommitSha?: string;
   attached?: boolean;
+  /**
+   * Workspace GitHub App identity retained from a restored resource that the
+   * catalog could not confirm yet (still loading or unavailable). The row keeps
+   * producing the same bound resource until catalog reconciliation selects it,
+   * so restoring a draft never silently turns a bound repository into a bare
+   * URL with a different mount path.
+   */
+  github?: { repositoryId: number; installationId: number };
+  /**
+   * An attached row open in the editor with unsaved local changes. Catalog
+   * reconciliation leaves it alone until the edit is attached or cancelled, so
+   * the catalog finishing loading never discards the edit.
+   */
+  editing?: true;
 };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
 // the old `Extract<…,"low"|…>` silently dropped `none`/`minimal`, so a deployment
@@ -310,10 +325,10 @@ export function buildResources(
         url: repo.url.trim(),
         ref: repo.ref.trim(),
         expectedCommitSha: repo.expectedCommitSha ?? null,
-        repositoryId: null,
-        installationId: null,
+        repositoryId: repo.github?.repositoryId ?? null,
+        installationId: repo.github?.installationId ?? null,
         private: false,
-        provider: null,
+        provider: repo.github ? ("github" as const) : null,
         connectionType: null,
         credentialBindingId: null,
         access: null,
@@ -524,12 +539,14 @@ export function repositorySelectionFromResources(
       selectedRepoIds.add(matched.id);
       selectedRepoRefs[matched.id] = resource.ref;
     } else {
+      const github = retainedGitHubIdentity(resource);
       manualRepos.push({
         id: nextManualId++,
         url: resource.uri,
         ref: resource.ref,
         ...(resource.expectedCommitSha ? { expectedCommitSha: resource.expectedCommitSha } : {}),
         attached: true,
+        ...(github ? { github } : {}),
       });
     }
   }
@@ -540,6 +557,180 @@ export function repositorySelectionFromResources(
     selectedPersonalRepoIds,
     selectedPersonalRepoRefs,
   };
+}
+
+function retainedGitHubIdentity(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): RepoDraft["github"] | undefined {
+  const repositoryId = resource.githubRepositoryId;
+  const installationId = resource.githubInstallationId;
+  return typeof repositoryId === "number" &&
+    Number.isSafeInteger(repositoryId) &&
+    repositoryId > 0 &&
+    typeof installationId === "number" &&
+    Number.isSafeInteger(installationId) &&
+    installationId > 0
+    ? { repositoryId, installationId }
+    : undefined;
+}
+
+/**
+ * The workspace catalog repository an attached manual row stands for, if any.
+ * A retained identity matches only that exact installation and repository. A
+ * bare row matches the same way attaching a typed URL does: an exact
+ * https://github.com URL naming the catalog repository. Other hosts never
+ * match, so custom remotes keep their own attachment.
+ */
+export function manualRepositoryCatalogMatch(
+  repo: RepoDraft,
+  repositories: readonly GitHubRepository[],
+): GitHubRepository | null {
+  if (repo.github) {
+    const { repositoryId, installationId } = repo.github;
+    return (
+      repositories.find(
+        (candidate) => candidate.id === repositoryId && candidate.installationId === installationId,
+      ) ?? null
+    );
+  }
+  let fullName: string;
+  try {
+    fullName = parseCanonicalGitHubRepositoryUrl(repo.url.trim()).fullName.toLowerCase();
+  } catch {
+    return null;
+  }
+  return repositories.find((candidate) => candidate.fullName.toLowerCase() === fullName) ?? null;
+}
+
+export type RepositorySelectionState = {
+  manualRepos: RepoDraft[];
+  selectedRepoIds: Set<number>;
+  selectedRepoRefs: Record<number, string>;
+};
+
+/** The composer's personal GitHub selection, read-only to catalog reconciliation. */
+export type PersonalRepositorySelection = {
+  repositories: readonly PersonalGitHubRepositoryCatalogItem[];
+  selectedRepoIds: ReadonlySet<string>;
+  selectedRepoRefs: Readonly<Record<string, string>>;
+};
+
+/**
+ * The personal GitHub selection that stands for the same GitHub repository as a
+ * workspace catalog repository: undefined when there is none, otherwise its ref
+ * when that selection is attached right now, or null when it is not (catalog not
+ * loaded, or no selected access), so it cannot replace another attachment yet.
+ * Personal ids are GitHub repository ids, so a restored selection matches
+ * before the personal catalog has loaded.
+ */
+function selectedPersonalCounterpartRef(
+  repository: GitHubRepository,
+  personal: PersonalRepositorySelection | undefined,
+): string | null | undefined {
+  if (!personal) return undefined;
+  const fullName = repository.fullName.toLowerCase();
+  const repositoryId = personal.selectedRepoIds.has(String(repository.id))
+    ? String(repository.id)
+    : personal.repositories.find(
+        (candidate) =>
+          personal.selectedRepoIds.has(candidate.repositoryId) &&
+          candidate.fullName.toLowerCase() === fullName,
+      )?.repositoryId;
+  if (repositoryId === undefined) return undefined;
+  // Mirror buildResources: only a catalog item with selected access attaches.
+  const attachable = personal.repositories.find(
+    (candidate) => candidate.repositoryId === repositoryId && candidate.selectedAccess !== null,
+  );
+  if (!attachable) return null;
+  return (personal.selectedRepoRefs[repositoryId] ?? attachable.defaultBranch).trim() || null;
+}
+
+/**
+ * Fold attached manual rows that stand for a workspace catalog repository into
+ * the catalog selection, so one repository is attached once and the picker
+ * shows it checked. Returns null when nothing changes.
+ *
+ * - An unselected match becomes selected at the row's ref.
+ * - A match already selected at the same ref is an exact duplicate and is dropped.
+ * - A match selected at a different ref keeps its row: two refs are never
+ *   collapsed silently.
+ * - A repository selected through personal GitHub keeps that authority: the
+ *   workspace App copy is never selected for it. A row at the ref of an
+ *   attached personal selection is an exact duplicate and is dropped; any
+ *   other row stays, including while the personal selection cannot attach yet.
+ * - A row open in the editor is left alone until the edit ends.
+ * - A retained identity that a ready catalog no longer contains is dropped,
+ *   exactly like draft hydration drops it when the catalog is already loaded.
+ * - A bare row for another GitHub installation than the current selection is
+ *   left alone, matching the picker's one-installation rule.
+ * - An unknown catalog changes nothing.
+ */
+export function reconcileManualRepositoriesWithCatalog(
+  state: RepositorySelectionState,
+  repositories: readonly GitHubRepository[],
+  catalogReady: boolean,
+  personal?: PersonalRepositorySelection,
+): RepositorySelectionState | null {
+  if (!catalogReady) return null;
+  let changed = false;
+  const selectedRepoIds = new Set(state.selectedRepoIds);
+  const selectedRepoRefs = { ...state.selectedRepoRefs };
+  const selectedInstallationId = () =>
+    repositories.find((candidate) => selectedRepoIds.has(candidate.id))?.installationId ?? null;
+  const manualRepos: RepoDraft[] = [];
+  // Retained identities first: they are the authoritative restored selection,
+  // and a bare duplicate of the same repository then reconciles against it.
+  const ordered = [
+    ...state.manualRepos.filter((repo) => repo.github),
+    ...state.manualRepos.filter((repo) => !repo.github),
+  ];
+  const kept = new Set<RepoDraft>();
+  for (const repo of ordered) {
+    const ref = repo.ref.trim();
+    if (repo.attached === false || repo.editing || !repo.url.trim() || !ref) {
+      kept.add(repo);
+      continue;
+    }
+    const match = manualRepositoryCatalogMatch(repo, repositories);
+    if (!match) {
+      if (repo.github) {
+        changed = true;
+      } else {
+        kept.add(repo);
+      }
+      continue;
+    }
+    const personalRef = selectedPersonalCounterpartRef(match, personal);
+    if (personalRef !== undefined) {
+      if (personalRef === ref) {
+        changed = true;
+      } else {
+        kept.add(repo);
+      }
+      continue;
+    }
+    if (!selectedRepoIds.has(match.id)) {
+      const installationId = selectedInstallationId();
+      if (!repo.github && installationId !== null && installationId !== match.installationId) {
+        kept.add(repo);
+        continue;
+      }
+      selectedRepoIds.add(match.id);
+      selectedRepoRefs[match.id] = ref;
+      changed = true;
+      continue;
+    }
+    if ((selectedRepoRefs[match.id] ?? match.defaultBranch).trim() === ref) {
+      changed = true;
+      continue;
+    }
+    kept.add(repo);
+  }
+  if (!changed) return null;
+  for (const repo of state.manualRepos) {
+    if (kept.has(repo)) manualRepos.push(repo);
+  }
+  return { manualRepos, selectedRepoIds, selectedRepoRefs };
 }
 
 export function repositoryDisplayName(

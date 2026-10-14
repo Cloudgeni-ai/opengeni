@@ -96,11 +96,12 @@ describe("gateway signature", () => {
   test("refuses a missing, foreign, stale, or tampered signature", () => {
     expect(verify({})).toEqual({ ok: false, reason: "missing_headers" });
     expect(verify(signed("x".repeat(40)))).toEqual({ ok: false, reason: "bad_signature" });
-    expect(verify(signed(CURRENT, { nowMs: Date.now() - 31_000 }))).toEqual({
+    // Timestamps are whole seconds, so stay well clear of the 30-second window.
+    expect(verify(signed(CURRENT, { nowMs: Date.now() - 45_000 }))).toEqual({
       ok: false,
       reason: "skew",
     });
-    expect(verify(signed(CURRENT, { nowMs: Date.now() + 31_000 }))).toEqual({
+    expect(verify(signed(CURRENT, { nowMs: Date.now() + 45_000 }))).toEqual({
       ok: false,
       reason: "skew",
     });
