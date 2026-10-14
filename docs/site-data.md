@@ -37,6 +37,7 @@ and DML granted to the runtime role, so it could move to its own database:
 | `site_data_files` | file metadata, scope (`shared` or `private`), owner, object key |
 | `site_data_usage` | per-Site counters; its row is also the per-Site write lock |
 | `site_data_rate_windows` | fixed one-minute windows: writes per principal and per Site, Site-frame reads per principal |
+| `site_data_validation_windows` | fixed one-minute window of schema-validation time per workspace |
 
 Principals are abstract strings: `user:<subjectId>` for people and
 `service:<subjectId>` for personless keys. Agents are recorded as
@@ -96,9 +97,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   origin (`surface = 'site'`) reaches no Site Data at all. The same check runs
   for MCP tools, Codemode and HTTP calls with an agent's delegated
   credential, since all of them resolve access in the service. The lineage
-  walk reads up to 32 spawning ancestors; when it cannot read the whole
-  lineage (a deeper chain, or a missing session) it fails closed: viewer reach
-  and no management. A session started from a Site stays clamped for its
+  walk reads up to 32 spawning ancestors, and the session's root session
+  (`sessions.root_session_id`) is read directly. When the walk cannot read
+  the whole lineage (a deeper chain, a missing session, or an ancestor the
+  agent's person cannot see under session RLS) it fails closed: viewer reach
+  and no management on the one Site a known origin names, and no Site Data at
+  all when no origin is known. A session started from a Site stays clamped for its
   whole life, including turns its owner later sends from the console; start a
   new chat to manage data.
 - So "Site HTML cannot define collections or change access rules" holds for
@@ -106,7 +110,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   Indirect paths that run with the viewer's general API authority (for
   example a schedule or automation the page creates, whose agents are not
   Site-started) are not clamped yet; they are tracked in
-  [OPE-801](https://linear.app/cloudgeni/issue/OPE-801).
+  [OPE-801](https://linear.app/cloudgeni/issue/OPE-801). So is one direct
+  path: a page on Site B can message an existing session that was started
+  from Site A. Site turns record only `surface = 'site'`, not which Site sent
+  them, so that agent keeps viewer reach on Site A (never management, and
+  nothing on Site B). Recording the sending Site on each Site turn needs
+  changes on every turn-insert path and is part of OPE-801.
 - The Site HTTP channel reaches only the current Site's data:
   `siteSessionPath` refuses `/published-artifacts/<id>/data|files` for every
   explicit id on every host, and hosts not bound to a published Site (inline
@@ -131,24 +140,50 @@ to 100 scalar values), `const` (scalar), `minimum`, `maximum`,
 `$ref`, `$defs`, `definitions`, `$id`, `$schema`, `default`, `examples`,
 `pattern`, `patternProperties`, `propertyNames`, `if`/`then`/`else`, `not`,
 `dependent*`, `contains`, `prefixItems` and `unevaluated*`. A schema has at
-most 100 schema nodes, 16 levels of nesting, 16 schemas in each `allOf`,
-`anyOf` or `oneOf`, 500 `enum` values in total and 64 KB of JSON. Each schema
-is compiled by its own Ajv instance (cached by content digest in a bounded
-LRU) with no coercion or defaults, so nothing registers across tenants.
+most 2,000 schema nodes, 1,000 properties per object (as many as a CSV import
+has columns), 16 levels of nesting, 16 schemas in each `allOf`, `anyOf` or
+`oneOf`, 500 `enum` values in total and 64 KB of JSON. Each schema is compiled
+by its own Ajv instance (cached by content digest in a bounded LRU) with no
+coercion or defaults, so nothing registers across tenants.
 
-Without references, regexes or pairwise comparisons, validating one record
-costs at most about (schema nodes + enum values) × values in the record:
-under 600 × 128K checks for a 256 KB record, about 0.3 s with the costliest
-allowed schema (5 × 16 branches over 500 enum values) on a development
-machine. Each write, batch or import request carries at most 4 MB of record
-JSON (`quota_exceeded`, quota `request_bytes`) and spends at most 250 ms
-validating, checked after each record with a yield to the event loop between
-records; past the budget it fails with `validation` (reason
-`validation_budget`), so a request costs at most one record past the budget.
-Validation happens before the Site's lock: inserts and puts as sent, patches
-and increments merged from the record read just before. The write skips
-records already checked against the same schema; a record that changed in
-between is checked again inside the transaction, on the same budget.
+Wide schemas are cheap: each property applies to its own value once. What
+costs is checking many schemas against each of the up to about 128K values a
+record can repeat (array elements and additional properties), so a schema's
+**repeated cost** is capped at 600 (`siteDataSchemaRepeatedCost`): the most
+checks it runs on one repeated value, counting 1 per schema object, enum
+value, property and required name, and 6 per `allOf`/`anyOf`/`oneOf` branch
+(a failing branch is the costliest check, measured). Branches on the same
+value add up; children on different values do not. A validator whose
+generated code is larger than 200,000 characters runs unoptimized, about four
+times slower (measured), so its repeated cost counts four times. On a
+development machine the costliest allowed schemas check a 256 KB record in
+about 0.2 s (96 failing branches per element, or a large validator at the
+reduced cap); the previous flat 100-node cap allowed schemas that took about
+0.33 s, and those are refused now.
+
+Each write, batch or import request carries at most 4 MB of record JSON
+(`quota_exceeded`, quota `request_bytes`) and spends at most 250 ms compiling
+schemas and validating, checked before each record after the first, with a
+yield to the event loop between records. Past the budget the next record
+fails with `validation` (reason `validation_budget`) before it runs, so a
+request costs at most the budget plus one record and its schema compile; a
+request with one record always completes. Validation happens before the
+Site's lock: inserts and puts as sent, patches and increments merged from the
+record read just before. The write reuses the request's compiled validators
+and skips records already checked against the same schema; a record that
+changed in between is checked again inside the transaction, on the same
+budget.
+
+Validation time is charged after every write, define and import, whatever
+its outcome. Each started 5 ms (from 1 ms; quicker checks, which are
+the normal case, are free) counts one more operation on the caller's write
+windows, for viewers and managers alike. The time also counts on a
+per-workspace window of validation time per minute across all its Sites
+(20 s by default); once it is spent, every further Site Data write in the
+workspace gets `rate_limited` (quota `workspace_validation_time`) until the
+minute ends. So one request costs at most about 0.25 s plus one record
+(about 0.2 s), and a workspace's Sites spend at most about 20 s of validation
+per minute plus what requests already in flight finish.
 Data paths (filters, sorts, keys, increments, indexes, CSV headers) refuse
 `__proto__`, `prototype` and `constructor`.
 
@@ -218,6 +253,7 @@ JSON as text, confirmed deletes with `expectedVersion`, and JSON/CSV export.
 | `OPENGENI_SITE_DATA_SITE_WRITES_PER_MINUTE` | 600 operations per Site |
 | `OPENGENI_SITE_DATA_VIEWER_READS_PER_MINUTE` | 600 Site-frame reads per viewer per Site |
 | `OPENGENI_SITE_DATA_MANAGER_WRITES_PER_MINUTE` | 6,000 operations per Site by all its managers (API and agent tools) |
+| `OPENGENI_SITE_DATA_WORKSPACE_VALIDATION_MS_PER_MINUTE` | 20,000 ms of schema validation per workspace across its Sites |
 | `OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION` | 100,000 |
 
 Record storage is charged as each record's JSON plus 512 bytes, so tiny records
@@ -225,6 +261,8 @@ still count. Filter strings are at most 1,024 characters and `in` lists at most
 100 values. Write windows count every attempt, including refused ones:
 viewers and Site frames per person and per Site, and managers' API and agent
 calls (records, imports, uploads, collection changes) in one window per Site.
+CSV imports count one operation per line before parsing. Validation time adds
+operations afterwards and has its own workspace window (see Access rules).
 The read window applies to Site frames only. Billing is always
 `usage_only` for now; a mode setting will arrive with `shadow`/`paid`. The workspace total is checked inside the Site's lock,
 not a workspace-wide one, so concurrent writes to different Sites can overshoot
@@ -249,7 +287,11 @@ mode are added.
   clamp, counters and the per-record charge, tampered cursors, the workspace
   total, attempt counting, upload ordering and streaming caps, CSV import and
   export, Site-started agents and their fail-closed lineage, the schedule
-  principal, the manager write window, and worst-case validation cost.
+  principal, the manager write window, worst-case validation cost under the
+  schema cost model, validation-time charging and the workspace window, the
+  budget order, CSV import counting, and the lineage under the production
+  session RLS context. Budgets and charges use an injected validation clock,
+  never wall-clock timing.
 - `packages/db/test/migration-0773-site-data-postgres.test.ts`: FORCE RLS,
   the application role without context, a mismatched tenant context with no
   tenant filter, the record-to-collection Site key, and workspace cascade.
@@ -268,7 +310,7 @@ mode are added.
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
   principals; live updates.
 - Clamp indirect paths from Site HTML (schedules, automations and other
-  agents created with the viewer's authority):
-  [OPE-801](https://linear.app/cloudgeni/issue/OPE-801).
+  agents created with the viewer's authority), and record which Site sent
+  each Site turn: [OPE-801](https://linear.app/cloudgeni/issue/OPE-801).
 - Stamp the Site origin onto child sessions at creation so the lineage check
   is one lookup instead of a bounded walk.

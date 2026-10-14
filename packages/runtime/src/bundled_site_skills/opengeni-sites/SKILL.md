@@ -315,8 +315,12 @@ schema), `enum` (up to 100 scalars), `const`, numeric and length bounds
 `minLength`, `maxLength`, `minItems`, `maxItems`, `minProperties`,
 `maxProperties`), `format`, `title`, `description`, `allOf`/`anyOf`/`oneOf`,
 and `uniqueItems` when `items` has a scalar `type`; no `$ref`, `$defs`,
-`pattern`, `default` or conditionals; at most 100 nodes, 16 levels, 16
-branches per `anyOf`/`oneOf`/`allOf` and 500 `enum` values in total. Field
+`pattern`, `default` or conditionals; at most 1,000 properties per object, 16
+levels, 16 branches per `anyOf`/`oneOf`/`allOf` and 500 `enum` values in
+total. Wide objects are fine; keep schemas under `items` and
+`additionalProperties` simple (few branches and enum values), since they run
+on every element: a schema too costly per element is refused at definition.
+Expect `rate_limited` if writes spend too long validating. Field
 paths cannot use `__proto__`, `prototype` or `constructor`. An Only me Site's data is reachable only by its owner.
 
 In the Site, use the same client:
