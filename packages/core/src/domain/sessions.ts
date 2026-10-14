@@ -31,6 +31,7 @@ import {
   sessionCreationMetadata,
   SITE_ORIGIN_METADATA_KEY,
 } from "../site-session-origin";
+import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
@@ -2633,6 +2634,25 @@ async function createSessionForRequestInFileScope(
       "Usage limits are not enabled on this server.",
     );
   }
+  // The trusted server in this process (published Site runtime) may attach a
+  // limit to a root session it creates as its own service principal, so the
+  // limit is in place before the first model call. Requests cannot set it.
+  const hostUsageLimit = currentHostSessionUsageLimit();
+  const hostInitialUsageLimit =
+    payload.usageLimitMicros === undefined &&
+    !parentSessionId &&
+    hostUsageLimit !== undefined &&
+    hostUsageLimit.subjectId === grant.subjectId
+      ? hostUsageLimit
+      : null;
+  if (hostInitialUsageLimit && !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
+    throw new SessionUsageLimitHttpError(
+      422,
+      "session_usage_limit_disabled",
+      "Usage limits are not enabled on this server.",
+    );
+  }
   // A task whose usage limit is reached cannot start more inference by
   // spawning another agent.
   if (parentSessionId) {
@@ -3836,7 +3856,12 @@ async function createSessionForRequestInFileScope(
   const initialUsageLimit =
     initialUsageLimitActor && payload.usageLimitMicros != null
       ? { actor: initialUsageLimitActor, limitMicros: payload.usageLimitMicros }
-      : null;
+      : hostInitialUsageLimit
+        ? {
+            actor: { type: "host" as const, subjectId: hostInitialUsageLimit.subjectId },
+            limitMicros: hostInitialUsageLimit.limitMicros,
+          }
+        : null;
   const applyInitialUsageLimit = initialUsageLimit
     ? async (tx: Database, sessionId: string) =>
         await applyInitialSessionUsageLimit(tx, {

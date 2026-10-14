@@ -174,6 +174,11 @@ export {
   siteSessionClamp,
   type SiteAgentClamp,
 } from "./site-agent-clamp";
+export {
+  currentHostSessionUsageLimit,
+  withHostSessionUsageLimit,
+  type HostSessionUsageLimit,
+} from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";

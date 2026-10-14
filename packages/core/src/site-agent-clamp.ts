@@ -80,12 +80,13 @@ export async function siteSessionClamp(
 
 /**
  * Refuse a Site-clamped agent: an agent started from a Site page acts with
- * that page's reach and cannot create or change schedules or automations.
+ * that page's reach and cannot create or change schedules, automations or
+ * Site publications.
  */
 export async function assertNotSiteClampedAgent(
   db: Database,
   grant: AccessGrant,
-  what: "schedules" | "automations",
+  what: "schedules" | "automations" | "Site publications",
 ): Promise<void> {
   const clamp = await siteAgentClamp(db, grant);
   if (!clamp?.clamped) return;
