@@ -17,6 +17,10 @@ Every route returns `404 sites_publishing_disabled` when
 `OPENGENI_SITES_GATEWAY_SECRET` is unset. Errors use the normal API error
 envelope, and the specific reason is in `details.code`.
 
+The console learns about publishing from `GET /v1/config/client`, which has a
+`sites` object: `{ domain, publicEnabled, publicAgentsEnabled, loginOnly,
+forceNoindex }`. It is `null` when `OPENGENI_SITES_DOMAIN` is unset.
+
 ## Settings
 
 | Variable | Default | Meaning |
@@ -175,10 +179,10 @@ signature.
 
 | Method and suffix | Result |
 | --- | --- |
-| `GET /host?host=` | `SiteHostMapRecord` (the gateway's fallback on a KV miss). `host` must equal the signed host |
+| `GET /host` | `SiteHostMapRecord` for the signed host (the gateway's fallback on a KV miss), or 404 `site_not_found`. An optional `host` query must equal the signed host |
 | `GET /versions/:versionId/html` | The immutable HTML of a version of this Site, with a sandbox CSP, `private, max-age=31536000, immutable` and an ETag. 404 `site_version_not_found` for another Site's version |
 | `POST /auth/exchange` | `SiteAuthExchangeResponse`. 400 `site_auth_code_invalid` (wrong verifier, host or redirect URI, expired, or already used) |
-| `POST /auth/logout` | 200 |
+| `POST /auth/logout` | 200 `{ revoked }`, even when the Site no longer exists |
 | `POST /site/reports` | 201. Rate limited per visitor |
 | `POST /tools/:method` | 403 `site_tools_unavailable` (direct tools need a person's session in the console) |
 | `SITE_OPERATIONS` suffixes | Served for the viewer, as below. Anything else returns 404 `site_operation_unsupported` |
@@ -206,14 +210,29 @@ Operations:
     token.
     - It uses `agentAccess: "session"`, the publication's model,
       instructions and MCP servers, no first-party tools, and memory off.
-    - The viewer is the end-user label, and the Site and version are its
-      provenance.
+    - The viewer is the end-user label. The Site, its title and the served
+      version are recorded as the session's origin and on every turn
+      (OPE-801 `SiteSessionOrigin`). The call runs inside
+      `withSiteSessionOrigin` and carries the Site and version headers, which
+      the Site frame guard validates again.
     - It is capped with a per-conversation session usage limit.
     - The conversation is recorded as owned by this Site and this viewer.
   - **Other operations** (list, get, events, stream, send, steer, control,
-    queue and human input) work only on the viewer's own conversations on
-    this Site. Any other conversation returns 404
-    `site_conversation_not_found`.
+    queue, queue items, composer draft, human input) work only on the
+    viewer's own conversations on this Site. Any other conversation returns
+    404 `site_conversation_not_found`.
+  - **Streams** resume after the gateway-forwarded `Last-Event-ID` when the
+    query has no `after`.
+  - **Composer drafts** are text only. A draft or submit with resources,
+    timeline annotations, credential updates, connection accounts, model
+    context or a personal resource attachment returns 400
+    `site_invalid_request`. The model must be the publication's, one of the
+    profile's `agentModels`, or the conversation's current model; otherwise
+    the call returns 400 `site_model_not_allowed`. Submitting a draft is a
+    message and counts as a turn.
+  - **Queue items** (move, edit, steer, delete) are forwarded with the
+    API's own request schemas. Steering a queued message also passes the
+    agent and spend checks; the message was already counted when sent.
   - **Budgets.** Create and send check the turns per conversation, the
     conversations per visitor per day, the spend per visitor per day and
     the spend per Site per month. Over budget returns 429
