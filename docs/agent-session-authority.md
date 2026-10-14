@@ -165,10 +165,20 @@ Authority never widens down a tree or through a side door:
   ([`scheduled-task-access.md`](scheduled-task-access.md)).
 - The Codemode SDK proxy (`/v1/workspaces/:workspaceId/codemode/sdk/*`) mints
   its agent token from the session's permissions intersected with the
-  permissions the session's selected first-party tools require, and
-  `siteSessionPath` is an explicit method-plus-path allowlist: session list,
-  create, read, events, stream, send, queue, and composer drafts. Tool policy,
-  visibility, forks, steer, and control are not reachable from a sandbox.
+  permissions the session's selected first-party tools require. The agent's
+  own SDK requests keep a workspace prefix boundary (`siteHostWorkspacePath`)
+  under that ceiling, and the configured tool families narrow it further.
+- Site code is held to the `SITE_OPERATIONS` allowlist
+  (`packages/contracts/src/site-publishing.ts`, method plus exact path shape):
+  `siteSessionPath` enforces it in the console bridge, the in-Site SDK and a
+  Codemode preview, and `apps/api/src/site-frame-guard.ts` enforces it again
+  for every request a host marks as a Site frame. A frame lists only its own
+  Site's sessions and may read, send, steer or control only sessions its own
+  Site (or, without a published Site, its own mounted frame) started; anything
+  else is a 404. Sessions, turns and schedules started from a Site record
+  which Site (`_opengeniSiteOrigin`), and an agent started from a Site cannot
+  create or change schedules or automations, nor message sessions outside its
+  Site.
 - A session-scoped grant without a signed `firstPartyMcpTools` claim registers
   no first-party tools.
 

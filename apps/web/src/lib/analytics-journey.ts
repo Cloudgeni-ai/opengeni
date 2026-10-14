@@ -41,6 +41,7 @@ const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/device$/, "device"],
   [/^\/connect-agent$/, "connect-agent"],
   [/^\/native-sign-in$/, "native-sign-in"],
+  [/^\/site-auth\/authorize$/, "site-auth"],
   [/^\/reset-password$/, "reset-password"],
   [/^\/setup-account$/, "setup-account"],
   [/^\/account-auth$/, "account-auth"],
