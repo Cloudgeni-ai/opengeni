@@ -17,7 +17,6 @@ import { CheckboxField, FieldStack } from "@/components/ui/field";
 import { ListRowSkeleton, RowList } from "@/components/ui/list-row";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
 import {
   SettingNavRow,
   SettingRow,
@@ -29,16 +28,19 @@ import { FallbackOrderControl } from "./model-account-policy-controls";
 import { ModelsFormPage } from "./models-ui";
 
 /* ----------------------------------------------------------------------------
-   How accounts are used: the organization's rules for its model accounts.
-   The organization sets each rule; a shared workspace can change a rule for
-   itself unless the organization keeps it the same everywhere ("What
-   workspaces can change"). Every value is resolved by the server
-   (`subscription_effective_settings`); this file only shows what it returns
-   and where each value comes from.
+   Sharing subscriptions: the default rules for the organization's model
+   subscriptions. The Defaults scope sets each rule; a shared workspace can
+   change a rule for itself unless the organization keeps it the same
+   everywhere ("What workspaces can change"). Every value is resolved by the
+   server (`subscription_effective_settings`); this file only shows what it
+   returns and where each value comes from.
 
-   One row per provider says how new chats share that provider's accounts.
-   A rule that only matters while another is on (personal fallback, the
-   fallback order) is indented under it and shown only then.
+   One switch per provider says whether new chats share work between that
+   provider's subscriptions. A rule that only matters while another is on
+   (personal fallback, the fallback order) is indented under it and shown
+   only then. On the Defaults scope each rule says which workspaces use it;
+   on a workspace each rule says whether it uses the default or was changed
+   there, with the default's value.
    -------------------------------------------------------------------------- */
 
 /** The rules on these pages, in order. `providers` is changed on each provider's own page. */
@@ -64,8 +66,9 @@ export const ACCOUNT_RULES: readonly AccountRule[] = [
 
 const RULES: Record<AccountRule, { label: string; description: string }> = {
   rotation: {
-    label: "Sharing work between accounts",
-    description: "Spread new chats across a provider’s accounts, or keep them on its primary one.",
+    label: "Share work between subscriptions",
+    description:
+      "Spread new chats across a provider’s subscriptions, or keep them on its primary one.",
   },
   personalConnectionsAllowed: {
     label: "Personal subscriptions",
@@ -73,10 +76,10 @@ const RULES: Record<AccountRule, { label: string; description: string }> = {
   },
   personalFallbackAllowed: {
     label: "Fall back to personal subscriptions",
-    description: "When shared accounts run out, people who opt in continue on their own.",
+    description: "When shared subscriptions run out, people who opt in continue on their own.",
   },
   crossProviderFailover: {
-    label: "Switch models when accounts run out",
+    label: "Switch models when subscriptions run out",
     description: "Continue on the next model in the fallback order instead of waiting.",
   },
   fallbackOrder: {
@@ -107,13 +110,32 @@ function rotationProviders(rotation: ModelAccountSettingValues["rotation"]): str
   );
 }
 
-/** "3 connected. Each new chat goes to the account with the most usage left." */
+/** Sharing is on unless the provider keeps new chats on its primary subscription. */
+const sharing = (mode: ModelAccountRotationMode | undefined) => mode !== "primary_first";
+
+/** "3 connected. New chats are shared evenly across subscriptions that can serve them." */
 function rotationDescription(mode: ModelAccountRotationMode, count: number | undefined): string {
-  const outcome =
-    mode === "primary_first"
-      ? "New chats use the primary account."
-      : "Each new chat goes to the account with the most usage left.";
+  const outcome = sharing(mode)
+    ? "New chats are shared evenly across subscriptions that can serve them."
+    : "New chats start on the primary subscription and use another when it can't serve them.";
   return count === undefined ? outcome : `${count} connected. ${outcome}`;
+}
+
+const onOff = (value: boolean) => (value ? "On" : "Off");
+
+/** A rule's value in one word ("On", "Off"), or null for the fallback order. */
+function ruleValue(
+  values: ModelAccountSettingValues,
+  rule: AccountRule,
+  provider?: string,
+): string | null {
+  if (rule === "rotation") return onOff(sharing(values.rotation[provider ?? ""]?.mode));
+  if (rule === "fallbackOrder") return null;
+  return onOff(values[rule]);
+}
+
+function QuietHint({ children }: { children: ReactNode }) {
+  return <span className="inline-flex items-center gap-1 text-xs text-fg-subtle">{children}</span>;
 }
 
 const modelId = (id: string) => id;
@@ -225,23 +247,21 @@ function AccountRuleRows({
         return (
           <SettingRow
             key={key}
-            label={`${providerName(provider)} accounts`}
+            label={`Share work between ${providerName(provider)} subscriptions`}
             description={rotationDescription(mode, accountCounts?.[provider])}
-            hint={providerHints[provider] ?? hints.rotation}
-            controlWidth="auto"
+            hint={provider in providerHints ? providerHints[provider] : hints.rotation}
+            controlWidth="compact"
             control={
-              <SegmentedControl<ModelAccountRotationMode>
-                size="sm"
-                value={mode}
+              <Switch
+                checked={sharing(mode)}
                 pending={saving === key}
                 disabled={rotationBlocked !== undefined || (saving !== null && saving !== key)}
-                onValueChange={(next) =>
-                  onChange(key, { rotation: { [provider]: { mode: next } } })
+                disabledReason={rotationBlocked}
+                onCheckedChange={(checked) =>
+                  onChange(key, {
+                    rotation: { [provider]: { mode: checked ? "spread" : "primary_first" } },
+                  })
                 }
-                options={[
-                  { value: "spread", label: "Spread work" },
-                  { value: "primary_first", label: "Primary only" },
-                ]}
               />
             }
           />
@@ -363,6 +383,9 @@ export function useModelAccountSettingsOverview(
 }
 
 /** "Every rule", "3 of 5 rules" or "Nothing": what workspaces can change for themselves. */
+type OverviewWorkspace = ModelAccountSettingsOverview["workspaces"][number];
+
+/** "Every rule", "3 of 5 rules" or "Nothing": what workspaces can change for themselves. */
 export function changeableRulesSummary(locked: readonly string[]): string {
   const open = ACCOUNT_RULES.filter((rule) => !locked.includes(rule)).length;
   if (open === ACCOUNT_RULES.length) return "Every rule";
@@ -370,7 +393,36 @@ export function changeableRulesSummary(locked: readonly string[]): string {
   return `${open} of ${ACCOUNT_RULES.length} rules`;
 }
 
-/** The organization's rules, and a row to the page that says which ones workspaces can change. */
+/**
+ * Which workspaces use a default rule: "Used by every workspace", or "Used by
+ * 2 of 3 workspaces · Research has its own (Off)". Null while some workspaces
+ * aren't read (more than one page), so it never claims a count it lacks.
+ */
+export function ruleReach(
+  workspaces: readonly OverviewWorkspace[] | null,
+  rule: AccountRule,
+  provider?: string,
+): string | null {
+  if (!workspaces || workspaces.length === 0) return null;
+  const own = workspaces.filter((workspace) =>
+    rule === "rotation"
+      ? workspace.sources.rotation === "workspace" &&
+        workspace.entrySources.rotation[provider ?? ""] === "workspace"
+      : workspace.sources[rule] === "workspace",
+  );
+  if (own.length === 0) return "Used by every workspace";
+  const using = workspaces.length - own.length;
+  const lead =
+    using === 0
+      ? "Not used by any workspace"
+      : `Used by ${using} of ${workspaces.length} workspaces`;
+  if (own.length > 1) return `${lead} · ${own.length} have their own`;
+  const [only] = own as [OverviewWorkspace];
+  const value = ruleValue(only.values, rule, provider);
+  return `${lead} · ${only.name} has its own${value ? ` (${value})` : ""}`;
+}
+
+/** The default rules, each saying which workspaces use it, and a row to "What workspaces can change". */
 export function OrganizationAccountRulesSection({
   organizationName,
   state,
@@ -388,20 +440,34 @@ export function OrganizationAccountRulesSection({
   onEditLocks: () => void;
 }) {
   const organization = state.overview?.organization;
+  // Which workspaces use each rule, once every workspace is read.
+  const workspaces = state.overview?.nextCursor === null ? state.overview.workspaces : null;
+  const reachHint = (rule: AccountRule, provider?: string): ReactNode => {
+    if (organization?.locked.includes(rule)) {
+      return (
+        <QuietHint>
+          <LockIcon aria-hidden="true" className="size-3" />
+          Used by every workspace. Workspaces can’t change it.
+        </QuietHint>
+      );
+    }
+    const reach = ruleReach(workspaces, rule, provider);
+    return reach ? <QuietHint>{reach}</QuietHint> : null;
+  };
   return (
     <Section
-      title="How accounts are used"
-      description="Every workspace follows these unless its admins change them."
+      title="Sharing subscriptions"
+      description="How chats use the subscriptions you connect."
     >
       {state.error && !organization ? (
         <ErrorMessage
-          title={`Couldn’t load how ${organizationName} uses its accounts.`}
+          title={`Couldn’t load how ${organizationName} shares its subscriptions.`}
           action={<RowButton onClick={() => void state.reload()}>Try again</RowButton>}
         >
           Nothing was changed.
         </ErrorMessage>
       ) : !organization ? (
-        <RowList label="How accounts are used" flush>
+        <RowList label="Sharing subscriptions" flush>
           <ListRowSkeleton count={3} />
         </RowList>
       ) : (
@@ -411,13 +477,11 @@ export function OrganizationAccountRulesSection({
             saving={state.saving}
             accountCounts={accountCounts}
             blocked={() => undefined}
-            hints={Object.fromEntries(
-              ACCOUNT_RULES.filter((rule) => organization.locked.includes(rule)).map((rule) => [
-                rule,
-                <span key={rule} className="inline-flex items-center gap-1 text-xs text-fg-subtle">
-                  <LockIcon aria-hidden="true" className="size-3" />
-                  Same in every workspace
-                </span>,
+            hints={Object.fromEntries(ACCOUNT_RULES.map((rule) => [rule, reachHint(rule)]))}
+            providerHints={Object.fromEntries(
+              Object.keys(organization.values.rotation).map((provider) => [
+                provider,
+                reachHint("rotation", provider),
               ]),
             )}
             onChange={(key, change) => void state.update(key, change)}
@@ -474,7 +538,7 @@ export function AccountRuleLocksPage({
   return (
     <ModelsFormPage
       title="What workspaces can change"
-      description={`Workspace admins can set these rules differently for their workspace. Anything you turn off stays as ${organizationName} sets it, everywhere.`}
+      description="Workspace admins can set these rules differently for their workspace. Anything you turn off uses the default, everywhere."
       submitLabel="Save"
       pendingLabel="Saving…"
       loading={!organization && !state.error}
@@ -505,7 +569,7 @@ export function AccountRuleLocksPage({
               label={RULES[rule].label}
               description={
                 replacing
-                  ? `${names.join(", ")} will go back to ${organizationName}’s setting.`
+                  ? `${names.join(", ")} will go back to the default.`
                   : names.length > 0
                     ? `Changed in ${names.join(", ")}.`
                     : RULES[rule].description
@@ -614,11 +678,9 @@ export function useWorkspaceModelAccountSettings(
   return { settings, error, saving, reload, update };
 }
 
-const onOff = (value: boolean) => (value ? "On" : "Off");
-
 /**
  * What a workspace set for itself instead of following the organization, in
- * words: "Claude: Primary only", "Switch models: On", "Own fallback order".
+ * words: "Claude sharing: Off", "Switch models: On", "Own fallback order".
  * A locked rule is the organization's, so it is never a change.
  */
 export function accountRuleChanges(
@@ -632,9 +694,7 @@ export function accountRuleChanges(
           .filter((provider) => settings.entrySources.rotation[provider] === "workspace")
           .map(
             (provider) =>
-              `${providerName(provider)}: ${
-                values.rotation[provider]?.mode === "primary_first" ? "Primary only" : "Spread work"
-              }`,
+              `${providerName(provider)} sharing: ${onOff(sharing(values.rotation[provider]?.mode))}`,
           )
       : []),
     ...(own("personalConnectionsAllowed")
@@ -650,25 +710,25 @@ export function accountRuleChanges(
   ];
 }
 
-/** "This workspace follows Acme’s rules." or "2 rules changed here. The rest follow Acme." */
-function workspaceRulesSummary(
-  changes: number,
-  organizationName: string,
-  canEdit: boolean,
-): string {
+/** "Design uses the defaults." or "2 rules changed for Design. The rest use the defaults." */
+function workspaceRulesSummary(changes: number, workspaceName: string): string {
   if (changes > 0) {
-    return `${changes === 1 ? "1 rule" : `${changes} rules`} changed here. The rest follow ${organizationName}.`;
+    return `${changes === 1 ? "1 rule" : `${changes} rules`} changed for ${workspaceName}. The rest use the defaults.`;
   }
-  return canEdit
-    ? `This workspace follows ${organizationName}’s rules. Change one here to set it for this workspace only.`
-    : `This workspace follows ${organizationName}’s rules.`;
+  // The scope header already says a change here applies only to this workspace.
+  return `${workspaceName} uses the defaults for every rule.`;
 }
 
 export function WorkspaceAccountRulesSection({
   organizationName,
+  workspaceName,
+  defaults,
   state,
 }: {
   organizationName: string;
+  workspaceName: string;
+  /** The default values, when the viewer can read them; names the value a reset goes back to. */
+  defaults?: ModelAccountSettingValues | undefined;
   state: WorkspaceModelAccountSettingsState;
 }) {
   const catalog = useAppContext().clientConfig?.models ?? [];
@@ -676,9 +736,9 @@ export function WorkspaceAccountRulesSection({
   const settings = state.settings;
   if (!settings) {
     return state.error ? (
-      <Section title="How accounts are used">
+      <Section title="Sharing subscriptions">
         <ErrorMessage
-          title="Couldn’t load how this workspace uses its accounts."
+          title={`Couldn’t load how ${workspaceName} shares subscriptions.`}
           action={<RowButton onClick={() => void state.reload()}>Try again</RowButton>}
         >
           Nothing was changed.
@@ -687,32 +747,48 @@ export function WorkspaceAccountRulesSection({
     ) : null;
   }
   const lockedReason = `${organizationName} keeps this the same in every workspace.`;
-  const readOnlyReason = `Only admins of this workspace or ${organizationName} can change this.`;
+  const readOnlyReason = `Only admins of ${workspaceName} or ${organizationName} can change this.`;
   const lockHint = (
-    <span className="inline-flex items-center gap-1 text-xs text-fg-subtle">
+    <QuietHint>
       <LockIcon aria-hidden="true" className="size-3" />
       {lockedReason}
-    </span>
+    </QuietHint>
   );
-  const resetLink = (key: string, request: UpdateWorkspaceModelAccountSettingsRequest) =>
-    settings.canEdit ? (
-      <SettingRowLink
-        disabled={state.saving !== null}
-        onClick={() => void state.update(key, request)}
-      >
-        {`Use ${organizationName}’s setting`}
-      </SettingRowLink>
-    ) : (
-      <span className="text-xs text-fg-subtle">Set for this workspace.</span>
+  /* Every rule says where its value comes from: "Uses the default (On)", or
+     "Changed for Design" with one step back to the default and its value. */
+  const sourceHint = (
+    source: "organization" | "workspace" | "locked",
+    value: string | null,
+    defaultValue: string | null,
+    key: string,
+    request: UpdateWorkspaceModelAccountSettingsRequest,
+  ): ReactNode => {
+    if (source === "locked") return lockHint;
+    if (source !== "workspace") {
+      return <QuietHint>{value ? `Uses the default (${value})` : "Uses the default"}</QuietHint>;
+    }
+    const reset = defaultValue ? `Use the default (${defaultValue})` : "Use the default";
+    return (
+      <span className="inline-flex flex-wrap items-center gap-x-1.5 text-xs text-fg-subtle">
+        <span className="font-medium text-fg-muted">{`Changed for ${workspaceName}`}</span>
+        {settings.canEdit ? (
+          <>
+            <span aria-hidden="true">·</span>
+            <SettingRowLink
+              disabled={state.saving !== null}
+              onClick={() => void state.update(key, request)}
+            >
+              {reset}
+            </SettingRowLink>
+          </>
+        ) : null}
+      </span>
     );
+  };
   return (
     <Section
-      title="How accounts are used"
-      description={workspaceRulesSummary(
-        accountRuleChanges(settings).length,
-        organizationName,
-        settings.canEdit,
-      )}
+      title="Sharing subscriptions"
+      description={workspaceRulesSummary(accountRuleChanges(settings).length, workspaceName)}
     >
       <SettingRowGroup>
         <AccountRuleRows
@@ -728,23 +804,31 @@ export function WorkspaceAccountRulesSection({
           hints={Object.fromEntries(
             ACCOUNT_RULES.map((rule) => [
               rule,
-              settings.sources[rule] === "locked"
-                ? lockHint
-                : settings.sources[rule] === "workspace" && rule !== "rotation"
-                  ? resetLink(`reset:${rule}`, {
-                      [rule]: null,
-                    } as UpdateWorkspaceModelAccountSettingsRequest)
-                  : null,
+              rule === "rotation"
+                ? settings.sources.rotation === "locked"
+                  ? lockHint
+                  : null
+                : sourceHint(
+                    settings.sources[rule],
+                    ruleValue(settings.values, rule),
+                    defaults ? ruleValue(defaults, rule) : null,
+                    `reset:${rule}`,
+                    { [rule]: null } as UpdateWorkspaceModelAccountSettingsRequest,
+                  ),
             ]),
           )}
           providerHints={Object.fromEntries(
             Object.keys(settings.values.rotation).map((provider) => [
               provider,
-              settings.sources.rotation === "locked"
-                ? lockHint
-                : settings.entrySources.rotation[provider] === "workspace"
-                  ? resetLink(`reset:rotation:${provider}`, { rotation: { [provider]: null } })
-                  : null,
+              sourceHint(
+                settings.sources.rotation === "locked"
+                  ? "locked"
+                  : (settings.entrySources.rotation[provider] ?? "organization"),
+                ruleValue(settings.values, "rotation", provider),
+                defaults ? ruleValue(defaults, "rotation", provider) : null,
+                `reset:rotation:${provider}`,
+                { rotation: { [provider]: null } },
+              ),
             ]),
           )}
           onChange={(key, change) => void state.update(key, change)}

@@ -496,6 +496,7 @@ impl OpCgroups {
             dir: Some(dir.clone()),
             cpu_lease,
             reservation: crate::current_work_reservation(),
+            applied: applied_config,
         };
 
         self.configure_op_cgroup(&dir, applied_config)?;
@@ -510,6 +511,44 @@ impl OpCgroups {
         }
 
         Ok(Some(PreparedOpCgroup { handle }))
+    }
+
+    /// Takes over a leaf a predecessor process image handed over, re-applying
+    /// its exact policy. Startup returns CPU scheduling to ambient before any
+    /// adoption, so a CPU-limited leaf re-acquires the controller and has its
+    /// quota written again.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adopt_op(
+        &self,
+        handover: &crate::exec_handover::OpCgroupHandover,
+    ) -> std::io::Result<OpCgroupHandle> {
+        let dir = &handover.dir;
+        let owned = dir.parent() == Some(self.service_dir.as_path())
+            && dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("op-"))
+                .is_some_and(|id| id.parse::<u64>().is_ok());
+        if !owned || !dir.is_dir() {
+            return Err(std::io::Error::other(format!(
+                "handed-over operation cgroup {} is not a live leaf of this runner",
+                dir.display()
+            )));
+        }
+        let applied = OpCgroupConfig {
+            memory_max: handover.memory_max,
+            memory_high: handover.memory_high,
+            cpu_max_millicores: handover.cpu_max_millicores,
+        };
+        let cpu_lease = self.acquire_cpu_lease(applied.cpu_max_millicores)?;
+        let handle = OpCgroupHandle {
+            dir: Some(dir.clone()),
+            cpu_lease,
+            reservation: crate::current_work_reservation(),
+            applied,
+        };
+        self.configure_op_cgroup(dir, applied)?;
+        Ok(handle)
     }
 
     #[cfg(target_os = "linux")]
@@ -747,6 +786,19 @@ impl OpCgroups {
         Ok(None)
     }
 
+    /// Non-Linux stub: no leaf can have been handed over off Linux.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn adopt_op(
+        &self,
+        handover: &crate::exec_handover::OpCgroupHandover,
+    ) -> std::io::Result<OpCgroupHandle> {
+        Err(std::io::Error::other(format!(
+            "operation cgroup {} cannot be adopted on this OS",
+            handover.dir.display()
+        )))
+    }
+
     /// Logs an operation admission fault exactly once; a persistent host failure
     /// must not spam a line per exec.
     #[cfg(target_os = "linux")]
@@ -789,10 +841,30 @@ pub(crate) struct OpCgroupHandle {
     cpu_lease: Option<CpuControllerLease>,
     #[cfg(target_os = "linux")]
     reservation: Option<crate::WorkReservation>,
+    /// The policy applied to this leaf, carried if the operation is handed to
+    /// a successor process image.
+    #[cfg(target_os = "linux")]
+    applied: OpCgroupConfig,
 }
 
 #[cfg(target_os = "linux")]
 impl OpCgroupHandle {
+    /// Gives the leaf to a successor process image without killing or removing
+    /// it. A CPU lease is deliberately leaked: the quota must stay enforced
+    /// until the successor re-acquires it, and `exec` ends this image's count.
+    pub(crate) fn into_handover(mut self) -> Option<crate::exec_handover::OpCgroupHandover> {
+        let dir = self.dir.take()?;
+        if let Some(lease) = self.cpu_lease.take() {
+            std::mem::forget(lease);
+        }
+        Some(crate::exec_handover::OpCgroupHandover {
+            dir,
+            memory_max: self.applied.memory_max,
+            memory_high: self.applied.memory_high,
+            cpu_max_millicores: self.applied.cpu_max_millicores,
+        })
+    }
+
     /// Kills every process still owned by this operation cgroup. Unlike a POSIX
     /// process-group signal, the kernel cgroup boundary also covers a descendant
     /// that called `setsid`; a service manager that deliberately moved a durable
@@ -956,6 +1028,13 @@ impl OpCgroupHandle {
     #[allow(dead_code)]
     #[allow(clippy::unused_async)]
     pub(crate) async fn teardown(self) {}
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn into_handover(self) -> Option<crate::exec_handover::OpCgroupHandover> {
+        None
+    }
 }
 
 /// Verifies the manager-owned startup topology and returns active [`OpCgroups`], or `None` (with a
@@ -963,12 +1042,21 @@ impl OpCgroupHandle {
 /// today's behavior. Call this ONCE at startup, before any host exec or
 /// agent-infrastructure child (for example Xvfb) is spawned, so only host work
 /// lands in per-op leaves.
+///
+/// `handed_over` lists operation leaves whose commands a predecessor process
+/// image handed to this one; they are kept for adoption instead of reclaimed.
 #[cfg(target_os = "linux")]
 #[must_use]
-pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
+pub fn establish_oom_isolation(
+    config: OpCgroupConfig,
+    handed_over: &[PathBuf],
+) -> Option<Arc<OpCgroups>> {
     report_supervisor_oom_score_adj();
 
-    let startup = discover_delegated_service()?;
+    let mut startup = discover_delegated_service()?;
+    startup
+        .stale_op_cgroups
+        .retain(|dir| !handed_over.contains(dir));
     let (enabled_controllers, unavailable_controllers, cpu_delegated) =
         establish_delegated_subtree(&startup)?;
     tracing::info!(
@@ -980,6 +1068,7 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         cpu_max_millicores = ?config.cpu_max_millicores,
         cpu_quota_supported = cpu_delegated,
         stale_operations_cleanup_scheduled = startup.stale_op_cgroups.len(),
+        handed_over_operations = handed_over.len(),
         "established per-op cgroups: host execs have separate resource accounting and systemd-oomd fate; no controller limit was added implicitly and kernel OOM selection remains score-based"
     );
     let service_dir = startup.service_dir;
@@ -1194,7 +1283,10 @@ fn establish_delegated_subtree(
 /// `None` so the agent runs unchanged on macOS/Windows.
 #[cfg(not(target_os = "linux"))]
 #[must_use]
-pub fn establish_oom_isolation(_config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
+pub fn establish_oom_isolation(
+    _config: OpCgroupConfig,
+    _handed_over: &[PathBuf],
+) -> Option<Arc<OpCgroups>> {
     tracing::debug!("per-op OOM cgroup isolation is Linux-only; running without it on this OS");
     None
 }

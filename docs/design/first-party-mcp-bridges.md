@@ -5,7 +5,7 @@ Status: implemented contract; provider adapters remain independently reviewed.
 A first-party local MCP bridge presents a provider API as an in-process
 `MCPServer`. It lets the ordinary runtime catalog, lazy tool discovery, session
 tool policy, approvals, connector-action policy, Codemode projection, and
-cleanup lifecycle treat provider-authored and OpenGeni-authored MCP surfaces
+cleanup lifecycle treat provider-authored and Opengeni-authored MCP surfaces
 the same way. It is an execution adapter, not a new Connection, OAuth, catalog,
 or UI subsystem.
 

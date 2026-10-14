@@ -104,14 +104,17 @@ export function ComposerMobilePlus(
     const handle = window.setTimeout(preloadComposerMenus, 1500);
     return () => window.clearTimeout(handle);
   }, []);
+  // The usage limit panel holds a text field, which a menu cannot contain, so
+  // it always opens as a dialog.
   const dialogOpen =
     open &&
     panel !== "root" &&
-    panel !== "tools" &&
-    panel !== "capabilities" &&
-    panel !== "settings" &&
-    panel !== "visibility" &&
-    props.expandedPanelPresentation === "dialog";
+    (panel === "usage-limit" ||
+      (panel !== "tools" &&
+        panel !== "capabilities" &&
+        panel !== "settings" &&
+        panel !== "visibility" &&
+        props.expandedPanelPresentation === "dialog"));
   // The retired menu's deferred callback must observe the current owner,
   // including after the lazy panel has changed presentation or unmounted.
   dialogFocusOwnerRef.current = dialogOpen;

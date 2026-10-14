@@ -1,4 +1,8 @@
-import { normalizeSlackScopes, OFFICIAL_SLACK_MCP_URL } from "@opengeni/contracts/slack-rest-mcp";
+import {
+  isSlackPrivateFileUrl,
+  normalizeSlackScopes,
+  OFFICIAL_SLACK_MCP_URL,
+} from "@opengeni/contracts/slack-rest-mcp";
 import { beginMcpPhase, measureMcpPhase } from "@opengeni/observability";
 import {
   environmentsEncryptionKeyBytes,
@@ -910,6 +914,8 @@ function isOfficialSlackRestDestination(
   )
     return false;
   const url = new URL(destinationUrl);
+  // Private file bytes for files.info results are a separate reviewed host.
+  if (isSlackPrivateFileUrl(url)) return true;
   return (
     url.origin === "https://slack.com" &&
     !url.username &&
@@ -923,6 +929,7 @@ function isOfficialSlackRestDestination(
       "users.info",
       "conversations.history",
       "conversations.replies",
+      "files.info",
       "conversations.open",
       "chat.postMessage",
     ].some((method) => url.pathname === `/api/${method}`)

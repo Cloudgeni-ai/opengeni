@@ -9,7 +9,7 @@ import {
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventorySnapshotValue,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { type Database, withRlsContext } from "./database";
+import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
   readWorkspaceInteractionRevision,
@@ -71,6 +71,60 @@ export type ReconcileAttachedBrowserInventoryResult = {
 function safeInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} is outside safe range`);
   return value;
+}
+
+/** Who is looking at a workspace's attached browsers. Personal (Only me)
+ *  machines show their browsers only to their owner, exactly like the machines
+ *  themselves; for an agent this is the person its turn acts for. */
+export type AttachedBrowserViewer = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+};
+
+type EnrollmentVisibility = {
+  active: Set<string>;
+  /** Revoked machines the viewer may still see, with when they were revoked. */
+  revoked: Map<string, Date | null>;
+};
+
+/** The machines this viewer may see here, through the same owner-aware
+ *  machine listing used everywhere else (`list_scoped_enrollments`). */
+async function visibleEnrollments(
+  db: Database,
+  viewer: AttachedBrowserViewer,
+): Promise<EnrollmentVisibility> {
+  return await withRlsContext(db, viewer, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, viewer.subjectId);
+    const rows = await rawRows<{ id: string; status: string; revokedAt: string | null }>(
+      scopedDb,
+      sql`select value->>'id' as id, value->>'status' as status, value->>'revokedAt' as "revokedAt"
+        from list_scoped_enrollments(
+          ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'active') value
+        union all
+        select value->>'id', value->>'status', value->>'revokedAt'
+        from list_scoped_enrollments(
+          ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'revoked') value`,
+    );
+    const visibility: EnrollmentVisibility = { active: new Set(), revoked: new Map() };
+    for (const row of rows) {
+      if (row.status === "active") visibility.active.add(row.id);
+      else visibility.revoked.set(row.id, row.revokedAt ? new Date(row.revokedAt) : null);
+    }
+    return visibility;
+  });
+}
+
+/** A device as this viewer may see it: null when its machine is hidden from
+ *  them; disconnected whenever its machine is no longer enrolled. */
+function visibleDevice(
+  row: DeviceRow,
+  visibility: EnrollmentVisibility,
+): AttachedBrowserDeviceValue | null {
+  if (visibility.active.has(row.enrollmentId)) return deviceFromRow(row);
+  if (!visibility.revoked.has(row.enrollmentId)) return null;
+  const revokedAt = visibility.revoked.get(row.enrollmentId) ?? row.updatedAt;
+  return deviceFromRow({ ...row, disconnectedAt: row.disconnectedAt ?? revokedAt });
 }
 
 function deviceFromRow(row: DeviceRow): AttachedBrowserDeviceValue {
@@ -610,12 +664,9 @@ export async function disconnectAttachedBrowserDevices(
 
 export async function listAttachedBrowserDevices(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    includeDisconnected?: boolean;
-  },
+  input: AttachedBrowserViewer & { includeDisconnected?: boolean },
 ): Promise<AttachedBrowserDeviceListResponseValue> {
+  const visibility = await visibleEnrollments(db, input);
   return await withRlsContext(
     db,
     input,
@@ -660,31 +711,43 @@ export async function listAttachedBrowserDevices(
           desc(schema.attachedBrowserInventories.observedAt),
           asc(schema.attachedBrowserInventories.enrollmentId),
         );
+      const devices = rows
+        .map((row) => visibleDevice(row, visibility))
+        .filter(
+          (device): device is AttachedBrowserDeviceValue =>
+            device !== null && (input.includeDisconnected === true || device.state === "connected"),
+        );
       const connectedProfilesByEnrollment = new Map<string, number>();
-      for (const row of rows) {
-        if (row.disconnectedAt !== null) continue;
+      for (const device of devices) {
+        if (device.state !== "connected") continue;
         connectedProfilesByEnrollment.set(
-          row.enrollmentId,
-          (connectedProfilesByEnrollment.get(row.enrollmentId) ?? 0) + 1,
+          device.enrollmentId,
+          (connectedProfilesByEnrollment.get(device.enrollmentId) ?? 0) + 1,
         );
       }
       return AttachedBrowserDeviceListResponse.parse({
         revision: await readWorkspaceInteractionRevision(scopedDb, input.workspaceId),
-        bridges: inventories.map((inventory) => ({
-          enrollmentId: inventory.enrollmentId,
-          state:
-            inventory.enrollmentStatus === "active" &&
-            inventory.wentOfflineAt === null &&
-            inventory.connectionLeaseExpiresAt !== null &&
-            inventory.connectionLeaseExpiresAt.getTime() > Date.now()
-              ? "online"
-              : "offline",
-          bridgeGeneration: inventory.bridgeGeneration,
-          inventoryRevision: inventory.revision,
-          connectedProfileCount: connectedProfilesByEnrollment.get(inventory.enrollmentId) ?? 0,
-          lastSeenAt: inventory.observedAt.toISOString(),
-        })),
-        devices: rows.map(deviceFromRow),
+        bridges: inventories
+          .filter(
+            (inventory) =>
+              visibility.active.has(inventory.enrollmentId) ||
+              visibility.revoked.has(inventory.enrollmentId),
+          )
+          .map((inventory) => ({
+            enrollmentId: inventory.enrollmentId,
+            state:
+              inventory.enrollmentStatus === "active" &&
+              inventory.wentOfflineAt === null &&
+              inventory.connectionLeaseExpiresAt !== null &&
+              inventory.connectionLeaseExpiresAt.getTime() > Date.now()
+                ? "online"
+                : "offline",
+            bridgeGeneration: inventory.bridgeGeneration,
+            inventoryRevision: inventory.revision,
+            connectedProfileCount: connectedProfilesByEnrollment.get(inventory.enrollmentId) ?? 0,
+            lastSeenAt: inventory.observedAt.toISOString(),
+          })),
+        devices,
       });
     },
     CONSISTENT_READ,
@@ -693,8 +756,9 @@ export async function listAttachedBrowserDevices(
 
 export async function getAttachedBrowserDevice(
   db: Database,
-  input: { accountId: string; workspaceId: string; deviceId: string },
+  input: AttachedBrowserViewer & { deviceId: string },
 ): Promise<AttachedBrowserDeviceValue> {
+  const visibility = await visibleEnrollments(db, input);
   return await withRlsContext(
     db,
     input,
@@ -709,8 +773,9 @@ export async function getAttachedBrowserDevice(
           ),
         )
         .limit(1);
-      if (!row) throw new AttachedBrowserDeviceNotFoundError("Attached browser not found");
-      return deviceFromRow(row);
+      const device = row ? visibleDevice(row, visibility) : null;
+      if (!device) throw new AttachedBrowserDeviceNotFoundError("Attached browser not found");
+      return device;
     },
     CONSISTENT_READ,
   );

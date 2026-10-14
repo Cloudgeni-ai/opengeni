@@ -15,6 +15,9 @@ export {
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
+export * from "./site-data";
+export * from "./site-publishing";
+export * from "./site-sql";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
@@ -24,6 +27,7 @@ export * from "./session-message-search";
 export * from "./session-goal-reports";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
+import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
@@ -305,7 +309,7 @@ export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
 );
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
-// OpenGeni-owned identity carried beside the provider's opaque SDK envelope.
+// Opengeni-owned identity carried beside the provider's opaque SDK envelope.
 // Provider serializers intentionally use different keys (`sandboxId`,
 // `devboxId`, `sandboxName`, ...); durable lease logic must not need to learn a
 // new provider's private state shape. Existing envelopes remain readable via
@@ -780,6 +784,8 @@ export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
   z.enum([
     "allowance_exhausted",
+    /** The task's root usage limit is reached; details carry SessionUsageLimitReachedRefusal fields. */
+    "session_usage_limit_reached",
     "unauthenticated",
     "forbidden",
     "not_found",
@@ -1079,6 +1085,29 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_rollback",
   "artifacts_archive",
   "artifacts_restore",
+  "site_data_describe",
+  "site_data_define_collection",
+  "site_data_query",
+  "site_data_write",
+  "site_data_import",
+  "site_data_export",
+  "site_data_reset",
+  "site_files_list",
+  "site_files_upload",
+  "site_files_delete",
+  "site_publication_get",
+  "site_publication_update",
+  "site_hostname_check",
+  "site_sql_inspect",
+  "site_sql_enable",
+  "site_sql_migrate",
+  "site_sql_define_query",
+  "site_sql_query",
+  "site_sql_run",
+  "site_sql_execute",
+  "site_sql_export",
+  "site_sql_import",
+  "site_sql_reset",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -3380,7 +3409,7 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
   "viaTruncated",
 ]);
 
-/** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
+/** Bounded host provenance that cannot forge Opengeni-owned lineage fields. */
 export const ServiceTurnInitiatorContext = /* @__PURE__ */ defineSchema(() =>
   TurnInitiatorContext.superRefine((value, ctx) => {
     for (const key of reservedServiceTurnInitiatorContextKeys) {
@@ -3799,7 +3828,7 @@ export async function verifyEnrollmentBearer(
 // (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
 // secret value is NEVER logged.
 /**
- * The OpenGeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
+ * The Opengeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
  * an installed Connected Machine agent through native messaging, so the machine
  * must be connected before the extension can link up.
  */
@@ -4416,6 +4445,7 @@ export type ListSlackUserLinkAccessRequestsResponse = z.infer<
 
 export * from "./organization-usage";
 export * from "./usage-allowances";
+export * from "./session-usage-limits";
 
 export const UsageEventType = /* @__PURE__ */ defineSchema(() =>
   z.enum([
@@ -5123,7 +5153,7 @@ export type CredentialAuthNeededReason =
   | "refresh_failed";
 
 /**
- * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * Host-owned run credentials are materialized below one Opengeni-owned sandbox
  * directory. Paths are relative POSIX names; the runtime validates traversal,
  * collisions, bounds, and modes before any content reaches a sandbox.
  */
@@ -7635,6 +7665,8 @@ export const SessionGoalPausedReason = /* @__PURE__ */ defineSchema(() =>
     "max_auto_continuations",
     "limits",
     "allowance",
+    /** The task's root usage limit is reached; raising it never resumes automatically. */
+    "session_usage_limit",
   ]),
 );
 export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
@@ -7723,7 +7755,8 @@ export type GoalAdmissionPausedReason =
   | "budget"
   | "usage_limit"
   | "usage_policy"
-  | "allowance";
+  | "allowance"
+  | "session_usage_limit";
 
 export const SessionGoal = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -12205,7 +12238,9 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
  * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
  * (terminal) and
- * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
+ * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`,
+ * `session_usage_limit` (an existing-session task reached its per-task usage
+ * limit; admitted again once a person raises or clears it)
  * (transient). Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
@@ -15515,6 +15550,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Server-authored nested-agent lineage/policy. Root sessions are depth 0;
     // snapshots are immutable and govern only future descendant creation.
     rootSessionId: z.string().uuid(),
+    /**
+     * The task root's usage limit and recorded API-equivalent model usage.
+     * Returned by detail reads and create responses of servers that support
+     * usage limits; omission means an older server or a list read, never "no
+     * limit". A create that requested a limit must see it echoed here.
+     */
+    usageLimit: SessionUsageLimit.optional(),
     nestedAgentDepth: NestedAgentDepthValue,
     maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
     effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
@@ -15958,6 +16000,8 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "terminal.pty.exited", // PTY session ended (exitCode/reason)
     "session.title_set",
     "session.model_settings.updated",
+    // An authorized person or host changed the task root's usage limit.
+    "session.usage_limit.updated",
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
     "session.agent.updated",
@@ -16221,6 +16265,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.agent.updated",
     "session.skills.updated",
     "session.model_settings.updated",
+    "session.usage_limit.updated",
   ],
   terminal: [
     "turn.completed",
@@ -18784,6 +18829,15 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * identity or authorization from the UUID.
        */
       requestedSessionId: z.string().uuid().optional(),
+      /**
+       * Optional usage limit for a new root task, in USD micros of API-equivalent
+       * model usage; null or omission means no limit and zero stops before the
+       * first model request. Only a person or trusted host may set it: agent
+       * callers and child sessions are rejected. Servers without usage limits
+       * strip unknown fields, so confirm `usageLimit.limitMicros` in the
+       * response before relying on it.
+       */
+      usageLimitMicros: SessionUsageLimitMicros.nullable().optional(),
       /** Explicit external-owner grants for the direct initial turn only. */
 
       /** Top-level omission is workspace-visible. Agent-child omission inherits
@@ -18809,7 +18863,12 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // Creates the durable session shell without fabricating a user message or
       // starting an underlying agent turn. Realtime can then become the first
       // interaction and use the ordinary Send/Steer path when it delegates.
-      startMode: z.literal("realtime").optional(),
+      // `standard` is the explicit spelling of the default (omitted) mode. A
+      // client that sends a task usage limit also sends `standard`, so an
+      // older server that predates usage limits (and accepts only
+      // `realtime`) rejects the whole create before creating or starting
+      // anything, instead of silently starting uncapped work.
+      startMode: z.enum(["realtime", "standard"]).optional(),
       // Model-visible application context attached to the initial user message.
       // Standard timeline rendering omits it, while full event/audit reads retain
       // it. This is ordinary user-role content, not secret or privileged input.
@@ -19690,6 +19749,25 @@ export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =
   }),
 );
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
+
+/** Published Sites facts the console needs to offer publishing (from OPENGENI_SITES_*). */
+export const ClientSitesConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Sites live at `<label>.<domain>`. */
+      domain: z.string().min(1),
+      /** `public` access may be chosen. */
+      publicEnabled: z.boolean(),
+      /** Agents may run for signed-out guests of public Sites. */
+      publicAgentsEnabled: z.boolean(),
+      /** `public` means any signed-in user; there are no guests. */
+      loginOnly: z.boolean(),
+      /** Every Site is served with noindex. */
+      forceNoindex: z.boolean(),
+    })
+    .strict(),
+);
+export type ClientSitesConfig = z.infer<typeof ClientSitesConfig>;
 
 export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.discriminatedUnion("mode", [
@@ -21407,6 +21485,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
+    // Whether people can connect their own computers to this deployment. Absent
+    // on older servers: clients then treat it as unknown.
+    connectedMachines: z.boolean().optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.
@@ -21489,6 +21570,13 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     sessionArchive: z
       .object({ enabled: z.literal(true), idleDays: z.number().int().positive() })
       .optional(),
+    /**
+     * Present when this server records and enforces per-task usage limits.
+     * `enabled` is the producer gate: when false, new non-null limits are
+     * refused while existing limits are still enforced and can be cleared.
+     * Omitted by older servers, which ignore `usageLimitMicros` on create.
+     */
+    sessionUsageLimits: z.object({ enabled: z.boolean() }).strict().optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z
@@ -21560,6 +21648,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         terminalEvents: z.boolean(),
       })
       .default({ fileSystem: false, git: false, terminalEvents: false }),
+    // Published Sites on this deployment (OPENGENI_SITES_*): null when
+    // publishing is off; absent from servers that predate published Sites.
+    sites: ClientSitesConfig.nullable().optional(),
   }),
 );
 export type ClientConfig = z.infer<typeof ClientConfig>;

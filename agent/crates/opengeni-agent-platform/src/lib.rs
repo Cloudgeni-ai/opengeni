@@ -33,6 +33,8 @@
 mod cgroup;
 mod desktop;
 mod error;
+#[cfg(unix)]
+mod exec_handover;
 mod native;
 mod pty;
 pub mod service;
@@ -71,7 +73,14 @@ pub use desktop::{
     validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
 };
 pub use error::{PlatformError, PlatformResult};
-pub use native::{assemble_git_response, spawn_contained, ContainedExec, NativePlatform};
+#[cfg(unix)]
+pub use exec_handover::{
+    discard_inherited_fd, keep_inherited_fd_private, ExecHandover, OpCgroupHandover, ProcHandover,
+};
+pub use native::{
+    adopt_workspace_working_directory, assemble_git_response, resolve_workspace_root,
+    spawn_contained, ContainedExec, NativePlatform,
+};
 pub use pty::{spawn_pty, PtyProcess};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
@@ -232,6 +241,18 @@ pub trait Platform: Send + Sync {
             ));
         }
         self.spawn_exec(req)
+    }
+
+    /// Takes over an exec a predecessor process image of this agent handed
+    /// over across an in-place update. The default keeps process-group
+    /// containment only; a platform with operation cgroups re-adopts the leaf.
+    ///
+    /// # Errors
+    ///
+    /// See [`ContainedExec::adopt`].
+    #[cfg(unix)]
+    fn adopt_exec(&self, handover: &ExecHandover) -> std::io::Result<ContainedExec> {
+        ContainedExec::adopt(handover, None)
     }
 
     /// Spawns the git invocation described by a `GitRequest` inside the shared

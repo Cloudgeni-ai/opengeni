@@ -1,3 +1,4 @@
+import { attachedBrowserViewer } from "../attached-browser-viewer";
 import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
@@ -228,12 +229,14 @@ import {
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { wrongInteractionPlacementMessage } from "./interaction-placement-message";
 import {
   releaseBrowserPasskeys,
   resolveInteractionSecretValues,
   syncBrowserPasskeys,
   type InteractionSecretsPort,
 } from "../interaction-secrets";
+import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
@@ -270,8 +273,7 @@ export function registerBrowserSessionRoutes(
     return context.json(
       AttachedBrowserDeviceListResponse.parse(
         await listAttachedBrowserDevices(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
+          ...(await attachedBrowserViewer(deps, grant, workspaceId)),
           includeDisconnected,
         }),
       ),
@@ -286,8 +288,7 @@ export function registerBrowserSessionRoutes(
       return context.json(
         AttachedBrowserDevice.parse(
           await getAttachedBrowserDevice(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
+            ...(await attachedBrowserViewer(deps, grant, workspaceId)),
             deviceId,
           }),
         ),
@@ -1200,6 +1201,12 @@ export function registerBrowserSessionRoutes(
               toolName: "browser_act",
               operationId: request.operationId,
             },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           try {
             return await sessionClient.action(
@@ -2691,20 +2698,17 @@ export function registerBrowserSessionRoutes(
   ): Promise<T> {
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
+      // Personal machines are controlled only for their owner, as everywhere else.
+      const viewer = await attachedBrowserViewer(deps, grant, sourceSession.workspaceId);
       const device = await getAttachedBrowserDevice(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
+        ...viewer,
         deviceId: expectedPlacement.deviceId,
       });
       if (device.state !== "connected") {
         recordAttachedBrowserUnavailable(deps.observability, "disconnected");
         throw new BrowserSessionStateError("Attached browser is disconnected");
       }
-      const enrollment = await getLiveEnrollmentConnection(
-        deps.db,
-        sourceSession.workspaceId,
-        device.enrollmentId,
-      );
+      const enrollment = await getLiveEnrollmentConnection(deps.db, viewer, device.enrollmentId);
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         recordAttachedBrowserUnavailable(deps.observability, "machine_unavailable");
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
@@ -2835,8 +2839,7 @@ export function registerBrowserSessionRoutes(
           ) {
             if (operation === "browser.create") {
               throw new HTTPException(422, {
-                message:
-                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+                message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
               });
             }
             return await throwBrowserSourcePlacementChanged(

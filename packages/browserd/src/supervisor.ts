@@ -594,9 +594,10 @@ export class BrowserSupervisor {
    * An open session does not by itself make a restart unsafe: a quiescent
    * managed session with a completed working-runtime launch is preserved by
    * graceful shutdown and reattached on its next causal request, and a session
-   * whose driver already ended has nothing left to lose. Any other session
-   * (attached Chrome, external providers, launches without a durable working
-   * runtime) or any admitted command still blocks. */
+   * whose driver already ended has nothing left to lose. A quiescent attached
+   * Chrome session is likewise left intact in the user's browser. Any other
+   * session (external providers, launches without a durable working runtime)
+   * or any admitted command still blocks. */
   isIdle(): boolean {
     return (
       !this.cleanupUncertain &&
@@ -606,6 +607,11 @@ export class BrowserSupervisor {
       this.stateTransferTails.size === 0 &&
       [...this.sessions.values()].every((runtime) => restartPreservesRuntime(runtime))
     );
+  }
+
+  /** No session of any lifecycle remains and no work is in flight. */
+  isEmpty(): boolean {
+    return this.sessions.size === 0 && this.isIdle();
   }
 
   listSessions(): BrowserSessionReference[] {
@@ -2264,6 +2270,11 @@ function restartPreservesRuntime(runtime: Runtime): boolean {
   if (!runtime.controller.isIdle()) return false;
   // A session whose driver already ended has no live state left to lose.
   if (runtime.driver.isTerminal?.()) return true;
+  // Attached Chrome lives outside this controller: its tabs, pages and
+  // debugger attachments survive our restart, and the agent keeps the
+  // profile's placement stable across it only for extensions that report a
+  // live-state generation. The agent's own update gate refuses older ones.
+  if (runtime.options.transport.kind === "attached_chrome") return runtime.lifecycle === "active";
   return hasPreservableWorkingRuntime(runtime);
 }
 

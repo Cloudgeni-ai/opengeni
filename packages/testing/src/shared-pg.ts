@@ -239,8 +239,8 @@ async function dockerOk(args: string[]): Promise<boolean> {
   }
 }
 
-async function startSharedContainer(args: string[]): Promise<string | null> {
-  const attempts = process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? 5 : 1;
+async function startSharedContainer(args: string[], minimumAttempts = 1): Promise<string | null> {
+  const attempts = Math.max(process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? 5 : 1, minimumAttempts);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const started = await docker(args).catch(() => null);
     const startedId = started?.stdout.trim() ?? "";
@@ -580,6 +580,21 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // with this harness's loopback port and role/password contract. Never
     // control or remove that server through Docker.
     const native = process.env.OPENGENI_TEST_PG_NATIVE === "1";
+    let replacedStaleContainer = false;
+    if (!native) {
+      const liveHolders = priorState
+        ? Object.values(priorState.holders).filter((holder) => processIsAlive(holder.pid)).length
+        : 0;
+      if (liveHolders === 0) {
+        const running = await probeContainerSpec();
+        if (
+          running &&
+          sharedTestContainerNeedsReplacement({ runningSpec: running.spec, liveHolders })
+        ) {
+          replacedStaleContainer = await dockerOk(["rm", "-f", "-v", running.id]);
+        }
+      }
+    }
     // A warm fixture's data plane is the authoritative fast path. Docker
     // Desktop/OrbStack's control API can briefly stop answering under a heavily
     // parallel suite even while PostgreSQL remains completely healthy. The
@@ -587,7 +602,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // transient `docker inspect` outage must not turn into skipped DB tests.
     let generation = native
       ? new Bun.CryptoHasher("sha256").update(`native:${ADMIN_URL}`).digest("hex")
-      : priorState && (await templateReady())
+      : priorState && !replacedStaleContainer && (await templateReady())
         ? priorState.generation
         : null;
     if (!generation) {
@@ -623,21 +638,11 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
       // visible) rather than a clean error. Give the throwaway test server a
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
-      generation = await startSharedContainer([
-        "run",
-        "-d",
-        "-e",
-        `POSTGRES_PASSWORD=${PASSWORD}`,
-        "-p",
-        `${PORT}:5432`,
-        "--name",
-        CONTAINER,
-        IMAGE,
-        "-c",
-        "max_connections=1000",
-        "-c",
-        "shared_buffers=256MB",
-      ]);
+      // A just-replaced container's port can take a moment to free up.
+      generation = await startSharedContainer(
+        sharedTestContainerRunArgs(),
+        replacedStaleContainer ? 5 : 1,
+      );
       if (!generation) {
         return null; // Docker unavailable or unable to start the fixture.
       }
@@ -956,5 +961,153 @@ export async function acquireOwnerMigratedTestDatabase(
   }
 }
 
+export type RestrictedRuntimeTestDatabase = {
+  /** Dedicated data schema the migration owner migrated into. */
+  schema: string;
+  /** opengeni_app URL; pass `{ searchPath: schema }` to createDb. */
+  appUrl: string;
+  /** Superuser pool on the same database with `search_path` set to the schema. */
+  admin: postgres.Sql;
+  /** Name of the NOSUPERUSER NOBYPASSRLS migration owner. */
+  ownerRole: string;
+  release: () => Promise<void>;
+};
+
+/**
+ * The production database posture in one call: a NOSUPERUSER NOBYPASSRLS
+ * migration owner, a dedicated (non-public) data schema migrated by that
+ * owner, and the restricted application role provisioned with FORCE RLS.
+ * SECURITY DEFINER routines then run as a role that FORCE RLS binds, exactly
+ * as deployed, unlike the superuser-owned shared template. Returns null when
+ * no test PostgreSQL is available.
+ */
+export async function acquireRestrictedRuntimeTestDatabase(
+  label = "restricted-runtime",
+  schema = "og_data",
+): Promise<RestrictedRuntimeTestDatabase | null> {
+  if (!/^[a-z_][a-z0-9_]{0,40}$/.test(schema)) throw new Error("Invalid test schema name");
+  const owner = await acquireOwnerMigratedTestDatabase(label);
+  if (!owner) return null;
+  let admin: postgres.Sql | null = null;
+  try {
+    await owner.admin.unsafe(`CREATE SCHEMA ${schema} AUTHORIZATION "${owner.ownerRole}"`);
+    await owner.admin.unsafe(`ALTER EXTENSION vector SET SCHEMA ${schema}`);
+    await migrate(owner.ownerUrl, schema, { applicationDatabaseRoles: ["opengeni_app"] });
+    await provisionRoles(owner.adminUrl, {
+      targetSchema: schema,
+      appRole: "opengeni_app",
+      appPassword: owner.appPassword,
+      rlsStrategy: "force",
+    });
+    const appUrl = new URL(owner.adminUrl);
+    appUrl.username = "opengeni_app";
+    appUrl.password = owner.appPassword;
+    admin = postgres(owner.adminUrl, { max: 4, connection: { search_path: schema } });
+    const pool = admin;
+    return {
+      schema,
+      appUrl: appUrl.toString(),
+      admin: pool,
+      ownerRole: owner.ownerRole,
+      release: async () => {
+        await pool.end().catch(() => undefined);
+        await owner.release();
+      },
+    };
+  } catch (error) {
+    await admin?.end().catch(() => undefined);
+    await owner.release();
+    throw error;
+  }
+}
+
 // Re-export so callers don't need to import the constant from elsewhere.
 export const SHARED_TEST_PG_IMAGE = IMAGE;
+
+const SHARED_TEST_CONTAINER_SPEC_LABEL = "com.opengeni.shared-pg-spec";
+
+/*
+ * Parallel queries allocate dynamic shared memory in /dev/shm, and Docker's
+ * 64 MB default is too small for hundreds of concurrent test connections: a
+ * single parallel hash can ask for 32 MB, the allocation fails with "No space
+ * left on device", and a FORCE drop issued right after such a failure has
+ * crashed the whole server into recovery. 1 GB is a tmpfs ceiling, not a
+ * reservation; only used pages count.
+ */
+function sharedTestContainerOptions(): string[] {
+  return [
+    "--shm-size=1g",
+    "-e",
+    `POSTGRES_PASSWORD=${PASSWORD}`,
+    "-p",
+    `${PORT}:5432`,
+    "--name",
+    CONTAINER,
+  ];
+}
+
+const SHARED_TEST_SERVER_ARGS = ["-c", "max_connections=1000", "-c", "shared_buffers=256MB"];
+
+/** Fingerprint of everything that shapes the container; stamped on it as a label. */
+export function sharedTestContainerSpec(): string {
+  return new Bun.CryptoHasher("sha256")
+    .update(JSON.stringify([sharedTestContainerOptions(), IMAGE, SHARED_TEST_SERVER_ARGS]))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/** `docker run` arguments for the shared test server. */
+export function sharedTestContainerRunArgs(): string[] {
+  return [
+    "run",
+    "-d",
+    ...sharedTestContainerOptions(),
+    "--label",
+    `${SHARED_TEST_CONTAINER_SPEC_LABEL}=${sharedTestContainerSpec()}`,
+    IMAGE,
+    ...SHARED_TEST_SERVER_ARGS,
+  ];
+}
+
+/**
+ * The container is kept warm indefinitely, so a changed run spec (for example
+ * more shared memory) would otherwise never reach a long-lived machine. Replace
+ * a container built from another spec, but only while nobody holds it: a
+ * container in use is never disturbed, and the next idle acquire upgrades it.
+ */
+export function sharedTestContainerNeedsReplacement(input: {
+  runningSpec: string | null;
+  liveHolders: number;
+}): boolean {
+  return (
+    input.liveHolders === 0 &&
+    input.runningSpec !== null &&
+    input.runningSpec !== sharedTestContainerSpec()
+  );
+}
+
+/**
+ * The spec label of the running container, "" for a container without one, or
+ * null when there is no container or Docker cannot answer (never replace then).
+ */
+async function probeContainerSpec(): Promise<{ id: string; spec: string } | null> {
+  try {
+    const result = await docker([
+      "inspect",
+      "--type",
+      "container",
+      "--format",
+      "{{.Id}}\t{{json .Config.Labels}}",
+      CONTAINER,
+    ]);
+    const [id, labelsJson, ...extra] = result.stdout.trim().split("\t");
+    if (extra.length > 0 || !id || !/^[a-f0-9]{64}$/u.test(id) || labelsJson === undefined) {
+      return null;
+    }
+    const labels = JSON.parse(labelsJson) as Record<string, unknown> | null;
+    const spec = labels?.[SHARED_TEST_CONTAINER_SPEC_LABEL];
+    return { id, spec: typeof spec === "string" ? spec : "" };
+  } catch {
+    return null;
+  }
+}

@@ -6,6 +6,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 
+import { dropSiteSqlDatabases, siteSqlSitesOfWorkspace } from "./site-sql/service";
 import { processTemporalScheduleCleanupClaims } from "./temporal-schedule-cleanup";
 import { workspaceDeleteObserver } from "./workspace-delete-observability";
 
@@ -18,6 +19,9 @@ export async function deleteWorkspaceForRequest(
   },
 ): Promise<void> {
   const observer = workspaceDeleteObserver(deps.observability, input);
+  // Site SQL rows in Postgres cascade with the workspace; the Durable Objects
+  // holding the data do not, so note them first and drop them after.
+  const siteSqlSites = await siteSqlSitesOfWorkspace(deps, input);
   let deleted;
   try {
     deleted = await deleteWorkspaceIfQuiescent(deps.db, {
@@ -80,4 +84,5 @@ export async function deleteWorkspaceForRequest(
     },
     deleted.temporalScheduleCleanups,
   );
+  await dropSiteSqlDatabases(deps, siteSqlSites, { workspaceId: input.workspaceId });
 }

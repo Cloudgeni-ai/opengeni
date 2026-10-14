@@ -44,6 +44,7 @@ import {
 } from "./connection-metadata";
 export {
   getConnectionMetadata,
+  getProviderConnectionHomeWorkspace,
   listConnectionsMetadata,
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
@@ -510,8 +511,11 @@ import {
 } from "./subscription-core/provider-route";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
+export * from "./site-data";
+export * from "./site-publishing";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
+export * from "./site-sql";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
@@ -948,7 +952,11 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
-export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
+export {
+  isStoredVerbatimAsLosslessJsonString,
+  LOSSLESS_TEXT_PREFIX,
+  toPostgresLosslessJson,
+} from "./lossless-json";
 import {
   projectSessionMcpProgressText,
   projectSessionTextPrefix,
@@ -6299,7 +6307,7 @@ export async function applyCreditDebitUpToBalance(
 }
 
 /**
- * Settle an already-consumed, OpenGeni-funded resource for its full cost.
+ * Settle an already-consumed, Opengeni-funded resource for its full cost.
  * Admission happens before use; an in-flight operation can take the account
  * below zero. Future grants and purchased top-ups net against that balance.
  * Never use this helper to admit a new operation or for externally paid use.
@@ -19395,7 +19403,8 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
-  | "monthly_agent_run_limit";
+  | "monthly_agent_run_limit"
+  | "session_usage_limit";
 
 /**
  * Record a refused occurrence as an immutable run receipt under its producer
@@ -24079,7 +24088,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       payload: { waiterId: waiter.waiterId, generation: waiter.generation, reason },
     }),
     cancelledBy: "codex_capacity_reconcile",
-    recheckBeforeReset: false,
+    recheckBeforeReset: true,
   },
   xai: {
     label: "SuperGrok",
@@ -24148,7 +24157,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     cancelledBy: "claude_capacity_reconcile",
     // Claude's adapter reads no usage that can end an exhaustion before its
     // stored reset (its quota comes from response headers), so its waiter
-    // sleeps until the reset like Codex's.
+    // sleeps until the reset.
     recheckBeforeReset: false,
   },
 };
@@ -40303,7 +40312,13 @@ export async function recordSkippedContextCompaction(
       | "replacement_not_smaller"
       | "replacement_exceeds_model_budget"
       | "replacement_unchanged"
-      | "summarization_failed";
+      | "summarization_failed"
+      /**
+       * The attempt was cancelled (worker shutdown or another activity
+       * cancellation) while the checkpoint request was in flight. Not a
+       * provider or summarizer failure; the recovered attempt re-evaluates.
+       */
+      | "interrupted";
     /**
      * When false, record the visible skip even if no operator `/compact` is
      * pending (auto/overflow paths that already emitted `compaction.started`).
@@ -49182,6 +49197,63 @@ export async function listEndedEpochWorkspaceBlockers(
     lostBackend: row.provider_backend,
     lostInstanceId: row.provider_instance_id,
   }));
+}
+
+export type EndedEpochSandboxSetupUncertainty = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  sandboxGroupId: string;
+  box: TerminatedSandboxSetupBox;
+};
+
+/**
+ * Recovering turns whose sandbox setup start outcome is unknown and whose
+ * every setup request ran on one exact Modal box the lease has since moved
+ * past. Lease succession is not proof the box is gone: the caller inspects the
+ * exact historical sandbox and passes it to `reconcileCompletedSandboxSetup`
+ * only on a terminated observation. Directly paused sessions are not listed.
+ */
+export async function listEndedEpochSandboxSetupUncertainties(
+  db: Database,
+  input: { limit: number },
+): Promise<EndedEpochSandboxSetupUncertainty[]> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 500) {
+    throw new Error("Ended-epoch setup batch is invalid");
+  }
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    session_id: string;
+    turn_id: string;
+    attempt_id: string;
+    lease_id: string;
+    sandbox_group_id: string;
+    lease_epoch: number | string;
+    provider_backend: string;
+    provider_instance_id: string;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_sandbox_ended_epoch_setup_uncertainties(${input.limit}::integer)`,
+  );
+  return rows
+    .filter((row) => row.provider_backend === "modal")
+    .map((row) => ({
+      accountId: row.account_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      turnId: row.turn_id,
+      attemptId: row.attempt_id,
+      sandboxGroupId: row.sandbox_group_id,
+      box: {
+        leaseId: row.lease_id,
+        leaseEpoch: Number(row.lease_epoch),
+        providerBackend: "modal" as const,
+        providerInstanceId: row.provider_instance_id,
+      },
+    }));
 }
 
 /**
@@ -65622,7 +65694,7 @@ export type SessionGoalResumeValidation = (
   tx: Database,
   session: Pick<
     Session,
-    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+    "id" | "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
   >,
   causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
 ) => Promise<void>;
@@ -65733,6 +65805,7 @@ export async function setSessionGoalStatus(
       await input.beforeResume(
         scopedDb,
         {
+          id: sessionId,
           accountId: session.accountId,
           workspaceId,
           model: effectiveSession!.model,
@@ -76654,9 +76727,24 @@ async function hasWaitingSandboxSetupForWriterTx(
   return row?.waiting === true;
 }
 
+/** The exact provider box every setup request of an uncertain attempt ran on,
+ * observed terminated by the provider after its lease moved to a later epoch. */
+export type TerminatedSandboxSetupBox = {
+  leaseId: string;
+  leaseEpoch: number;
+  providerBackend: "modal";
+  providerInstanceId: string;
+};
+
 /** Retire an uncertainty marker after physical completion, not after a timeout.
  * Setup reruns its idempotent preparation; this does not declare setup successful
- * or replay an uncertain provider command. Peek itself remains read-only. */
+ * or replay an uncertain provider command. Peek itself remains read-only.
+ *
+ * Physical completion is either the exit of the setup's retained process, or a
+ * caller's terminated observation of the exact box every setup request of the
+ * attempt ran on (`terminatedBox`): nothing can still run on a terminated box,
+ * including a start whose process was never recorded. Missing provider state,
+ * NotFound, lease succession or time alone is never proof. */
 export async function reconcileCompletedSandboxSetup(
   db: Database,
   input: {
@@ -76665,8 +76753,19 @@ export async function reconcileCompletedSandboxSetup(
     sessionId: string;
     turnId: string;
     attemptId: string;
+    terminatedBox?: TerminatedSandboxSetupBox;
   },
 ): Promise<{ reconciled: boolean; events: SessionEvent[] }> {
+  const box = input.terminatedBox ?? null;
+  if (
+    box &&
+    (box.providerBackend !== "modal" ||
+      !Number.isSafeInteger(box.leaseEpoch) ||
+      box.leaseEpoch < 0 ||
+      box.providerInstanceId.length === 0)
+  ) {
+    throw new Error("Terminated sandbox setup box is invalid");
+  }
   return withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
       const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
@@ -76708,15 +76807,43 @@ export async function reconcileCompletedSandboxSetup(
       if (control.state !== "active") return { reconciled: false, events: [] };
       // Closed attempt + canonical session/attempt locks prevent new admissions.
       // Terminal rows cannot revert to active, so no provider or lease I/O is needed.
+      // A terminated box is the caller's provider observation; the lease row
+      // only confirms the box is no longer current (epochs never go back).
+      const setupAdmission = sql`
+        a.account_id = ${input.accountId} and a.workspace_id = ${input.workspaceId}
+        and a.session_id = ${input.sessionId} and a.attempt_id = ${attempt.id}
+        and a.turn_id = ${turn.id} and a.execution_generation = ${turn.executionGeneration}
+        and a.actor_kind = 'turn' and a.actor_id = ${attempt.id}
+        and a.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+        and a.route_kind = 'home' and a.route_target_id is null`;
+      const onTerminatedBox = (alias: "a" | "p") =>
+        box
+          ? sql`${sql.raw(alias)}.lease_id = ${box.leaseId}
+              and ${sql.raw(alias)}.lease_epoch = ${box.leaseEpoch}
+              and ${sql.raw(alias)}.provider_backend = ${box.providerBackend}
+              and ${sql.raw(alias)}.provider_instance_id = ${box.providerInstanceId}`
+          : sql`false`;
+      const setupPhysicallyEnded = box
+        ? sql`(
+            exists (
+              select 1 from sandbox_workspace_mutation_admissions a
+              where ${setupAdmission} and ${onTerminatedBox("a")}
+            ) and not exists (
+              select 1 from sandbox_workspace_mutation_admissions a
+              where ${setupAdmission} and not (${onTerminatedBox("a")})
+            ) and exists (
+              select 1 from sandbox_leases l
+              where l.id = ${box.leaseId} and l.workspace_id = ${input.workspaceId}
+                and l.backend = ${box.providerBackend}
+                and l.lease_epoch > ${box.leaseEpoch}
+                and l.instance_id is distinct from ${box.providerInstanceId}
+            )
+          )`
+        : sql`false`;
       const [proof] = await tx.execute<{ completed: boolean }>(sql`
-        select exists (
+        select (exists (
           select 1 from sandbox_workspace_mutation_admissions a
-          where a.account_id = ${input.accountId} and a.workspace_id = ${input.workspaceId}
-            and a.session_id = ${input.sessionId} and a.attempt_id = ${attempt.id}
-            and a.turn_id = ${turn.id} and a.execution_generation = ${turn.executionGeneration}
-            and a.actor_kind = 'turn' and a.actor_id = ${attempt.id}
-            and a.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
-            and a.route_kind = 'home' and a.route_target_id is null
+          where ${setupAdmission}
             and exists (
               select 1 from sandbox_retained_processes p
               where p.parent_admission_id = a.id and p.owner_attempt_id = ${attempt.id}
@@ -76724,7 +76851,7 @@ export async function reconcileCompletedSandboxSetup(
                 and p.lease_epoch = a.lease_epoch and p.provider_instance_id = a.provider_instance_id
                 and p.state = 'exited' and p.exit_code is not null
             )
-        ) and not exists (
+        ) or ${setupPhysicallyEnded}) and not exists (
           select 1 from sandbox_workspace_mutation_admissions a
           where a.workspace_id = ${input.workspaceId} and a.session_id = ${input.sessionId}
             and (a.attempt_id = ${attempt.id} or (a.actor_kind = 'process' and exists (
@@ -76737,6 +76864,8 @@ export async function reconcileCompletedSandboxSetup(
           where p.workspace_id = ${input.workspaceId} and p.session_id = ${input.sessionId}
             and p.owner_attempt_id = ${attempt.id}
             and (p.state <> 'exited' or p.exit_code is null)
+            -- A process recorded as lost on the terminated box cannot run.
+            and not (p.state = 'lost' and ${onTerminatedBox("p")})
         ) as completed
       `);
       if (!proof?.completed) return { reconciled: false, events: [] };
@@ -76982,8 +77111,12 @@ export type ApplySessionTurnSettlementInput = {
    * input after a bounded terminal condition.
    */
   suppressGoalContinuation?: boolean;
-  /** Pause an active goal atomically with a recoverable allowance stop. */
-  allowanceGoalPause?: { rationale: string };
+  /**
+   * Pause an active goal atomically with a recoverable non-failure stop: an
+   * allowance stop (default reason `allowance`) or a reached per-task usage
+   * limit (`session_usage_limit`).
+   */
+  allowanceGoalPause?: { rationale: string; reason?: "allowance" | "session_usage_limit" };
   events: AppendEventInput[];
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
@@ -77969,7 +78102,7 @@ export async function applySessionTurnSettlement(
           .update(schema.sessionGoals)
           .set({
             status: "paused",
-            pausedReason: "allowance",
+            pausedReason: input.allowanceGoalPause.reason ?? "allowance",
             rationale: input.allowanceGoalPause.rationale,
             continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
             version: sql`${schema.sessionGoals.version} + 1`,
@@ -77993,7 +78126,7 @@ export async function applySessionTurnSettlement(
             payload: {
               goalId: pausedGoal.id,
               actor: "system",
-              reason: "allowance",
+              reason: input.allowanceGoalPause.reason ?? "allowance",
               rationale: input.allowanceGoalPause.rationale,
               autoContinuations: pausedGoal.autoContinuations,
               noProgressStreak: pausedGoal.noProgressStreak,
@@ -86006,3 +86139,5 @@ export {
   SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
 } from "./subscription-core/serving-policy";
 export { readSubscriptionHistoryProvenance } from "./subscription-core/serving-runtime";
+export * from "./session-usage-limits";
+export * from "./boot-connect";

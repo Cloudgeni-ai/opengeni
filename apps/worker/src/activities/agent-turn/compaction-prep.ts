@@ -1,4 +1,7 @@
-import { ensureRunAllowedBetweenModelCalls } from "./admission";
+import {
+  ensureRunAllowedBetweenModelCalls,
+  ensureSessionUsageLimitAllowsBetweenModelCalls,
+} from "./admission";
 import { hasPendingSteerAfterContextCompaction, isSessionCompactionRequested } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -23,6 +26,10 @@ import {
 import { type ModelProviderApi, type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
+import {
+  isContextCompactionInterruption,
+  settleContextCompactionInterruption,
+} from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type {
   TurnActivityServices as ActivityServices,
@@ -324,6 +331,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         entitlements: deps.entitlements,
+        sessionId: input.sessionId,
       });
       return await summarizeModel(s, m);
     };
@@ -359,8 +367,15 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   // first so it does not send empty tools/instructions).
   const remoteCompactionRequester =
     resolvedModel && billingState.isCodexTurn
-      ? (s: Settings, m: Array<Record<string, unknown>>) =>
-          withCodexRemoteCompaction(async () => {
+      ? async (s: Settings, m: Array<Record<string, unknown>>) => {
+          // The remote compaction request is a paid model request: the task
+          // usage limit admits it exactly like the portable summarizer above.
+          await ensureSessionUsageLimitAllowsBetweenModelCalls(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          });
+          return await withCodexRemoteCompaction(async () => {
             if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
             const preparedRequest = preparedCompactionRequest(remotePrefix.agent);
             return requestRemoteCompactionV2(s, m, {
@@ -372,7 +387,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               signal: cancellationSignal,
               onUsage: recordCompactionUsage,
             });
-          })
+          });
+        }
       : undefined;
   const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
@@ -497,6 +513,24 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         // `compaction.started` may already be live — settle skipped before
         // failing the turn so the timeline cannot stick on Compacting…
         const landmark = await settleFailedContextCompactionLandmark(
@@ -680,6 +714,24 @@ export async function runPostAgentCompaction(
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         const landmark = await settleFailedContextCompactionLandmark(
           db,
           {
@@ -851,6 +903,21 @@ export async function runPostAgentCompaction(
     } catch (compactError) {
       if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
       if (compactError instanceof TurnAttemptFencedError) throw compactError;
+      if (isContextCompactionInterruption(compactError, cancellationSignal)) {
+        await settleContextCompactionInterruption(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: attempt.turnId!,
+            executionGeneration: attempt.executionGeneration,
+            attemptId: input.attemptId,
+          },
+          { publishLiveEvents: publishCompactionLiveEvents, observability },
+        );
+        throw compactError;
+      }
       const landmark = await settleFailedContextCompactionLandmark(
         db,
         {

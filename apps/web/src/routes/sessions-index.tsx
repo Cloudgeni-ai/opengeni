@@ -68,6 +68,7 @@ import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/worksp
 import {
   RunsOnMenuBody,
   RunsOnNotice,
+  UsageLimitMenuBody,
   VisibilityMenuBody,
   hasRunsOnChoices,
   runsOnAttention,
@@ -75,6 +76,13 @@ import {
   runsOnSummary,
   visibilitySummary,
 } from "@/components/session/new-session-settings-menu";
+import {
+  NO_SESSION_USAGE_LIMIT,
+  parseSessionUsageLimitDraft,
+  sessionUsageLimitCapability,
+  sessionUsageLimitDraftSummary,
+  type SessionUsageLimitDraft,
+} from "@/lib/session-usage-limit";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
@@ -586,6 +594,13 @@ function SessionsIndexRouteContent({
     context.setSelectedCapabilityToolIds(selection.mcpServerIds);
   };
   const [submitting, setSubmitting] = useState(false);
+  // The new chat's usage limit: local to this composer (never the synced
+  // draft or a remembered default), and only offered when the server can
+  // enforce it.
+  const usageLimitCapability = sessionUsageLimitCapability(context.clientConfig);
+  const [usageLimitDraft, setUsageLimitDraft] =
+    useState<SessionUsageLimitDraft>(NO_SESSION_USAGE_LIMIT);
+  const [usageLimitSendBlocked, setUsageLimitSendBlocked] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1054,6 +1069,17 @@ function SessionsIndexRouteContent({
       ) {
         return false;
       }
+      // A chosen limit must be a valid amount; an older server never gets one.
+      const usageLimit =
+        usageLimitCapability === "enabled" ? parseSessionUsageLimitDraft(usageLimitDraft) : null;
+      if (createdSessionAuthority === null && usageLimit && !usageLimit.ok) {
+        setUsageLimitSendBlocked(true);
+        toast.error("Check the usage limit", {
+          description: `${usageLimit.error} Change it under + > Usage limit.`,
+        });
+        return false;
+      }
+      const usageLimitMicros = usageLimit?.ok ? usageLimit.limitMicros : null;
       const model = policy?.model ?? persistedValue.model;
       const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
       const latencyMode = policy?.latency ?? persistedValue.latencyMode;
@@ -1125,6 +1151,7 @@ function SessionsIndexRouteContent({
                     expectedNewSessionDraftRevision: flushed.revision,
                     newSessionDraftToolPolicy: persistedToolPolicy,
                     agentLearning: draft.agentLearning,
+                    usageLimitMicros,
                     visibility: newSessionCreateVisibility(
                       personalWorkspace,
                       submission.options.visibility ?? "workspace",
@@ -1144,6 +1171,8 @@ function SessionsIndexRouteContent({
                   if (!outcomeUnknown) await preserveNewerLocalDraft();
                   return null;
                 }
+                setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+                setUsageLimitSendBlocked(false);
                 return {
                   sessionId: created.id,
                   settleDraft: async () => true,
@@ -1192,6 +1221,7 @@ function SessionsIndexRouteContent({
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
+                  usageLimitMicros,
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
@@ -1213,6 +1243,9 @@ function SessionsIndexRouteContent({
                 if (!outcomeUnknown) await preserveNewerLocalDraft();
                 return null;
               }
+              // The limit belongs to the chat just created; the next starts with none.
+              setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+              setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
                 settleDraft: async () => {
@@ -1623,6 +1656,22 @@ function SessionsIndexRouteContent({
                                 visibilityChosenRef.current = true;
                                 setDraft((current) => ({ ...current, visibility }));
                               }}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(usageLimitCapability === "enabled"
+                    ? {
+                        usageLimit: {
+                          summary: sessionUsageLimitDraftSummary(usageLimitDraft),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <UsageLimitMenuBody
+                              value={usageLimitDraft}
+                              disabled={busy || newSessionDraft.loading}
+                              showRequiredError={usageLimitSendBlocked}
+                              onChange={setUsageLimitDraft}
                             />
                           ),
                         },

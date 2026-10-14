@@ -356,9 +356,12 @@ if (
   failures.push("@opengeni/connect must remain dependency-free and framework-neutral.");
 }
 const reactPeerDependencies = reactPkg.peerDependencies ?? {};
-if (reactPeerDependencies["@opengeni/artifact-tool"] !== "^1.0.0") {
+// The peer follows the lockstep major: a Version PR may legitimately cut a new
+// major, and changesets then moves this range to `^<major>.0.0`.
+const artifactToolMajor = String(readPkg("packages/artifact-tool").version ?? "").split(".")[0];
+if (reactPeerDependencies["@opengeni/artifact-tool"] !== `^${artifactToolMajor}.0.0`) {
   failures.push(
-    `@opengeni/react must expose the lockstep @opengeni/artifact-tool 1.x line as a compatible peer.`,
+    `@opengeni/react must expose the lockstep @opengeni/artifact-tool ${artifactToolMajor}.x line as a compatible peer.`,
   );
 }
 const reactPeerMetadata = (

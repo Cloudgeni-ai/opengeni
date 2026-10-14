@@ -30,6 +30,7 @@ import {
   setSubjectRlsContext,
   submitHumanPromptInTransaction,
   PersonalSessionInitiatorRequiredError,
+  SessionTenancyInvalidRequestError,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
   withRlsContext,
@@ -1615,6 +1616,14 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       where session_id = ${sourceSessionId} and position = 1`;
     await expect(fork(replyEventId)).rejects.toThrow("Session tenancy request is invalid");
     await expect(fork(userEventId)).rejects.toThrow("Session tenancy request is invalid");
+    // The refusal says why: the message's own history rows were superseded.
+    await expect(fork(userEventId)).rejects.toMatchObject({
+      constructor: SessionTenancyInvalidRequestError,
+      forkPointRefusal: "boundary_not_retained",
+    });
+    await expect(fork(crypto.randomUUID())).rejects.toMatchObject({
+      forkPointRefusal: "message_unavailable",
+    });
     // Model-facing history after an actual compaction consists of new active
     // rows, while every older row is inactive. Its receipt authenticates the
     // opaque checkpoint, and both later user/assistant boundaries can copy it.
@@ -1672,6 +1681,9 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       where session_id = ${sourceSessionId} and position = 5`;
     await shared.admin`delete from session_events where id = ${compactedEventId}`;
     await expect(fork(nextReplyEventId)).rejects.toThrow("Session tenancy request is invalid");
+    await expect(fork(nextReplyEventId)).rejects.toMatchObject({
+      forkPointRefusal: "history_compacted",
+    });
   }, 180_000);
 
   test("message fork copies the exact prefix and replays the same boundary", async () => {

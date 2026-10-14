@@ -7,6 +7,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
 import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
+import { ApiHttpError } from "../src/http/api-error";
+import { httpRejectionFactsFromEnvelope } from "../src/http/rejection-telemetry";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -112,6 +114,36 @@ describe("access-grant session RLS context", () => {
     }
     expect(caught).toBeInstanceOf(HTTPException);
     expect((caught as HTTPException).status).toBe(403);
+    expect((caught as ApiHttpError).details).toEqual({ code: "agent_attempt_malformed" });
+    expect(context).not.toHaveBeenCalled();
+  });
+
+  test("names an ended attempt when its credential is reused after the turn", async () => {
+    const context = spyOn(db, "withSessionRlsActorContext");
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockRejectedValue(
+      new core.SessionAuthorizationDeniedError("caller_stale"),
+    );
+    let caught: unknown;
+    try {
+      await withAccessGrantSessionRlsContext(
+        { db: {} } as never,
+        grant({ principalKind: "agent_attempt", metadata: { sessionId } }),
+        async () => "unreachable",
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ApiHttpError);
+    const error = caught as ApiHttpError;
+    expect(error.status).toBe(403);
+    expect(error.message).toBe("agent attempt authority is invalid");
+    expect(error.details).toEqual({ code: "agent_attempt_caller_stale" });
+    expect(
+      httpRejectionFactsFromEnvelope(
+        { error: { code: error.code, message: error.message, details: error.details } },
+        "forbidden",
+      ).reason,
+    ).toBe("agent_attempt_caller_stale");
     expect(context).not.toHaveBeenCalled();
   });
   test("API-key grants retain pure-service billing attribution, not a human subject", async () => {

@@ -2,28 +2,13 @@ import type { ObjectStorageSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import {
-  BlobSASPermissions,
-  BlobServiceClient,
-  generateBlobSASQueryParameters,
+import type {
   StorageSharedKeyCredential,
-  type BlobDownloadResponseParsed,
-  type BlobGetPropertiesResponse,
+  BlobDownloadResponseParsed,
+  BlobGetPropertiesResponse,
 } from "@azure/storage-blob";
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-  S3Client,
-  type S3ClientConfig,
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import {
-  Storage as GcsClient,
-  type GetSignedUrlConfig,
-  type StorageOptions,
-} from "@google-cloud/storage";
+import type { S3ClientConfig } from "@aws-sdk/client-s3";
+import type { GetSignedUrlConfig, StorageOptions } from "@google-cloud/storage";
 
 export * from "./bounded-object-read";
 export * from "./bounded-object-write";
@@ -163,6 +148,37 @@ export type ObjectStorage = {
   deleteObject: (key: string) => Promise<void>;
 };
 
+// Literal synchronous requires remain bundle-visible, but do not initialize an
+// unselected provider. Keep imports out of request methods: service startup
+// prepares its selected SDK, and client construction remains synchronous.
+function s3Sdk(): typeof import("./provider-sdk-s3") {
+  return require("./provider-sdk-s3.js");
+}
+
+function azureSdk(): typeof import("./provider-sdk-azure") {
+  return require("./provider-sdk-azure.js");
+}
+
+function gcsSdk(): typeof import("./provider-sdk-gcs") {
+  return require("./provider-sdk-gcs.js");
+}
+
+/** Load only the selected SDK before readiness, without constructing a client. */
+export function prepareObjectStorageProvider(settings: ObjectStorageSettings): void {
+  if (settings.objectStorageBackend === "azure-blob") {
+    azureSdk();
+  } else if (settings.objectStorageBackend === "gcs") {
+    gcsSdk();
+  } else if (
+    settings.objectStorageBackend === "aws-s3" ||
+    (settings.objectStorageEndpoint &&
+      settings.objectStorageAccessKeyId &&
+      settings.objectStorageSecretAccessKey)
+  ) {
+    s3Sdk();
+  }
+}
+
 export function createObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   if (settings.objectStorageBackend === "azure-blob") {
     return createAzureBlobObjectStorage(settings);
@@ -182,6 +198,14 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
   ) {
     return null;
   }
+  const {
+    S3Client,
+    PutObjectCommand,
+    GetObjectCommand,
+    HeadObjectCommand,
+    DeleteObjectCommand,
+    getSignedUrl,
+  } = s3Sdk();
   const sharedClientConfig: S3ClientConfig = {
     region: settings.objectStorageRegion,
     forcePathStyle: settings.objectStorageForcePathStyle,
@@ -539,6 +563,7 @@ function isS3VersionMismatch(error: unknown): boolean {
 }
 
 function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage {
+  const { Storage: GcsClient } = gcsSdk();
   const client = new GcsClient(gcsClientOptions(settings));
   const bucket = client.bucket(settings.objectStorageBucket);
   return {
@@ -727,6 +752,7 @@ function isGcsVersionMismatch(error: unknown): boolean {
 }
 
 function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
+  const { BlobServiceClient, BlobSASPermissions, generateBlobSASQueryParameters } = azureSdk();
   const sharedKey = azureSharedKeyCredential(settings);
   const requestServiceClient = settings.objectStorageAzureConnectionString
     ? BlobServiceClient.fromConnectionString(settings.objectStorageAzureConnectionString)
@@ -956,6 +982,7 @@ function isAzureVersionMismatch(error: unknown): boolean {
 }
 
 function azureSharedKeyCredential(settings: ObjectStorageSettings): StorageSharedKeyCredential {
+  const { StorageSharedKeyCredential } = azureSdk();
   if (settings.objectStorageAzureConnectionString) {
     const parsed = parseConnectionString(settings.objectStorageAzureConnectionString);
     if (parsed.AccountName && parsed.AccountKey) {

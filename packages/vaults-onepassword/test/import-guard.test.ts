@@ -85,6 +85,9 @@ describe("OP-5 import guard", () => {
   });
 
   test("no package manifest outside the loaders depends on the SDK or the provider package", () => {
+    // The loaders declare the SDK too: their images keep it as an installed
+    // package (never bundled), because its core loads a WASM file from beside
+    // its own module. Code still reaches it only through this package.
     const glob = new Bun.Glob("{apps,packages}/*/package.json");
     const offenders: string[] = [];
     for (const path of glob.scanSync({ cwd: REPO, onlyFiles: true })) {
@@ -99,7 +102,7 @@ describe("OP-5 import guard", () => {
         ...(manifest.optionalDependencies as object),
       } as Record<string, string>;
       const loader = LOADERS.some((dir) => path.startsWith(dir));
-      if (SDK in deps || (!loader && PACKAGE in deps))
+      if (!loader && (SDK in deps || PACKAGE in deps))
         offenders.push(relative(REPO, join(REPO, path)));
     }
     expect(offenders).toEqual([]);

@@ -3,7 +3,7 @@
 // `acquireSharedTestDatabase` hands out the container superuser, for whom
 // `FORCE ROW LEVEL SECURITY` never engages, so every existing 0340 test drives
 // the classify -> backfill -> activate chain through a principal that cannot
-// observe this defect class at all. OpenGeni migrates and runs its SECURITY
+// observe this defect class at all. Opengeni migrates and runs its SECURITY
 // DEFINER routines as a NON-superuser owner without `BYPASSRLS`
 // (`docs/force-rls-migration-backfills.md`), where the owner is policy-bound
 // like everybody else - and a `SELECT ... FOR SHARE` additionally needs the

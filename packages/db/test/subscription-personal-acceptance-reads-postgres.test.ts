@@ -34,6 +34,9 @@ import {
   recoverSubscriptionCoreCodexConnectionHealth,
   retiredSubscriptionObjectDescriptions,
   retiredSubscriptionObjectViolation,
+  RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+  SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
+  SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -603,6 +606,50 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ...MAINTENANCE_WORK_PROBE_ROUTINES.map(
         ([routine]) => `maintenance work check ${routine} is missing or has unsafe posture`,
       ),
+    );
+    // 0773 (per-task usage limits).
+    heldBack.push(
+      ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
+      ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
+        (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
+      ),
+      ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
+        (table) => `session usage limit private table ${table} is missing or unsafe`,
+      ),
+      "session usage limit capability has unsafe owner or direct runtime privileges",
+    );
+    // 0776 (Site Data), 0782 (published Sites) and 0783 (Site SQL): their tables
+    // are in the runtime and protected contracts.
+    const siteDataTables = [
+      "site_abuse_reports",
+      "site_auth_codes",
+      "site_data_collections",
+      "site_data_files",
+      "site_data_rate_windows",
+      "site_data_record_values",
+      "site_data_records",
+      "site_data_usage",
+      "site_data_validation_windows",
+      "site_data_workspace_validation_windows",
+      "site_hostname_holds",
+      "site_hostnames",
+      "site_limit_profiles",
+      "site_publications",
+      "site_runtime_conversations",
+      "site_runtime_rate_windows",
+      "site_runtime_usage",
+      "site_sql_databases",
+      "site_sql_migrations",
+      "site_sql_queries",
+      "site_sql_rate_windows",
+      "site_sql_usage",
+      "site_viewer_sessions",
+    ].join(", ");
+    heldBack.push(
+      `runtime privilege tables are missing: ${siteDataTables}`,
+      `protected tables are missing: ${siteDataTables}`,
     );
     const expected = [
       ...heldBack,

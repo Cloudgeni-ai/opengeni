@@ -782,11 +782,11 @@ export interface ModelAccount {
 export const codexProvider = {
   name: "Codex",
   subtitle: "ChatGPT plan",
-  /** "Spread work | Primary only", shown only with 2+ accounts. */
+  /** "Spread work | Primary first", shown only with 2+ accounts. */
   rotation: "spread" as "spread" | "primary",
   rotationOptions: [
     { id: "spread", label: "Spread work" },
-    { id: "primary", label: "Primary only" },
+    { id: "primary", label: "Primary first" },
   ],
   /** "Organization | This workspace", shown only when the org assigns an account. */
   source: "workspace" as "organization" | "workspace",

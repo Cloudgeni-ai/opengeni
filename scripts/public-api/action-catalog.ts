@@ -24,6 +24,14 @@ import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-t
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
   {
+    pattern: /^\/v1\/site-auth\//,
+    reason: "signing a person in to a published Site, from their own signed-in browser",
+  },
+  {
+    pattern: /^\/v1\/site-runtime(\/|$)/,
+    reason: "published Site gateway calls, signed by the gateway",
+  },
+  {
     pattern: /^\/v1\/native-app\//,
     reason: "signing the native app in and out, and its push device: the app's own credential",
   },
@@ -40,11 +48,6 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
-  {
-    pattern: /^\/v1\/workspaces\/:workspaceId\/machines\/:enrollmentId\/audience(\/preview)?$/,
-    reason:
-      "who can use a connected machine is decided by a person on the Machines page or through the API; agents are refused",
-  },
 ];
 
 export function isActionCatalogExempt(path: string): boolean {
@@ -77,6 +80,11 @@ export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reaso
     pattern: /^\w+ \/v1\/workspaces\/:workspaceId\/identity-links(\/|$)/,
     reason:
       "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/usage-limit$/,
+    reason:
+      "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent",
   },
 ];
 
@@ -139,6 +147,19 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
   {
     pattern: /^POST \/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/control$/,
     request: "SessionControlRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication$/,
+    request: "UpsertSitePublicationRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/takedown$/,
+    request: "SiteTakedownRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/site-limit-profile$/,
+    request: "SiteLimitProfile",
   },
 ];
 

@@ -82,7 +82,7 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
  * Without a family (the new-chat composer fallback when both the selected
  * model and the server-resolved default are unavailable), a selectable Codex,
  * SuperGrok, or workspace provider wins over the free deployment model; an
- * organization-paid provider ranks after the free model, and OpenGeni-credit
+ * organization-paid provider ranks after the free model, and Opengeni-credit
  * models are never chosen implicitly here. The resolved default is what moves
  * a workspace with credits onto the credits model.
  */

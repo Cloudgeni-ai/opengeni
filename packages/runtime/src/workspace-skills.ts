@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { tool, type Tool } from "@openai/agents";
+import { ErrorCode } from "@opengeni/agent-proto";
 import { parseSkillFrontmatter } from "@opengeni/contracts";
 import { z } from "zod";
 import {
@@ -20,6 +21,7 @@ import {
 import { SandboxFilesystemNotFoundError } from "modal";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
 import { isDefinitePathNotFoundError } from "./sandbox/channel-a";
+import { SelfhostedControlError } from "./sandbox/selfhosted/control-rpc";
 
 const SKILL_FILE = "SKILL.md";
 const MAX_DISCOVERED_SKILLS = 256;
@@ -30,6 +32,9 @@ const DISCOVERY_CONCURRENCY = 8;
 
 // Keep ordered results, bound remote work, and drain already-started operations
 // before propagating a failure. Never leave detached filesystem work behind.
+// A genuine failure always outranks an unreachable-workspace failure, so an
+// in-flight real error is never hidden behind a degradable one; within one
+// class the lowest index wins deterministically.
 async function mapDiscovery<T, R>(
   items: readonly T[],
   read: (item: T) => Promise<R>,
@@ -39,6 +44,7 @@ async function mapDiscovery<T, R>(
   let failed = false;
   let failure: unknown;
   let failureIndex = Infinity;
+  let failureUnreachable = true;
   await Promise.all(
     Array.from({ length: Math.min(DISCOVERY_CONCURRENCY, items.length) }, async () => {
       while (!failed && next < items.length) {
@@ -46,9 +52,14 @@ async function mapDiscovery<T, R>(
         try {
           results[index] = await read(items[index]!);
         } catch (error) {
-          if (index < failureIndex) {
+          const unreachable = isUnreachableWorkspaceError(error);
+          if (
+            (failureUnreachable && !unreachable) ||
+            (failureUnreachable === unreachable && index < failureIndex)
+          ) {
             failure = error;
             failureIndex = index;
+            failureUnreachable = unreachable;
           }
           failed = true;
         }
@@ -66,6 +77,31 @@ function isMissingSkillPath(error: unknown): boolean {
     error instanceof SandboxFilesystemNotFoundError
   );
 }
+
+/**
+ * The bound workspace could not be reached at all: a Connected Machine with no
+ * live runner connection (`agentOffline`), or a control request that timed out
+ * after the session's own read-only retry (`agent_reconnecting`). Classified
+ * only from the typed control error, never from message text. Fencing, consent,
+ * payload, OS, and every non-control error are not unreachability.
+ */
+function isUnreachableWorkspaceError(error: unknown): boolean {
+  if (!(error instanceof SelfhostedControlError)) return false;
+  if (error.fenced || error.payloadTooLarge) return false;
+  return (
+    error.agentOffline ||
+    error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE ||
+    error.code === ErrorCode.ERROR_CODE_TIMEOUT ||
+    error.reason === "agent_reconnecting"
+  );
+}
+
+type WorkspaceSkillDiscovery = Readonly<{
+  skills: readonly WorkspaceSkill[];
+  /** True only when the workspace was unreachable: `skills` is then empty and
+   * is not an authoritative "no repository skills" answer. */
+  unavailable: boolean;
+}>;
 
 export type WorkspaceSkillSearchPath = Readonly<{
   path: string;
@@ -98,7 +134,7 @@ type DiscoveredWorkspaceSkill = {
  */
 export class WorkspaceSkillsCapability extends Capability {
   readonly type = "workspace-skills";
-  private discovery?: Promise<readonly WorkspaceSkill[]>;
+  private discovery?: Promise<WorkspaceSkillDiscovery>;
 
   constructor(
     private readonly searchPaths: readonly WorkspaceSkillSearchPath[],
@@ -113,7 +149,16 @@ export class WorkspaceSkillsCapability extends Capability {
     return super.bind(session);
   }
 
-  private discover(): Promise<readonly WorkspaceSkill[]> {
+  /**
+   * Discover once per bound session (one SDK run). An unreachable workspace
+   * degrades to an empty, explicitly unavailable index instead of failing
+   * instruction preparation: machine unavailability must surface through
+   * sandbox tool results, never block the turn before the model runs. The
+   * degraded result is memoized only for this binding, so the run keeps a
+   * stable instruction prefix and pays the unreachable cost once; the next
+   * run clones and rebinds the capability and discovers again.
+   */
+  private discover(): Promise<WorkspaceSkillDiscovery> {
     const session = requireWorkspaceSkillSession(this._session);
     return (this.discovery ??= discoverWorkspaceSkills(
       session,
@@ -121,6 +166,12 @@ export class WorkspaceSkillsCapability extends Capability {
       this.reservedNames,
       this._runAs,
       this.shadowedNames,
+    ).then(
+      (skills) => ({ skills, unavailable: false }),
+      (error: unknown) => {
+        if (!isUnreachableWorkspaceError(error)) throw error;
+        return { skills: [], unavailable: true };
+      },
     ));
   }
 
@@ -141,7 +192,7 @@ export class WorkspaceSkillsCapability extends Capability {
               "invalid_request",
               "listFiles:true cannot be combined with paths.",
             );
-          const skill = (await this.discover()).find(
+          const skill = (await this.discover()).skills.find(
             (entry) => repositorySkillId(entry) === request.skill,
           );
           if (!skill)
@@ -184,7 +235,12 @@ export class WorkspaceSkillsCapability extends Capability {
   }
 
   override async instructions(): Promise<string | null> {
-    const skills = await this.discover();
+    const { skills, unavailable } = await this.discover();
+    if (unavailable) {
+      return `## Repository skills
+
+Repository skills could not be indexed because the workspace was unreachable when this run started (for example, its Connected Machine is offline). Sandbox tools may fail until it reconnects; if that blocks the task, tell the user.`;
+    }
     if (skills.length === 0) return null;
 
     const available = skills

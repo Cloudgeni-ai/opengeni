@@ -70,7 +70,11 @@
           "guides/connect-a-machine",
           "guides/webhooks-and-credentials",
           "guides/usage-allowances",
-          "guides/insights"
+          "guides/task-usage-limits",
+          "guides/insights",
+          "guides/site-data",
+          "guides/site-sql",
+          "guides/published-sites"
         ]
       },
       {

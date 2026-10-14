@@ -28,7 +28,7 @@ import { syncLinkedProviderVault } from "./provider-sync";
  * Edits of items in a read-write connected vault (OP-3): the change is written
  * to the provider (1Password `items.get` → patch → `items.put`, with the
  * mirrored version as the expected version), then the metadata mirror is
- * refreshed. Values never touch OpenGeni storage.
+ * refreshed. Values never touch Opengeni storage.
  */
 
 /** One field change; the REST `VaultFieldInput` and the agent `secret_save` field both fit. */
@@ -112,7 +112,7 @@ async function providerFieldWrites(
     if (input.fileBase64 !== undefined || kind === "file") {
       throw new VaultError(
         "provider_unavailable",
-        "files in connected vaults are read-only in OpenGeni",
+        "files in connected vaults are read-only in Opengeni",
         { field: input.name },
       );
     }
@@ -181,7 +181,7 @@ async function refreshAndFind(
     if (error instanceof VaultError && error.code === "vault_item_not_found") {
       throw new VaultError(
         "provider_unavailable",
-        "saved in the provider; OpenGeni will show it after the next sync",
+        "saved in the provider; Opengeni will show it after the next sync",
         { vaultId: vault.id },
       );
     }
@@ -210,7 +210,7 @@ export async function writeProviderVaultItem(
   const { vault, existing, change } = input;
   assertProviderVaultWritable(vault);
   if ((change.type ?? existing?.type) === "passkey") {
-    throw new VaultError("vault_permission_denied", "passkeys live only in OpenGeni vaults");
+    throw new VaultError("vault_permission_denied", "passkeys live only in Opengeni vaults");
   }
   let externalItemId: string | undefined;
   let expectedVersion: string | null | undefined;

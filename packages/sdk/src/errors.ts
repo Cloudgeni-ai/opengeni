@@ -1,3 +1,8 @@
+import {
+  parseSessionUsageLimitReachedRefusal,
+  type ParsedSessionUsageLimitReachedRefusal,
+} from "@opengeni/contracts/session-usage-limit-refusal";
+
 /** Error for a non-2xx Opengeni API response. */
 export class OpenGeniApiError extends Error {
   readonly status: number;
@@ -90,6 +95,125 @@ export class OpenGeniAllowanceExhaustedError extends OpenGeniApiError {
     this.scope = refusal?.scope ?? "workspace";
     this.resetsAt = refusal?.resetsAt ?? null;
     this.subjectId = refusal?.subjectId;
+  }
+}
+
+/**
+ * The task's root usage limit is reached: recorded API-equivalent model usage
+ * is at or above the limit. Not a credit or billing failure and not retryable
+ * by waiting; a person can raise or remove the limit, then send again.
+ */
+export class OpenGeniSessionUsageLimitReachedError extends OpenGeniApiError {
+  readonly rootSessionId: string | undefined;
+  readonly limitMicros: number | undefined;
+  readonly usedMicros: number | undefined;
+
+  constructor(
+    status: number,
+    body: string,
+    options: ConstructorParameters<typeof OpenGeniApiError>[2] = {},
+  ) {
+    super(status, body, {
+      ...options,
+      code: "session_usage_limit_reached",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    this.name = "OpenGeniSessionUsageLimitReachedError";
+    const refusal = sessionUsageLimitReachedFields(body);
+    this.rootSessionId = refusal?.rootSessionId;
+    this.limitMicros = refusal?.limitMicros;
+    this.usedMicros = refusal?.usedMicros;
+  }
+}
+
+/**
+ * The server did not accept or confirm a requested task usage limit, so it
+ * predates usage limits (or limits are not enabled there). `sessionId` is null
+ * when the server rejected the create before creating anything; otherwise the
+ * session exists without a confirmed limit and no initial work was started by
+ * this SDK's request (an older server rejects it up front).
+ */
+export class OpenGeniSessionUsageLimitUnsupportedError extends Error {
+  readonly code = "session_usage_limit_unsupported";
+  readonly sessionId: string | null;
+
+  constructor(message: string, options: { sessionId?: string | null; cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "OpenGeniSessionUsageLimitUnsupportedError";
+    this.sessionId = options.sessionId ?? null;
+  }
+}
+
+/**
+ * True only when a create was refused because the server rejected the
+ * `startMode` field itself: servers that predate usage limits accept only
+ * `realtime` there. Matches the session create route's 422 validation
+ * envelope (`Invalid session create request: <fields> failed schema
+ * validation`) and a 400 request-body envelope whose issues name `startMode`.
+ * Any other validation error stays an ordinary API error.
+ */
+export function rejectsStartModeField(error: OpenGeniApiError): boolean {
+  if (error.status !== 400 && error.status !== 422) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(error.body);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object") return false;
+  const record = parsed as Record<string, unknown>;
+  const envelope =
+    record.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : record;
+  const message = typeof envelope.message === "string" ? envelope.message : "";
+  const fields = /^Invalid session create request: (.+) failed schema validation$/.exec(message);
+  if (
+    envelope.code === "INVALID_SESSION_CREATE_REQUEST" &&
+    fields?.[1]?.split(/,\s*/).includes("startMode")
+  ) {
+    return true;
+  }
+  const details =
+    envelope.details && typeof envelope.details === "object"
+      ? (envelope.details as Record<string, unknown>)
+      : null;
+  const issues = Array.isArray(details?.issues) ? details.issues : [];
+  return issues.some((issue) => {
+    if (!issue || typeof issue !== "object") return false;
+    const path = (issue as Record<string, unknown>).path;
+    return (
+      path === "startMode" || (Array.isArray(path) && path.length === 1 && path[0] === "startMode")
+    );
+  });
+}
+
+/** The committed limit differs from the one requested: never report success. */
+export function sessionUsageLimitNotConfirmed(
+  sessionId: string,
+): OpenGeniSessionUsageLimitUnsupportedError {
+  return new OpenGeniSessionUsageLimitUnsupportedError(
+    "The server did not confirm the requested usage limit; it may not support usage limits. Read the limit again before relying on it.",
+    { sessionId },
+  );
+}
+
+/** Parse a session usage limit refusal from an API error envelope body. */
+export function sessionUsageLimitReachedFields(
+  body: string,
+): ParsedSessionUsageLimitReachedRefusal | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    return parseSessionUsageLimitReachedRefusal(
+      root.error && typeof root.error === "object" && !Array.isArray(root.error)
+        ? root.error
+        : root,
+    );
+  } catch {
+    return null;
   }
 }
 

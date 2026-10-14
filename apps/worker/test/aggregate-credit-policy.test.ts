@@ -5,6 +5,9 @@ import {
   aggregateCreditPolicyRevision,
   recordModelUsageAndDebitCredits,
 } from "../src/activities/agent-turn/model-usage";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const restores: Array<{ mockRestore(): void }> = [];
 afterEach(() => {

@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { organizationAccessPresetPermissions, type AccessGrant } from "@opengeni/contracts";
+import { siteAgentClamp } from "@opengeni/core";
 import { resolveSessionAdminAuthority, type Database } from "@opengeni/db";
 import * as z4 from "zod/v4";
 
@@ -133,6 +134,10 @@ export function registerSessionAdminAccessTools(input: {
     async ({ id, pathParameters, query, body }) => {
       const authority = await currentAuthority();
       if (!authority) return ended();
+      // An agent acting for a Site page (its session, an ancestor or its
+      // turn came from one) never acts as the person, even with admin access.
+      if ((await siteAgentClamp(db, grant))?.clamped)
+        return failure("An agent started from a Site page cannot run organization actions.");
       return await callOrganizationAction(
         {
           caller: {

@@ -124,7 +124,7 @@ switch to another provider. When a provider is selected, Opengeni calls it
 before a turn's sandbox work and again before the returned material expires.
 It replaces the deployment's injected `runCredentials` port for the turn
 and reuses the same lifecycle: values are delivered off the sandbox manifest,
-files are written below one OpenGeni-owned directory, renewals swap files in
+files are written below one Opengeni-owned directory, renewals swap files in
 place, and reconnect notices reach both the model and the UI.
 
 ```ts
@@ -191,6 +191,15 @@ connection; see [Test requests](#test-requests)). The provider answers with one 
   their own credential path; enabled providers suppress inferred GitHub App
   bindings for bare resources. Tokens never enter remotes or `.git/config`.
   Connected Machines neither clone resources nor receive platform credentials.
+- Providers that need repository-path selection (for example, multiple GitHub
+  installations on one host) can return a renewable helper through `files` and
+  `fileEnvironment`, with its Git configuration in `environment.GIT_CONFIG_*`.
+  Set `credential.useHttpPath=true` and explicitly reset `credential.helper`
+  before the custom helper. The worker validates and stamps the provider's
+  configuration count (0–128); the clone hook resets ambient helpers and reapplies
+  only that declared helper chain, in order. Explicit Opengeni connection
+  selections continue to use their own helper. `OPENGENI_PROVIDER_GIT_CONFIG_COUNT`
+  is worker-owned bookkeeping, not a host-supplied authorization flag.
 - `expiresAt` schedules renewal five minutes early; without it Opengeni
   refreshes every 30 minutes.
 - Scope echoes are added by Opengeni; the provider does not return them.

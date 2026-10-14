@@ -39,7 +39,7 @@ export const ONEPASSWORD_PLAN_LIMITS: Record<
   business: { dailyRequests: 50_000, hourlyReads: 10_000, hourlyWrites: 1_000 },
 };
 
-/** Fraction of the daily account quota OpenGeni may burst through at once. */
+/** Fraction of the daily account quota Opengeni may burst through at once. */
 const DAILY_BURST_FRACTION = 0.25;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -125,7 +125,7 @@ export class OnePasswordQuota {
     if (waitMs > 0) {
       throw new VaultProviderError(
         "provider_rate_limited",
-        `OpenGeni paused 1Password calls to stay inside the ${this.planTier} plan quota`,
+        `Opengeni paused 1Password calls to stay inside the ${this.planTier} plan quota`,
         waitMs,
       );
     }

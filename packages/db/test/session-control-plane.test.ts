@@ -2023,7 +2023,9 @@ describe("clean session control plane", () => {
     });
     expect(JSON.stringify(plans.created)).toContain("sessions_workspace_created_id_idx");
     expect(JSON.stringify(plans.updated)).toContain("sessions_workspace_activity_revision_idx");
-  });
+    // Seeding and analyzing the planner fixture takes about 25s on a 4-core CI
+    // runner, so the 30s default leaves no headroom.
+  }, 90_000);
 
   test("raw delta writers advance sequence without advancing monitoring activity", async () => {
     const baseline = "2020-01-02T03:04:05.123000Z";
@@ -6215,9 +6217,11 @@ describe("clean session control plane", () => {
 
   test("Pause and Resume preserve lifecycle while Cancel is terminal", async () => {
     const { grant, session } = await fixture();
+    const before = (await getSession(client.db, grant.workspaceId!, session.id))?.status;
     const paused = await controlSession(grant, session.id, "pause");
     expect(paused.control.state).toBe("paused");
-    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("queued");
+    // Pause is control state only: the lifecycle status (an idle shell since #4330) is unchanged.
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe(before!);
     const resumed = await controlSession(grant, session.id, "resume");
     expect(resumed.control.state).toBe("active");
   });

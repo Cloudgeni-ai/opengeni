@@ -165,7 +165,11 @@ Every table is `ENABLE` + `FORCE ROW LEVEL SECURITY` and keyed by
 - Management: `managed_by_workspace_id` (delegated management). Delegated
   managers can reconnect, rename, toggle allocation and, from the managing
   workspace, choose the connection's models (migration 0702); only
-  organization administrators change scope, ownership, or delete (SUB-OWN-04).
+  organization administrators change scope or ownership (SUB-OWN-04). The
+  managing workspace's administrators may also delete the workspace's own
+  account: one that serves only that workspace and never Personal workspaces
+  (SUB-OWN-09, migration 0777); anything wider is deleted by an organization
+  administrator.
   `connected_by_subject_id` is audit only.
 - `provider_state` jsonb is adapter-owned (for example Codex reset-credit
   counts); core decisions never read it.
@@ -1122,7 +1126,10 @@ always stays after them.
   The next check is the earliest reset placement knows (authoritative); else
   the earliest end of a health quarantine, if sooner than the bounded
   control-plane backoff (1 minute doubling to 15). A check never calls the
-  provider; it only evaluates placement.
+  provider; it only evaluates placement. (Amended 2026-10-14: OpenAI can
+  reset a Codex limit before the reset it reported, so Codex waiters now
+  recheck on the bounded backoff and re-read `/wham/usage` before each
+  reconcile; see "Waits that can end before their reset" under X1b.)
 - **Reconcile.** Two steps. Placement is evaluated for the exact accepted
   turn without leasing or writing (`evaluateSubscriptionCoreCodexPlacement`),
   then the waiter is settled under the session row locks: `run` makes the
@@ -1772,12 +1779,19 @@ management capability. Placement reads live consent before allocating new work.
   and poll rejects another actor. Managed-cookie start/poll require the same
   browser origin. Both poll routes re-read the gate after token exchange,
   before writing. Poll writes through `connectSubscriptionCoreCodexConnection`:
-  - a new shared connection is an organization decision: only an
-    organization administrator creates one. From the organization route it
-    is organization-scoped and organization-managed; from a shared
-    workspace's route it serves and is managed by that workspace (exactly
-    the core shape the drained cutover gives a legacy workspace account),
-    with its assignment and pool policy;
+  - a new organization account is an organization decision: only an
+    organization administrator creates one, from the organization route,
+    organization-scoped and organization-managed. From a shared workspace's
+    route an organization administrator or an administrator of that
+    workspace (SUB-OWN-09) creates the workspace's own account: it serves
+    and is managed by that workspace alone and never reaches Personal
+    workspaces (exactly the core shape the drained cutover gives a legacy
+    workspace account), with its assignment and pool policy. Migration 0777's
+    insert policies admit a workspace administrator for exactly that shape;
+    the row is readable to them only once its workspace link exists, so the
+    writer chooses its id instead of returning it. The same upstream login
+    already connected as another workspace's own account, which the caller
+    cannot see, is refused as `managed_elsewhere`, never duplicated;
   - the same upstream account reconnects in place: a new credential, the next
     refresh generation, active status. An organization administrator may
     reconnect any shared connection through the organization route, a workspace administrator only one their
@@ -1806,10 +1820,13 @@ management capability. Placement reads live consent before allocating new work.
   Every credential replacement takes the connection's refresh key
   (`subscription-refresh:<id>`) before its row lock, so it waits for an
   in-flight refresh and for a redemption's `FOR SHARE`.
-- **Disconnect** (`disconnect_subscription_codex_connection`): only an
-  organization administrator deletes a shared connection (a delegated
-  manager reconnects, renames and toggles allocation but does not delete,
-  SUB-OWN-04); a personal connection is deleted by its owner from their
+- **Disconnect** (`disconnect_subscription_codex_connection`): an
+  organization administrator deletes any shared connection; a delegated
+  manager reconnects, renames and toggles allocation, and deletes only the
+  workspace's own account (SUB-OWN-04/09: managed by and serving only their
+  workspace, never Personal workspaces; the owner-run routine reads the
+  connection's links in every workspace through a policy bound to its exact
+  `connection_owner` capability). A personal connection is deleted by its owner from their
   Personal workspace, which revokes its resource authority. Deletion takes
   the refresh key and the row lock (waiting for a redemption's share lock),
   and is refused while any workspace's redemption of the connection is
@@ -4616,8 +4633,22 @@ SuperGrok on the core:
   organization would sleep until the end of the credit period after credits
   were back. The personal probe receives that exact identity as
   `personalTurn`; ownerless or shared-only accepted work cannot borrow a
-  person's connection. Codex
-  waiters are unchanged: they sleep until an authoritative reset. The waiter
+  person's connection. Codex waiters do the same (amended 2026-10-14):
+  OpenAI can reset a limit before the reset `/wham/usage` reported, and a
+  waiter that slept until that stale reset stayed parked for days after
+  capacity was back. The Codex adapter declares
+  `usageReadEndsQuotaExhaustion`; its `usageReadConfirmsAvailability` limits
+  that to readings that confirm the account may serve
+  (`codexUsageConfirmsQuotaAvailable`: not `allowed: false` and no spent
+  feature limit), so only those end a refusal's stored quota deadline. Its
+  binding's `refreshBeforeReconcile` re-reads usage through the same core
+  probe as the usage refresh route, for connections whose stored reading is
+  at least 30 minutes old (`CODEX_CORE_USAGE_RECHECK_MIN_INTERVAL_MS`), so
+  an early reset resumes a parked turn within about 50 minutes. A probe
+  that stores nothing (an endpoint error, or no windows) leaves that age
+  unchanged, so each worker also attempts one probe scope (a workspace's
+  shared pool, or one owner's personal connections) at most every 5
+  minutes (`CODEX_CORE_USAGE_PROBE_ATTEMPT_INTERVAL_MS`). The waiter
   vocabulary's `recheckBeforeReset` mirrors the adapter flag, and the
   conformance suite checks that the two agree.
 - Compaction: X1b adds no compaction change. A compaction turn whose
@@ -5859,7 +5890,7 @@ like C1a.
   (only a Claude core waiter), then the legacy Claude waiter. Compaction
   never parks (C1a). The shared conformance suite runs its session-wait
   scenarios for both Claude subjects.
-  A Claude core waiter sleeps until its stored reset, as Codex's does
+  A Claude core waiter sleeps until its stored reset
   (`recheckBeforeReset: false`): the Claude adapter reads no usage that can
   end an exhaustion early (its quota comes from response headers, so it
   does not declare `usageReadEndsQuotaExhaustion`), and its wait binding has

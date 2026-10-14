@@ -57,6 +57,7 @@ import {
   appendSessionEvents,
   addSessionSystemUpdateWithSourceMutation,
   bindScheduledTaskRunSessionInTransaction,
+  checkSessionUsageLimitAdmission,
   createScheduledTaskRun,
   recordScheduledTaskAdmissionFailure,
   recordScheduledTaskAdmissionRefusal,
@@ -1170,6 +1171,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
         return await refuseAdmission(admissionDenial, true, "agent run admission denied");
+      }
+      if (acceptedTargetSessionId && targetSessionExecutionBase) {
+        // An occurrence that targets an existing task tree counts against
+        // that task's usage limit. A reached limit skips the occurrence
+        // visibly (no message, turn or wake is appended) until a person raises
+        // or clears the limit; an unreadable state throws for activity retry,
+        // never admitting as unlimited.
+        const usageLimit = await checkSessionUsageLimitAdmission(db, {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          sessionId: acceptedTargetSessionId,
+          runtime: true,
+        });
+        if (!usageLimit.allowed) {
+          return await refuseAdmission(
+            "session_usage_limit",
+            true,
+            "the target task reached its usage limit",
+          );
+        }
       }
       const acceptedModel = targetSessionExecution?.model ?? model;
       const acceptedReasoningEffort = targetSessionExecution?.reasoningEffort ?? reasoningEffort;

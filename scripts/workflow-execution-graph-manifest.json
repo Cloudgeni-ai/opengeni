@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "1c18e243d1d82540d1439c4354f9e07f6c12a8391d68ab4b3940146a82ef220a"
+      "sha256": "82e5d6f9cc0ebaba5519ddce29d706c71faeb3a1a240c3a449c3fdc2b72ba7d9"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "17f62a74dd6c34f546e2d3c58ac7627097e81e1f20d5fa1626f7f4df5decd86a"
+      "sha256": "9e84537854c47a89e66f2975893463030aeb662415e768049871b78ca0647c30"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -22,11 +22,15 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "4738e9fe9554dc8718c5de4d886b2dd086aca5e41b397f26e910cd9823fed29e"
+      "sha256": "397b21065c0448aac95e8b9946d7168d7961d3291a2029826e162075f435d238"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
-      "sha256": "eefc69afb4a4e480515828d34069a8c7159c5c71b5db19f2c4a0924244757ba3"
+      "sha256": "8b901e666887c644b0be477cd3d15e7018353762fc354f3a61500a269169c910"
+    },
+    {
+      "path": ".github/workflows/desktop-app-release.yml",
+      "sha256": "a5ab25e03f662f3c3149969f549e42ff1689f1a8f33928efc542d16da02d84d1"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -49,12 +53,16 @@
       "sha256": "92543a710cd808d8d930c827c8f877953406993e8965e1c01d1097afef7f9a47"
     },
     {
+      "path": ".github/workflows/publish-browser-extension.yml",
+      "sha256": "db8d4155f396094f43283f98a521327000cda3d722aac44d627d2e8970f25480"
+    },
+    {
       "path": ".github/workflows/publish-canary-chart.yml",
       "sha256": "4cb5d3bb038e0a1f8997b83b93d02c7dbb579ef3c4bcc84cd831f2e3210c1288"
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "0c604969879ae54c818df46818547548dbd48165aa8fc65e8d9f3907cac0d99a"
+      "sha256": "2fecee50c354d8567e750f0627de842e359298bb61c49396b6994341fbb9729e"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -62,11 +70,11 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "e9f07f7665ebdc9f841de20c361665b3fc485e8565b80a292fcbbc5b06b7ffe0"
+      "sha256": "e959f5658679e791841ad1af4a481b91ccba5e226bf86bef78743a39f7e96f10"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
-      "sha256": "1159f5b8fa72d596ae6e5ffb9f99b5d0c147a9771a614d9a7e0a7e2f93f45743"
+      "sha256": "892dc87af9b030ce92a848f4fc8faae97d6aa04f13b7e5b65f4957bb5bab64bb"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
@@ -98,7 +106,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "eb8c7dcba198651cda023f00621b53536cc3895b6973374acd47c523226f07b5"
+      "sha256": "0699567351803a79a314b65b66cf8895a18a4842e3e13cf25afc71bc3d0914b7"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
@@ -172,6 +180,18 @@
       "job": "cua-linux",
       "step": "Verify isolated desktops and compiled packaging",
       "sha256": "053f0ca55c7ce235956a91a7a5cd606c4af45e4260645b4a1be853fdaea5cd9c"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Drive a real window and verify compiled packaging",
+      "sha256": "b814d6d0e9715fd6fe796d2190bd71343896a9ad8326799beecd770a9fa22f19"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Install",
+      "sha256": "6b53200cb717e5db732d2f6094f04af1cddc07e651f9f39df6961dd57ae9b831"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -291,7 +311,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Windows x64)",
-      "sha256": "db7bc69a7fc8af6b65a787d7984388c06a04a6589f6f87243a5d6c49f6340d9d"
+      "sha256": "06a7d742999d79db1ecc0acc5ddb4958817651744c7c25811848c5de6e80bde1"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -561,7 +581,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "automation-admission",
       "step": "Reproduce deterministic Version PR tree",
-      "sha256": "53e99af56de3c76307da5da43b5d5a85fd47a56c785ecd5e28cff0d2928f8ce9"
+      "sha256": "abd3d6e39075c7463d09e9d7db441013dc68017e86ced309dbf611a5c132e0ba"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -813,7 +833,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "f1c68f7a528153f5653d6c8a5dd87410c1eab524214fc452a24989dca6fea75b"
+      "sha256": "5019ac6e5a9e7de2044e2fab17edc9432de6e26a0307b96d52cfa187325567b7"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -837,7 +857,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "3cb07f9390ad4e5470d45081e87d3e0b5fe4a7197d3ddc9478b5cebedc62468c"
+      "sha256": "67607b839be59a82a088124958b3b7aab9f31098c888aac432551da9993903f0"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -888,6 +908,102 @@
       "sha256": "d4d8249940209553aac5a8bfba42fe6d8023806d37f3042bfd080c271d851584"
     },
     {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Build",
+      "sha256": "b8abe2668e6b9ac43ae93007e748eadeba5d114143cc73491a6db2ea25a26ea6"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Check",
+      "sha256": "61d0737ccdef48f245decc67d57030042caec7681ecdc4214c64e442c781c9ac"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Install",
+      "sha256": "910a01ec875791a5aa02602e796a6da8e22f5de91c1b3efa238b87b820f2d50e"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Packaging tools",
+      "sha256": "bc3068dff6b5a4ac2d75ae79ae528684cca4d749dc5bf5f920f250c8a6a4f00a"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "linux",
+      "step": "Verify",
+      "sha256": "22f1b4a1b8b959438183f7fcbc25f8203a5c36425a942316fcac2c363bf4a64f"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Build, sign and notarize",
+      "sha256": "11e368019200d64062e117b5d8e9d0db1857b587bd47ef8c8b5cf23afd240049"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Check",
+      "sha256": "72037d5aceb14e9e18c6cfb2e3fc3cf2bceb9032628a5b7880493c647a479d8f"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Install",
+      "sha256": "80703888d15e71ca6f9e33e11446af0122f1df8cc12e22d876770edf090939ee"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Signing and notarization credentials",
+      "sha256": "8b7876b21afd3846c837a596cc4ad1b022cd880719075ca7b7f03f49e80d454b"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "macos",
+      "step": "Verify",
+      "sha256": "dc4a624a3538c56c0fd5162ae9c67d6bb63a46e4c160c9762da38277bdbf079e"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "publish",
+      "step": "Publish",
+      "sha256": "0501f67601a2b188d07165038cb1c606cad4f67ca0177391203043f7bd53c3a1"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "version",
+      "step": "Version",
+      "sha256": "5edc42dd348682740712de0c43c77c9de025da3862b139d1360dbcc51dbd3668"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Build",
+      "sha256": "6900a898855f2935f91e189713a30a96032da5de7af4c00c4ab56959b48994d6"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Check",
+      "sha256": "24c9feeaadfd5f52ab1a3bb0aab71eabdaef29161b350225620cfd2fe2df85d0"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Install",
+      "sha256": "0e153e9a11f09aaa8c2ff94a1ed6f992b73c9bf110dec214fd85d38aead2d404"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Verify",
+      "sha256": "e558a14395a7534bb9328c859d9bf44b1847aff3d029f3db9131f90e904e4f6e"
+    },
+    {
       "workflow": ".github/workflows/desktop-e2e.yml",
       "job": "desktop-image",
       "step": "Install dependencies",
@@ -916,6 +1032,36 @@
       "job": "admit-head",
       "step": "Require main or hotfix/* head",
       "sha256": "908ca29300a102728fbafc0c6b501bfe098c335138c8be1dbf852e40dd46f5b0"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Admit protected main",
+      "sha256": "7ef4625258376bb691af17bdf48bc3fb109cc39e963cd852b74e230a60ee83aa"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Build store ZIP",
+      "sha256": "9936df9bc7d412a04b7af314b1b19203ba2699fd3a7bce41554e9ce0b5721852"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Install dependencies",
+      "sha256": "1cd1c6c436f7ed4dc025c83963fd1c032f0b4493bc78c225fcb0d1d76c6cfae8"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Test publisher",
+      "sha256": "732302fc33663d81adfe2bd6efd3941c356e9074eb74252ad68a00d7494f6d7a"
+    },
+    {
+      "workflow": ".github/workflows/publish-browser-extension.yml",
+      "job": "publish",
+      "step": "Upload and submit",
+      "sha256": "43ac13a8054a46653f52363073da632dede951e3b2e8fc019d83c591fd071b24"
     },
     {
       "workflow": ".github/workflows/publish-canary-chart.yml",

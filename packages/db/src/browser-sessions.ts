@@ -507,6 +507,45 @@ export async function listBrowserSessions(
   );
 }
 
+/** Managed browsers that may still have a live browser process on one
+ * Connected Machine: every non-terminal browser except a saved one whose
+ * controller binding was already released (its process is gone). */
+export async function countLiveConnectedMachineBrowsers(
+  db: Database,
+  input: { accountId: string; workspaceId: string; enrollmentId: string },
+): Promise<number> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.browserSessions)
+      .innerJoin(
+        schema.sandboxes,
+        and(
+          eq(schema.sandboxes.workspaceId, schema.browserSessions.workspaceId),
+          eq(schema.sandboxes.id, schema.browserSessions.connectedSandboxId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.browserSessions.workspaceId, input.workspaceId),
+          eq(schema.browserSessions.placementKind, "connected_machine"),
+          eq(schema.sandboxes.enrollmentId, input.enrollmentId),
+          inArray(schema.browserSessions.lifecycle, [
+            "starting",
+            "active",
+            "suspending",
+            "suspended",
+            "restoring",
+            "repair_required",
+            "ending",
+          ]),
+          sql`(${schema.browserSessions.lifecycle} <> 'suspended' or ${schema.browserSessions.controllerGeneration} is not null)`,
+        ),
+      );
+    return row?.count ?? 0;
+  });
+}
+
 export async function getBrowserSession(
   db: Database,
   input: { accountId: string; workspaceId: string; browserSessionId: string },

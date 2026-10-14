@@ -1,5 +1,458 @@
 # @opengeni/api-router
 
+## 2.0.1
+
+### Patch Changes
+
+- dfc66e9: Attached browsers follow their machine's audience.
+
+  - A personal (Only me) machine's browsers are listed, read and controlled only for the machine's owner. Before, any workspace member could see them, and the browser and linked-desktop control paths reached the machine without the owner check that normal machine use applies. An agent counts as the person whose turn it runs for; keys and services see no personal machines.
+  - A revoked machine's browsers no longer show as connected with their old profiles and tab counts. They read as disconnected (from when the machine was revoked) and leave the default listing.
+
+- a9052e9: Connected 1Password vaults work again and stay current on their own.
+
+  - The API and worker images ship the 1Password SDK as a real package. Bundling it left its WASM core behind, so every 1Password connect, sync and read failed with a generic error.
+  - An Only-me vault's personal 1Password token now loads in every workspace the vault reaches, not only the one it was added in. Before, using or syncing it elsewhere marked the vault "expired, reconnect 1Password" for everyone. Organization vaults likewise load their organization connection in every workspace they are available in.
+  - Linked vault mirrors refresh themselves: agent secret search refreshes mirrors older than 10 minutes, and a reference that finds nothing refreshes mirrors older than 2 minutes and looks again. Each refresh is one provider call (plus an item listing only when the vault changed), honours provider rate limits, and retries a failing vault at most once per period.
+
+- Updated dependencies [dfc66e9]
+- Updated dependencies [a9052e9]
+- Updated dependencies [2ea5f7b]
+- Updated dependencies [f2ffb76]
+  - @opengeni/db@2.0.1
+  - @opengeni/core@2.0.1
+  - @opengeni/contracts@2.0.1
+  - @opengeni/documents@2.0.1
+  - @opengeni/events@2.0.1
+  - @opengeni/artifact-tool@2.0.1
+  - @opengeni/capabilities@2.0.1
+  - @opengeni/codemode@2.0.1
+  - @opengeni/codex@2.0.1
+  - @opengeni/config@2.0.1
+  - @opengeni/github@2.0.1
+  - @opengeni/interaction@2.0.1
+  - @opengeni/observability@2.0.1
+  - @opengeni/runtime@2.0.1
+  - @opengeni/storage@2.0.1
+  - @opengeni/tool-gateway@2.0.1
+  - @opengeni/vaults@2.0.1
+  - @opengeni/vaults-onepassword@2.0.1
+  - @opengeni/agent-proto@2.0.1
+  - @opengeni/network@2.0.1
+  - @opengeni/xai-subscription@2.0.1
+
+## 2.0.0
+
+### Minor Changes
+
+- fc57bd2: An agent acting as a person with their full access (an agent with session admin access, or a connected agent given Full access over all workspaces) can now do what that person can in the organization: give their sessions admin access and allow it for the organization, approve an agent sign-in they started, manage connected agents, read and tidy their inbox and session mutes, and redeem usage-limit resets. An agent with less access is refused the steps that give or approve access, so it can never widen its own. Creating organizations, invitations, organization recovery and identity links stay with the person in the browser. The session control action now describes that cancel is permanent while pause is reversible, and the agent sign-in and connected-agent bodies are named contract schemas (`McpConnectionDecision`, `UpdateOrganizationMcpConnectionRequest`).
+- 40e2542: Expose optional cached usage snapshots on already-authorized model-account choices. Preserve partial and unknown readings, snapshot timestamps and historical reset times without polling providers or changing account eligibility or visibility.
+- 945490f: A connected machine can switch between This workspace and Only me in place, keeping its enrollment, sandbox id, credentials and live connection, so chats, schedules and the installed agent are not registered again. The Machines page gains **Who can use it?**, a dialog that summarizes what one confirmation does, backed by `POST .../machines/:enrollmentId/audience/preview` and `PUT .../machines/:enrollmentId/audience` (`previewMachineAudience` and `changeMachineAudience` in the SDK). Narrowing applies everything in one transaction: the owner's chats stay (shared ones stay shared, usable only by the owner) and their running attempts are re-authorized; other people's chats move off; turns that may no longer use the machine end as cancelled through the terminal `authority_change` interruption; the owner's Workspace schedules on it become Only me (or pause) and other schedules pause; and each affected person gets one inbox notice. Only a second live connection of the same computer blocks the switch. The worker reads the machine's current audience on every operation, so running sessions follow the change without a rebuild and the agent needs no restart or upgrade.
+- 9701372: Agents can notify another member of their workspace. `notify_user` takes an optional `recipient` (email or member name); it reaches that member only while they allow other members' agents to notify them in that workspace, a per-person setting that is off by default (`GET`/`PUT /v1/workspaces/:workspaceId/inbox/member-notifications`, `getMemberNotifications` and `updateMemberNotifications` in the SDK). Otherwise the agent gets a clear refusal, as it does for non-members and for sessions that work for no person. Inbox items now carry `sender` (who the notification came from) and `sessionAvailable`: another member's private session is never linked, titled or opened from the inbox or the phone notification. Inbox items are kept per recipient, so one key can reach the owner and a teammate separately, and `notification_withdraw` can withdraw one member's copy.
+- 3426850: Personal API keys: an organization member can create a key (`ogp_…`) that acts as them. A script or outside agent using it does what that person can do in the organization right now, capped by the key's access setting, and shows up as them, including on the organization MCP server. A changed role applies on the next request, suspension pauses the key, and leaving the organization revokes it. Keys are created in Organization settings > Developer with a choice of access and an expiry of 30, 90 (the default) or 365 days, or never; the key is shown once. People see and revoke their own keys; owners and admins see and revoke everyone's. Only the person, or an agent or key with their full access, can create one, so a limited key never mints a broader one. New routes `GET|POST /v1/organizations/:id/personal-api-keys` and `DELETE …/:apiKeyId`, with SDK methods `listPersonalApiKeys`, `createPersonalApiKey` and `revokePersonalApiKey`. Migration `0722` is rolling: older API instances read a personal key as having no access.
+- 3a4a435: Organization privacy settings: owners and admins choose whether new chats and schedules start as Workspace or Only me, and whether admins see Only me schedule summaries. Deployment settings can turn Only me off, require the Workspace default, or require admin summaries, and organizations cannot widen past them.
+- 14343e4: Leftover records no longer block making a chat Only me. The private visibility change now settles them in the same transaction: turns stuck `queued`, `recovering` or `waiting_capacity` on an idle chat are cancelled, RunState rows, questions and capacity waiters on finished turns are ignored, a finished background-command result carrying someone else's authority is cancelled, and schedules that can no longer run stop counting (rolling migration 0768). Work the person can see (a running or parked response, queued messages, an active goal) answers a typed `active_work` conflict unless `UpdateSessionVisibilityRequest.stopActiveWork` is sent; with it the change cancels that work, pauses the goal, interrupts a response a worker is executing and then completes, answering a retryable `stopping_active_work` with the same idempotency key if the worker is slow. New owner-only `GET /v1/workspaces/:workspaceId/sessions/:sessionId/visibility/preview?visibility=private` (SDK `previewSessionVisibilityChange`) reports that work and any block stopping it would not clear; the console shows one summary and one "Stop work and limit to me" confirmation. Blocks that protect another person's authority are unchanged.
+- 2b8ee21: Nothing in a chat refuses making it Only me any more (rolling migration 0769). Another member's authority is dropped by the change: their pending updates are cancelled, a subscription account choice pointing at their personal connection is removed, and a pending update that later arrives with someone else's authority on a private chat is stored cancelled. A live voice session ends. Schedules, sandbox processes, file operations and viewers no longer count. `SessionVisibilityWork` gains `liveVoice`, `otherPeoplePendingUpdateCount` and `otherPeopleAccountChoiceCount`; any of them, like running work, needs `stopActiveWork` ("make private anyway"). The visibility preview's `blocker` is deprecated and always `null`. The console skips the dialog when nothing is in the way and otherwise shows one short list with a single button.
+- 6861501: Scheduled task reads now include `accountPlan` for a viewer who can act on the task: for each connector, whether it follows the owner's current accounts (`default`) or uses accounts a person pinned (`pinned`), which accounts a run would use if it started now, and any pinned account that can no longer be used. It is resolved at read time from the owner's live connections and never stored.
+
+  The schedule page shows this as an Accounts section, and a pin that can no longer be used can go back to the owner's current accounts in one step.
+
+- a81a567: Schedules can now be Only me, like chats. An Only me schedule is visible only to its owner through the API, the agent's schedule tools and Slack, and each run creates an Only me chat owned by that person after rechecking that they may still create one. A schedule that posts into an Only me chat or saves to personal knowledge is always Only me; existing ones become Only me. Workspace admins see other people's Only me schedules only as a summary (owner, cadence, status, last run and 30-day cost) and can pause them, but never see their name, message or runs. `ScheduledTask.visibility` reports the audience, create and update requests accept `visibility`, and `GET .../scheduled-tasks/private-summaries` and `POST .../scheduled-tasks/private-summaries/:taskId/pause` serve the admin summary. The schedule form asks who can see it, and the Schedules list marks Only me schedules.
+- 6861501: Schedules that start their own session now follow the workspace's default connectors at each run, the way a new chat does. A schedule created without choosing tools stores `agentConfig.toolPolicy` (`{ mode: "workspace_default", excludedMcpServerIds }`) instead of a copy of the defaults, so a connector the workspace adds later reaches its next run. Its `tools` list only connectors added on top, and an edit that does not name a policy keeps the existing one. Creating a schedule with an explicit `tools` list and no policy still gives it exactly that list.
+
+  The schedule editor shows what the next run gets and saves defaults a person turns off as exclusions. Agent schedule tools cannot set `toolPolicy`; their reads report where a run's connectors come from (`configuration.connectors`).
+
+  Migration 0754 moves agent- and service-created schedules that start their own session to follow the defaults, keeping their saved tools as additions. A list a person created directly is kept exactly.
+
+- 6861501: Schedules use the owner's current connector accounts on every run instead of a saved snapshot. Saving a schedule no longer stores which accounts were connected at that moment, so a reconnected, renamed or newly added account is picked up by the next run, and an account that was removed is simply no longer used.
+
+  A person can still pin accounts on a schedule that starts its own session, with `pinnedAccounts` on create and update (`[]` unpins everything). A pin narrows only its own connector; every other connector keeps following the owner's current accounts. Agents, API keys and services cannot pin accounts (403). A schedule that posts into an existing chat has no pins: that chat supplies its connectors and the owner's current accounts.
+
+  When a pinned account can no longer be used, the run goes ahead without that connector and never substitutes another account; the run records it in `degradedAccounts`. Set `pinnedAccountsRequired: true` to skip the run instead.
+
+  Migration: `connectionAccounts` and `connectionAccountsFrozen` are removed from schedule requests and `ScheduledTask.agentConfig`, and `attachableAccounts` is removed from `ScheduledTaskPolicyDrift`. Requests that still send `connectionAccounts` for a schedule are rejected; send `pinnedAccounts` only for an account a person chose, or nothing to follow the owner's current accounts. A database migration turns every saved account snapshot into the default behaviour. Session and message `connectionAccounts` are unchanged.
+
+- b90e5fa: Only me schedules can run on their owner's own connected machine. Saving the schedule is the owner's consent; each run gets a grant for exactly that run's chat, and every attempt rechecks that the owner is still a member, the machine is still theirs and the grant is still active. Workspace schedules and other people's schedules are still refused, and the schedule form locks Who can see it to Only me when a personal machine is picked.
+- e8c3557: Admin access for a session now has a time limit. It lasts one hour by default; the person giving it can choose 8 hours, a day or no limit, and can change the limit while it is on. Access ends by itself when the time is up. `PUT .../admin-access` accepts `{ durationHours }` (1 to 720, or null for no limit), and `SessionAdminAccess` reports `expiresAt`.
+- 5cdfbaa: Owners and admins can give one of their own sessions admin access. When the organization allows it (Organization settings > Security & data > Agents, off by default), "Give admin access…" in a session's header menu lets its agent find and run every organization action the person can, across all workspaces, through `admin_actions_search`, `admin_action_describe` and `admin_action_call`. A small shield beside the session title shows it is on and turns it off. Access is checked on every call and ends when either switch is turned off or the person stops being an owner or admin. SDK: `getOrganizationAgentAdminAccess`, `updateOrganizationAgentAdminAccess`, `getSessionAdminAccess`, `grantSessionAdminAccess`, `revokeSessionAdminAccess`.
+- 09928dc: Agents can choose a Site's audience. `artifacts_create` takes an optional `visibility` (`private` or `workspace`); without it, a Site published from an Only me chat starts Only me and other Sites start shared. `artifacts_list`, `artifacts_get_source` and the create, publish, rollback, archive and restore results include each Site's `visibility` and `ownerSubjectId`. Agents still cannot change an existing Site's audience; only its owner can, from the Site page.
+- 66b3026: Sites now have an audience, like chats and schedules: **Only me** or **Workspace**. An Only me Site is visible only to its owner, everywhere it can be reached: the Site page, versions, content and downloads, the artifact library, Site tools and Site conversations; admins cannot see it, as with an Only me chat. New Sites start shared unless `visibility` is set when creating one over HTTP; Sites agents publish start shared and are owned by the person the agent acts for. The Site page shows who can see it and gives its owner a "Share with workspace" action (and "Limit to me" while Only me is allowed), each confirmed first. Only the owner changes the audience, through `PUT /v1/workspaces/{workspaceId}/published-artifacts/{artifactId}/visibility` or the SDK's `updateWorkspaceArtifactVisibility`; agents cannot. Sites expose `visibility` and `ownerSubjectId`, and artifact catalog items for Sites include `visibility`. Existing Sites stay shared with the workspace; migration 0737 records their owner.
+
+### Patch Changes
+
+- dbb2cb6: Connected Machines now update to their channel's promoted agent build without anyone clicking "Update now". Each live machine behind its promoted build is asked to update from its next heartbeat. The agent applies the update only at an idle point, so running work is never interrupted. An older agent that postpones because it is busy is asked again every 10 minutes, an unanswered request is re-sent after 10 minutes, and other retryable failures are retried hourly. Non-retryable failures, rollbacks to an older build, and Macs that need the whole-app installer still need an explicit request. Set `OPENGENI_AGENT_AUTO_UPDATE=false` to update only on request. "Update now" no longer re-requests the build a machine already runs after an earlier attempt failed.
+- 70031df: Archiving a chat you started now also pauses it when it still has work: a running or queued turn, a pending wait, or an active goal. Before, an archived chat kept running out of sight. The pause is the ordinary Pause (Resume brings it back, and a paused chat runs no goal continuations), it happens once per archive even if the request is retried, and it only applies when you may control chats. Archiving a chat someone else started still only hides it for you, and settled chats are not paused.
+- c2f4153: Record why each attached Chrome profile connection ended. Every connection generation change ends that profile's live browser sessions, but the reason only existed in machine logs, so a Chrome-side port close could not be told apart from a crashed native host. The native host now sends a final closing frame naming why it is shutting down (Chrome closed the port, Chrome sent an unreadable message, writing to Chrome failed); an end without that frame means the native host itself vanished, and a hello or message the agent refuses is reported as rejected. The agent includes its recent connection ends in every inventory snapshot, and the server keeps a bounded per-profile history in `attached_browser_devices.connection_history` (rolling migration `0770`). Generations that ended without a report are still recorded: as `agent_restarted` when the whole bridge was replaced, otherwise `unreported` for agents too old to report.
+
+  The bridge is also harder to disconnect by accident. An oversized tab title is truncated and an oversized tab URL makes that tab uncontrollable, instead of either one tearing down the whole profile connection. Fields a newer extension adds are ignored rather than rejected. Native-host diagnostics now go to stderr, never to the stdout channel Chrome reads frames from.
+
+- d4c17b3: Automatic agent updates no longer close open browsers. Agents before 0.1.58 close every managed browser when they restart, so the automatic updater now leaves such a machine on its current agent while it still has a managed browser that may be open, and looks again on the usual busy backoff. The machine card shows "Update to vX postponed: open browsers would close" and notes that updating by hand closes them; "Update now" still works. Agents from 0.1.58 on keep their browsers across a restart and are updated as before.
+- b969da0: Saving a browser download to a workspace path now creates missing folders on that path, instead of failing with "mutation path not found". Every existing folder on the path must still be inside the workspace.
+- 1ee99c1: Report a crashed browser tab as a definite, non-retryable `tab_crashed` diagnosis with open-a-new-tab guidance through browserd and the API. Previously the API turned it into a generic "temporarily unavailable, retry" outage, so agents kept retrying a dead tab.
+- 1756cfe: Preserve a typed tab_not_responding diagnosis and recovery guidance when page-scoped CDP commands time out. Reads and pre-input failures are definite; actions whose input was already sent retain uncertain effects and must not be replayed automatically. Healthy tabs remain usable.
+- 262e6b5: A managed browser whose restored launch failed before it finished can be resumed again. Previously, if Chrome started from a restored private profile but the launch then threw, cleanup removed the profile but left the launch record "in progress". Every later cleanup or resume of that browser was then refused as "Current browser is unavailable", and the stuck resume eventually marked the browser lost.
+
+  Now the browser service records such a launch as failed, with a short error code, and logs the original error. Cleanup of that exact controller generation succeeds, so the next resume restores again from the saved private checkpoint. Launch records left "in progress" by earlier versions are treated the same way when no process was recorded and the restored profile is gone. A launch that might still be running stays protected as before.
+
+  A browser that was lost because its resume timed out (`controller_transition_expired` after a resume) can now be resumed through the normal resume request. The API first ends the old controller generation, then returns the browser to suspended and restores it from the same checkpoint under a new generation. Browsers lost during create, suspend or end are unchanged.
+
+- 01b1a62: API images ship a bundled `scripts/admission-settings.ts` command that prints the parsed user-admission policy and deployment revision, so deployment verifiers can prove the serving policy now that the API runtime is bundled and `@opengeni/config` is no longer importable by name.
+- 8d3b860: Bundled database commands in server images run only when executed directly. Importing a bundled command module, for example from an image smoke check, no longer runs migrations or other commands against whatever database the environment points at.
+- a8f67a7: Fix bundled database commands (migrate, provision-roles, session-content-compaction) silently doing nothing in release images: code splitting moved their `import.meta.main` entry into a shared chunk, so the release assembly now calls each command's exported runner explicitly and refuses to build an entry that would no-op.
+- b194e31: Agent capability catalog search now tolerates near spellings, so "Wispr" or "Wisprflow" finds a custom MCP named "Whisprflow". Typo-only hits rank below exact, prefix and substring hits and carry `approximate: true`. Custom catalog entries without a provider domain are also matched by their endpoint's registrable domain (for example `api.wisprflow.ai` matches `wisprflow.ai`). When nothing matches, `capability_catalog_search` returns the closest catalog names as labelled `suggestions` instead of a bare empty result, so the agent does not conclude an existing integration is missing.
+- 15c5c35: A request refused because its agent-attempt credential is no longer valid now carries a detail code (for example `agent_attempt_caller_stale` when a process keeps using the credential after its turn ended), so request telemetry reports why instead of "unclassified".
+- 35fb6fd: Remove the legacy Claude subscription runtime now that Claude runs on the shared subscription core. Claude turns, refusals, waits and readiness use only the shared core; without the Claude cutover a Claude turn fails closed instead of using the old account pool. Organization Claude custom models are offered and admitted only while the shared core serves the model in that workspace (an enabled cutover and a usable shared Claude connection that allows it); otherwise they are refused. Workspace-scoped Claude custom models are not offered for new selections on the shared core, and their admission check follows the same core rule. A single Claude model call (the API model-calls endpoint) fails closed with capacity unavailable in every case, including after the cutover, until the shared core serves it. Until the shared core serves them, the Claude account, usage, sign-in, setup-token and access-policy endpoints keep their permission checks (the strictest workspace check where the old check depended on the account's scope) and then answer 503 instead of reading or writing the old account pool. The no-legacy runtime check now covers Claude.
+- bfed4f1: Web client error reports now say why a page failed, not only where: the beacon carries the error's name, message and stack, plus React's component stack for a render failure. The browser and the API apply one shared projection that removes URL query strings, redacts obvious credentials and bounds each field, and the API logs the result as `clientErrorName`, `clientErrorMessage`, `clientErrorStack` and `clientComponentStack` on the `Web client error reported` line.
+- c62a3ac: A key-only deployment (configured access mode) can now connect a Claude subscription to its workspace with the deployment key, from the console or the API. Before, the sign-in asked for an Opengeni browser sign-in that this mode doesn't have. Agents and requests without the exact key are still refused, and managed and local deployments are unchanged.
+- 496ce55: Manage each connected account on a connector page. OAuth start accepts `newAccount: true` to sign in a further account instead of re-authorizing the first one. The web connector page now offers a per-account Reconnect (only for accounts that need it), a confirmed Remove that deletes exactly that account, and an Add account action beside the list. Accounts whose sign-in never finished are labelled as such. The header action that only disables the connector now reads "Turn off for this workspace".
+- 3962da3: Sessions keep one subscription account choice per provider on the shared subscription core, as they did before it. Work on one provider's model never reads, replaces or clears another provider's pinned account, so switching back to the pinned provider's model uses the pinned account again, and a session can hold a pin for each provider. Choosing "automatic" for Codex changes only the Codex choice. A pinned account that was deleted now waits for a new choice instead of silently pinning a different account. Migration 0733 rekeys the bindings table in a rolling-compatible way; a session still holds one binding until the next drained provider cutover.
+
+  The neutral model-account API lists all provider choices in `bindings`. Choosing an account changes only that provider's choice. Returning to automatic accepts an optional `provider` to clear only that choice; omitting it resets all explicit choices, preserving the original whole-session action.
+
+- c7b786b: A key-only deployment's operator can now save, remove, approve and move Skills with the deployment key. Such deployments have no sign-in, so a request made with the key itself counts as the person; agents and signed attempts stay refused.
+- 225fcfc: Docker sandbox: draining an idle box to cold no longer leaves its whole host workspace directory (`openai-agents-docker-sandbox-*`) behind. After the workspace archive is published and the exact container is removed, the drain re-checks its ownership evidence and deletes the directory, including read-only Go module caches. A retry after a crash finishes without recapturing, and `bun run dev:clean` also removes the workspace directories of the sandbox containers it removes. Object-storage restore downloads now use owner-marked temporary directories as well, so a process killed mid-download leaves nothing behind once the next process starts.
+- ce7b403: Track built-in tool default inheritance independently of connector selection. New sessions and explicit resets follow current workspace defaults on the next attempt, while explicit lists, exclusions, deployment ceilings, capability restrictions, and frozen catalogs remain authoritative. A rolling migration adopts default intent only for older root sessions whose latest retained policy event proves a full reset and still matches their stored selection; ambiguous legacy selections remain pinned.
+- f0244af: Forking a chat at a message that cannot be a fork point now says why, instead of the generic "Invalid session tenancy request". The fork routine's four boundary refusals (not a user or agent message, the message's history was superseded by compaction, the history up to it was compacted, or it splits an unfinished tool exchange) reach `SessionTenancyInvalidRequestError.forkPointRefusal`. The API returns them as 422 `validation_failed` with `details.reason` `fork_point_<reason>`, and the fork dialog explains each one. Other invalid requests keep the generic error.
+- 3558595: The GitHub connection pages now render in the web app's own Inter and DM Sans fonts (inlined, no external requests), so the Opengeni wordmark and text match the app on machines without those fonts installed.
+- 8751a2e: Show the GitHub mark on every GitHub connection page, next to the Opengeni mark, in light and dark mode. The Opengeni Lens GitHub pages now use the same design.
+- 1eda9e3: Restyle the GitHub connection pages (account chooser, connected, pending and connect-failure pages) to match the Opengeni web app, with light and dark mode and a mobile layout.
+- 121f6ed: A new chat without a goal no longer logs failed `GET .../goal` 404s in the browser console. `GET /v1/workspaces/:workspaceId/sessions/:sessionId/goal?absent=null` answers 200 `null` for a goal-less session (without the opt-in the 404 is unchanged, and a missing session is always 404). The SDK adds `findGoal`, which sends the opt-in and resolves `null`; the session proxy forwards it. `useGoal` reads through `findGoal` when the client has it (falling back to `getGoal` and its absorbed 404 otherwise), and no longer re-reads a goal-less session when the stream's opening events race the first read, so an embedded Opengeni chat makes one successful goal read per new chat. A goal set later still arrives through its `goal.*` event.
+- 2654237: Fix Google Drive publishing setup failing with `invalid_scope` when the account already has other Google permissions. Keep the folder picker limited to `drive.file`, then use a separate OAuth step to preserve source-read access before enabling publishing.
+- b061e43: An idle deployment no longer starts a Temporal workflow on every tick of the session wake dispatcher (every 10 seconds), Knowledge indexing (every 15 seconds) and site-auth maintenance (every minute). The control worker now runs these cadences itself: each tick is one cheap read-only check of whether the job's claim could find work, and the workflow starts only when it could. Periods and claims are unchanged, and a failed check still starts the workflow. The old per-tick Temporal Schedules are deleted at startup; an older release recreates them, so rollback keeps working. Immediate wake requests now signal-with-start one fixed dispatcher execution, and a request that arrives during a sweep runs exactly one more sweep. New migration 0730 adds the read-only checks with the same owner and grants as the claims they preview. New metrics: `opengeni_maintenance_cadence_ticks_total{job,outcome}` and `opengeni_maintenance_cadence_last_success_timestamp_seconds{job}`. `registerKnowledgeIndexingSchedule`, `registerSiteAuthMaintenanceSchedule` and `registerSessionWorkflowWakeDispatcherSchedule` are replaced by `startInternalMaintenanceCadences`.
+- 8e7cb8d: Allow release bundlers to remove unused contract validators, including their nested schema construction. Used schemas remain eager, retain their exact validation and JSON-schema behavior, and add no first-request initialization work.
+- 72b0312: MCP OAuth always sends providers the short reference `state`, so connecting Stripe and other providers that cap `state` length works on every deployment. `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED` is retired: it is ignored with a one-time startup warning and can be removed from deployment configuration.
+- bc40348: Tell the model who sent each person's message. Members of a shared workspace talk to the same agents, and the model previously saw only the message time, so it could mistake one member for another. A claimed human message's metadata part now reads `[Message sent <time> by <sender>]`, using the sender label frozen with the turn at acceptance (normally the member's email). The label is made safe for the one-line part: no brackets or line breaks, at most 200 characters. Agent, service and scheduled turns carry no sender. Realtime voice requests and the end-of-call transcript handoff now carry the caller's own label instead of the generic "Realtime" label when the request has one.
+- 5eb1c32: Choosing a session's model account is now classified internally as the provider-neutral `session.model_account.write` operation, for the neutral `PUT .../model-account` route and the older Codex pin route alike. Hosts receive the older name `session.codex_account.write` by default, preserving existing allow/deny policies. After migrating policy keys, hosts opt in to neutral delivery with `SessionAuthorizationPort.capabilities.modelAccountOperation: true`. Both names remain valid; `canonicalSessionAuthorizationOperation` and `SESSION_AUTHORIZATION_OPERATION_ALIASES` normalize old names, but input normalization alone does not migrate policy keys. Each authorization calls the host once, never retrying a denial under another alias. Turning a person's personal-fallback opt-in on now wakes only that person's own waiting turns instead of every waiting turn in the organization, because no other session can place on their personal accounts.
+- da01634: Add a provider-neutral explicit model-account choice for sessions and a person's own personal-fallback opt-in. `GET`/`PUT /v1/workspaces/{workspaceId}/sessions/{sessionId}/model-account` lists the workspace's shared accounts and the caller's own personal accounts with whether each can be chosen, and sets or clears an explicit choice; the database still decides, so a personal account is accepted only for its owner's private session or Personal workspace while personal accounts are allowed. An ownerless session lists every account as not choosable (`session_has_no_owner`). `GET`/`PATCH /v1/organizations/{organizationId}/me/model-account-preferences` reads and changes only the caller's own opt-in; turning it on wakes waiting turns so they can fall back at once. The SDK gains `getSessionModelAccount`, `setSessionModelAccount`, `getModelAccountPreferences` and `updateModelAccountPreferences`. Rolling migration 0729 adds the owner's own access to their preferences row and nothing else. `isCodexAccountEvent` in `@opengeni/react` also matches `model_account.selection.changed`.
+- 0152516: Add low-cardinality money and per-model usage metrics: `opengeni_model_responses_total{provider,model,priced}`, `opengeni_model_tokens_total{provider,model,type}` (input, cached input, cache write, output, reasoning), `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}` (estimated upstream cost), `opengeni_model_credits_charged_micros_total{provider,model,funding}` (credits debited, promotional grant vs general credit), and paid credit purchases `opengeni_credit_purchases_total{mode}`, `opengeni_credit_purchased_micros_total{mode}` and `opengeni_credit_purchase_paid_usd_micros_total{mode}`. `model` is the bounded deployment catalog product id; account and user ids are never labels. A raced Stripe checkout delivery no longer double-counts `opengeni_credit_micros_total{kind="topup"}`.
+- eb68b58: Notification webhooks now carry the notification itself. `session.notification.posted` deliveries include its bounded `key`, `title`, `subtitle`, `body`, `facts`, `link`, `urgency`, `replaced`, and member `recipientSubjectId`/`sender`, and `session.notification.withdrawn` includes its `key`, on both workspace and organization lanes. Other event fields are never copied. When Opengeni notified nobody because the session works for no person (an API key or service started it), the event and its webhook carry `undeliveredReason: "no_human_recipient"`, so an integration can deliver it itself.
+
+  Deployment policy no longer narrows an explicit request silently. A resolved agent configuration now reports `unavailableReasons` next to `unavailable`, naming why each capability is off. Updating a session's tool policy with first-party tools the deployment disables now fails with 422, naming every such tool and the allowed set; tools echoed from the session's stored selection or defaults are still filtered as before, so a later policy change never blocks an unrelated edit.
+
+- 86797dd: Importing a workspace DOCX, XLSX, or PPTX file as an editable document, spreadsheet, or presentation no longer fails with 409 "The workspace file changed during import." `headFile` now reports the object version token (S3 ETag, Azure Blob etag, GCS generation) that the import's before/after consistency check requires, on every storage backend.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- 7b825ec: Organization administrators can see and redeem Codex usage limit resets for organization-managed subscription accounts on the organization Models account page, including accounts that serve no workspaces. Organization account rows show the reset count. Redemption stays a signed-in human administrator action; agents and non-administrators are refused.
+- b4d2829: Asking for a computer or browser on a Connected Machine the session is not placed on now names the exact fix in the error: switch with sandbox_swap to that machine, retry, and swap back when done.
+- ae01a91: An Only-me session can now share a sandbox or Connected Machine with other sessions. Who can read a conversation and who can use a box are separate: making a session private, or creating one private, no longer requires its own sandbox group, and its conversation, events, command records, terminals and stream access stay scoped to its audience while files on the box stay as shared as the box. Migration 0739 (rolling) drops the singleton-group requirement from visibility transitions and whole-session forks, counts only sandbox access attributed to the session itself as a quiescence blocker, and lets a top-level private create join a group its creator can already see. Effective control now walks the complete ancestry, so a paused private parent still pauses its workspace-visible children, shown to other members only as "An ancestor session". Variable Set changes still require a singleton group, now counted across every member including private ones, and the stream-capabilities shared-exposure flag counts every session on the box while listing only the ids the caller can read.
+- 9a7c8fe: Sites published from an "Only me" chat are readable by the whole workspace again. The private-chat row policy had also been applied to Site versions and Site history through their source-chat column, so other members saw the Site listed but could not open any version. Versions and history now follow workspace access only; the source chat, turn and attempt stay redacted for anyone who cannot read that chat. A Site with no version the viewer can open now shows a clear message with Retry instead of loading forever.
+- 9ea1ad6: Ship API and worker containers with verified frozen runtime dependency closures instead of the development install and checkout. Preserve native parsing/image bindings, conversion tools, signed installers, Skill assets, workflows, migration commands and the stock catalog-import Job. Defer Temporal's source-workflow compiler until compilation is requested, avoiding its retained idle graph for prebuilt workflow hosts.
+- 536dc1d: Tests for manual schedule runs stub the visibility-checked schedule lookup the trigger route now uses.
+- fe9bbb4: Secret references follow one rule in every tool call: a reference resolves where it is written, including Opengeni's own tools such as admin actions, messages, schedules and goals, and an escaped reference passes on unresolved for later work. Interaction tools (resolved by the API at dispatch) and the secret tools, whose arguments name references, keep their arguments unchanged. The agent instructions and the secrets skill describe the escape for handing a reference on.
+- d1796f9: Load only the selected object-storage SDK, preparing it during worker startup rather than on the first activity. Preserve synchronous storage construction and avoid retaining unused cloud-provider SDK modules at idle.
+- a10dd2d: Keep only the action catalog's request validators in the organization MCP schema lookup, instead of retaining the entire contracts namespace. Preserve every action's schema object, JSON-schema output, description, and permission handling.
+- 5cb6d71: `session_create` now advertises in `firstPartyMcpTools` only the deployment-allowed tools the calling session actually holds, instead of the whole first-party catalog, and its description tells agents to omit the field in almost every case. Its `agent`, `goal` and `machineTarget` object inputs also accept the same object sent as a JSON string, validated exactly like the object form; anything else is still rejected.
+
+  Creating a session with first-party tools the deployment disables now names every such tool and the allowed set, instead of only the first one, and checks the caller's own tool names before legacy aliases expand them. A capability unavailable because its tools are not allowed now names those tools. `notify_user` results report `undeliveredReason: "no_human_recipient"` when no one was notified.
+
+- b63b529: `session_events` returns a named tool's latest result in one call (`toolName` with `includeOutput`, up to three calls per page), and its refusals for a corrupted cursor, a guessed event type, or selectors on the wrong view now name the corrected call. `callId`/`toolName` sent with a non-tools view read `view: "tools"` and report it in `notice`.
+- 726bdc1: Add `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills` and SDK `updateSessionSkills` to replace the Skills a session carries itself. It uses the session's tool-policy version, applies from the next turn and records a `session.skills.updated` event; an agent can only remove Skills.
+- 6d97d6a: Pinning a Site checks that the caller can see it with a single lookup (`isWorkspaceArtifactVisible`) instead of loading the Site's full history, and the artifact catalog route tests now cover the Site audience: catalog Sites carry `visibility`, and pinning someone else's Only me Site answers 404 without writing a pin.
+- 001977c: Remove LibreOffice, OCR language data and the unused native Documents parser
+  closure from the API image. Documents uploads continue to index on the existing
+  control worker, whose converter dependencies are unchanged. Keep FFmpeg local to
+  voice transcription and fonts available for native artifact rendering; no new
+  process or network hop is introduced.
+- 9087c66: Signed setup state now verifies on every API replica. Without an explicit `OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET`, each process used its own random key, so a Codex sign-in (or GitHub App setup) whose next request reached another replica failed with "state is invalid or expired". The key is now derived from an existing stable deployment secret, and a per-process key is used, with a startup warning, only when none is configured.
+- a9a0395: Add a stateless OpenAI-compatible Chat Completions endpoint for single model calls without tools (`POST /v1/workspaces/:workspaceId/chat/completions`, `GET /v1/workspaces/:workspaceId/models`). Calls route through the workspace model catalog, including Codex, Claude and SuperGrok subscription accounts, admit on a positive credit balance, and settle actual usage once per request. Session titles use the same single-call path and stay on the turn's subscription account (Codex titles with `codex/gpt-6-luna`, Claude with Haiku 5.5).
+- 35fb6fd: Once a deployment records the Claude cutover, organization administrators can refresh an organization Claude account's usage live from organization settings, and people can refresh their own personal Claude account's usage live from their Personal workspace, as before the move to the shared subscription core. Nothing changes until that cutover.
+- ab4378c: Claude account routes, setup-token and browser sign-in, and Claude access settings can now run on the shared subscription core once a deployment records the Claude cutover. Until then every Claude, SuperGrok and Codex route answers exactly as before. A reconnect on the core replaces exactly the account and version it names.
+- 733f01d: Claude account usage, model readiness and organization custom-model admission can now run on the shared subscription core, the same runtime Codex uses, once a deployment records the Claude cutover. Until then every Claude and Codex route, model listing and admission answers exactly as before. Usage decoding can now receive the models a connection serves.
+- 347b581: SuperGrok account routes, access settings and connection writers can now run on the shared subscription core, the same runtime Codex uses, once a deployment records the SuperGrok cutover. Until then every SuperGrok and Codex route answers exactly as before. Accepted work also writes the newer authority record for every registered provider and copies its compatibility record on every path that carries authority forward, and a personal connection can record its credential format.
+- 35fb6fd: Remove the legacy SuperGrok subscription runtime now that SuperGrok runs only on the shared subscription core. The old SuperGrok account repository, its waiters, leases, pins, legacy quota refresh, organization surface, API authorization helper, legacy video token envelope and shadow comparison are deleted; a SuperGrok request that does not reach the shared core fails closed, as it does during maintenance. The stateless Chat Completions API (`GET /v1/workspaces/:workspaceId/models`, `POST .../chat/completions`) no longer lists or serves SuperGrok subscription models, because the shared core's single-call operation is Codex-only; a request for one answers `model_not_found`. A SuperGrok video operation whose stored credential is not a shared-core connection reference now ends at its recovery deadline instead of retrying. The legacy tables stay read-only. Claude is unchanged. Rolling change; no migration.
+- 35fb6fd: Let a personal subscription account's owner, when also an organization administrator,
+  explicitly share that account through the existing access editor. The form explains
+  consumer-plan limits and requires a chosen workspace reach before sharing. Other
+  administrators cannot discover or convert someone else's personal account.
+
+  Migration 0752 adds the owner- and version-fenced transition. The connection identity,
+  encrypted credentials, quota, pins and accepted history stay intact. Old personal
+  resource authority is revoked, never reinterpreted as shared authority. Conversion
+  and the requested reach commit together; stale versions, conflicting upstream
+  identities and invalid reach leave the personal account unchanged.
+
+- 35fb6fd: On the shared subscription core (still inactive for SuperGrok), a person whose SuperGrok account is personal now shows as connected in SuperGrok status. Only the signed-in owner (or an agent with their full access) gets a live check of it there. Before the owner's own private turn treats their personal account as still exhausted, its billing is re-checked; no other turn re-checks it.
+- 8906166: Targeted tool resolution, invocation, approvals and Site manifests evaluate one live fence per physical provider request instead of re-running nested caller, Site, registry, account and policy checks. The fence reads only the selected rows in a `statement_timeout`-bounded transaction, re-reads an organization key without a lock or write, and reads a pinned Site once per evaluation however many tools it pins. Authority that cannot be read within 2.5 seconds is answered as 503 `upstream_unavailable` with `details.code: "tool_authority_unavailable"` instead of a silently missing tool (404). `Server-Timing` adds `gw-fence`.
+- f039388: Offer the 1Password setup card from agent discovery when no account is connected.
+  Keep 1Password visible among built-in connections and route its catalog and chat
+  actions to the protected Secrets service-account and vault-selection flow.
+- 0b5bf2c: Tell agents that the artifactId returned by `sandbox_file_publish` is also the file's workspace File ID, so a published sandbox file can be passed straight to a browser upload action.
+- e8a5b0a: A shared workspace's administrators can now connect subscription accounts (Codex, Claude, SuperGrok and API keys) for their own workspace without being organization administrators, and remove them again. The account belongs to the organization, serves only that workspace, never reaches Personal workspaces, and stays visible to organization owners and admins, who alone widen its scope. Once an account serves another workspace, only an organization administrator can remove it. Rolling migration 0777 adds the matching insert and read policies and lets the disconnect routine accept the managing workspace's administrator for the workspace's own account. The Models page now offers Codex to workspace administrators and says who the account is for.
+- c245c16: Workspace deletion no longer deadlocks with ordinary writers in the same organization (previously a retryable 503 `DATABASE_CONTENTION`): it locks the organization row `FOR NO KEY UPDATE`, takes the target's workspace-control prefix before its workspace row, and locks sibling workspace rows only `FOR KEY SHARE`. A deletion blocked by retained editable documents, spreadsheets, or presentations now names them in its 409 message.
+- Updated dependencies [fc57bd2]
+- Updated dependencies [04ebc42]
+- Updated dependencies [ab03f44]
+- Updated dependencies [dbb2cb6]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [12bcb8e]
+- Updated dependencies [14a9340]
+- Updated dependencies [608e907]
+- Updated dependencies [c2f4153]
+- Updated dependencies [d4c17b3]
+- Updated dependencies [de2d721]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [0380bc5]
+- Updated dependencies [9eccfe5]
+- Updated dependencies [7ae7683]
+- Updated dependencies [931ac51]
+- Updated dependencies [055015d]
+- Updated dependencies [b969da0]
+- Updated dependencies [8df9e66]
+- Updated dependencies [4b2d2c5]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [4cccd33]
+- Updated dependencies [1756cfe]
+- Updated dependencies [262e6b5]
+- Updated dependencies [40e2542]
+- Updated dependencies [90f297f]
+- Updated dependencies [b194e31]
+- Updated dependencies [6861501]
+- Updated dependencies [cd6bf1d]
+- Updated dependencies [91c7c0e]
+- Updated dependencies [e8a3d83]
+- Updated dependencies [63140a3]
+- Updated dependencies [69a3f42]
+- Updated dependencies [f86c658]
+- Updated dependencies [ab1ea00]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [f5ad69f]
+- Updated dependencies [32528f8]
+- Updated dependencies [bfed4f1]
+- Updated dependencies [6372501]
+- Updated dependencies [4532435]
+- Updated dependencies [92b6aef]
+- Updated dependencies [851cbdc]
+- Updated dependencies [efb4c0c]
+- Updated dependencies [590e42a]
+- Updated dependencies [d393b9b]
+- Updated dependencies [7e59f42]
+- Updated dependencies [e112198]
+- Updated dependencies [6d5f287]
+- Updated dependencies [0eae048]
+- Updated dependencies [17b262f]
+- Updated dependencies [124bf22]
+- Updated dependencies [c9f2c11]
+- Updated dependencies [1d3019e]
+- Updated dependencies [f96605f]
+- Updated dependencies [715e812]
+- Updated dependencies [496ce55]
+- Updated dependencies [21d64c1]
+- Updated dependencies [4943abb]
+- Updated dependencies [6a237fc]
+- Updated dependencies [aab88de]
+- Updated dependencies [5b31ec7]
+- Updated dependencies [3822e5f]
+- Updated dependencies [c47d199]
+- Updated dependencies [3962da3]
+- Updated dependencies [a90e943]
+- Updated dependencies [e656292]
+- Updated dependencies [c4dd318]
+- Updated dependencies [4192cb9]
+- Updated dependencies [225fcfc]
+- Updated dependencies [4c42f16]
+- Updated dependencies [2be7683]
+- Updated dependencies [adf96dc]
+- Updated dependencies [bc599cc]
+- Updated dependencies [aeabfec]
+- Updated dependencies [129ead3]
+- Updated dependencies [ce7b403]
+- Updated dependencies [f0244af]
+- Updated dependencies [445baf4]
+- Updated dependencies [7ae7683]
+- Updated dependencies [2becf01]
+- Updated dependencies [5b4a738]
+- Updated dependencies [9712020]
+- Updated dependencies [5baab79]
+- Updated dependencies [3e00c37]
+- Updated dependencies [b061e43]
+- Updated dependencies [17374c1]
+- Updated dependencies [334c470]
+- Updated dependencies [296e862]
+- Updated dependencies [96d7167]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [0c6f5c4]
+- Updated dependencies [9a84080]
+- Updated dependencies [e29b641]
+- Updated dependencies [c13d080]
+- Updated dependencies [0a743b9]
+- Updated dependencies [c878320]
+- Updated dependencies [061ae01]
+- Updated dependencies [b55185c]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [6313dd8]
+- Updated dependencies [c7165c2]
+- Updated dependencies [945490f]
+- Updated dependencies [4d8eb5e]
+- Updated dependencies [f718376]
+- Updated dependencies [8e878ac]
+- Updated dependencies [a876a1d]
+- Updated dependencies [757c3d5]
+- Updated dependencies [c502add]
+- Updated dependencies [0001298]
+- Updated dependencies [d842107]
+- Updated dependencies [72b0312]
+- Updated dependencies [c43f174]
+- Updated dependencies [9701372]
+- Updated dependencies [bc40348]
+- Updated dependencies [4e4507c]
+- Updated dependencies [6819496]
+- Updated dependencies [d15e8e9]
+- Updated dependencies [5eb1c32]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [0152516]
+- Updated dependencies [4cb80a9]
+- Updated dependencies [9ffe528]
+- Updated dependencies [c7f468c]
+- Updated dependencies [4435af0]
+- Updated dependencies [560acdd]
+- Updated dependencies [259d77e]
+- Updated dependencies [eb68b58]
+- Updated dependencies [86797dd]
+- Updated dependencies [6b506e5]
+- Updated dependencies [6a510ec]
+- Updated dependencies [945c247]
+- Updated dependencies [906d3c2]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [42c87e4]
+- Updated dependencies [1da17d9]
+- Updated dependencies [6960770]
+- Updated dependencies [4c73e2e]
+- Updated dependencies [9a252af]
+- Updated dependencies [7b825ec]
+- Updated dependencies [a4f19c2]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [55eb9b0]
+- Updated dependencies [32851ac]
+- Updated dependencies [a15f487]
+- Updated dependencies [63bf721]
+- Updated dependencies [bd61cb7]
+- Updated dependencies [d060b10]
+- Updated dependencies [3a4a435]
+- Updated dependencies [83af41e]
+- Updated dependencies [ae01a91]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [1489689]
+- Updated dependencies [78c28ca]
+- Updated dependencies [71c42bf]
+- Updated dependencies [9a7c8fe]
+- Updated dependencies [5d42a57]
+- Updated dependencies [6d5b2ba]
+- Updated dependencies [a9f5b24]
+- Updated dependencies [a390b9e]
+- Updated dependencies [7b51a1a]
+- Updated dependencies [db51750]
+- Updated dependencies [10624f7]
+- Updated dependencies [2fb5ec6]
+- Updated dependencies [7f257db]
+- Updated dependencies [70332a4]
+- Updated dependencies [feb1737]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [b90e5fa]
+- Updated dependencies [d2abf63]
+- Updated dependencies [fe9bbb4]
+- Updated dependencies [322f26c]
+- Updated dependencies [945c247]
+- Updated dependencies [d1796f9]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [7926f10]
+- Updated dependencies [1041a61]
+- Updated dependencies [5cb6d71]
+- Updated dependencies [732a788]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [132684f]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [09928dc]
+- Updated dependencies [dde17a8]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [6d97d6a]
+- Updated dependencies [bc1f47f]
+- Updated dependencies [f4b1061]
+- Updated dependencies [3179009]
+- Updated dependencies [11946c9]
+- Updated dependencies [a9a0395]
+- Updated dependencies [7ce535f]
+- Updated dependencies [d7be9e8]
+- Updated dependencies [2be8529]
+- Updated dependencies [340472b]
+- Updated dependencies [90561db]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [df83216]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [ab4378c]
+- Updated dependencies [733f01d]
+- Updated dependencies [0613dca]
+- Updated dependencies [f7c7eec]
+- Updated dependencies [ce61681]
+- Updated dependencies [d94b666]
+- Updated dependencies [43f9b03]
+- Updated dependencies [347b581]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [b6ce509]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [1727b17]
+- Updated dependencies [a34d8f5]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [fe01a43]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [9975001]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [5a4a742]
+- Updated dependencies [e712954]
+- Updated dependencies [8906166]
+- Updated dependencies [1382728]
+- Updated dependencies [2889108]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [fa73fc0]
+- Updated dependencies [443ac28]
+- Updated dependencies [dd82a5c]
+- Updated dependencies [0bc3889]
+- Updated dependencies [003cd3d]
+- Updated dependencies [0b5bf2c]
+- Updated dependencies [4750ce7]
+- Updated dependencies [51c2be9]
+- Updated dependencies [4e19def]
+- Updated dependencies [4b568b4]
+- Updated dependencies [d7b947e]
+- Updated dependencies [aa0f483]
+- Updated dependencies [e8a5b0a]
+- Updated dependencies [a91718c]
+- Updated dependencies [c245c16]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/core@2.0.0
+  - @opengeni/interaction@2.0.0
+  - @opengeni/config@2.0.0
+  - @opengeni/runtime@2.0.0
+  - @opengeni/agent-proto@2.0.0
+  - @opengeni/db@2.0.0
+  - @opengeni/observability@2.0.0
+  - @opengeni/codex@2.0.0
+  - @opengeni/events@2.0.0
+  - @opengeni/storage@2.0.0
+  - @opengeni/artifact-tool@2.0.0
+  - @opengeni/documents@2.0.0
+  - @opengeni/tool-gateway@2.0.0
+  - @opengeni/codemode@2.0.0
+  - @opengeni/vaults-onepassword@2.0.0
+  - @opengeni/vaults@2.0.0
+  - @opengeni/xai-subscription@2.0.0
+  - @opengeni/capabilities@2.0.0
+  - @opengeni/github@2.0.0
+  - @opengeni/network@2.0.0
+
 ## 1.4.4
 
 ### Patch Changes

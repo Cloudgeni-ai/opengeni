@@ -56,4 +56,24 @@ describe("artifact outbox dispatcher PostgreSQL posture", () => {
       );
     }
   }, 30_000);
+
+  test("ignores PUBLIC-readable extension relations and names any other accessible relation", async () => {
+    if (!available || !shared || !dispatcher) return;
+    await shared.admin.unsafe("create extension if not exists pg_stat_statements");
+    await shared.admin.unsafe("create view posture_probe_view as select 1 as probe");
+    await shared.admin.unsafe("grant select on posture_probe_view to public");
+    try {
+      await expect(assertDedicatedOutboxDispatcherDatabaseRole(dispatcher.db)).rejects.toThrow(
+        /unsafe role posture: it can directly access [a-z_]+\.posture_probe_view;/,
+      );
+      await shared.admin.unsafe("drop view posture_probe_view");
+      // pg_stat_statements' views are granted to PUBLIC but belong to the extension.
+      await expect(
+        assertDedicatedOutboxDispatcherDatabaseRole(dispatcher.db),
+      ).resolves.toBeUndefined();
+    } finally {
+      await shared.admin.unsafe("drop view if exists posture_probe_view");
+      await shared.admin.unsafe("drop extension if exists pg_stat_statements");
+    }
+  }, 30_000);
 });

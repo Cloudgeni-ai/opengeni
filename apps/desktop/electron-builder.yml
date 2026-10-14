@@ -1,0 +1,88 @@
+# Packaging for the Opengeni desktop app. scripts/build.ts inlines everything
+# but Electron into dist/ and writes a dependency-free package.json there, so
+# dist/ is the whole app archive.
+appId: ai.opengeni.desktop
+productName: Opengeni
+copyright: Copyright © Opengeni
+electronVersion: 44.7.2
+directories:
+  output: release
+  buildResources: resources
+  app: dist
+files:
+  - "**/*"
+  - "!**/*.map"
+  - "!**/node_modules/**"
+npmRebuild: false
+nodeGypRebuild: false
+asar: true
+electronLanguages: [en]
+protocols:
+  - name: Opengeni
+    schemes: [opengeni]
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: false
+# A publish target makes electron-builder write latest-mac.yml. The app sets its
+# real feed at runtime: the newest desktop-v release (see src/main.ts).
+publish:
+  provider: generic
+  url: https://github.com/Cloudgeni-ai/opengeni/releases
+mac:
+  category: public.app-category.productivity
+  artifactName: Opengeni-${version}-mac.${ext}
+  target:
+    - target: dmg
+      arch: [universal]
+    - target: zip
+      arch: [universal]
+  icon: resources/icon.png
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  minimumSystemVersion: "12.0"
+  extendInfo:
+    NSMicrophoneUsageDescription: Opengeni uses the microphone when you dictate or talk to an agent.
+    NSCameraUsageDescription: Opengeni uses the camera when you share a photo with an agent.
+  notarize: true
+dmg:
+  writeUpdateInfo: false
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+  icon: resources/icon.png
+nsis:
+  oneClick: true
+  perMachine: false
+  artifactName: Opengeni-${version}-windows-${arch}.${ext}
+linux:
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]
+    - target: rpm
+      arch: [x64, arm64]
+  icon: resources/linux-icons
+  category: Development
+  executableName: opengeni
+  artifactName: Opengeni-${version}-linux-${arch}.${ext}
+  synopsis: Work with your agents from the desktop
+  description: Opengeni for Linux. Chat with agents, follow sessions and the inbox, and let agents use this computer.
+  # Debian packages need a maintainer; there is no maintainer mailbox.
+  maintainer: Opengeni
+  vendor: Opengeni
+  desktop:
+    entry:
+      Name: Opengeni
+      Comment: Work with your agents
+      MimeType: x-scheme-handler/opengeni;
+      StartupWMClass: opengeni

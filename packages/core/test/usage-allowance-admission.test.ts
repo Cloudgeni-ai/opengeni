@@ -9,6 +9,9 @@ import {
   retryFailedSession,
 } from "../src/domain/sessions";
 import type { ApiRouteDeps } from "../src/dependencies";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";

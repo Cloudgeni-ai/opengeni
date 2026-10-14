@@ -1,6 +1,7 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -843,6 +844,9 @@ export function postClaimDatabaseRecoveryFailure(input: {
         }
       : {}),
   };
+  // Known usage whose receipt write failed travels with the exact attempt.
+  const sessionUsageReceipts = heldSessionUsageReceiptsForTurn(input.turnId);
+  if (sessionUsageReceipts.length > 0) detail.sessionUsageReceipts = sessionUsageReceipts;
   return ApplicationFailure.create({
     message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
     type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
@@ -1202,6 +1206,11 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
+  // The worker's own included-usage refusal (usage exhausted or unverifiable)
+  // happens before dispatch, so the checkpoint request was never sent. It
+  // settles exactly like the same refusal on an ordinary request: recorded
+  // against the account, then the same turn re-places or waits for capacity.
+  if (findCodexCreditPolicyError(error)) return true;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
   // A Claude subscription refusal (rate limit or reconnect) on the checkpoint
   // request recovers exactly like one on an ordinary request: failure
@@ -1354,9 +1363,38 @@ export function collectErrorStrings(value: unknown, seen = new WeakSet<object>()
  */
 export const STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE =
   "unable to connect. is the computer able to access the url?";
+/** Bun's exact fetch text when an upstream drops an open connection. */
+export const STATUSLESS_UPSTREAM_SOCKET_CLOSED_MESSAGE =
+  "the socket connection was closed unexpectedly. for more information, pass `verbose: true` in the second argument to fetch()";
+const STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGES = new Set([
+  STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE,
+  STATUSLESS_UPSTREAM_SOCKET_CLOSED_MESSAGE,
+]);
 
 export function isExactStatuslessUpstreamConnectivityMessage(message: string): boolean {
-  return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
+  return STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGES.has(message.trim().toLowerCase());
+}
+
+const TRANSIENT_TRANSPORT_CODE = /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i;
+
+/**
+ * A network fault code anywhere on the Error.cause chain. SDK and runner
+ * wrappers often keep the transport error only as `cause`, so the outermost
+ * error's own `code` is not enough.
+ */
+function transientTransportCode(error: unknown): string | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { code?: unknown; cause?: unknown };
+    if (typeof value.code === "string" && TRANSIENT_TRANSPORT_CODE.test(value.code)) {
+      return value.code;
+    }
+    current = value.cause;
+  }
+  return undefined;
 }
 
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
@@ -1425,13 +1463,7 @@ export function isTransientProviderError(error: unknown): boolean {
   if (status !== undefined && Number.isFinite(status)) {
     return status >= 500 && status < 600;
   }
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
-  if (code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)) {
-    return true;
-  }
+  if (transientTransportCode(error)) return true;
   const message = error instanceof Error ? error.message : String(error);
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;

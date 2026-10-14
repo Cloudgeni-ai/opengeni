@@ -199,8 +199,8 @@ export function useOrganizationCodexSubscriptions({
         }
       },
       allocatorEnabled
-        ? `${codexAccountName(account)} is available for new work`
-        : `${codexAccountName(account)} is paused for new work`,
+        ? `${codexAccountName(account)} enabled`
+        : `${codexAccountName(account)} disabled`,
     );
 
   const setExtraCredits = (account: CodexAccount, extraCreditsEnabled: boolean) =>

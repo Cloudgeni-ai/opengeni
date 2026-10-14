@@ -159,7 +159,7 @@ fn spec_for(install_scope: ServiceScope) -> Result<ServiceSpec, String> {
     })
 }
 
-/// Upgrades the exact old OpenGeni-owned systemd unit after a verified binary
+/// Upgrades the exact old Opengeni-owned systemd unit after a verified binary
 /// self-update. This runs before any host-work admission. It never adopts a
 /// custom unit: live manager identity, canonical fragment path, exact ExecStart,
 /// and byte-identical legacy generated content must all agree.
@@ -380,7 +380,7 @@ fn remove_legacy_opengeni_control_dropins(install_scope: ServiceScope) -> Result
             if legacy_opengeni_control_dropin(name, &contents) {
                 std::fs::remove_file(&path)
                     .map_err(|error| format!("remove {}: {error}", path.display()))?;
-                info!(path = %path.display(), "removed an obsolete OpenGeni-owned aggregate-limit reset");
+                info!(path = %path.display(), "removed an obsolete Opengeni-owned aggregate-limit reset");
             }
         }
     }
@@ -658,6 +658,12 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     std::fs::write(&plist_path, body)
         .map_err(|e| format!("write {}: {e}", plist_path.display()))?;
     info!(path = %plist_path.display(), "wrote LaunchAgent plist");
+    // launchd opens StandardErrorPath itself and does not create its parent.
+    let stderr_log = service::launchd_stderr_log_path(&user_home);
+    if let Some(directory) = stderr_log.parent() {
+        crate::log_file::create_private_directory(directory)
+            .map_err(|e| format!("mkdir {}: {e}", directory.display()))?;
+    }
 
     let uid = unsafe_uid();
     let domain = format!("gui/{uid}");

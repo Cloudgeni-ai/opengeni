@@ -24,6 +24,45 @@ import type {
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
+  SiteDataCollectionDefinitionRequest,
+  SiteDataCollectionResponse,
+  SiteDataDescribeResponse,
+  SiteDataFileListResponse,
+  SiteDataFileUrlResponse,
+  SiteDataImportRequest,
+  SiteDataImportResponse,
+  SiteDataQueryRequest,
+  SiteDataQueryResponse,
+  SiteDataWriteRequest,
+  SiteDataWriteResponse,
+} from "@opengeni/contracts";
+import type {
+  SiteSqlDescribeResponse,
+  SiteSqlExportFormat,
+  SiteSqlImportRequest,
+  SiteSqlImportResponse,
+  SiteSqlInspectResponse,
+  SiteSqlMigrateResponse,
+  SiteSqlMigrationRequest,
+  SiteSqlQueryDefinitionRequest,
+  SiteSqlQueryResponse,
+  SiteSqlResetResponse,
+  SiteSqlRunRequest,
+  SiteSqlRunResponse,
+  SiteSqlSettingsRequest,
+  SiteSqlStatementRequest,
+} from "@opengeni/contracts";
+import type {
+  SiteAbuseReport,
+  SiteAuthAuthorizeRequest,
+  SiteAuthAuthorizeResponse,
+  SiteHostnameAvailability,
+  SiteLimitProfile,
+  SitePublication,
+  SiteTakedownRequest,
+  UpsertSitePublicationRequest,
+} from "@opengeni/contracts";
+import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
   SessionMessagePreview,
@@ -78,7 +117,12 @@ import {
   OpenGeniApiError,
   OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
+  OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
+  rejectsStartModeField,
+  sessionUsageLimitNotConfirmed,
+  sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
@@ -282,6 +326,8 @@ import type {
   WorkspaceModelAccountSettings,
   ModelAccountPreferences,
   SessionModelAccountChoiceResponse,
+  SessionUsageLimit,
+  SetSessionUsageLimitRequest,
   SetSessionModelAccountChoiceRequest,
   SetSessionModelAccountChoiceResponse,
   UpdateModelAccountPreferencesRequest,
@@ -1326,11 +1372,77 @@ export class OpenGeniClient {
     workspaceId: string,
     request: CreateSessionRequest,
   ): Promise<CreateSessionResponse> {
-    return await this.requestJson<CreateSessionResponse>(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+    const limited = request.usageLimitMicros !== undefined && request.usageLimitMicros !== null;
+    // A limited create spells out the default start mode. Servers that
+    // predate usage limits accept only `realtime` there, so they reject the
+    // whole request before creating or starting anything, rather than
+    // dropping the unknown limit and starting uncapped work.
+    const body: CreateSessionRequest =
+      limited && request.startMode === undefined ? { ...request, startMode: "standard" } : request;
+    let created: CreateSessionResponse;
+    try {
+      created = await this.requestJson<CreateSessionResponse>(
+        "POST",
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+        body,
+      );
+    } catch (error) {
+      if (
+        limited &&
+        body.startMode === "standard" &&
+        error instanceof OpenGeniApiError &&
+        rejectsStartModeField(error)
+      ) {
+        throw new OpenGeniSessionUsageLimitUnsupportedError(
+          "This server does not support task usage limits, so the session was not created. Create it without a usage limit, or upgrade the server.",
+          { sessionId: null, cause: error },
+        );
+      }
+      throw error;
+    }
+    assertSessionUsageLimitEcho(request.usageLimitMicros, created);
+    return created;
+  }
+
+  /**
+   * The task's usage limit and recorded API-equivalent model usage. A child
+   * session returns its root's state with `inherited: true`. Servers that
+   * predate usage limits return 404.
+   */
+  async getSessionUsageLimit(
+    workspaceId: string,
+    sessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SessionUsageLimit> {
+    return await this.requestJson<SessionUsageLimit>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /**
+   * Set (`limitMicros`), lower, raise or clear (`limitMicros: null`) a root
+   * task's usage limit with compare-and-set on `expectedVersion`. Person or
+   * trusted host only; agents are refused. Changing the limit never resumes
+   * paused work. Returns the committed state; 409 on a stale version.
+   */
+  async setSessionUsageLimit(
+    workspaceId: string,
+    sessionId: string,
+    request: SetSessionUsageLimitRequest,
+  ): Promise<SessionUsageLimit> {
+    const committed = await this.requestJson<SessionUsageLimit>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
       request,
     );
+    if (committed.limitMicros !== request.limitMicros) {
+      throw sessionUsageLimitNotConfirmed(sessionId);
+    }
+    return committed;
   }
 
   async getNewSessionDraft(
@@ -2361,7 +2473,7 @@ export class OpenGeniClient {
   }
 
   /** Open one macOS Privacy & Security pane on a connected Mac, so the person
-   * only has to flip the permission for OpenGeni. */
+   * only has to flip the permission for Opengeni. */
   async openMachinePrivacySettings(
     workspaceId: string,
     enrollmentId: string,
@@ -8144,6 +8256,588 @@ export class OpenGeniClient {
     );
   }
 
+  /** A Site's data collections, usage and limits. Needs a manager of the Site. */
+  async getSiteData(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataDescribeResponse> {
+    return await this.requestJson<SiteDataDescribeResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/data`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create or change a Site Data collection. Needs a manager of the Site. */
+  async defineSiteDataCollection(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteDataCollectionDefinitionRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataCollectionResponse> {
+    return await this.requestJson<SiteDataCollectionResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a collection and all of its records. */
+  async deleteSiteDataCollection(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deletedRecords: number }> {
+    return await this.requestJson<{ deletedRecords: number }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}`,
+      undefined,
+      { confirm: "true" },
+      options,
+    );
+  }
+
+  /** Remove every record from a collection and keep its definition. */
+  async resetSiteDataCollection(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deletedRecords: number }> {
+    return await this.requestJson<{ deletedRecords: number }>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}/reset`,
+      { confirm: true },
+      undefined,
+      options,
+    );
+  }
+
+  /** Query records with the caller's access to the collection. */
+  async querySiteData(
+    workspaceId: string,
+    siteId: string,
+    request: SiteDataQueryRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataQueryResponse> {
+    return await this.requestJson<SiteDataQueryResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/query`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Apply up to 100 record operations together or not at all. */
+  async writeSiteData(
+    workspaceId: string,
+    siteId: string,
+    request: SiteDataWriteRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataWriteResponse> {
+    return await this.requestJson<SiteDataWriteResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/write`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Import JSON or CSV records into a collection. */
+  async importSiteData(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteDataImportRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataImportResponse> {
+    return await this.requestJson<SiteDataImportResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}/import`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Export a collection as JSON or CSV text (bounded; check `truncated`). */
+  async exportSiteData(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { format?: "json" | "csv"; signal?: AbortSignal } = {},
+  ): Promise<{ content: string; contentType: string; truncated: boolean }> {
+    const format = options.format ?? "json";
+    const response = await this.requestResponse(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}/export`,
+      { format },
+      { ...options, accept: format === "csv" ? "text/csv" : "application/json" },
+    );
+    return {
+      content: await response.text(),
+      contentType: response.headers.get("content-type") ?? "",
+      truncated: response.headers.get("x-opengeni-export-truncated") === "true",
+    };
+  }
+
+  /** Files stored with a Site that the caller may see. */
+  async listSiteDataFiles(
+    workspaceId: string,
+    siteId: string,
+    options: { limit?: number; cursor?: string; signal?: AbortSignal } = {},
+  ): Promise<SiteDataFileListResponse> {
+    return await this.requestJson<SiteDataFileListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/files`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+      },
+      options,
+    );
+  }
+
+  /** A short-lived download URL for one Site file. */
+  async getSiteDataFileUrl(
+    workspaceId: string,
+    siteId: string,
+    fileId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataFileUrlResponse> {
+    return await this.requestJson<SiteDataFileUrlResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/files/${encodeURIComponent(fileId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  async deleteSiteDataFile(
+    workspaceId: string,
+    siteId: string,
+    fileId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: { id: string } }> {
+    return await this.requestJson<{ deleted: { id: string } }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/files/${encodeURIComponent(fileId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * A Site's SQL database (optional Cloudflare storage): availability, whether
+   * it is on, migrations, named queries, usage and limits. Needs a manager.
+   */
+  async getSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlDescribeResponse> {
+    return await this.requestJson<SiteSqlDescribeResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Turn a Site's SQL database on or off; turning it off keeps its data. */
+  async updateSiteSqlSettings(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlSettingsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlDescribeResponse> {
+    return await this.requestJson<SiteSqlDescribeResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/sql/settings`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Add a named schema migration to a Site's SQL database. */
+  async migrateSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlMigrationRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlMigrateResponse> {
+    return await this.requestJson<SiteSqlMigrateResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/migrations`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create or replace a named query Site pages run with site.sql.run. */
+  async defineSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteSqlQueryDefinitionRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlQueryResponse> {
+    return await this.requestJson<SiteSqlQueryResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  async deleteSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run a named query with the caller's access (its audience decides who may). */
+  async runSiteSqlQuery(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteSqlRunRequest = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/queries/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run one read-only statement on a Site's SQL database. Needs a manager. */
+  async querySiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlStatementRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/query`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Run one data-changing statement on a Site's SQL database. Needs a manager. */
+  async executeSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlStatementRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlRunResponse> {
+    return await this.requestJson<SiteSqlRunResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/execute`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Tables, columns, row counts and applied migrations of a Site's SQL database. */
+  async inspectSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlInspectResponse> {
+    return await this.requestJson<SiteSqlInspectResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql/inspect`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Export a Site's SQL database as SQL, CSV (one table) or JSON. One call
+   * returns at most `maxBytes` (16 MiB at most); when `nextCursor` is set,
+   * call again with it as `cursor` and append the pieces in order.
+   */
+  async exportSiteSql(
+    workspaceId: string,
+    siteId: string,
+    options: {
+      format?: SiteSqlExportFormat;
+      table?: string;
+      cursor?: string;
+      maxBytes?: number;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<{
+    content: string;
+    contentType: string;
+    truncated: boolean;
+    nextCursor: string | null;
+  }> {
+    const format = options.format ?? "sql";
+    const response = await this.requestResponse(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/sql/export`,
+      {
+        format,
+        ...(options.table ? { table: options.table } : {}),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.maxBytes !== undefined ? { maxBytes: String(options.maxBytes) } : {}),
+      },
+      { ...options, accept: format === "json" ? "application/json" : "*/*" },
+    );
+    return {
+      content: await response.text(),
+      contentType: response.headers.get("content-type") ?? "",
+      truncated: response.headers.get("x-opengeni-export-truncated") === "true",
+      nextCursor: response.headers.get("x-opengeni-export-next-cursor") || null,
+    };
+  }
+
+  /** Import SQL statements, CSV or JSON rows into a Site's SQL database. */
+  async importSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: SiteSqlImportRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlImportResponse> {
+    return await this.requestJson<SiteSqlImportResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/import`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Empty a Site's SQL database, keeping (rebuilding) or dropping its schema. */
+  async resetSiteSql(
+    workspaceId: string,
+    siteId: string,
+    request: { schema?: "keep" | "drop" } = {},
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteSqlResetResponse> {
+    return await this.requestJson<SiteSqlResetResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/sql/reset`,
+      { confirm: true, ...request },
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * A Site's web publication: hostname, access, embedded agent, limits,
+   * status and moderation. 404 when the Site was never published; 503
+   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   */
+  async getSitePublication(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "GET",
+      sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Publish a Site on its own hostname or change its publication. Omitted
+   * fields keep their current values. 409 `site_hostname_taken` when the
+   * label belongs to another Site; 403 when the Site is Only me or the
+   * caller cannot manage it.
+   */
+  async updateSitePublication(
+    workspaceId: string,
+    siteId: string,
+    request: UpsertSitePublicationRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "PUT",
+      sitePublicationPath(workspaceId, siteId),
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Stop serving a published Site. Its hostname stays held for the workspace. */
+  async unpublishSite(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "DELETE",
+      sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Whether a hostname label is valid and free for a Site in this workspace. */
+  async checkSiteHostname(
+    workspaceId: string,
+    label: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteHostnameAvailability> {
+    return await this.requestJson<SiteHostnameAvailability>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-hostnames/${encodeURIComponent(label)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Take a published Site down at once; visitors see a takedown notice. */
+  async takeDownSite(
+    workspaceId: string,
+    siteId: string,
+    request: SiteTakedownRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/takedown`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Serve a Site that was taken down again. */
+  async restoreSite(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/restore`,
+      {},
+      undefined,
+      options,
+    );
+  }
+
+  /** Abuse reports visitors filed against a published Site. */
+  async listSiteAbuseReports(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ reports: SiteAbuseReport[] }> {
+    return await this.requestJson<{ reports: SiteAbuseReport[] }>(
+      "GET",
+      `${sitePublicationPath(workspaceId, siteId)}/reports`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Close an abuse report as dismissed or actioned. */
+  async updateSiteAbuseReport(
+    workspaceId: string,
+    siteId: string,
+    reportId: string,
+    request: { status: "dismissed" | "actioned" },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteAbuseReport> {
+    return await this.requestJson<SiteAbuseReport>(
+      "PATCH",
+      `${sitePublicationPath(workspaceId, siteId)}/reports/${encodeURIComponent(reportId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** The workspace's default limit profile for published Sites. */
+  async getSiteLimitProfile(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteLimitProfile> {
+    return await this.requestJson<SiteLimitProfile>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-limit-profile`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change the workspace's default limit profile for published Sites. Needs a workspace admin. */
+  async updateSiteLimitProfile(
+    workspaceId: string,
+    profile: SiteLimitProfile,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteLimitProfile> {
+    return await this.requestJson<SiteLimitProfile>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-limit-profile`,
+      profile,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Let the signed-in person open a published Site: returns a one-time code,
+   * bound to the Site host, PKCE challenge and redirect, inside `redirectTo`.
+   * 403 `site_access_denied` when they may not open the Site.
+   */
+  async authorizeSiteViewer(
+    request: SiteAuthAuthorizeRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteAuthAuthorizeResponse> {
+    return await this.requestJson<SiteAuthAuthorizeResponse>(
+      "POST",
+      "/v1/site-auth/authorize",
+      request,
+      undefined,
+      options,
+    );
+  }
+
   /** Search the official MCP registry for installable capabilities. */
   async discoverMcpCapabilities(
     workspaceId: string,
@@ -10528,6 +11222,22 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | unde
   });
 }
 
+/**
+ * Servers without usage limits strip the unknown create field. A requested
+ * limit that is not echoed back would silently run unlimited, so fail loudly.
+ */
+function assertSessionUsageLimitEcho(
+  requested: number | null | undefined,
+  created: CreateSessionResponse,
+): void {
+  if (requested === undefined || requested === null) return;
+  if (created.usageLimit?.limitMicros === requested) return;
+  throw new OpenGeniSessionUsageLimitUnsupportedError(
+    `The session ${created.id} was created, but the server did not confirm its usage limit; it may not support usage limits. Set the limit with setSessionUsageLimit before sending work, or treat the task as unlimited.`,
+    { sessionId: created.id },
+  );
+}
+
 type ApiErrorRequestContext = {
   method: string;
   correlationId?: string | undefined;
@@ -10540,7 +11250,9 @@ async function apiErrorFromResponse(
   const body = await readBoundedJsonErrorBody(response);
   const ErrorType = allowanceExhaustedFields(body)
     ? OpenGeniAllowanceExhaustedError
-    : OpenGeniApiError;
+    : sessionUsageLimitReachedFields(body)
+      ? OpenGeniSessionUsageLimitReachedError
+      : OpenGeniApiError;
   const error = new ErrorType(response.status, body, {
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     mutation: isMutationMethod(context.method),
@@ -10775,4 +11487,12 @@ async function readBoundedResponseBytes(
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+function siteDataPath(workspaceId: string, siteId: string): string {
+  return `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}`;
+}
+
+function sitePublicationPath(workspaceId: string, siteId: string): string {
+  return `${siteDataPath(workspaceId, siteId)}/publication`;
 }

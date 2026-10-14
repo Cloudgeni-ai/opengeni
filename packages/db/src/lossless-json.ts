@@ -66,6 +66,15 @@ export function toPostgresLosslessJson(value: unknown): unknown {
 }
 
 /**
+ * Whether a JSON string value is stored byte-for-byte as given. False for
+ * strings the codec must encode: NUL, lone UTF-16 surrogates and the codec's
+ * own string prefix. SQL that reads such a stored value sees the encoding.
+ */
+export function isStoredVerbatimAsLosslessJsonString(value: string): boolean {
+  return toPostgresLosslessJson(value) === value;
+}
+
+/**
  * Restore an explicitly versioned JSON value after a PostgreSQL read. A NULL
  * version denotes literal legacy/old-writer data, including strings that happen
  * to be valid active-marker encodings.

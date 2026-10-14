@@ -7,6 +7,7 @@ import { ControlRequest, ErrorCode } from "@opengeni/agent-proto";
 import {
   advanceEnrollmentAgentUpdate,
   beginEnrollmentAgentUpdate,
+  countLiveConnectedMachineBrowsers,
   type Database,
   type EnrollmentRecord,
 } from "@opengeni/db";
@@ -139,10 +140,68 @@ function refused(status: 409 | 422 | 502, message: string): AgentUpdateRequestRe
   return { kind: "refused", status, message };
 }
 
+/** First agent release whose restart detaches from its managed browsers so
+ * the successor adopts them with their tabs and page state. An older agent
+ * closes every managed browser while it shuts down for an update. */
+export const BROWSER_PRESERVING_AGENT_VERSION = "0.1.58";
+
+/** Recorded when the automatic updater leaves an older agent alone because
+ * updating it would close managed browsers. A `update_busy_*` code, so it
+ * reads and retries as a postponement rather than a failure. */
+export const UPDATE_POSTPONED_FOR_BROWSERS = "update_busy_browsers";
+
+/** Whether updating this agent would close browsers it manages. */
+export async function agentUpdateWouldCloseBrowsers(
+  db: Database,
+  enrollment: EnrollmentRecord,
+): Promise<boolean> {
+  const order = enrollment.agentVersion
+    ? compareAgentVersions(enrollment.agentVersion, BROWSER_PRESERVING_AGENT_VERSION)
+    : null;
+  if (order !== null && order >= 0) return false;
+  const live = await countLiveConnectedMachineBrowsers(db, {
+    accountId: enrollment.accountId,
+    workspaceId: enrollment.workspaceId,
+    enrollmentId: enrollment.id,
+  });
+  return live > 0;
+}
+
+/** Record a postponed automatic update on the machine without asking its
+ * agent, so the machine shows why it stays on its current build and the
+ * busy backoff decides when to look again. */
+async function postponeAgentUpdate(
+  db: Database,
+  live: EnrollmentRecord,
+  targetVersion: string,
+  errorCode: string,
+): Promise<boolean> {
+  if (!live.connectionInstanceId) return false;
+  const fence = {
+    accountId: live.accountId,
+    workspaceId: live.workspaceId,
+    enrollmentId: live.id,
+    connectionInstanceId: live.connectionInstanceId,
+    connectionGeneration: live.connectionGeneration,
+    operationId: crypto.randomUUID(),
+  };
+  const reserved = await beginEnrollmentAgentUpdate(db, { ...fence, targetVersion });
+  if (!reserved) return false;
+  await advanceEnrollmentAgentUpdate(db, {
+    ...fence,
+    status: "failed",
+    errorCode,
+    retryable: true,
+    rolledBack: false,
+  });
+  return true;
+}
+
 /** How long the automatic updater leaves a machine alone after an attempt. */
 export const AUTOMATIC_AGENT_UPDATE_RETRY_MS = {
-  /** An older agent that refused because it was busy is asked again soon: the
-   * refusal is instant and interrupts nothing. */
+  /** A machine postponed because it was busy (running work, or managed
+   * browsers an older agent would close) is looked at again soon: the check
+   * is instant and interrupts nothing. */
   busy: 10 * 60_000,
   /** A request the runner never answered is re-sent under the same operation. */
   unanswered: 10 * 60_000,
@@ -208,23 +267,41 @@ export function createAutomaticAgentUpdater(
       if (inFlight.has(enrollment.id)) return;
       if (!automaticAgentUpdateDue(enrollment, targetVersion, now())) return;
       inFlight.add(enrollment.id);
-      void requestAgentUpdate(deps, enrollment, { releaseBaseUrl })
-        .then((result) => {
-          const fields = {
-            workspaceId: enrollment.workspaceId,
-            enrollmentId: enrollment.id,
-            installedVersion: enrollment.agentVersion,
-            targetVersion,
-          };
-          if (result.kind === "accepted") {
-            observability?.info?.("Requested an automatic Connected Machine agent update", fields);
-          } else if (result.status !== 409) {
-            observability?.warn?.("An automatic Connected Machine agent update was refused", {
-              ...fields,
-              message: result.message,
-            });
+      const fields = {
+        workspaceId: enrollment.workspaceId,
+        enrollmentId: enrollment.id,
+        installedVersion: enrollment.agentVersion,
+        targetVersion,
+      };
+      void (async () => {
+        // An explicit "Update now" may still close them; an automatic update
+        // never does.
+        if (await agentUpdateWouldCloseBrowsers(deps.db, enrollment)) {
+          if (
+            await postponeAgentUpdate(
+              deps.db,
+              enrollment,
+              targetVersion,
+              UPDATE_POSTPONED_FOR_BROWSERS,
+            )
+          ) {
+            observability?.info?.(
+              "Postponed an automatic Connected Machine agent update: the installed agent would close its open managed browsers",
+              fields,
+            );
           }
-        })
+          return;
+        }
+        const result = await requestAgentUpdate(deps, enrollment, { releaseBaseUrl });
+        if (result.kind === "accepted") {
+          observability?.info?.("Requested an automatic Connected Machine agent update", fields);
+        } else if (result.status !== 409) {
+          observability?.warn?.("An automatic Connected Machine agent update was refused", {
+            ...fields,
+            message: result.message,
+          });
+        }
+      })()
         .catch((error: unknown) => {
           observability?.warn?.("Failed to request an automatic Connected Machine agent update", {
             workspaceId: enrollment.workspaceId,

@@ -26,7 +26,13 @@ import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
-import { sessionCreationMetadata } from "../site-session-origin";
+import {
+  currentSiteSessionOrigin,
+  sessionCreationMetadata,
+  SITE_ORIGIN_METADATA_KEY,
+} from "../site-session-origin";
+import { assertSiteAgentMayChooseCompute } from "../site-agent-clamp";
+import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
@@ -212,6 +218,14 @@ import { prepareExternalLinkTurnAdmission } from "../application/external-link-w
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
 
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
+import {
+  applyInitialSessionUsageLimit,
+  requireSessionUsageLimitAllows,
+  SessionUsageLimitHttpError,
+  sessionUsageLimitsProducerEnabled,
+  sessionUsageLimitWriteActorForAccess,
+} from "../session-usage-limits";
+import { recordSessionUsageLimitEvent } from "../session-usage-limit-metrics";
 import type {
   AcceptSessionUserMessageDependencies,
   ApiRouteDeps,
@@ -2041,6 +2055,8 @@ export async function postUserMessageTurn(
   const { db, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
+  // A message sent from a Site page records which Site (and version) on its turn.
+  const siteOrigin = currentSiteSessionOrigin();
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
@@ -2117,6 +2133,7 @@ export async function postUserMessageTurn(
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               mcpAccountBindings: input.mcpAccountBindings ?? null,
               connectionAccountIntent: input.connectionAccountIntent ?? null,
+              ...(siteOrigin ? { turnMetadata: { [SITE_ORIGIN_METADATA_KEY]: siteOrigin } } : {}),
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
@@ -2379,6 +2396,12 @@ export async function retryFailedSession(
   );
   if (replay) return replay;
   const session = await requireSession(deps.db, workspaceId, sessionId);
+  // A retry is a new model request: a reached task usage limit refuses it.
+  await requireSessionUsageLimitAllows(
+    deps.db,
+    { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
+    { sink: deps.observability, boundary: "send" },
+  );
   const failure = await getSessionEvent(deps.db, workspaceId, request.failureEventId);
   if (!failure || failure.sessionId !== sessionId)
     throw new SessionRetryConflictError("RETRY_STALE_FAILURE", "The failure event is unavailable");
@@ -2482,7 +2505,7 @@ async function withSessionCreateUsageRecording(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   workspaceId: string;
-  startMode: "realtime" | undefined;
+  startMode: "realtime" | "standard" | undefined;
   origin: "system" | "user";
   createOutcome: CreateSessionOutcome;
 }): Promise<CreateSessionRequestOutcome> {
@@ -2522,6 +2545,9 @@ async function createSessionForRequestInFileScope(
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  // An agent started from a Site page keeps its workers off chosen machines
+  // and other sessions' sandboxes.
+  await assertSiteAgentMayChooseCompute(unresolvedDeps.db, grant, payload);
   // A tool whose backing workload this deployment does not run is dropped, not
   // rejected: a client echoing a full catalog must not fail on a deployment fact.
   if (payload.firstPartyMcpTools) {
@@ -2580,6 +2606,65 @@ async function createSessionForRequestInFileScope(
       }
       throw error;
     }
+  }
+  // a create-time usage limit belongs to a new ROOT task and only a
+  // person or the trusted host may set it. Agents (including children, which
+  // always share their root's limit) are rejected even when the value is null.
+  let initialUsageLimitActor: ReturnType<typeof sessionUsageLimitWriteActorForAccess> | null = null;
+  if (payload.usageLimitMicros !== undefined) {
+    try {
+      if (parentSessionId || !authorization) {
+        throw new SessionUsageLimitHttpError(
+          403,
+          "session_usage_limit_forbidden",
+          "Only a person or the application's server can set a task usage limit.",
+        );
+      }
+      initialUsageLimitActor = sessionUsageLimitWriteActorForAccess(authorization);
+    } catch (error) {
+      recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "forbidden");
+      throw error;
+    }
+  }
+  if (
+    payload.usageLimitMicros !== undefined &&
+    payload.usageLimitMicros !== null &&
+    !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)
+  ) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
+    throw new SessionUsageLimitHttpError(
+      422,
+      "session_usage_limit_disabled",
+      "Usage limits are not enabled on this server.",
+    );
+  }
+  // The trusted server in this process (published Site runtime) may attach a
+  // limit to a root session it creates as its own service principal, so the
+  // limit is in place before the first model call. Requests cannot set it.
+  const hostUsageLimit = currentHostSessionUsageLimit();
+  const hostInitialUsageLimit =
+    payload.usageLimitMicros === undefined &&
+    !parentSessionId &&
+    hostUsageLimit !== undefined &&
+    hostUsageLimit.subjectId === grant.subjectId
+      ? hostUsageLimit
+      : null;
+  if (hostInitialUsageLimit && !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
+    throw new SessionUsageLimitHttpError(
+      422,
+      "session_usage_limit_disabled",
+      "Usage limits are not enabled on this server.",
+    );
+  }
+  // A task whose usage limit is reached cannot start more inference by
+  // spawning another agent.
+  if (parentSessionId) {
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId: parentSessionId },
+      { sink: unresolvedDeps.observability, boundary: "child_create" },
+    );
   }
   const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
   if (parentSessionId && !parentSession) {
@@ -3192,7 +3277,7 @@ async function createSessionForRequestInFileScope(
   // model and reasoning fields therefore inherit that calling turn rather than the
   // deployment defaults. This is especially important for Codex subscription
   // managers: falling back to the deployment model would silently move a child
-  // onto the OpenGeni-credits billing path. Legacy session-bound grants without
+  // onto the Opengeni-credits billing path. Legacy session-bound grants without
   // exact attempt claims fall back to the parent session's persisted defaults.
   const model = canonicalConfiguredModel(settings, effectiveModelId);
   if (model === null || model === undefined) {
@@ -3772,10 +3857,31 @@ async function createSessionForRequestInFileScope(
       ? ("personal" as const)
       : ("workspace" as const);
   const initialLearningActor = initialLearningContext?.actor;
+  const initialUsageLimit =
+    initialUsageLimitActor && payload.usageLimitMicros != null
+      ? { actor: initialUsageLimitActor, limitMicros: payload.usageLimitMicros }
+      : hostInitialUsageLimit
+        ? {
+            actor: { type: "host" as const, subjectId: hostInitialUsageLimit.subjectId },
+            limitMicros: hostInitialUsageLimit.limitMicros,
+          }
+        : null;
+  const applyInitialUsageLimit = initialUsageLimit
+    ? async (tx: Database, sessionId: string) =>
+        await applyInitialSessionUsageLimit(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          limitMicros: initialUsageLimit.limitMicros,
+          actor: initialUsageLimit.actor,
+          producerEnabled: sessionUsageLimitsProducerEnabled(unresolvedDeps.settings),
+        })
+    : null;
   const beforeCreateCommit =
     initialLearning && initialLearningContext && initialLearningActor?.kind === "human"
       ? async (tx: Database, sessionId: string) => {
           await externalBeforeCreateCommit?.(tx);
+          await applyInitialUsageLimit?.(tx, sessionId);
           await saveAgentLearningSettings(
             tx,
             {
@@ -3791,7 +3897,12 @@ async function createSessionForRequestInFileScope(
             },
           );
         }
-      : externalBeforeCreateCommit;
+      : applyInitialUsageLimit
+        ? async (tx: Database, sessionId: string) => {
+            await externalBeforeCreateCommit?.(tx);
+            await applyInitialUsageLimit(tx, sessionId);
+          }
+        : externalBeforeCreateCommit;
   let createOutcome: CreateSessionOutcome;
   try {
     createOutcome = await createAndStartSessionWithOutcome({
@@ -4220,6 +4331,13 @@ async function acceptSessionUserMessageInFileScope(
     // pure read with no side effects.
     const existingSession = await requireSession(db, workspaceId, sessionId);
     assertSessionIsNotImported(existingSession);
+    // a reached task usage limit refuses a fresh Send/Steer here,
+    // after exact replays returned above and before any queue/interrupt write.
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
+      { sink: deps.observability, boundary: delivery === "steer" ? "steer" : "send" },
+    );
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
       grant,

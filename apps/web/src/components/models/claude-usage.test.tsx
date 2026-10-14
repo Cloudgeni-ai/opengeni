@@ -67,6 +67,24 @@ test("meters use remaining percentages, retain exact resets and invalidate elaps
   });
   expect(claudeUsageReadings(null, 0).every((reading) => reading.percent === null)).toBe(true);
 });
+test("an account row says when both plan limits reset, the shown one first", async () => {
+  const state: ClaudeUsageState = {
+    value: usage(),
+    loading: false,
+    refreshing: false,
+    error: false,
+    canRefresh: false,
+    refresh: async () => {},
+  };
+  await act(async () => root.render(<ClaudeUsageReadout state={state} />));
+  // The 5-hour limit is reached, so the row shows it and its reset leads.
+  expect(container.querySelector('[data-slot="usage-readout"]')?.textContent).toStartWith(
+    "Limit reached",
+  );
+  expect(container.querySelector('[data-slot="usage-readout-resets"]')?.textContent).toMatch(
+    /^Resets \d+ (Sep|Oct) 2099 · Weekly \d+ Oct 2099$/,
+  );
+});
 test("near-full allowed quotas stay available and explicit rejection needs no invented percentage", async () => {
   const value = usage();
   value.windows = [{ ...value.windows[0]!, usedPercent: 99.6, status: "allowed" }];
@@ -97,7 +115,13 @@ test("near-full allowed quotas stay available and explicit rejection needs no in
       </>,
     ),
   );
-  expect(container.querySelector('[data-slot="usage-readout"]')?.textContent).toBe("Limit reached");
+  expect(container.querySelector('[data-slot="usage-readout"]')?.textContent).toStartWith(
+    "Limit reached",
+  );
+  // A reached limit still says when it resets.
+  expect(container.querySelector('[data-slot="usage-readout-resets"]')?.textContent).toMatch(
+    /^Resets \d+ Sep 2099$/,
+  );
   expect(
     container.querySelector('[data-slot="usage-readout"]')?.hasAttribute("aria-valuenow"),
   ).toBe(false);

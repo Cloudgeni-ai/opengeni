@@ -259,7 +259,7 @@ describe("organization Codex subscriptions", () => {
       container.remove();
     }
   });
-  test("a paused account shows live credits without workspace assignment or consent changes", async () => {
+  test("a disabled account shows live credits without workspace assignment or consent changes", async () => {
     response.accounts[1] = { ...response.accounts[1]!, allocatorEnabled: false };
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -273,7 +273,8 @@ describe("organization Codex subscriptions", () => {
       expect(container.textContent).toContain(
         new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(120.5),
       );
-      expect(container.textContent).toContain("Paused");
+      expect(container.textContent).toContain("Disabled");
+      expect(container.textContent).not.toContain("Paused");
       expect(requestJson.mock.calls.slice(before).every(([method]) => method === "GET")).toBe(true);
       expect(
         container
@@ -286,7 +287,7 @@ describe("organization Codex subscriptions", () => {
       container.remove();
     }
   });
-  test("a conflicting pause refreshes the account before the next change", async () => {
+  test("a conflicting disable refreshes the account before the next change", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -301,10 +302,11 @@ describe("organization Codex subscriptions", () => {
         };
         throw new Error("Account changed; refresh and try again");
       });
-      const selector = '[role="switch"][aria-label="Use Backup subscription for new work"]';
+      const selector = '[role="switch"][aria-label="Enable Backup subscription"]';
       await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
       await flush();
-      expect(container.textContent).toContain("Paused");
+      expect(container.textContent).toContain("Disabled");
+      expect(container.textContent).not.toContain("Paused");
       await act(async () => container.querySelector<HTMLButtonElement>(selector)!.click());
       await flush();
       expect(requestJson.mock.calls).toContainEqual([
@@ -346,7 +348,7 @@ describe("organization Codex subscriptions", () => {
     }
   });
 
-  test("pause changes only organization allocation and preserves workspace access", async () => {
+  test("disabling changes only organization allocation and preserves workspace access", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -354,7 +356,7 @@ describe("organization Codex subscriptions", () => {
       await act(async () => root.render(<Harness accountId={inactiveAccountId} />));
       await flush();
       const toggle = container.querySelector<HTMLButtonElement>(
-        '[role="switch"][aria-label="Use Backup subscription for new work"]',
+        '[role="switch"][aria-label="Enable Backup subscription"]',
       );
       expect(toggle).not.toBeNull();
       await act(async () => toggle!.click());
@@ -364,7 +366,8 @@ describe("organization Codex subscriptions", () => {
         `/v1/organizations/${organizationId}/codex/accounts/${inactiveAccountId}/allocator`,
         { enabled: false, expectedVersion: 1 },
       ]);
-      expect(container.textContent).toContain("Paused");
+      expect(container.textContent).toContain("Disabled");
+      expect(container.textContent).not.toContain("Paused");
       expect(container.textContent).toContain("Everyone in Acme");
       expect(access.policy.allowedWorkspaces).toBeNull();
     } finally {

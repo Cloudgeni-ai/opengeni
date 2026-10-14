@@ -304,7 +304,7 @@ describe("Computer routes on the placement interaction server", () => {
         async ({ server, reference }) => {
           const idle = async () =>
             await json(await request(server, "/v1/runtime", { token: adminToken }));
-          expect((await idle()).data).toEqual({ idle: true });
+          expect((await idle()).data).toEqual({ idle: true, empty: true });
           expect(
             (
               await request(server, "/v1/computer-sessions", {
@@ -316,7 +316,9 @@ describe("Computer routes on the placement interaction server", () => {
           ).toBe(201);
           // A physical seat keeps nothing a restart would lose; the next
           // request recreates its controller. A virtual seat owns its desktop.
-          expect((await idle()).data).toEqual({ idle: openIsIdle });
+          // Either way an open session means the controller is not empty, so
+          // its parent keeps it running.
+          expect((await idle()).data).toEqual({ idle: openIsIdle, empty: false });
           expect(
             (
               await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
@@ -326,7 +328,7 @@ describe("Computer routes on the placement interaction server", () => {
               })
             ).status,
           ).toBe(200);
-          expect((await idle()).data).toEqual({ idle: true });
+          expect((await idle()).data).toEqual({ idle: true, empty: true });
         },
         rfbPort === undefined ? {} : { rfbPort },
       );

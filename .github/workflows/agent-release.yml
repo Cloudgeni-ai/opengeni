@@ -68,6 +68,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: guard
+    environment: agent-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -312,6 +313,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Windows computer use runs CUA's published native runtime in process.
+          bun packages/browserd/scripts/stage-cua-runtime.ts x64
           bun build --compile --target=bun-windows-x64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}.exe"
@@ -327,6 +330,7 @@ jobs:
             OPENGENI_EMBEDDED_BROWSERD="$workspace_windows\\opengeni-browserd-${{ matrix.target }}.exe" \
             OPENGENI_EMBEDDED_AGENT_BROWSER="$workspace_windows\\opengeni-agent-browser-${{ matrix.target }}.exe" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$workspace_windows\\opengeni-computer-native-${{ matrix.target }}.exe" \
+            OPENGENI_EMBEDDED_CUA_RUNTIME="$workspace_windows\\packages\\browserd\\dist\\cua\\x64\\embedded.rs" \
               cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
           )
           cp "agent/target/${{ matrix.target }}/release/opengeni-agent.exe" "${{ matrix.asset }}"
@@ -591,6 +595,7 @@ jobs:
   # combined SHA256SUMS, signs the channel manifest, and creates the GH Release with
   # the binaries + the install scripts attached.
   publish:
+    environment: agent-release
     name: Publish release
     needs: [guard, build]
     runs-on: ubuntu-latest

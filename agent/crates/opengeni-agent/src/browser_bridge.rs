@@ -389,8 +389,25 @@ struct ExtensionDevice {
     platform: ExtensionPlatform,
     architecture: ExtensionArchitecture,
     connection_generation: String,
+    /// The extension's live-state generation: one value for the lifetime of
+    /// its background worker, reused by every native reconnect. Chrome keeps
+    /// tab ids and debugger attachments across those reconnects, so the
+    /// control plane's placement stays the same while the per-port
+    /// `connection_generation` keeps fencing this transport. Older extensions
+    /// omit it; their placement then changes with every connection.
+    #[serde(default)]
+    state_generation: Option<String>,
     inventory_revision: u64,
     capabilities: ExtensionCapabilities,
+}
+
+impl ExtensionDevice {
+    /// The generation the control plane binds sessions to.
+    fn placement_generation(&self) -> &str {
+        self.state_generation
+            .as_deref()
+            .unwrap_or(&self.connection_generation)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -665,6 +682,28 @@ impl BrowserBridgeInventory {
             connection_ends: state.connection_ends.iter().cloned().collect(),
         }
     }
+}
+
+impl std::fmt::Debug for BrowserBridgeInventory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeInventory")
+            .finish_non_exhaustive()
+    }
+}
+
+impl BrowserBridgeInventory {
+    /// Whether `placement` belongs to a connected profile whose extension
+    /// reports no live-state generation: its next native connection, such as
+    /// after this process restarts, gets a new placement and ends its sessions.
+    #[must_use]
+    pub fn placement_ends_on_reconnect(&self, placement: &str) -> bool {
+        let state = self.state.read().expect("browser bridge inventory lock");
+        state.profiles.values().any(|profile| {
+            profile.device.state_generation.is_none()
+                && profile.device.connection_generation == placement
+        })
+    }
 
     async fn request(
         &self,
@@ -691,7 +730,7 @@ impl BrowserBridgeInventory {
             ));
         }
 
-        let (outbound, bytes, receiver) = {
+        let (outbound, bytes, receiver, transport_generation) = {
             let mut state = self.state.write().expect("browser bridge inventory lock");
             if state.pending.len() >= MAX_PENDING_COMMANDS {
                 return Err(BrowserBridgeError::Unavailable);
@@ -705,16 +744,19 @@ impl BrowserBridgeInventory {
                 .profiles
                 .get(device_id)
                 .ok_or(BrowserBridgeError::Unavailable)?;
-            if profile.device.connection_generation != expected_connection_generation {
+            if profile.device.placement_generation() != expected_connection_generation {
                 return Err(BrowserBridgeError::Fenced);
             }
             let outbound = profile.outbound.clone();
+            // The placement generation may outlive one native port; the
+            // extension and every result fence use the exact live port.
+            let transport_generation = profile.device.connection_generation.clone();
             let bytes = serde_json::to_vec(&ExtensionCommand {
                 kind: "command",
                 protocol_version: BRIDGE_PROTOCOL_VERSION,
                 request_id,
                 device_id,
-                connection_generation: expected_connection_generation,
+                connection_generation: &transport_generation,
                 payload: &payload,
             })?;
             if bytes.len() > MAX_COMMAND_MESSAGE_BYTES {
@@ -727,19 +769,19 @@ impl BrowserBridgeInventory {
                 request_id.to_string(),
                 PendingCommand {
                     device_id: device_id.to_string(),
-                    connection_generation: expected_connection_generation.to_string(),
+                    connection_generation: transport_generation.clone(),
                     settle: Some(settle),
                     _reservation: opengeni_agent_platform::current_work_reservation(),
                 },
             );
-            (outbound, bytes, receiver)
+            (outbound, bytes, receiver, transport_generation)
         };
 
         if outbound.send(bytes).await.is_err() {
             self.cancel_request(
                 request_id,
                 device_id,
-                expected_connection_generation,
+                &transport_generation,
                 BrowserBridgeRequestFailure::Unavailable,
             );
         }
@@ -1354,7 +1396,7 @@ fn announcement(profile: &ConnectedProfile) -> v1::AttachedBrowserDeviceAnnounce
             ExtensionArchitecture::X64 => v1::Arch::X8664 as i32,
             ExtensionArchitecture::Arm64 => v1::Arch::Aarch64 as i32,
         },
-        connection_generation: profile.device.connection_generation.clone(),
+        connection_generation: profile.device.placement_generation().to_string(),
         inventory_revision: profile.device.inventory_revision,
         tab_count: u32::try_from(profile.tabs.len()).unwrap_or(u32::MAX),
         capabilities: Some(v1::AttachedBrowserDeviceCapabilities {
@@ -1391,6 +1433,9 @@ fn validate_device(
         512,
         "browser connection generation",
     )?;
+    if let Some(state_generation) = &device.state_generation {
+        bounded_string(state_generation, 1, 512, "browser state generation")?;
+    }
     validate_tabs(tabs)
 }
 
@@ -1655,6 +1700,62 @@ fn write_public_atomic(destination: &Path, body: &[u8]) -> Result<(), BrowserBri
 
 fn read_authority(path: &Path) -> Result<BridgeAuthority, BrowserBridgeError> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{authority_path, read_authority, read_native_frame, write_native_frame};
+    use std::path::Path;
+    use tokio::net::TcpStream;
+
+    /// Connects one authenticated extension to the bridge in `config_dir` and
+    /// waits for its ready frame. `state_generation` is omitted for an older
+    /// extension.
+    pub(crate) async fn connect_extension(
+        config_dir: &Path,
+        device_id: &str,
+        connection_generation: &str,
+        state_generation: Option<&str>,
+    ) -> TcpStream {
+        let authority = read_authority(&authority_path(config_dir)).expect("authority");
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+            .await
+            .expect("connect");
+        let auth = serde_json::json!({
+            "type": "authenticate", "protocolVersion": 1, "role": "extension",
+            "token": authority.token
+        });
+        write_native_frame(&mut socket, &serde_json::to_vec(&auth).expect("auth"))
+            .await
+            .expect("write auth");
+        let mut device = serde_json::json!({
+            "id": device_id, "name": "Chrome profile", "profileLabel": null,
+            "browserName": "Chrome", "browserVersion": "151.0.0.0", "extensionVersion": "1.0.0",
+            "platform": "linux", "architecture": "x64",
+            "connectionGeneration": connection_generation, "inventoryRevision": 1,
+            "capabilities": {
+                "tabInventory": true, "debuggerAttachment": true, "semanticObservation": true,
+                "screenshots": true, "liveFrames": true, "humanInput": true, "diagnostics": true,
+                "rawCdp": false, "linkedComputer": true
+            }
+        });
+        if let Some(state) = state_generation {
+            device["stateGeneration"] = serde_json::json!(state);
+        }
+        let hello = serde_json::json!({
+            "type": "hello", "protocolVersion": 1, "device": device, "tabs": []
+        });
+        write_native_frame(&mut socket, &serde_json::to_vec(&hello).expect("hello"))
+            .await
+            .expect("write hello");
+        let ready = read_native_frame(&mut socket)
+            .await
+            .expect("ready")
+            .expect("ready frame");
+        let ready: serde_json::Value = serde_json::from_slice(&ready).expect("ready json");
+        assert_eq!(ready["type"], "ready");
+        socket
+    }
 }
 
 #[cfg(test)]
@@ -2480,6 +2581,331 @@ mod tests {
         );
         assert_eq!(server.inventory().snapshot().devices.len(), 1);
         drop(socket);
+        server.shutdown().await.expect("shutdown");
+    }
+
+    async fn wait_for_placement(server: &BrowserBridgeServer, expected: Option<&str>) {
+        for _ in 0..400 {
+            let snapshot = server.inventory().snapshot();
+            let current = snapshot
+                .devices
+                .first()
+                .map(|device| device.connection_generation.clone());
+            if current.as_deref() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!(
+            "placement never became {expected:?}: {:?}",
+            server.inventory().snapshot().devices
+        );
+    }
+
+    async fn controller_ping(
+        controller: &mut TcpStream,
+        request_id: &str,
+        device_id: &str,
+        placement: &str,
+    ) {
+        write_native_frame(
+            controller,
+            &serde_json::to_vec(&json!({
+                "type": "request",
+                "protocolVersion": 1,
+                "requestId": request_id,
+                "deviceId": device_id,
+                "expectedConnectionGeneration": placement,
+                "payload": { "type": "ping" }
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("write request");
+    }
+
+    async fn answer_ping(extension: &mut TcpStream, device_id: &str, transport: &str) -> String {
+        let command = read_json(extension).await;
+        assert_eq!(command["type"], "command");
+        // The extension fences on its exact live port, never on the placement.
+        assert_eq!(command["connectionGeneration"], transport);
+        let request_id = command["requestId"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        write_native_frame(
+            extension,
+            &serde_json::to_vec(&json!({
+                "type": "command_result",
+                "requestId": request_id,
+                "deviceId": device_id,
+                "connectionGeneration": transport,
+                "ok": true,
+                "payload": { "pong": true },
+                "error": null
+            }))
+            .expect("result"),
+        )
+        .await
+        .expect("write result");
+        request_id
+    }
+
+    async fn wait_for_device(
+        server: &BrowserBridgeServer,
+    ) -> v1::AttachedBrowserDeviceAnnouncement {
+        for _ in 0..600 {
+            if let Some(device) = server.inventory().snapshot().devices.pop() {
+                return device;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("Chromium's extension never connected to the bridge");
+    }
+
+    async fn controller_tab_count(config_dir: &Path, device_id: &str, placement: &str) -> usize {
+        let authority = read_authority(&authority_path(config_dir)).expect("authority");
+        let mut controller = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+            .await
+            .expect("controller connect");
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type": "authenticate", "protocolVersion": 1, "role": "controller",
+                "token": authority.token
+            }))
+            .expect("auth"),
+        )
+        .await
+        .expect("auth");
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type": "request", "protocolVersion": 1,
+                "requestId": uuid::Uuid::new_v4().to_string(), "deviceId": device_id,
+                "expectedConnectionGeneration": placement, "payload": { "type": "tabs.list" }
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("request");
+        let frame =
+            tokio::time::timeout(Duration::from_secs(10), read_native_frame(&mut controller))
+                .await
+                .expect("controller response timeout")
+                .expect("controller response")
+                .expect("controller frame");
+        let response: serde_json::Value = serde_json::from_slice(&frame).expect("response");
+        assert_eq!(response["ok"], true, "{response}");
+        response["payload"]["tabs"].as_array().expect("tabs").len()
+    }
+
+    /// Real Chromium + the unpacked extension + this agent binary as its native
+    /// host. The bridge is restarted, as an agent restart or update does, and
+    /// the profile must keep its placement so live sessions stay bound.
+    ///
+    /// OPENGENI_REAL_CHROME_AGENT_BINARY=<built opengeni-agent>
+    /// OPENGENI_REAL_CHROME_EXTENSION=<apps/browser-extension/dist> DISPLAY=:N
+    /// cargo test ... attached_chrome_keeps_its_placement_across_a_bridge_restart -- --ignored
+    #[tokio::test]
+    #[ignore = "needs Chromium, a display, a built agent binary and the unpacked extension"]
+    async fn attached_chrome_keeps_its_placement_across_a_bridge_restart() {
+        let binary = std::env::var("OPENGENI_REAL_CHROME_AGENT_BINARY").expect("agent binary");
+        let extension = std::env::var("OPENGENI_REAL_CHROME_EXTENSION").expect("extension");
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join("agent");
+        let xdg = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::create_dir_all(xdg.join("chromium")).expect("xdg");
+        // This ignored test runs alone; the variable only steers where the
+        // manifest installer writes.
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        install_native_host_manifests(Path::new(&binary), root.path()).expect("manifest");
+        let server = BrowserBridgeServer::start(&config_dir)
+            .await
+            .expect("bridge");
+        let mut chromium = tokio::process::Command::new(
+            std::env::var("CHROMIUM").unwrap_or_else(|_| "chromium".to_string()),
+        )
+        // Chromium reads user-level native-host manifests from its user-data
+        // directory; the installer writes the default one.
+        .arg(format!(
+            "--user-data-dir={}",
+            xdg.join("chromium").display()
+        ))
+        .arg(format!("--load-extension={extension}"))
+        // Chromium 137+ ignores --load-extension unless this is disabled.
+        .arg("--disable-features=DisableLoadExtensionCommandLineSwitch")
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+        ])
+        .arg("data:text/html,<title>user page</title>")
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("OPENGENI_CONFIG_DIR", &config_dir)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("chromium");
+
+        let before = wait_for_device(&server).await;
+        let tabs =
+            controller_tab_count(&config_dir, &before.id, &before.connection_generation).await;
+        assert!(tabs >= 1);
+
+        // Agent restart: the listener, its token and every native host go away;
+        // the extension reconnects to the successor's bridge on its own.
+        server.shutdown().await.expect("shutdown");
+        let server = BrowserBridgeServer::start(&config_dir)
+            .await
+            .expect("successor bridge");
+        let after = wait_for_device(&server).await;
+        assert_eq!(after.id, before.id);
+        assert_eq!(
+            after.connection_generation, before.connection_generation,
+            "the restart must not move the profile to a new placement"
+        );
+        // A re-created controller still drives the same live profile.
+        assert_eq!(
+            controller_tab_count(&config_dir, &before.id, &before.connection_generation).await,
+            tabs
+        );
+        let _ = chromium.kill().await;
+        server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One reconnect story, read top to bottom.
+    async fn a_reconnected_extension_keeps_its_placement_for_live_controllers() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let authority = read_authority(&authority_path(directory.path())).expect("authority");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let with_state = |state: &'static str| {
+            move |hello: &mut serde_json::Value| {
+                hello["device"]["stateGeneration"] = json!(state);
+            }
+        };
+
+        let mut first = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut first,
+            &hello_with(device_id, "connection-1", with_state("state-1")),
+        )
+        .await
+        .expect("hello");
+        assert_eq!(
+            read_json(&mut first).await["connectionGeneration"],
+            "connection-1"
+        );
+        wait_for_placement(&server, Some("state-1")).await;
+        assert!(!server.inventory().placement_ends_on_reconnect("state-1"));
+        assert!(!server
+            .inventory()
+            .placement_ends_on_reconnect("connection-1"));
+
+        // One long-lived controller, as a browser controller keeps for its
+        // whole session.
+        let mut controller = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+            .await
+            .expect("controller connect");
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type": "authenticate",
+                "protocolVersion": 1,
+                "role": "controller",
+                "token": authority.token
+            }))
+            .expect("controller auth"),
+        )
+        .await
+        .expect("write controller auth");
+        let first_request = "22222222-2222-4222-8222-222222222222";
+        controller_ping(&mut controller, first_request, device_id, "state-1").await;
+        assert_eq!(
+            answer_ping(&mut first, device_id, "connection-1").await,
+            first_request
+        );
+        let response = read_json(&mut controller).await;
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["connectionGeneration"], "state-1");
+
+        // The native host goes away (agent or host restart, port reconnect)
+        // while Chrome and the extension's worker stay alive.
+        drop(first);
+        wait_for_placement(&server, None).await;
+        let mut second = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut second,
+            &hello_with(device_id, "connection-2", with_state("state-1")),
+        )
+        .await
+        .expect("hello");
+        assert_eq!(
+            read_json(&mut second).await["connectionGeneration"],
+            "connection-2"
+        );
+        wait_for_placement(&server, Some("state-1")).await;
+
+        let second_request = "33333333-3333-4333-8333-333333333333";
+        controller_ping(&mut controller, second_request, device_id, "state-1").await;
+        assert_eq!(
+            answer_ping(&mut second, device_id, "connection-2").await,
+            second_request
+        );
+        let response = read_json(&mut controller).await;
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["connectionGeneration"], "state-1");
+
+        // A restarted worker lost its live state: that is a new placement and
+        // the old one is fenced.
+        drop(second);
+        wait_for_placement(&server, None).await;
+        let mut third = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut third,
+            &hello_with(device_id, "connection-3", with_state("state-2")),
+        )
+        .await
+        .expect("hello");
+        assert_eq!(read_json(&mut third).await["type"], "ready");
+        wait_for_placement(&server, Some("state-2")).await;
+        controller_ping(
+            &mut controller,
+            "44444444-4444-4444-8444-444444444444",
+            device_id,
+            "state-1",
+        )
+        .await;
+        let response = read_json(&mut controller).await;
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "fenced");
+
+        // An older extension's placement is its port: a restart would end it.
+        let mut legacy = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut legacy,
+            &hello("55555555-5555-4555-8555-555555555555", "legacy-1", 1),
+        )
+        .await
+        .expect("legacy hello");
+        assert_eq!(read_json(&mut legacy).await["type"], "ready");
+        for _ in 0..400 {
+            if server.inventory().snapshot().devices.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(server.inventory().placement_ends_on_reconnect("legacy-1"));
+        assert!(!server.inventory().placement_ends_on_reconnect("state-2"));
+
+        drop((third, legacy, controller));
         server.shutdown().await.expect("shutdown");
     }
 }

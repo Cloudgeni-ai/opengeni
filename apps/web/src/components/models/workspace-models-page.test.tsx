@@ -558,7 +558,7 @@ beforeEach(async () => {
   context.clientConfig.claudeSubscriptionEnabled = false;
 });
 
-const ACCOUNTS_SECTION = "Subscriptions, API keys and credits that pay for models here.";
+const ACCOUNTS_SECTION = "Subscriptions, API keys and credits that run models in";
 
 let organizationAdmin = false;
 
@@ -649,6 +649,23 @@ function sectionDescription(container: HTMLElement, title: string): string | und
   return section?.querySelector("[data-slot=section-description]")?.textContent ?? undefined;
 }
 
+/** Opens "Models for" and returns its options, or picks the one with this label. */
+async function pickScope(container: HTMLElement, label?: string): Promise<HTMLElement[]> {
+  const picker = container.querySelector<HTMLButtonElement>("[role=combobox]")!;
+  await act(async () => picker.click());
+  // The menu opens in a popover a moment after the click.
+  let options: HTMLElement[] = [];
+  for (let tries = 0; tries < 50 && options.length === 0; tries += 1) {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 10)));
+    options = [...container.ownerDocument.querySelectorAll<HTMLElement>("[role=option]")];
+  }
+  if (label) {
+    const option = options.find((candidate) => candidate.textContent?.includes(label));
+    await act(async () => option!.click());
+  }
+  return options;
+}
+
 function button(container: HTMLElement, text: string | RegExp): HTMLButtonElement | undefined {
   return [...container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) =>
     typeof text === "string"
@@ -717,15 +734,15 @@ describe("Codex rows", () => {
     const view = await render();
     try {
       expect(view.container.textContent).toContain("Couldn't load Codex accounts.");
-      expect(view.container.textContent).not.toContain("No accounts connected");
+      expect(view.container.textContent).not.toContain("No model providers connected");
       failed = false;
       await act(async () => button(view.container, "Try again")!.click());
       await flush();
       expect(client.listCodexAccounts).toHaveBeenCalledTimes(2);
       expect(view.container.textContent).not.toContain("Couldn't load Codex accounts.");
-      expect(view.container.textContent).toContain("No accounts connected");
+      expect(view.container.textContent).toContain("No model providers connected");
       // A workspace admin adds accounts for this workspace.
-      expect(button(view.container, /Connect account/)).toBeDefined();
+      expect(button(view.container, /Connect provider/)).toBeDefined();
     } finally {
       await cleanup(view);
     }
@@ -859,10 +876,15 @@ describe("Models list", () => {
       expect(row?.textContent).toContain("paid by this workspace's Codex subscription");
       // Accounts come first, as on the organization's page, then Defaults.
       const headings = [...view.container.querySelectorAll("h2")].map((h) => h.textContent);
-      expect(headings.indexOf("Accounts")).toBeGreaterThan(-1);
-      expect(headings.indexOf("Accounts")).toBeLessThan(headings.indexOf("Defaults"));
-      // The header says this is one workspace, not the organization's page.
-      expect(view.container.textContent).toContain("Changes here apply only to this workspace");
+      expect(headings.indexOf("Model providers")).toBeGreaterThan(-1);
+      expect(headings.indexOf("Model providers")).toBeLessThan(headings.indexOf("New chats"));
+      // The picker's header says this is one workspace, not the defaults.
+      expect(view.container.querySelector("[role=combobox]")?.textContent).toContain(
+        "Design preview",
+      );
+      expect(view.container.textContent).toContain(
+        "Changes here apply only to Design preview. Anything not changed comes from the defaults.",
+      );
     } finally {
       await cleanup(view);
     }
@@ -872,9 +894,9 @@ describe("Models list", () => {
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("Defaults");
+      expect(text).toContain("New chats");
       expect(text).toContain(ACCOUNTS_SECTION);
-      // Unconnected API-key providers are choices on Connect account, not rows.
+      // Unconnected API-key providers are choices on Connect provider, not rows.
       expect(text).not.toContain("OpenRouter");
       expect(text).not.toContain("Opper");
       expect(text).not.toContain("Vercel AI Gateway");
@@ -940,7 +962,7 @@ describe("Models list", () => {
     }
   });
 
-  test("Connect account shows SuperGrok disabled when this server has it off", async () => {
+  test("Connect provider shows SuperGrok disabled when this server has it off", async () => {
     const { OpenGeniApiError } = await import("@opengeni/sdk/browser");
     const off = async () => {
       throw new OpenGeniApiError(
@@ -965,13 +987,13 @@ describe("Models list", () => {
     }
   });
 
-  test("Connect account lists providers as rows that open their own step", async () => {
+  test("Connect provider lists providers as rows that open their own step", async () => {
     asOrganizationAdmin();
     const view = await render();
     try {
-      await act(async () => button(view.container, /Connect account/)!.click());
+      await act(async () => button(view.container, /Connect provider/)!.click());
       await flush();
-      expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
       const text = view.container.textContent ?? "";
       expect(text).toContain("Pay with your ChatGPT plan");
       expect(text).toContain("Pay per token through OpenRouter");
@@ -1107,7 +1129,7 @@ describe("Codex pool controls", () => {
     try {
       expect(view.container.textContent).toContain("New work uses this workspace's Codex account.");
       expect(button(view.container, "Use automatically")).toBeUndefined();
-      expect(button(view.container, "Connect account")).toBeUndefined();
+      expect(button(view.container, "Connect provider")).toBeUndefined();
     } finally {
       await cleanup(view);
     }
@@ -1152,18 +1174,21 @@ describe("Codex pool controls", () => {
     });
     const view = await render();
     try {
-      // One "Codex accounts" row in How accounts are used, and no legacy pool control.
-      const groups = [...view.container.querySelectorAll("[role='radiogroup']")].filter(
-        (group) =>
-          document.getElementById(group.getAttribute("aria-labelledby") ?? "")?.textContent ===
-          "Codex accounts",
+      // One Codex sharing switch in Sharing subscriptions, and no legacy pool control.
+      const switches = [...view.container.querySelectorAll("[role='switch']")].filter((control) =>
+        (control.getAttribute("aria-labelledby") ?? "")
+          .split(" ")
+          .some(
+            (id) =>
+              document.getElementById(id)?.textContent === "Share work between Codex subscriptions",
+          ),
       );
-      expect(groups).toHaveLength(1);
+      expect(switches).toHaveLength(1);
       expect(
         [...view.container.querySelectorAll("button")].filter(
           (candidate) => candidate.textContent?.trim() === "Spread work",
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
     } finally {
       await cleanup(view);
     }
@@ -1171,7 +1196,7 @@ describe("Codex pool controls", () => {
 });
 
 describe("Codex account page", () => {
-  test("opens from the row, maps Use for new work to the allocator, and goes back", async () => {
+  test("opens from the row, maps Enable account to the allocator, and goes back", async () => {
     const view = await render();
     try {
       const row = view.container.querySelector<HTMLElement>("[data-row-action]")!;
@@ -1179,7 +1204,7 @@ describe("Codex account page", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
       const toggle = view.container.querySelector<HTMLButtonElement>(
-        'button[role="switch"][aria-label="Use Team plan for new work"]',
+        'button[role="switch"][aria-label="Enable Team plan"]',
       )!;
       expect(toggle.getAttribute("aria-checked")).toBe("true");
       await act(async () => toggle.click());
@@ -1264,7 +1289,7 @@ describe("Codex account page", () => {
       // No green "Connected", no "Organization" chip, no aside repeating the header.
       expect(text).not.toContain("Connected");
       expect(text).not.toContain("Belongs to");
-      expect(text).not.toContain("Use for new work");
+      expect(text).not.toContain("Enable account");
       expect(view.container.querySelector('button[role="switch"]')).toBeNull();
       expect(button(view.container, /Disconnect/)).toBeUndefined();
       expect(button(view.container, /Rename/)).toBeUndefined();
@@ -1445,7 +1470,7 @@ describe("Opengeni credits", () => {
     );
     const view = await render(true, "organization-a");
     const text = view.container.textContent ?? "";
-    expect(text).not.toContain("No accounts connected");
+    expect(text).not.toContain("No model providers connected");
     const row = button(view.container, "Opengeni credits");
     expect(row).toBeDefined();
     expect(text).toContain("Pay as you go");
@@ -1820,14 +1845,14 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("Connect account connects for the organization, every workspace by default", async () => {
+  test("Connect provider connects for the organization, every workspace by default", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     const view = await render();
     try {
-      await act(async () => button(view.container, /Connect account/)!.click());
+      await act(async () => button(view.container, /Connect provider/)!.click());
       await flush();
-      expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
       expect(view.container.textContent).toContain(
         "Connect it once for Acme, then choose who can use it.",
       );
@@ -2054,11 +2079,11 @@ describe("One Models page for the organization and the workspace", () => {
     personalWorkspace = true;
     const view = await render();
     try {
-      expect(button(view.container, /Connect account/)).toBeDefined();
+      expect(button(view.container, /Connect provider/)).toBeDefined();
       expect(view.container.textContent).not.toContain("can add accounts");
       await act(async () => navigateTo({ view: "connect" }));
       await flush();
-      expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
       expect(view.container.textContent).toContain(
         "It pays for models in your Personal workspace, so only you use it.",
       );
@@ -2076,12 +2101,42 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
+  test("SUB-OWN-09: a shared workspace's admin connects every provider for the workspace, Codex too", async () => {
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Connect a subscription or an API key for everyone in Design preview.",
+      );
+      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
+        (row) => row.textContent ?? "",
+      );
+      for (const provider of ["Codex", "SuperGrok", "Claude subscription", "OpenRouter"]) {
+        expect(rows.some((row) => row.includes(provider))).toBe(true);
+      }
+      // Codex signs in for this workspace, not for the organization.
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+      expect(view.container.textContent).toContain(
+        "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
+      );
+      expect(view.container.textContent).not.toContain("Which workspaces can use it");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("a shared workspace's member who isn't its admin connects for themselves only", async () => {
     workspaceSettingsAdmin = false;
     context.clientConfig.claudeSubscriptionEnabled = true;
     const view = await render();
     try {
-      await act(async () => button(view.container, /Connect account/)!.click());
+      await act(async () => button(view.container, /Connect provider/)!.click());
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect your own subscription");
       const text = view.container.textContent ?? "";
@@ -2102,7 +2157,7 @@ describe("One Models page for the organization and the workspace", () => {
   test("someone who can't change connections still can't add accounts", async () => {
     const view = await render(false);
     try {
-      expect(button(view.container, /Connect account/)).toBeUndefined();
+      expect(button(view.container, /Connect provider/)).toBeUndefined();
       await act(async () => navigateTo({ view: "connect" }));
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("You can't add accounts here");
@@ -2130,7 +2185,7 @@ describe("One Models page for the organization and the workspace", () => {
     const view = await render(false);
     try {
       const text = view.container.textContent ?? "";
-      expect(button(view.container, "Connect account")).toBeUndefined();
+      expect(button(view.container, "Connect provider")).toBeUndefined();
       expect(text).toContain("Only admins of this workspace or Acme can add accounts.");
       expect(client.requestJson).not.toHaveBeenCalledWith(
         "GET",
@@ -2161,10 +2216,10 @@ describe("One Models page for the organization and the workspace", () => {
     routeOrganizationReads();
     const view = await render();
     try {
-      // An old link to the workspace-only picker opens Connect account.
+      // An old link to the workspace-only picker opens Connect provider.
       await act(async () => navigateTo({ view: "connect-workspace" }));
       await flush();
-      expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
       expect(view.container.textContent).toContain(
         "Connect it once for Acme, then choose who can use it.",
       );
@@ -2274,16 +2329,21 @@ describe("One Models page for the organization and the workspace", () => {
       expect(text).toContain("Everyone in Acme");
       expect(text).toContain("Team plan");
       expect(text).toContain("Belongs to Design preview");
-      expect(button(view.container, /Connect account/)).toBeDefined();
-      // Every workspace, with its rules; one this person can't change says who can.
-      expect(text).toContain("Workspaces");
-      expect(text).toContain("Finance ops");
-      expect(text).toContain("Only its workspace admins can change its models.");
-      expect(text).toContain("Your Personal workspace");
-      const workspaceRow = [
-        ...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
-      ].find((row) => row.querySelector("[data-row-action]")?.textContent === "Design preview")!;
-      await act(async () => workspaceRow.querySelector<HTMLElement>("[data-row-action]")!.click());
+      expect(button(view.container, /Connect provider/)).toBeDefined();
+      // The Defaults scope lists only workspaces that change something.
+      expect(text).toContain("Workspaces with their own settings");
+      expect(text).toContain("Every workspace uses the defaults.");
+      // Every workspace is in "Models for"; one this person can't change says who can.
+      const options = await pickScope(view.container);
+      const labels = options.map((option) => option.textContent ?? "");
+      expect(labels[0]).toStartWith("Defaults");
+      const finance = options.find((option) => option.textContent?.includes("Finance ops"))!;
+      expect(finance.getAttribute("aria-disabled")).toBe("true");
+      expect(finance.textContent).toContain("Only its workspace admins can change its models.");
+      expect(labels.some((label) => label.includes("Your Personal workspace"))).toBe(true);
+      await act(async () =>
+        options.find((option) => option.textContent?.includes("Design preview"))!.click(),
+      );
       expect(lastNavigation?.to).toBe("/workspaces/$workspaceId/organization");
       expect(lastNavigation?.search).toEqual({ section: "models", workspace: "workspace-a" });
     } finally {
@@ -2315,12 +2375,12 @@ describe("One Models page for the organization and the workspace", () => {
     try {
       const empty = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=empty-state]"),
-      ].find((node) => node.textContent?.includes("No accounts connected"));
+      ].find((node) => node.textContent?.includes("No model providers connected"));
       expect(empty).toBeDefined();
       expect(empty!.textContent).toContain(
         "Connect a subscription or an API key, then choose who can use it.",
       );
-      expect(button(view.container, /Connect account/)).toBeDefined();
+      expect(button(view.container, /Connect provider/)).toBeDefined();
     } finally {
       await cleanup(view);
     }
@@ -2376,8 +2436,8 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         // Accounts reach workspaces or people, and their tags say which: the
         // section doesn't promise only workspaces.
-        expect(sectionDescription(view.container, "Accounts")).toBe(
-          "Subscriptions, API keys and credits that pay for models. Open one to see its usage, choose who can use it, or reconnect it.",
+        expect(sectionDescription(view.container, "Model providers")).toBe(
+          "Subscriptions, API keys and credits that run models. Open one to see its usage, choose who can use it, or reconnect it.",
         );
         expect(rowsNamed(view.container, "Team plan")).toHaveLength(1);
         expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
@@ -2656,14 +2716,14 @@ describe("One Models page for the organization and the workspace", () => {
         }
         return callList(...args);
       });
-      // Its error row (with Try again) keeps the list from reading "No accounts connected".
+      // Its error row (with Try again) keeps the list from reading "No model providers connected".
       const listFailed = await render();
       try {
         await flush();
         expect(listFailed.container.textContent).toContain(
           "Couldn't load the organization's Codex accounts.",
         );
-        expect(listFailed.container.textContent).not.toContain("No accounts connected");
+        expect(listFailed.container.textContent).not.toContain("No model providers connected");
         expect(listFailed.container.textContent).not.toContain("New Codex work");
       } finally {
         client.requestJson.mockImplementation(keptList);
@@ -3316,9 +3376,9 @@ describe("One Models page for the organization and the workspace", () => {
       ].find((row) => row.textContent?.includes("team@example.test"))!;
       expect(claudeRow.textContent).toContain("70%");
       expect(text).toContain(
-        "To connect your own account, open one of your workspaces. Only organization owners and admins add accounts for everyone.",
+        "To connect your own subscription, pick one of your workspaces above. Only organization owners and admins connect providers for everyone.",
       );
-      expect(button(view.container, /Connect account/)).toBeUndefined();
+      expect(button(view.container, /Connect provider/)).toBeUndefined();
       // The organization's own accounts are never read for them.
       expect(client.requestJson).not.toHaveBeenCalledWith(
         "GET",
@@ -3493,11 +3553,15 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("a workspace's model page goes back to the organization's list", async () => {
+  test("a workspace's model page goes back to the defaults through Models for", async () => {
     const view = await render();
     try {
-      expect(view.container.querySelector("h1")?.textContent).toBe("Design preview");
-      await act(async () => button(view.container, "Models")!.click());
+      expect(view.container.querySelector("[role=combobox]")?.textContent).toContain(
+        "Design preview",
+      );
+      await act(async () => {
+        await pickScope(view.container).then((options) => options[0]!.click());
+      });
       expect(lastNavigation?.search).toEqual({ section: "models" });
     } finally {
       await cleanup(view);

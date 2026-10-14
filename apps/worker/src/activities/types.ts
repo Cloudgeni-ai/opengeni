@@ -336,6 +336,20 @@ export type PostClaimDatabaseRecoveryDetail = {
   sandboxSetupOutcomeUnknown?: true;
   /** Preserve the exhausted budget for a command proven not dispatched. */
   sandboxSetupRecoveryExhausted?: true;
+  /** Content-free task usage receipts whose write failed after their
+   * provider responses were received. The DB-only control lane writes them
+   * with their original identities before any replacement attempt, so known
+   * usage is neither lost nor re-requested. Bounded; omitted when none. */
+  sessionUsageReceipts?: PostClaimSessionUsageReceipt[];
+};
+
+export type PostClaimSessionUsageReceipt = {
+  sessionId: string;
+  sourceId: string;
+  turnId: string | null;
+  amountMicros: number | null;
+  pricingSource: "configured_list_price" | "gateway_reported" | null;
+  model: string | null;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";
@@ -498,6 +512,7 @@ export type DispatchScheduledTaskRunResult =
         | "allowance_exhausted"
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
+        | "session_usage_limit"
         | "malformed_manual_trigger"
         | "scheduled_task_paused"
         | "scheduled_authority_exhausted"

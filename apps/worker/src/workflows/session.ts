@@ -387,7 +387,44 @@ export function postClaimDatabaseRecoveryDetail(
   ) {
     return null;
   }
+  if (
+    detail.sessionUsageReceipts !== undefined &&
+    !validPostClaimSessionUsageReceipts(detail.sessionUsageReceipts)
+  ) {
+    return null;
+  }
   return detail as PostClaimDatabaseRecoveryDetail;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Bounded, content-free task usage receipts carried by a recovery detail. */
+function validPostClaimSessionUsageReceipts(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return false;
+  return value.every((receipt) => {
+    if (!receipt || typeof receipt !== "object") return false;
+    const r = receipt as Record<string, unknown>;
+    const keys = Object.keys(r);
+    return (
+      keys.every((key) =>
+        ["sessionId", "sourceId", "turnId", "amountMicros", "pricingSource", "model"].includes(key),
+      ) &&
+      typeof r.sessionId === "string" &&
+      UUID_PATTERN.test(r.sessionId) &&
+      typeof r.sourceId === "string" &&
+      r.sourceId.length >= 1 &&
+      r.sourceId.length <= 1024 &&
+      (r.turnId === null || (typeof r.turnId === "string" && UUID_PATTERN.test(r.turnId))) &&
+      (r.amountMicros === null ||
+        (typeof r.amountMicros === "number" &&
+          Number.isSafeInteger(r.amountMicros) &&
+          r.amountMicros >= 0)) &&
+      (r.pricingSource === null ||
+        r.pricingSource === "configured_list_price" ||
+        r.pricingSource === "gateway_reported") &&
+      (r.model === null || (typeof r.model === "string" && r.model.length <= 512))
+    );
+  });
 }
 
 /**

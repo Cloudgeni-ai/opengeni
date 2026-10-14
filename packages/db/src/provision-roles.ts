@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { databaseBootConnectOptions } from "./boot-connect";
 import type { RlsStrategy } from "./database";
 import {
   RUNTIME_FULL_DML_TABLES,
@@ -135,7 +136,7 @@ export async function provisionRoles(
     commaSeparated(process.env.OPENGENI_TEMPORAL_DATABASES ?? "temporal,temporal_visibility")
   ).map((name) => validateIdentifier("temporalDatabases", name));
 
-  const sql = postgres(adminConnection, { max: 1 });
+  const sql = postgres(adminConnection, { max: 1, ...databaseBootConnectOptions(adminConnection) });
   try {
     // FORCE strategy provisions the non-owner app role Opengeni connects as.
     // SCOPED strategy: the host owns the connection role; Opengeni provisions no
@@ -509,7 +510,7 @@ async function grantTemporalRoleInDatabase(
   role: string,
 ): Promise<void> {
   const databaseUrl = databaseUrlFor(adminConnection, database);
-  const databaseSql = postgres(databaseUrl, { max: 1 });
+  const databaseSql = postgres(databaseUrl, { max: 1, ...databaseBootConnectOptions(databaseUrl) });
   try {
     await databaseSql.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${identifier(role)}`);
   } finally {
@@ -558,6 +559,9 @@ async function grantAppRoleIfSchemaExists(
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "maintain_usage_allowances(integer,integer)",
     "usage_allowance_command(jsonb)",
+    // Per-task usage limits: the runtime's only two entry points.
+    "maintain_session_usage_limits(integer,integer)",
+    "session_usage_limit_command(jsonb)",
     "ensure_external_identity(uuid,text,text)",
     "lookup_external_identity(uuid,text,text,text)",
     "prepare_external_workspace_membership_operation(jsonb)",
@@ -781,6 +785,22 @@ BEGIN
         'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods',
         'workspace_video_allowance_allocations','usage_allowance_attribution_receipts',
         'workspace_allowance_clear_receipts']
+      LOOP
+        EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM %I',runtime_table,${literal(role)});
+        EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.%I FROM %I',
+          (SELECT string_agg(quote_ident(attname),',') FROM pg_attribute
+            WHERE attrelid=format('opengeni_private.%I',runtime_table)::regclass
+              AND attnum>0 AND NOT attisdropped),runtime_table,${literal(role)});
+      END LOOP;
+    END IF;
+    -- Per-task usage limits: only the command/maintenance entry
+    -- points are runtime-callable; helpers and private tables stay owner-only.
+    IF to_regprocedure(format('%I.session_usage_limit_command(jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.session_usage_limit_capability_active(uuid,uuid) TO PUBLIC', ${literal(schema)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.session_usage_limit_state(jsonb,boolean), %I.session_usage_limit_apply_receipt(uuid,uuid,uuid,text,uuid,uuid,bigint,text,text,text), %I.session_usage_limit_import_page(uuid,uuid,uuid,integer), %I.session_usage_limit_import_step(uuid,uuid,uuid,integer), %I.session_usage_limit_meter_amount(numeric,text,numeric,numeric), %I.session_usage_limit_event_amount(jsonb), %I.seed_session_usage_limit_root(), %I.meter_session_usage_limit_event() FROM %I',
+        ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      FOREACH runtime_table IN ARRAY ARRAY['session_usage_limit_roots','session_usage_limit_receipts',
+        'session_usage_limit_config_receipts','session_usage_limit_capabilities']
       LOOP
         EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM %I',runtime_table,${literal(role)});
         EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.%I FROM %I',
@@ -1936,8 +1956,12 @@ BEGIN
         vault_table text;
       BEGIN
         FOREACH vault_routine IN ARRAY ARRAY[${VAULT_RUNTIME_ROUTINES.map((routine) => literal(routine)).join(", ")}] LOOP
-          EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, vault_routine);
-          EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, vault_routine, ${literal(role)});
+          -- Later vault routines arrive with later migrations; runtime posture
+          -- reports any that are missing.
+          IF to_regprocedure(format('%I.%s', ${literal(schema)}, vault_routine)) IS NOT NULL THEN
+            EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, vault_routine);
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, vault_routine, ${literal(role)});
+          END IF;
         END LOOP;
         FOREACH vault_table IN ARRAY ARRAY[${VAULT_TABLES.map((table) => literal(table)).join(", ")}] LOOP
           EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', ${literal(schema)}, vault_table, ${literal(role)});

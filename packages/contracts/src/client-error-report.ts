@@ -303,6 +303,7 @@ export const CLIENT_PAGES = [
   "reset-password",
   "setup-account",
   "account-auth",
+  "site-auth",
   "personal-security",
   "other",
 ] as const;

@@ -12,7 +12,7 @@ export interface VaultProviderCapabilities {
   totp: boolean;
   files: boolean;
   groupGrants: boolean;
-  /** Passkeys live only in OpenGeni-hosted vaults (D20). */
+  /** Passkeys live only in Opengeni-hosted vaults (D20). */
   passkeys: false;
 }
 export interface ProviderVault {

@@ -416,6 +416,11 @@ ceilings, not reservations or organization-credit purchases. Keep budget
 configuration/grants in organization-authorized backend flows and use the
 session proxy's own-usage route for a browser meter.
 
+To stop one task (a root session and its child agents) at an API-equivalent
+model-usage amount, set `usageLimitMicros` from your server on create or with
+`setSessionUsageLimit`; see [task usage limits](session-usage-limits.md). The
+browser proxy never accepts a limit from an end user.
+
 ```text
 product browser / mobile client
              |
@@ -803,7 +808,7 @@ boolean values, at most 2 KiB of serialized header bytes). Context is non-secret
 attribution, not credentials or a permissions request. `asService` and
 `asUser` / `asLinkedUser` are mutually exclusive; start each lane from the
 unscoped client. Reapplying `asService` replaces its name and context.
-The server rejects mixed user/service headers with 422. OpenGeni-owned
+The server rejects mixed user/service headers with 422. Opengeni-owned
 provenance fields such as `via` and `label` are reserved context keys.
 Session create, Send, and Steer freeze this service principal with no initiating
 human; a scheduled task created in this lane freezes it for its occurrences.
@@ -1074,7 +1079,7 @@ Opengeni credits, then the deployment default. `GET
 availability are live deployment facts; do not hard-code a remembered catalog.
 
 Opengeni credits are held at the organization account. All of that
-organization's workspaces using the OpenGeni-credits model path draw from the
+organization's workspaces using the Opengeni-credits model path draw from the
 same account balance; creating one workspace per user or chat does not create
 separate wallets. Connected subscriptions and workspace-owned provider
 credentials can use their separately reported external billing path. Retain

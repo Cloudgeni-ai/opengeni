@@ -9,7 +9,7 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
 import { LaptopIcon, Loader2Icon, ServerIcon } from "lucide-react";
-import { useRef, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { ComposerMenuHeader } from "@/components/ui/composer-menu";
 import {
@@ -87,10 +87,21 @@ export function SessionRunsOnMenuBody(props: {
   runsOn: SessionRunsOn;
   workspaceId: string;
   rigId: string | null;
+  /**
+   * Moves the chat onto a machine when moving needs more than repointing it
+   * (the person's own machine also needs their consent for this chat).
+   * Resolves to why the chat could not move, or null.
+   */
+  move?: ((machine: MachineView) => Promise<string | null>) | undefined;
 }) {
   const { fleet, machines } = props.runsOn;
   const presentation = props.presentation ?? "menu";
   const bodyRef = useRef<HTMLDivElement>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
+  // A move onto the person's own machine is a repoint plus a consent message;
+  // keep the rows locked until both settle so a second pick can't interleave.
+  const [movingSandboxId, setMovingSandboxId] = useState<string | null>(null);
+  const locked = fleet.attaching || movingSandboxId !== null;
   useFocusCheckedRow(bodyRef, presentation);
   const rigs = useWorkspaceRigs({ workspaceId: props.workspaceId, enabled: props.rigId !== null });
   const rig = props.rigId ? rigs.rigs.find((candidate) => candidate.id === props.rigId) : null;
@@ -122,15 +133,26 @@ export function SessionRunsOnMenuBody(props: {
           ) : null}
           {machines.map((machine) => {
             const selectable = isSelectable(machine) && fleet.canAttach;
-            const swapping = fleet.attachingSandboxId === machine.sandboxId;
+            const swapping =
+              fleet.attachingSandboxId === machine.sandboxId ||
+              movingSandboxId === machine.sandboxId;
             return (
               <RadioRow
                 key={machine.sandboxId}
                 value={machine.sandboxId}
-                disabled={!selectable || fleet.attaching}
+                disabled={!selectable || locked}
                 onSelect={() => {
-                  if (machine.active || !selectable || fleet.attaching) return;
-                  void fleet.attach(machine.sandboxId);
+                  if (machine.active || !selectable || locked) return;
+                  setMoveError(null);
+                  if (!props.move) {
+                    void fleet.attach(machine.sandboxId);
+                    return;
+                  }
+                  setMovingSandboxId(machine.sandboxId);
+                  void props
+                    .move(machine)
+                    .then(setMoveError, () => setMoveError(null))
+                    .finally(() => setMovingSandboxId(null));
                 }}
                 label={machineDisplayName(machine)}
                 meta={
@@ -153,7 +175,11 @@ export function SessionRunsOnMenuBody(props: {
             );
           })}
         </RadioGroup>
-        {fleet.mutationError ? (
+        {moveError ? (
+          <p role="alert" className={cn(MENU_NOTE_CLASS, "text-danger")}>
+            Couldn't move this chat. {moveError}
+          </p>
+        ) : fleet.mutationError ? (
           <p role="alert" className={cn(MENU_NOTE_CLASS, "text-danger")}>
             Couldn't move this chat. {userErrorText(fleet.mutationError)}
           </p>

@@ -1,6 +1,6 @@
 import { defineSchema } from "./define-schema";
 /**
- * Vaults: the OpenGeni secrets model (replaces variable sets).
+ * Vaults: the Opengeni secrets model (replaces variable sets).
  *
  * A vault holds a flat list of items; an item holds named fields; hosted
  * fields keep encrypted versions. Every type here is `z.infer` of its schema.
@@ -170,7 +170,7 @@ export const VaultSummary = /* @__PURE__ */ defineSchema(() =>
     lastSyncedAt: z.string().nullable(),
     rateLimitedUntil: z.string().nullable(),
     providerConnectionId: z.string().uuid().nullable(),
-    /** Organization vaults only. */
+    /** Organization and Only-me vaults; null for workspace and task vaults. */
     availability: VaultAvailability.nullable(),
     isDefault: z.boolean(),
     itemCount: z.number().int(),

@@ -59,9 +59,8 @@ export class CuaComputerBackend implements ComputerBackend {
       windowCapture: permissions.screen_recording,
       screenCapture: false,
       semanticActions: permissions.accessibility,
-      pointerInput:
-        platform !== "windows" && permissions.accessibility && permissions.screen_recording,
-      keyboardInput: platform !== "windows" && permissions.accessibility,
+      pointerInput: permissions.accessibility && permissions.screen_recording,
+      keyboardInput: permissions.accessibility,
       clipboard: false,
       backgroundActions: permissions.accessibility,
       backgroundInput: platform === "macos" && permissions.accessibility,
@@ -121,14 +120,11 @@ export class CuaComputerBackend implements ComputerBackend {
         ...this.initialCapabilities,
         semanticObservation: permissions.accessibility,
         semanticActions: permissions.accessibility,
-        keyboardInput: this.identity.platform !== "windows" && permissions.accessibility,
+        keyboardInput: permissions.accessibility,
         backgroundActions: permissions.accessibility,
         backgroundInput: macos && permissions.accessibility,
         windowCapture: permissions.screen_recording,
-        pointerInput:
-          this.identity.platform !== "windows" &&
-          permissions.accessibility &&
-          permissions.screen_recording,
+        pointerInput: permissions.accessibility && permissions.screen_recording,
       };
     });
   }
@@ -475,8 +471,6 @@ export class CuaComputerBackend implements ComputerBackend {
       throw new ComputerBackendError("target_stale", "CUA target generation changed", false, false);
     const args = this.args(target),
       action = command.action;
-    if (this.identity.platform === "windows" && action.type !== "semantic")
-      throw unsupported("The Windows CUA experiment admits advertised semantic actions only");
     if (action.type === "pointer") {
       const frame = this.frames.get(action.frameId);
       if (
@@ -513,12 +507,7 @@ export class CuaComputerBackend implements ComputerBackend {
         .find((entry) => entry.targetId === command.targetId)!;
       const x = (action.x * latest.width) / frame.width,
         y = (action.y * latest.height) / frame.height;
-      // Linux owns an isolated desktop: viewer input may focus within that seat.
-      // Attached physical desktops retain strictly background delivery.
-      const delivery = {
-        ...args,
-        delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
-      };
+      const delivery = { ...args, delivery_mode: this.inputDelivery() };
       if (action.action === "click" || action.action === "double_click")
         return [
           {
@@ -670,27 +659,16 @@ export class CuaComputerBackend implements ComputerBackend {
             ...args,
             ...focused,
             text: action.value,
-            delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
+            delivery_mode: this.inputDelivery(),
           },
         },
       ];
     const keys = action.value.split("+").map((key) => key.toLowerCase());
     const key = keys.pop()!;
-    const modifierAliases: Record<string, string> =
-      this.identity.platform === "linux"
-        ? { meta: "super", control: "ctrl", option: "alt" }
-        : { meta: "cmd", control: "ctrl", alt: "option" };
+    const { aliases: modifierAliases, allowed: allowedModifiers } =
+      KEY_MODIFIERS[this.identity.platform];
     const modifiers = keys.map((modifier) => modifierAliases[modifier] ?? modifier);
-    if (
-      modifiers.some(
-        (modifier) =>
-          !(
-            this.identity.platform === "linux"
-              ? ["super", "ctrl", "alt", "shift"]
-              : ["cmd", "ctrl", "option", "shift", "fn"]
-          ).includes(modifier),
-      )
-    )
+    if (modifiers.some((modifier) => !allowedModifiers.includes(modifier)))
       throw unsupported("CUA keyboard modifier is unsupported");
     return [
       {
@@ -700,12 +678,41 @@ export class CuaComputerBackend implements ComputerBackend {
           ...focused,
           key: key === "enter" ? "return" : key,
           modifiers,
-          delivery_mode: this.identity.platform === "linux" ? "foreground" : "background",
+          delivery_mode: this.inputDelivery(),
         },
       },
     ];
   }
+
+  /** Pointer and keyboard delivery. Linux owns an isolated seat, so viewer
+   * input may focus within it. macOS posts events to the target process
+   * without raising it. Windows delivers through SendInput after briefly
+   * fronting the window and restoring the previous foreground window:
+   * background PostMessage input is silently dropped by Chromium, Electron,
+   * WinUI and other common surfaces, which would leave ordinary clicks and
+   * typing unreliable. Semantic UIA actions stay in the background everywhere. */
+  private inputDelivery(): "foreground" | "background" {
+    return this.identity.platform === "macos" ? "background" : "foreground";
+  }
 }
+
+const KEY_MODIFIERS: Record<
+  "macos" | "windows" | "linux",
+  { aliases: Record<string, string>; allowed: string[] }
+> = {
+  macos: {
+    aliases: { meta: "cmd", control: "ctrl", alt: "option" },
+    allowed: ["cmd", "ctrl", "option", "shift", "fn"],
+  },
+  windows: {
+    aliases: { meta: "win", super: "win", cmd: "win", control: "ctrl", option: "alt" },
+    allowed: ["win", "ctrl", "alt", "shift"],
+  },
+  linux: {
+    aliases: { meta: "super", control: "ctrl", option: "alt" },
+    allowed: ["super", "ctrl", "alt", "shift"],
+  },
+};
 
 async function readPermissions(
   runtime: CuaDesktopRuntime,

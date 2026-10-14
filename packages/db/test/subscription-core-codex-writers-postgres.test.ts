@@ -1158,7 +1158,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     expect(stale).toHaveLength(0);
   });
 
-  test("workspace route: SUB-OWN-04 delegated managers reconnect only; administrators create and delete", async () => {
+  test("workspace route: SUB-OWN-04 and SUB-OWN-09 workspace administrators create, reconnect and remove only the workspace's own account", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     const manager = await person(org, "admin");
@@ -1201,27 +1201,94 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
       await connect(org, manager.subjectId, org.sharedWorkspaceId, "ws-account"),
     ).toMatchObject({ kind: "connected", id: local.id, isNew: false });
     expect((await row(local.id))!.refresh_generation).toBe("2");
-    // ... but cannot take over an organization account, create a new shared
-    // account, or delete one.
+    // ... but cannot take over an organization account ...
     expect(await connect(org, manager.subjectId, org.sharedWorkspaceId, "org-managed")).toEqual({
       kind: "refused",
       reason: "managed_elsewhere",
     });
-    expect(await connect(org, manager.subjectId, org.sharedWorkspaceId, "brand-new")).toEqual({
+    // ... or create an organization account (the organization route).
+    expect(await connect(org, manager.subjectId, null, "manager-org")).toEqual({
       kind: "refused",
       reason: "forbidden",
     });
-    expect(
-      (await disconnect(org, manager.subjectId, org.sharedWorkspaceId, local.id)).outcome,
-    ).toBe("forbidden");
-    // A plain member manages nothing (the update policy refuses).
+    // SUB-OWN-09: a workspace administrator who is no organization
+    // administrator connects a new account for the workspace. It is the
+    // workspace's own account: organization-owned, serving and managed by
+    // that workspace alone, never reaching Personal workspaces.
+    const own = await connect(org, manager.subjectId, org.sharedWorkspaceId, "brand-new");
+    expect(own).toMatchObject({ kind: "connected", isNew: true, ownership: "shared", version: 1 });
+    if (own.kind !== "connected") throw new Error("connect failed");
+    expect(await row(own.id)).toMatchObject({
+      ownership: "shared",
+      scope_kind: "workspaces",
+      managed_by_workspace_id: org.sharedWorkspaceId,
+      allow_personal_workspaces: false,
+      owner_subject_id: null,
+    });
+    const reach = await shared!.admin<{ workspace_id: string }[]>`
+      select workspace_id::text as workspace_id from subscription_connection_workspaces
+      where connection_id = ${own.id}::uuid`;
+    expect(reach.map((entry) => entry.workspace_id)).toEqual([org.sharedWorkspaceId]);
+    const [ownPolicy] = await shared!.admin<{ inference_pool: string; managed: string }[]>`
+      select inference_pool, managed_by_workspace_id::text as managed
+      from subscription_connection_assignment_policies
+      where connection_id = ${own.id}::uuid and workspace_id = ${org.sharedWorkspaceId}::uuid`;
+    expect(ownPolicy).toEqual({ inference_pool: "workspace", managed: org.sharedWorkspaceId });
+    const managed = await withSessionRlsActorContext({ subjectId: manager.subjectId }, () =>
+      getSubscriptionCoreCodexWorkspaceProjection(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+      }),
+    );
+    expect(managed.accounts.find((account) => account.id === own.id)?.source).toBe("workspace");
+    // The same upstream login connected by another workspace's administrator
+    // is that workspace's account, which this one can't even see.
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid, ${manager.subjectId}, 'member')`;
+    const otherManager = await person(org, "member");
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid, ${otherManager.subjectId}, 'admin')`;
+    expect(await connect(org, otherManager.subjectId, org.otherWorkspaceId, "brand-new")).toEqual({
+      kind: "refused",
+      reason: "managed_elsewhere",
+    });
+    // A member of a workspace (not its administrator) creates nothing there.
+    expect(await connect(org, manager.subjectId, org.otherWorkspaceId, "member-new")).toEqual({
+      kind: "refused",
+      reason: "forbidden",
+    });
+    // A plain member manages nothing (the update and insert policies refuse).
     expect(await connect(org, plain.subjectId, org.sharedWorkspaceId, "ws-account")).toEqual({
+      kind: "refused",
+      reason: "forbidden",
+    });
+    expect(await connect(org, plain.subjectId, org.sharedWorkspaceId, "plain-new")).toEqual({
       kind: "refused",
       reason: "forbidden",
     });
     expect((await disconnect(org, plain.subjectId, org.sharedWorkspaceId, local.id)).outcome).toBe(
       "forbidden",
     );
+    expect((await disconnect(org, plain.subjectId, org.sharedWorkspaceId, own.id)).outcome).toBe(
+      "forbidden",
+    );
+    // Once the organization widens an account to another workspace it is no
+    // longer the workspace's own: only an organization administrator removes it.
+    await shared!.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${local.id}::uuid, ${org.otherWorkspaceId}::uuid)`;
+    expect(
+      (await disconnect(org, manager.subjectId, org.sharedWorkspaceId, local.id)).outcome,
+    ).toBe("forbidden");
+    expect(await row(local.id)).not.toBeNull();
+    // The workspace administrator removes the workspace's own account.
+    expect(await disconnect(org, manager.subjectId, org.sharedWorkspaceId, own.id)).toMatchObject({
+      outcome: "removed",
+      connectionId: own.id,
+    });
+    expect(await row(own.id)).toBeNull();
     // An organization account named from a workspace route keeps the legacy 409.
     await expect(
       disconnect(org, org.ownerSubjectId, org.sharedWorkspaceId, organizationAccount.id),

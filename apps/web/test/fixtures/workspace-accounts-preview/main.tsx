@@ -72,7 +72,7 @@ createRoot(document.getElementById("root")!).render(
         // As the settings shell frames it: the page header, then grouped cards.
         <PageHeaderStyleProvider icon="hide">
           <SectionVariantProvider variant="group">
-            {params.get("account") || params.get("view") || params.get("workspace") ? null : (
+            {params.get("account") || params.get("view") ? null : (
               <PageHeader
                 title="Models"
                 description={organizationSettingsDescription("models", "Acme")}

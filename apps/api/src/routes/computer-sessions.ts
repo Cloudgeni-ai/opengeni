@@ -1,3 +1,4 @@
+import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { randomUUID } from "node:crypto";
 import {
   resolveFirstPartyDelegationSecret,
@@ -122,11 +123,13 @@ import {
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { wrongInteractionPlacementMessage } from "./interaction-placement-message";
 import {
   collectStringsDeep,
   resolveInteractionSecretValues,
   type InteractionSecretsPort,
 } from "../interaction-secrets";
+import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -629,6 +632,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: collectStringsDeep(request.arguments),
             use: { surface: "desktop", toolName: request.tool, operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.nativeCall(
             ComputerNativeCommand.parse({
@@ -684,6 +693,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: computerActionSecretTexts(request.action),
             use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.action(
             ComputerActionCommand.parse({
@@ -1113,19 +1128,16 @@ export function registerComputerSessionRoutes(
     }
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
+      // Personal machines are controlled only for their owner, as everywhere else.
+      const viewer = await attachedBrowserViewer(deps, grant, sourceSession.workspaceId);
       const device = await getAttachedBrowserDevice(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
+        ...viewer,
         deviceId: expectedPlacement.deviceId,
       });
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
       }
-      const enrollment = await getLiveEnrollmentConnection(
-        deps.db,
-        sourceSession.workspaceId,
-        device.enrollmentId,
-      );
+      const enrollment = await getLiveEnrollmentConnection(deps.db, viewer, device.enrollmentId);
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }
@@ -1242,8 +1254,7 @@ export function registerComputerSessionRoutes(
           ) {
             if (operation === "computer.create") {
               throw new HTTPException(422, {
-                message:
-                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+                message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
               });
             }
             return await throwComputerSourcePlacementChanged(

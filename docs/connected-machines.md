@@ -255,6 +255,22 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+The extension's hello carries two generations. `connectionGeneration` is new
+for every native port and fences that transport: commands, results and
+inventory must name the exact live port. `stateGeneration` is created once per
+extension worker lifetime and reused by every native reconnect in it; Chrome
+keeps the tab ids, pages and debugger attachments that the worker owns for
+exactly that long. The agent reports `stateGeneration` as the profile's
+inventory `connectionGeneration` (the placement instance above), so a
+native-host exit, an agent restart or an agent update reconnects in place and
+the profile's sessions stay live; if the agent restarted, the next action
+re-creates the controller session. A restarted worker, a reloaded or updated
+extension, or a restarted Chrome reports a new `stateGeneration` and ends the
+sessions as above. Extensions that do not send `stateGeneration` keep the
+per-port behavior, and the agent's update gate waits while one of them backs a
+live attached controller, because restarting would end its sessions. A
+quiescent attached session does not otherwise hold back an agent update.
+
 Each ended connection generation is recorded with its reason in
 `attached_browser_devices.connection_history` (the latest 50 per profile).
 The native host sends a final `native_host_closing` frame before it exits,
@@ -283,6 +299,11 @@ can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it
 can explain the outage, choose another available tool or compute target, or help
 recover the machine. The transport failure must not replace the agent loop.
+The same holds for sessions with repository resources, whose repository Skill
+index is built through the sandbox before the first model call: a typed
+offline/timeout control error during that discovery degrades to a short
+"repository skills unavailable" instruction for that run instead of failing the
+turn, and the next run discovers again.
 
 ## Create a session on a machine
 
@@ -494,8 +515,19 @@ the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
 unreadable controller as `update_state_unavailable`), keeps admitting new work,
 and every few seconds re-attempts a short fenced idle proof, reopening
 admission whenever it is still busy. It never cancels accepted work, stops
-long-lived servers, or restarts the host early; an update behind a long-lived
-command simply keeps waiting. Only lost physical settlement, which can never
+long-lived servers, or restarts the host early. On Linux and macOS a running
+streamed command (an `OpStart` exec) does not hold the update back: after the
+verified binary is installed, the agent hands each such command to its
+successor and `exec`s the new binary in the same process. The command keeps
+running as the same process with the same pipes, process group and operation
+cgroup; the successor keeps the connection instance, so the server sees a
+short reconnect on the same op subjects (no `GoingOffline`), re-attaches as
+after any reconnect, and the stream continues byte-exact with one digest.
+Every failure is fail-closed: a command that cannot be continued ends as a
+typed failure, and if the successor never starts, the command's anchor ends it
+as for a crashed runner. Other admitted work, such as a request still being
+answered, a git operation or a pending upload, still makes the update wait,
+and Windows keeps waiting for every command. Only lost physical settlement, which can never
 become provable in that process, ends the update with retryable
 `update_state_unavailable`. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
@@ -850,8 +882,14 @@ for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
 continues to use the directory it was launched from, and an explicit session
 `workingDir` still takes precedence.
 
-After installing a release with this fix, regenerate an older service definition
-with `opengeni-agent service install --restart` when no machine work is running.
+The agent also never treats a filesystem root as its workspace, so an older
+service definition needs no manual step: when `run` starts with `/` (or a
+Windows drive root) as its working directory and the user's home directory
+exists, it moves into that home directory before connecting and reports it as
+the workspace root. Any other launch directory is kept as chosen.
+
+Regenerating an older service definition with `opengeni-agent service install
+--restart` is still useful to pick up other plist changes (such as the stderr log).
 The installer checks launchd's loaded binary and working directory as well as the
 plist on disk. If an earlier install wrote the plist but failed before reloading,
 a retry still reloads the stale job without requiring `--restart`. Dry-run
@@ -864,6 +902,20 @@ with a writable custom path in the new-session **Runs on** settings (or pass an
 explicit `workingDir` to `createSession`). Historical attachments are not restaged
 automatically; retrieve them explicitly through Files or attach them to a new
 message when needed.
+
+While a session keeps `/`, staging an attachment, spilled tool result or generated
+image into it usually still fails. When the turn's effective backend is a
+Connected Machine and its working directory is `/`, any failed staging command
+gets a reason that says the filesystem root is often not writable (read-only on
+macOS), that this may be why it failed, and how to fix it, followed by the
+underlying error. The model and timeline therefore no longer see only a raw
+`mkdir: .opengeni: Read-only file system`. This condition is structural (backend
+plus root), never a match on the possibly localized command output, so the
+wording stays conditional. The original command output and exit code are kept,
+and managed sandboxes keep their raw reason. Opengeni never redirects those
+files to another host folder, so the cwd-relative `.opengeni/...` paths keep
+their meaning (`packages/runtime/src/index.ts`,
+`explainConnectedMachineRootDownloadFailure`).
 
 `opengeni-agent run` is the explicit foreground alternative.
 
@@ -979,7 +1031,7 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   chat** (the same attach path as the list). Closing the dialog stops the watch;
 - once a machine with a screen is reachable (the chat's own machine first),
   offers the
-  [OpenGeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
+  [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
   stops after ten minutes or when the inventory is not readable.
@@ -1038,13 +1090,13 @@ per-attempt admission `run_on` uses. When computer input is refused because
 screen control is off, the error names that tool.
 
 macOS also needs Screen Recording, Accessibility and Input Monitoring for
-OpenGeni. Mac agents report all three without prompting, on Hello and on each
+Opengeni. Mac agents report all three without prompting, on Hello and on each
 desktop heartbeat, as `runtime.macPermissions` in the machine list; older agents
 report only a missing Screen Recording grant, as `desktopUnavailableReason`.
 `POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings` with
 `pane: screen_recording | accessibility | input_monitoring` opens that System
 Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
-nothing; the person switches OpenGeni on there. The chat card walks the missing
+nothing; the person switches Opengeni on there. The chat card walks the missing
 permissions in that order, from what the Mac reports.
 
 ### Change who can use a machine
@@ -1121,6 +1173,12 @@ The API is the same flow:
   changed since the preview (preview again and retry), and
   `details.reason: "blocked"` with the preview while a duplicate connection
   remains.
+
+A person makes this change, in the app, through the API, or through an agent
+they gave their full access: a session with admin access or a connected agent
+with full access calls the same two routes as them (the `previewMachineAudience`
+and `changeMachineAudience` admin actions). An agent acting as itself, or one
+with less than the person's full access, is refused.
 
 ### Zero-click token (fleet / headless)
 
@@ -1231,6 +1289,26 @@ target. The managed consent page always asks for personal, workspace, or
 organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
+
+### Agent logs
+
+The running agent (`opengeni-agent run`, or a bare launch of an enrolled
+machine) keeps its own log in `logs/agent.log` under its config directory
+(`~/.config/opengeni/agent` unless `$OPENGENI_CONFIG_DIR` or
+`$XDG_CONFIG_HOME` says otherwise), whatever service manager runs it. The file
+rotates at 8 MiB and keeps two older generations (`agent.log.1`,
+`agent.log.2`); the directory and files are owner-only. It records browser
+controller diagnostics and exit statuses, and a panic on any thread with its
+backtrace, so a crashed agent can be diagnosed afterwards. One-shot CLI
+commands log only to the terminal.
+
+On Linux the same lines also reach the systemd journal
+(`journalctl --user -u opengeni-agent`). The macOS LaunchAgent sends the
+process's raw stdout and stderr to `logs/agent.stderr.log` and sets
+`OPENGENI_AGENT_STDERR_LOG=off`, so that file keeps only output that bypasses
+the agent log, such as an abort message; the agent bounds it at startup. A Mac
+picks up that LaunchAgent change the next time `opengeni-agent service install`
+runs; the agent log itself needs only the new agent.
 
 ## Transactional file edits
 
@@ -1351,6 +1429,17 @@ This engine does not provide rendered screenshots, live viewing, desktop input,
 Chromium profile identities, or a linked ComputerSession. Use Chromium for
 visual/mobile testing and human interaction. Browser authority, per-session
 isolation, and source-placement fences remain identical for both engines.
+
+The agent runs one browser controller (browserd) per scope: workspace,
+placement kind and placement (the machine, or an attached Chrome device). A
+controller that reports holding no session at all (no open, retained or
+recovering browser or computer session and no work in flight), and whose scope
+has not been ensured for ten minutes, is stopped; the next request starts a
+fresh one in about a second. Each controller also holds the write end of a
+stdin lifeline from its agent: however the agent ends, including a crash or
+SIGKILL, the kernel closes it and the controller shuts down gracefully,
+leaving retained browsers running for the next agent to adopt. Controllers no
+longer accumulate across scopes or outlive the agent that started them.
 
 Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
 launched by a shell command remains subject to that command's containment and

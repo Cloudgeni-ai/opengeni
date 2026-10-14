@@ -142,6 +142,7 @@ oauth_config:
       - im:history
       - mpim:history
       - users:read
+      - files:read
       - im:write
       - chat:write
 settings:

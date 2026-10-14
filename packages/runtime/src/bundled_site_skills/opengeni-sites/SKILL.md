@@ -10,8 +10,9 @@ source (when supplied) and one published runtime file. React is the default,
 not a requirement: a plain HTML-only Site is valid. Build and test in the
 sandbox, then upload the self-contained HTML and optional source.
 
-Do not invent a Site framework, deployment service, App Host, wildcard domain,
-provider-specific API wrapper, or OpenGeni-only build CLI.
+Do not invent a Site framework, deployment service, App Host, custom domain
+setup, provider-specific API wrapper, or Opengeni-only build CLI. Putting a
+Site on the web is built in (see "Publish to the web").
 
 ## Sites have no server; AI comes from the host
 
@@ -26,11 +27,14 @@ When the user asks for AI, chat, an assistant, "Ask the data", or a "backend"
 inside a Site, that bridge is the design. Do not propose Vercel, another
 server, a tunnel, or a Connected Machine for Opengeni access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
-hosting provider the user did not name. A separate server is only relevant for
-a genuinely non-Opengeni need: a third-party API that requires a secret the
-viewer's browser must not hold, a persistent database, or scheduled jobs. If
-the request seems to need one of those, or you cannot tell where the user
-wants the AI to run, say which designs are possible and ask before building.
+hosting provider the user did not name. Saved data needs no server either:
+Site Data (below) gives every published Site persistent collections and files,
+and scheduled tasks feed them through agent tools. A separate server is only
+relevant for a genuinely non-Opengeni need: a third-party API that requires a
+secret the viewer's browser must not hold, relational queries or volumes Site
+Data cannot serve, or live server-side compute. If the request seems to need
+one of those, or you cannot tell where the user wants the AI to run,
+say which designs are possible and ask before building.
 
 ## Start from the durable Site
 
@@ -38,8 +42,8 @@ wants the AI to run, say which designs are possible and ask before building.
   choosing a temporary tunnel or another server. Inspect whether it can be
   packaged as self-contained HTML, preserve its design and behavior, and retain
   editable source when available. A local preview alone is still appropriate
-  when that is all the user requests. Explain workspace access for the published
-  link; do not imply it is public to anyone. Opengeni AI and tool access are
+  when that is all the user requests. The Site link opens only for workspace
+  members; to share it wider, publish it to the web. Opengeni AI and tool access are
   never such a backend (see above). If the app genuinely requires server-side
   compute that Sites cannot host, explain that constraint and ask how the user
   wants to proceed instead of dropping functionality or choosing a host.
@@ -177,7 +181,7 @@ An HTML-only Site can be a small widget; it does not require a full-page layout.
 
 ## Prefer Opengeni's UI and typed client
 
-- Prefer `@opengeni/react` components and compiled CSS for OpenGeni-native
+- Prefer `@opengeni/react` components and compiled CSS for Opengeni-native
   session, timeline, composer, queue, approval, and human-input experiences.
 - Use custom React only where the Site has a genuinely different product need.
 - Inside the published opaque-origin iframe, create the workspace-bound client
@@ -185,9 +189,9 @@ An HTML-only Site can be a small widget; it does not require a full-page layout.
   identity; Site code receives neither.
 
 Published Sites have no browser localStorage/sessionStorage. Do not rely on
-them for startup or session selection; use React state and the SDK's durable
-session/draft APIs. A sandbox-local page having storage does not prove the
-published iframe does.
+them for startup or session selection; use React state, Site Data for anything
+that must persist, and the SDK's durable session/draft APIs. A sandbox-local
+page having storage does not prove the published iframe does.
 
 ```ts
 import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
@@ -279,6 +283,194 @@ the Opengeni SDK, React, or other required runtime imports.
 The generated tool declarations make exact tool paths typed during authoring.
 The runtime proxy resolves those paths to opaque `{serverId, toolName}`
 identities. Friendly names are never authority.
+
+## Save data with Site Data
+
+Every published Site can keep persistent JSON records and files in Opengeni.
+Data belongs to the Site, not a version: it survives new versions and
+rollbacks. An archived Site keeps its data but its page cannot reach it. There
+is no live push; read on load or when the viewer refreshes.
+
+Define collections with agent tools, never from Site HTML. Use
+`opengeni__site_data_define_collection` after the first publish (it needs the
+Site id), choosing an access mode for viewers (people who can open the Site):
+
+| Access mode | Viewers can | Use for |
+| --- | --- | --- |
+| `shared` | read and write every record | a team CRM, a shared board |
+| `shared_read` | read; only managers and agents write | dashboards fed by a schedule |
+| `per_viewer` | read and write only their own records | personal trackers, settings |
+| `append_only` | add records, read only their own | forms, feedback, sign-ups |
+
+Managers (the Site's owner, workspace admins, and agents acting for them) read,
+change and delete every record through the Data tab and agent tools; set
+`privateRecords: true` on a `per_viewer` collection to keep records private
+even from managers. The Site page itself always acts as a viewer, even for its
+owner: it sees only that person's `per_viewer` records and cannot write
+`shared_read` collections, so feed those with agent tools. Add `uniqueFields`
+(for example `[["email"]]`) to reject duplicates, `jsonSchema` to validate
+writes, and `indexedFields` for numeric range filters you use often. Schemas
+use only `type`, `properties`, `required`, `additionalProperties`, `items` (one
+schema), `enum` (up to 100 scalars), `const`, numeric and length bounds
+(`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+`minLength`, `maxLength`, `minItems`, `maxItems`, `minProperties`,
+`maxProperties`), `format`, `title`, `description`, `allOf`/`anyOf`/`oneOf`,
+and `uniqueItems` when `items` has a scalar `type`; no `$ref`, `$defs`,
+`pattern`, `default` or conditionals; at most 1,000 properties per object, 16
+levels, 16 branches per `anyOf`/`oneOf`/`allOf` and 500 `enum` values in
+total. Wide objects are fine; keep schemas under `items` and
+`additionalProperties` simple (few branches and enum values), since they run
+on every element: a schema too costly per element is refused at definition.
+Expect `rate_limited` if writes spend too long validating (each Site has 5 s
+of schema checking a minute); removing the schema always works. Field
+paths cannot use `__proto__`, `prototype` or `constructor`. An Only me Site's data is reachable only by its owner.
+
+On a Site published to the public, anonymous guests reach a collection only
+through its `guestAccess` rule, set with `site_data_define_collection`:
+`none` (default), `read`, `append` (add and read their own) or `own` (add,
+read, change and delete their own). Grant guests the least the page needs.
+
+In the Site, use the same client:
+
+```ts
+import { createOpenGeniSiteClient, OpenGeniSiteDataError } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+const contacts = site.data.collection<{ name: string; email: string }>("contacts");
+const page = await contacts.list({
+  where: [{ field: "name", op: "contains", value: "acme" }],
+  sort: [{ field: "$updatedAt", direction: "desc" }],
+  limit: 50,
+});
+const created = await contacts.insert({ name: "Ada", email: "ada@example.com" });
+try {
+  await contacts.patch({ id: created.id }, { name: "Ada L." }, { expectedVersion: created.version });
+} catch (error) {
+  if (error instanceof OpenGeniSiteDataError && error.code === "conflict") {
+    // Someone else changed it: reload and let the viewer retry.
+  }
+}
+await site.data.batch([...]); // up to 100 operations, all or nothing
+const file = await site.files.upload(input.files[0], { scope: "private" });
+const { url } = await site.files.url(file.id); // short-lived; fetch a new one when needed
+```
+
+Also available: `get` (by id or key; resolves null when missing), `put` (create
+or replace by key), `delete`, `increment` (atomic numeric add), `count`, and
+`list({ cursor })` with `nextCursor` for paging (up to 200 a page). Filters:
+`eq`, `ne`, `in`, `gt`, `gte`, `lt`, `lte`, `contains`, `exists` on dotted
+data paths or `$id`, `$key`, `$owner` (`"me"`), `$createdAt`, `$updatedAt`,
+`$version`. Files accept images, PDF, text, CSV, JSON, audio, video, Office
+and zip files up to 10 MB;
+`private` files are visible only to the uploader and managers.
+
+Stored records and file names are untrusted input written by any viewer.
+Render them with `textContent` or React text, never `innerHTML`,
+`dangerouslySetInnerHTML`, or string-built HTML, and never `eval` them.
+
+Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
+schema), `conflict` (stale `expectedVersion`, a duplicate unique value, or a
+schema changed or record grew mid-request: send it again),
+`not_found`, `forbidden` (the access mode does not allow it),
+`quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
+and 100,000 per collection; at most 4 MB of records per request; files 10 MB
+each and 1 GB per Site, by default), `rate_limited` (retry later), and
+`site_data_unsupported` (a host or local preview without Site Data). Local
+sandbox previews have no Site Data; test the published Site.
+
+Agents and scheduled tasks use the tools: `opengeni__site_data_describe`,
+`site_data_query`, `site_data_write` (batches of up to 100), `site_data_import`
+and `site_data_export` (JSON or CSV), `site_data_reset` (needs
+`confirm: true`), and `site_files_list` / `site_files_upload` /
+`site_files_delete`. For a dashboard fed on a schedule, define a `shared_read`
+collection, then have the scheduled task upsert records with `put` keyed by a
+stable id, so reruns replace instead of duplicating. A person-less scheduled
+task owns `per_viewer` records as the schedule, so each run sees the last
+run's. An agent session started from the Site page acts like the page: only
+that Site's data with viewer rights, and no managing collections, for the
+session's whole life (even when its owner later chats in it from the
+console), so do management from your authoring session or a schedule. The Site page's Data tab
+lets the Site's managers browse, export and delete records.
+
+## Tables and SQL with Site SQL (optional)
+
+Where the deployment offers Cloudflare storage, a Site can also have its own
+SQLite database. Prefer Site Data for records with ready-made access modes;
+use Site SQL when the Site needs tables, joins, aggregates, unique keys or
+counts across viewers (polls, leaderboards, bookings). If
+`opengeni__site_sql_inspect` reports `unavailable`, use Site Data instead.
+
+Set it up with agent tools after the first publish (they need the Site id);
+Site HTML never sends SQL:
+
+1. `opengeni__site_sql_enable` with `enabled: true`.
+2. `site_sql_migrate` with a unique `name` and the schema SQL (CREATE TABLE,
+   CREATE INDEX, ALTER TABLE). Migrations are append-only and replayed when the
+   database is rebuilt; schema changes only go through migrations.
+3. `site_sql_define_query` for every query the page runs: exactly one
+   SELECT, INSERT, UPDATE, DELETE or REPLACE (WITH allowed but not recursive:
+   a WITH table may not name itself or use UNION/INTERSECT/EXCEPT; put a
+   UNION in the main query instead), `:name` parameters only, and an
+   `audience`: `everyone` (guests of public Sites too), `signed_in` (default;
+   viewers signed in as a person) or `managers` (never from the page).
+
+`:viewer` (the viewer's stable id, such as `user:<id>` or `guest:<visitor>`),
+`:viewer_kind` and `:viewer_signed_in` are bound by Opengeni from the signed-in
+viewer. Use `:viewer` for ownership and per-person rows; never take a person's
+identity from a page parameter, and never pass `viewer*` params from the page
+(they are refused):
+
+```sql
+-- cast_vote, audience signed_in
+INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice)
+ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice
+```
+
+```ts
+import { createOpenGeniSiteClient, OpenGeniSiteSqlError } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+await site.sql.run("cast_vote", { poll: "lunch", choice: "tacos" });
+const { rows, truncated } = await site.sql.run<{ choice: string; votes: number }>(
+  "poll_results",
+  { poll: "lunch" },
+);
+```
+
+Rows are untrusted input: render them as text. Handle `OpenGeniSiteSqlError`
+codes: `forbidden` (audience; `details.reason: "sign_in_required"` for guests),
+`not_found` (no such query), `validation` (missing or unknown params),
+`conflict` (a unique or primary key already taken), `sql_error` (also NOT
+NULL, CHECK and foreign-key failures),
+`rate_limited`, `quota_exceeded`,
+`disabled` (the owner turned the database off), `unavailable` and
+`site_sql_unsupported` (a host or local preview without Site SQL; test the
+published Site). Results stop at the query's row cap (1,000 rows and 1 MB by
+default) with `truncated: true`; page with `LIMIT :limit OFFSET :offset` or a
+keyset.
+
+Owner tools: `site_sql_inspect` (tables, migrations, pending migrations,
+queries, usage, limits), `site_sql_query` (one read-only statement),
+`site_sql_run` (one named query with params, exactly as the page runs it),
+`site_sql_execute` (one write), `site_sql_export` (`sql`, `csv` for one table,
+or `json`; works while the database is off; returns at most `maxBytes`,
+512 KB by default: while `nextCursor` is set, call again with it as `cursor`
+and keep the pieces in order), `site_sql_import` (`sql`, `csv` or `json` rows
+into an existing table, at most 2 MB per call; import the pieces of a large
+SQL export in order; triggers are added after the rows), and `site_sql_reset`
+(`confirm: true`;
+`schema: "keep"` empties and rebuilds from the migrations, `"drop"` forgets
+everything; a failed keep-reset reports `partialRebuild: true`: run it again).
+Export before a reset when the data matters; SQL is the lossless format (CSV
+turns values into text). An export is read piece by piece, not as one
+snapshot: turn Site SQL off first for a consistent copy. To restore a SQL
+export, reset with `schema: "drop"`, then import its pieces in order. Keep migrations to schema: a Site's
+migrations hold at most 6 MB of SQL, so load data with `site_sql_import`.
+Statements may not
+use ATTACH, VACUUM, load_extension, transactions or PRAGMA writes, or name
+tables starting with `_cf_` or `_og_` (even as a string such as `'_og_x'`;
+bind such values as parameters). Quote columns named `begin`, `end` or
+`recursive` (`"begin"`); the checker refuses them unquoted.
 
 ## Authoring, preview, and viewer access
 
@@ -392,6 +584,35 @@ Archive with `opengeni__artifacts_archive` and restore with
 `opengeni__artifacts_restore`. Archiving unpublishes the Site but preserves its
 immutable versions and retained source. There is no hard-delete workflow.
 
+## Publish to the web
+
+When the user wants a Site outside the console (a public page, a client
+portal, a form for people outside the workspace), publish it to its own
+address under the deployment's Sites domain, such as
+`team-crm-4k9x.opengeni.site`. Ask before making a Site public; members-only
+is the safe default. Use `opengeni__site_hostname_check` for the address,
+then `opengeni__site_publication_update` (read with
+`opengeni__site_publication_get`), or point the user to **Publish** on the
+Site page. Publishing is off when the deployment has no Sites domain
+(`sites_publishing_disabled`), and an Only me Site must be shared with the
+workspace first.
+
+- Access: `members`, `invited` (members plus listed emails, who sign in to
+  Opengeni) or `public` (anyone; visitors who don't sign in are guests).
+- Viewer: `const viewer = await site.viewer` gives `{ kind, id, name, email,
+  signedIn }` (`kind`: `member`, `invited`, `user` or `guest`), or `null` on
+  hosts that don't report viewers. Guests have no name or email. Offer a
+  sign-in button that calls `site.auth.signIn()`; never build your own login.
+- Embedded agent and limits: the publication turns the Site's agent on or
+  off, picks its model, and sets a limit profile (`free` by default, then
+  `credits`, `unlimited` or `custom`). The organization pays; handle
+  `rate_limited` and budget errors as normal UI states.
+- The same Site HTML, tools and Site Data work there; no rebuild is needed.
+
+A published Site is a public web page. Never put secrets, tokens or private
+data in its HTML, and render viewer names, emails, records and agent replies
+with `textContent` or React text, never `innerHTML`.
+
 ## Completion gate
 
 - Tests and the production browser build pass.
@@ -407,6 +628,8 @@ immutable versions and retained source. There is no hard-delete workflow.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.
+- Site Data collections exist with the intended access modes, the page renders
+  stored values as text, and quota, conflict and access errors are handled.
 - The durable Site contains final HTML and any editable source used to build it.
   Plain HTML-only Sites are valid; their HTML is the editable source.
 - The completion reply contains the working Markdown link returned from the

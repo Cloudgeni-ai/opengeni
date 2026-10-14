@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/worker-bundle",
-  "version": "1.4.4",
+  "version": "2.0.1",
   "description": "Opengeni worker entry and reusable embedded lifecycle, shipped with a release-coherent pre-bundled Temporal workflow artifact.",
   "license": "Apache-2.0",
   "repository": {
@@ -53,6 +53,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@1password/sdk": "0.5.0",
     "@llamaindex/liteparse": "2.14.2",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/capabilities": "workspace:*",

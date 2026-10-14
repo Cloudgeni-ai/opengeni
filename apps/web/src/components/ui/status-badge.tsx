@@ -74,6 +74,7 @@ export const PRODUCT_STATUSES = {
   limit_reached: { label: "Limit reached", tone: "danger" },
   // Grey: paused or off.
   paused: { label: "Paused", tone: "neutral", icon: CirclePauseIcon },
+  disabled: { label: "Disabled", tone: "neutral" },
   queued: { label: "Queued", tone: "neutral", icon: CircleDashedIcon },
   invited: { label: "Invited", tone: "neutral", icon: MailIcon },
   not_connected: { label: "Not connected", tone: "neutral" },

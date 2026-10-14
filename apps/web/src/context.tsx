@@ -62,6 +62,7 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
@@ -127,6 +128,7 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { useCapabilityToolDefaults } from "@/lib/use-capability-tool-defaults";
+import { useManualRepositoryCatalogReconciliation } from "@/lib/use-manual-repository-catalog-reconciliation";
 import { upsertWorkspace } from "@/lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
@@ -427,6 +429,8 @@ export type AppContextValue = {
       startMode?: "realtime";
       /** Atomic create-time session visibility. */
       visibility?: "private" | "workspace";
+      /** Create-time per-task usage limit (USD micros); omit for no limit. */
+      usageLimitMicros?: number | null;
       /** Exact attempted request and classified outcome for host reconciliation. */
       /** Return true when the caller handles this failure (including its user-facing error). */
       onFailure?: (failure: StartSessionFailure) => boolean | void;
@@ -1289,6 +1293,19 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (!repositoryBuild.error) lastValidResources.current = repositoryBuild.resources;
   }, [repositoryBuild]);
+  useManualRepositoryCatalogReconciliation({
+    manualRepos,
+    selectedRepoIds,
+    selectedRepoRefs,
+    repositories: githubRepos,
+    catalogReady: githubCatalogReady,
+    personalRepositories: personalGitHubRepositories,
+    selectedPersonalRepoIds: selectedPersonalGitHubRepoIds,
+    selectedPersonalRepoRefs: selectedPersonalGitHubRepoRefs,
+    setManualRepos,
+    setSelectedRepoIds,
+    setSelectedRepoRefs,
+  });
   const currentResources = repositoryBuild.resources;
   const repositoryValidationError = repositoryBuild.error;
 
@@ -1975,6 +1992,7 @@ export function RootRouteComponent() {
       agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
       startMode?: "realtime";
       visibility?: "private" | "workspace";
+      usageLimitMicros?: number | null;
       onFailure?: (failure: StartSessionFailure) => boolean | void;
     },
   ): Promise<Session | null> {
@@ -2051,6 +2069,7 @@ export function RootRouteComponent() {
           agentLearning: options?.agentLearning,
           startMode: options?.startMode,
           visibility: options?.visibility,
+          usageLimitMicros: options?.usageLimitMicros,
         }),
       });
       attempted = attempt;
@@ -2910,48 +2929,51 @@ export function RootRouteComponent() {
   ) : managedAuthRequired && authSession === undefined ? (
     <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
-    <Suspense fallback={<LoadingPanel />}>
-      <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
-        {browserAccountsEnabled ? (
-          <BrowserAccountsSignedOutPanel
-            presentation="embedded"
-            search={window.location.search}
-            invitation={organizationInvitationContinuation}
-            emptySetRegistrationPanel={
-              clientConfig?.managedAuthSessionSetMode === "broker" ||
-              clientConfig?.managedAuthSessionSetMode === "dual" ? (
-                <ManagedAuthPanel
-                  initialMode="signup"
-                  allowedModes={["signup"]}
-                  presentation="embedded"
-                  onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
-                  emailVerificationRequired={managedEmailVerificationRequired}
-                  newSignupsEnabled={managedNewSignupsEnabled}
-                />
-              ) : undefined
-            }
-          />
-        ) : (
-          <ManagedAuthPanel
-            presentation="embedded"
-            search={window.location.search}
-            invitation={organizationInvitationContinuation}
-            onDismissInvitation={clearOrganizationInvitationContinuation}
-            onSubmit={handleManagedAuth}
-            emailVerificationRequired={managedEmailVerificationRequired}
-            newSignupsEnabled={managedNewSignupsEnabled}
-            socialProviders={managedSocialProviders}
-            onSocialSubmit={handleManagedSocialAuth}
-          />
-        )}
-      </SignedOutPage>
-    </Suspense>
-  ) : /^\/native-sign-in\/?$/.test(pathname) &&
+    <DesktopSignedOutRecovery>
+      <Suspense fallback={<LoadingPanel />}>
+        <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
+          {browserAccountsEnabled ? (
+            <BrowserAccountsSignedOutPanel
+              presentation="embedded"
+              search={window.location.search}
+              invitation={organizationInvitationContinuation}
+              emptySetRegistrationPanel={
+                clientConfig?.managedAuthSessionSetMode === "broker" ||
+                clientConfig?.managedAuthSessionSetMode === "dual" ? (
+                  <ManagedAuthPanel
+                    initialMode="signup"
+                    allowedModes={["signup"]}
+                    presentation="embedded"
+                    onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
+                    emailVerificationRequired={managedEmailVerificationRequired}
+                    newSignupsEnabled={managedNewSignupsEnabled}
+                  />
+                ) : undefined
+              }
+            />
+          ) : (
+            <ManagedAuthPanel
+              presentation="embedded"
+              search={window.location.search}
+              invitation={organizationInvitationContinuation}
+              onDismissInvitation={clearOrganizationInvitationContinuation}
+              onSubmit={handleManagedAuth}
+              emailVerificationRequired={managedEmailVerificationRequired}
+              newSignupsEnabled={managedNewSignupsEnabled}
+              socialProviders={managedSocialProviders}
+              onSocialSubmit={handleManagedSocialAuth}
+            />
+          )}
+        </SignedOutPage>
+      </Suspense>
+    </DesktopSignedOutRecovery>
+  ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (
-    // A phone app is signed in by the person, not by a workspace grant, so
-    // approval renders before the access and onboarding gates.
+    // A phone app, and a published Site's viewer, are signed in by the person,
+    // not by a workspace grant (an invited viewer may belong to no
+    // organization), so approval renders before the access and onboarding gates.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />
     ) : (

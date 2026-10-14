@@ -1,0 +1,54 @@
+---
+title: "Site Data"
+description: "Let a Site save records and files: shared lists, personal trackers, forms and dashboards fed by schedules, with access rules the server enforces."
+---
+
+A published Site can keep data in Opengeni: collections of JSON records and files. Data belongs to the Site, so it survives new versions and rollbacks. There is no server to run and no credential in the Site.
+
+## Collections and access
+
+Agents create collections (ask Opengeni, or use the `site_data_define_collection` tool); Site code never does. Each collection has an access mode for the people who can open the Site:
+
+| Access mode   | People who open the Site can           | Good for                     |
+| ------------- | -------------------------------------- | ---------------------------- |
+| `shared`      | read and change every record           | a team CRM or board          |
+| `shared_read` | read; only managers and agents write   | dashboards fed by a schedule |
+| `per_viewer`  | read and change only their own records | personal trackers            |
+| `append_only` | add records and see only their own     | forms and feedback           |
+
+The Site's managers (its owner, workspace admins, and agents acting for them) can read and change everything from the **Data** tab and agent tools, unless a `per_viewer` collection is marked private. The Site page itself always acts as a viewer, even for its owner, so a page someone else republished cannot read everyone's records. An **Only me** Site's data is reachable only by its owner. Collections can also require unique values (for example one record per email) and validate records with a JSON Schema.
+
+## In Site code
+
+```ts
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+const contacts = site.data.collection("contacts");
+const { records, nextCursor } = await contacts.list({
+  where: [{ field: "company", op: "eq", value: "Acme" }],
+  limit: 50,
+});
+await contacts.insert({ name: "Ada", email: "ada@example.com" });
+const file = await site.files.upload(input.files[0], { scope: "private" });
+```
+
+Writes take an optional `expectedVersion`, so two people editing the same record get a `conflict` error instead of overwriting each other. Errors are `OpenGeniSiteDataError` with a `code`: `validation`, `conflict`, `not_found`, `forbidden`, `quota_exceeded` or `rate_limited`. Records are written by people who use the Site: show them as text, never as HTML.
+
+Pages read data when they load; there are no live updates.
+
+## Agents and schedules
+
+Agents use `site_data_describe`, `site_data_query`, `site_data_write`, `site_data_import`, `site_data_export`, `site_data_reset` and `site_files_*`. A scheduled task runs them with the schedule's access, which makes a Site a dashboard that refreshes itself. A conversation started from a Site page acts like the page for its whole life: it reaches only that Site's data, with viewer rights, even when its owner later continues it from the console.
+
+## Limits and usage
+
+By default a Site can hold 100 MB of records (256 KB each, each charged an extra 512 bytes), 100,000 records per collection, 50 collections and 1 GB of files (10 MB each), and a workspace 1 GB of Site data in total. One request carries at most 4 MB of records. Self-hosted deployments change these with the `OPENGENI_SITE_DATA_*` settings. Writes are rate limited per person and per Site (managers and agents share a generous per-Site limit), and reads from a Site page per person. Usage is recorded for the workspace, which pays for what viewers do; it is not charged yet.
+
+## Managing data
+
+On the Site's page, the **Data** tab lists its collections with their access, record counts and size against the limit. Managers can browse records, open a record's JSON, delete a record and export a collection as CSV or JSON.
+
+## Embedding
+
+If you render Sites in your own product, pass `fetchResponse` and the Site's identity to `createSiteToolBridge` to serve Site Data; without them Site code gets `site_data_unsupported`. See [Site Data internals](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/site-data.md).

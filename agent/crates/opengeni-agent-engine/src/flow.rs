@@ -83,6 +83,18 @@ impl CreditFlow {
         }
     }
 
+    /// A detached flow continuing a predecessor process's stream. The current
+    /// consumer generation is kept, so a zombie consumer still cannot speak for
+    /// the stream; the consumer re-attaches (same or newer generation) to
+    /// resume sending.
+    #[must_use]
+    pub fn resumed(generation: u64) -> Self {
+        Self {
+            attach_gen: generation,
+            ..Self::new()
+        }
+    }
+
     /// Handles an attach request from a consumer at `generation`, resuming
     /// from `from_seq` (its cumulative ack floor) with an initial `window`.
     ///

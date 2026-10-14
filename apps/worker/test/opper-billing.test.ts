@@ -5,6 +5,9 @@ import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 
 import { recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const db = {} as Database;
 const OPUS = "aws/claude-opus-5-5";

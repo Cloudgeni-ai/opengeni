@@ -10,6 +10,7 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  siteSessionClamp,
   withResolvedSessionAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -212,6 +213,18 @@ export function registerSessionAdminAccessRoutes(app: Hono, deps: ApiRouteDeps):
           "durationHours must be a whole number of hours from 1 to 720, or null for no time limit",
       });
     }
+    // A session a Site page started acts with that page's reach: admin
+    // access would let it act as the person across the organization.
+    const clamp = await siteSessionClamp(
+      deps.db,
+      { accountId: target.grant.accountId, workspaceId: target.workspaceId },
+      target.sessionId,
+      null,
+    );
+    if (clamp.clamped)
+      throw new HTTPException(409, {
+        message: "A session started from a Site page cannot get admin access",
+      });
     const grant = () =>
       grantSessionAdminAccess(deps.db, {
         organizationId: target.grant.accountId,

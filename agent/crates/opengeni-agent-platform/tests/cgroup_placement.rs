@@ -116,7 +116,7 @@ mod linux {
         // Run the real startup path: verify `<service>/supervisor` and delegate
         // accounting controllers from the empty service root to per-op leaves.
         let config = test_policy();
-        let cgroups = establish_oom_isolation(config)
+        let cgroups = establish_oom_isolation(config, &[])
             .expect("delegated + isolated cgroup should establish per-op isolation");
         let self_unified = assert_supervisor_setup(&service_dir);
         let platform = std::sync::Arc::new(

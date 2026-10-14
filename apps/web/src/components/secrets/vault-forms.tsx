@@ -15,6 +15,7 @@ import { SegmentedControl } from "@/components/ui/segmented-control";
 import {
   AvailabilityEditor,
   DEFAULT_AVAILABILITY,
+  personalAvailabilityFrom,
   type AvailabilityWorkspace,
 } from "./availability-editor";
 import { vaultErrorText } from "./vault-model";
@@ -43,6 +44,7 @@ export function NewVaultPage({
   canCreateOrganization,
   organizationName,
   workspaces,
+  currentWorkspaceId,
   onClose,
   onCreate,
 }: {
@@ -50,6 +52,8 @@ export function NewVaultPage({
   canCreateOrganization: boolean;
   organizationName: string;
   workspaces: AvailabilityWorkspace[];
+  /** The shared workspace the vault is created from; null from a Personal workspace. */
+  currentWorkspaceId: string | null;
   onClose: () => void;
   onCreate: (request: CreateVaultRequest) => Promise<void>;
 }) {
@@ -57,6 +61,9 @@ export function NewVaultPage({
   const [description, setDescription] = useState("");
   const [owner, setOwner] = useState<Owner>(canCreateWorkspace ? "workspace" : "user");
   const [availability, setAvailability] = useState<VaultAvailability>(DEFAULT_AVAILABILITY);
+  const [personalAvailability, setPersonalAvailability] = useState<VaultAvailability>(() =>
+    personalAvailabilityFrom(currentWorkspaceId),
+  );
   const [nameError, setNameError] = useState<string | undefined>();
   const [availabilityError, setAvailabilityError] = useState<string | undefined>();
   const [formError, setFormError] = useState<ReactNode>(null);
@@ -98,6 +105,7 @@ export function NewVaultPage({
             ownerKind: owner,
             ...(description.trim() ? { description: description.trim() } : {}),
             ...(owner === "organization" ? { availability } : {}),
+            ...(owner === "user" ? { availability: personalAvailability } : {}),
           });
           return true;
         } catch (error) {
@@ -145,6 +153,15 @@ export function NewVaultPage({
             error={availabilityError}
           />
         ) : null}
+        {owner === "user" ? (
+          <AvailabilityEditor
+            personal
+            value={personalAvailability}
+            onChange={setPersonalAvailability}
+            workspaces={workspaces}
+            organizationName={organizationName}
+          />
+        ) : null}
         <Field label="Description" optional>
           <TextArea
             rows={2}
@@ -171,6 +188,7 @@ export function AvailabilityPage({
   onClose: () => void;
   onSave: (availability: VaultAvailability) => Promise<void>;
 }) {
+  const personal = vault.ownerKind === "user";
   const initial = vault.availability ?? DEFAULT_AVAILABILITY;
   const [availability, setAvailability] = useState<VaultAvailability>(initial);
   const [error, setError] = useState<string | undefined>();
@@ -181,14 +199,18 @@ export function AvailabilityPage({
       backLabel={vault.name}
       onClose={onClose}
       title="Available in"
-      description={`Which workspaces in ${organizationName} can use ${vault.name}.`}
+      description={
+        personal
+          ? `Where you can use ${vault.name}. It's always available in your Personal workspace.`
+          : `Which workspaces in ${organizationName} can use ${vault.name}.`
+      }
       submitLabel="Save"
       pendingLabel="Saving…"
       submitDisabled={!changed}
       error={formError}
       onSubmit={async (event) => {
         event.preventDefault();
-        if (availability.allowedWorkspaceIds?.length === 0) {
+        if (!personal && availability.allowedWorkspaceIds?.length === 0) {
           setError("Pick at least one workspace, or choose All workspaces.");
           return false;
         }
@@ -211,6 +233,7 @@ export function AvailabilityPage({
         organizationName={organizationName}
         error={error}
         labelHidden
+        personal={personal}
       />
     </FlushFormPage>
   );

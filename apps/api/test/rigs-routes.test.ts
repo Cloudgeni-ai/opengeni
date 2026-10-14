@@ -9,6 +9,7 @@ import {
   createRigVersion,
   createSession,
   getRigChange,
+  initializeSessionStartAtomically,
   listRigVersions,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
@@ -292,6 +293,15 @@ describe("rig route permission matrix", () => {
       latencyMode: "standard",
       sandboxBackend: "none",
       rigId: rig.id,
+    });
+    // Creation reserves an idle shell (#4330); admitting its first turn makes it active.
+    await initializeSessionStartAtomically(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
     });
 
     const blocked = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });

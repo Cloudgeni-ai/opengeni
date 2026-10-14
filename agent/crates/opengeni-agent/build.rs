@@ -45,9 +45,9 @@ fn main() {
         assert!(
             matches!(
                 env::var("CARGO_CFG_TARGET_OS").as_deref(),
-                Ok("macos" | "linux")
+                Ok("macos" | "linux" | "windows")
             ),
-            "CUA assets require a macOS or Linux target"
+            "CUA assets require a macOS, Linux or Windows target"
         );
         let path = std::path::PathBuf::from(manifest);
         println!(

@@ -160,7 +160,7 @@ function PreviewControls() {
         />
         <Control
           label="Q14 Account selection"
-          help={`Recommended: "Spread work | Primary only", a Primary chip and a "Use for new work" switch. Other answer: today's Auto-rotate checkbox and active account.`}
+          help={`Recommended: "Spread work | Primary first", a Primary chip and a "Use for new work" switch. Other answer: today's Auto-rotate checkbox and active account.`}
           value={questions.q14}
           recommended="modes"
           onChange={question("q14")}

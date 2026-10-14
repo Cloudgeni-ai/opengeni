@@ -273,6 +273,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "mcp_operation_command_scoped(jsonb, text, jsonb)",
   "guard_workspace_owned_skill_head_delete()",
   "guard_workspace_owned_skill_history_delete()",
+  // Migration 0782: the owner-run trigger that leaves a release hold when a
+  // published Site's hostname row is deleted (the app cannot write holds).
+  "hold_deleted_site_hostname()",
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
@@ -573,6 +576,7 @@ export const VAULT_RUNTIME_ROUTINES = [
   "link_provider_vault(jsonb, jsonb)",
   "provider_vault_sync_target(uuid, jsonb)",
   "provider_vault_item_ref(uuid, uuid, text, jsonb)",
+  "provider_connection_home_workspace(uuid)",
 ] as const;
 /** Vault tables (0739): FORCE row security, no application-role privileges. */
 export const VAULT_TABLES = [
@@ -1347,6 +1351,30 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "files",
   "documents",
 ] as const;
+/** Per-task usage limits: the only runtime entry points. */
+export const SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE =
+  "session_usage_limit_capability_active(uuid, uuid)";
+export const SESSION_USAGE_LIMIT_RUNTIME_ROUTINES = [
+  "maintain_session_usage_limits(integer, integer)",
+  "session_usage_limit_command(jsonb)",
+  SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
+] as const;
+export const SESSION_USAGE_LIMIT_STATE_ROUTINE = "session_usage_limit_state(jsonb, boolean)";
+/** Pure amount rules shared by the event trigger and the legacy import. */
+export const SESSION_USAGE_LIMIT_AMOUNT_ROUTINES = [
+  "session_usage_limit_meter_amount(numeric, text, numeric, numeric)",
+  "session_usage_limit_event_amount(jsonb)",
+] as const;
+/** Owner-internal helpers; never runtime-callable. */
+export const SESSION_USAGE_LIMIT_INTERNAL_ROUTINES = [
+  SESSION_USAGE_LIMIT_STATE_ROUTINE,
+  "session_usage_limit_apply_receipt(uuid, uuid, uuid, text, uuid, uuid, bigint, text, text, text)",
+  "session_usage_limit_import_page(uuid, uuid, uuid, integer)",
+  "session_usage_limit_import_step(uuid, uuid, uuid, integer)",
+  ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
+  "seed_session_usage_limit_root()",
+  "meter_session_usage_limit_event()",
+] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   "scheduled_task_is_exhausted(uuid)",
   "lock_live_native_original_origin_v2(jsonb)",
@@ -1355,6 +1383,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
   "usage_allowance_capability_active(uuid, uuid)",
+  ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
   ...UNIFIED_KNOWLEDGE_ROUTINES,
   MCP_OPERATION_CAPABILITY_ROUTINE,
   "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
@@ -1409,6 +1438,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
 export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
   "usage_allowance_capability_active(uuid, uuid)",
+  SESSION_USAGE_LIMIT_CAPABILITY_PREDICATE_ROUTINE,
 ] as const;
 const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
@@ -1429,6 +1459,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
@@ -1449,6 +1480,8 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  SESSION_USAGE_LIMIT_STATE_ROUTINE,
+  ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
@@ -1790,7 +1823,30 @@ export const FORCE_RLS_TABLES = [
   "session_work_claims",
   "session_workflow_wake_outbox",
   "sessions",
+  "site_abuse_reports",
+  "site_auth_codes",
   "site_auth_connections",
+  "site_data_collections",
+  "site_data_files",
+  "site_data_rate_windows",
+  "site_data_record_values",
+  "site_data_records",
+  "site_data_usage",
+  "site_data_validation_windows",
+  "site_data_workspace_validation_windows",
+  "site_hostname_holds",
+  "site_hostnames",
+  "site_limit_profiles",
+  "site_publications",
+  "site_runtime_conversations",
+  "site_runtime_rate_windows",
+  "site_runtime_usage",
+  "site_sql_databases",
+  "site_sql_migrations",
+  "site_sql_queries",
+  "site_sql_rate_windows",
+  "site_sql_usage",
+  "site_viewer_sessions",
   "skill_config_conversion_receipts",
   "skill_source_bindings",
   "skill_write_receipts",
@@ -2062,6 +2118,28 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_turns",
   "session_workflow_wake_outbox",
   "sessions",
+  "site_abuse_reports",
+  "site_auth_codes",
+  "site_data_collections",
+  "site_data_files",
+  "site_data_rate_windows",
+  "site_data_record_values",
+  "site_data_records",
+  "site_data_usage",
+  "site_data_validation_windows",
+  "site_data_workspace_validation_windows",
+  "site_hostnames",
+  "site_limit_profiles",
+  "site_publications",
+  "site_runtime_conversations",
+  "site_runtime_rate_windows",
+  "site_runtime_usage",
+  "site_sql_databases",
+  "site_sql_migrations",
+  "site_sql_queries",
+  "site_sql_rate_windows",
+  "site_sql_usage",
+  "site_viewer_sessions",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
@@ -2167,6 +2245,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "preference_registry_snapshots",
   "session_tenancy_activations",
   "session_work_claims",
+  "site_hostname_holds",
   "skill_source_bindings",
   "skill_write_receipts",
   "slack_installation_bindings",
@@ -2943,15 +3022,15 @@ export async function inspectRuntimeDatabasePosture(
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
               ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
@@ -2994,6 +3073,10 @@ export async function inspectRuntimeDatabasePosture(
               'usage_allowance_attribution_receipts',
               'workspace_video_allowance_allocations',
               'workspace_allowance_clear_receipts',
+              'session_usage_limit_roots',
+              'session_usage_limit_receipts',
+              'session_usage_limit_config_receipts',
+              'session_usage_limit_capabilities',
               'session_file_attachments',
               'session_file_read_capabilities',
               'session_import_batches',
@@ -3135,6 +3218,13 @@ export async function inspectRuntimeDatabasePosture(
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
 }
+
+/** Private per-task usage accounting; FORCE-RLS, owner-only. */
+export const RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES = [
+  "session_usage_limit_roots",
+  "session_usage_limit_receipts",
+  "session_usage_limit_config_receipts",
+] as const;
 
 /** Additive private inventory; absent from older binaries' exact data tables. */
 export const RUNTIME_ALLOWANCE_PRIVATE_TABLES = [
@@ -3530,6 +3620,23 @@ export function evaluateRuntimeDatabasePosture(
       ) {
         violations.push(
           `target-schema runtime capability ${routine.name} allowance authority owners do not match`,
+        );
+      }
+    } else if ((SESSION_USAGE_LIMIT_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const owners = new Set(
+        RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
+          (name) => posture.privateTables.find((table) => table.name === name)?.owner,
+        ),
+      );
+      if (
+        (!options.protectedTables ||
+          posture.privateTables.some(
+            (table) => table.name === "session_usage_limit_capabilities",
+          )) &&
+        (owners.size !== 1 || owners.has(undefined) || !owners.has(routine.owner))
+      ) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} session usage limit authority owners do not match`,
         );
       }
     } else if (
@@ -5210,6 +5317,47 @@ export function evaluateRuntimeDatabasePosture(
       !allowanceAttribution.rlsActive)
   ) {
     violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
+  }
+  const sessionUsageLimitCapability = posture.privateTables.find(
+    (table) => table.name === "session_usage_limit_capabilities",
+  );
+  if (!options.protectedTables || sessionUsageLimitCapability) {
+    const authorityOwner = tableByName.get("workspaces")?.owner;
+    for (const name of RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner === expectedRole ||
+        table.owner !== authorityOwner ||
+        !table.rlsEnabled ||
+        !table.rlsForced ||
+        !table.rlsActive ||
+        (table.policyCount ?? 0) < 1 ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`session usage limit private table ${name} is missing or unsafe`);
+      }
+    }
+    if (
+      !sessionUsageLimitCapability ||
+      sessionUsageLimitCapability.owner === expectedRole ||
+      sessionUsageLimitCapability.owner !== authorityOwner ||
+      sessionUsageLimitCapability.select ||
+      sessionUsageLimitCapability.insert ||
+      sessionUsageLimitCapability.update ||
+      sessionUsageLimitCapability.delete ||
+      sessionUsageLimitCapability.truncate
+    ) {
+      violations.push(
+        "session usage limit capability has unsafe owner or direct runtime privileges",
+      );
+    }
   }
   const nativeOriginCapability = posture.privateTables.find(
     (table) => table.name === "modal_native_origin_read_capabilities",

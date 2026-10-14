@@ -145,14 +145,19 @@ export async function resolveInteractionSecretValues(input: {
   grant: AccessGrant;
   texts: readonly string[];
   use: SecretUseContext;
+  /** Runs once the text is known to carry references for an agent with
+   * secrets enabled, before anything resolves: a controller that cannot
+   * accept secret values refuses here, with nothing used or dispatched. */
+  beforeResolve?: () => Promise<void>;
 }): Promise<InteractionSecretValues | undefined> {
-  const { port, grant, texts, use } = input;
+  const { port, grant, texts, use, beforeResolve } = input;
   if (!port) return undefined;
   if (!texts.some((text) => containsSecretReference(text))) return undefined;
   const principal = attemptSecretPrincipal(grant);
   if (!principal) return undefined;
   const resolver = await port.resolverFor(principal);
   if (!resolver || !resolver.enabled) return undefined;
+  await beforeResolve?.();
   const failures: SecretReferenceFailure[] = [];
   for (const text of texts) {
     for (const invalid of findInvalidSecretReferences(text)) {

@@ -4,6 +4,7 @@ import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
 import {
   compactionFailureDetails,
   compactionSkipSubtitle,
+  compactionSkipTitle,
   presentTurnFailureText,
 } from "../src/timeline/compaction-copy";
 import { readableWorkStatus } from "../src/timeline/work-presentation";
@@ -2217,6 +2218,36 @@ describe("buildTimeline", () => {
   test("explains a checkpoint that cannot fit the selected model", () => {
     expect(compactionSkipSubtitle("replacement_exceeds_model_budget")).toContain(
       "Chat history is unchanged",
+    );
+  });
+
+  test("settles an interrupted compaction as a retryable non-failure", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.started", {
+        trigger: "proactive",
+        implementation: "responses_compaction_v2",
+      }),
+      event("session.context.compaction.skipped", { reason: "interrupted" }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "context-compaction",
+        phase: "skipped",
+        trigger: "proactive",
+        skipReason: "interrupted",
+        providerRejection: null,
+      }),
+    ]);
+    const projected = items[0];
+    if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(compactionSkipTitle(projected.skipReason)).toBe("Compaction interrupted");
+    expect(compactionSkipSubtitle(projected.skipReason)).toBe(
+      "It will retry if still needed. Chat history is unchanged.",
+    );
+    expect(compactionFailureDetails(projected)).toBeNull();
+    expect(compactionSkipTitle("summarization_failed")).toBe(
+      "Couldn’t compact conversation history",
     );
   });
 
