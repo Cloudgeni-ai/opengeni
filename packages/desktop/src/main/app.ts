@@ -224,6 +224,9 @@ export class DesktopShell {
           this.config.updates,
           app.getVersion(),
           () => Menu.setApplicationMenu(this.menu()),
+          () => {
+            this.quitting = true;
+          },
         );
         this.updates.start();
       }
