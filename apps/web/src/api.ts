@@ -1006,13 +1006,15 @@ export async function signInEmail(input: {
 }
 
 /**
- * Where sign-in returns: home, or the agent sign-in page a signed-out person
- * started from, so the agent's pending sign-in continues instead of being lost.
+ * Where sign-in returns: home, or the agent, app or Site sign-in page a
+ * signed-out person started from, so the pending sign-in continues instead of
+ * being lost.
  */
 function authReturnBase(): string {
   if (typeof window === "undefined") return "/";
   return window.location.pathname === "/connect-agent" ||
-    window.location.pathname === "/native-sign-in"
+    window.location.pathname === "/native-sign-in" ||
+    window.location.pathname === "/site-auth/authorize"
     ? `${window.location.pathname}${window.location.search}`
     : "/";
 }
