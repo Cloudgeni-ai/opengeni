@@ -37,8 +37,8 @@ export function updateMenuItem(
 
 /**
  * The menu bar: standard roles, the everyday commands with their usual
- * shortcuts (new session, search, sidebar, inbox), history, accounts and
- * settings on the web.
+ * shortcuts (new session, search, sidebar, inbox), history, accounts and the
+ * workspace settings, which open in the window.
  */
 export function buildApplicationMenu(model: MenuModel): Menu {
   return Menu.buildFromTemplate(applicationMenuTemplate(model));
