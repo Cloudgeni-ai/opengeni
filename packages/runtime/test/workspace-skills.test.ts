@@ -689,6 +689,67 @@ description: Prepare a safe release.
     });
   }
 
+  for (const offlineIndex of [0, 1]) {
+    for (const offlineSettlesFirst of [true, false]) {
+      test(`a concurrent genuine failure outranks an unreachable one (offline at index ${offlineIndex}, ${offlineSettlesFirst ? "offline" : "genuine"} settles first)`, async () => {
+        const genuine = Object.assign(new Error("permission denied"), { code: "EACCES" });
+        const offline = agentErrorToControlError(offlineAgentError(undefined, true));
+        const pending = new Map<string, (error: unknown) => void>();
+        let bothStarted!: () => void;
+        const started = new Promise<void>((resolve) => (bothStarted = resolve));
+        const session = fakeSession({});
+        session.listDir = ({ path }) =>
+          new Promise((_, reject) => {
+            pending.set(path, reject);
+            if (pending.size === 2) bothStarted();
+          });
+        const paths = ["root0", "root1"];
+        const capability = workspaceSkills(paths.map((path) => ({ path, source: path }))).bind(
+          session,
+        );
+        // Observe the outcome now: it may settle while the reads are released.
+        const outcome = capability.instructions().then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await started;
+        const offlinePath = paths[offlineIndex]!;
+        const genuinePath = paths[1 - offlineIndex]!;
+        const order = offlineSettlesFirst
+          ? [
+              [offlinePath, offline],
+              [genuinePath, genuine],
+            ]
+          : [
+              [genuinePath, genuine],
+              [offlinePath, offline],
+            ];
+        for (const [path, error] of order) {
+          pending.get(path as string)!(error);
+          await Bun.sleep(0);
+        }
+        expect(await outcome).toBe(genuine);
+      });
+    }
+  }
+
+  test("only unreachable failures degrade; the lowest index still wins among genuine ones", async () => {
+    const first = new Error("first");
+    const second = new Error("second");
+    const session = fakeSession({});
+    session.listDir = async ({ path }) => {
+      if (path === "root0") throw agentErrorToControlError(timeoutAgentError());
+      await Bun.sleep(path === "root1" ? 5 : 1);
+      throw path === "root1" ? first : second;
+    };
+    await expect(
+      discoverWorkspaceSkills(
+        session,
+        ["root0", "root1", "root2"].map((path) => ({ path, source: path })),
+      ),
+    ).rejects.toBe(first);
+  });
+
   test("an unreachable skill file read mid-discovery also degrades", async () => {
     const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
     session.readFile = async () => {

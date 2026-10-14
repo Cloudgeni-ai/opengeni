@@ -32,6 +32,9 @@ const DISCOVERY_CONCURRENCY = 8;
 
 // Keep ordered results, bound remote work, and drain already-started operations
 // before propagating a failure. Never leave detached filesystem work behind.
+// A genuine failure always outranks an unreachable-workspace failure, so an
+// in-flight real error is never hidden behind a degradable one; within one
+// class the lowest index wins deterministically.
 async function mapDiscovery<T, R>(
   items: readonly T[],
   read: (item: T) => Promise<R>,
@@ -41,6 +44,7 @@ async function mapDiscovery<T, R>(
   let failed = false;
   let failure: unknown;
   let failureIndex = Infinity;
+  let failureUnreachable = true;
   await Promise.all(
     Array.from({ length: Math.min(DISCOVERY_CONCURRENCY, items.length) }, async () => {
       while (!failed && next < items.length) {
@@ -48,9 +52,14 @@ async function mapDiscovery<T, R>(
         try {
           results[index] = await read(items[index]!);
         } catch (error) {
-          if (index < failureIndex) {
+          const unreachable = isUnreachableWorkspaceError(error);
+          if (
+            (failureUnreachable && !unreachable) ||
+            (failureUnreachable === unreachable && index < failureIndex)
+          ) {
             failure = error;
             failureIndex = index;
+            failureUnreachable = unreachable;
           }
           failed = true;
         }
