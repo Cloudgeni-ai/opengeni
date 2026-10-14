@@ -76,16 +76,30 @@ field with a value (tools, MCP servers, first-party tools and permissions,
 vault policy, connections, sandbox or environment choice, working directory,
 resources, Skills, agent overrides, model context, learning overrides, goal,
 project, visibility, usage limit, nesting). The session then runs on a minimal
-Site profile: no vault access and the workspace defaults for everything else.
+Site profile: no vault access, the workspace's default agent capabilities with
+workspace administration and browser and computer control turned off (so the
+page cannot reach the viewer's sandboxes, Connected Machines or Chrome through
+`run_on`, `sandbox_attach`, `sandbox_swap`, `sandbox_provision`, `browser_*` or
+`computer_*`), and the workspace defaults for everything else. Workers it starts
+can only narrow that.
 An agent started from a Site page is also clamped (`assertNotSiteClampedAgent`):
 it cannot create or change schedules, automations, Site publications,
 workspace instructions, Skills, Knowledge or secrets, so it does not learn.
 Nor can it change the workspace itself, its members, connections,
 integrations, webhooks, network routes or settings, the organization
-profile, Connected Machines or sandbox environments. It changes a published
-Site's content (new versions, rollback, archive, restore, audience) only for
-the Site it was started from; Sites without a publication stay open to it.
-The first-party tools refuse those writes with `site_agent_clamped`:
+profile, Connected Machines or sandbox environments. It cannot reach compute
+beyond its own session's: it cannot run on, attach, swap or provision a
+sandbox or Connected Machine, drive a browser or computer session, or start a
+worker on a chosen machine (`targetSandboxId`), a self-hosted backend or
+another session's sandbox group (403); its workers share its sandbox or get a
+new managed one. It changes a Site's content (new versions, rollback, archive,
+restore, audience) only for the Site it was started from and Sites an agent in
+its own session tree created with the artifact tools (the Site's first version
+records that session), published or not, so a page cannot spread itself
+through the person's other Sites. Sites it creates over HTTP record no source
+session, so it cannot change them later; agents create Sites with
+`artifacts_create`. The first-party tools refuse those writes with
+`site_agent_clamped`:
 
 - `knowledge_*` writes and `instruction_policy_save`;
 - `secret_save`, `secret_move` and `secret_delete`;
@@ -94,8 +108,9 @@ The first-party tools refuse those writes with `site_agent_clamped`:
 - `connected_machine_enroll_token`, `connected_machine_enable_screen_control`
   and `connected_machine_remove`;
 - `rig_propose_change`, `rig_verify` and `rig_promote`;
+- `run_on`, `sandbox_attach`, `sandbox_swap` and `sandbox_provision`;
 - `artifacts_publish`, `artifacts_rollback`, `artifacts_archive` and
-  `artifacts_restore` for another published Site.
+  `artifacts_restore` for any other Site.
 
 Over HTTP the clamp is an allowlist (`SITE_AGENT_WRITES` in
 `apps/api/src/site-agent-guard.ts`). Under `/v1/workspaces/:workspaceId` such
@@ -107,7 +122,6 @@ an agent may send writes only to:
   clamped), renaming, archiving or deleting one it reaches, and working in
   one (events, steer, control, queue, composer draft, retry, context, goal,
   artifacts, files, git, terminal, background commands);
-- the browser and computer sessions it drives;
 - files and content: uploads and download links, editable artifacts, new
   Sites and uploads, Site Data and a Site's files (only for the Site it was
   started from), and a Site's versions, rollback, status and audience (under
@@ -118,7 +132,8 @@ an agent may send writes only to:
 
 Every other write, including `PATCH` or `DELETE` on the workspace itself, a
 session's agent, tools, servers, credentials, variable sets, vaults, Skills,
-usage limit and admin access, tool approvals, and any route family added
+usage limit and admin access, tool approvals, browser and computer sessions
+(which can drive the viewer's Chrome or screen), and any route family added
 later, is refused with 403 before the route runs. The refusal names what it
 would change ("workspace settings" when no narrower name fits). Paths are
 matched percent-decoded, as the router sees them, and reading stays open.

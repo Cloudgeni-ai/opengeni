@@ -382,7 +382,11 @@ import {
   SITE_AGENT_OTHER_SITE_MESSAGE,
   siteAgentMayChangeArtifact,
 } from "../site-publishing/service";
-import { siteAgentClampRefusal, siteAgentClampedToolResult } from "./site-agent-clamp-tools";
+import {
+  siteAgentClampRefusal,
+  siteAgentClampedToolResult,
+  siteAgentComputeRefusal,
+} from "./site-agent-clamp-tools";
 import {
   registerSessionAdminAccessTools,
   type SessionAdminAccessDispatch,
@@ -3367,8 +3371,8 @@ function registerWorkspaceArtifactTools(
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
     await mutation(await afterSiteArtifactMutation(deps, response, { scan }));
-  // An agent started from a Site page changes only Sites no publication
-  // serves, and the Sites it was started from (the HTTP routes check the same).
+  // An agent started from a Site page changes only the Sites it was started
+  // from and Sites its own session tree created (the HTTP routes check the same).
   const otherSiteRefusal = async (artifactId: string) =>
     (await siteAgentMayChangeArtifact(deps, grant, artifactId))
       ? null
@@ -4244,7 +4248,9 @@ function registerFleetTools(
         'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      (await siteAgentComputeRefusal(deps, grant)) ??
+      json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
@@ -4254,7 +4260,9 @@ function registerFleetTools(
         'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
-    async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
+    async ({ target }) =>
+      (await siteAgentComputeRefusal(deps, grant)) ??
+      json(await swapActiveSandbox(services, await fleetContext(), target)),
   );
 
   server.registerTool(
@@ -4280,6 +4288,8 @@ function registerFleetTools(
       },
     },
     async ({ target, op }) => {
+      const refused = await siteAgentComputeRefusal(deps, grant);
+      if (refused) return refused;
       const typedOp = op as RunOnOp;
       const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
       // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
@@ -4313,6 +4323,8 @@ function registerFleetTools(
       },
     },
     async ({ kind, name }) => {
+      const refused = await siteAgentComputeRefusal(deps, grant);
+      if (refused) return refused;
       if (kind === "selfhosted" && exactAgentAttemptClaims(grant)) {
         // Same live-attempt authority the other fleet tools resolve, without
         // requiring a session box: a chat with no sandbox can still connect one.

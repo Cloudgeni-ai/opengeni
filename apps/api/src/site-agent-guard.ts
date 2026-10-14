@@ -53,8 +53,6 @@ export const SITE_AGENT_WRITES: readonly RegExp[] = [
   /^\/sessions\/?$/u,
   /^\/sessions\/[^/]+\/?$/u,
   new RegExp(`^/sessions/[^/]+/(?:${SESSION_WORK})(?:/.*)?$`, "u"),
-  // Browser and computer sessions it drives.
-  /^\/(?:browser|computer)-sessions(?:\/.*)?$/u,
   // Files and content. Site Data and a Site's files keep their own clamp
   // (only the Site the agent was started from); a Site's versions, rollback,
   // status and audience follow `requireSiteAgentMayChangeArtifact`.
@@ -130,6 +128,11 @@ const RESOURCES: ReadonlyMap<string, SiteClampedResource> = new Map([
   ["default-rig", "sandbox environments"],
   ["environments", "sandbox environments"],
   ["sandbox-images", "sandbox environments"],
+  // Browsers and screens, the viewer's own Chrome and machines among them.
+  ["browser-sessions", "browser or computer sessions"],
+  ["computer-sessions", "browser or computer sessions"],
+  ["attached-browsers", "browser or computer sessions"],
+  ["interaction-interventions", "browser or computer sessions"],
 ]);
 
 /** The path after the workspace id, or null when `path` is not a workspace route. */
@@ -160,14 +163,16 @@ export function siteAgentWriteResource(path: string): SiteClampedResource {
  * `/v1/workspaces/:workspaceId` it may send only the writes in
  * `SITE_AGENT_WRITES` (its tools, its conversations, files and content, and
  * reads sent as POST); any other write, including `PATCH` or `DELETE` on the
- * workspace itself, is refused with 403 before the route runs. It also
+ * workspace itself and browser or computer sessions (which can drive the
+ * viewer's Chrome or screen), is refused with 403 before the route runs. It also
  * changes a published Site's content only for a Site it was started from.
  * Reads are unaffected, and so is every caller that is not a Site-clamped
  * agent. The first-party tools that write workspace state (`knowledge_save`,
  * `instruction_policy_save`, `secret_save`, `skill_save`,
- * `company_profile_propose`, the Connected Machine and sandbox environment
- * tools, the artifact tools and their siblings) check the same clamp
- * themselves.
+ * `company_profile_propose`, the Connected Machine, sandbox environment and
+ * fleet tools (`run_on`, `sandbox_attach`, `sandbox_swap`,
+ * `sandbox_provision`), the artifact tools and their siblings) check the
+ * same clamp themselves.
  *
  * Paths are matched as Hono routes them (`c.req.path`, percent-decoded), so
  * an encoded segment cannot reach a route this guard did not recognize.

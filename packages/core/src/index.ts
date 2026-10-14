@@ -169,6 +169,8 @@ export {
 } from "./site-session-origin";
 export {
   assertNotSiteClampedAgent,
+  assertSiteAgentMayChooseCompute,
+  SITE_AGENT_COMPUTE_MESSAGE,
   siteAgentClamp,
   siteAgentMayReachSession,
   siteClampedAgentMessage,

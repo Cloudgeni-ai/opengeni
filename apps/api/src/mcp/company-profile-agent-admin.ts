@@ -31,7 +31,7 @@ export type RegisterCompanyProfileAgentAdminToolsInput = {
    * profile even with the owner's authority (an agent started from a Site
    * page), or null.
    */
-  refuseSiteAgent?: () => Promise<{
+  refuseSiteAgent: () => Promise<{
     isError: true;
     content: Array<{ type: "text"; text: string }>;
   } | null>;
@@ -146,7 +146,7 @@ export function registerCompanyProfileAgentAdminTools(
     },
     async (request) => {
       await input.authorize();
-      const refused = await input.refuseSiteAgent?.();
+      const refused = await input.refuseSiteAgent();
       if (refused) return refused;
       const parsed = AgentAuthoredCompanyProfileContent.safeParse({
         identity: request.identity,
@@ -196,7 +196,7 @@ export function registerCompanyProfileAgentAdminTools(
     },
     async (request) => {
       await input.authorize();
-      const refused = await input.refuseSiteAgent?.();
+      const refused = await input.refuseSiteAgent();
       if (refused) return refused;
       try {
         return input.json(await router.confirm({ attempt: input.attempt, request }));

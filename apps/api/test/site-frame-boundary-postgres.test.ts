@@ -923,10 +923,15 @@ test("agents started from a Site leave the organization profile, machines, envir
     "rig_propose_change",
     "rig_verify",
     "rig_promote",
+    "artifacts_create",
     "artifacts_publish",
     "artifacts_rollback",
     "artifacts_archive",
     "artifacts_restore",
+    "sandbox_attach",
+    "sandbox_swap",
+    "run_on",
+    "sandbox_provision",
   ];
   // One running turn each: the agents the MCP calls and the HTTP calls run as.
   const clampedAgent = await f.liveAgentGrant(fromSite);
@@ -1008,6 +1013,11 @@ test("agents started from a Site leave the organization profile, machines, envir
     ["rig_propose_change", { rigId: uuid(), command: "echo hello" }],
     ["rig_verify", { rigId: uuid() }],
     ["rig_promote", { rigId: uuid(), changeId: uuid() }],
+    // Compute beyond its own session's: the viewer's machines among it.
+    ["sandbox_attach", { target: uuid() }],
+    ["sandbox_swap", { target: uuid() }],
+    ["run_on", { target: uuid(), op: { kind: "read", path: "/etc/hostname" } }],
+    ["sandbox_provision", { kind: "modal" }],
   ];
 
   for (const [agent, clamped] of [
@@ -1043,10 +1053,22 @@ test("agents started from a Site leave the organization profile, machines, envir
       await client.close();
     }
   }
-  // The Site it was started from, and a Site no publication serves, stay open.
+  // The Site it was started from stays open, and so does a Site its own
+  // session tree created. A Site a person made does not, published or not,
+  // so a page cannot spread itself through the person's drafts.
   const client = await connect(clampedAgent);
+  let mine = { siteId: "", versionId: "" };
   try {
-    for (const site of [own, draft]) {
+    const made = await client.callTool({
+      name: "artifacts_create",
+      arguments: { title: "Made by the Site's agent", html, idempotencyKey: uuid() },
+    });
+    expect(made.isError ?? false).toBe(false);
+    const { version } = JSON.parse((made.content as Array<{ text: string }>)[0]!.text) as {
+      version: { id: string; artifactId: string };
+    };
+    mine = { siteId: version.artifactId, versionId: version.id };
+    for (const site of [own, mine]) {
       const [name, args] = writes(site.siteId, site.versionId)[0]!;
       const result = await client.callTool({ name, arguments: args });
       expect({ siteId: site.siteId, isError: result.isError ?? false }).toEqual({
@@ -1054,6 +1076,13 @@ test("agents started from a Site leave the organization profile, machines, envir
         isError: false,
       });
     }
+    for (const [name, args] of writes(draft.siteId, draft.versionId)) {
+      const result = await client.callTool({ name, arguments: args });
+      expect({ name, code: errorCode(result) }).toEqual({ name, code: "site_agent_clamped" });
+    }
+    const [unchanged] = await shared.admin<{ current_version_id: string; status: string }[]>`
+      select current_version_id, status from workspace_artifacts where id = ${draft.siteId}`;
+    expect(unchanged).toEqual({ current_version_id: draft.versionId, status: "active" });
   } finally {
     await client.close();
   }
@@ -1088,7 +1117,7 @@ test("agents started from a Site leave the organization profile, machines, envir
     return { status: response.status, text: await response.text() };
   };
   const clampRefusal =
-    /An agent started from a Site page cannot (create or change|change another)/u;
+    /An agent started from a Site page (cannot create or change|can change only its own Site)/u;
   const otherSite = `/published-artifacts/${other.siteId}`;
   const refused: Array<[string, string, unknown]> = [
     ["POST", `${otherSite}/versions`, { html, expectedCurrentVersionId: other.versionId }],
@@ -1112,6 +1141,8 @@ test("agents started from a Site leave the organization profile, machines, envir
     ["POST", "/network-routes", {}],
     ["POST", "/browser-identities", {}],
     ["PATCH", "/session-mcp-tool-permissions", {}],
+    ["POST", `/published-artifacts/${draft.siteId}/versions`, {}],
+    ["PATCH", `/published-artifacts/${draft.siteId}/status`, { status: "archived" }],
   ];
   for (const [method, path, body] of refused) {
     const route = `${method} ${path}`;
@@ -1122,15 +1153,15 @@ test("agents started from a Site leave the organization profile, machines, envir
       refused: true,
     });
   }
-  // Not refused: other callers, the agent's own Site, Sites no publication
-  // serves, and writes that only read.
+  // Not refused: other callers, the agent's own Site, a Site its session
+  // tree created, and writes that only read.
   const open: Array<[AccessGrant, string, string, unknown]> = [
     [plainAgent, "POST", `${otherSite}/versions`, {}],
     [plainAgent, "PATCH", "", {}],
     [plainAgent, "PATCH", "/%73ettings", {}],
     [plainAgent, "POST", "/webhooks", {}],
     [clampedAgent, "POST", `/published-artifacts/${own.siteId}/versions`, {}],
-    [clampedAgent, "POST", `/published-artifacts/${draft.siteId}/versions`, {}],
+    [clampedAgent, "POST", `/published-artifacts/${mine.siteId}/versions`, {}],
     [clampedAgent, "POST", `/machines/${uuid()}/audience/preview`, {}],
   ];
   for (const [grant, method, path, body] of open) {
@@ -1225,6 +1256,9 @@ test("agents started from a Site write only on the allowlist; other workspace wr
     ["PUT", `/sessions/${fromSite}/usage-limit`, {}, "workspace settings"],
     ["POST", "/tools/approvals", {}, "workspace settings"],
     ["POST", "/chat/completions", {}, "workspace settings"],
+    // Browsers and screens can be the viewer's own Chrome and machines.
+    ["POST", "/browser-sessions", {}, "browser or computer sessions"],
+    ["POST", "/computer-sessions", {}, "browser or computer sessions"],
   ];
   for (const [method, path, body, what] of refused) {
     const route = `${method} ${path}`;
@@ -1285,6 +1319,26 @@ test("agents started from a Site write only on the allowlist; other workspace wr
     clamped: true,
     originSiteIds: [own.siteId],
   });
+  // Its workers run in its own sandbox or a new managed one: never on a
+  // chosen machine, a self-hosted backend or another session's sandbox.
+  for (const compute of [
+    { targetSandboxId: uuid() },
+    { sandboxBackend: "selfhosted" },
+    { sandbox: { groupId: uuid() } },
+  ]) {
+    const body = { initialMessage: "Child work", ...compute };
+    const refusedChild = await as(clampedAgent, "POST", "/sessions", body);
+    expect({ compute, status: refusedChild.status, text: refusedChild.text }).toMatchObject({
+      compute,
+      status: 403,
+      text: expect.stringContaining("cannot run on, attach, provision or choose sandboxes"),
+    });
+    const plainChild = await as(plainAgent, "POST", "/sessions", body);
+    expect({ compute, refused: clampRefusal.test(plainChild.text) }).toEqual({
+      compute,
+      refused: false,
+    });
+  }
   const created = await as(clampedAgent, "POST", "/published-artifacts", {
     title: "Made by a Site agent",
     html: "<!doctype html><h1>New</h1>",
@@ -1305,7 +1359,6 @@ test("agents started from a Site write only on the allowlist; other workspace wr
     ["POST", "/knowledge/entries/search", {}],
     ["POST", `/document-bases/${uuid()}/search`, {}],
     ["POST", "/company-brain/knowledge/search", {}],
-    ["POST", "/browser-sessions", {}],
     ["POST", "/feedback", {}],
   ];
   for (const [method, path, body] of open) {
@@ -1501,4 +1554,50 @@ test("a Site page starts a session with a message and a model only, on a minimal
   });
   expect(row!.vault_policy).toEqual({ mode: "selected", vaultIds: [] });
   expect(row!.reasoning_effort).toBe("low");
+
+  // Its agent has the workspace's default capabilities without workspace
+  // administration (sandboxes, Connected Machines, run_on) or browser and
+  // computer control, so the page cannot reach the viewer's machines.
+  const agentConfig = async (sessionId: string) => {
+    const [config] = await shared.admin<
+      { agent_config: { from: string; capabilities: Record<string, unknown> } }[]
+    >`select agent_config from sessions where id = ${sessionId}`;
+    return config!.agent_config;
+  };
+  const fromAll = await agentConfig(id);
+  expect({
+    from: fromAll.from,
+    workspaceAdmin: fromAll.capabilities.workspaceAdmin,
+    browser: fromAll.capabilities.browser,
+  }).toEqual({ from: "all", workspaceAdmin: false, browser: false });
+  // A narrower workspace default stays narrow; it cannot turn them back on.
+  await shared.admin`
+    update workspaces
+    set settings = jsonb_set(
+      coalesce(settings, '{}'::jsonb),
+      '{sessionAgentDefaults}',
+      ${shared.admin.json({
+        capabilities: { from: "none", artifacts: true, workspaceAdmin: true, browser: true },
+      })}
+    )
+    where id = ${f.workspace.id}`;
+  const narrow = await f.call("POST", "/sessions", frame, {
+    initialMessage: "Hello again",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(narrow.status, await narrow.clone().text()).toBe(202);
+  const fromNone = await agentConfig(((await narrow.json()) as { id: string }).id);
+  expect({
+    from: fromNone.from,
+    artifacts: fromNone.capabilities.artifacts,
+    subagents: fromNone.capabilities.subagents,
+    workspaceAdmin: fromNone.capabilities.workspaceAdmin,
+    browser: fromNone.capabilities.browser,
+  }).toEqual({
+    from: "none",
+    artifacts: true,
+    subagents: false,
+    workspaceAdmin: false,
+    browser: false,
+  });
 });

@@ -30,6 +30,7 @@ import {
   countOpenSiteAbuseReports,
   getPublishedSiteVersion,
   getSiteDataSite,
+  artifactCreatedInSessionTree,
   getSitePublication,
   getWorkspaceSiteLimitProfile,
   markSitePublicationEdgeSynced,
@@ -835,14 +836,16 @@ export async function requireSitePublicationWriter(
 }
 
 export const SITE_AGENT_OTHER_SITE_MESSAGE =
-  "An agent started from a Site page cannot change another published Site";
+  "An agent started from a Site page can change only its own Site and Sites it created";
 
 /**
  * Whether `grant` may change a Site's content (new versions, rollback,
  * archive, restore, audience). An agent started from a Site page may only
- * when no publication serves the Site on its own hostname, or when it is a
- * Site the agent was started from: it never rewrites another published Site
- * the person can edit. Other callers are not limited here.
+ * for a Site it was started from, or one an agent in its own session tree
+ * created with the artifact tools (the Site's first version records that
+ * session). It never rewrites another Site the person can edit, published
+ * or not, so a page cannot spread itself through the person's drafts. Other
+ * callers are not limited here.
  */
 export async function siteAgentMayChangeArtifact(
   deps: SitePublishingDeps,
@@ -851,10 +854,14 @@ export async function siteAgentMayChangeArtifact(
 ): Promise<boolean> {
   const clamp = await siteAgentClamp(deps.db, grant);
   if (!clamp?.clamped || clamp.originSiteIds.includes(artifactId)) return true;
-  const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
-  // Any publication counts, unpublished or taken down included: publishing
-  // it again would serve what the agent wrote.
-  return (await getSitePublication(deps.db, scope, artifactId)) === null;
+  const sessionId = grant.metadata?.sessionId;
+  if (typeof sessionId !== "string") return false;
+  return await artifactCreatedInSessionTree(
+    deps.db,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    artifactId,
+    sessionId,
+  );
 }
 
 /** `siteAgentMayChangeArtifact`, refusing with 403 `site_agent_forbidden`. */
@@ -1101,6 +1108,23 @@ export async function upsertSitePublicationForManager(
       "forbidden",
       "site_admin_required",
       "Only a workspace admin can open a Site with tools to everyone",
+    );
+  // Invited viewers always get the Site's tools, so inviting people (adding
+  // invitees, or switching to invited access) while the agent has tools needs
+  // an admin too. Removing invitees does not.
+  const accessAfter = request.access ?? existing?.access;
+  const invitedBefore = new Set(existing?.invitedEmails ?? []);
+  const invitesPeople =
+    accessAfter === "invited" &&
+    (existing?.access !== "invited" ||
+      (request.invitedEmails !== undefined &&
+        normalizeEmails(request.invitedEmails).some((email) => !invitedBefore.has(email))));
+  if (invitesPeople && toolsAfter.length > 0 && !management.admin)
+    throw sitePublishingError(
+      403,
+      "forbidden",
+      "site_admin_required",
+      "Only a workspace admin can invite people while the Site's assistant has tools",
     );
   for (const tool of tools ?? [])
     if (!SITE_AGENT_TOOL_ID.test(tool) || RESERVED_SITE_AGENT_TOOL_IDS.has(tool))

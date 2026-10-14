@@ -142,7 +142,7 @@ function routeFixture() {
     currentSiteSessionOrigin,
     siteFrameBodyRefusal,
     // The route's minimal Site profile (module-private): recorded, payload kept.
-    siteFrameSessionProfile: (value: unknown) => {
+    siteFrameSessionProfile: async (_deps: unknown, _workspaceId: unknown, value: unknown) => {
       calls.push({ name: "site profile", args: [value] });
       return value;
     },

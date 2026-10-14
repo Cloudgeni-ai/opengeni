@@ -1746,6 +1746,46 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   ).toBe(200);
   // An admin opens it with the tools.
   expect((await f.publication(f.admin, internal.id, "PUT", { access: "public" })).status).toBe(200);
+
+  // Invited people always get the Site's tools, so inviting people while the
+  // agent has tools needs an admin too. Removing invitees does not.
+  const team = await f.live("Team tools", { access: "members", agent: { enabled: true } });
+  const teamChange = (who: Who, body: Record<string, unknown>) =>
+    f.publication(who, team.id, "PUT", body);
+  expect((await teamChange(f.admin, { agent: { tools: ["crm"] } })).status).toBe(200);
+  for (const body of [
+    { access: "invited", invitedEmails: ["outside@example.com"] },
+    { access: "invited" },
+  ]) {
+    const refused = await teamChange(f.owner, body);
+    expect({ body, status: refused.status, code: code(refused) }).toEqual({
+      body,
+      status: 403,
+      code: "site_admin_required",
+    });
+    expect(refused.json.error.message).toBe(
+      "Only a workspace admin can invite people while the Site's assistant has tools",
+    );
+  }
+  const invitedByAdmin = await teamChange(f.admin, {
+    access: "invited",
+    invitedEmails: ["ada@example.com"],
+  });
+  expect(invitedByAdmin.status, JSON.stringify(invitedByAdmin.json)).toBe(200);
+  const addInvitee = await teamChange(f.owner, {
+    invitedEmails: ["ada@example.com", "outside@example.com"],
+  });
+  expect({ status: addInvitee.status, code: code(addInvitee) }).toEqual({
+    status: 403,
+    code: "site_admin_required",
+  });
+  // The same people (however they are written), fewer people, or no tools: the owner may.
+  expect((await teamChange(f.owner, { invitedEmails: ["ADA@example.com"] })).status).toBe(200);
+  expect((await teamChange(f.owner, { invitedEmails: [] })).status).toBe(200);
+  expect((await teamChange(f.owner, { agent: { tools: null } })).status).toBe(200);
+  const withoutTools = await teamChange(f.owner, { invitedEmails: ["outside@example.com"] });
+  expect(withoutTools.status, JSON.stringify(withoutTools.json)).toBe(200);
+  expect(withoutTools.json.invitedEmails).toEqual(["outside@example.com"]);
 }, 90_000);
 
 test("finished conversations free the Site budget; a lowered cap lowers running conversations", async () => {

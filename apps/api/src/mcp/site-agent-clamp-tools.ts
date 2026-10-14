@@ -1,5 +1,6 @@
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  SITE_AGENT_COMPUTE_MESSAGE,
   siteAgentClamp,
   siteClampedAgentMessage,
   type ApiRouteDeps,
@@ -32,5 +33,19 @@ export async function siteAgentClampRefusal(
 ): Promise<SiteAgentClampedToolResult | null> {
   return (await siteAgentClamp(deps.db, grant))?.clamped
     ? siteAgentClampedToolResult(siteClampedAgentMessage(what))
+    : null;
+}
+
+/**
+ * Null, or the refusal when `grant` is an agent started from a Site page:
+ * such an agent cannot run on, attach, swap or provision sandboxes or
+ * Connected Machines (the viewer's machines among them).
+ */
+export async function siteAgentComputeRefusal(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+): Promise<SiteAgentClampedToolResult | null> {
+  return (await siteAgentClamp(deps.db, grant))?.clamped
+    ? siteAgentClampedToolResult(SITE_AGENT_COMPUTE_MESSAGE)
     : null;
 }
