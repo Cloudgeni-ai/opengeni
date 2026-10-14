@@ -38,7 +38,10 @@ function verify(
   });
 }
 
-function signed(secret = CURRENT, extra: Partial<Parameters<typeof signSiteGatewayRequest>[0]> = {}) {
+function signed(
+  secret = CURRENT,
+  extra: Partial<Parameters<typeof signSiteGatewayRequest>[0]> = {},
+) {
   return signSiteGatewayRequest({
     secret,
     method: "POST",
@@ -65,7 +68,10 @@ describe("gateway signature", () => {
       },
     });
     expect(verify(signed(PREVIOUS)).ok).toBe(true);
-    expect(verify(signed(CURRENT, { human: true }))).toMatchObject({ ok: true, fields: { human: true } });
+    expect(verify(signed(CURRENT, { human: true }))).toMatchObject({
+      ok: true,
+      fields: { human: true },
+    });
   });
 
   test("refuses a missing, foreign, stale, or tampered signature", () => {
@@ -90,9 +96,9 @@ describe("gateway signature", () => {
     expect(
       verify({ ...signed(), "x-opengeni-site-visitor": "another-visitor-abcdefgh" }),
     ).toMatchObject({ reason: "bad_signature" });
-    expect(verify({ ...signed(), "x-opengeni-site-host": "other.sites.example.test" })).toMatchObject(
-      { reason: "bad_signature" },
-    );
+    expect(
+      verify({ ...signed(), "x-opengeni-site-host": "other.sites.example.test" }),
+    ).toMatchObject({ reason: "bad_signature" });
     expect(verify({ ...signed(), [SITE_GATEWAY_TIMESTAMP_HEADER]: "12ab" })).toMatchObject({
       reason: "bad_timestamp",
     });
@@ -127,7 +133,9 @@ describe("limits", () => {
       { kind: "credits", overrides: null },
     );
     expect(site.turnsPerConversation).toBe(3);
-    expect(site.requestsPerMinutePerVisitor).toBe(DEFAULT_FREE_SITE_LIMITS.requestsPerMinutePerVisitor);
+    expect(site.requestsPerMinutePerVisitor).toBe(
+      DEFAULT_FREE_SITE_LIMITS.requestsPerMinutePerVisitor,
+    );
     const workspace = effectiveSiteLimits(settings, null, { kind: "credits", overrides: null });
     expect(workspace.agentMicrosPerSitePerMonth).toBe(
       DEFAULT_FREE_SITE_LIMITS.agentMicrosPerSitePerMonth! * settings.sitesCreditsLimitMultiplier,
@@ -145,7 +153,10 @@ describe("limits", () => {
     expect(unlimited.agentMicrosPerSitePerMonth).toBeNull();
     const custom = effectiveSiteLimits(
       settings,
-      { kind: "custom", overrides: { requestsPerMinutePerVisitor: null, agentMicrosPerConversation: 9e12 } },
+      {
+        kind: "custom",
+        overrides: { requestsPerMinutePerVisitor: null, agentMicrosPerConversation: 9e12 },
+      },
       null,
     );
     expect(custom.requestsPerMinutePerVisitor).toBe(
@@ -158,9 +169,9 @@ describe("limits", () => {
 
   test("turning public agents off turns guest agents off everywhere", () => {
     const off = testSettings({ sitesPublicAgentsEnabled: false });
-    expect(effectiveSiteLimits(off, { kind: "unlimited", overrides: null }, null).guestAgentsEnabled).toBe(
-      false,
-    );
+    expect(
+      effectiveSiteLimits(off, { kind: "unlimited", overrides: null }, null).guestAgentsEnabled,
+    ).toBe(false);
   });
 });
 
