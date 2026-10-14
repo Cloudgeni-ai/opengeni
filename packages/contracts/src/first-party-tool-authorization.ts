@@ -276,6 +276,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   site_files_list: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_files_upload: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_files_delete: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_publication_get: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_publication_update: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_hostname_check: { sessionRequired: true, allOf: ["artifacts:read"] },
   sandbox_file_publish: {
     sessionRequired: true,
     allOf: ["files:read", "files:upload"],

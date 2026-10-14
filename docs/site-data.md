@@ -108,14 +108,12 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
   new chat to manage data.
 - So "Site HTML cannot define collections or change access rules" holds for
   the page's own requests and for agents it starts or messages directly.
-  Indirect paths that run with the viewer's general API authority (for
-  example a schedule or automation the page creates, whose agents are not
-  Site-started) are not clamped yet; they are planned follow-up work. So is
-  one direct path: a page on Site B can message an existing session that was
-  started from Site A. Site turns record only `surface = 'site'`, not which Site sent
-  them, so that agent keeps viewer reach on Site A (never management, and
-  nothing on Site B). Recording the sending Site on each Site turn needs
-  changes on every turn-insert path and is part of that follow-up.
+  Indirect paths are closed too (OPE-801): Site code reaches only the
+  `SITE_OPERATIONS` allowlist, a page reaches only sessions its own Site
+  started (a page on Site B gets a 404 for a Site A session), each Site turn
+  records which Site sent it, a schedule created from a Site records the Site
+  and its runs inherit the clamp, and an agent started from a Site cannot
+  create or change schedules or automations.
 - The Site HTTP channel reaches only the current Site's data:
   `siteSessionPath` refuses `/published-artifacts/<id>/data|files` for every
   explicit id on every host, and hosts not bound to a published Site (inline
@@ -127,6 +125,13 @@ store applies the per-collection matrix (`packages/db/src/site-data-policy.ts`).
 | `shared_read` | all | none | write |
 | `per_viewer` | own | own | read, update and delete all unless `privateRecords` (then own only) |
 | `append_only` | own | create only | read all, update, delete |
+
+On a Site [published](published-sites.md) to the public, anonymous guests
+(`guest:<visitorId>`) reach a collection only through its `guestAccess`
+rule: `none` (the default), `read` (what viewers read), `append` (create,
+and read their own) or `own` (create, read, update and delete their own).
+Members, invited people and signed-in users are viewers as above. Guest
+writes have their own rate limit.
 
 Collection JSON Schemas use a strict keyword allowlist, walked over the whole
 schema when a collection is defined: `type`, `properties`, `required`,
@@ -394,8 +399,10 @@ mode are added.
   that render Sites behind the session proxy (it is GET-only for Sites today).
 - `shadow`/`paid` billing with a reviewed rate; public, guest and anonymous
   principals; live updates.
-- Clamp indirect paths from Site HTML (schedules, automations and other
-  agents created with the viewer's authority), and record which Site sent
-  each Site turn.
+- Review new workspace route families and first-party tools for the Site
+  agent clamp as they are added. Agents started from a Site page already
+  cannot change schedules, automations, publications, instructions, Skills,
+  Knowledge, secrets, members, connections or settings (see
+  `docs/site-conversations.md`).
 - Stamp the Site origin onto child sessions at creation so the lineage check
   is one lookup instead of a bounded walk.

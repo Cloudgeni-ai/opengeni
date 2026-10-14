@@ -38,6 +38,7 @@ import {
   ReasoningEffort,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  normalizeSitesDomain,
   OpenGeniSlackBotDisplayName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
@@ -1581,6 +1582,56 @@ const SettingsSchema = z.object({
   // Schema-validation time all of a workspace's Sites may spend per minute.
   siteDataWorkspaceValidationMsPerMinute: z.coerce.number().int().positive().default(20_000),
   siteDataMaxRecordsPerCollection: z.coerce.number().int().positive().default(100_000),
+  // Published Sites (docs/design/published-sites-2026-10-14.md). Publishing is
+  // off unless sitesDomain names the Sites domain; the site-runtime API also
+  // needs the gateway secret. Defaults are strict.
+  sitesDomain: z.string().trim().min(3).max(200).optional(),
+  sitesGatewaySecret: z.string().min(32).optional(),
+  // Accepted during rotation only; remove once the gateway signs with the new secret.
+  sitesGatewaySecretPrevious: z.string().min(32).optional(),
+  sitesPublicEnabled: EnvBoolean.default(true),
+  sitesPublicAgentsEnabled: EnvBoolean.default(true),
+  // Login-only deployments (staging): public means any signed-in user; no guests.
+  sitesLoginOnly: EnvBoolean.default(false),
+  sitesForceNoindex: EnvBoolean.default(false),
+  // Defaults to abuse@<sites domain>.
+  sitesAbuseEmail: z.string().email().optional(),
+  // Guests start embedded agents only after the gateway verified a bot challenge.
+  sitesGuestAgentHumanCheck: EnvBoolean.default(false),
+  // The free limit profile (DEFAULT_FREE_SITE_LIMITS); money in micro-USD.
+  sitesFreeRequestsPerMinutePerVisitor: z.coerce.number().int().positive().default(120),
+  sitesFreeGuestWritesPerMinute: z.coerce.number().int().nonnegative().default(30),
+  sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().default(10),
+  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().default(50),
+  sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().default(20),
+  sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().default(20_000),
+  sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().default(200_000),
+  sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().default(2_000_000),
+  // The credits profile multiplies the free conversation and spend caps.
+  sitesCreditsLimitMultiplier: z.coerce.number().int().min(1).max(1_000).default(10),
+  sitesReportsPerMinutePerVisitor: z.coerce.number().int().positive().default(5),
+  sitesViewerSessionIdleSeconds: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .default(12 * 60 * 60),
+  sitesViewerSessionAbsoluteSeconds: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 24 * 60 * 60)
+    .default(7 * 24 * 60 * 60),
+  // A released hostname stays held for its workspace at least this long.
+  sitesHostnameHoldDays: z.coerce.number().int().min(30).default(30),
+  // Optional Cloudflare edge sync: KV host map and cache purge. All unset: no-op.
+  sitesCloudflareApiToken: z.string().min(1).optional(),
+  sitesCloudflareAccountId: z.string().min(1).optional(),
+  sitesCloudflareKvNamespaceId: z.string().min(1).optional(),
+  sitesCloudflareZoneId: z.string().min(1).optional(),
+  // KV expiry of host-map entries; bounds staleness if a sync write is missed.
+  sitesHostMapTtlSeconds: z.coerce.number().int().min(60).max(86_400).default(300),
+  // Google Web Risk scanning of URLs in Site HTML on publish; off without a key.
+  sitesWebRiskApiKey: z.string().min(1).optional(),
   // Explicit commercial cutover. Existing queued revisions remain unpriced;
   // only jobs created at or after this instant may enter the paid rail.
   documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
@@ -4926,6 +4977,46 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_SITE_DATA_WORKSPACE_VALIDATION_MS_PER_MINUTE",
     ),
     siteDataMaxRecordsPerCollection: optional("OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION"),
+    sitesDomain: optional("OPENGENI_SITES_DOMAIN"),
+    sitesGatewaySecret: optional("OPENGENI_SITES_GATEWAY_SECRET"),
+    sitesGatewaySecretPrevious: optional("OPENGENI_SITES_GATEWAY_SECRET_PREVIOUS"),
+    sitesPublicEnabled: optional("OPENGENI_SITES_PUBLIC_ENABLED"),
+    sitesPublicAgentsEnabled: optional("OPENGENI_SITES_PUBLIC_AGENTS_ENABLED"),
+    sitesLoginOnly: optional("OPENGENI_SITES_LOGIN_ONLY"),
+    sitesForceNoindex: optional("OPENGENI_SITES_FORCE_NOINDEX"),
+    sitesAbuseEmail: optional("OPENGENI_SITES_ABUSE_EMAIL"),
+    sitesGuestAgentHumanCheck: optional("OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK"),
+    sitesFreeRequestsPerMinutePerVisitor: optional(
+      "OPENGENI_SITES_FREE_REQUESTS_PER_MINUTE_PER_VISITOR",
+    ),
+    sitesFreeGuestWritesPerMinute: optional("OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE"),
+    sitesFreeConversationsPerVisitorPerDay: optional(
+      "OPENGENI_SITES_FREE_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesFreeConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_FREE_CONVERSATIONS_PER_SITE_PER_DAY",
+    ),
+    sitesFreeTurnsPerConversation: optional("OPENGENI_SITES_FREE_TURNS_PER_CONVERSATION"),
+    sitesFreeAgentMicrosPerConversation: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION",
+    ),
+    sitesFreeAgentMicrosPerVisitorPerDay: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_VISITOR_PER_DAY",
+    ),
+    sitesFreeAgentMicrosPerSitePerMonth: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH",
+    ),
+    sitesCreditsLimitMultiplier: optional("OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER"),
+    sitesReportsPerMinutePerVisitor: optional("OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR"),
+    sitesViewerSessionIdleSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_IDLE_SECONDS"),
+    sitesViewerSessionAbsoluteSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_ABSOLUTE_SECONDS"),
+    sitesHostnameHoldDays: optional("OPENGENI_SITES_HOSTNAME_HOLD_DAYS"),
+    sitesCloudflareApiToken: optional("OPENGENI_SITES_CLOUDFLARE_API_TOKEN"),
+    sitesCloudflareAccountId: optional("OPENGENI_SITES_CLOUDFLARE_ACCOUNT_ID"),
+    sitesCloudflareKvNamespaceId: optional("OPENGENI_SITES_CLOUDFLARE_KV_NAMESPACE_ID"),
+    sitesCloudflareZoneId: optional("OPENGENI_SITES_CLOUDFLARE_ZONE_ID"),
+    sitesHostMapTtlSeconds: optional("OPENGENI_SITES_HOST_MAP_TTL_SECONDS"),
+    sitesWebRiskApiKey: optional("OPENGENI_SITES_WEB_RISK_API_KEY"),
     documentEmbeddingCreditsActivatedAt: optional(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
     ),
@@ -9778,9 +9869,40 @@ export function localSandboxApiRouteAllowed(pathname: string): boolean {
   return LOCAL_SANDBOX_API_ROUTES.some((route) => route.test(pathname));
 }
 
+/**
+ * Published Sites serve untrusted HTML, so their domain must not hold or sit
+ * inside the console or API hosts: a Site could otherwise read or set their
+ * cookies. A separate registrable domain is required (see
+ * docs/published-sites.md); this catches the nesting a host check can see.
+ */
+export function validateSitesDomain(
+  settings: Pick<Settings, "sitesDomain" | "publicBaseUrl" | "webBaseUrl">,
+): void {
+  if (settings.sitesDomain === undefined) return;
+  let domain: string;
+  try {
+    domain = normalizeSitesDomain(settings.sitesDomain);
+  } catch {
+    throw new Error("OPENGENI_SITES_DOMAIN must be a domain name such as sites.example.com");
+  }
+  const hosts: Array<[string, string | undefined]> = [
+    ["OPENGENI_PUBLIC_BASE_URL", settings.publicBaseUrl],
+    ["OPENGENI_WEB_BASE_URL", settings.webBaseUrl],
+  ];
+  for (const [name, url] of hosts) {
+    if (!url) continue;
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/u, "");
+    if (host === domain || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`))
+      throw new Error(
+        `OPENGENI_SITES_DOMAIN (${domain}) must be a separate domain from the console and API: ${name} uses ${host}`,
+      );
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  validateSitesDomain(settings);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&
     !settings.organizationUserSetupQueryEdgeSanitizationConfirmed

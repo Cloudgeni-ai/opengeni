@@ -37,6 +37,16 @@ import type {
   SiteDataWriteResponse,
 } from "@opengeni/contracts";
 import type {
+  SiteAbuseReport,
+  SiteAuthAuthorizeRequest,
+  SiteAuthAuthorizeResponse,
+  SiteHostnameAvailability,
+  SiteLimitProfile,
+  SitePublication,
+  SiteTakedownRequest,
+  UpsertSitePublicationRequest,
+} from "@opengeni/contracts";
+import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
   SessionMessagePreview,
@@ -8413,6 +8423,186 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * A Site's web publication: hostname, access, embedded agent, limits,
+   * status and moderation. 404 when the Site was never published; 503
+   * `sites_publishing_disabled` when the deployment has no Sites domain.
+   */
+  async getSitePublication(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "GET",
+      sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Publish a Site on its own hostname or change its publication. Omitted
+   * fields keep their current values. 409 `site_hostname_taken` when the
+   * label belongs to another Site; 403 when the Site is Only me or the
+   * caller cannot manage it.
+   */
+  async updateSitePublication(
+    workspaceId: string,
+    siteId: string,
+    request: UpsertSitePublicationRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "PUT",
+      sitePublicationPath(workspaceId, siteId),
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Stop serving a published Site. Its hostname stays held for the workspace. */
+  async unpublishSite(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "DELETE",
+      sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Whether a hostname label is valid and free for a Site in this workspace. */
+  async checkSiteHostname(
+    workspaceId: string,
+    label: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteHostnameAvailability> {
+    return await this.requestJson<SiteHostnameAvailability>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-hostnames/${encodeURIComponent(label)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Take a published Site down at once; visitors see a takedown notice. */
+  async takeDownSite(
+    workspaceId: string,
+    siteId: string,
+    request: SiteTakedownRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/takedown`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Serve a Site that was taken down again. */
+  async restoreSite(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/restore`,
+      {},
+      undefined,
+      options,
+    );
+  }
+
+  /** Abuse reports visitors filed against a published Site. */
+  async listSiteAbuseReports(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ reports: SiteAbuseReport[] }> {
+    return await this.requestJson<{ reports: SiteAbuseReport[] }>(
+      "GET",
+      `${sitePublicationPath(workspaceId, siteId)}/reports`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Close an abuse report as dismissed or actioned. */
+  async updateSiteAbuseReport(
+    workspaceId: string,
+    siteId: string,
+    reportId: string,
+    request: { status: "dismissed" | "actioned" },
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteAbuseReport> {
+    return await this.requestJson<SiteAbuseReport>(
+      "PATCH",
+      `${sitePublicationPath(workspaceId, siteId)}/reports/${encodeURIComponent(reportId)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** The workspace's default limit profile for published Sites. */
+  async getSiteLimitProfile(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteLimitProfile> {
+    return await this.requestJson<SiteLimitProfile>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-limit-profile`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Change the workspace's default limit profile for published Sites. Needs a workspace admin. */
+  async updateSiteLimitProfile(
+    workspaceId: string,
+    profile: SiteLimitProfile,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteLimitProfile> {
+    return await this.requestJson<SiteLimitProfile>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-limit-profile`,
+      profile,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Let the signed-in person open a published Site: returns a one-time code,
+   * bound to the Site host, PKCE challenge and redirect, inside `redirectTo`.
+   * 403 `site_access_denied` when they may not open the Site.
+   */
+  async authorizeSiteViewer(
+    request: SiteAuthAuthorizeRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteAuthAuthorizeResponse> {
+    return await this.requestJson<SiteAuthAuthorizeResponse>(
+      "POST",
+      "/v1/site-auth/authorize",
+      request,
+      undefined,
+      options,
+    );
+  }
+
   /** Search the official MCP registry for installable capabilities. */
   async discoverMcpCapabilities(
     workspaceId: string,
@@ -11066,4 +11256,8 @@ async function readBoundedResponseBytes(
 
 function siteDataPath(workspaceId: string, siteId: string): string {
   return `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}`;
+}
+
+function sitePublicationPath(workspaceId: string, siteId: string): string {
+  return `${siteDataPath(workspaceId, siteId)}/publication`;
 }

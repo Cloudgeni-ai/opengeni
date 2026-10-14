@@ -102,17 +102,17 @@ describe("session admin access end to end", () => {
     const organizationId = access.accountGrants[0]!.accountId;
     const workspaceId = access.workspaceGrants[0]!.workspaceId;
 
-    const session = async (createdBySubjectId: string) => {
+    const session = async (createdBySubjectId: string, metadata: Record<string, unknown> = {}) => {
       const id = crypto.randomUUID();
       await withWorkspaceSessionActivityRls(client.db, workspaceId, async (scoped) => {
         await scoped.execute(sql`
           insert into sessions (id, account_id, workspace_id, initial_message, model,
             reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
-            root_session_id, status, created_by_kind, created_by_subject_id)
+            root_session_id, status, created_by_kind, created_by_subject_id, metadata)
           values (${id}, ${organizationId}, ${workspaceId}, 'fixture', 'test-model', 'medium',
             'standard', 'none', ${id},
             jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null), ${id}, 'idle',
-            'subject', ${createdBySubjectId})`);
+            'subject', ${createdBySubjectId}, ${JSON.stringify(metadata)}::jsonb)`);
       });
       return id;
     };
@@ -202,6 +202,23 @@ describe("session admin access end to end", () => {
         })
       ).status,
     ).toBe(403);
+    // Never a session a Site page started: it acts with that page's reach.
+    // (`_opengeniSiteOrigin` is where a session records the Site page that started it.)
+    const fromSite = await session(subjectId, {
+      _opengeniSiteOrigin: { siteId: null, title: "Inline page", frame: "inline" },
+    });
+    const refusedForSite = await app.request(sessionAccess(fromSite), {
+      method: "PUT",
+      headers: browser(cookie),
+      body: "{}",
+    });
+    expect(refusedForSite.status).toBe(409);
+    expect(
+      ((await refusedForSite.json()) as { error: { message: string } }).error.message,
+    ).toContain("A session started from a Site page cannot get admin access");
+    expect(
+      await (await app.request(sessionAccess(fromSite), { headers: { cookie } })).json(),
+    ).toMatchObject({ active: false });
 
     const granted = await app.request(sessionAccess(own), {
       method: "PUT",

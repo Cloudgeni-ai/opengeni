@@ -10,8 +10,9 @@ source (when supplied) and one published runtime file. React is the default,
 not a requirement: a plain HTML-only Site is valid. Build and test in the
 sandbox, then upload the self-contained HTML and optional source.
 
-Do not invent a Site framework, deployment service, App Host, wildcard domain,
-provider-specific API wrapper, or Opengeni-only build CLI.
+Do not invent a Site framework, deployment service, App Host, custom domain
+setup, provider-specific API wrapper, or Opengeni-only build CLI. Putting a
+Site on the web is built in (see "Publish to the web").
 
 ## Sites have no server; AI comes from the host
 
@@ -41,8 +42,8 @@ say which designs are possible and ask before building.
   choosing a temporary tunnel or another server. Inspect whether it can be
   packaged as self-contained HTML, preserve its design and behavior, and retain
   editable source when available. A local preview alone is still appropriate
-  when that is all the user requests. Explain workspace access for the published
-  link; do not imply it is public to anyone. Opengeni AI and tool access are
+  when that is all the user requests. The Site link opens only for workspace
+  members; to share it wider, publish it to the web. Opengeni AI and tool access are
   never such a backend (see above). If the app genuinely requires server-side
   compute that Sites cannot host, explain that constraint and ask how the user
   wants to proceed instead of dropping functionality or choosing a host.
@@ -324,6 +325,11 @@ Expect `rate_limited` if writes spend too long validating (each Site has 5 s
 of schema checking a minute); removing the schema always works. Field
 paths cannot use `__proto__`, `prototype` or `constructor`. An Only me Site's data is reachable only by its owner.
 
+On a Site published to the public, anonymous guests reach a collection only
+through its `guestAccess` rule, set with `site_data_define_collection`:
+`none` (default), `read`, `append` (add and read their own) or `own` (add,
+read, change and delete their own). Grant guests the least the page needs.
+
 In the Site, use the same client:
 
 ```ts
@@ -497,6 +503,35 @@ the finished destination.
 Archive with `opengeni__artifacts_archive` and restore with
 `opengeni__artifacts_restore`. Archiving unpublishes the Site but preserves its
 immutable versions and retained source. There is no hard-delete workflow.
+
+## Publish to the web
+
+When the user wants a Site outside the console (a public page, a client
+portal, a form for people outside the workspace), publish it to its own
+address under the deployment's Sites domain, such as
+`team-crm-4k9x.opengeni.site`. Ask before making a Site public; members-only
+is the safe default. Use `opengeni__site_hostname_check` for the address,
+then `opengeni__site_publication_update` (read with
+`opengeni__site_publication_get`), or point the user to **Publish** on the
+Site page. Publishing is off when the deployment has no Sites domain
+(`sites_publishing_disabled`), and an Only me Site must be shared with the
+workspace first.
+
+- Access: `members`, `invited` (members plus listed emails, who sign in to
+  Opengeni) or `public` (anyone; visitors who don't sign in are guests).
+- Viewer: `const viewer = await site.viewer` gives `{ kind, id, name, email,
+  signedIn }` (`kind`: `member`, `invited`, `user` or `guest`), or `null` on
+  hosts that don't report viewers. Guests have no name or email. Offer a
+  sign-in button that calls `site.auth.signIn()`; never build your own login.
+- Embedded agent and limits: the publication turns the Site's agent on or
+  off, picks its model, and sets a limit profile (`free` by default, then
+  `credits`, `unlimited` or `custom`). The organization pays; handle
+  `rate_limited` and budget errors as normal UI states.
+- The same Site HTML, tools and Site Data work there; no rebuild is needed.
+
+A published Site is a public web page. Never put secrets, tokens or private
+data in its HTML, and render viewer names, emails, records and agent replies
+with `textContent` or React text, never `innerHTML`.
 
 ## Completion gate
 

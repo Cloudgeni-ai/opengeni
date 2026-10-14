@@ -110,6 +110,10 @@ const integrationMethods = [
   "importSiteData",
   "listSiteDataFiles",
   "resetSiteDataCollection",
+  // The workspace default limit profile for published Sites, for hosts and
+  // admin scripts; the web console sets limits per Site.
+  "getSiteLimitProfile",
+  "updateSiteLimitProfile",
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push

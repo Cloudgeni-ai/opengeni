@@ -50,6 +50,10 @@
       "types": "./src/site.ts",
       "default": "./src/site.ts"
     },
+    "./site-bridge-host": {
+      "types": "./src/site-bridge-host.ts",
+      "default": "./src/site-bridge-host.ts"
+    },
     "./github-repositories": {
       "types": "./src/github-repositories.ts",
       "default": "./src/github-repositories.ts"

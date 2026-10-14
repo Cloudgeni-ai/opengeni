@@ -24,6 +24,12 @@ import {
   type SessionRlsActorContext,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
+import {
+  currentSiteSessionOrigin,
+  siteOriginsMatch,
+  siteSessionOriginFromMetadata,
+} from "./site-session-origin";
+import { siteAgentMayReachSession } from "./site-agent-clamp";
 
 export type SessionAuthorizationDependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
 
@@ -306,6 +312,17 @@ export async function requireSessionAuthorization(
     throw new SessionAuthorizationDeniedError("not_found");
   }
 
+  // A request from a Site page (an HTTP frame request, or a tool the page
+  // called) may act on a session only when that same Site, or for a frame
+  // without a published Site the same mounted frame, started it. Anything
+  // else is indistinguishable from a missing session.
+  const siteOrigin = currentSiteSessionOrigin();
+  if (siteOrigin && authority && !input.operation.endsWith(".read")) {
+    const session = await getSession(deps.db, grant.workspaceId, input.sessionId);
+    if (!siteOriginsMatch(siteOrigin, siteSessionOriginFromMetadata(session?.metadata)))
+      throw new SessionAuthorizationDeniedError("not_found");
+  }
+
   // Preserve the standalone workspace-shared path. Private sessions continue
   // through the durable actor and ownership checks even without a host port.
   if (
@@ -339,6 +356,23 @@ export async function requireSessionAuthorization(
   // embedding-host port cannot widen this.
   if (actor.kind === "agent_attempt" && input.operation === "session.approval.write") {
     throw new SessionAuthorizationDeniedError("forbidden");
+  }
+  // An agent started from a Site page acts with that page's reach: it may
+  // read, message, steer or control only sessions that act for the same Site
+  // (its own lineage, or another session that Site started), never a session
+  // a person started elsewhere. Reads count too: a transcript is data the
+  // Site page must not reach. Indistinguishable from a missing session.
+  if (
+    actor.kind === "agent_attempt" &&
+    target.sessionId !== actor.callerSessionId &&
+    !(await siteAgentMayReachSession(
+      deps.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      { sessionId: actor.callerSessionId, turnId: actor.turnId },
+      target.sessionId,
+    ))
+  ) {
+    throw new SessionAuthorizationDeniedError("not_found");
   }
 
   if (authority.visibility === "user_private") {

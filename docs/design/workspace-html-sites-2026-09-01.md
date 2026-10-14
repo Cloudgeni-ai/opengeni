@@ -3,6 +3,11 @@
 > **Point-in-time design record.** Written against `main` at `9e21a09c` on
 > September 1, 2026 and resolved on September 3, 2026. Code wins where the
 > implementation later differs.
+>
+> **Partly superseded** by [published-sites-2026-10-14.md](published-sites-2026-10-14.md):
+> Sites can now be published on their own hostname under a configurable
+> wildcard Sites domain, served by a gateway that keeps the opaque-origin
+> frame and bridge described here.
 
 # Workspace HTML Sites
 
