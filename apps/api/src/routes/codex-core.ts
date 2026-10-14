@@ -125,7 +125,9 @@ export async function coreCodexConnected(
       default:
         throw new HTTPException(403, {
           message:
-            "only an organization administrator can connect a new shared Codex account; workspace administrators can reconnect the accounts their workspace manages",
+            input.workspaceId === null
+              ? "only an organization administrator can connect a Codex account for the whole organization"
+              : "only an administrator of this workspace or of the organization can connect a Codex account here",
         });
     }
   }
@@ -155,7 +157,8 @@ export async function coreCodexConnected(
 function disconnectRefused(outcome: SubscriptionCoreCodexDisconnectOutcome): void {
   if (outcome === "forbidden") {
     throw new HTTPException(403, {
-      message: "only an organization administrator can disconnect a shared Codex account",
+      message:
+        "only an organization administrator can disconnect this Codex account; a workspace administrator can disconnect only an account that serves just their workspace",
     });
   }
   if (outcome === "unresolved_redemption") {
