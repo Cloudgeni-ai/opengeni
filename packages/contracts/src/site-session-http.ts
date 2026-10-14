@@ -1,4 +1,4 @@
-import { matchSiteOperation, type SiteOperation } from "./site-publishing";
+import { matchSiteOperation, type SiteOperation } from "./site-operations";
 
 const SITE_WORKSPACE_PREFIX = "/v1/workspaces/site-host";
 /** Site Data routes under any published Site: `<prefix>/published-artifacts/<id>/data|files`. */
