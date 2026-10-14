@@ -86,6 +86,17 @@ The same suffixes exist beneath
 `/v1/workspaces/external/:workspaceSource/:workspaceExternalId` for exact,
 existing organization-tenant lookups without provisioning or expanded authority.
 
+## Task usage limit endpoints
+
+- `GET /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit`
+- `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit`
+- `usageLimitMicros` on `POST /v1/workspaces/:workspaceId/sessions` (new roots only)
+
+See [task usage limits](session-usage-limits.md) for the API-equivalent basis,
+root scope, compare-and-set writes, person/host-only authority, the
+`session_usage_limit_reached` refusal and rollout. The packaged conversation
+proxy forwards neither the routes nor the create field.
+
 ## GitHub endpoints
 
 - `GET /v1/workspaces/:workspaceId/github/app`

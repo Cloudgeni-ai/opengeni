@@ -29,6 +29,7 @@ import {
   slackReactionInboxEntry,
   slackReactionTaskText,
   slackAdmissionFailureText,
+  slackSessionUsageLimitStopText,
   SLACK_SESSION_INSTRUCTIONS,
   SLACK_DELIVERY_EVENT_TYPES,
   SLACK_INTERACTION_MAX_BODY_BYTES,
@@ -85,6 +86,61 @@ describe("Slack allowance admission remedies", () => {
     expect(slackAdmissionFailureText(new HTTPException(429))).toContain(
       "review the workspace limits",
     );
+  });
+});
+
+describe("Slack task usage limit copy", () => {
+  const rootSessionId = "2f1c6a52-6b1e-4f43-9d55-1c0c2f7e8a10";
+  const refusal = {
+    code: "session_usage_limit_reached" as const,
+    basis: "model_api_equivalent_v1" as const,
+    rootSessionId,
+    limitMicros: 50_000_000,
+    usedMicros: 52_100_000,
+    message: "PRIVATE_SERVER_TEXT",
+  };
+
+  test("the stop names the amounts, the remedy and the task link, never credits", () => {
+    const text = slackSessionUsageLimitStopText({
+      mention: "<@U1> ",
+      refusal,
+      link: "https://app.example.test/workspaces/w/sessions/s",
+    });
+    expect(text).toBe(
+      "<@U1> Opengeni paused at this task's usage limit ($52.10 of $50.00 API-equivalent model usage). A person can raise or remove the limit in Opengeni, then reply in this thread to continue. <https://app.example.test/workspaces/w/sessions/s|Open in Opengeni>",
+    );
+    expect(text).not.toMatch(/credit|billing|monthly|reset|buy|PRIVATE/i);
+  });
+
+  test("a malformed marker still stops neutrally, without guessed amounts or a link", () => {
+    const text = slackSessionUsageLimitStopText({ mention: "", refusal: null, link: null });
+    expect(text).toBe(
+      "Opengeni paused at this task's usage limit. A person can raise or remove the limit in Opengeni, then reply in this thread to continue.",
+    );
+    expect(text).not.toContain("$");
+  });
+
+  test("a refused Send names the task limit before the generic 402 billing text", () => {
+    for (const error of [
+      new HTTPException(402, { message: "PRIVATE_WRAPPER", cause: refusal }),
+      new HTTPException(402, { cause: { error: { ...refusal, details: refusal } } }),
+      new ApiHttpError(402, {
+        code: refusal.code,
+        message: refusal.message,
+        details: {
+          basis: refusal.basis,
+          rootSessionId,
+          limitMicros: 50_000_000,
+          usedMicros: 52_100_000,
+        },
+      }),
+    ]) {
+      const text = slackAdmissionFailureText(error);
+      expect(text).toBe(
+        "Opengeni could not continue this task because its usage limit is reached ($52.10 of $50.00 API-equivalent model usage). A person can raise or remove the limit in Opengeni, then reply in this thread to continue.",
+      );
+      expect(text).not.toMatch(/billing source|credit|subscription|PRIVATE/i);
+    }
   });
 });
 

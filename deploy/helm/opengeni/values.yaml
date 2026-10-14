@@ -118,9 +118,6 @@ config:
   # release/config change, set this to "query" for mail-gateway-compatible
   # invitation links. See docs/deployment.md before rollback.
   OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: fragment
-  # Keep full MCP OAuth state during the first API rollout. Once every API pod
-  # can resolve short references, set true in a separate config rollout.
-  OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED: "false"
   # Query transport additionally requires a separately proven controller/edge
   # error-log policy. Access-log and OpenTelemetry annotations do not sanitize
   # ingress-nginx's error_log request line. Query mode also requires the chart's
@@ -1310,7 +1307,7 @@ observability:
     # Cumulative p95 startup SLOs, measured from the durable turn queue time.
     # Keep these aligned with the canonical Turn Startup dashboard annotations.
     turnStartupQueueP95Seconds: 5
-    # Accepted turn -> first provider dispatch is OpenGeni-owned latency, so it
+    # Accepted turn -> first provider dispatch is Opengeni-owned latency, so it
     # gets tight tiers: a warning (investigate) and a paging critical tier that
     # replaces it. Normal p95 is a few seconds.
     turnStartupProviderDispatchP95Seconds: 20

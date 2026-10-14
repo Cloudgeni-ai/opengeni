@@ -29,6 +29,9 @@ import {
   type DbClient,
   retiredSubscriptionObjectDescriptions,
   retiredSubscriptionObjectViolation,
+  RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+  SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
+  SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
 } from "../src";
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
@@ -389,6 +392,31 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
     // This historical fixture applies only 0733, not the later 0735 owned-usage
     // routines. Current readiness must report exactly those missing routines
     // both before and after provisioning; no other posture failure is allowed.
+    const SITE_DATA_TABLES = [
+      "site_abuse_reports",
+      "site_auth_codes",
+      "site_data_collections",
+      "site_data_files",
+      "site_data_rate_windows",
+      "site_data_record_values",
+      "site_data_records",
+      "site_data_usage",
+      "site_data_validation_windows",
+      "site_data_workspace_validation_windows",
+      "site_hostname_holds",
+      "site_hostnames",
+      "site_limit_profiles",
+      "site_publications",
+      "site_runtime_conversations",
+      "site_runtime_rate_windows",
+      "site_runtime_usage",
+      "site_sql_databases",
+      "site_sql_migrations",
+      "site_sql_queries",
+      "site_sql_rate_windows",
+      "site_sql_usage",
+      "site_viewer_sessions",
+    ];
     const missing0735Routines = [
       "subscription M3 precursor private routine read_subscription_core_owned_connection_credential(text, uuid, uuid, text, uuid) is missing or unsafe",
       "subscription M3 precursor private routine begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid) is missing or unsafe",
@@ -402,6 +430,21 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
       "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
       ...missing0735Routines,
+      // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
+      // tables the runtime and protected contracts list.
+      `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
+      `protected tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
+      // Nor per-task usage limits (0773).
+      ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
+        (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
+      ),
+      ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
+      ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
+        (table) => `session usage limit private table ${table} is missing or unsafe`,
+      ),
+      "session usage limit capability has unsafe owner or direct runtime privileges",
     ];
     expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });

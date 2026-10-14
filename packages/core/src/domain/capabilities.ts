@@ -1732,7 +1732,7 @@ export function nativeConnectionCapabilityRecommendations(
         source: "built_in",
         name: "Connected Machine",
         description:
-          "Run this chat on the person's own computer or server (Mac, Linux or Windows), and optionally let agents use their Chrome through the OpenGeni Browser extension.",
+          "Run this chat on the person's own computer or server (Mac, Linux or Windows), and optionally let agents use their Chrome through the Opengeni Browser extension.",
         category: "compute",
         tags: [
           "machine",
@@ -1760,7 +1760,7 @@ export function nativeConnectionCapabilityRecommendations(
         tools: [{ kind: "mcp", id: "opengeni" }],
         runtime: {
           available: true,
-          notes: `The person runs a one-line connect command on their machine from the chat card. The OpenGeni Browser Chrome extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
+          notes: `The person runs a one-line connect command on their machine from the chat card. The Opengeni Browser Chrome extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
         },
         lifecycle: {
           status: "available",

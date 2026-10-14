@@ -217,7 +217,7 @@ describe("1Password adapter", () => {
     expect(fake.signIns).toBe(2);
   });
 
-  test("create: login built-ins plus TOTP in an OpenGeni section; api_key value → credential", async () => {
+  test("create: login built-ins plus TOTP in an Opengeni section; api_key value → credential", async () => {
     const { provider, ctx, fake } = world();
     const login = await provider.writeItem(ctx(), RW, {
       name: "GitHub",

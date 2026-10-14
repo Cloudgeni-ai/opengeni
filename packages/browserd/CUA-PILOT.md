@@ -3,19 +3,19 @@
 The macOS and Linux adapters use CUA Driver source revision
 `35e376ed509cb8eee49624279256a81da83df8cc`, including its non-invalidating preview
 capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
-transport; the source-built executable performs desktop operations. The narrow
-Windows experiment still uses the published SDK in process. CUA is the default
-on macOS and for explicitly selected isolated Linux desktops. Linux host desktops
-and Windows retain the native default.
+transport; the source-built executable performs desktop operations. Windows uses
+the published SDK's native runtime in process. CUA is the default on macOS, on
+Windows and for explicitly selected isolated Linux desktops. Linux host desktops
+retain the native default.
 
 `ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
-continues to handle OpenGeni sessions, operation receipts and frame streaming.
+continues to handle Opengeni sessions, operation receipts and frame streaming.
 There is no second authorization system or operation journal. Structured browser
 control, attached Chrome and browser profiles are unchanged.
 
 ## Runtime and packaging
 
-macOS configuration selects CUA with the existing desktop. Linux configuration
+macOS and Windows configuration select CUA with the existing desktop. Linux configuration
 retains the existing native desktop unless
 `OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux` is explicitly selected;
 that mode defaults to CUA and requires the Linux desktop dependencies listed below.
@@ -85,11 +85,17 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.
-- Windows has not completed adoption acceptance. Windows requires an
-  unlocked interactive session on `WinSta0/Default`; Session 0 is refused.
-  Only Windows semantic actions and window capture are admitted. Edit values
-  and labels copied from those values are redacted when password metadata is absent.
-- Release staging includes macOS and Linux. Runtime defaults take effect only in
+- Windows requires an unlocked interactive session on `WinSta0/Default`;
+  Session 0 is refused. Window capture, semantic UIA actions, pointer input
+  (click, scroll, drag) and keyboard input (typing and key chords with
+  ctrl/alt/shift/win) are admitted. Semantic actions run in the background;
+  pointer and keyboard input use foreground delivery, which briefly fronts
+  the window and restores the previous foreground, because background
+  PostMessage input is dropped by Chromium, Electron and WinUI surfaces. Raw
+  native CUA tool calls are not offered on Windows yet. Edit values and labels
+  copied from those values are redacted when password metadata is absent.
+  `cua-windows.e2e.test.ts` drives a real window on a hosted Windows runner.
+- Release staging includes macOS, Linux and Windows x64. Runtime defaults take effect only in
   an installed release containing this change; server deployment alone does not
   update a connected machine's installed helpers. macOS still requires OS consent.
 

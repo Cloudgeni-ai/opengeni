@@ -1,6 +1,7 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -843,6 +844,9 @@ export function postClaimDatabaseRecoveryFailure(input: {
         }
       : {}),
   };
+  // Known usage whose receipt write failed travels with the exact attempt.
+  const sessionUsageReceipts = heldSessionUsageReceiptsForTurn(input.turnId);
+  if (sessionUsageReceipts.length > 0) detail.sessionUsageReceipts = sessionUsageReceipts;
   return ApplicationFailure.create({
     message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
     type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
@@ -1202,6 +1206,11 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
+  // The worker's own included-usage refusal (usage exhausted or unverifiable)
+  // happens before dispatch, so the checkpoint request was never sent. It
+  // settles exactly like the same refusal on an ordinary request: recorded
+  // against the account, then the same turn re-places or waits for capacity.
+  if (findCodexCreditPolicyError(error)) return true;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
   // A Claude subscription refusal (rate limit or reconnect) on the checkpoint
   // request recovers exactly like one on an ordinary request: failure

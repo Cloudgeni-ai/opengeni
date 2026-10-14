@@ -192,6 +192,23 @@ export function formatDate(input: DateInput, options: TimeFormatOptions = {}): s
   return `${wall.day} ${MONTHS[wall.month - 1]}${year}`;
 }
 
+/**
+ * The shortest unambiguous label for an upcoming time, for a dense row: the
+ * clock alone later today ("14:20"), the weekday within the coming week
+ * ("Thu 09:00"), otherwise the date ("16 Oct", "3 Jan 2027"). Use
+ * `formatAbsoluteTime` wherever there is room for the full label.
+ */
+export function formatShortTime(input: DateInput, options: TimeFormatOptions = {}): string {
+  const zone = zoneOf(options);
+  const wall = wallClock(toDate(input), zone);
+  const today = wallClock(toDate(options.now ?? Date.now()), zone);
+  const offset = calendarDays(today, wall);
+  const suffix = options.utc ? " UTC" : "";
+  if (offset === 0) return `${clockTime(wall)}${suffix}`;
+  if (offset > 0 && offset < 7) return `${wall.weekday} ${clockTime(wall)}${suffix}`;
+  return formatDate(input, options);
+}
+
 /** The exact time for tooltips, always with the year and zone: "Wed 23 Sep 2026, 11:12 Oslo time". */
 export function formatExactTime(input: DateInput, options: TimeFormatOptions = {}): string {
   const zone = zoneOf(options);

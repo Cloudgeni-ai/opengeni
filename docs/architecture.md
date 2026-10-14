@@ -43,6 +43,12 @@ Continuations freeze causal-turn provenance at claim; renewals preserve snapshot
 and service principals. See
 [`workspace-integrations.md`](workspace-integrations.md).
 
+For managed repository clones, the worker stamps only the authenticated credential
+provider's declared Git configuration. The runtime clears ambient helpers before
+reapplying that helper chain; explicit native connection bindings remain separate.
+Renewable host helpers can therefore keep per-repository token selection through
+initial clone, not just subsequent sandbox commands.
+
 ---
 
 ## 3. Core invariants
@@ -425,7 +431,7 @@ and provenance never imply human authority. Turns freeze initiating principals
 and execution/recovery authority snapshots.
 
 An effective first-party permission ceiling of `[]` remains zero delegated
-Opengeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
+Opengeni authority. Runtime skips only remote Opengeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
 See [automation defaults](automations.md#empty-first-party-authority).
@@ -809,6 +815,14 @@ Org admins set budgets; workspace admins split members. Counters permit
 overshoot, not reservations; shares may oversubscribe. Default-off
 `OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
+
+### 3.13 Task usage limits stop admission, not running work
+
+One optional USD-micro limit per root session counts the pre-margin
+API-equivalent model cost of the whole tree, settled synchronously into a
+per-root counter. Admission refuses new model requests; no reservations, so
+admitted calls may overshoot. Default-off `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`
+gates producers only. Canonical: [`session-usage-limits.md`](session-usage-limits.md).
 
 ---
 
@@ -1381,7 +1395,9 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | `apps/api` | `@opengeni/api-router` | Hono HTTP composition, middleware, routes, MCP transport, SSE, and API-side control adapters over core |
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
+| `apps/desktop` | `@opengeni/desktop-app` | Opengeni desktop app for macOS, Windows and Linux, built on `@opengeni/desktop` |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
+| `apps/site-gateway` | `@opengeni/site-gateway` | Cloudflare Worker serving published Sites on `<label>.<sites domain>`: host lookup, viewer sign-in cookies, signed forwarding to `/v1/site-runtime`, short generation-keyed HTML caching and edge headers; no authorization of its own ([README](../apps/site-gateway/README.md)) |
 | `apps/mobile` | Standalone Expo app `opengeni-mobile` (own `bun.lock`) | iOS and Android client: web sign-in for its own app credential, accounts, workspace switching, settings, and push; a leaf client ([README](../apps/mobile/README.md)) |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
@@ -1442,6 +1458,7 @@ behind a generic 500, so its session lookups run through
 | `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, event streaming, and transport helpers |
 | `packages/react` | `@opengeni/react` | React hooks and styled session, composer, artifact, and machine surfaces |
 | `packages/react-native` | `@opengeni/react-native` | Native session timeline, composer, and attention renderers over the renderer-neutral `@opengeni/react` models, plus Expo adapters |
+| `packages/desktop` | `@opengeni/desktop` | Electron kit for desktop apps: accounts, server windows, notifications, deep links, updates, and Connected Machine setup |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
 | `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
@@ -1655,6 +1672,9 @@ Local preview remains frozen-attempt Codemode, not current-human authority.
 Explicit catalog/declarations discovery and OAuth remain separate paths.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
+The framework-free bridge host (`packages/sdk/src/site-bridge-host.ts`) is
+shared by the console frame and the published-Sites gateway shell
+(`apps/site-gateway`); hosts inject tool transport, viewer and sign-in.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
 for loading, versioning, visualization assets, and retained images.
 
@@ -1903,6 +1923,20 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
+Site Data gives each published Site persistent JSON collections and files
+(Postgres `site_data_*` tables behind the backend-neutral `SiteDataStore`,
+bytes in object storage). Data belongs to the Site, not a version; collection
+access modes are enforced only in the API, Site frames reach it through the
+existing Site HTTP channel with host-pinned `current` routes only and always
+with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
+
+Site SQL is the optional per-Site database next to it: one SQLite-backed
+Durable Object per Site in the Sites gateway Worker, reached only by the API
+through a signed internal gateway route. Postgres keeps the definitions
+(settings, migrations and named queries) so the database can be rebuilt; Site
+pages run only named queries with `:viewer` bound by the API. See
+[`site-data.md`](site-data.md#site-sql-optional-cloudflare-storage).
+
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
@@ -2027,8 +2061,10 @@ creation. Leases track provider identity, epoch, holders, workspace mutation
 generation, archive/recovery state and teardown authority. Active-target selection
 never rewrites durable home policy.
 
-Repository skill discovery skips definite path misses. Other failures reach
-turn settlement; rotation resumes through the durable lifecycle wake.
+Repository skill discovery skips definite path misses. A typed unreachable
+Connected Machine (offline or control timeout) degrades that run's repository
+index to an "unavailable" notice instead of blocking the model. Other failures
+reach turn settlement; rotation resumes through the durable lifecycle wake.
 
 Immutable environment setup is lease-boundary single-flight: exact lease epoch,
 provider instance and non-secret setup hash bind durable claim/revision/settlement
@@ -2336,6 +2372,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Knowledge retrieval, source preparation, or review | `packages/db/src/knowledge-entries.ts`, `packages/core/src/domain/knowledge*.ts`, `apps/api/src/routes/knowledge.ts` | [`knowledge.md`](knowledge.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
 | Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
+| Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
@@ -2352,6 +2389,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
 | Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts`, `packages/react/src/usage.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |
+| Per-task (root session) usage limits | `packages/contracts/src/session-usage-limits.ts`, `packages/db/src/session-usage-limits.ts`, `packages/core/src/session-usage-limits.ts`, `apps/worker/src/activities/agent-turn/admission.ts` | §3.13 and [`session-usage-limits.md`](session-usage-limits.md) |
 | Organization/workspace callbacks | `packages/db/src/workspace-integrations.ts`, `apps/api/src/routes/workspace-integrations.ts`, `apps/api/src/routes/organization-integrations.ts`, `apps/api/src/workspace-webhook-dispatch.ts`, `apps/worker/src/activities/workspace-credential-provider.ts` | [`workspace-integrations.md`](workspace-integrations.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 

@@ -24,12 +24,13 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
     type: "opengeni.site.http" as const,
     requestId: "request",
     method: "GET",
-    path: "/v1/workspaces/site-host/sessions",
+    path: "/v1/workspaces/site-host/sessions/session-1/events/stream",
     headers: [
       ["authorization", "forged"],
       ["x-opengeni-external-actor", "other"],
       ["x-opengeni-site-id", "forged-site"],
       ["x-opengeni-site-version", "forged-version"],
+      ["x-opengeni-site-frame-id", "forged-frame"],
       ["accept", "text/event-stream"],
       ["range", "bytes=0-1023"],
       ["if-none-match", "image-version"],
@@ -43,17 +44,22 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
     ["idempotency-key", "operation-1"],
   ])
     expect(new Headers(requests[0]!.init.headers).get(name!)).toBe(value!);
-  expect(requests[0]!.path).toBe("/v1/workspaces/workspace/sessions");
+  expect(requests[0]!.path).toBe("/v1/workspaces/workspace/sessions/session-1/events/stream");
   expect(new Headers(requests[0]!.init.headers).get("authorization")).toBeNull();
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-external-actor")).toBeNull();
   expect(new Headers(requests[0]!.init.headers).get("accept")).toBe("text/event-stream");
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-id")).toBe("site");
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-version")).toBe("version");
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-frame")).toBe("1");
+  const frameId = new Headers(requests[0]!.init.headers).get("x-opengeni-site-frame-id");
+  expect(frameId).toMatch(/^[0-9a-f-]{36}$/u);
   await bridge.fetch!(
     { ...message, path: "/v1/workspaces/site-host/sessions?originSiteId=current" },
     new AbortController().signal,
   );
   expect(requests[1]!.path).toBe("/v1/workspaces/workspace/sessions?originSiteId=site");
+  // One bridge is one frame: its id is stable across its requests.
+  expect(new Headers(requests[1]!.init.headers).get("x-opengeni-site-frame-id")).toBe(frameId);
   await expect(
     bridge.fetch!(
       { ...message, path: "/v1/workspaces/other/sessions" },
@@ -61,6 +67,53 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
     ),
   ).rejects.toThrow("Unsupported");
   expect(requests).toHaveLength(2);
+});
+
+test("Site HTTP forwarding refuses every route outside SITE_OPERATIONS before any request", async () => {
+  const requests: string[] = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    artifactId: "site",
+    siteVersionId: "version",
+    requestedTools: [],
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async () => {
+      throw new Error("unexpected tool call");
+    },
+    fetchResponse: async (path) => {
+      requests.push(path);
+      return new Response("ok");
+    },
+  });
+  const request = (method: string, path: string) =>
+    bridge.fetch!(
+      { type: "opengeni.site.http", requestId: "r", method, path, headers: [] },
+      new AbortController().signal,
+    );
+  for (const [method, path] of [
+    ["POST", "/v1/workspaces/site-host/scheduled-tasks"],
+    ["POST", "/v1/workspaces/site-host/scheduled-tasks/task-1/trigger"],
+    ["PATCH", "/v1/workspaces/site-host/scheduled-tasks/task-1"],
+    ["POST", "/v1/workspaces/site-host/automations/triggers"],
+    ["POST", "/v1/workspaces/site-host/api-keys"],
+    ["PUT", "/v1/workspaces/site-host/sessions/session-1/tool-policy"],
+    ["POST", "/v1/workspaces/site-host/sessions/session-1/fork"],
+    ["GET", "/v1/workspaces/site-host/sessions"],
+    ["GET", "/v1/workspaces/site-host/sessions?channelId=project"],
+    ["DELETE", "/v1/workspaces/site-host/sessions/session-1"],
+    ["POST", "/v1/workspaces/site-host/tools/calls"],
+  ] as const)
+    await expect(request(method, path)).rejects.toThrow("Unsupported");
+  expect(requests).toEqual([]);
+  for (const [method, path] of [
+    ["POST", "/v1/workspaces/site-host/sessions"],
+    ["POST", "/v1/workspaces/site-host/sessions/session-1/events"],
+    ["POST", "/v1/workspaces/site-host/sessions/session-1/steer"],
+    ["POST", "/v1/workspaces/site-host/sessions/session-1/control"],
+    ["POST", "/v1/workspaces/site-host/sessions/session-1/composer-draft/submit"],
+  ] as const)
+    await request(method, path);
+  expect(requests).toHaveLength(5);
 });
 const catalog: ToolGatewayCatalog = {
   version: 1,
@@ -192,4 +245,110 @@ test("inline HTML reuses the bridge without inventing a saved Site identity", as
     ),
   ).rejects.toThrow("not enabled");
   expect(calls).toHaveLength(1);
+});
+
+test("an unpinned host (inline HTML) forwards no Site Data and marks its requests as framed", async () => {
+  const requests: Array<{ path: string; init: RequestInit }> = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async () => {
+      throw new Error("unexpected tool call");
+    },
+    fetchResponse: async (path: string, init: RequestInit) => {
+      requests.push({ path, init });
+      return new Response("ok");
+    },
+  } as unknown as Parameters<typeof createSiteToolBridge>[0]);
+  const base = {
+    type: "opengeni.site.http" as const,
+    requestId: "request",
+    method: "POST",
+    headers: [["x-opengeni-site-frame", "0"]] as [string, string][],
+  };
+  for (const path of [
+    "/v1/workspaces/site-host/published-artifacts/current/data/query",
+    "/v1/workspaces/site-host/published-artifacts/11111111-2222-4333-8444-555555555555/data/query",
+    "/v1/workspaces/site-host/published-artifacts/11111111-2222-4333-8444-555555555555/files",
+  ])
+    await expect(bridge.fetch!({ ...base, path }, new AbortController().signal)).rejects.toThrow();
+  expect(requests).toHaveLength(0);
+  await bridge.fetch!(
+    { ...base, path: "/v1/workspaces/site-host/sessions" },
+    new AbortController().signal,
+  );
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-frame")).toBe("1");
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-id")).toBeNull();
+  // Each mounted frame gets its own id; another bridge never shares it.
+  const other = createSiteToolBridge({
+    workspaceId: "workspace",
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async () => {
+      throw new Error("unexpected tool call");
+    },
+    fetchResponse: async (path: string, init: RequestInit) => {
+      requests.push({ path, init });
+      return new Response("ok");
+    },
+  } as unknown as Parameters<typeof createSiteToolBridge>[0]);
+  await other.fetch!(
+    { ...base, path: "/v1/workspaces/site-host/sessions" },
+    new AbortController().signal,
+  );
+  const first = new Headers(requests[0]!.init.headers).get("x-opengeni-site-frame-id");
+  const second = new Headers(requests[1]!.init.headers).get("x-opengeni-site-frame-id");
+  expect(first).toBeTruthy();
+  expect(second).toBeTruthy();
+  expect(second).not.toBe(first);
+});
+
+test("the bridge refuses Site bodies with approvals, answers, resources or credentials", async () => {
+  const requests: string[] = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async () => {
+      throw new Error("unexpected tool call");
+    },
+    fetchResponse: async (path: string) => {
+      requests.push(path);
+      return new Response("ok");
+    },
+  } as unknown as Parameters<typeof createSiteToolBridge>[0]);
+  const send = (path: string, body: unknown, method = "POST") =>
+    bridge.fetch!(
+      {
+        type: "opengeni.site.http" as const,
+        requestId: "request",
+        method,
+        path: `/v1/workspaces/site-host${path}`,
+        headers: [["content-type", "application/json"]] as [string, string][],
+        body: JSON.stringify(body),
+      },
+      new AbortController().signal,
+    );
+  for (const [path, body, field] of [
+    [
+      "/sessions/one/events",
+      { type: "user.approvalDecision", payload: { approvalId: "a", decision: "approve" } },
+      "type",
+    ],
+    [
+      "/sessions/one/events",
+      { type: "user.message", payload: { text: "Hi", resources: [{ kind: "file" }] } },
+      "payload.resources",
+    ],
+    ["/sessions/one/steer", { text: "Hi", mcpCredentialUpdates: [{}] }, "mcpCredentialUpdates"],
+    ["/sessions", { initialMessage: "Hi", tools: [{ kind: "mcp", id: "crm" }] }, "tools"],
+  ] as const) {
+    const response = await send(path, body);
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { details: unknown } }).error.details).toEqual({
+      code: "site_frame_field_forbidden",
+      field,
+    });
+  }
+  expect(requests).toHaveLength(0);
+  await send("/sessions/one/events", { type: "user.message", payload: { text: "Hi" } });
+  expect(requests).toEqual(["/v1/workspaces/workspace/sessions/one/events"]);
 });

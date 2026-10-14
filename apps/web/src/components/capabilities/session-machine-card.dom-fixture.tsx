@@ -331,7 +331,7 @@ describe("Connected Machine conversation card", () => {
       const store = h.container.querySelector<HTMLAnchorElement>(`a[href="${STORE_URL}"]`);
       expect(store?.textContent).toContain("Add to Chrome");
       expect(store?.target).toBe("_blank");
-      expect(h.text()).toContain("Add OpenGeni Browser on Studio Mac");
+      expect(h.text()).toContain("Add Opengeni Browser on Studio Mac");
       // The outcome is announced through a live region that stays mounted.
       expect(h.container.querySelector('[role="status"][aria-live="polite"]')?.textContent).toBe(
         "This chat now runs on Studio Mac.",
@@ -445,13 +445,13 @@ describe("Connected Machine conversation card", () => {
         mac({ allowScreenControl: true, runtime: runtime(true, granted(false, false, false)) }),
       ];
       await h.rerender();
-      expect(h.text()).toContain("Allow Screen Recording for OpenGeni on this Mac.");
+      expect(h.text()).toContain("Allow Screen Recording for Opengeni on this Mac.");
       await click(h.button("Open settings"));
       expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({
         pane: "screen_recording",
       });
       expect(h.text()).toContain(
-        "On the Mac, switch on OpenGeni under Screen Recording. Choose Quit & Reopen if macOS asks.",
+        "On the Mac, switch on Opengeni under Screen Recording. Choose Quit & Reopen if macOS asks.",
       );
       await click(h.button("Open again"));
       expect(openMachinePrivacySettings).toHaveBeenCalledTimes(2);
@@ -461,7 +461,7 @@ describe("Connected Machine conversation card", () => {
         mac({ allowScreenControl: true, runtime: runtime(true, granted(true, false, false)) }),
       ];
       await h.rerender();
-      expect(h.text()).toContain("Allow Accessibility for OpenGeni on this Mac.");
+      expect(h.text()).toContain("Allow Accessibility for Opengeni on this Mac.");
       await click(h.button("Open settings"));
       expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({ pane: "accessibility" });
 
@@ -613,7 +613,7 @@ describe("Connected Machine conversation card", () => {
     ];
     const h = await render();
     try {
-      expect(h.text()).toContain("Allow Screen Recording for OpenGeni on this Mac.");
+      expect(h.text()).toContain("Allow Screen Recording for Opengeni on this Mac.");
       await click(h.button("Open settings"));
       expect(openMachinePrivacySettings.mock.calls.at(-1)?.[2]).toEqual({
         pane: "screen_recording",

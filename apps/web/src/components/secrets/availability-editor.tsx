@@ -6,9 +6,11 @@ import { Checkbox, CheckboxField } from "@/components/ui/field";
 import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
 
 /* ----------------------------------------------------------------------------
-   "Available in" (S6): which workspaces of the organization can use an
-   organization vault. All (new ones too) or a selection, plus whether
-   Personal workspaces may use it.
+   "Available in" (S6): which workspaces can use a vault. For an organization
+   vault: all of the organization's workspaces (new ones too) or a selection,
+   plus whether Personal workspaces may use it. For an Only-me vault: every
+   workspace its owner uses or a selection; their Personal workspace always
+   has it.
    -------------------------------------------------------------------------- */
 
 export type AvailabilityWorkspace = { id: string; name: string };
@@ -27,6 +29,14 @@ export function availabilitySummary(
   return `${count} of ${workspaces.length} workspaces`;
 }
 
+/** The Only-me default: the workspace it is added from, or only Personal from there. */
+export function personalAvailabilityFrom(currentWorkspaceId: string | null): VaultAvailability {
+  return {
+    allowedWorkspaceIds: currentWorkspaceId ? [currentWorkspaceId] : [],
+    allowPersonalWorkspaces: true,
+  };
+}
+
 export function AvailabilityEditor({
   value,
   onChange,
@@ -34,15 +44,18 @@ export function AvailabilityEditor({
   organizationName,
   error,
   labelHidden = false,
+  personal = false,
 }: {
   value: VaultAvailability;
   onChange: (value: VaultAvailability) => void;
-  /** The organization's shared workspaces. */
+  /** The organization's shared workspaces (for an Only-me vault, the owner's). */
   workspaces: AvailabilityWorkspace[];
   organizationName: string;
   error?: string | undefined;
   /** On the Available in page the title already says it; name the group for screen readers only. */
   labelHidden?: boolean;
+  /** An Only-me vault: always in its owner's Personal workspace, never in anyone else's. */
+  personal?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const selected = new Set(value.allowedWorkspaceIds ?? []);
@@ -72,13 +85,21 @@ export function AvailabilityEditor({
       >
         <ChoiceCard
           value="all"
-          title="All workspaces"
-          description={`Every workspace in ${organizationName}, including new ones.`}
+          title={personal ? "All my workspaces" : "All workspaces"}
+          description={
+            personal
+              ? `Every workspace you use in ${organizationName}, including new ones.`
+              : `Every workspace in ${organizationName}, including new ones.`
+          }
         />
         <ChoiceCard
           value="selected"
           title="Selected workspaces"
-          description="Only the workspaces you pick."
+          description={
+            personal
+              ? "Your Personal workspace and the workspaces you pick."
+              : "Only the workspaces you pick."
+          }
         />
       </ChoiceCards>
       {mode === "selected" ? (
@@ -118,20 +139,28 @@ export function AvailabilityEditor({
               );
             })}
             {shown.length === 0 ? (
-              <li className="px-2.5 py-2 text-sm text-fg-muted">No workspaces match.</li>
+              <li className="px-2.5 py-2 text-sm text-fg-muted">
+                {workspaces.length === 0 ? "You have no other workspaces." : "No workspaces match."}
+              </li>
             ) : null}
           </ul>
           <p className="m-0 text-xs leading-4.5 text-fg-muted">
-            {selected.size} of {workspaces.length} selected
+            {personal
+              ? selected.size === 0
+                ? "Only your Personal workspace"
+                : `Personal and ${selected.size} of ${workspaces.length} selected`
+              : `${selected.size} of ${workspaces.length} selected`}
           </p>
         </div>
       ) : null}
-      <CheckboxField
-        label="Include personal workspaces"
-        description="People can use it in their own Personal workspace."
-        checked={value.allowPersonalWorkspaces}
-        onCheckedChange={(next) => onChange({ ...value, allowPersonalWorkspaces: next })}
-      />
+      {personal ? null : (
+        <CheckboxField
+          label="Include personal workspaces"
+          description="People can use it in their own Personal workspace."
+          checked={value.allowPersonalWorkspaces}
+          onCheckedChange={(next) => onChange({ ...value, allowPersonalWorkspaces: next })}
+        />
+      )}
     </div>
   );
 }

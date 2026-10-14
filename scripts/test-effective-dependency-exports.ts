@@ -305,7 +305,14 @@ export async function main(): Promise<void> {
     await mkdir(staging);
     const candidate = await stageRegistryCandidate(pkg, staging, versions);
     candidates.set(pkg.name, candidate);
-    for (const name of Object.keys(candidate.manifest.dependencies ?? {})) {
+    // Consumers install peers too, so a lockstep peer such as
+    // @opengeni/artifact-tool must resolve to this cut's version.
+    const closure = new Set([
+      ...Object.keys(candidate.manifest.dependencies ?? {}),
+      ...Object.keys(candidate.manifest.peerDependencies ?? {}),
+      ...Object.keys(candidate.manifest.optionalDependencies ?? {}),
+    ]);
+    for (const name of closure) {
       if (!name.startsWith("@opengeni/")) continue;
       const dependency = packages.get(name);
       if (!dependency) throw new Error(`No intended publishable dependency ${name}`);

@@ -62,6 +62,10 @@ update the member instead.
 Per-seat allowances, team budgets, and usage meters:
 https://docs.opengeni.ai/guides/usage-allowances.
 
+To stop one task and its child agents at an API-equivalent model-usage amount,
+set `usageLimitMicros` from your server (the `createSession` hook or the server
+SDK), never from the browser: https://docs.opengeni.ai/guides/task-usage-limits.
+
 ## Handoff
 
 Tell the user what works, what you verified (including the isolation tests),

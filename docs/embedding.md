@@ -1,7 +1,7 @@
 # Advanced In-Process Embedding
 
 > Most customer products do **not** need this integration shape. When Opengeni
-> remains a standalone service and the product presents an OpenGeni-backed agent
+> remains a standalone service and the product presents an Opengeni-backed agent
 > in its own UI, mount `OpenGeniChat` or `SessionConversation` from
 > `@opengeni/react` behind the packaged `createSessionProxyHandler` from
 > `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
@@ -65,7 +65,7 @@ behavior is not appropriate. The proxy does not need billing, sandbox environmen
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
-**OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+**Opengeni-rendered product UI.** A host that mounts the styled React surfaces
 should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
 under `OpenGeniProvider`. A standalone product backs both with
@@ -395,7 +395,7 @@ with exact agent turn/attempt claims, and is consumed only by commands that
 create work; it cannot impersonate a human or change access. V2 core callers
 can provide the same typed fields on their trusted `AccessGrant`. The optional
 display label belongs on `serviceInitiator`, not in its context. Identity fields
-and context are bounded; OpenGeni-owned lineage/backfill keys and the
+and context are bounded; Opengeni-owned lineage/backfill keys and the
 `unattributed-legacy` migration sentinel are reserved.
 
 Ordinary delegated and first-party/Codemode credentials remain `ogd_`. The
@@ -484,6 +484,37 @@ approval authority. Normal resource authorization and command receipts apply.
 
 See `examples/site-session-embed` for a standard React provider, timeline and
 durable composer using this transport without knowing its execution location.
+
+### Site Data inside a Site
+
+`site.data` and `site.files` ([Site Data](site-data.md)) use the same HTTP
+transport with `published-artifacts/current/...` paths. A host opts in by
+building its bridge with `createSiteToolBridge({ artifactId, siteVersionId,
+requestedTools, fetchResponse, ... })`: the bridge rewrites `current` to the
+pinned Site, adds `x-opengeni-site-frame`, `x-opengeni-site-id` and
+`x-opengeni-site-version`, and the frame advertises `siteData: 1`. The API
+gives every framed request viewer reach, whoever is viewing. Hosts without
+`fetchResponse` or a pinned Site (inline HTML, tools-only hosts, local
+previews) do not advertise it, and Site code gets `site_data_unsupported`
+without a request being sent; their bridges also refuse `current` Site Data
+paths. No host forwards an explicit `published-artifacts/<id>/data|files`
+path from a Site. `site.sql.run` (Site SQL) travels the same way on
+`published-artifacts/current/sql/queries/<name>` and gets
+`site_sql_unsupported` where Site Data is unsupported. `createOpenGeniSessionProxy`
+does not forward Site Data or Site SQL routes yet.
+
+### Viewers and published Sites
+
+Hosts can answer `site.viewer` and `site.auth.signIn()` by passing `viewer`
+(a `SiteViewer`) and optionally `onSignIn` to `PublishedHtmlArtifactFrame`
+or `ArtifactSandbox`; the frame then advertises `viewer: 1`. The console
+passes the signed-in member (`kind: "member"`, `id: "user:<subject>"`) and
+resolves sign-in at once. Without `viewer`, Site code gets `null`. Sites
+published to their own hostname run in the Sites gateway's shell, which
+answers the same methods for members, invited people and guests and sends
+sign-in through the app's `/site-auth/authorize` page. Products manage
+publications with the `OpenGeniClient` methods in
+[Published Sites](published-sites.md); they never need to proxy Site hosts.
 
 ### Session Authorization
 

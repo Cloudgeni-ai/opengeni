@@ -24,6 +24,7 @@ import {
   BellIcon,
   BellOffIcon,
   CalendarClockIcon,
+  GaugeIcon,
   LockIcon,
   MoreHorizontalIcon,
   PanelRightCloseIcon,
@@ -89,6 +90,7 @@ export function SessionHeader({
   onArchive,
   repliesMute,
   adminAccess,
+  onOpenUsageLimit,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -131,6 +133,11 @@ export function SessionHeader({
    * Absent hides the shield and the menu action.
    */
   adminAccess?: SessionAdminAccessControl | null;
+  /**
+   * Opens this chat's usage limit (Agent tab > Usage). Absent hides the menu
+   * item, for servers without usage limits.
+   */
+  onOpenUsageLimit?: (() => void) | null;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -216,7 +223,11 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap">
+    <header
+      data-window-drag
+      data-titlebar
+      className="flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
+    >
       {leading}
       {/* The title takes every pixel the actions leave; it truncates last. */}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
@@ -436,6 +447,16 @@ export function SessionHeader({
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
                 {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
                 {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+              </DropdownMenuItem>
+            ) : null}
+            {onOpenUsageLimit ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = onOpenUsageLimit;
+                }}
+              >
+                <GaugeIcon />
+                Usage limit
               </DropdownMenuItem>
             ) : null}
             {adminAccess?.state.active && adminAccess.state.canRevoke ? (

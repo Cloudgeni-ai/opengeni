@@ -31,9 +31,9 @@ Each organization subscription account has its own page.
 - Models it can serve: "All models, including new ones" also covers models the
   provider adds later. "Only the models I choose" keeps new models off until
   someone adds them.
-- Use for new work: when off, the account is not picked for new chats or
-  schedules. Work already running continues. Use this to retire an account
-  gently.
+- Enable account: when off, the account shows as Disabled and is not picked for
+  new chats or schedules. Turning it off won't interrupt running work. Use this
+  to retire an account gently. It doesn't pause or cancel the provider plan.
 - Use extra credits: allows paid extra credits after the plan's included usage
   runs out. Spread work uses other accounts' included usage first. Usage updates
   can lag, so a request may still use credits shortly after this is turned off.
@@ -58,9 +58,9 @@ Each organization subscription account has its own page.
 - Which accounts: a workspace uses either its own Codex accounts or the
   organization's, never both for new work. Codex can also be turned off for the
   workspace; accounts stay connected.
-- Sharing work between this workspace's accounts: Spread work sends each new
-  chat to the account with the most usage left. Primary only uses the primary
-  account and waits when it runs out.
+- Sharing work between this workspace's accounts: Spread work shares new chats
+  evenly across accounts that can serve them. Primary first starts new chats on
+  the primary account and uses another account when it can't serve them.
 - Keep Codex chats portable: summarizes long chats in a form another provider's
   model can continue. Off keeps new chats on Codex, with better memory of long
   conversations.

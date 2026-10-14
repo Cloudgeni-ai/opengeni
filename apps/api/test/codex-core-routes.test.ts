@@ -528,6 +528,13 @@ describe("Codex routes with an enabled cutover", () => {
       result = { kind: "refused", reason };
       const refused = await poll();
       expect({ reason, status: refused.status }).toEqual({ reason, status });
+      // A workspace's administrators may connect its own accounts (SUB-OWN-09),
+      // so a refusal on a workspace route names both kinds of administrator.
+      if (reason === "forbidden") {
+        expect(await refused.text()).toContain(
+          "only an administrator of this workspace or of the organization can connect a Codex account here",
+        );
+      }
     }
     // The cutover can change while token exchange is in flight. Re-read it
     // before deciding whether its core writer may still run.

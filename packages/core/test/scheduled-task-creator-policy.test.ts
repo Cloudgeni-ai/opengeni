@@ -136,6 +136,15 @@ function origin(restricted: "turn" | "session" | "neither") {
     metadata: metadata(restricted === "session"),
   };
   track(spyOn(db, "getSession").mockResolvedValue(session as never));
+  // The calling agent's session has no Site lineage, so the Site clamp lets it through.
+  track(
+    spyOn(db, "getSiteDataAgentSession").mockResolvedValue({
+      originSiteIds: [],
+      siteTurn: false,
+      scheduledTaskId: null,
+      complete: true,
+    }),
+  );
   // The frozen policy resolves first-party tool defaults from workspace settings.
   track(
     spyOn(db, "requireWorkspace").mockResolvedValue({

@@ -505,6 +505,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "checkSiteHostname",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
+    "request": [],
+    "response": [
+      "SiteHostnameAvailability"
+    ]
+  },
+  {
     "id": "clearCodexAppsAccount",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/codex/apps",
@@ -1241,6 +1250,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "defineSiteDataCollection",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name",
+    "request": [
+      "SiteDataCollectionDefinitionRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "defineSiteSqlQuery",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlQueryDefinitionRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -1269,6 +1296,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
     "request": [],
     "response": []
   },
@@ -1446,6 +1480,27 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteSession",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteDataCollection",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteDataFile",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteSqlQuery",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
     "request": [],
     "response": []
   },
@@ -1780,6 +1835,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
+    "id": "executeSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/execute",
+    "request": [
+      "SiteSqlStatementRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "exportCompanyBrainOkf",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/company-brain/export",
@@ -1788,6 +1852,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CompanyBrainContextReceiptPage",
       "CompanyBrainKnowledgeProposalPage"
     ]
+  },
+  {
+    "id": "exportSiteData",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/export",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "exportSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/export",
+    "request": [
+      "SiteSqlExportFormat"
+    ],
+    "response": []
   },
   {
     "id": "exportWorkspaceState",
@@ -2141,6 +2221,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
     "request": [],
     "response": []
   },
@@ -3131,6 +3218,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSessionUsageLimit",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+    "request": [],
+    "response": [
+      "SessionUsageLimit"
+    ]
+  },
+  {
     "id": "getSiteAuthConnection",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
@@ -3138,6 +3234,36 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SiteAuthConnection"
     ]
+  },
+  {
+    "id": "getSiteData",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "getSiteDataFileUrl",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "getSiteLimitProfile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [],
+    "response": [
+      "SiteLimitProfile"
+    ]
+  },
+  {
+    "id": "getSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql",
+    "request": [],
+    "response": []
   },
   {
     "id": "getSlackUserLinkAccess",
@@ -3566,9 +3692,34 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "importSiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/import",
+    "request": [
+      "SiteDataImportRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "importSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/import",
+    "request": [
+      "SiteSqlImportRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "inspectMcpAuthentication",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-auth",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "inspectSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/inspect",
     "request": [],
     "response": []
   },
@@ -4439,6 +4590,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listSiteDataFiles",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listSlackInstallationBindings",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/slack-bot/bindings",
@@ -4670,6 +4828,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MachineMetricsSeriesResponse",
       "MetricSample"
     ]
+  },
+  {
+    "id": "migrateSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/migrations",
+    "request": [
+      "SiteSqlMigrationRequest"
+    ],
+    "response": []
   },
   {
     "id": "mintEnrollToken",
@@ -4909,6 +5076,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "CodexSourceRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "PATCH /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "request": [],
     "response": []
   },
   {
@@ -5170,6 +5344,36 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/rollback",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "request": [
+      "SiteTakedownRequest"
+    ],
     "response": []
   },
   {
@@ -5593,6 +5797,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [
+      "UpsertSitePublicationRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
@@ -5677,6 +5890,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "PutWorkspaceCredentialProviderResponse"
     ]
+  },
+  {
+    "id": "querySiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/query",
+    "request": [
+      "SiteDataQueryRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "querySiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/query",
+    "request": [
+      "SiteSqlStatementRequest"
+    ],
+    "response": []
   },
   {
     "id": "readBrowserClipboard",
@@ -5985,6 +6216,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "resetSiteDataCollection",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/reset",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "resetSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/reset",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "resolveInteractionIntervention",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve",
@@ -6250,6 +6495,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "runSiteSqlQuery",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlRunRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "saveAgentLearningSettings",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/agent-learning",
@@ -6501,6 +6755,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setSessionUsageLimit",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
+    "request": [
+      "SetSessionUsageLimitRequest"
+    ],
+    "response": [
+      "SessionUsageLimit"
+    ],
+    "browserOnly": "a task's usage limit bounds what agents may spend, so only a person in the Opengeni app or the embedding product's server can change it, never an agent"
+  },
+  {
     "id": "setSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/allocator",
@@ -6567,6 +6833,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "WorkspacePauseTimerRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "sitePublicationPath",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [],
     "response": []
   },
   {
@@ -7506,6 +7779,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateSiteLimitProfile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [
+      "SiteLimitProfile"
+    ],
+    "response": [
+      "SiteLimitProfile"
+    ]
+  },
+  {
+    "id": "updateSiteSqlSettings",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/settings",
+    "request": [
+      "SiteSqlSettingsRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "updateSource",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/automations/sources/:sourceId",
@@ -7690,5 +7983,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "RigChange"
     ]
+  },
+  {
+    "id": "writeSiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/write",
+    "request": [
+      "SiteDataWriteRequest"
+    ],
+    "response": []
   }
 ];

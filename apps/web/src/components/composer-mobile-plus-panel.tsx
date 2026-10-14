@@ -4,6 +4,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   EyeIcon,
+  GaugeIcon,
   GitBranchIcon,
   LockKeyholeIcon,
   PaperclipIcon,
@@ -62,7 +63,8 @@ export type Panel =
   | "secrets"
   | "settings"
   | "runs-on"
-  | "visibility";
+  | "visibility"
+  | "usage-limit";
 
 /** A per-session setting shown as a "+" row with its current value, opening a drill-in. */
 export type ComposerSettingPanel = {
@@ -134,6 +136,8 @@ export type ComposerPlusProps = {
   runsOn?: ComposerSettingPanel;
   /** Who can see the chat, when the organization offers a choice. */
   visibility?: ComposerSettingPanel;
+  /** A new chat's usage limit, when the server offers limits. */
+  usageLimit?: ComposerSettingPanel;
   /** When set, Voice model appears under + (bar keeps a start-only control). */
   voiceModel?: {
     selectedLabel: string;
@@ -309,7 +313,7 @@ export function ComposerMobilePlusPanel(
               onOpen={() => setPanel("secrets")}
             />
           ) : null}
-          {props.runsOn || props.visibility ? <DropdownMenuSeparator /> : null}
+          {props.runsOn || props.visibility || props.usageLimit ? <DropdownMenuSeparator /> : null}
           {props.runsOn ? (
             <SettingRowItem
               icon={<ServerIcon className="size-4" />}
@@ -326,6 +330,16 @@ export function ComposerMobilePlusPanel(
               setting={props.visibility}
               disabled={props.disabled}
               onOpen={() => setPanel("visibility")}
+            />
+          ) : null}
+          {props.usageLimit ? (
+            <SettingRowItem
+              panel="usage-limit"
+              icon={<GaugeIcon className="size-4" />}
+              label="Usage limit"
+              setting={props.usageLimit}
+              disabled={props.disabled}
+              onOpen={() => setPanel("usage-limit")}
             />
           ) : null}
           {voiceModel ? (
@@ -413,6 +427,11 @@ export function ComposerMobilePlusPanel(
           leading: backButton,
           presentation: dialogOpen ? "dialog" : "menu",
         })
+      ) : panel === "usage-limit" && props.usageLimit ? (
+        cloneElement(props.usageLimit.panel, {
+          leading: backButton,
+          presentation: dialogOpen ? "dialog" : "menu",
+        })
       ) : panel === "voice" && voiceModel ? (
         withLeading(voiceModel.panel, backButton)
       ) : panel === "settings" && props.draftChatSettings ? (
@@ -450,6 +469,7 @@ export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
   settings: "Chat settings",
   "runs-on": "Runs on",
   visibility: "Who can see this chat",
+  "usage-limit": "Usage limit",
 };
 
 function ComposerPanelContent(props: {

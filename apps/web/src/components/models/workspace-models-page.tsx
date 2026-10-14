@@ -118,7 +118,7 @@ import { ListRow, RowList } from "@/components/ui/list-row";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRowGroup } from "@/components/ui/setting-row";
-import { UsageReadout } from "@/components/ui/usage-meter";
+import { UsageReadout, usageResets } from "@/components/ui/usage-meter";
 import { useAppContext } from "@/context";
 import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
 import {
@@ -582,11 +582,15 @@ export function WorkspaceModelsPageBody({
   const reconnectAllowed = Boolean(workspaceStep && reconnectStep.current === view);
   // Anyone who can manage connections here may connect their own account on a
   // workspace's page: in their Personal workspace, or as "Only me" in a shared
-  // one. Workspace admins may also add a key for the whole workspace.
-  // Accounts for everyone in the organization stay with its owners and admins.
+  // one. A shared workspace's admins connect subscriptions and keys for
+  // everyone in that workspace: the workspace's own accounts, which the
+  // organization still owns and its owners and admins see. Accounts for
+  // everyone in the organization stay with its owners and admins.
   const memberConnects = !organizationAdmin && workspacePage && canManageConnections;
   // A member who isn't a workspace admin connects for themselves only.
   const onlyMe = memberConnects && !personal && !canManageSettings;
+  // A shared workspace's admin who isn't an organization owner or admin.
+  const workspaceAdminConnects = memberConnects && !personal && !onlyMe;
   const listLabel = workspacePage
     ? personal
       ? "Your Personal workspace"
@@ -695,9 +699,9 @@ export function WorkspaceModelsPageBody({
             ? "It pays for models in your Personal workspace, so only you use it."
             : onlyMe
               ? `Only work you start in ${workspaceName} uses it. Nobody else here can.`
-              : `Connect your own subscription, or a key for everyone in ${workspaceName}.`
+              : `Connect a subscription or an API key for everyone in ${workspaceName}.`
         }
-        codexAvailable={personal}
+        codexAvailable={personal || workspaceAdminConnects}
         // A Personal workspace can't hold its own SuperGrok account.
         grok={grok.unavailable || personal ? "hidden" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
@@ -895,6 +899,10 @@ export function WorkspaceModelsPageBody({
     ) : onlyMe ? (
       <p className="m-0 text-sm leading-5 text-fg-muted">
         {`Only work you start in ${workspaceName} uses it. Nobody else here can.`}
+      </p>
+    ) : workspaceAdminConnects ? (
+      <p className="m-0 text-sm leading-5 text-fg-muted">
+        {`It will belong to ${workspaceName}: everyone here can use it. ${workspaceName}'s admins and ${organizationName}'s owners and admins can change or remove it.`}
       </p>
     ) : undefined;
     page =
@@ -1338,9 +1346,14 @@ function codexUsageReadout(
 ): ReactNode {
   const live = codex.usageMap[accountId];
   if (!live?.usage) return null;
-  const weekly = codexUsageReadings(live.usage, codex.now)[0]!;
+  const readings = codexUsageReadings(live.usage, codex.now);
+  const weekly = readings[0]!;
   return weekly.percent === null ? null : (
-    <UsageReadout percent={weekly.percent} window="this week" resetsLabel={weekly.resetsLabel} />
+    <UsageReadout
+      percent={weekly.percent}
+      window="this week"
+      resets={usageResets(readings, weekly.label)}
+    />
   );
 }
 

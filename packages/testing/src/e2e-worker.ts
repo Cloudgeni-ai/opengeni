@@ -1,4 +1,4 @@
-import { getSettings } from "@opengeni/config";
+import { dbSearchPath, getSettings } from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -22,7 +22,13 @@ const role = process.env.OPENGENI_WORKER_ROLE;
 if (role !== "control" && role !== "turn") {
   throw new Error("OPENGENI_WORKER_ROLE must be 'control' or 'turn' for the E2E worker");
 }
-const dbClient = createDb(settings.databaseUrl);
+// Same database scoping as the production worker entry point: a deployment
+// with a dedicated schema (OPENGENI_DB_SCHEMA) is reached through it.
+const searchPath = dbSearchPath(settings);
+const dbClient = createDb(settings.databaseUrl, {
+  ...(searchPath ? { searchPath } : {}),
+  rlsStrategy: settings.rlsStrategy,
+});
 const bus = await createNatsEventBus(settings.natsUrl);
 const model = scriptedModelForScenario(process.env.OPENGENI_TEST_SCENARIO ?? "default");
 const runtime = createProductionAgentRuntime({ model });
@@ -90,6 +96,9 @@ function scriptedModelForScenario(scenario: string): Model {
   if (scenario === "browser-command-control") {
     return new BrowserCommandControlModel();
   }
+  if (scenario === "session-usage-limit-restart") {
+    return new SessionUsageLimitRestartModel(process.env.OPENGENI_TEST_USAGE_LIMIT_PHASE);
+  }
   if (scenario === "slow") {
     return new ScriptedModel([
       {
@@ -115,6 +124,39 @@ function scriptedModelForScenario(scenario: string): Model {
       outputText: "hello from e2e",
     },
   ]);
+}
+
+/**
+ * Task usage-limit crash/wake fixture. Each worker generation is a separate
+ * process, so the phase comes from its environment: `hold` streams the main
+ * turn until the test kills the worker (no usage is ever reported for it), and
+ * `answer` replies with a priced 200-token response. Non-streamed auxiliary
+ * calls (such as titles) cost one token so they never hold or dominate.
+ */
+class SessionUsageLimitRestartModel implements Model {
+  constructor(private readonly phase: string | undefined) {}
+
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return await new ScriptedModel([
+      { inputTokens: 1, outputText: "Usage limit fixture" },
+    ]).getResponse(request);
+  }
+
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    const step: ScriptedModelStep =
+      this.phase === "hold"
+        ? {
+            chunks: Array.from({ length: 6_000 }, () => "working "),
+            outputText: "never finished",
+            delayMs: 100,
+          }
+        : {
+            inputTokens: 200,
+            chunks: ["usage ", "limit ", "answer"],
+            outputText: "usage limit answer",
+          };
+    yield* new ScriptedModel([step]).getStreamedResponse(request);
+  }
 }
 
 class BrowserCommandControlModel implements Model {

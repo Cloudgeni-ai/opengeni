@@ -327,6 +327,14 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("session usage limits producer flag defaults off and parses", () => {
+    expect(withEnv({}, () => getSettings()).sessionUsageLimitsEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_SESSION_USAGE_LIMITS_ENABLED: "true" }, () => getSettings())
+        .sessionUsageLimitsEnabled,
+    ).toBe(true);
+  });
+
   test("configured host MCP refs are rejected", () => {
     const mcpServers = JSON.stringify([
       {
@@ -578,14 +586,6 @@ describe("Google Drive integration settings", () => {
     expect(settings.webBaseUrl).toBe("http://127.0.0.1:3000");
     expect(settings.googleDriveClientId).toBe("client.apps.googleusercontent.com");
     expect(settings.googleDriveClientSecret).toBe("client-secret");
-  });
-
-  test("keeps short MCP OAuth state issuance off until the callback reader is deployed", () => {
-    expect(withEnv({}, () => getSettings()).integrationsOauthShortStateEnabled).toBe(false);
-    expect(
-      withEnv({ OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED: "true" }, () => getSettings())
-        .integrationsOauthShortStateEnabled,
-    ).toBe(true);
   });
 
   test("requires the Google OAuth client id and secret together", () => {
@@ -1038,18 +1038,22 @@ describe("rig verification lease ownership rollout", () => {
   });
 });
 
-describe("retired organization-tenancy activation switch", () => {
-  test("is accepted and ignored for any value so existing deployments keep booting", () => {
-    for (const value of [undefined, "false", "true", "0", "1", "not-a-boolean"]) {
-      const settings = withEnv(
-        value === undefined
-          ? {}
-          : { OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: value },
-        () => getSettings(),
-      );
-      expect(settings).not.toHaveProperty("organizationTenancyCanonicalActivationEnabled");
-    }
-  });
+describe("retired deployment switches", () => {
+  test.each([
+    [
+      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
+      "organizationTenancyCanonicalActivationEnabled",
+    ],
+    ["OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED", "integrationsOauthShortStateEnabled"],
+  ])(
+    "%s is accepted and ignored for any value so existing deployments keep booting",
+    (name, key) => {
+      for (const value of [undefined, "false", "true", "0", "1", "not-a-boolean"]) {
+        const settings = withEnv(value === undefined ? {} : { [name]: value }, () => getSettings());
+        expect(settings).not.toHaveProperty(key);
+      }
+    },
+  );
 });
 
 describe("Temporal connection security", () => {

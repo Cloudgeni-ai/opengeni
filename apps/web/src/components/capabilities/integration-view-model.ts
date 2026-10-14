@@ -1,5 +1,5 @@
 /**
- * The one shape every OpenGeni-run integration renders through.
+ * The one shape every Opengeni-run integration renders through.
  *
  * `IntegrationRow` and `IntegrationSheet` know nothing about Slack, GitHub,
  * Google Drive, or Atlassian: each provider has an adapter hook that maps its

@@ -10,6 +10,7 @@ import {
   UsageMeter,
   UsageMeterGroup,
   UsageReadout,
+  usageResets,
 } from "./usage-meter";
 
 describe("usage levels", () => {
@@ -145,14 +146,70 @@ describe("UsageMeter", () => {
 });
 
 describe("UsageReadout", () => {
+  // Thursday 15 October 2026, 10:00 UTC.
+  const NOW = Date.parse("2026-10-15T10:00:00Z");
+  const weeklyReset = "2026-10-19T07:00:00Z";
+  const fiveHourReset = "2026-10-15T13:20:00Z";
+
   test("reads as a sentence with a small bar, and names the reset for screen readers", () => {
     const html = renderToStaticMarkup(
-      <UsageReadout percent={78} window="this week" resetsLabel="Sun 4 Oct, 09:57" />,
+      <UsageReadout percent={78} window="this week" resets={[{ at: weeklyReset }]} now={NOW} />,
     );
     expect(html).toContain("78% left this week");
     expect(html).toContain('role="meter"');
-    expect(html).toContain('aria-valuetext="78% left this week, resets Sun 4 Oct, 09:57"');
+    expect(html).toMatch(/aria-valuetext="78% left this week\. Resets Mon 19 Oct, \d\d:\d\d"/);
     expect(html).toContain("w-16");
+  });
+
+  test("shows when each limit resets, the shown window first and the others by name", () => {
+    const html = renderToStaticMarkup(
+      <UsageReadout
+        percent={38}
+        window="this week"
+        resets={[{ at: weeklyReset }, { label: "5-hour", at: fiveHourReset }]}
+        now={NOW}
+      />,
+    );
+    expect(html).toContain('data-slot="usage-readout-resets"');
+    expect(html).toMatch(/>Resets Mon \d\d:\d\d · 5-hour \d\d:\d\d</);
+    expect(html).toMatch(/title="Resets Mon 19 Oct, \d\d:\d\d; 5-hour resets today, \d\d:\d\d"/);
+  });
+
+  test("a reached limit still says when it resets, and past resets are left out", () => {
+    const html = renderToStaticMarkup(
+      <UsageReadout
+        percent={0}
+        window="this week"
+        resets={[{ at: "2026-10-15T09:00:00Z" }, { label: "5-hour", at: fiveHourReset }]}
+        now={NOW}
+      />,
+    );
+    expect(html).toContain("Limit reached");
+    expect(html).toMatch(/>5-hour resets \d\d:\d\d</);
+    expect(html).not.toMatch(/>Resets /);
+  });
+
+  test("without reset times there is no second line", () => {
+    const html = renderToStaticMarkup(<UsageReadout percent={52} window="this period" now={NOW} />);
+    expect(html).not.toContain("usage-readout-resets");
+    expect(html).not.toContain("title=");
+  });
+
+  test("usageResets puts the shown window first and drops a reset in the same minute", () => {
+    expect(
+      usageResets(
+        [
+          { label: "Weekly", percent: 40, resetsAt: Date.parse(weeklyReset) },
+          { label: "5-hour", percent: 90, resetsAt: Date.parse(fiveHourReset) },
+          { label: "Weekly · Opus", percent: 70, resetsAt: Date.parse(weeklyReset) },
+          { label: "Extra usage", percent: null },
+        ],
+        "5-hour",
+      ),
+    ).toEqual([
+      { at: Date.parse(fiveHourReset) },
+      { label: "Weekly", at: Date.parse(weeklyReset) },
+    ]);
   });
 
   test("a missing reading says why in words, and an empty window says so", () => {

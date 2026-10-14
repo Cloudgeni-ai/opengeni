@@ -46,6 +46,10 @@ import { z } from "zod";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import { userContentDispositionHeaders } from "../http/user-content";
 import {
+  afterSiteArtifactMutation,
+  notifySitePublicationChanged,
+} from "../site-publishing/service";
+import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
   redactWorkspaceArtifactListProvenance,
@@ -177,6 +181,15 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
   // `published-artifacts` deliberately avoids the existing `/artifacts/:id`
   // retained-output API. The product route remains simply `/artifacts`.
   const base = "/v1/workspaces/:workspaceId/published-artifacts";
+  // A published Site follows its Site: a new version, rollback, archive or
+  // restore advances its host map (after commit, never blocking the change),
+  // through the same hook the agent artifact tools run. Recorded before the
+  // response so the next host lookup sees the change; publish and rollback
+  // scan the version that became current.
+  const publishedSiteChanged = async <T extends WorkspaceArtifactMutationResponse>(
+    result: T,
+    scan = false,
+  ): Promise<T> => await afterSiteArtifactMutation(deps, result, { scan });
 
   app.post(`${base}/uploads`, async (context) => {
     const grant = await requireAccessGrant(
@@ -438,17 +451,20 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         await mutationResponse(
           deps,
           grant,
-          await publishWorkspaceArtifactVersion(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            artifactId: id,
-            viewer: await siteViewerForGrant(deps.db, grant),
-            expectedCurrentVersionId: request.expectedCurrentVersionId,
-            ...(request.title !== undefined ? { title: request.title } : {}),
-            ...(request.description !== undefined ? { description: request.description } : {}),
-            ...content,
-            ...provenance(grant.subjectId, request.idempotencyKey),
-          }),
+          await publishedSiteChanged(
+            await publishWorkspaceArtifactVersion(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              artifactId: id,
+              viewer: await siteViewerForGrant(deps.db, grant),
+              expectedCurrentVersionId: request.expectedCurrentVersionId,
+              ...(request.title !== undefined ? { title: request.title } : {}),
+              ...(request.description !== undefined ? { description: request.description } : {}),
+              ...content,
+              ...provenance(grant.subjectId, request.idempotencyKey),
+            }),
+            true,
+          ),
         ),
       );
     } catch (error) {
@@ -472,16 +488,19 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         await mutationResponse(
           deps,
           grant,
-          await rollbackWorkspaceArtifact(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            artifactId: id,
-            viewer: await siteViewerForGrant(deps.db, grant),
-            versionId: request.versionId,
-            expectedCurrentVersionId: request.expectedCurrentVersionId,
-            reason: request.reason,
-            ...provenance(grant.subjectId, request.idempotencyKey),
-          }),
+          await publishedSiteChanged(
+            await rollbackWorkspaceArtifact(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              artifactId: id,
+              viewer: await siteViewerForGrant(deps.db, grant),
+              versionId: request.versionId,
+              expectedCurrentVersionId: request.expectedCurrentVersionId,
+              reason: request.reason,
+              ...provenance(grant.subjectId, request.idempotencyKey),
+            }),
+            true,
+          ),
         ),
       );
     } catch (error) {
@@ -505,16 +524,18 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         await mutationResponse(
           deps,
           grant,
-          await setWorkspaceArtifactStatus(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            artifactId: id,
-            viewer: await siteViewerForGrant(deps.db, grant),
-            status: request.status,
-            expectedCurrentVersionId: request.expectedCurrentVersionId,
-            reason: request.reason,
-            ...provenance(grant.subjectId, request.idempotencyKey),
-          }),
+          await publishedSiteChanged(
+            await setWorkspaceArtifactStatus(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              artifactId: id,
+              viewer: await siteViewerForGrant(deps.db, grant),
+              status: request.status,
+              expectedCurrentVersionId: request.expectedCurrentVersionId,
+              reason: request.reason,
+              ...provenance(grant.subjectId, request.idempotencyKey),
+            }),
+          ),
         ),
       );
     } catch (error) {
@@ -544,6 +565,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         viewer,
         visibility,
       });
+      await notifySitePublicationChanged(deps, { accountId: grant.accountId, workspaceId }, id);
       const projected = await projectWorkspaceArtifactDetailProvenance(
         { artifact, versions: [], events: [], versionsTruncated: false, eventsTruncated: false },
         (sessionId) => canReadProvenanceSession(deps, grant, sessionId),

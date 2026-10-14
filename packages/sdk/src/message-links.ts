@@ -1,5 +1,5 @@
 /**
- * Links an agent writes into chat Markdown that point at OpenGeni-owned objects.
+ * Links an agent writes into chat Markdown that point at Opengeni-owned objects.
  *
  * Agents write these forms (tool receipts and bundled Skills teach them):
  *

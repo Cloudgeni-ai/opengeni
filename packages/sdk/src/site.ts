@@ -12,12 +12,39 @@ import {
 } from "./tools";
 import { OpenGeniClient } from "./client";
 import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
+import { createOpenGeniSiteData, type OpenGeniSiteData, type OpenGeniSiteFiles } from "./site-data";
+import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
+export {
+  OpenGeniSiteSqlError,
+  type OpenGeniSiteSql,
+  type OpenGeniSiteSqlErrorCode,
+  type OpenGeniSiteSqlResult,
+  type OpenGeniSiteSqlValue,
+} from "./site-sql";
+export {
+  OpenGeniSiteDataError,
+  SITE_DATA_PATH_PREFIX,
+  type OpenGeniSiteData,
+  type OpenGeniSiteDataCollection,
+  type OpenGeniSiteDataErrorCode,
+  type OpenGeniSiteDataFilter,
+  type OpenGeniSiteDataListOptions,
+  type OpenGeniSiteDataOperation,
+  type OpenGeniSiteDataPage,
+  type OpenGeniSiteDataRecord,
+  type OpenGeniSiteDataRef,
+  type OpenGeniSiteDataScalar,
+  type OpenGeniSiteDataWriteResult,
+  type OpenGeniSiteFile,
+  type OpenGeniSiteFiles,
+} from "./site-data";
 export {
   isSiteHttpRequest,
   serveSiteHttp,
   siteSessionPath,
   type SiteHttpRequest,
 } from "./site-http";
+import type { SiteViewer } from "@opengeni/contracts";
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
@@ -37,6 +64,20 @@ export const OPENGENI_SITE_BRIDGE_RESPONSE = "opengeni.site.response" as const;
 export const OPENGENI_SITE_BRIDGE_CANCEL = "opengeni.site.cancel" as const;
 export const OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL = "__opengeniSiteBridgeBootstrapV2" as const;
 export const OPENGENI_SITE_LOCAL_CODEMODE_PATH = "/__opengeni/site-tools" as const;
+/** Bridge request method that returns the viewer (advertised by `viewer: 1`). */
+export const OPENGENI_SITE_BRIDGE_VIEWER_METHOD = "viewer" as const;
+/** Bridge request method that asks the host to sign the viewer in (advertised by `viewer: 1`). */
+export const OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD = "auth.signIn" as const;
+
+/**
+ * The person viewing a Site, as the host reports it. Guests of public
+ * published Sites have no name or email. `id` is stable per Site and is the
+ * Site Data owner principal; it is not an Opengeni subject id usable elsewhere.
+ */
+export type OpenGeniSiteViewer = SiteViewer;
+
+/** Result of `site.auth.signIn()`: `started` is true when the host began a sign-in navigation. */
+export type OpenGeniSiteSignInResult = { started: boolean };
 
 export type OpenGeniSiteBridgeConnectMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_CONNECT;
@@ -47,6 +88,10 @@ export type OpenGeniSiteBridgeReadyMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_READY;
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
   targetTools?: 1;
+  /** The host serves Site Data for this published Site over the Site HTTP channel. */
+  siteData?: 1;
+  /** The host answers the `viewer` and `auth.signIn` bridge methods. */
+  viewer?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -70,6 +115,8 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: "declarations" }
   | { method: "resolve"; payload: ToolGatewayResolveRequest }
   | { method: "invoke"; payload: ToolGatewayInvokeRequest }
+  | { method: typeof OPENGENI_SITE_BRIDGE_VIEWER_METHOD }
+  | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }
 );
 
 export type OpenGeniSiteBridgeCancelMessage = {
@@ -90,7 +137,9 @@ export type OpenGeniSiteBridgeResponseMessage = {
         | ToolGatewayCallResponse
         | ToolGatewayDeclarationsResponse
         | ToolGatewayResolvedTool
-        | ToolGatewayInvokeResponse;
+        | ToolGatewayInvokeResponse
+        | OpenGeniSiteViewer
+        | OpenGeniSiteSignInResult;
     }
   | {
       ok: false;
@@ -110,6 +159,34 @@ export type OpenGeniSiteClient = {
   readonly workspaceId: string;
   /** Workspace-bound typed facade. The parent host owns workspace identity and credentials. */
   readonly tools: OpenGeniSiteWorkspaceTools;
+  /** Persistent collections of JSON records that belong to this published Site. */
+  readonly data: OpenGeniSiteData;
+  /** Files stored with this published Site. */
+  readonly files: OpenGeniSiteFiles;
+  /**
+   * The Site's optional SQL database: run the named queries its owner
+   * defined (`await site.sql.run("top_votes", { limit: 10 })`). Served by
+   * hosts bound to a published Site, like `data`; the owner turns it on.
+   */
+  readonly sql: OpenGeniSiteSql;
+  /**
+   * The person viewing this Site, resolved once from the host and cached for
+   * the life of the client (`await site.viewer`). In the console this is the
+   * signed-in workspace member; on a published Site it is the signed-in
+   * viewer or an anonymous guest (`kind: "guest"`, `signedIn: false`).
+   * Resolves `null` when the host does not report viewers (older hosts and
+   * local previews). A failed lookup is not cached; reading again retries.
+   */
+  readonly viewer: Promise<OpenGeniSiteViewer | null>;
+  readonly auth: {
+    /**
+     * Ask the host to sign the viewer in. On a published Site the host
+     * navigates the whole page to sign-in and returns `{ started: true }`;
+     * the page reloads signed in afterwards. Resolves `{ started: false }`
+     * when the viewer is already signed in or the host has no sign-in.
+     */
+    signIn(): Promise<OpenGeniSiteSignInResult>;
+  };
   close(): void;
 };
 
@@ -154,6 +231,15 @@ export function createOpenGeniSiteClient(
   const transport = shouldUseLocalCodemode(options)
     ? new OpenGeniSiteLocalCodemodeTransport(options)
     : new OpenGeniSiteBridgeTransport(options);
+  const siteData = createOpenGeniSiteData(
+    (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
+    () => transport.siteDataSupported(),
+  );
+  const siteSql = createOpenGeniSiteSql(
+    (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
+    () => transport.siteDataSupported(),
+  );
+  let viewer: Promise<OpenGeniSiteViewer | null> | null = null;
   return {
     client: new OpenGeniClient({
       baseUrl: "https://site.opengeni.invalid",
@@ -162,6 +248,20 @@ export function createOpenGeniSiteClient(
     }),
     workspaceId: SITE_WORKSPACE,
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
+    data: siteData.data,
+    files: siteData.files,
+    sql: siteSql,
+    get viewer() {
+      if (!viewer) {
+        const pending = transport.viewer();
+        viewer = pending;
+        pending.catch(() => {
+          if (viewer === pending) viewer = null;
+        });
+      }
+      return viewer;
+    },
+    auth: { signIn: () => transport.signIn() },
     close: () => transport.close(),
   };
 }
@@ -181,6 +281,20 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
   }
 
   close(): void {}
+
+  /** Local previews have no published Site, so no Site Data. */
+  async siteDataSupported(): Promise<boolean> {
+    return false;
+  }
+
+  /** Local previews run outside any host that knows the viewer. */
+  async viewer(): Promise<OpenGeniSiteViewer | null> {
+    return null;
+  }
+
+  async signIn(): Promise<OpenGeniSiteSignInResult> {
+    return { started: false };
+  }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const request = new Request(input, init);
@@ -265,7 +379,13 @@ export function isOpenGeniSiteBridgeRequestMessage(
   ) {
     return false;
   }
-  if (value.method === "catalog" || value.method === "declarations") return true;
+  if (
+    value.method === "catalog" ||
+    value.method === "declarations" ||
+    value.method === OPENGENI_SITE_BRIDGE_VIEWER_METHOD ||
+    value.method === OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD
+  )
+    return true;
   return ["call", "resolve", "invoke"].includes(String(value.method)) && isRecord(value.payload);
 }
 
@@ -309,6 +429,8 @@ export function sanitizeOpenGeniSiteToolInvokeRequest(
 class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   readonly toolGatewayMode: "catalog" | "target";
   private targetTools = false;
+  private siteData = false;
+  private viewerSupported = false;
   private readonly options: OpenGeniSiteClientOptions;
   private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
@@ -323,6 +445,30 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     return sitePortFetch(await this.connect(), input, init);
+  }
+
+  async siteDataSupported(): Promise<boolean> {
+    await this.connect();
+    return this.siteData;
+  }
+
+  async viewer(): Promise<OpenGeniSiteViewer | null> {
+    await this.connect();
+    if (!this.viewerSupported) return null;
+    const value = await this.request({ method: OPENGENI_SITE_BRIDGE_VIEWER_METHOD }, {});
+    if (!isOpenGeniSiteViewer(value))
+      throw new OpenGeniSiteBridgeError(
+        "invalid_viewer",
+        "The Site host returned an invalid viewer",
+      );
+    return value;
+  }
+
+  async signIn(): Promise<OpenGeniSiteSignInResult> {
+    await this.connect();
+    if (!this.viewerSupported) return { started: false };
+    const value = await this.request({ method: OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD }, {});
+    return { started: isRecord(value) && value.started === true };
   }
 
   async requestJson<T>(
@@ -387,7 +533,9 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
         >
       | { method: "catalog" }
       | { method: "call"; payload: OpenGeniSiteToolCallRequest }
-      | { method: "declarations" },
+      | { method: "declarations" }
+      | { method: typeof OPENGENI_SITE_BRIDGE_VIEWER_METHOD }
+      | { method: typeof OPENGENI_SITE_BRIDGE_SIGN_IN_METHOD },
     options: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<unknown> {
     const port = await this.connect();
@@ -486,6 +634,8 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
         }
         cleanup();
         this.targetTools = message.targetTools === 1;
+        this.siteData = message.siteData === 1;
+        this.viewerSupported = message.viewer === 1;
         this.port = channel.port1;
         resolve(channel.port1);
       };
@@ -624,6 +774,20 @@ function isOpenGeniSiteBridgeReadyMessage(value: unknown): value is OpenGeniSite
     isRecord(value) &&
     value.type === OPENGENI_SITE_BRIDGE_READY &&
     value.version === OPENGENI_SITE_BRIDGE_VERSION
+  );
+}
+
+const SITE_VIEWER_KINDS: readonly string[] = ["member", "invited", "user", "guest"];
+
+function isOpenGeniSiteViewer(value: unknown): value is OpenGeniSiteViewer {
+  return (
+    isRecord(value) &&
+    SITE_VIEWER_KINDS.includes(String(value.kind)) &&
+    typeof value.id === "string" &&
+    value.id.length > 0 &&
+    (value.name === null || typeof value.name === "string") &&
+    (value.email === null || typeof value.email === "string") &&
+    typeof value.signedIn === "boolean"
   );
 }
 

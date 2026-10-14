@@ -137,8 +137,10 @@ export type {
 export {
   COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  COMPOSER_SESSION_USAGE_LIMIT_MESSAGE,
   composerSubmissionErrorMessage,
   isModelUnavailableSubmissionError,
+  isSessionUsageLimitSubmissionError,
 } from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
@@ -446,6 +448,7 @@ export type {
   ReasoningItem,
   SandboxItem,
   SessionStatusItem,
+  SessionUsageLimitStop,
   TimelineGroup,
   TimelineItem,
   TurnEndItem,

@@ -93,7 +93,7 @@ describe("request_human_input secret questions (AC-1)", () => {
         hasActingHuman: true,
         validateQuestionVault: async (input) => {
           seen.push(input);
-          return "it is a connected 1Password vault; answers are saved to OpenGeni vaults only.";
+          return "it is a connected 1Password vault; answers are saved to Opengeni vaults only.";
         },
       },
     );

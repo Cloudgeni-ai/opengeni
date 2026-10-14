@@ -4,7 +4,16 @@
 // stored core quota onto the legacy usage response. No network: the global
 // fetch is denied for the whole file; every request goes through the
 // connection read's scripted custody fetch.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setSystemTime,
+  test,
+} from "bun:test";
 import { ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import type { SubscriptionCoreConnectionRead } from "@opengeni/subscriptions";
 import {
@@ -169,6 +178,10 @@ describe("fetchUsage", () => {
 });
 
 describe("decodeQuota", () => {
+  // The usage fixture has fixed reset dates; keep observations before those dates.
+  beforeEach(() => setSystemTime(new Date("2026-10-11T12:00:00.000Z")));
+  afterEach(() => setSystemTime());
+
   const available = async () =>
     await fetchSubscriptionCoreClaudeUsage(
       connectionRead(oauth, () => Response.json(usageBody)).read,
@@ -224,6 +237,21 @@ describe("decodeQuota", () => {
     })!;
     expect(bare.modelCooldowns).toEqual({});
   });
+
+  test.each(["2026-10-14T00:00:00.000Z", "2027-01-01T00:00:00.000Z"])(
+    "an expired family window does not cool models at %s",
+    async (now) => {
+      setSystemTime(new Date(now));
+      const quota = SUBSCRIPTION_CORE_CLAUDE.adapter.decodeQuota!({
+        response: await available(),
+        observedAt: Date.now(),
+        refreshGeneration: 7,
+        modelIds: ["organization-claude-subscription/claude-opus-4-1"],
+      })!;
+      expect(quota.modelCooldowns).toEqual({});
+      expect(quota.exhaustedUntil).toBeNull();
+    },
+  );
 
   test("upstream ids come only from Claude product ids", () => {
     expect(

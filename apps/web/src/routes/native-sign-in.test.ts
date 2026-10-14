@@ -15,6 +15,8 @@ describe("native sign-in page", () => {
   test("names the device the person is allowing", () => {
     expect(nativeDeviceLabel({ device_name: " Ada's iPhone " })).toBe("Ada's iPhone");
     expect(nativeDeviceLabel({ platform: "android" })).toBe("this Android device");
+    expect(nativeDeviceLabel({ platform: "macos" })).toBe("this Mac");
+    expect(nativeDeviceLabel({ platform: "linux" })).toBe("this computer");
     expect(nativeDeviceLabel({})).toBe("this iPhone or iPad");
   });
 });

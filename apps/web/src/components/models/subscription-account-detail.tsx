@@ -14,6 +14,7 @@ import {
   subscriptionAccountName,
   type SubscriptionPoolAccount,
 } from "./use-subscription-account-pool";
+import { ACCOUNT_ENABLED_LABELS, EnableAccountRow } from "./subscription-account-ui";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
@@ -30,7 +31,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 export type SubscriptionAccountPlaces = {
@@ -185,7 +185,7 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
       ? "needs_reconnect"
       : account.allocatorEnabled
         ? "connected"
-        : "paused";
+        : "disabled";
   const access = useConnectionAccess({
     client,
     organizationId: pool.organizationId,
@@ -267,18 +267,12 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
         {canEdit ? (
           <DetailSection title="Settings">
             <SettingRowGroup className="-my-3">
-              <SettingRow
-                label="Use for new work"
-                description="When off, this account isn't picked for new chats or schedules. Work already running continues."
-                control={
-                  <Switch
-                    aria-label={`Use ${name} for new work`}
-                    checked={account.allocatorEnabled}
-                    pending={pool.working === `allocator:${account.id}`}
-                    disabled={pool.busy}
-                    onCheckedChange={(next) => void pool.setAllocator(account, next)}
-                  />
-                }
+              <EnableAccountRow
+                name={name}
+                checked={account.allocatorEnabled}
+                pending={pool.working === `allocator:${account.id}`}
+                disabled={pool.busy}
+                onCheckedChange={(next) => void pool.setAllocator(account, next)}
               />
               {pool.accounts.length > 1 ? (
                 <SettingRow
@@ -338,8 +332,8 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
         ) : (
           <DetailSection title="Details">
             <DetailFacts>
-              <DetailFact label="Use for new work">
-                {account.allocatorEnabled ? "On" : "Off"}
+              <DetailFact label="Account">
+                {account.allocatorEnabled ? ACCOUNT_ENABLED_LABELS.on : ACCOUNT_ENABLED_LABELS.off}
               </DetailFact>
               {pool.accounts.length > 1 ? (
                 <DetailFact label="Primary">

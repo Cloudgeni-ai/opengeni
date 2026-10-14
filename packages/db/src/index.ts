@@ -40,6 +40,7 @@ import {
 } from "./connection-metadata";
 export {
   getConnectionMetadata,
+  getProviderConnectionHomeWorkspace,
   listConnectionsMetadata,
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
@@ -506,8 +507,11 @@ import {
 } from "./subscription-core/provider-route";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
+export * from "./site-data";
+export * from "./site-publishing";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
+export * from "./site-sql";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
@@ -944,7 +948,11 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
-export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
+export {
+  isStoredVerbatimAsLosslessJsonString,
+  LOSSLESS_TEXT_PREFIX,
+  toPostgresLosslessJson,
+} from "./lossless-json";
 import {
   projectSessionMcpProgressText,
   projectSessionTextPrefix,
@@ -6295,7 +6303,7 @@ export async function applyCreditDebitUpToBalance(
 }
 
 /**
- * Settle an already-consumed, OpenGeni-funded resource for its full cost.
+ * Settle an already-consumed, Opengeni-funded resource for its full cost.
  * Admission happens before use; an in-flight operation can take the account
  * below zero. Future grants and purchased top-ups net against that balance.
  * Never use this helper to admit a new operation or for externally paid use.
@@ -19391,7 +19399,8 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
-  | "monthly_agent_run_limit";
+  | "monthly_agent_run_limit"
+  | "session_usage_limit";
 
 /**
  * Record a refused occurrence as an immutable run receipt under its producer
@@ -24075,7 +24084,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       payload: { waiterId: waiter.waiterId, generation: waiter.generation, reason },
     }),
     cancelledBy: "codex_capacity_reconcile",
-    recheckBeforeReset: false,
+    recheckBeforeReset: true,
   },
   xai: {
     label: "SuperGrok",
@@ -24144,7 +24153,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     cancelledBy: "claude_capacity_reconcile",
     // Claude's adapter reads no usage that can end an exhaustion before its
     // stored reset (its quota comes from response headers), so its waiter
-    // sleeps until the reset like Codex's.
+    // sleeps until the reset.
     recheckBeforeReset: false,
   },
 };
@@ -40248,7 +40257,13 @@ export async function recordSkippedContextCompaction(
       | "replacement_not_smaller"
       | "replacement_exceeds_model_budget"
       | "replacement_unchanged"
-      | "summarization_failed";
+      | "summarization_failed"
+      /**
+       * The attempt was cancelled (worker shutdown or another activity
+       * cancellation) while the checkpoint request was in flight. Not a
+       * provider or summarizer failure; the recovered attempt re-evaluates.
+       */
+      | "interrupted";
     /**
      * When false, record the visible skip even if no operator `/compact` is
      * pending (auto/overflow paths that already emitted `compaction.started`).
@@ -65624,7 +65639,7 @@ export type SessionGoalResumeValidation = (
   tx: Database,
   session: Pick<
     Session,
-    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+    "id" | "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
   >,
   causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
 ) => Promise<void>;
@@ -65735,6 +65750,7 @@ export async function setSessionGoalStatus(
       await input.beforeResume(
         scopedDb,
         {
+          id: sessionId,
           accountId: session.accountId,
           workspaceId,
           model: effectiveSession!.model,
@@ -77040,8 +77056,12 @@ export type ApplySessionTurnSettlementInput = {
    * input after a bounded terminal condition.
    */
   suppressGoalContinuation?: boolean;
-  /** Pause an active goal atomically with a recoverable allowance stop. */
-  allowanceGoalPause?: { rationale: string };
+  /**
+   * Pause an active goal atomically with a recoverable non-failure stop: an
+   * allowance stop (default reason `allowance`) or a reached per-task usage
+   * limit (`session_usage_limit`).
+   */
+  allowanceGoalPause?: { rationale: string; reason?: "allowance" | "session_usage_limit" };
   events: AppendEventInput[];
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
@@ -78027,7 +78047,7 @@ export async function applySessionTurnSettlement(
           .update(schema.sessionGoals)
           .set({
             status: "paused",
-            pausedReason: "allowance",
+            pausedReason: input.allowanceGoalPause.reason ?? "allowance",
             rationale: input.allowanceGoalPause.rationale,
             continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
             version: sql`${schema.sessionGoals.version} + 1`,
@@ -78051,7 +78071,7 @@ export async function applySessionTurnSettlement(
             payload: {
               goalId: pausedGoal.id,
               actor: "system",
-              reason: "allowance",
+              reason: input.allowanceGoalPause.reason ?? "allowance",
               rationale: input.allowanceGoalPause.rationale,
               autoContinuations: pausedGoal.autoContinuations,
               noProgressStreak: pausedGoal.noProgressStreak,
@@ -86060,4 +86080,5 @@ export {
   SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
 } from "./subscription-core/serving-policy";
 export { readSubscriptionHistoryProvenance } from "./subscription-core/serving-runtime";
+export * from "./session-usage-limits";
 export * from "./boot-connect";

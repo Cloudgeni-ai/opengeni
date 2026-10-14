@@ -322,7 +322,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/privacy-settings ───────────
   // Open one macOS Privacy & Security pane on the connected Mac, so the person
-  // only flips the switch for OpenGeni. Opening a pane grants nothing.
+  // only flips the switch for Opengeni. Opening a pane grants nothing.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(

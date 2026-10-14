@@ -115,7 +115,7 @@ export function useConnectToken(workspaceId: string, choice: ConnectChoice) {
           setToken(null);
           setError(
             requested.scope === "user"
-              ? "This server can't connect a machine for you only yet. Choose This workspace, or ask an admin to update OpenGeni."
+              ? "This server can't connect a machine for you only yet. Choose This workspace, or ask an admin to update Opengeni."
               : "The command didn't match your choices. Try again.",
           );
           return;
@@ -291,7 +291,7 @@ function ConnectMachineBody({
       <DialogHeader>
         <DialogTitle>Connect a machine</DialogTitle>
         <DialogDescription>
-          Run one command on the computer you want to use. Existing OpenGeni connections on it stay
+          Run one command on the computer you want to use. Existing Opengeni connections on it stay
           as they are.
         </DialogDescription>
       </DialogHeader>

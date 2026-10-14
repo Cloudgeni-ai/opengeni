@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, spyOn, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
+import { SITE_FRAME_HEADER } from "@opengeni/contracts/site-session-http";
 import { ConnectAttemptConflictError, ConnectAttemptNotFoundError } from "@opengeni/db";
 import {
   apiRequestBodyLimitBytes,
@@ -590,6 +591,39 @@ describe("API helpers", () => {
     expect(externalResponse.headers.get("access-control-expose-headers")?.toLowerCase()).toContain(
       "x-opengeni-actor-state",
     );
+  });
+
+  test("allows every header a Site bridge sets on cross-origin preflights", async () => {
+    const app = createApp({
+      settings: testSettings({ productAccessMode: "managed" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    // The bridge marks every bridged request as framed, names the frame and pins the Site.
+    const bridgeHeaders = [
+      SITE_FRAME_HEADER,
+      "x-opengeni-site-frame-id",
+      "x-opengeni-site-id",
+      "x-opengeni-site-version",
+    ];
+    for (const origin of ["https://product.example", "http://localhost:5173"]) {
+      const preflight = await app.request(
+        "http://localhost/v1/workspaces/00000000-0000-4000-8000-000000000001/published-artifacts/current/data/query",
+        {
+          method: "OPTIONS",
+          headers: {
+            origin,
+            "access-control-request-method": "POST",
+            "access-control-request-headers": ["content-type", ...bridgeHeaders].join(","),
+          },
+        },
+      );
+      expect(preflight.status).toBe(204);
+      const allowed = preflight.headers.get("access-control-allow-headers")?.toLowerCase() ?? "";
+      for (const header of bridgeHeaders) expect(allowed).toContain(header);
+    }
   });
 
   test("normalizes dynamic route labels for metrics", () => {
@@ -2274,6 +2308,13 @@ describe("GET /v1/config/client", () => {
       config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID),
     ).not.toHaveProperty("source");
     expect(JSON.stringify(config)).not.toContain("openrouter-client-config-secret");
+  });
+
+  test("tells clients whether this deployment accepts connected machines", async () => {
+    const enabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: true }));
+    expect(enabled.connectedMachines).toBe(true);
+    const disabled = await fetchClientConfig(testSettings({ sandboxSelfhostedEnabled: false }));
+    expect(disabled.connectedMachines).toBe(false);
   });
 });
 

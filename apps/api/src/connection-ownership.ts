@@ -62,7 +62,7 @@ export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void 
  * The allow-list that actually decides is `principalKind === "human_session"`.
  * This list is defence-in-depth against exactly one residual threat: a holder
  * of the first-party delegation secret signing a human claim over an
- * OpenGeni-minted machine subject.
+ * Opengeni-minted machine subject.
  *
  * `connection-ownership.test.ts` asserts that every machine subject named in
  * its list is rejected. Note what that does and does not buy: it catches a
@@ -108,7 +108,7 @@ export function isPersonalConnectionOwnerPrincipal(access: AccessGrantAuthorizat
   );
 }
 
-/** Rejects an OpenGeni-minted machine subject; see the namespace list's rationale. */
+/** Rejects an Opengeni-minted machine subject; see the namespace list's rationale. */
 export function isPersonalConnectionOwnerSubject(subjectId: string): boolean {
   const separator = subjectId.indexOf(":");
   if (separator < 0) {

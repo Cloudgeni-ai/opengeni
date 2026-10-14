@@ -176,6 +176,13 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/events",
   ],
+  "test/integration/session-usage-limit-restart.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/integration/workspace-capture.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -414,6 +421,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/e2e/skill-review.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/session-skill-review.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/session-usage-limit.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
     "@opengeni/sdk",

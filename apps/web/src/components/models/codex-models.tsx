@@ -1,5 +1,5 @@
 import type { CodexAccount } from "@opengeni/sdk";
-import { SubscriptionAccountRow } from "./subscription-account-ui";
+import { EnableAccountRow, SubscriptionAccountRow } from "./subscription-account-ui";
 import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -57,7 +57,7 @@ import {
 } from "@/components/ui/setting-row";
 import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
-import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { UsageMeterGroup, UsageReadout, usageResets } from "@/components/ui/usage-meter";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
@@ -108,7 +108,7 @@ function limitReached(account: CodexAccount, now: number): boolean {
 /** A state that needs attention, in the one status language. A healthy account has none. */
 function attentionStatus(account: CodexAccount, now: number): ProductStatus | null {
   if (needsReconnect(account)) return "needs_reconnect";
-  if (!account.allocatorEnabled) return "paused";
+  if (!account.allocatorEnabled) return "disabled";
   if (limitReached(account, now)) return "out_of_usage";
   return null;
 }
@@ -964,7 +964,8 @@ function CodexRow({
   onOpen: () => void;
 }) {
   const live = codex.usageMap[account.id];
-  const weekly = codexUsageReadings(live?.usage, codex.now)[0]!;
+  const readings = codexUsageReadings(live?.usage, codex.now);
+  const weekly = readings[0]!;
   const status = attentionStatus(account, codex.now);
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const resets = codex.overviewMap[account.id]?.resetCredits.availableCount;
@@ -985,8 +986,8 @@ function CodexRow({
       ]}
       cells={{
         usage:
-          status === "needs_reconnect" ? null : status === "paused" ? (
-            <StatusBadge status="paused" variant="dot" />
+          status === "needs_reconnect" ? null : status === "disabled" ? (
+            <StatusBadge status="disabled" variant="dot" />
           ) : status === "out_of_usage" ? (
             <span className="text-xs font-medium text-danger">Out of usage</span>
           ) : (
@@ -994,7 +995,7 @@ function CodexRow({
               percent={loadingUsage ? null : weekly.percent}
               loading={loadingUsage}
               window="this week"
-              resetsLabel={weekly.resetsLabel}
+              resets={usageResets(readings, weekly.label)}
               fallback={
                 live?.status === "error" || (!live && codex.usageError)
                   ? "Usage unavailable"
@@ -1196,18 +1197,12 @@ function CodexAccountDetail({
         {canEdit ? (
           <DetailSection title="Settings">
             <SettingRowGroup className="-my-3">
-              <SettingRow
-                label="Use for new work"
-                description="When off, this account isn't picked for new chats or schedules. Work already running continues."
-                control={
-                  <Switch
-                    aria-label={`Use ${name} for new work`}
-                    checked={account.allocatorEnabled}
-                    pending={codex.working === `allocator:${account.id}`}
-                    disabled={codex.busy}
-                    onCheckedChange={(next) => void codex.setAllocator(account, next)}
-                  />
-                }
+              <EnableAccountRow
+                name={name}
+                checked={account.allocatorEnabled}
+                pending={codex.working === `allocator:${account.id}`}
+                disabled={codex.busy}
+                onCheckedChange={(next) => void codex.setAllocator(account, next)}
               />
               <SettingRow
                 label="Use extra credits"

@@ -96,13 +96,55 @@ export class SessionVisibilityWorkConflictError extends Error {
 
 export class SessionTenancyInvalidRequestError extends Error {
   readonly name = "SessionTenancyInvalidRequestError";
-  constructor(options?: ErrorOptions) {
+  constructor(
+    options?: ErrorOptions,
+    /** Why a message could not be used as a fork point, when that was the refusal. */
+    readonly forkPointRefusal: SessionForkPointRefusal | null = null,
+  ) {
     super("Session tenancy request is invalid", options);
   }
 }
 
+/** Why `fork_session_content` refused the selected message as a fork boundary. */
+export type SessionForkPointRefusal =
+  | "message_unavailable"
+  | "boundary_not_retained"
+  | "history_compacted"
+  | "unfinished_tool_exchange";
+
+// The fork routine raises these fixed messages (SQLSTATE 22023) for its
+// message-boundary checks. Only this exact vocabulary is recognized; any
+// other driver text stays an unspecific invalid request.
+const SESSION_FORK_POINT_REFUSALS: ReadonlyMap<string, SessionForkPointRefusal> = new Map([
+  ["The selected message is not available for forking", "message_unavailable"],
+  ["This message has no unambiguous retained conversation boundary", "boundary_not_retained"],
+  ["Forking at a message is unavailable after conversation compaction", "history_compacted"],
+  ["This message splits an unfinished tool exchange", "unfinished_tool_exchange"],
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object");
+}
+
+/** Extract only the fixed fork-boundary refusal vocabulary from a nested driver error. */
+export function nestedSessionForkPointRefusal(error: unknown): SessionForkPointRefusal | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+    if (typeof current.message === "string") {
+      const refusal = SESSION_FORK_POINT_REFUSALS.get(current.message);
+      if (refusal) return refusal;
+    }
+    for (const key of ["cause", "original", "driverError", "error", "errors"] as const) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return null;
 }
 
 /** Extract only the fixed quiescence DETAIL vocabulary, never arbitrary driver detail. */
@@ -347,7 +389,10 @@ function mapSessionTenancyPersistenceError(
     throw new SessionTenancyAccessError({ cause: error });
   }
   if (state === "22023") {
-    throw new SessionTenancyInvalidRequestError({ cause: error });
+    throw new SessionTenancyInvalidRequestError(
+      { cause: error },
+      nestedSessionForkPointRefusal(error),
+    );
   }
   throw error;
 }

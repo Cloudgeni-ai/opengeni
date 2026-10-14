@@ -119,7 +119,7 @@ provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 
 | Route                        | Enable                                        | Wire             | Catalog                                                           |
 | ---------------------------- | --------------------------------------------- | ---------------- | ----------------------------------------------------------------- |
-| OpenGeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, Opengeni credits                         |
+| Opengeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, Opengeni credits                         |
 | Workspace AI Gateway         | member connects a Gateway key in Settings     | Responses        | Same curated models plus optional workspace slugs, workspace-paid |
 | Deployment OpenRouter        | `OPENGENI_OPENROUTER_API_KEY`                 | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter)             |
 | Workspace OpenRouter         | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid                          |
@@ -611,7 +611,7 @@ ownership must stay explicit:
 - For deployment-managed paid Zen models, declare a separate `kind: "api-key"`
   provider (it may reuse the same base URL) with `apiKeyEnv` and reviewed model
   pricing/capabilities. The deployment owns the upstream account and Opengeni
-  meters those turns through the ordinary OpenGeni-credit path.
+  meters those turns through the ordinary Opengeni-credit path.
 - A workspace member connecting their own OpenCode key/account is not generic
   registry JSON. That requires a reviewed encrypted workspace-connection broker,
   readiness/re-auth UI, and `upstreamPayer: workspace` external billing—the same
@@ -631,7 +631,7 @@ Opper is a first-class reviewed provider, not a registry example; see
 
 ## Curated AI Gateway models
 
-`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
+`OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed Opengeni-credit
 models. They are siblings of the built-in GPT-5.6 family in the Opengeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
@@ -1118,7 +1118,7 @@ An agent-spawned child that omits `model`, `reasoningEffort`, or `latencyMode`
 inherits those fields from the exact worker-signed calling turn. Explicit child
 values still win. The fallback for legacy session-bound grants is the parent
 session, never the deployment default; consequently a Codex-subscription
-manager cannot silently spawn an OpenGeni-credit worker merely by omitting
+manager cannot silently spawn an Opengeni-credit worker merely by omitting
 `model`.
 
 Configuration fails loud when:

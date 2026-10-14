@@ -1196,7 +1196,7 @@ describe("Codex pool controls", () => {
 });
 
 describe("Codex account page", () => {
-  test("opens from the row, maps Use for new work to the allocator, and goes back", async () => {
+  test("opens from the row, maps Enable account to the allocator, and goes back", async () => {
     const view = await render();
     try {
       const row = view.container.querySelector<HTMLElement>("[data-row-action]")!;
@@ -1204,7 +1204,7 @@ describe("Codex account page", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
       const toggle = view.container.querySelector<HTMLButtonElement>(
-        'button[role="switch"][aria-label="Use Team plan for new work"]',
+        'button[role="switch"][aria-label="Enable Team plan"]',
       )!;
       expect(toggle.getAttribute("aria-checked")).toBe("true");
       await act(async () => toggle.click());
@@ -1289,7 +1289,7 @@ describe("Codex account page", () => {
       // No green "Connected", no "Organization" chip, no aside repeating the header.
       expect(text).not.toContain("Connected");
       expect(text).not.toContain("Belongs to");
-      expect(text).not.toContain("Use for new work");
+      expect(text).not.toContain("Enable account");
       expect(view.container.querySelector('button[role="switch"]')).toBeNull();
       expect(button(view.container, /Disconnect/)).toBeUndefined();
       expect(button(view.container, /Rename/)).toBeUndefined();
@@ -2096,6 +2096,36 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect-org:codex" }));
       await flush();
       expect(view.container.querySelector("h1")?.textContent).not.toBe("Connect Codex");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("SUB-OWN-09: a shared workspace's admin connects every provider for the workspace, Codex too", async () => {
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect provider");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Connect a subscription or an API key for everyone in Design preview.",
+      );
+      const rows = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].map(
+        (row) => row.textContent ?? "",
+      );
+      for (const provider of ["Codex", "SuperGrok", "Claude subscription", "OpenRouter"]) {
+        expect(rows.some((row) => row.includes(provider))).toBe(true);
+      }
+      // Codex signs in for this workspace, not for the organization.
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+      expect(view.container.textContent).toContain(
+        "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
+      );
+      expect(view.container.textContent).not.toContain("Which workspaces can use it");
     } finally {
       await cleanup(view);
     }

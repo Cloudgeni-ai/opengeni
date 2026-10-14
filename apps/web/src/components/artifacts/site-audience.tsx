@@ -64,7 +64,13 @@ export function useSiteAudience({
   /** The viewer owns the Site and may publish in this workspace. */
   ownedByCurrentUser: boolean;
   onChanged: (artifact: WorkspaceArtifact) => void;
-}): { chip: ReactNode; shareButton: ReactNode; dialog: ReactNode } {
+}): {
+  chip: ReactNode;
+  shareButton: ReactNode;
+  dialog: ReactNode;
+  /** Opens the Share with workspace confirmation, while the owner's Site is Only me. */
+  share: (() => void) | undefined;
+} {
   const audience: Audience = artifact.visibility === "private" ? "private" : "workspace";
   const onlyMe = audience === "private";
   const canLimitToMe = useCanLimitToMe(client, workspaceId, ownedByCurrentUser && !onlyMe);
@@ -215,5 +221,10 @@ export function useSiteAudience({
     />
   );
 
-  return { chip, shareButton, dialog };
+  return {
+    chip,
+    shareButton,
+    dialog,
+    share: ownedByCurrentUser && onlyMe ? () => setConfirming("workspace") : undefined,
+  };
 }

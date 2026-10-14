@@ -1,0 +1,65 @@
+---
+title: "Published Sites"
+description: "Give a Site its own web address for your workspace, invited people or everyone, with sign-in, guests, an embedded agent and limits you control."
+---
+
+Publishing gives a workspace Site its own address under your deployment's Sites domain, such as `team-crm-4k9x.opengeni.site`. The Site's HTML, tools, [Site Data](/guides/site-data) and embedded agent work there the same way they do in the console. Your organization pays for what visitors do, within the limits you set.
+
+## Publish a Site
+
+Open the Site and choose **Publish**. Pick an address (Opengeni suggests one and checks it as you type), who can open the Site, whether visitors can chat with its agent, the limits, and whether search engines may list it. Only the Site's owner and workspace admins can publish, and the Site must be shared with its workspace first.
+
+**Unpublish** takes the Site offline at once and keeps its address reserved for your workspace. Changing the address moves the Site; a released address stays held for 30 days.
+
+Agents can publish too, with the `site_publication_get`, `site_publication_update` and `site_hostname_check` tools.
+
+## Who can open it
+
+| Option               | Who                                             | Sign-in  |
+| -------------------- | ----------------------------------------------- | -------- |
+| Workspace members    | Members of the Site's workspace                 | Required |
+| Invited people       | Members, plus the email addresses you add       | Required |
+| Anyone with the link | Everyone; visitors who don't sign in are guests | Optional |
+
+Invited people sign in to Opengeni with the invited email. They don't join your organization and see nothing else in it.
+
+## Viewers in Site code
+
+```ts
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+const viewer = await site.viewer;
+if (viewer && !viewer.signedIn) signIn.onclick = () => site.auth.signIn();
+hello.textContent = viewer?.name ?? "Welcome";
+```
+
+`site.viewer` is `{ kind, id, name, email, signedIn }` with `kind` one of `member`, `invited`, `user` or `guest`. `id` is stable per Site and is the owner of the viewer's Site Data records. Guests have no name or email. `site.auth.signIn()` sends the visitor through Opengeni sign-in and back; the Site never sees a password or token.
+
+## Guests and Site Data
+
+Guests reach a collection only when its guest rule allows it: `none` (the default), `read`, `append` (add records and read their own) or `own` (add, read, change and delete their own). Ask Opengeni to set it when it defines the collection.
+
+## Limits
+
+| Profile   | Limits                                                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Free      | 10 conversations per visitor a day, 20 messages per conversation, agent spend of $0.02 per conversation, $0.20 per visitor a day and $2.00 a month |
+| Credits   | Higher limits paid from your organization's credits                                                                                                |
+| Unlimited | No budgets; flood brakes and a per-conversation cap still apply                                                                                    |
+| Custom    | Your own numbers                                                                                                                                   |
+
+Workspace admins set the default for new publications; each Site can override it. The Publish page shows this month's agent spend.
+
+## Reports and takedown
+
+Every published Site has a **Report** link. Reports appear in the **Reports** section of the Publish page and go to the abuse contact. The owner or a workspace admin can take a Site down at once with a reason; visitors then see a takedown notice until it is restored.
+
+## Keep Sites safe
+
+- A published Site is a public page: never put secrets or private data in its HTML.
+- Show viewer names, records and agent replies as text, never as HTML.
+
+## Self-hosting
+
+Publishing is off until `OPENGENI_SITES_DOMAIN` is set and the Sites gateway is deployed on that domain. See [Published Sites internals](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/published-sites.md) for settings, the management API and staging behavior.

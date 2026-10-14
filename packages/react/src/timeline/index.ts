@@ -45,6 +45,7 @@ export type {
   MessageSender,
   KnowledgeItem,
   NoticeItem,
+  SessionUsageLimitStop,
   ReasoningItem,
   SandboxItem,
   StartupPhase,

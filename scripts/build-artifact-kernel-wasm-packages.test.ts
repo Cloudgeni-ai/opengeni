@@ -131,12 +131,14 @@ test("regenerates exact version-bearing metadata for a fixed Changesets release"
 });
 
 test("version automation regenerates WASM identity without forcing peer dependents major", async () => {
-  const [rootPackageRaw, changesetConfigRaw, reactPackageRaw, ciWorkflow] = await Promise.all([
-    readFile(join(repoRoot, "package.json"), "utf8"),
-    readFile(join(repoRoot, ".changeset/config.json"), "utf8"),
-    readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
-    readFile(join(repoRoot, ".github/workflows/ci.yml"), "utf8"),
-  ]);
+  const [rootPackageRaw, changesetConfigRaw, reactPackageRaw, artifactToolPackageRaw, ciWorkflow] =
+    await Promise.all([
+      readFile(join(repoRoot, "package.json"), "utf8"),
+      readFile(join(repoRoot, ".changeset/config.json"), "utf8"),
+      readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
+      readFile(join(repoRoot, "packages/artifact-tool/package.json"), "utf8"),
+      readFile(join(repoRoot, ".github/workflows/ci.yml"), "utf8"),
+    ]);
   const rootPackage = JSON.parse(rootPackageRaw) as { scripts?: Record<string, string> };
   const changesetConfig = JSON.parse(changesetConfigRaw) as {
     ___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH?: {
@@ -146,18 +148,25 @@ test("version automation regenerates WASM identity without forcing peer dependen
   const reactPackage = JSON.parse(reactPackageRaw) as {
     peerDependencies?: Record<string, string>;
   };
+  const artifactToolMajor = (
+    JSON.parse(artifactToolPackageRaw) as { version: string }
+  ).version.split(".")[0];
 
   expect(rootPackage.scripts?.["changeset:version"]).toBe(
-    "changeset version && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
+    "changeset version && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities && bun scripts/public-api/refresh-sdk-major.ts",
   );
   expect(
     changesetConfig.___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH
       ?.onlyUpdatePeerDependentsWhenOutOfRange,
   ).toBe(true);
-  expect(reactPackage.peerDependencies?.["@opengeni/artifact-tool"]).toBe("^1.0.0");
+  // The peer range follows the lockstep major (a Version PR may legitimately
+  // cut a new major); it is never pinned to the exact current version.
+  expect(reactPackage.peerDependencies?.["@opengeni/artifact-tool"]).toBe(
+    `^${artifactToolMajor}.0.0`,
+  );
   expect(
     ciWorkflow.match(
-      /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/release\/lockstep-version\.ts\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities/gu,
+      /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/release\/lockstep-version\.ts\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities\n\s+bun scripts\/public-api\/refresh-sdk-major\.ts/gu,
     ),
   ).toHaveLength(2);
 });

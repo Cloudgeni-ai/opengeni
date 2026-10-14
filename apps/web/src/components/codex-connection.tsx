@@ -248,7 +248,9 @@ export function codexUsageReading(
   return {
     label,
     percent: Math.round(Math.min(100, Math.max(0, window.remaining))),
-    ...(reset ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
+    ...(reset
+      ? { resetsLabel: formatAbsoluteTime(reset, { now }), resetsAt: reset.getTime() }
+      : {}),
   };
 }
 
@@ -1048,8 +1050,8 @@ export function useCodexSubscriptions({
         await refreshAccounts();
         toast.success(
           enabled
-            ? `${codexAccountName(account)} is used for new work again`
-            : `${codexAccountName(account)} won't be used for new work`,
+            ? `${codexAccountName(account)} enabled`
+            : `${codexAccountName(account)} disabled`,
         );
       } catch (error) {
         await refreshAccounts();

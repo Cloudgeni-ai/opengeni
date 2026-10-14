@@ -13,6 +13,7 @@ import {
 } from "../src/activities/subscription-core-codex-waits";
 import { XAI_CORE_WAIT_BINDING } from "../src/activities/subscription-core-xai-waits";
 import * as xaiQuota from "../src/activities/subscription-core-xai-quota";
+import * as codexQuota from "../src/activities/subscription-core-codex-quota";
 
 const restores: Array<{ mockRestore(): void }> = [];
 function spy<T extends object, K extends keyof T>(target: T, key: K) {
@@ -604,9 +605,47 @@ describe("capacity activities accept both waiter shapes", () => {
     );
   });
 
-  test("only a provider whose billing read ends an exhaustion re-reads before reconcile", () => {
+  test("a provider whose usage read ends an exhaustion re-reads before reconcile", () => {
     expect(XAI_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeFunction();
-    expect(CODEX_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeUndefined();
+    expect(CODEX_CORE_WAIT_BINDING.refreshBeforeReconcile).toBeFunction();
+  });
+
+  test("a Codex core waiter re-reads usage under the parked turn's identity before its reconcile evaluates, at the woken revision", async () => {
+    const read = spy(db, "getSubscriptionCoreCodexCapacityWaitById")
+      .mockResolvedValueOnce(waiter)
+      .mockResolvedValueOnce({ ...waiter, wakeRevision: 6 });
+    outbox([]);
+    const refresh = spy(codexQuota, "refreshExhaustedCodexCoreQuota").mockResolvedValue(undefined);
+    spy(db, "readSubscriptionCoreTurnIdentity").mockResolvedValue(parkedTurn);
+    spy(db, "readSubscriptionCoreTurnModel").mockResolvedValue(null);
+    const reconcile = spy(db, "reconcileSubscriptionCoreCodexCapacityWait").mockResolvedValue({
+      action: "superseded",
+      events: [],
+    });
+    spy(events, "publishDurableSessionEvents").mockResolvedValue(undefined as never);
+    expect(
+      await activities().reconcileCodexCapacityWait({ ...xaiReconcile, provider: "codex" }),
+    ).toEqual({ action: "superseded" });
+    expect(refresh).toHaveBeenCalledWith({
+      db: {},
+      settings: {},
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      personalTurn: parkedTurn,
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(reconcile).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ evaluatedWakeRevision: 6, evaluation: { kind: "revoked" } }),
+    );
+
+    // A failed usage read never blocks the reconcile.
+    read.mockResolvedValue(waiter);
+    refresh.mockRejectedValue(new Error("usage unavailable"));
+    expect(
+      await activities().reconcileCodexCapacityWait({ ...xaiReconcile, provider: "codex" }),
+    ).toEqual({ action: "superseded" });
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 
   test("a core waiter of another provider never reconciles through the Claude binding", async () => {
@@ -752,7 +791,7 @@ describe("core waiter recheck schedule", () => {
     ).toEqual({ nextCheckAt: at(90_000), resetKind: "bounded_refresh" });
   });
 
-  test("any other provider sleeps until its reset, unchanged", () => {
+  test("a provider that does not recheck sleeps until its reset", () => {
     expect(
       db.subscriptionCoreCodexNextCheckAt({
         earliestResetAt: at(6 * 3_600_000),
@@ -761,7 +800,7 @@ describe("core waiter recheck schedule", () => {
         now,
       }),
     ).toEqual({ nextCheckAt: at(6 * 3_600_000), resetKind: "authoritative" });
-    expect(db.subscriptionCoreWaiterRechecksBeforeReset("codex")).toBe(false);
+    expect(db.subscriptionCoreWaiterRechecksBeforeReset("codex")).toBe(true);
     expect(db.subscriptionCoreWaiterRechecksBeforeReset("xai")).toBe(true);
     expect(db.subscriptionCoreWaiterRechecksBeforeReset("claude")).toBe(false);
   });

@@ -62,6 +62,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/model-picker-order",
       // The new-conversation controller imports only the voice model type.
       "@opengeni/sdk/realtime",
+      // The timeline's task usage-limit stop: a zod-free refusal leaf.
+      "@opengeni/sdk/session-usage-limits",
       "react",
     ]);
     expect(visited.size).toBeGreaterThan(5);

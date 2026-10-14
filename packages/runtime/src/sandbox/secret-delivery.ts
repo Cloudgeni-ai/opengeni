@@ -10,7 +10,7 @@
  * (never serialized) down to the provider call:
  *
  * - routing-session `execCommand` delivers them through an env file
- *   (`. file; rm -f file`) for managed backends whose exec OpenGeni does not
+ *   (`. file; rm -f file`) for managed backends whose exec Opengeni does not
  *   own;
  * - the selfhosted (connected machine) session delivers them natively in
  *   `ExecRequest.env` and splices in the machine's dialect.
@@ -553,7 +553,7 @@ function renderTokens(
 
 /**
  * `apply_patch` (Q-24): resolve references in every patch line except the
- * `*** …` header lines that name paths, at the OpenGeni wrapper just before
+ * `*** …` header lines that name paths, at the Opengeni wrapper just before
  * the editor writes. The model-facing patch (run state, spans) keeps the
  * references. Returns null when nothing changes (byte-identical fast path).
  */

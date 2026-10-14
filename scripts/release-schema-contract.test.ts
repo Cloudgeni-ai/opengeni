@@ -2325,6 +2325,13 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0783_site_sql.sql",
+      "0782_published_sites.sql",
+      "0781_session_usage_limit_statement_seed.sql",
+      "0780_only_me_vault_availability.sql",
+      "0779_provider_connection_home_workspace.sql",
+      "0777_workspace_admin_subscription_connections.sql",
+      "0776_site_data.sql",
       "0772_sandbox_ended_epoch_setup_uncertainties.sql",
       "0771_session_turn_setup_uncertainty_index.sql",
       "0770_attached_browser_connection_history.sql",
@@ -2789,6 +2796,9 @@ describe("release schema contract", () => {
       "0687_human_wait_command_containment.sql",
       "0736_notification_webhook_content.sql",
       "0739_vaults.sql",
+      "0773_session_usage_limits.sql",
+      "0774_session_usage_limit_attention_index.sql",
+      "0775_session_usage_limit_attention_cursor.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

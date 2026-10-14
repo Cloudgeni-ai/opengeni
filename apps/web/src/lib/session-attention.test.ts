@@ -70,6 +70,27 @@ describe("attention acknowledgment scheduling", () => {
     expect(sessionAttentionReadThroughSequence([event(6, "tool.auth_needed")])).toBe(6);
   });
 
+  test("a task usage-limit stop is actionable attention; other segment limits are not", () => {
+    expect(
+      sessionAttentionReadThroughSequence([
+        event(1, "agent.message.completed", { text: "Answer" }),
+        event(2, "turn.completed", {
+          output: "",
+          segmentLimit: "session_usage_limit",
+          sessionUsageLimit: { code: "session_usage_limit_reached" },
+        }),
+        event(3, "session.status.changed", { status: "idle" }),
+      ]),
+    ).toBe(2);
+    expect(
+      sessionAttentionReadThroughSequence([
+        event(1, "agent.message.completed", { text: "Answer" }),
+        event(2, "turn.completed", { output: "", segmentLimit: "budget_exhausted" }),
+        event(3, "turn.completed", { output: "", segmentLimit: "max_turns" }),
+      ]),
+    ).toBe(1);
+  });
+
   test("rejected and duplicate events cannot acknowledge new attention", () => {
     expect(
       sessionAttentionReadThroughSequence([

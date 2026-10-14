@@ -14,6 +14,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/allowance-refusal.ts",
+    "src/app-links.ts",
     "src/chat/index.ts",
     "src/tenant-workspaces.ts",
     "src/session-proxy.ts",
@@ -26,6 +27,7 @@ export default defineConfig({
     "src/core.ts",
     "src/browser.ts",
     "src/site.ts",
+    "src/site-bridge-host.ts",
     "src/site-document.ts",
     "src/github-repositories.ts",
     "src/document-authority.ts",
@@ -34,6 +36,7 @@ export default defineConfig({
     "src/session-history-import.ts",
     "src/session-list-entries.ts",
     "src/usage-allowances.ts",
+    "src/session-usage-limits.ts",
     "src/insights-usage.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
@@ -59,6 +62,7 @@ export default defineConfig({
   external: [/^@opengeni\//],
   noExternal: [
     "@opengeni/contracts/allowance-refusal",
+    "@opengeni/contracts/session-usage-limit-refusal",
     "@opengeni/contracts/browser-storage",
     "@opengeni/contracts/mcp-endpoint",
     "@opengeni/contracts/session-titles",

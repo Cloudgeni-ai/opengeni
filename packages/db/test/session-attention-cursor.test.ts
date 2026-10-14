@@ -72,6 +72,15 @@ test("the app-role attention cursor equals the indexed history predicate for eve
     { type: "turn.completed", payload: { output: "", result: "Ignored" } },
     { type: "turn.completed", payload: { output: "Maintenance", maintenance: false } },
     { type: "turn.completed", payload: { output: "Limit", segmentLimit: true } },
+    { type: "turn.completed", payload: { output: "", segmentLimit: "budget_exhausted" } },
+    { type: "turn.completed", payload: { output: "", segmentLimit: "max_turns" } },
+    // a task usage-limit stop is the one segment limit that needs a
+    // person (raise or clear the limit), so it advances attention.
+    {
+      type: "turn.completed",
+      payload: { output: "", segmentLimit: "session_usage_limit", sessionUsageLimit: {} },
+    },
+    { type: "session.status.changed", payload: { status: "idle" } },
     {
       type: "agent.model.usage",
       payload: {},

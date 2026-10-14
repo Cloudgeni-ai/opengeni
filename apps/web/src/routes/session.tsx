@@ -73,6 +73,18 @@ import {
 } from "@opengeni/react/session-ui";
 import type { SessionSearchRoute } from "@/lib/session-search-route";
 import { OPEN_CONVERSATION_FIND_EVENT } from "@/lib/conversation-find-event";
+import {
+  OPEN_SESSION_USAGE_LIMIT_EVENT,
+  goalPausedAtUsageLimit,
+  lineageHasRunningSession,
+  sessionUsageLimitCapability,
+  usageLimitRefusalFromState,
+  useSessionUsageLimit,
+} from "@/lib/session-usage-limit";
+import { SessionUsageLimitNotice } from "@opengeni/react/usage";
+import { isSessionUsageLimitSubmissionError } from "@opengeni/react";
+import { OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
+import { SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON } from "@opengeni/sdk/session-usage-limits";
 import { expireArtifactCatalog } from "@/lib/artifact-catalog-cache";
 import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
 import {
@@ -1186,16 +1198,34 @@ export function SessionRoute({
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
-  // Composer + > Chat settings opens the dock's Agent tab at its Agent learning.
+  // Composer + > Chat settings opens the dock's Agent tab at its Agent learning;
+  // the header menu and the usage limit notice open it at Usage limit.
   const agentSettingsRequestSeq = useRef(0);
   const [agentSettingsRequest, setAgentSettingsRequest] = useState<{
     sessionId: string;
     requestId: number;
+    target: "learning" | "usage-limit";
   } | null>(null);
   const openAgentSettings = useCallback(() => {
-    setAgentSettingsRequest({ sessionId, requestId: ++agentSettingsRequestSeq.current });
+    setAgentSettingsRequest({
+      sessionId,
+      requestId: ++agentSettingsRequestSeq.current,
+      target: "learning",
+    });
     setInspectorOpen(true);
   }, [sessionId, setInspectorOpen]);
+  const openUsageLimit = useCallback(() => {
+    setAgentSettingsRequest({
+      sessionId,
+      requestId: ++agentSettingsRequestSeq.current,
+      target: "usage-limit",
+    });
+    setInspectorOpen(true);
+  }, [sessionId, setInspectorOpen]);
+  useEffect(() => {
+    document.addEventListener(OPEN_SESSION_USAGE_LIMIT_EVENT, openUsageLimit);
+    return () => document.removeEventListener(OPEN_SESSION_USAGE_LIMIT_EVENT, openUsageLimit);
+  }, [openUsageLimit]);
   const openSandboxFile = useCallback(
     (path: string, line?: number) => {
       setSandboxFileRequest({
@@ -1320,6 +1350,8 @@ export function SessionRoute({
       onReloadSession={refreshSession}
       onOpenSandboxFile={openSandboxFile}
       onOpenAgentSettings={openAgentSettings}
+      onOpenUsageLimit={openUsageLimit}
+      connectionState={connectionState}
     />
   );
 
@@ -1415,8 +1447,8 @@ function SessionDock(props: {
     line?: number | null;
     requestId: number;
   } | null;
-  /** Open the Agent tab at its Agent learning section. A new requestId reopens it. */
-  openAgentSettingsRequest?: { requestId: number } | null;
+  /** Open the Agent tab at Agent learning or Usage limit. A new requestId reopens it. */
+  openAgentSettingsRequest?: { requestId: number; target: "learning" | "usage-limit" } | null;
 }) {
   const context = useAppContext();
   // One request sequence for every tab the host opens (an artifact, the Agent
@@ -1428,7 +1460,9 @@ function SessionDock(props: {
     requestId: number;
   } | null>(null);
   const agentSettingsRequestId = props.openAgentSettingsRequest?.requestId ?? null;
+  const agentSettingsTarget = props.openAgentSettingsRequest?.target ?? "learning";
   const [agentLearningFocus, setAgentLearningFocus] = useState(0);
+  const [usageLimitFocus, setUsageLimitFocus] = useState(0);
   useEffect(() => {
     if (agentSettingsRequestId === null) return;
     setTabRequest({
@@ -1436,8 +1470,11 @@ function SessionDock(props: {
       tab: "agent",
       requestId: ++tabRequestSeq.current,
     });
-    setAgentLearningFocus((value) => value + 1);
+    if (agentSettingsTarget === "usage-limit") setUsageLimitFocus((value) => value + 1);
+    else setAgentLearningFocus((value) => value + 1);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- the target travels with its request
   }, [agentSettingsRequestId, props.sessionId]);
+  const goalPausedAtLimit = useMemo(() => goalPausedAtUsageLimit(props.events), [props.events]);
   const currentTabRequest = tabRequest?.sessionId === props.sessionId ? tabRequest : null;
   const dockLayoutStorageId = sessionDockLayoutStorageId(
     context.accessContext.subjectId,
@@ -1585,6 +1622,8 @@ function SessionDock(props: {
             lastChange={lastAgentChange(props.events)}
             onReloadSession={props.onReloadSession}
             learningFocusRequest={agentLearningFocus}
+            usageLimitFocusRequest={usageLimitFocus}
+            goalPausedAtUsageLimit={goalPausedAtLimit}
           />
         </Suspense>
       ),
@@ -1828,6 +1867,9 @@ function SessionChatPane(props: {
   onOpenSandboxFile: (path: string, line?: number) => void;
   /** Composer + > Chat settings: open this chat's Agent tab. */
   onOpenAgentSettings: () => void;
+  /** The usage limit notice's Change limit: open the Agent tab at Usage limit. */
+  onOpenUsageLimit: () => void;
+  connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
 }) {
   const context = useAppContext();
   // Live voice starts only from the current build: a tab opened before a
@@ -2800,6 +2842,71 @@ function SessionChatPane(props: {
       failedMessageCount: failedOptimisticMessageCount,
     });
   }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
+
+  // The task's usage limit: one live read shared with the Agent tab, and the
+  // calm composer notice near and at the limit. Enforcement is server-side;
+  // this only keeps the view fresh.
+  const usageLimitCapability = sessionUsageLimitCapability(context.clientConfig);
+  const usageLimitTreeActive =
+    props.session.status === "running" || lineageHasRunningSession(props.agentNodes);
+  const usageLimit = useSessionUsageLimit({
+    client: context.client,
+    workspaceId: props.session.workspaceId,
+    sessionId: props.session.id,
+    initial: props.session.usageLimit,
+    enabled: usageLimitCapability !== "absent",
+    live: {
+      events: props.events,
+      active: usageLimitTreeActive,
+      watch: props.agentNodes.length > 0,
+      connectionState: props.connectionState,
+    },
+  });
+  // A Send refused at the limit keeps its message (as a failed bubble with
+  // Restore, never Retry). Reread the limit; until that answers, show reached.
+  const refusedUsageLimitSendIds = (optimisticMessages ?? [])
+    .filter(
+      (message) =>
+        message.state === "failed" &&
+        message.error !== undefined &&
+        !acceptedClientEventIds.has(message.clientEventId) &&
+        isSessionUsageLimitSubmissionError(new Error(message.error)),
+    )
+    .map((message) => message.clientEventId)
+    .join(",");
+  const composerUsageLimitError =
+    composer.error instanceof OpenGeniSessionUsageLimitReachedError ? composer.error : null;
+  const [usageLimitRefusalPending, setUsageLimitRefusalPending] = useState(false);
+  const refreshUsageLimit = usageLimit.refresh;
+  useEffect(() => {
+    if (!refusedUsageLimitSendIds && !composerUsageLimitError) return;
+    setUsageLimitRefusalPending(true);
+    void refreshUsageLimit().finally(() => setUsageLimitRefusalPending(false));
+  }, [composerUsageLimitError, refreshUsageLimit, refusedUsageLimitSendIds]);
+  const usageLimitRefusal = usageLimitRefusalFromState({
+    pending: usageLimitRefusalPending,
+    error: composerUsageLimitError,
+    usage: usageLimit.usage,
+  });
+  const usageLimitChild =
+    Boolean(props.session.parentSessionId) || usageLimit.usage?.inherited === true;
+  const usageLimitRootId = usageLimit.usage?.rootSessionId ?? null;
+  const usageLimitNotice =
+    usageLimitCapability !== "absent" && !terminal ? (
+      <SessionUsageLimitNotice
+        usage={usageLimit.usage}
+        stale={usageLimit.error !== null && usageLimit.usage !== null}
+        refusal={usageLimitRefusal}
+        onChangeLimit={!usageLimitChild && canControlSession ? props.onOpenUsageLimit : undefined}
+        mainTaskHref={
+          usageLimitChild && usageLimitRootId
+            ? `/workspaces/${props.session.workspaceId}/sessions/${usageLimitRootId}`
+            : undefined
+        }
+        goalPaused={props.goal.goal?.pausedReason === SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON}
+        dismissStorageKey={`opengeni:${props.session.workspaceId}`}
+      />
+    ) : null;
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
     return conversationTimeline(
       props.timeline,
@@ -3457,7 +3564,14 @@ function SessionChatPane(props: {
                     `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
                 }}
                 disabled={terminal}
-                header={unavailableModelNotice}
+                header={
+                  unavailableModelNotice || usageLimitNotice ? (
+                    <>
+                      {unavailableModelNotice}
+                      {usageLimitNotice}
+                    </>
+                  ) : null
+                }
                 commandContext={commandContext}
                 onClearView={props.onClearView}
                 fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}

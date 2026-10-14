@@ -196,6 +196,7 @@ import {
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
+  restoreDirectDeferredCallArgumentTypes,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import {
@@ -4854,6 +4855,11 @@ class DeferredPreparedMcpServer implements MCPServer {
     return target.unprefixedToolName(name);
   }
 
+  /** Only meaningful after listTools; an unprepared server owns no first-party tool. */
+  isFirstPartyCatalog(): boolean {
+    return this.preparedTarget?.isFirstPartyCatalog() ?? false;
+  }
+
   async callTool(
     toolName: string,
     args: Record<string, unknown> | null,
@@ -8353,6 +8359,11 @@ export class PrefixedMcpServer implements MCPServer {
     return this.unprefixToolName(toolName);
   }
 
+  /** True only for a verified first-party Opengeni server (deployment URL + reserved id). */
+  isFirstPartyCatalog(): boolean {
+    return this.firstPartyCatalog;
+  }
+
   hasCatalogCallPreflight(): boolean {
     return this.catalogCallPreflight !== undefined;
   }
@@ -8828,7 +8839,7 @@ export async function restoreInterruptedRunState(
   });
 }
 
-export const TURN_OPERATIONAL_NOTICE_PREFIX = "[OpenGeni turn-scoped operational notice]\n";
+export const TURN_OPERATIONAL_NOTICE_PREFIX = "[Opengeni turn-scoped operational notice]\n";
 
 export async function prepareRunInput(
   agent: Agent<any, any>,
@@ -8964,7 +8975,7 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
-  // OpenGeni-minted Codemode token renewal registration. Called only after the
+  // Opengeni-minted Codemode token renewal registration. Called only after the
   // initial token file reached the real sandbox session.
   onCodemodeTokenSessionReady?: (session: CodemodeTokenWriterSession) => Promise<void> | void;
   // Host-owned run material is seeded off-manifest before setup and every
@@ -9315,6 +9326,7 @@ async function runAgentStreamInternal(
     const resourceClient =
       fileDownloads.length > 0
         ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
+            sandboxBackend: agentActiveSandboxBackend.get(agent),
             ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
             ...(runAs ? { runAs } : {}),
             ...(overrides.turnToolCancellationFence
@@ -9480,6 +9492,7 @@ async function runAgentStreamInternal(
   const resourceClient =
     refreshedClient && fileDownloads.length > 0
       ? withSandboxFileDownloads(refreshedClient, fileDownloads, {
+          sandboxBackend: agentActiveSandboxBackend.get(agent),
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(runAs ? { runAs } : {}),
         })
@@ -9676,6 +9689,126 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   };
 }
 
+/** Catalog sources Opengeni itself serves (mirrors `toolFamilyForCatalogIdentity`). */
+const FIRST_PARTY_CATALOG_SOURCES: ReadonlySet<ToolCallCatalogIdentity["source"]> = new Set([
+  "opengeni",
+  "files",
+  "docs",
+  "interaction",
+]);
+
+type BareToolNameEntry = { modelName: string; bareName: string; firstParty: boolean };
+
+/** The bare catalog name behind each model-visible tool one server lists. */
+async function bareToolNameEntries(server: MCPServer): Promise<BareToolNameEntry[]> {
+  const tools = await server.listTools();
+  if (server instanceof PrefixedMcpServer) {
+    const firstParty = server.isFirstPartyCatalog();
+    return tools.map((tool) => ({
+      modelName: tool.name,
+      bareName: server.unprefixedToolName(tool.name),
+      firstParty,
+    }));
+  }
+  if (server instanceof DeferredPreparedMcpServer) {
+    const entries: BareToolNameEntry[] = [];
+    for (const tool of tools) {
+      entries.push({
+        modelName: tool.name,
+        bareName: await server.unprefixedToolName(tool.name),
+        firstParty: server.isFirstPartyCatalog(),
+      });
+    }
+    return entries;
+  }
+  if (server instanceof AttemptDefinitionMcpServer) {
+    return tools.map((tool) => {
+      const identity = server.toolCatalogIdentity(tool.name);
+      return {
+        modelName: tool.name,
+        bareName: identity?.identity.toolName ?? tool.name,
+        firstParty: identity !== undefined && FIRST_PARTY_CATALOG_SOURCES.has(identity.source),
+      };
+    });
+  }
+  // Unknown server shapes never own an alias, but still count as a collision.
+  return tools.map((tool) => {
+    const separator = tool.name.lastIndexOf("__");
+    return {
+      modelName: tool.name,
+      bareName: separator >= 0 ? tool.name.slice(separator + 2) : tool.name,
+      firstParty: false,
+    };
+  });
+}
+
+/**
+ * Claude sometimes calls a first-party tool by the bare name the agent
+ * instructions use (`command_wait` for `opengeni__command_wait`) and only
+ * reaches the tool after a "not found" round trip. Bind such a call when
+ * exactly one listed MCP tool, across every server, has that bare catalog
+ * name and a verified first-party server serves it. Any other server listing
+ * the same bare name leaves the call unresolved. The call is renamed to the
+ * canonical model-facing name before dispatch, so history, events, display,
+ * and approvals all see the tool that actually runs. Instructions stay
+ * provider-neutral and prompt-cache stable.
+ */
+async function resolveBareFirstPartyToolCall(
+  agent: Agent<any, any>,
+  input: { name: string; toolCall?: unknown },
+  resolveCurrent: ReturnType<typeof createResolveMissingFunctionTool> | null,
+) {
+  const call = input.toolCall;
+  if (
+    !call ||
+    typeof call !== "object" ||
+    (call as { type?: unknown }).type !== "function_call" ||
+    (call as { name?: unknown }).name !== input.name ||
+    (call as { namespace?: unknown }).namespace !== undefined ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(input.name) ||
+    input.name.includes("__")
+  ) {
+    return null;
+  }
+  const matches: BareToolNameEntry[] = [];
+  try {
+    for (const server of agent.mcpServers) {
+      for (const entry of await bareToolNameEntries(server)) {
+        if (entry.bareName === input.name) matches.push(entry);
+      }
+    }
+  } catch {
+    // Uniqueness cannot be proven without every catalog; keep the not-found result.
+    return null;
+  }
+  const [match] = matches;
+  if (matches.length !== 1 || !match?.firstParty || match.modelName === input.name) return null;
+  // With progressive disclosure the lazy runtime's authorized pool is the only
+  // source; otherwise the agent's own (policy-wrapped) MCP tool list is.
+  const listed = resolveCurrent
+    ? undefined
+    : (await agent.getMcpTools(new RunContext())).find(
+        (candidate) => candidate.type === "function" && candidate.name === match.modelName,
+      );
+  const tool = resolveCurrent
+    ? await resolveCurrent({ name: match.modelName })
+    : listed?.type === "function"
+      ? listed
+      : null;
+  if (!tool || tool.name !== match.modelName) return null;
+  const record = call as Record<string, unknown>;
+  record.name = match.modelName;
+  // An exact-name call to a search-disclosed tool gets its string-encoded
+  // values restored when the response arrives, before this resolver runs.
+  // Apply the same restoration now that the call carries the real name.
+  const runtime = lazyToolRuntimeForAgent(agent);
+  if (runtime) {
+    const restored = restoreDirectDeferredCallArgumentTypes(record, runtime);
+    if (restored !== record) record.arguments = restored.arguments;
+  }
+  return tool;
+}
+
 /** Old hashes are aliases only for an exact tool in the current authorized
  * catalog. Never recover tools from history, labels, URLs, or a different account. */
 function mcpToolResolverForAgent(agent: Agent<any, any>) {
@@ -9684,6 +9817,8 @@ function mcpToolResolverForAgent(agent: Agent<any, any>) {
   return async (input: { name: string; toolCall?: unknown }) => {
     const current = await resolveCurrent?.(input);
     if (current) return current;
+    const bare = await resolveBareFirstPartyToolCall(agent, input, resolveCurrent);
+    if (bare) return bare;
     if (!/^[a-f0-9]{64}$/.test(input.name)) return null;
     const tools = await agent.getMcpTools(new RunContext());
     let resolvedName: string | undefined;
@@ -10106,6 +10241,7 @@ export async function runOwnedSandboxSetup(
   // rig, credential, and Azure setup remain excluded above on selfhosted.
   if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
     const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+      sandboxBackend: agentActiveSandboxBackend.get(agent),
       ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
       ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
@@ -10137,7 +10273,7 @@ function mergePathGrants(
 export function withSandboxFileDownloads(
   client: SandboxClient,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
+  context: SandboxFileDownloadMaterializationContext = {},
 ): SandboxClient {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -10263,10 +10399,19 @@ export function withSandboxSessionReady(
   };
 }
 
+export type SandboxFileDownloadMaterializationContext = Pick<
+  SandboxLifecycleHookContext,
+  "onRuntimeEvent" | "runAs" | "commandRunner"
+> & {
+  /** The turn's effective sandbox backend. Only `selfhosted` (a Connected
+   * Machine) receives working-directory guidance on a failed staging command. */
+  sandboxBackend?: Settings["sandboxBackend"] | undefined;
+};
+
 export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
+  context: SandboxFileDownloadMaterializationContext = {},
 ): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -10324,7 +10469,10 @@ export async function materializeSandboxFileDownloads(
       });
     } catch (error) {
       if (error instanceof TurnSandboxCommandCancelledError) throw error;
-      const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
+      const failure = explainConnectedMachineRootDownloadFailure(
+        sandboxFileDownloadFailure(download, targetPath, error, result),
+        { sandboxBackend: context.sandboxBackend, workspaceRoot, targetRelativePath },
+      );
       failures.push(failure);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.failed",
@@ -10356,6 +10504,38 @@ function sandboxFileDownloadFailure(
     reason: error instanceof Error ? error.message : String(error),
     ...(exitCode !== null ? { exitCode } : {}),
     ...(output ? { output } : {}),
+  };
+}
+
+/**
+ * A Connected Machine session whose working directory is the filesystem root
+ * (an older macOS LaunchAgent started by launchd at `/`, persisted on the
+ * session at attach time) usually cannot stage Opengeni-owned files there: `/`
+ * is a read-only system volume on macOS and unwritable for ordinary users
+ * elsewhere. The raw command error tells neither the model nor the user what to
+ * do, so prepend conditional guidance. The condition is structural (effective
+ * backend + root), never a match on localized command output, so the wording
+ * stays conditional. The raw output and exit code are kept unchanged, and
+ * nothing is redirected to another host location: the cwd-relative
+ * `.opengeni/...` contract stays intact.
+ */
+function explainConnectedMachineRootDownloadFailure(
+  failure: SandboxFileDownloadFailure,
+  input: {
+    sandboxBackend: Settings["sandboxBackend"] | undefined;
+    workspaceRoot: string;
+    targetRelativePath: string;
+  },
+): SandboxFileDownloadFailure {
+  if (input.sandboxBackend !== "selfhosted") return failure;
+  if (posixPath.normalize(input.workspaceRoot) !== "/") return failure;
+  return {
+    ...failure,
+    reason: [
+      `The session's working directory is the filesystem root (/), which is often not writable (it is read-only on macOS), so staging the file at ${input.targetRelativePath} may have failed for that reason.`,
+      "This session keeps that folder; start a new session on this machine with a writable working folder (for example the home directory). An updated Opengeni agent defaults new sessions to the home directory.",
+      `Underlying error: ${failure.reason}`,
+    ].join(" "),
   };
 }
 
@@ -12145,8 +12325,30 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  repository_credential_source="${6:-connection}"',
   "  repository_git() {",
   '    if [ "$repository_credential_source" = provider ]; then',
+  // Only the worker-stamped provider configuration is eligible after the reset.
+  // Prepend in reverse order so Git sees the original helper chain, including
+  // empty entries that reset it. Values remain single argv elements, never eval.
+  '      if [ -n "${OPENGENI_PROVIDER_GIT_CONFIG_COUNT:-}" ]; then',
+  '        provider_config_count="${OPENGENI_PROVIDER_GIT_CONFIG_COUNT:-0}"',
+  '        case "$provider_config_count" in ""|*[!0-9]*) return 1 ;; esac',
+  '        [ "$provider_config_count" -le 129 ] || return 1',
+  '        while [ "$provider_config_count" -gt 0 ]; do',
+  "          provider_config_count=$((provider_config_count - 1))",
+  '          provider_config_key="$(printenv "GIT_CONFIG_KEY_$provider_config_count")" || return 1',
+  '          provider_config_key="$(printf "%s" "$provider_config_key" | tr "[:upper:]" "[:lower:]")"',
+  '          if [ "$provider_config_key" = credential.helper ]; then',
+  '            provider_config_value="$(printenv "GIT_CONFIG_VALUE_$provider_config_count" && printf .)" || return 1',
+  // printenv adds one newline; strip it plus the sentinel, not value newlines.
+  '            provider_config_value="${provider_config_value%?}"',
+  '            provider_config_value="${provider_config_value%?}"',
+  '            set -- -c "credential.helper=$provider_config_value" "$@"',
+  "          fi",
+  "        done",
+  '        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= "$@"',
+  "        return $?",
+  "      fi",
   '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
-  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ] || [ -n "${OPENGENI_PROVIDER_GIT_CONFIG_COUNT:-}" ]; then',
   // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
   // leaving its platform binding, broker route and askpass behavior intact.
   '      command git -c credential.helper= -c credential.helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper" "$@"',

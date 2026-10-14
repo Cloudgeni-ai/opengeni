@@ -180,6 +180,7 @@ const GOAL_PAUSED_REASON_SUFFIX: Record<string, string> = {
   usage_limit: "usage limit",
   usage_policy: "limits",
   allowance: "allowance",
+  session_usage_limit: "usage limit",
   user_pause: "manually",
   api: "manually",
   agent: "agent",
@@ -197,6 +198,7 @@ const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
   usage_limit: "Monthly agent run limit reached. Resume when the run limit allows.",
   usage_policy: "The application's usage policy blocks another run. Resume when it allows.",
   allowance: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
+  session_usage_limit: "Paused at the task's usage limit. Raise or remove the limit, then resume.",
   user_pause:
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
   api: "Paused manually by a person or an API call. Resume to let the goal continue on its own.",

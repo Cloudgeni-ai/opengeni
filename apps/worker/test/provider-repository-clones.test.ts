@@ -84,8 +84,9 @@ describe("provider credentials for repository resource clones", () => {
           '  target="$2"',
           '  uri=$("$OPENGENI_FIXTURE_GIT" -C "$target" remote get-url origin)',
           '  host="${uri#https://}"; host="${host%%/*}"',
+          '  path="${uri#https://*/}"',
           '  expected="${EXPECTED_PASSWORD:-}"',
-          '  credential=$(printf "protocol=https\\nhost=%s\\n\\n" "$host" | eval \'"$OPENGENI_FIXTURE_GIT" \' "$prefix credential fill" 2>/dev/null || :)',
+          '  credential=$(printf "protocol=https\\nhost=%s\\npath=%s\\n\\n" "$host" "$path" | eval \'"$OPENGENI_FIXTURE_GIT" \' "$prefix credential fill" 2>/dev/null || :)',
           '  if [ -n "$expected" ]; then',
           '    printf "%s\\n" "$credential" | grep -Fx "password=$expected" >/dev/null || { echo "credential mismatch" >&2; exit 1; }',
           '  elif printf "%s\\n" "$credential" | grep "^password=." >/dev/null; then',
@@ -209,7 +210,13 @@ describe("provider credentials for repository resource clones", () => {
         "",
       );
       await clone(
-        { ...repository, mountPath: "repos/explicit", connectionId: "explicit-connection" },
+        {
+          ...repository,
+          mountPath: "repos/explicit",
+          connectionId: "explicit-connection",
+          credentialBindingId: "explicit-connection",
+          provider: "github",
+        },
         "",
       );
       for (const [host, provider, tool, password] of [
@@ -243,6 +250,97 @@ describe("provider credentials for repository resource clones", () => {
         );
         expect((await providerCli.exec({ cmd: `${tool} --version` })).exitCode).toBe(0);
       }
+      // The authenticated provider's public files/environment seam is used by
+      // hosts with more than one installation on the same Git hostname.
+      async function provisionPaths(firstPassword: string, includeHostStore = false) {
+        const material = normalizeRunCredentialsResolution(
+          toRunCredentialsResolution(
+            {
+              status: "ok",
+              ...(includeHostStore
+                ? { git: [{ host: "gitlab.example.test", password: "host-store-fixture" }] }
+                : {}),
+              files: [
+                {
+                  path: "git/path-helper.sh",
+                  mode: "0400",
+                  content: [
+                    "#!/bin/sh",
+                    'test "$1" = get || exit 0',
+                    "protocol= host= path=",
+                    'while IFS="=" read -r key value; do',
+                    '  case "$key" in protocol) protocol=$value ;; host) host=$value ;; path) path=$value ;; esac',
+                    "done",
+                    'test "$protocol" = https || exit 0',
+                    'case "$host/$path" in',
+                    `github.com/acme/infra) printf "username=fixture\\npassword=${firstPassword}\\n" ;;`,
+                    'github.com/other/private) printf "username=fixture\\npassword=second-installation\\n" ;;',
+                    "esac",
+                  ].join("\n"),
+                },
+              ],
+              fileEnvironment: { HOST_PATH_GIT_HELPER: "git/path-helper.sh" },
+              environment: {
+                GIT_CONFIG_COUNT: "3",
+                GIT_CONFIG_KEY_0: "credential.helper",
+                GIT_CONFIG_VALUE_0: "",
+                GIT_CONFIG_KEY_1: "credential.useHttpPath",
+                GIT_CONFIG_VALUE_1: "true",
+                GIT_CONFIG_KEY_2: "Credential.Helper",
+                GIT_CONFIG_VALUE_2: '!sh "$HOST_PATH_GIT_HELPER"',
+              },
+            },
+            scope,
+          ),
+          scope,
+        )!;
+        await materializeRunCredentials(raw, material, {
+          sessionId: scope.sessionId,
+          attemptId: "attempt",
+          executionGeneration: 1,
+        });
+      }
+      await provisionPaths("first-installation");
+      await clone({ ...repository, mountPath: "repos/path-first" }, "first-installation");
+      await clone(
+        { ...repository, uri: "https://github.com/other/private", mountPath: "repos/path-second" },
+        "second-installation",
+      );
+      await clone(
+        { ...repository, uri: "https://github.com/other/unselected", mountPath: "repos/path-miss" },
+        "",
+      );
+      await clone(
+        {
+          ...repository,
+          uri: "https://github.com.evil.test/acme/infra",
+          mountPath: "repos/path-host-miss",
+        },
+        "",
+      );
+      await clone(
+        {
+          ...repository,
+          connectionId: "explicit-connection",
+          credentialBindingId: "explicit-connection",
+          provider: "github",
+          mountPath: "repos/path-explicit",
+        },
+        "",
+      );
+      await provisionPaths("renewed-installation");
+      await clone({ ...repository, mountPath: "repos/path-renewed" }, "renewed-installation");
+      await provisionPaths("mixed-installation", true);
+      await clone({ ...repository, mountPath: "repos/path-with-host-store" }, "mixed-installation");
+      await clone(
+        {
+          ...repository,
+          uri: "https://gitlab.example.test/acme/infra",
+          provider: "gitlab",
+          mountPath: "repos/host-with-path-helper",
+        },
+        "host-store-fixture",
+      );
       const noProvider = hostShellSession(root, {
         shell: "bash",
         env: {
@@ -250,6 +348,9 @@ describe("provider credentials for repository resource clones", () => {
           GIT_ASKPASS: join(root, "askpass"),
           OPENGENI_FIXTURE_GIT: realGit,
           OPENGENI_FIXTURE_CHMOD: realChmod,
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "credential.helper",
+          GIT_CONFIG_VALUE_0: '!printf "username=ambient\\npassword=must-not-leak\\n"',
         },
         rewriteCommand: (cmd) =>
           cmd.replaceAll("/workspace", root).replaceAll("/etc/profile.d", join(root, "profile.d")),

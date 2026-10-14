@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "1.4.4",
+  "version": "2.0.1",
   "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -26,6 +26,10 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./app-links": {
+      "types": "./src/app-links.ts",
+      "default": "./src/app-links.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -46,6 +50,10 @@
       "types": "./src/site.ts",
       "default": "./src/site.ts"
     },
+    "./site-bridge-host": {
+      "types": "./src/site-bridge-host.ts",
+      "default": "./src/site-bridge-host.ts"
+    },
     "./github-repositories": {
       "types": "./src/github-repositories.ts",
       "default": "./src/github-repositories.ts"
@@ -57,6 +65,10 @@
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
+    },
+    "./session-usage-limits": {
+      "types": "./src/session-usage-limits.ts",
+      "default": "./src/session-usage-limits.ts"
     },
     "./insights-usage": {
       "types": "./src/insights-usage.ts",

@@ -682,7 +682,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(await resets.getByText(/available again\./).count()).toBe(1);
     expect(await page.getByRole("button", { name: /^Redeem / }).count()).toBe(1);
     const aria = await detailed.ariaSnapshot();
-    expect(aria).toContain('switch "Use Detailed account for new work"');
+    expect(aria).toContain('switch "Enable Detailed account"');
     expect(aria).toContain('button "Redeem Full reset"');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -750,11 +750,8 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await mobileRedeem.waitFor({ timeout: 20_000 });
     expect((await mobileRedeem.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     expect(
-      (
-        await mobileDetailed
-          .getByRole("switch", { name: "Use Detailed account for new work" })
-          .boundingBox()
-      )?.height ?? 0,
+      (await mobileDetailed.getByRole("switch", { name: "Enable Detailed account" }).boundingBox())
+        ?.height ?? 0,
     ).toBeGreaterThan(0);
     expect(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -788,7 +785,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await backToModels(page);
     const detailedAgain = await openCodexAccount(page, "Detailed account");
     const allocator = detailedAgain.getByRole("switch", {
-      name: "Use Detailed account for new work",
+      name: "Enable Detailed account",
     });
     await allocator.click();
     await waitFor(async () => (await allocator.getAttribute("aria-checked")) === "false", {
@@ -863,7 +860,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // Redemption never touched the allocator choice made earlier.
     expect(
       await recoveryDetailed
-        .getByRole("switch", { name: "Use Detailed account for new work" })
+        .getByRole("switch", { name: "Enable Detailed account" })
         .getAttribute("aria-checked"),
     ).toBe("false");
     expect(

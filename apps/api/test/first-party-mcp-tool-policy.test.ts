@@ -123,7 +123,12 @@ function broadServerTools(tools: readonly FirstPartyMcpToolName[]): FirstPartyMc
 
 function deps(): ApiRouteDeps {
   return {
-    settings: testSettings({ sandboxSelfhostedEnabled: true }),
+    // A configured Site SQL gateway, so the complete default catalog registers.
+    settings: testSettings({
+      sandboxSelfhostedEnabled: true,
+      sitesGatewayInternalOrigin: "https://internal.sites.test",
+      sitesGatewaySecret: "site-sql-gateway-secret-0123456789abcdef",
+    }),
     db: {},
     bus: new MemoryEventBus(),
     workflowClient: {},
@@ -682,6 +687,23 @@ describe("first-party MCP tool visibility policy", () => {
     disabledDeps.settings = testSettings({ workClaimMutationsEnabled: false });
     const disabled = buildOpenGeniMcpServer(disabledDeps, grant(["sessions:control"], selected));
     expect(registeredToolNames(disabled)).toEqual([]);
+  });
+
+  test("Site SQL tools are offered only where a Site SQL gateway is configured", () => {
+    const selected: FirstPartyMcpToolName[] = ["site_sql_inspect", "site_sql_export"];
+    const configured = buildOpenGeniMcpServer(
+      deps(),
+      grant(["artifacts:read", "artifacts:publish"], selected),
+    );
+    expect(registeredToolNames(configured)).toEqual([...selected].sort());
+
+    const bare = deps();
+    bare.settings = testSettings({ sandboxSelfhostedEnabled: true });
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(bare, grant(["artifacts:read", "artifacts:publish"], selected)),
+      ),
+    ).toEqual([]);
   });
 
   test("operator-disabled MCP relevance discovery fails before storage", async () => {

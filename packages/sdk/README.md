@@ -25,6 +25,21 @@ bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
+## Task usage limits
+
+`createSession(workspaceId, { initialMessage, usageLimitMicros })` sets an
+optional API-equivalent model-usage limit on a new root task;
+`getSessionUsageLimit` and `setSessionUsageLimit` (compare-and-set on
+`expectedVersion`, idempotent on `operationId`, `limitMicros: null` clears)
+read and change it. Both writes verify the server's echo and throw when a
+server that predates usage limits would otherwise run the task unlimited. A
+refused message raises `OpenGeniSessionUsageLimitReachedError` (HTTP 402
+`session_usage_limit_reached`), never the allowance error. The browser-safe
+`@opengeni/sdk/session-usage-limits` subpath exports the free functions, the
+refusal parser and neutral wording. The session proxy never forwards limits
+from a browser; set them from your server. See
+[task usage limits](../../docs/session-usage-limits.md).
+
 ## Allowance lifecycle recovery
 
 `getWorkspaceAllowance(workspaceId)` still returns nullable configuration.

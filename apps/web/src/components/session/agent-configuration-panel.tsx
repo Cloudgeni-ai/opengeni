@@ -36,6 +36,7 @@ import { Field, TextArea } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { KeepActiveSetting, sessionReadOnlyArchive } from "@/components/session/session-retention";
+import { SessionUsageLimitSection } from "@/components/session/session-usage-limit-section";
 import { useAppContext } from "@/context";
 import {
   AGENT_CAPABILITY_GROUPS,
@@ -53,6 +54,7 @@ import {
 import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { sessionUsageLimitCapability } from "@/lib/session-usage-limit";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 import { apiErrorFacts } from "@/lib/api-error";
@@ -74,6 +76,10 @@ export function AgentConfigurationPanel(props: {
   onReloadSession: () => Promise<void>;
   /** A new value (composer + > Chat settings) scrolls to Agent learning and focuses it. */
   learningFocusRequest?: number;
+  /** A new value (header menu, usage limit notice) opens the usage limit editor. */
+  usageLimitFocusRequest?: number;
+  /** The goal is paused at the usage limit (raising it doesn't resume). */
+  goalPausedAtUsageLimit?: boolean;
 }) {
   const { session } = props;
   const context = useAppContext();
@@ -221,6 +227,14 @@ export function AgentConfigurationPanel(props: {
     });
     return () => cancelAnimationFrame(frame);
   }, [focusRequest, canEdit]);
+  // The usage limit lives in the read view: leave capability editing for it,
+  // unless that would drop unsaved capability changes.
+  const usageLimitFocusRequest = props.usageLimitFocusRequest ?? 0;
+  useEffect(() => {
+    if (usageLimitFocusRequest && !dirty) setEditing(false);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- once per request
+  }, [usageLimitFocusRequest]);
+  const usageLimitsOffered = sessionUsageLimitCapability(context.clientConfig) !== "absent";
 
   return (
     <div
@@ -365,6 +379,15 @@ export function AgentConfigurationPanel(props: {
                     session={session}
                     idleDays={context.clientConfig.sessionArchive.idleDays}
                     onSaved={props.onReloadSession}
+                  />
+                </PanelSection>
+              ) : null}
+              {usageLimitsOffered ? (
+                <PanelSection id={`${sectionId}-usage`} title="Usage">
+                  <SessionUsageLimitSection
+                    session={session}
+                    focusRequest={usageLimitFocusRequest}
+                    goalPausedAtLimit={props.goalPausedAtUsageLimit}
                   />
                 </PanelSection>
               ) : null}

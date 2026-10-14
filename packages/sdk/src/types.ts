@@ -1,4 +1,12 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+import type { SessionUsageLimit } from "@opengeni/contracts/session-usage-limits";
+export type {
+  SessionUsageLimit,
+  SessionUsageLimitHistory,
+  SessionUsageLimitReachedRefusal,
+  SessionUsageLimitStatus,
+  SetSessionUsageLimitRequest,
+} from "@opengeni/contracts/session-usage-limits";
 export type {
   InsightsUsageRange,
   InsightsUsageGroupBy,
@@ -1456,7 +1464,7 @@ export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
 
 export type TurnInitiatorContext = Record<string, unknown>;
 
-/** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
+/** Bounded host provenance; Opengeni-owned lineage keys are reserved. */
 export type ServiceTurnInitiatorContext = TurnInitiatorContext;
 
 export type IntegrationClientMetadata = {
@@ -1719,6 +1727,12 @@ export type Session = {
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
   rootSessionId: string;
+  /**
+   * The task root's usage limit and recorded API-equivalent model usage, on
+   * detail reads and create responses. Omitted by older servers and list
+   * reads: omission never means "no limit".
+   */
+  usageLimit?: SessionUsageLimit | undefined;
   nestedAgentDepth: number;
   maxNestedAgentDepthOverride: number | null;
   effectiveMaxNestedAgentDepth: number;
@@ -2429,6 +2443,8 @@ export const SESSION_EVENT_TYPES = [
   "session.agent.updated",
   "session.skills.updated",
   "session.model_settings.updated",
+  // An authorized person or host changed the task root's usage limit.
+  "session.usage_limit.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "subscription.account.selected",
@@ -3528,12 +3544,27 @@ export type CreateSessionRequest = {
   // projection before Opengeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
+  /**
+   * Optional usage limit for a new root task in USD micros of API-equivalent
+   * model usage (null/omitted: no limit; 0: stop before the first model
+   * request). Person or trusted host only. `OpenGeniClient.createSession`
+   * sends a limited create with `startMode: "standard"`, which servers that
+   * predate usage limits reject before creating or starting anything; it then
+   * throws `OpenGeniSessionUsageLimitUnsupportedError`, as it does for a
+   * response that does not echo the requested limit.
+   */
+  usageLimitMicros?: number | null | undefined;
   visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
-  /** Create an idle session shell so realtime voice can be the first interaction. */
-  startMode?: "realtime" | undefined;
+  /**
+   * `realtime` creates an idle session shell so realtime voice can be the
+   * first interaction. `standard` is the explicit default; `createSession`
+   * sends it with a usage limit so servers that predate limits reject the
+   * create instead of starting uncapped work.
+   */
+  startMode?: "realtime" | "standard" | undefined;
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
@@ -3868,6 +3899,29 @@ export type FirstPartyMcpToolName =
   | "artifacts_rollback"
   | "artifacts_archive"
   | "artifacts_restore"
+  | "site_data_describe"
+  | "site_data_define_collection"
+  | "site_data_query"
+  | "site_data_write"
+  | "site_data_import"
+  | "site_data_export"
+  | "site_data_reset"
+  | "site_files_list"
+  | "site_files_upload"
+  | "site_files_delete"
+  | "site_publication_get"
+  | "site_publication_update"
+  | "site_hostname_check"
+  | "site_sql_inspect"
+  | "site_sql_enable"
+  | "site_sql_migrate"
+  | "site_sql_define_query"
+  | "site_sql_query"
+  | "site_sql_run"
+  | "site_sql_execute"
+  | "site_sql_export"
+  | "site_sql_import"
+  | "site_sql_reset"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -4973,6 +5027,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Whether people can connect their own computers; absent on older servers. */
+  connectedMachines?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -5048,6 +5104,12 @@ export type ClientConfig = {
    * without activity a session (unless kept live) becomes read-only.
    */
   sessionArchive?: { enabled: true; idleDays: number } | undefined;
+  /**
+   * Present when the server records and enforces per-task usage limits.
+   * `enabled: false` refuses new limits but still enforces and clears existing
+   * ones. Omitted by older servers, which ignore `usageLimitMicros`.
+   */
+  sessionUsageLimits?: { enabled: boolean } | undefined;
   /** Agent configuration rollout and per-capability availability. */
   agentConfig?: ClientAgentConfig | undefined;
   productAccessMode: ProductAccessMode;
@@ -6247,7 +6309,7 @@ export type MemberNotificationsSetting = {
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
-export type NativeAppPlatform = "ios" | "android";
+export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux";
 
 export type NativeAppAuthorizeInput = {
   /** Exactly `<registered scheme>://auth/callback`. */
@@ -9024,7 +9086,7 @@ export type GitHubInstallationBinding = {
   lifecycle: GitHubInstallationLifecycle;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
-  /** OpenGeni-owned entry point for changing the installation's repository allowlist. */
+  /** Opengeni-owned entry point for changing the installation's repository allowlist. */
   configureUrl: string | null;
   createdAt: string;
   updatedAt: string;
