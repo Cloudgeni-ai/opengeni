@@ -182,14 +182,16 @@ The abuse contact shown to visitors is `OPENGENI_SITES_ABUSE_EMAIL`, or
 The owner or a workspace admin can **take down** a Site at once with a
 reason: the API stops serving it immediately, its viewers are signed out,
 its running conversations are cancelled, the edge cache is purged and an
-audit event is recorded. **Restore** brings it back; only a workspace admin
-restores an admin's takedown. While a Site is taken down its hostname can't
-be changed. The operator takes any Site down with
-`bun scripts/operator/site-takedown.ts` (by hostname, label or `--site-id`);
-only the operator restores those, and the hostname stays held for the
-platform even if the Site or its workspace is deleted (`--release-hold`
-frees it). An optional content scanner (Google Web Risk) checks new versions
-when a key is configured.
+audit event is recorded. New page loads stop within a minute, and every edge
+location shows the takedown notice within about two minutes (see
+[the gateway's takedown latency](../apps/site-gateway/README.md#caching-and-takedown-latency)).
+**Restore** brings it back; only a workspace admin restores an admin's
+takedown. While a Site is taken down its hostname can't be changed. The
+operator takes any Site down with `bun scripts/operator/site-takedown.ts` (by
+hostname, label or `--site-id`); only the operator restores those, and the
+hostname stays held for the platform even if the Site or its workspace is
+deleted (`--release-hold` frees it). An optional content scanner (Google Web
+Risk) checks new versions when a key is configured.
 
 ## Staging and self-hosting
 

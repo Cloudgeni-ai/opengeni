@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyApiRequest, rateLimitKey, readBodyCapped } from "../src/api";
+import { classifyApiRequest, rateLimitKeys, readBodyCapped } from "../src/api";
 import { gatewayConfig, GatewayConfigError } from "../src/env";
 import { safeReturnPath } from "../src/return-path";
 import { isSameOriginRequest } from "../src/site-context";
@@ -47,13 +47,13 @@ describe("Site API routing", () => {
       expect(classifyApiRequest(method, path)).toBeNull();
   });
 
-  test("rate-limit keys prefer the verified visitor", () => {
-    expect(rateLimitKey({ hostname: "a-site.x.test", visitor: "v", clientIp: "1.2.3.4" })).toBe(
-      "v:a-site.x.test:v",
+  test("rate limits always key the client IP, and the visitor too when known", () => {
+    expect(rateLimitKeys({ hostname: "a-site.x.test", visitor: "v", clientIp: "1.2.3.4" })).toEqual(
+      ["api:ip:a-site.x.test:1.2.3.4", "api:v:a-site.x.test:v"],
     );
-    expect(rateLimitKey({ hostname: "a-site.x.test", visitor: null, clientIp: "1.2.3.4" })).toBe(
-      "ip:a-site.x.test:1.2.3.4",
-    );
+    expect(
+      rateLimitKeys({ hostname: "a-site.x.test", visitor: null, clientIp: "1.2.3.4" }, "report"),
+    ).toEqual(["report:ip:a-site.x.test:1.2.3.4"]);
   });
 
   test("bodies are capped", async () => {

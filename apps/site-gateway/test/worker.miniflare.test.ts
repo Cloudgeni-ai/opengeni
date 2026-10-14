@@ -20,7 +20,8 @@ import {
 import { Miniflare } from "miniflare";
 import { TEST_SECRET, verifyGatewaySignature } from "./helpers";
 
-const API_PORT = 18790;
+/** The fake API listens on an ephemeral port unless one is configured. */
+const API_PORT = Number(process.env.SITE_GATEWAY_TEST_API_PORT ?? 0);
 const DOMAIN = "sites.test";
 const VERSION = "11111111-1111-4111-8111-111111111111";
 const OLD_VERSION = "22222222-2222-4222-8222-222222222222";
@@ -184,6 +185,9 @@ async function hostMap(): Promise<TestKv> {
   return (await mf!.getKVNamespace("HOST_MAP")) as unknown as TestKv;
 }
 
+/** What a browser sends when the shell's iframe loads Site HTML. */
+const FRAME = { "sec-fetch-dest": "iframe" };
+
 function siteUrl(label: string, path: string): string {
   return `https://${label}.${DOMAIN}${path}`;
 }
@@ -258,7 +262,7 @@ async function startWorkerFrom(buildDir: string): Promise<void> {
     compatibilityDate: "2026-07-01",
     bindings: {
       SITES_DOMAIN: DOMAIN,
-      API_ORIGIN: `http://127.0.0.1:${API_PORT}`,
+      API_ORIGIN: `http://127.0.0.1:${server!.port}`,
       APP_ORIGIN: "https://app.test",
       GATEWAY_SECRET: TEST_SECRET,
       ENVIRONMENT: "production",
@@ -438,19 +442,43 @@ describe("site gateway in workerd", () => {
 
     // Members HTML is private and only after the access check.
     const frame = await get("team", `/_og/v/${VERSION}`, {
-      headers: { cookie: `${visitor}; __Host-og_session=${SESSION}` },
+      headers: { ...FRAME, cookie: `${visitor}; __Host-og_session=${SESSION}` },
     });
     expect(frame.status).toBe(200);
-    expect(frame.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+    expect(frame.headers.get("cache-control")).toBe("private, no-cache");
     await frame.text();
-    const anonymousFrame = await get("team", `/_og/v/${VERSION}`);
+    const anonymousFrame = await get("team", `/_og/v/${VERSION}`, { headers: FRAME });
     expect(anonymousFrame.status).toBe(401);
     expect(await anonymousFrame.text()).not.toContain("Hello Site");
 
-    const logout = await get("team", "/_og/auth/logout", {
+    // GET only asks; a link or an image can't sign anyone out.
+    const logoutCalls = received.filter((entry) => entry.path.endsWith("/auth/logout")).length;
+    const confirm = await get("team", "/_og/auth/logout?return=%2Freports", {
       headers: { cookie: `${visitor}; __Host-og_session=${SESSION}` },
     });
+    expect(confirm.status).toBe(200);
+    expect(setCookies(confirm)).toEqual([]);
+    expect(await confirm.text()).toContain(
+      '<form method="post" action="/_og/auth/logout?return=%2Freports">',
+    );
+    expect(received.filter((entry) => entry.path.endsWith("/auth/logout")).length).toBe(
+      logoutCalls,
+    );
+    const crossSiteLogout = await get("team", "/_og/auth/logout", {
+      method: "POST",
+      headers: { origin: "https://evil.test", cookie: `__Host-og_session=${SESSION}` },
+    });
+    expect(crossSiteLogout.status).toBe(403);
+    await crossSiteLogout.text();
+    const logout = await get("team", "/_og/auth/logout?return=%2Freports", {
+      method: "POST",
+      headers: {
+        origin: `https://team.${DOMAIN}`,
+        cookie: `${visitor}; __Host-og_session=${SESSION}`,
+      },
+    });
     expect(logout.status).toBe(303);
+    expect(logout.headers.get("location")).toBe(`https://team.${DOMAIN}/reports`);
     expect(
       setCookies(logout).some((cookie) => /^__Host-og_session=;.*Max-Age=0/u.test(cookie)),
     ).toBe(true);
@@ -465,21 +493,33 @@ describe("site gateway in workerd", () => {
     expect(await response.text()).not.toContain("/_og/v/");
   });
 
-  test("version HTML is cached at the edge with immutable headers and the Site CSP", async () => {
+  test("version HTML loads only in the frame, revalidates with an ETag and is edge-cached", async () => {
     const before = htmlFetches;
-    const first = await get("cache", `/_og/v/${VERSION}`);
+    // A top-level navigation (or no Fetch Metadata at all) goes back to the shell.
+    for (const headers of [{ "sec-fetch-dest": "document" }, {}]) {
+      const direct = await get("cache", `/_og/v/${VERSION}`, { headers });
+      expect(direct.status).toBe(302);
+      expect(direct.headers.get("location")).toBe("/");
+      expect(await direct.text()).toBe("");
+    }
+    expect(htmlFetches).toBe(before);
+
+    const first = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
     expect(first.status).toBe(200);
     expect(first.headers.get("x-opengeni-site-cache")).toBe("MISS");
     const html = await first.text();
     expect(html).toContain("Hello Site");
     expect(html).toContain("__opengeniSiteBridgeBootstrapV2");
-    expect(first.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(first.headers.get("cache-control")).toBe("private, no-cache");
+    expect(first.headers.get("vary")).toBe("Sec-Fetch-Dest");
+    const etag = first.headers.get("etag")!;
+    expect(etag).toMatch(/^"[0-9a-f]{32}"$/u);
     const csp = first.headers.get("content-security-policy") ?? "";
     expect(csp).toContain("sandbox allow-scripts");
     expect(csp).not.toContain("allow-same-origin");
     expect(csp).toContain("frame-ancestors 'self'");
     expect(first.headers.get("x-frame-options")).toBe("SAMEORIGIN");
-    let second = await get("cache", `/_og/v/${VERSION}`);
+    let second = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
     for (
       let attempt = 0;
       attempt < 20 && second.headers.get("x-opengeni-site-cache") !== "HIT";
@@ -487,19 +527,47 @@ describe("site gateway in workerd", () => {
     ) {
       await second.text();
       await Bun.sleep(50);
-      second = await get("cache", `/_og/v/${VERSION}`);
+      second = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
     }
     expect(second.headers.get("x-opengeni-site-cache")).toBe("HIT");
+    expect(second.headers.get("etag")).toBe(etag);
     expect(await second.text()).toBe(html);
-    expect(htmlFetches - before).toBeLessThanOrEqual(1 + 20);
     const settled = htmlFetches;
-    const third = await get("cache", `/_og/v/${VERSION}`);
-    await third.text();
+    const revalidated = await get("cache", `/_og/v/${VERSION}`, {
+      headers: { ...FRAME, "if-none-match": etag },
+    });
+    expect(revalidated.status).toBe(304);
+    expect(await revalidated.text()).toBe("");
     expect(htmlFetches).toBe(settled);
-    const bad = await get("cache", "/_og/v/not-a-version");
+    const bad = await get("cache", "/_og/v/not-a-version", { headers: FRAME });
     expect(bad.status).toBe(404);
     await bad.text();
     expect(htmlFetches).toBe(settled);
+  });
+
+  test("a new host-map generation bypasses cached HTML, and a takedown applies at once", async () => {
+    const kv = await hostMap();
+    const key = siteHostMapKey(`cache.${DOMAIN}`);
+    const cached = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
+    expect(cached.headers.get("x-opengeni-site-cache")).toBe("HIT");
+    await cached.text();
+    const base = record("cache", { siteId: "44444444-4444-4444-8444-444444444444" });
+    await kv.put(key, JSON.stringify({ ...base, generation: 2 }));
+    const fresh = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
+    expect(fresh.status).toBe(200);
+    expect(fresh.headers.get("x-opengeni-site-cache")).toBe("MISS");
+    await fresh.text();
+    await kv.put(key, JSON.stringify({ ...base, status: "suspended", generation: 3 }));
+    const gone = await get("cache", `/_og/v/${VERSION}`, { headers: FRAME });
+    expect(gone.status).toBe(410);
+    expect(await gone.text()).not.toContain("Hello Site");
+  });
+
+  test("a trailing-dot host redirects to the canonical host", async () => {
+    const response = await dispatch(`https://pub.${DOMAIN}./reports?x=1`);
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe(`https://pub.${DOMAIN}/reports?x=1`);
+    await response.text();
   });
 
   test("noindex Sites send X-Robots-Tag and a disallow-all robots.txt", async () => {
@@ -597,11 +665,25 @@ describe("site gateway in workerd", () => {
     expect(received.length).toBe(count);
   });
 
-  test("the rate-limit binding answers 429", async () => {
-    let limited = 0;
+  test("the rate-limit binding answers 429, and fresh visitor cookies don't reset it", async () => {
+    // Every request carries a different, valid visitor cookie from the same IP.
+    const visitors: string[] = [];
     for (let index = 0; index < RATE_LIMIT + 5; index += 1) {
+      const shell = await get("limit", "/");
+      await shell.text();
+      visitors.push(
+        cookiePair(setCookies(shell).find((cookie) => cookie.startsWith("__Host-og_v="))!),
+      );
+    }
+    expect(new Set(visitors).size).toBe(visitors.length);
+    let limited = 0;
+    for (const visitor of visitors) {
       const response = await get("limit", "/_og/api/site/config", {
-        headers: { origin: `https://limit.${DOMAIN}`, "cf-connecting-ip": "198.51.100.9" },
+        headers: {
+          origin: `https://limit.${DOMAIN}`,
+          "cf-connecting-ip": "198.51.100.9",
+          cookie: visitor,
+        },
       });
       if (response.status === 429) {
         limited += 1;
@@ -652,7 +734,10 @@ describe("site gateway in workerd", () => {
       headers: { ...headers, origin: `https://pub.${DOMAIN}` },
     });
     expect(sent.status).toBe(200);
-    expect(await sent.text()).toContain("Report sent");
+    const sentPage = await sent.text();
+    expect(sentPage).toContain("Report sent");
+    expect(sentPage).toContain("sent to the Site&#39;s owners and to Opengeni&#39;s abuse team");
+    expect(sentPage).toContain(`mailto:abuse@${DOMAIN}`);
     const upstream = lastTo("/site/reports")!;
     expect(upstream.verified).toBe(true);
     expect(JSON.parse(upstream.body)).toEqual({
