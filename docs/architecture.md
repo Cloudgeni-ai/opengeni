@@ -2048,8 +2048,10 @@ creation. Leases track provider identity, epoch, holders, workspace mutation
 generation, archive/recovery state and teardown authority. Active-target selection
 never rewrites durable home policy.
 
-Repository skill discovery skips definite path misses. Other failures reach
-turn settlement; rotation resumes through the durable lifecycle wake.
+Repository skill discovery skips definite path misses. A typed unreachable
+Connected Machine (offline or control timeout) degrades that run's repository
+index to an "unavailable" notice instead of blocking the model. Other failures
+reach turn settlement; rotation resumes through the durable lifecycle wake.
 
 Immutable environment setup is lease-boundary single-flight: exact lease epoch,
 provider instance and non-secret setup hash bind durable claim/revision/settlement

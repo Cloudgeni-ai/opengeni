@@ -1950,6 +1950,11 @@ symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
 the configured-catalog history lifecycle above. It is fixed for the bound capability; reads
 observe live edits or report missing files, and rebinding refreshes discovery.
+When discovery meets a typed unreachable workspace (a Connected Machine
+`agentOffline` or control-timeout `SelfhostedControlError`), the bound
+capability memoizes an explicitly unavailable, empty index and contributes a
+short notice instead of failing instruction preparation; the next run rebinds
+and discovers again. Every other discovery failure still fails the turn.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves
