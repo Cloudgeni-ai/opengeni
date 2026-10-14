@@ -877,8 +877,14 @@ for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
 continues to use the directory it was launched from, and an explicit session
 `workingDir` still takes precedence.
 
-After installing a release with this fix, regenerate an older service definition
-with `opengeni-agent service install --restart` when no machine work is running.
+The agent also never treats a filesystem root as its workspace, so an older
+service definition needs no manual step: when `run` starts with `/` (or a
+Windows drive root) as its working directory and the user's home directory
+exists, it moves into that home directory before connecting and reports it as
+the workspace root. Any other launch directory is kept as chosen.
+
+Regenerating an older service definition with `opengeni-agent service install
+--restart` is still useful to pick up other plist changes (such as the stderr log).
 The installer checks launchd's loaded binary and working directory as well as the
 plist on disk. If an earlier install wrote the plist but failed before reloading,
 a retry still reloads the stale job without requiring `--restart`. Dry-run
@@ -1259,6 +1265,26 @@ organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
 
+### Agent logs
+
+The running agent (`opengeni-agent run`, or a bare launch of an enrolled
+machine) keeps its own log in `logs/agent.log` under its config directory
+(`~/.config/opengeni/agent` unless `$OPENGENI_CONFIG_DIR` or
+`$XDG_CONFIG_HOME` says otherwise), whatever service manager runs it. The file
+rotates at 8 MiB and keeps two older generations (`agent.log.1`,
+`agent.log.2`); the directory and files are owner-only. It records browser
+controller diagnostics and exit statuses, and a panic on any thread with its
+backtrace, so a crashed agent can be diagnosed afterwards. One-shot CLI
+commands log only to the terminal.
+
+On Linux the same lines also reach the systemd journal
+(`journalctl --user -u opengeni-agent`). The macOS LaunchAgent sends the
+process's raw stdout and stderr to `logs/agent.stderr.log` and sets
+`OPENGENI_AGENT_STDERR_LOG=off`, so that file keeps only output that bypasses
+the agent log, such as an abort message; the agent bounds it at startup. A Mac
+picks up that LaunchAgent change the next time `opengeni-agent service install`
+runs; the agent log itself needs only the new agent.
+
 ## Transactional file edits
 
 Native ranged file reads retain only the selected bytes, rather than allocating
@@ -1378,6 +1404,17 @@ This engine does not provide rendered screenshots, live viewing, desktop input,
 Chromium profile identities, or a linked ComputerSession. Use Chromium for
 visual/mobile testing and human interaction. Browser authority, per-session
 isolation, and source-placement fences remain identical for both engines.
+
+The agent runs one browser controller (browserd) per scope: workspace,
+placement kind and placement (the machine, or an attached Chrome device). A
+controller that reports holding no session at all (no open, retained or
+recovering browser or computer session and no work in flight), and whose scope
+has not been ensured for ten minutes, is stopped; the next request starts a
+fresh one in about a second. Each controller also holds the write end of a
+stdin lifeline from its agent: however the agent ends, including a crash or
+SIGKILL, the kernel closes it and the controller shuts down gracefully,
+leaving retained browsers running for the next agent to adopt. Controllers no
+longer accumulate across scopes or outlive the agent that started them.
 
 Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
 launched by a shell command remains subject to that command's containment and

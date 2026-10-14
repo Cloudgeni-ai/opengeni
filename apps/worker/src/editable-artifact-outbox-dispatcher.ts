@@ -22,10 +22,21 @@ import {
   type ConfirmedNatsEditableArtifactHintBroker,
   type EditableArtifactHintNatsAuth,
 } from "./editable-artifact-hint-broker";
+import {
+  UnsafeDatabaseRolePostureError,
+  settleReadinessCheck,
+  type ReadinessCheckResult,
+} from "./readiness-checks";
 
 export const EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE =
   "opengeni_artifact_outbox_dispatcher";
 export const EDITABLE_ARTIFACT_OUTBOX_DATABASE_URL_ENV = "OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL";
+
+/** Independent readiness probes; each names its own failure. */
+export type EditableArtifactOutboxReadinessChecks = Readonly<{
+  databaseRole: ReadinessCheckResult;
+  nats: ReadinessCheckResult;
+}>;
 
 export type EditableArtifactOutboxWorkerOptions = Readonly<{
   /** Must authenticate as the dedicated dispatcher role, never the generic app role. */
@@ -64,14 +75,18 @@ export class EditableArtifactOutboxWorkerRuntime {
     return true;
   }
 
-  async check(signal?: AbortSignal): Promise<void> {
+  async check(signal?: AbortSignal): Promise<EditableArtifactOutboxReadinessChecks> {
     if (this.abort.signal.aborted || this.closing) {
       throw new Error("Artifact outbox worker is stopping");
     }
-    await Promise.all([
-      assertDedicatedOutboxDispatcherDatabaseRole(this.database.db),
-      this.broker.check(signal),
+    const [databaseRole, nats] = await Promise.all([
+      settleReadinessCheck(
+        () => assertDedicatedOutboxDispatcherDatabaseRole(this.database.db),
+        signal,
+      ),
+      settleReadinessCheck(() => this.broker.check(signal), signal),
     ]);
+    return { databaseRole, nats };
   }
 
   stop(): Promise<void> {
@@ -142,69 +157,115 @@ export async function createEditableArtifactOutboxWorker(
  * Verify the database identity and its negative capability at runtime. A DSN
  * username check alone is insufficient because PostgreSQL role inheritance,
  * SET ROLE, or a mis-provisioned grant could otherwise widen this worker.
+ *
+ * Relations owned by an installed extension (for example the PUBLIC-readable
+ * pg_stat_statements views) are not Opengeni data and do not count; any other
+ * accessible relation or sequence is named in the error so an operator can
+ * revoke the grant without guessing.
  */
 export async function assertDedicatedOutboxDispatcherDatabaseRole(db: Database): Promise<void> {
   const raw = await db.execute<{
     current_role: string;
     session_role: string;
-    can_access_any_relation: boolean;
-    can_access_any_sequence: boolean;
+    accessible_relations: string[];
   }>(dbSql`
     select
       current_user::text as current_role,
       session_user::text as session_role,
-      exists (
-        select 1
-        from pg_catalog.pg_class relation_row
-        join pg_catalog.pg_namespace namespace_row
-          on namespace_row.oid = relation_row.relnamespace
-        where namespace_row.nspname = current_schema()
-          and relation_row.relkind in ('r', 'p', 'v', 'm', 'f')
-          and (
-            has_table_privilege(current_user, relation_row.oid, 'SELECT')
-            or has_table_privilege(current_user, relation_row.oid, 'INSERT')
-            or has_table_privilege(current_user, relation_row.oid, 'UPDATE')
-            or has_table_privilege(current_user, relation_row.oid, 'DELETE')
-            or has_table_privilege(current_user, relation_row.oid, 'TRUNCATE')
-            or has_table_privilege(current_user, relation_row.oid, 'REFERENCES')
-            or has_table_privilege(current_user, relation_row.oid, 'TRIGGER')
-            or has_any_column_privilege(current_user, relation_row.oid, 'SELECT')
-            or has_any_column_privilege(current_user, relation_row.oid, 'INSERT')
-            or has_any_column_privilege(current_user, relation_row.oid, 'UPDATE')
-            or has_any_column_privilege(current_user, relation_row.oid, 'REFERENCES')
-          )
-      ) as can_access_any_relation,
-      exists (
-        select 1
-        from pg_catalog.pg_class sequence_row
-        join pg_catalog.pg_namespace namespace_row
-          on namespace_row.oid = sequence_row.relnamespace
-        where namespace_row.nspname = current_schema()
-          and sequence_row.relkind = 'S'
-          and (
-            has_sequence_privilege(current_user, sequence_row.oid, 'USAGE')
-            or has_sequence_privilege(current_user, sequence_row.oid, 'SELECT')
-            or has_sequence_privilege(current_user, sequence_row.oid, 'UPDATE')
-          )
-      ) as can_access_any_sequence
+      coalesce(
+        (
+          select array_agg(accessible.name order by accessible.name)
+          from (
+            select format('%I.%I', namespace_row.nspname, relation_row.relname) as name
+            from pg_catalog.pg_class relation_row
+            join pg_catalog.pg_namespace namespace_row
+              on namespace_row.oid = relation_row.relnamespace
+            where namespace_row.nspname = current_schema()
+              and relation_row.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+              and not exists (
+                select 1
+                from pg_catalog.pg_depend extension_member
+                where extension_member.classid = 'pg_catalog.pg_class'::regclass
+                  and extension_member.objid = relation_row.oid
+                  and extension_member.refclassid = 'pg_catalog.pg_extension'::regclass
+                  and extension_member.deptype = 'e'
+              )
+              and (
+                (
+                  relation_row.relkind <> 'S'
+                  and (
+                    has_table_privilege(current_user, relation_row.oid, 'SELECT')
+                    or has_table_privilege(current_user, relation_row.oid, 'INSERT')
+                    or has_table_privilege(current_user, relation_row.oid, 'UPDATE')
+                    or has_table_privilege(current_user, relation_row.oid, 'DELETE')
+                    or has_table_privilege(current_user, relation_row.oid, 'TRUNCATE')
+                    or has_table_privilege(current_user, relation_row.oid, 'REFERENCES')
+                    or has_table_privilege(current_user, relation_row.oid, 'TRIGGER')
+                    or has_any_column_privilege(current_user, relation_row.oid, 'SELECT')
+                    or has_any_column_privilege(current_user, relation_row.oid, 'INSERT')
+                    or has_any_column_privilege(current_user, relation_row.oid, 'UPDATE')
+                    or has_any_column_privilege(current_user, relation_row.oid, 'REFERENCES')
+                  )
+                )
+                or (
+                  relation_row.relkind = 'S'
+                  and (
+                    has_sequence_privilege(current_user, relation_row.oid, 'USAGE')
+                    or has_sequence_privilege(current_user, relation_row.oid, 'SELECT')
+                    or has_sequence_privilege(current_user, relation_row.oid, 'UPDATE')
+                  )
+                )
+              )
+            order by 1
+            limit ${MAX_REPORTED_RELATIONS + 1}
+          ) accessible
+        ),
+        '{}'::text[]
+      ) as accessible_relations
   `);
   const rows = Array.isArray(raw) ? raw : ((raw as unknown as { rows?: unknown[] }).rows ?? []);
   const row = rows[0] as
     | {
         current_role?: unknown;
         session_role?: unknown;
-        can_access_any_relation?: unknown;
-        can_access_any_sequence?: unknown;
+        accessible_relations?: unknown;
       }
     | undefined;
+  const violations: string[] = [];
   if (
     row?.current_role !== EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE ||
-    row.session_role !== EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE ||
-    row.can_access_any_relation !== false ||
-    row.can_access_any_sequence !== false
+    row.session_role !== EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE
   ) {
-    throw new Error("Artifact outbox dispatcher database connection has an unsafe role posture");
+    violations.push(
+      `connected as role ${describeRole(row?.current_role)} (session role ${describeRole(row?.session_role)}), expected ${EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE}`,
+    );
   }
+  const accessible = textArray(row?.accessible_relations);
+  if (accessible === null) {
+    violations.push("relation access could not be verified");
+  } else if (accessible.length > 0) {
+    const named = accessible.slice(0, MAX_REPORTED_RELATIONS).join(", ");
+    const more = accessible.length > MAX_REPORTED_RELATIONS ? " and more" : "";
+    violations.push(
+      `it can directly access ${named}${more}; revoke those privileges (including grants to PUBLIC) or move the relations out of the dispatcher's schema`,
+    );
+  }
+  if (violations.length > 0) {
+    throw new UnsafeDatabaseRolePostureError("Artifact outbox dispatcher", violations);
+  }
+}
+
+const MAX_REPORTED_RELATIONS = 5;
+
+function describeRole(value: unknown): string {
+  return typeof value === "string" && value.length > 0 ? value : "unknown";
+}
+
+function textArray(value: unknown): string[] | null {
+  // Anything other than a decoded text[] fails closed as "could not be verified".
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? (value as string[])
+    : null;
 }
 
 function dispatcherStore(

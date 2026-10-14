@@ -11,9 +11,17 @@ import {
   EDITABLE_ARTIFACT_OUTBOX_DATABASE_URL_ENV,
   EDITABLE_ARTIFACT_OUTBOX_DISPATCHER_DATABASE_ROLE,
   createEditableArtifactOutboxWorker,
+  type EditableArtifactOutboxReadinessChecks,
   type EditableArtifactOutboxWorkerRuntime,
 } from "./editable-artifact-outbox-dispatcher";
 import type { EditableArtifactHintNatsAuth } from "./editable-artifact-hint-broker";
+import {
+  ReadinessCheckFailedError,
+  createReadinessTransitionRecorder,
+  notCheckedReadiness,
+  readinessChecksOk,
+  readinessFailureReason,
+} from "./readiness-checks";
 
 export type EditableArtifactOutboxServiceState =
   | "starting"
@@ -26,7 +34,8 @@ export interface EditableArtifactOutboxRuntimePort {
   start(): Promise<void>;
   drain(): boolean;
   stop(): Promise<void>;
-  check(signal?: AbortSignal): Promise<void>;
+  /** Settles every probe; rejects only when the runtime is stopping. */
+  check(signal?: AbortSignal): Promise<EditableArtifactOutboxReadinessChecks>;
   readonly dispatcher: Readonly<{
     dispatchOnce(): Promise<EditableArtifactOutboxDispatchSummary>;
   }>;
@@ -148,13 +157,36 @@ export function createEditableArtifactOutboxService(
   let state: EditableArtifactOutboxServiceState = "starting";
   let runPromise: Promise<void> | null = null;
   let closePromise: Promise<void> | null = null;
-  let readinessPromise: Promise<void> | null = null;
+  let readinessPromise: Promise<EditableArtifactOutboxReadinessChecks> | null = null;
+  let lastReadiness: EditableArtifactOutboxReadinessChecks | null = null;
   const readinessTimeoutMs = input.readinessTimeoutMs ?? 2_000;
+  const recordReadiness = createReadinessTransitionRecorder("Artifact outbox dispatcher", {
+    warn: (message) =>
+      input.observability.warn(message, {
+        errorClass: "WorkerOperationError",
+        errorCode: "worker_operation_failed",
+        origin: "worker",
+      }),
+    info: (message) => input.observability.info(message),
+  });
 
-  const ready = (): Promise<void> => {
-    if (readinessPromise) return readinessPromise;
+  const evaluateReadiness = async (): Promise<EditableArtifactOutboxReadinessChecks> => {
     const abort = new AbortController();
-    const check = withTimeout(input.runtime.check(abort.signal), readinessTimeoutMs, abort);
+    let checks: EditableArtifactOutboxReadinessChecks;
+    try {
+      checks = await withTimeout(input.runtime.check(abort.signal), readinessTimeoutMs, abort);
+    } catch (error) {
+      const reason = readinessFailureReason(error);
+      checks = { databaseRole: { ok: false, reason }, nats: { ok: false, reason } };
+    }
+    lastReadiness = checks;
+    recordReadiness(checks);
+    return checks;
+  };
+
+  const ready = (): Promise<EditableArtifactOutboxReadinessChecks> => {
+    if (readinessPromise) return readinessPromise;
+    const check = evaluateReadiness();
     readinessPromise = check;
     void check.then(
       () => {
@@ -174,7 +206,10 @@ export function createEditableArtifactOutboxService(
     }
     runPromise = (async () => {
       try {
-        await ready();
+        const checks = await ready();
+        if (!readinessChecksOk(checks)) {
+          throw new ReadinessCheckFailedError("Artifact outbox dispatcher", checks);
+        }
         if ((state as EditableArtifactOutboxServiceState) === "draining") {
           state = "stopped";
           return;
@@ -239,28 +274,14 @@ export function createEditableArtifactOutboxService(
           {
             ok: false,
             state,
-            checks: { databaseRole: { ok: false }, nats: { ok: false } },
+            checks: lastReadiness ?? notCheckedReadiness(["databaseRole", "nats"]),
           },
           { status: 503 },
         );
       }
-      try {
-        await ready();
-        return Response.json({
-          ok: true,
-          state,
-          checks: { databaseRole: { ok: true }, nats: { ok: true } },
-        });
-      } catch {
-        return Response.json(
-          {
-            ok: false,
-            state,
-            checks: { databaseRole: { ok: false }, nats: { ok: false } },
-          },
-          { status: 503 },
-        );
-      }
+      const checks = await ready();
+      const ok = readinessChecksOk(checks);
+      return Response.json({ ok, state, checks }, { status: ok ? 200 : 503 });
     }
     if (url.pathname === "/metrics") {
       return new Response(await input.observability.prometheusMetrics(), {
@@ -389,24 +410,33 @@ export async function createOutboxSidecarFromEnvironment(
   return Object.freeze({ service, httpPort: sidecar.httpPort });
 }
 
+const READINESS_ABORT_GRACE_MS = 250;
+
 async function withTimeout<T>(
   promise: Promise<T>,
   milliseconds: number,
   abort: AbortController,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let grace: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
+          // Aborting lets each probe report its own timeout; the grace period
+          // only guards against a runtime that ignores the signal.
           abort.abort();
-          reject(new Error("readiness check timed out"));
+          grace = setTimeout(
+            () => reject(new Error("readiness check timed out")),
+            READINESS_ABORT_GRACE_MS,
+          );
         }, milliseconds);
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (grace) clearTimeout(grace);
   }
 }
 

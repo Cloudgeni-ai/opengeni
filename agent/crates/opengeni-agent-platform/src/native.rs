@@ -71,15 +71,19 @@ impl Default for NativePlatform {
 }
 
 impl NativePlatform {
-    /// Builds a platform rooted at the process's current working directory, with the
-    /// host desktop backend resolved and no relay registrar yet (the supervisor
-    /// wires one via [`with_stream_registry`](Self::with_stream_registry)).
+    /// Builds a platform rooted at the process's current working directory (or the
+    /// user's home when that directory is a filesystem root, see
+    /// [`resolve_workspace_root`]), with the host desktop backend resolved and no
+    /// relay registrar yet (the supervisor wires one via
+    /// [`with_stream_registry`](Self::with_stream_registry)).
     #[must_use]
     pub fn new() -> Self {
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let home_dir = user_home_dir();
+        let workspace_root =
+            resolve_workspace_root(std::env::current_dir().ok(), home_dir.as_deref());
         Self {
             workspace_root,
-            home_dir: user_home_dir(),
+            home_dir,
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
             browser_control: None,
@@ -193,6 +197,42 @@ fn user_home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+/// Chooses the agent's workspace root from its working directory.
+///
+/// A filesystem root is never a usable workspace: service managers start a
+/// process there unless told otherwise (launchd does for a LaunchAgent without
+/// `WorkingDirectory`, as does a custom systemd unit), it is read-only on macOS,
+/// and every relative write would land at the top of the disk. In that case
+/// (or when the working directory is unknown) the user's home directory is used.
+/// Any other working directory is kept exactly as the operator chose it.
+#[must_use]
+pub fn resolve_workspace_root(current_dir: Option<PathBuf>, home_dir: Option<&Path>) -> PathBuf {
+    let usable_home = home_dir.filter(|home| home.is_absolute() && home.parent().is_some());
+    match (current_dir, usable_home) {
+        (Some(directory), _) if directory.parent().is_some() => directory,
+        (_, Some(home)) => home.to_path_buf(),
+        (directory, None) => directory.unwrap_or_else(|| PathBuf::from("/")),
+    }
+}
+
+/// Moves the process into its workspace root when it was started at a
+/// filesystem root, so the reported workspace, relative paths and child
+/// processes all agree on the user's home directory. Returns the directory it
+/// moved to, or `None` when the working directory was already usable (or no
+/// usable home directory exists).
+///
+/// # Errors
+/// Returns the OS error when changing into the home directory fails.
+pub fn adopt_workspace_working_directory() -> std::io::Result<Option<PathBuf>> {
+    let current = std::env::current_dir().ok();
+    let target = resolve_workspace_root(current.clone(), user_home_dir().as_deref());
+    if current.as_ref() == Some(&target) || !target.is_dir() {
+        return Ok(None);
+    }
+    std::env::set_current_dir(&target)?;
+    Ok(Some(target))
 }
 
 fn requested_policy(
@@ -1533,6 +1573,78 @@ mod tests {
         let mut platform = NativePlatform::with_root(root.path());
         platform.home_dir = Some(home.path().to_path_buf());
         (platform, root, home)
+    }
+
+    #[test]
+    fn workspace_root_keeps_a_chosen_directory_and_replaces_a_filesystem_root() {
+        let home = Path::new("/Users/me");
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from("/srv/work")), Some(home)),
+            PathBuf::from("/srv/work")
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from("/")), Some(home)),
+            home.to_path_buf()
+        );
+        assert_eq!(resolve_workspace_root(None, Some(home)), home.to_path_buf());
+        // Without a usable home there is nothing better than the directory we have.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from("/")), None),
+            PathBuf::from("/")
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from("/")), Some(Path::new("/"))),
+            PathBuf::from("/")
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from("/")), Some(Path::new("relative"))),
+            PathBuf::from("/")
+        );
+    }
+
+    /// A service manager that starts the agent at `/` (launchd without a
+    /// `WorkingDirectory`) must still give it a writable workspace: the process
+    /// moves into the user's home and reports that as its workspace root. Runs in
+    /// a child copy of this test binary because the working directory is
+    /// process-wide.
+    #[cfg(unix)]
+    #[test]
+    fn agent_started_at_the_filesystem_root_works_in_the_users_home() {
+        const CHILD: &str = "OPENGENI_TEST_FILESYSTEM_ROOT_CWD_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let moved = adopt_workspace_working_directory().expect("adopt home");
+            let platform = NativePlatform::new();
+            println!("moved={}", moved.is_some());
+            println!("cwd={}", std::env::current_dir().expect("cwd").display());
+            println!("root={}", platform.workspace_root());
+            return;
+        }
+        let home = tempfile::tempdir().expect("home tempdir");
+        let home_path = home.path().canonicalize().expect("canonical home");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "native::tests::agent_started_at_the_filesystem_root_works_in_the_users_home",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .current_dir("/")
+            .env(CHILD, "1")
+            .env("HOME", &home_path)
+            .env_remove("USERPROFILE")
+            .output()
+            .expect("run child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        assert!(stdout.contains("moved=true"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("cwd={}\n", home_path.display())),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("root={}\n", home_path.display())),
+            "{stdout}"
+        );
     }
 
     /// TEST-ONLY NixOS-sandbox fork/exec transient-ENOENT mitigation.

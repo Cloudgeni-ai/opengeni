@@ -82,6 +82,11 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
               const manifest=JSON.parse(readFileSync('./package.json','utf8'));
               if (!manifest.scripts['db:'+command]) throw new Error('missing operator command '+command);
             }
+            const admission = Bun.spawnSync([process.execPath, '--no-env-file', 'scripts/admission-settings.ts'], {
+              env: { PATH: process.env.PATH, OPENGENI_DEPLOYMENT_REVISION: 'runtime-smoke', OPENGENI_ALLOWED_USER_EMAILS: 'a@example.com' },
+            });
+            const report = JSON.parse(admission.stdout.toString());
+            if (admission.exitCode !== 0 || report.sourceSha !== 'runtime-smoke' || report.emails?.[0] !== 'a@example.com') throw new Error('admission settings probe failed');
             if (!existsSync('./apps/api/dist/process/assets/agent-install/install.sh')) throw new Error('missing installer');
           }
           process.stdout.write('runtime-ready');

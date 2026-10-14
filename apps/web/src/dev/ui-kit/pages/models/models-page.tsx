@@ -77,7 +77,7 @@ const COLUMNS: RowListColumn[] = [
 const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "opper", "vercel"];
 
 const PICK_HELP =
-  "Spread work sends each new chat to the account with the most usage left. Primary only uses the primary account and waits when it runs out.";
+  "Spread work shares new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them.";
 
 const LEGACY_SOURCE_OPTIONS: SelectOption<LegacySource>[] = [
   {
@@ -733,7 +733,7 @@ function RotationRow({
           onValueChange={onChange}
           options={[
             { value: "spread", label: "Spread work" },
-            { value: "primary", label: "Primary only" },
+            { value: "primary", label: "Primary first" },
           ]}
         />
       }

@@ -2351,11 +2351,11 @@ impl ComputerAdapter for AtspiComputerAdapter {
         let result = if is_pointer {
             self.dispatch_on_seat(command).await
         } else {
-            dispatch_with_mutation_invalidation(
+            Box::pin(dispatch_with_mutation_invalidation(
                 &self.captured_frames,
                 command.operation_id.as_deref(),
                 self.dispatch_on_seat(command),
-            )
+            ))
             .await
         };
         if is_pointer && result.is_err() {

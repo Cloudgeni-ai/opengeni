@@ -305,6 +305,25 @@ fn service_user_home_from_environment(
         .ok_or_else(|| PlatformError::os("could not resolve a home directory ($HOME/$USERPROFILE)"))
 }
 
+/// Environment switch for a service manager that captures the agent's stderr
+/// itself: `off` keeps `tracing` output only in the agent's own bounded log.
+pub const AGENT_STDERR_LOG_ENV: &str = "OPENGENI_AGENT_STDERR_LOG";
+
+/// The file launchd appends the agent's stdout and stderr to. It sits in the
+/// agent's default config directory (`~/.config/opengeni/agent`, which is what a
+/// LaunchAgent without `$XDG_CONFIG_HOME` resolves) beside the agent's own log,
+/// which also bounds its size at startup. Without it launchd discards a crashed
+/// agent's last words.
+#[must_use]
+pub fn launchd_stderr_log_path(user_home: &Path) -> PathBuf {
+    user_home
+        .join(".config")
+        .join("opengeni")
+        .join("agent")
+        .join("logs")
+        .join("agent.stderr.log")
+}
+
 /// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
 /// The user home is explicit: launchd otherwise starts in `/`, which is read-only
 /// on macOS and cannot hold session attachments. Never inherit the installer's
@@ -340,16 +359,22 @@ pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformRes
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("\n");
-    let environment = spec
+    let path = spec
         .environment_path
         .as_deref()
         .map(|value| {
             format!(
-                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{}</string>\n  </dict>\n",
+                "    <key>PATH</key>\n    <string>{}</string>\n",
                 xml_escape(value)
             )
         })
         .unwrap_or_default();
+    // The agent writes its own bounded log; launchd's capture keeps only output
+    // that bypasses it (panics during abort, allocator failures, raw prints).
+    let environment = format!(
+        "  <key>EnvironmentVariables</key>\n  <dict>\n{path}    <key>{AGENT_STDERR_LOG_ENV}</key>\n    <string>off</string>\n  </dict>\n"
+    );
+    let stderr_log = xml_escape(&launchd_stderr_log_path(Path::new(user_home)).to_string_lossy());
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -370,6 +395,10 @@ pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformRes
          \x20 <true/>\n\
          \x20 <key>ThrottleInterval</key>\n\
          \x20 <integer>5</integer>\n\
+         \x20 <key>StandardOutPath</key>\n\
+         \x20 <string>{stderr_log}</string>\n\
+         \x20 <key>StandardErrorPath</key>\n\
+         \x20 <string>{stderr_log}</string>\n\
          </dict>\n\
          </plist>\n",
         label = ids::LAUNCHD_LABEL,
@@ -607,6 +636,25 @@ mod tests {
             systemd_system_unit_path(),
             PathBuf::from("/etc/systemd/system/opengeni-agent.service")
         );
+    }
+
+    #[test]
+    fn launchd_plist_keeps_crash_output_in_the_agent_log_directory() {
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/Runner & Co")).unwrap();
+        let log =
+            "<string>/Users/Runner &amp; Co/.config/opengeni/agent/logs/agent.stderr.log</string>";
+        assert!(plist.contains(&format!("<key>StandardOutPath</key>\n  {log}")));
+        assert!(plist.contains(&format!("<key>StandardErrorPath</key>\n  {log}")));
+        assert!(plist.contains(
+            "    <key>OPENGENI_AGENT_STDERR_LOG</key>\n    <string>off</string>\n  </dict>"
+        ));
+        let mut without_path = spec();
+        without_path.environment_path = None;
+        let plist = render_launchd_plist(&without_path, Path::new("/Users/runner")).unwrap();
+        assert!(!plist.contains("<key>PATH</key>"));
+        assert!(plist.contains(
+            "<key>EnvironmentVariables</key>\n  <dict>\n    <key>OPENGENI_AGENT_STDERR_LOG</key>"
+        ));
     }
 
     #[test]

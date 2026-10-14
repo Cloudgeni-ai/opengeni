@@ -5791,6 +5791,44 @@ describe("transient provider error classifier", () => {
     }
   });
 
+  test("a dropped upstream socket recovers the same turn even when wrapped", () => {
+    // Bun's exact fetch error when an upstream closes an open connection.
+    const message =
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+    const dropped = Object.assign(new TypeError(message), { code: "ECONNRESET" });
+    const recovery = {
+      error:
+        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
+      code: "upstream_connectivity_unavailable",
+      retryable: true,
+    };
+    for (const error of [
+      dropped,
+      // A wrapper that keeps the text but moves the code to `cause`.
+      new Error(message, { cause: dropped }),
+      // A wrapper that re-creates the error from its message alone.
+      new Error(message),
+    ]) {
+      expect(isTransientProviderError(error)).toBe(true);
+      expect(agentRunFailurePayload(error)).toEqual(recovery);
+    }
+    // A wrapper with its own text still recovers through the transport code.
+    const runner = new Error("Model stream failed", {
+      cause: new Error("read failed", { cause: dropped }),
+    });
+    expect(isTransientProviderError(runner)).toBe(true);
+    expect(agentRunFailurePayload(runner)).toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    // HTTP status stays authoritative over a transport code or text in the chain.
+    const rejected = Object.assign(new Error(message, { cause: dropped }), { status: 400 });
+    expect(isTransientProviderError(rejected)).toBe(false);
+    for (const nearMatch of [`Tool failed: ${message}`, `${message} Unexpected suffix`]) {
+      expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
+    }
+  });
+
   test("server-originated TaskExecStart DNS text never authorizes same-turn recovery", () => {
     for (const details of [
       "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443",

@@ -831,7 +831,7 @@ export function CodexSettingRows({
         {showPick ? (
           <SettingRow
             label="Sharing work between this workspace's accounts"
-            description="Spread work sends each new chat to the account with the most usage left. Primary only uses the primary account and waits when it runs out."
+            description="Spread work shares new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them."
             controlWidth="auto"
             control={
               <SegmentedControl<"spread" | "primary">
@@ -844,7 +844,7 @@ export function CodexSettingRows({
                 }
                 options={[
                   { value: "spread", label: "Spread work" },
-                  { value: "primary", label: "Primary only" },
+                  { value: "primary", label: "Primary first" },
                 ]}
               />
             }

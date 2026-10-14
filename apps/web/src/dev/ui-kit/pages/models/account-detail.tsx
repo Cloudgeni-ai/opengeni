@@ -449,7 +449,7 @@ function SettingsSection({ account }: { account: CodexAccount }) {
               account.isPrimary
                 ? legacy
                   ? "Used when a session isn't pinned and Auto-rotate is off."
-                  : "New work starts here. With Primary only, it's the only account used."
+                  : "New work starts here. With Primary first, other accounts are used only when this one can't serve it."
                 : legacy
                   ? "Make this the account unpinned sessions use."
                   : "Make this the account new work starts with."
