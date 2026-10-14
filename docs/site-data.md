@@ -376,7 +376,7 @@ Turning a Site's database off keeps its data.
 
 ### Definitions in Postgres
 
-Migration `0790_site_sql.sql` (placeholder ordinal) adds four
+Migration `0779_site_sql.sql` (placeholder ordinal) adds four
 workspace-owned FORCE-RLS tables, keyed and cascading like Site Data:
 
 - `site_sql_databases`: one row per Site that ever turned Site SQL on:
@@ -555,7 +555,7 @@ overshoot by its own rows. Every call records `site_sql.rows_read`,
   (the `SiteDatabase` Durable Object in workerd: signatures, previous secret,
   skew, replay, refusals, limits, migrations, rebuild, export and import),
   `packages/sdk/test/site-sql.test.ts` (`site.sql.run` over the bridge),
-  `packages/db/test/migration-0790-site-sql-postgres.test.ts` (FORCE RLS and
+  `packages/db/test/migration-0779-site-sql-postgres.test.ts` (FORCE RLS and
   cascades) and `apps/api/test/site-sql-postgres.test.ts` (routes and tools on
   Postgres against the real gateway Worker in Miniflare: audiences, guests,
   principal parameters, limits and metering, export and import round trips).

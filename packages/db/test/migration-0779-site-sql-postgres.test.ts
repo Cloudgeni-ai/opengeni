@@ -1,4 +1,4 @@
-// Migration 0790: Site SQL definitions. The four site_sql_* tables are
+// Migration 0779: Site SQL definitions. The four site_sql_* tables are
 // workspace-owned, FORCE RLS and reachable by the application role only inside
 // a workspace context; definitions follow their Site and are removed with the
 // workspace. Also covers the store in src/site-sql.ts.
@@ -41,7 +41,7 @@ let shared: SharedTestDatabase;
 let client: DbClient;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("migration-0790-site-sql");
+  const acquired = await acquireSharedTestDatabase("migration-0779-site-sql");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });

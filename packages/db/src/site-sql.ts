@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 /**
- * Site SQL definitions in Postgres (migration 0790): whether the owner turned
+ * Site SQL definitions in Postgres (migration 0779): whether the owner turned
  * a Site's Cloudflare database on, its ordered migrations, its named queries,
  * its usage counters and its call windows. The rows themselves live in the
  * Site's Durable Object; everything here is what rebuilds it.
