@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { MenuItemConstructorOptions } from "electron";
 
-mock.module("electron", () => ({
-  app: { isPackaged: true },
-  Menu: { buildFromTemplate: (template: unknown) => template },
-}));
+import { electronStub } from "./electron-stub";
+
+mock.module("electron", () => electronStub);
 
 const { applicationMenuTemplate, updateMenuItem } = await import("../src/main/menu");
 type Model = Parameters<typeof applicationMenuTemplate>[0];
