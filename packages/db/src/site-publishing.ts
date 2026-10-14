@@ -1257,10 +1257,16 @@ export async function putWorkspaceSiteLimitProfile(
 
 // --- conversations and budgets ---------------------------------------------------
 
+/** Who started a Site conversation, as the Site saw them then. */
+export type SiteRuntimeConversationViewerKind = "member" | "invited" | "user" | "guest";
+
 export type SiteRuntimeConversationRecord = {
   sessionId: string;
   siteId: string;
   viewerPrincipal: string;
+  viewerKind: SiteRuntimeConversationViewerKind;
+  /** The workspace tools (MCP connection ids) the conversation was started with. */
+  toolIds: string[];
   versionId: string | null;
   turns: number;
   meteredMicros: number;
@@ -1278,6 +1284,8 @@ type ConversationRow = {
   session_id: string;
   site_id: string;
   viewer_principal: string;
+  viewer_kind: string;
+  tool_ids: unknown;
   version_id: string | null;
   turns: number;
   metered_micros: string | number;
@@ -1290,7 +1298,8 @@ type ConversationRow = {
   updated_at: unknown;
 };
 
-const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, version_id, turns,
+const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, viewer_kind, tool_ids,
+  version_id, turns,
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
   reserved_month::text as reserved_month, admissions, created_at, updated_at`;
 
@@ -1299,6 +1308,8 @@ function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
     sessionId: row.session_id,
     siteId: row.site_id,
     viewerPrincipal: row.viewer_principal,
+    viewerKind: row.viewer_kind as SiteRuntimeConversationViewerKind,
+    toolIds: jsonValue<string[] | null>(row.tool_ids) ?? [],
     versionId: row.version_id,
     turns: Number(row.turns),
     meteredMicros: Number(row.metered_micros),
@@ -1425,9 +1436,24 @@ const ACTIVE_SESSION_STATUSES = [
 export async function listActiveSiteRuntimeConversations(
   db: Database,
   scope: SitePublishingScope,
-  input: { siteId: string; limit: number },
+  input: {
+    siteId: string;
+    limit: number;
+    /**
+     * Only conversations holding workspace tools the Site no longer gives
+     * them: a tool outside `tools`, or any tool for a viewer outside the
+     * workspace once `everyoneTools` is off.
+     */
+    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
+  },
 ): Promise<string[]> {
   if (!UUID.test(input.siteId)) return [];
+  const narrowed = input.toolsNarrowedTo;
+  const toolFilter = narrowed
+    ? sql`and (not (c.tool_ids <@ ${JSON.stringify(narrowed.tools)}::jsonb)
+        or (${!narrowed.everyoneTools} and jsonb_array_length(c.tool_ids) > 0
+          and c.viewer_kind in ('user', 'guest')))`
+    : sql``;
   return await withRlsContext(db, scope, async (tx) =>
     (
       await rawRows<{ session_id: string }>(
@@ -1435,7 +1461,7 @@ export async function listActiveSiteRuntimeConversations(
         sql`select c.session_id from site_runtime_conversations c
           join sessions s on s.workspace_id = c.workspace_id and s.id = c.session_id
           where c.workspace_id = ${scope.workspaceId} and c.site_id = ${input.siteId}
-            and c.updated_at > now() - interval '2 days'
+            and c.updated_at > now() - interval '2 days' ${toolFilter}
             and s.status in (${sql.join(
               ACTIVE_SESSION_STATUSES.map((status) => sql`${status}`),
               sql`, `,
@@ -1622,6 +1648,8 @@ export async function reserveSiteRuntimeConversationStart(
     sessionId: string;
     siteId: string;
     viewerPrincipal: string;
+    viewerKind: SiteRuntimeConversationViewerKind;
+    toolIds: readonly string[];
     versionId: string | null;
     limits: SiteRuntimeBudgetLimits;
     now?: Date;
@@ -1679,11 +1707,12 @@ export async function reserveSiteRuntimeConversationStart(
     const limitMicros = cap === null ? null : reserve;
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
-          viewer_principal, version_id, turns, limit_micros, reserved_micros, reserved_day,
-          reserved_month, admissions)
+          viewer_principal, viewer_kind, tool_ids, version_id, turns, limit_micros,
+          reserved_micros, reserved_day, reserved_month, admissions)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
-          ${input.viewerPrincipal}, ${input.versionId}, 1, ${limitMicros}, ${reserve},
-          ${periods.day}::date, ${periods.month}::date, 1)`,
+          ${input.viewerPrincipal}, ${input.viewerKind}, ${JSON.stringify(input.toolIds)}::jsonb,
+          ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
+          ${periods.month}::date, 1)`,
     );
     for (const window of [visitorDay, siteDay, siteMonth])
       await adjustUsageWindow(tx, scope, input.siteId, window, {

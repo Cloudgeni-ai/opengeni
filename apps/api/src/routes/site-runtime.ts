@@ -977,20 +977,24 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         limit: 5,
       }))
         await settleSiteRuntimeSpend(deps, host, conversation);
+      const agent = host.publication.agent;
+      const mcpTools = siteAgentToolRefs(agent, viewer);
       // One transaction counts the start and reserves the conversation's whole
       // cap against the visitor's day and the Site's day and month; the cap
-      // becomes the session's usage limit, set in the create transaction.
+      // becomes the session's usage limit, set in the create transaction. The
+      // row also records the tools the conversation gets, so narrowing them
+      // later stops it.
       const reservation = await reserve(() =>
         reserveSiteRuntimeConversationStart(deps.db, host.scope, {
           sessionId: requestedSessionId,
           siteId: host.site.id,
           viewerPrincipal: viewer.principal,
+          viewerKind: viewer.kind,
+          toolIds: mcpTools.map((tool) => tool.id),
           versionId: host.versionId,
           limits: budgets,
         }),
       );
-      const agent = host.publication.agent;
-      const mcpTools = siteAgentToolRefs(agent, viewer);
       const body = {
         initialMessage: input.initialMessage,
         requestedSessionId,
@@ -1106,6 +1110,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The agent and budget checks every message-bearing operation passes.
     const admitAgentWork = async (newTurn: boolean) => {
       requireSiteAgent(deps, host, viewer, limits);
+      // Tools are bound when a conversation starts. One holding a tool the
+      // Site no longer gives this viewer (removed, or no longer for everyone,
+      // or the viewer left the workspace) takes no more work.
+      const allowedTools = new Set(
+        siteAgentToolRefs(host.publication.agent, viewer).map((t) => t.id),
+      );
+      if (conversation.toolIds.some((tool) => !allowedTools.has(tool)))
+        throw sitePublishingError(
+          409,
+          "conflict",
+          "site_conversation_outdated",
+          "This Site's assistant changed since this conversation started; start a new one",
+        );
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
       const admitted = await reserve(() =>
         reserveSiteRuntimeConversationWork(deps.db, host.scope, {

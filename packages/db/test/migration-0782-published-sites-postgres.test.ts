@@ -697,6 +697,8 @@ test("conversation starts reserve their cap against every budget in one transact
       sessionId,
       siteId,
       viewerPrincipal: viewer,
+      viewerKind: viewer.startsWith("guest:") ? "guest" : "user",
+      toolIds: [],
       versionId: null,
       limits: budgets,
     });

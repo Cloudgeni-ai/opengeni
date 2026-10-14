@@ -622,7 +622,13 @@ export async function stopSiteViewers(
   deps: SitePublishingDeps,
   scope: SitePublishingScope,
   siteId: string,
-  options: { revokeSessions?: boolean; cancelConversations?: boolean; reason: string },
+  options: {
+    revokeSessions?: boolean;
+    cancelConversations?: boolean;
+    /** Cancel only conversations holding tools outside these (see `siteAgentToolsNarrowed`). */
+    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
+    reason: string;
+  },
 ): Promise<{ revokedSessions: number }> {
   let revokedSessions = 0;
   if (options.revokeSessions !== false) {
@@ -649,6 +655,7 @@ export async function stopSiteViewers(
     const sessionIds = await listActiveSiteRuntimeConversations(deps.db, scope, {
       siteId,
       limit: STOP_CONVERSATIONS_LIMIT,
+      ...(options.toolsNarrowedTo ? { toolsNarrowedTo: options.toolsNarrowedTo } : {}),
     });
     if (sessionIds.length === 0) return;
     // The Site acts with its own origin (a Site and one of its versions).
@@ -1121,6 +1128,17 @@ export async function upsertSitePublicationForManager(
       reason: stopping,
       revokeSessions: stopping !== "agent_disabled",
     });
+  else if (existing && siteAgentToolsNarrowed(existing.agent, publication.agent))
+    // Fewer tools, or no longer for everyone: stop the conversations that hold
+    // tools they would not get now. Viewers stay signed in.
+    await stopSiteViewers(deps, scope, record.id, {
+      reason: "agent_tools_narrowed",
+      revokeSessions: false,
+      toolsNarrowedTo: {
+        tools: publication.agent.tools ?? [],
+        everyoneTools: publication.agent.guestTools,
+      },
+    });
   scheduleSiteEdgeSync(deps, [publication.label, previousLabel], {
     siteIdHint: record.id,
     purge: stopping === "unpublished",
@@ -1149,6 +1167,19 @@ export function siteAccessNarrowed(
   }
   if (before.agent.enabled && !after.agent.enabled) return "agent_disabled";
   return null;
+}
+
+/**
+ * Whether a Site's workspace tools narrowed: a tool removed, or tools no
+ * longer given to everyone outside the workspace (`guestTools` turned off).
+ */
+export function siteAgentToolsNarrowed(
+  before: Pick<SitePublicationRecord["agent"], "tools" | "guestTools">,
+  after: Pick<SitePublicationRecord["agent"], "tools" | "guestTools">,
+): boolean {
+  const kept = new Set(after.tools ?? []);
+  if ((before.tools ?? []).some((tool) => !kept.has(tool))) return true;
+  return before.guestTools && !after.guestTools && (before.tools ?? []).length > 0;
 }
 
 /** MCP server ids (the session tool reference format). */

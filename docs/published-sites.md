@@ -132,9 +132,12 @@ tools** (`agent.guestTools`, which means tools for everyone who isn't a
 workspace member or invited; the name is kept for compatibility). A
 connection the workspace doesn't have is skipped rather than failing the
 conversation.
-Unpublishing, taking down, or narrowing a Site's access signs its viewers out
-and cancels its running conversations; turning the agent off cancels the
-conversations only.
+Unpublishing, taking down, or narrowing a Site's access signs all its viewers
+out (those who keep access sign in again) and cancels its running
+conversations; turning the agent off cancels the conversations only.
+Removing a tool, or turning **Let everyone use these tools** off, cancels the
+conversations that hold tools they would no longer get, and those
+conversations take no more messages.
 
 ## Limits and billing
 

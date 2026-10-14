@@ -1710,6 +1710,68 @@ test("finished conversations free the Site budget; a lowered cap lowers running 
   expect((await reserved(second.json.id)).reserved).toBe(0);
 }, 60_000);
 
+test("narrowing a Site's tools stops the conversations that hold tools they would not get now", async () => {
+  const f = await fixture();
+  const effects = configureSitePublishingEffects(f.settings, {});
+  const site = await f.live("Tools", { access: "public", agent: { enabled: true } });
+  const change = async (agent: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, site.id, "PUT", { agent });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+    await effects.flush();
+  };
+  const conversation = async (sessionId: string) => {
+    const [row] = await shared.admin`select c.viewer_kind, c.tool_ids, s.status
+      from site_runtime_conversations c join sessions s on s.id = c.session_id
+      where c.session_id = ${sessionId}`;
+    return { kind: row!.viewer_kind, tools: row!.tool_ids, cancelled: row!.status === "cancelled" };
+  };
+  await change({ tools: ["crm", "billing"], guestTools: true });
+  const guest = { visitor: visitorId(), clientIp: "198.51.100.40" };
+  const member = { session: await f.signIn(f.member, site.host) };
+  const start = async (who: Record<string, string>) => {
+    const started = await f.gateway(site.host, "POST", "/sessions", {
+      ...who,
+      body: { initialMessage: "Hi" },
+    });
+    expect(started.status, JSON.stringify(started.json)).toBe(202);
+    return String(started.json.id);
+  };
+  const send = async (who: Record<string, string>, sessionId: string) =>
+    await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      ...who,
+      body: { type: "user.message", payload: { text: "More" } },
+    });
+  const guestChat = await start(guest);
+  const memberChat = await start(member);
+  expect(await conversation(guestChat)).toEqual({
+    kind: "guest",
+    tools: ["crm", "billing"],
+    cancelled: false,
+  });
+  expect(await conversation(memberChat)).toMatchObject({ kind: "member", cancelled: false });
+
+  // Tools no longer for everyone: the guest's conversation stops and takes no
+  // more messages; the member's goes on. Nobody is signed out.
+  await change({ guestTools: false });
+  expect((await conversation(guestChat)).cancelled).toBe(true);
+  expect((await conversation(memberChat)).cancelled).toBe(false);
+  const outdated = await send(guest, guestChat);
+  expect(outdated.status, JSON.stringify(outdated.json)).toBe(409);
+  expect(code(outdated)).toBe("site_conversation_outdated");
+  expect((await send(member, memberChat)).status).toBeLessThan(300);
+  // A new guest conversation starts without tools.
+  expect((await conversation(await start(guest))).tools).toEqual([]);
+
+  // A removed tool stops the member's conversation too; a new one gets what is left.
+  await change({ tools: ["crm"] });
+  expect((await conversation(memberChat)).cancelled).toBe(true);
+  expect(code(await send(member, memberChat))).toBe("site_conversation_outdated");
+  expect((await conversation(await start(member))).tools).toEqual(["crm"]);
+  const [signedIn] = await shared.admin`select count(*)::int as n from site_viewer_sessions
+    where site_id = ${site.id} and revoked_at is null`;
+  expect(signedIn!.n).toBe(1);
+}, 60_000);
+
 test("abuse reports and flagged scans reach the platform, at most once an hour per Site", async () => {
   const sent: Array<{ kind: string; to: string; subject: string }> = [];
   const transport = {

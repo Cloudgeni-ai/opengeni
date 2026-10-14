@@ -205,6 +205,12 @@ CREATE TABLE site_runtime_conversations (
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   site_id uuid NOT NULL,
   viewer_principal text NOT NULL CHECK (char_length(viewer_principal) BETWEEN 1 AND 300),
+  -- Who started it, as the Site saw them then, and the workspace tools (MCP
+  -- connection ids) it was started with: narrowing a Site's tools stops the
+  -- conversations that hold tools they would no longer get.
+  viewer_kind text NOT NULL CHECK (viewer_kind IN ('member', 'invited', 'user', 'guest')),
+  tool_ids jsonb NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(tool_ids) = 'array' AND jsonb_array_length(tool_ids) <= 100),
   version_id uuid,
   turns integer NOT NULL DEFAULT 0 CHECK (turns >= 0),
   metered_micros bigint NOT NULL DEFAULT 0 CHECK (metered_micros >= 0),

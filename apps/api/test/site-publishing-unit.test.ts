@@ -20,7 +20,7 @@ import {
 import { siteAgentToolRefs } from "../src/routes/site-runtime";
 import { effectiveSiteLimits, freeSiteLimits } from "../src/site-publishing/limits";
 import { siteClientAddressKey } from "../src/site-publishing/runtime";
-import { siteAccessNarrowed } from "../src/site-publishing/service";
+import { siteAccessNarrowed, siteAgentToolsNarrowed } from "../src/site-publishing/service";
 import {
   siteSessionEventProjection,
   siteSessionEventSseTransform,
@@ -365,6 +365,21 @@ describe("Site agents", () => {
     expect(siteAccessNarrowed(base, { ...base, agent: { ...base.agent, enabled: false } })).toBe(
       "agent_disabled",
     );
+  });
+
+  test("tools narrow when one is removed or they are no longer for everyone", () => {
+    const tools = { tools: ["crm", "billing"], guestTools: true };
+    expect(siteAgentToolsNarrowed(tools, tools)).toBe(false);
+    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: ["crm", "billing", "docs"] })).toBe(
+      false,
+    );
+    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: ["crm"] })).toBe(true);
+    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: null })).toBe(true);
+    expect(siteAgentToolsNarrowed(tools, { ...tools, guestTools: false })).toBe(true);
+    // Without tools, the opt-in changes nothing.
+    expect(
+      siteAgentToolsNarrowed({ tools: null, guestTools: true }, { tools: null, guestTools: false }),
+    ).toBe(false);
   });
 });
 

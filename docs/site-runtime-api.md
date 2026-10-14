@@ -123,6 +123,16 @@ Takedown:
   Unpublishing and narrowing access (a narrower mode or a removed
   invitation) do the same for sessions and conversations; turning the agent
   off cancels the conversations.
+- Narrowing access signs out every viewer of the Site and cancels every
+  conversation, including those of viewers who keep access; they sign in
+  again. The sign-out is prompt cleanup, not the boundary: every
+  site-runtime request re-checks the viewer's access.
+- A conversation's workspace tools are fixed when it starts and recorded
+  with it. Removing a tool, or turning **Let everyone use these tools**
+  (`guestTools`) off, cancels the running conversations that hold tools
+  they would not get now, without signing anyone out. Such a conversation
+  (also one whose viewer has since left the workspace) takes no more
+  messages: `409 site_conversation_outdated`; the viewer starts a new one.
 - An owner's takedown is restored by the owner or an admin; an admin's
   takedown only by an admin.
 - Only the operator script can lift a platform takedown:
