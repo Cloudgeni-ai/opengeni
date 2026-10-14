@@ -1,4 +1,4 @@
-// Regression coverage for OPE-804: a session that already persisted the same
+// Regression coverage: a session that already persisted the same
 // GitHub repository twice (a catalog-bound row plus a bare manual row for the
 // same remote, at a different mount path) must still start. Turn-time binding
 // resolution stamps the bare row with the same installation/repository ids, so
@@ -107,7 +107,7 @@ function signingSettings() {
   });
 }
 
-describe("persisted duplicate GitHub repository attachments (OPE-804)", () => {
+describe("persisted duplicate GitHub repository attachments", () => {
   const originalFetch = globalThis.fetch;
   let mintBodies: unknown[] = [];
 
