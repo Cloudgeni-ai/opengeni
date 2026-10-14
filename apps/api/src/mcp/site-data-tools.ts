@@ -104,6 +104,7 @@ export function registerSiteDataTools(
         action?: "upsert" | "delete" | undefined;
         accessMode?: z4.infer<typeof SiteDataAccessMode> | undefined;
         privateRecords?: boolean | undefined;
+        guestAccess?: "none" | "read" | "append" | "own" | undefined;
         jsonSchema?: Record<string, unknown> | null | undefined;
         indexedFields?: string[] | undefined;
         uniqueFields?: string[][] | undefined;
@@ -121,6 +122,7 @@ export function registerSiteDataTools(
         return defineSiteDataCollection(deps, grant, args.siteId, args.name, {
           accessMode: args.accessMode,
           ...(args.privateRecords === undefined ? {} : { privateRecords: args.privateRecords }),
+          ...(args.guestAccess === undefined ? {} : { guestAccess: args.guestAccess }),
           ...(args.jsonSchema === undefined ? {} : { jsonSchema: args.jsonSchema }),
           ...(args.indexedFields ? { indexedFields: args.indexedFields } : {}),
           ...(args.uniqueFields ? { uniqueFields: args.uniqueFields } : {}),
