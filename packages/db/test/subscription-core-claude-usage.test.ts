@@ -318,7 +318,10 @@ describe("early reset: availability and model cooldowns a reading ends", () => {
       { five_hour: window(3), seven_day: null },
       { five_hour: window(100), seven_day: window(41) },
       { five_hour: window(3), seven_day: window(100) },
-      { five_hour: { utilization: null, resets_at: "2026-10-15T00:00:00.000Z" }, seven_day: window(1) },
+      {
+        five_hour: { utilization: null, resets_at: "2026-10-15T00:00:00.000Z" },
+        seven_day: window(1),
+      },
     ]) {
       expect(subscriptionCoreClaudeUsageConfirmsAvailability(await read(body))).toBe(false);
     }

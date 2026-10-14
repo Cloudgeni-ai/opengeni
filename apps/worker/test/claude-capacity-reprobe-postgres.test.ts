@@ -313,9 +313,7 @@ describe.skipIf(!realDb)("Claude capacity waits re-read usage before a far reset
     const parked = await park(org, staleReset);
     // The waiter checks again on the bounded backoff, not at the stale reset.
     expect(parked.waiter.resetKind).toBe("bounded_refresh");
-    expect(parked.waiter.nextCheckAt.getTime()).toBeLessThanOrEqual(
-      parked.armedAt + 15 * 60_000,
-    );
+    expect(parked.waiter.nextCheckAt.getTime()).toBeLessThanOrEqual(parked.armedAt + 15 * 60_000);
 
     const usage = stubUsage();
     expect(await reconcile(org, parked)).toEqual({ action: "resumed" });
@@ -385,7 +383,10 @@ describe.skipIf(!realDb)("Claude capacity waits re-read usage before a far reset
     ["omits the weekly account window", { seven_day: undefined }],
     ["reports the weekly account window without a percentage", { seven_day: null }],
     ["omits the model's family window", { seven_day_opus: undefined }],
-    ["reports the model's family window at the limit", { seven_day_opus: { utilization: 100, resets_at: null } }],
+    [
+      "reports the model's family window at the limit",
+      { seven_day_opus: { utilization: 100, resets_at: null } },
+    ],
   ] as const)("a reading that %s keeps the refused model cooled", async (_case, override) => {
     const org = await organization();
     const connectionId = await sharedConnection(org);
@@ -434,7 +435,9 @@ describe.skipIf(!realDb)("Claude capacity waits re-read usage before a far reset
     const parked = await park(org, staleReset);
     // The Sonnet weekly window is still full, so the Sonnet cooldown stands;
     // a model id that is not Claude's never ends.
-    stubUsage({ seven_day_sonnet: { utilization: 100, resets_at: new Date(staleReset).toISOString() } });
+    stubUsage({
+      seven_day_sonnet: { utilization: 100, resets_at: new Date(staleReset).toISOString() },
+    });
     expect(await reconcile(org, parked)).toEqual({ action: "resumed" });
     const cooldowns = (await storedQuota(connectionId)).modelCooldowns;
     expect(cooldowns[MODEL]).toBeUndefined();
