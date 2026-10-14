@@ -16,8 +16,12 @@
  * gone (a restore releases the hold of a live Site by itself). List what
  * needs attention with `scripts/operator/site-moderation-queue.ts`.
  *
- * Needs OPENGENI_MIGRATIONS_DATABASE_URL or OPENGENI_DATABASE_ADMIN_URL and
- * the deployment's OPENGENI_SITES_* settings.
+ * Needs the database role that owns the Opengeni schema (the migrations
+ * credential, OPENGENI_MIGRATIONS_DATABASE_URL): only it writes hostname
+ * holds, and `--site-id` reads across workspaces through owner-only
+ * policies (no BYPASSRLS needed). OPENGENI_DATABASE_ADMIN_URL works when it
+ * is a superuser or BYPASSRLS role. Also needs the deployment's
+ * OPENGENI_SITES_* settings.
  */
 import { parseArgs } from "node:util";
 import { dbSearchPath, getSettings } from "@opengeni/config";
@@ -50,7 +54,10 @@ if (
   throw new Error("Provide --reason (at least six characters), --restore or --release-hold");
 const settings = getSettings();
 const url = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_ADMIN_URL;
-if (!url) throw new Error("Set OPENGENI_MIGRATIONS_DATABASE_URL or OPENGENI_DATABASE_ADMIN_URL");
+if (!url)
+  throw new Error(
+    "Set OPENGENI_MIGRATIONS_DATABASE_URL (the schema owner) or OPENGENI_DATABASE_ADMIN_URL (a superuser or BYPASSRLS role)",
+  );
 const searchPath = dbSearchPath(settings);
 const client = createDb(url, { max: 1, ...(searchPath ? { searchPath } : {}) });
 try {

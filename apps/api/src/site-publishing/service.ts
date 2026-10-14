@@ -272,7 +272,7 @@ export function siteHostnameEdgeRecord(
     v: 1,
     hostname: siteHostname(state.label, domain),
     siteId,
-    status: state.hold ? "suspended" : "unpublished",
+    status: state.hold?.kind === "platform" ? "suspended" : "unpublished",
     access: "members",
     versionId: null,
     title: "",

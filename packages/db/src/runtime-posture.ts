@@ -273,6 +273,9 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "mcp_operation_command_scoped(jsonb, text, jsonb)",
   "guard_workspace_owned_skill_head_delete()",
   "guard_workspace_owned_skill_history_delete()",
+  // Migration 0782: the owner-run trigger that leaves a release hold when a
+  // published Site's hostname row is deleted (the app cannot write holds).
+  "hold_deleted_site_hostname()",
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
@@ -2120,7 +2123,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_data_usage",
   "site_data_validation_windows",
   "site_data_workspace_validation_windows",
-  "site_hostname_holds",
   "site_hostnames",
   "site_limit_profiles",
   "site_publications",
@@ -2233,6 +2235,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "preference_registry_snapshots",
   "session_tenancy_activations",
   "session_work_claims",
+  "site_hostname_holds",
   "skill_source_bindings",
   "skill_write_receipts",
   "slack_installation_bindings",

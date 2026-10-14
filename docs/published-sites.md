@@ -22,7 +22,7 @@ Open the Site and choose **Publish**. The **Publish to web** page sets:
   are unique across every workspace, and reserved names and brand or
   credential words are refused. The page checks the name as you type.
   Changing the address moves the Site; a released name stays held for its
-  workspace for 30 days.
+  workspace for 30 days, also when the Site or its workspace is deleted.
 - **Who can open it**: workspace members, invited people, or anyone with the
   link (see below).
 - **Embedded agent**: whether visitors can chat with the Site's agent, and
@@ -178,7 +178,10 @@ Reports and flagged content scans also reach the deployment operator:
   email configured, that address gets an email (at most one per Site per
   hour);
 - `bun scripts/operator/site-moderation-queue.ts` lists open reports and
-  flagged scans across all workspaces (it needs the migrations credential).
+  flagged scans across all workspaces. It needs the role that owns the
+  Opengeni schema (the migrations credential, which reads across workspaces
+  through owner-only policies and needs no `BYPASSRLS`), or a superuser or
+  `BYPASSRLS` role. The application role is refused.
 
 The abuse contact shown to visitors is `OPENGENI_SITES_ABUSE_EMAIL`, or
 `abuse@<sites domain>` when unset.

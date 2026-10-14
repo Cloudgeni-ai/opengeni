@@ -1303,12 +1303,29 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect((await f.publication(f.owner, site.id, "POST", {}, "/restore")).status).toBe(200);
 
   // A platform takedown (operator script) holds against the owner and admins.
-  const platform = await moderateSiteAsPlatform(f.deps, {
-    host: `${site.host}.`,
-    operator: "trust-and-safety",
-    action: "takedown",
-    reason: "Confirmed phishing",
-  });
+  // It places a hostname hold, which only the schema owner (the operator's
+  // migrations credential; a superuser in these tests) may write.
+  await expect(
+    moderateSiteAsPlatform(f.deps, {
+      host: `${site.host}.`,
+      operator: "trust-and-safety",
+      action: "takedown",
+      reason: "Confirmed phishing",
+    }),
+  ).rejects.toBeDefined();
+  const operatorDb = createDb(shared.adminUrl);
+  const operatorDeps = { ...f.deps, db: operatorDb.db };
+  let platform: Awaited<ReturnType<typeof moderateSiteAsPlatform>>;
+  try {
+    platform = await moderateSiteAsPlatform(operatorDeps, {
+      host: `${site.host}.`,
+      operator: "trust-and-safety",
+      action: "takedown",
+      reason: "Confirmed phishing",
+    });
+  } finally {
+    await operatorDb.close();
+  }
   expect(platform).toMatchObject({ status: "suspended", suspendedBy: "platform" });
   const ownerRestore = await f.publication(f.owner, site.id, "POST", {}, "/restore");
   expect(ownerRestore.status).toBe(403);
@@ -1330,7 +1347,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect(platformAudit!.metadata).toMatchObject({ by: "platform", reason: "Confirmed phishing" });
   expect(JSON.parse(hostRecord() ?? "null")).toMatchObject({ status: "suspended" });
   // The operator finds a Site by id too; that lookup reads across workspaces
-  // and so needs the migrations (admin) credential.
+  // and so needs the schema owner (or a superuser), never the app role.
   await expect(
     moderateSiteAsPlatform(f.deps, {
       host: site.id,

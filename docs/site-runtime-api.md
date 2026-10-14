@@ -105,9 +105,14 @@ Hostnames:
   holds the label for the platform (`site_hostname_holds`, with no foreign
   keys, so deleting the Site or its workspace does not free it); only
   `site-takedown.ts --release-hold` lifts it.
+- Deleting a Site or its workspace never frees its label at once: a
+  database trigger leaves a 30-day `release` hold (kept for that workspace,
+  `held` for everyone else) in `site_hostname_holds`.
 - Global lookups go through a transaction-local hostname "lane" setting
   that a row-level security policy matches (the `api_keys` pattern), not a
-  `SECURITY DEFINER` function.
+  `SECURITY DEFINER` function. The application role only reads holds; the
+  schema owner writes them (operator scripts, and the release-hold trigger,
+  which runs as the owner).
 
 Takedown:
 
@@ -395,8 +400,10 @@ KV fallback entries with a TTL no longer than this setting.
   `site_abuse_notice` log line, and, when `OPENGENI_SITES_ABUSE_EMAIL` is
   set and managed email is configured, an email (at most one per Site and
   kind per hour, best effort). `bun scripts/operator/site-moderation-queue.ts`
-  lists open reports and flagged scans across workspaces (it needs the
-  migrations credential).
+  lists open reports and flagged scans across workspaces. It needs the
+  role that owns the Opengeni schema (the migrations credential), which
+  reads across workspaces through owner-only read policies, or a superuser
+  or `BYPASSRLS` role; the application role is refused.
 - After a version is published, the content scanner checks the URLs found
   in its HTML.
   - The default scanner is `none`, which records nothing.

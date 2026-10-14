@@ -9,11 +9,19 @@
 -- has an api_keys-style lane that shows exactly the row whose label the
 -- transaction set in `opengeni.site_hostname_label`, and lets that lane
 -- delete a released row whose 30-day hold has ended (so another workspace
--- can take the label). RLS is never disabled and nothing runs as definer.
--- The same lane reaches site_hostname_holds: labels a platform moderator
--- took down, which no workspace may claim until the platform lifts the hold.
--- Holds have no workspace foreign keys on purpose: they outlive the Site and
--- its workspace.
+-- can take the label). RLS is never disabled.
+-- The same lane shows site_hostname_holds read-only: labels a platform
+-- moderator took down, which no workspace may claim until the platform lifts
+-- the hold, and labels whose Site or workspace was deleted, held for 30 days
+-- (a definer trigger on site_hostnames writes those, so deleting a Site or
+-- workspace never frees its label at once). Holds have no workspace foreign
+-- keys on purpose: they outlive the Site and its workspace. Only the schema
+-- owner (the migrations credential the operator scripts use) writes holds.
+--
+-- The operator moderation queue reads open abuse reports and flagged
+-- publications across workspaces as the schema owner, through owner-only
+-- read policies (as 0639 and 0751 do): the application role never matches
+-- them, and nobody needs BYPASSRLS.
 --
 -- Host-map generations come from one sequence, so they only grow per
 -- hostname whichever Site holds it: a label that moves to another Site, or a
@@ -110,13 +118,18 @@ CREATE INDEX site_hostnames_workspace_site_idx ON site_hostnames (workspace_id, 
 
 -- Platform holds on taken-down labels. No foreign keys: a hold survives the
 -- Site and its workspace, so deleting either never frees the label.
+-- A `release` hold keeps a deleted Site's (or workspace's) label for its
+-- workspace until expires_at; a `platform` hold never expires.
 CREATE TABLE site_hostname_holds (
   label text PRIMARY KEY CHECK (label ~ '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'),
   site_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
   reason text NOT NULL CHECK (char_length(reason) BETWEEN 1 AND 2000),
   held_by text NOT NULL CHECK (char_length(held_by) BETWEEN 1 AND 300),
-  created_at timestamptz NOT NULL DEFAULT now()
+  kind text NOT NULL DEFAULT 'platform' CHECK (kind IN ('platform', 'release')),
+  expires_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT site_hostname_holds_expiry_check CHECK ((kind = 'release') = (expires_at IS NOT NULL))
 );
 
 -- One-time viewer sign-in codes: hash only, 60 s, single use, bound to the
@@ -314,7 +327,8 @@ BEGIN
   ALTER TABLE site_hostname_holds FORCE ROW LEVEL SECURITY;
   REVOKE ALL ON TABLE site_hostname_holds FROM PUBLIC;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE site_hostname_holds TO opengeni_app;
+    -- Read-only: the application never places or lifts a hold.
+    GRANT SELECT ON TABLE site_hostname_holds TO opengeni_app;
     GRANT USAGE ON SEQUENCE site_host_generation_seq TO opengeni_app;
   END IF;
 END
@@ -334,9 +348,71 @@ CREATE POLICY site_hostnames_label_takeover ON site_hostnames
     AND released_at IS NOT NULL
     AND released_at < now() - interval '30 days'
   );
--- Platform holds are reached only through the same lane, one label at a time.
+-- Holds are read through the same lane, one label at a time.
 CREATE POLICY site_hostname_holds_label_lane ON site_hostname_holds
-  USING (label = nullif(pg_catalog.current_setting('opengeni.site_hostname_label', true), ''))
-  WITH CHECK (
-    label = nullif(pg_catalog.current_setting('opengeni.site_hostname_label', true), '')
+  FOR SELECT
+  USING (label = nullif(pg_catalog.current_setting('opengeni.site_hostname_label', true), ''));
+
+-- Owner-only lanes: the schema owner (operator scripts with the migrations
+-- credential, and the release-hold trigger below) writes holds and reads the
+-- moderation queue across workspaces. The application role is never the
+-- owner, so these never match for it.
+DO $owner_lanes$
+DECLARE
+  owner_table text;
+BEGIN
+  FOREACH owner_table IN ARRAY ARRAY['site_hostname_holds', 'site_publications', 'site_abuse_reports']
+  LOOP
+    EXECUTE format(
+      'CREATE POLICY %I ON %I %s USING (CURRENT_USER = pg_catalog.pg_get_userbyid(('
+      'SELECT relation.relowner FROM pg_catalog.pg_class relation '
+      'WHERE relation.oid = %L::regclass)))%s',
+      owner_table || '_owner',
+      owner_table,
+      CASE WHEN owner_table = 'site_hostname_holds' THEN '' ELSE 'FOR SELECT' END,
+      format('%I.%I', current_schema(), owner_table),
+      CASE WHEN owner_table = 'site_hostname_holds' THEN format(
+        ' WITH CHECK (CURRENT_USER = pg_catalog.pg_get_userbyid(('
+        'SELECT relation.relowner FROM pg_catalog.pg_class relation '
+        'WHERE relation.oid = %L::regclass)))',
+        format('%I.%I', current_schema(), owner_table)) ELSE '' END
+    );
+  END LOOP;
+END
+$owner_lanes$;
+
+-- Deleting a hostname row (its Site or workspace was deleted) leaves a
+-- 30-day release hold, so the label is not free to another workspace at
+-- once. A row released more than 30 days ago (the takeover path) leaves
+-- nothing. A platform hold is never replaced. Runs as the owner: the
+-- application role holds no write privilege on site_hostname_holds.
+CREATE FUNCTION opengeni_private.hold_deleted_site_hostname()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $hold$
+BEGIN
+  IF OLD.released_at IS NOT NULL AND OLD.released_at <= now() - interval '30 days' THEN
+    RETURN OLD;
+  END IF;
+  INSERT INTO site_hostname_holds (label, site_id, workspace_id, reason, held_by, kind, expires_at)
+  VALUES (
+    OLD.label, OLD.site_id, OLD.workspace_id, 'Released when its Site or workspace was deleted',
+    'system', 'release', coalesce(OLD.released_at, now()) + interval '30 days'
+  )
+  ON CONFLICT (label) DO UPDATE SET site_id = excluded.site_id,
+    workspace_id = excluded.workspace_id, reason = excluded.reason, held_by = excluded.held_by,
+    expires_at = excluded.expires_at, created_at = now()
+  WHERE site_hostname_holds.kind = 'release';
+  RETURN OLD;
+END
+$hold$;
+DO $hold_search_path$
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.hold_deleted_site_hostname() SET search_path = pg_catalog, %I, pg_temp',
+    current_schema()
   );
+END
+$hold_search_path$;
+REVOKE ALL ON FUNCTION opengeni_private.hold_deleted_site_hostname() FROM PUBLIC;
+CREATE TRIGGER site_hostnames_hold_deleted
+  AFTER DELETE ON site_hostnames
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.hold_deleted_site_hostname();

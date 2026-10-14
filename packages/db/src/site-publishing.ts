@@ -104,13 +104,20 @@ export type SiteHostnameRecord = {
   releasedAt: Date | null;
 };
 
-/** A platform hold: a taken-down label no workspace may claim. */
+/**
+ * A hold on a label. `platform`: a taken-down label no workspace may claim
+ * until the operator lifts it. `release`: the label of a deleted Site or
+ * workspace, kept for that workspace until `expiresAt` (written by the
+ * database when the hostname row is deleted).
+ */
 export type SiteHostnameHoldRecord = {
   label: string;
   siteId: string;
   workspaceId: string;
   reason: string;
   heldBy: string;
+  kind: "platform" | "release";
+  expiresAt: Date | null;
   createdAt: Date;
 };
 
@@ -251,8 +258,12 @@ type HoldRow = {
   workspace_id: string;
   reason: string;
   held_by: string;
+  kind: "platform" | "release";
+  expires_at: unknown;
   created_at: unknown;
 };
+
+const HOLD_COLUMNS = sql`label, site_id, workspace_id, reason, held_by, kind, expires_at, created_at`;
 
 function toHold(row: HoldRow): SiteHostnameHoldRecord {
   return {
@@ -261,6 +272,8 @@ function toHold(row: HoldRow): SiteHostnameHoldRecord {
     workspaceId: row.workspace_id,
     reason: row.reason,
     heldBy: row.held_by,
+    kind: row.kind,
+    expiresAt: nullableDate(row.expires_at),
     createdAt: date(row.created_at),
   };
 }
@@ -277,8 +290,7 @@ async function laneState(
   );
   const [hold] = await rawRows<HoldRow>(
     tx,
-    sql`select label, site_id, workspace_id, reason, held_by, created_at
-      from site_hostname_holds where label = ${label}`,
+    sql`select ${HOLD_COLUMNS} from site_hostname_holds where label = ${label}`,
   );
   return { hostname: row ? toHostname(row) : null, hold: hold ? toHold(hold) : null };
 }
@@ -309,8 +321,9 @@ export async function findSiteHostname(
 }
 
 /**
- * Lift a platform hold by label (operator only: the Site and workspace may
- * be gone). Returns whether a hold existed.
+ * Lift a hold by label (operator only, as the schema owner: the application
+ * role cannot write holds, and the Site and workspace may be gone). Returns
+ * whether a hold existed.
  */
 export async function liftSiteHostnameHold(db: Database, label: string): Promise<boolean> {
   if (!LABEL.test(label)) return false;
@@ -346,7 +359,15 @@ function claimCheck(
     existing.releasedAt === null &&
     existing.workspaceId === scope.workspaceId &&
     existing.siteId === siteId;
-  if (hold && !ownLive) return { available: false, problem: "reserved" };
+  if (hold?.kind === "platform" && !ownLive) return { available: false, problem: "reserved" };
+  // A deleted Site's (or workspace's) label stays its workspace's until the
+  // release hold ends, like a released row.
+  if (
+    hold?.kind === "release" &&
+    hold.workspaceId !== scope.workspaceId &&
+    (hold.expiresAt?.getTime() ?? 0) > now.getTime()
+  )
+    return { available: false, problem: "held" };
   if (!existing) return { available: true };
   if (existing.workspaceId === scope.workspaceId) {
     if (existing.releasedAt !== null) return { available: true };
@@ -556,8 +577,7 @@ async function claimInLane(
     const now = row ? date(row.now) : new Date();
     const [hold] = await rawRows<HoldRow>(
       tx,
-      sql`select label, site_id, workspace_id, reason, held_by, created_at
-        from site_hostname_holds where label = ${label}`,
+      sql`select ${HOLD_COLUMNS} from site_hostname_holds where label = ${label}`,
     );
     const check = claimCheck(existing, hold ? toHold(hold) : null, scope, siteId, holdDays, now);
     if (!check.available)
@@ -766,12 +786,14 @@ export async function suspendSitePublication(
       await lockHostnameLabel(tx, existing.label);
       await setHostnameLane(tx, existing.label);
       await tx.execute(
-        sql`insert into site_hostname_holds (label, site_id, workspace_id, reason, held_by)
+        sql`insert into site_hostname_holds (label, site_id, workspace_id, reason, held_by, kind)
           values (${existing.label}, ${siteId}, ${scope.workspaceId},
-            ${input.reason.trim().slice(0, 2000) || "Taken down"}, ${input.subject.slice(0, 300)})
+            ${input.reason.trim().slice(0, 2000) || "Taken down"}, ${input.subject.slice(0, 300)},
+            'platform')
           on conflict (label) do update set site_id = excluded.site_id,
             workspace_id = excluded.workspace_id, reason = excluded.reason,
-            held_by = excluded.held_by`,
+            held_by = excluded.held_by, kind = 'platform', expires_at = null,
+            created_at = now()`,
       );
       await setHostnameLane(tx, "");
     }
@@ -1889,13 +1911,34 @@ export type SiteModerationQueueItem = {
   at: Date;
 };
 
+/** The database role operator tooling needs for cross-workspace reads. */
+export const SITE_OPERATOR_ROLE_REQUIREMENT =
+  "the database role that owns the Opengeni schema (the migrations credential, OPENGENI_MIGRATIONS_DATABASE_URL), or a superuser or BYPASSRLS role";
+
+/**
+ * Refuse cross-workspace operator reads unless this connection is the schema
+ * owner (whose owner-only read policies show every row, migration 0782) or a
+ * role that bypasses RLS. The application role is neither, so it gets an
+ * error instead of a silently empty list.
+ */
+async function requireOperatorRole(tx: Database, what: string): Promise<void> {
+  const [role] = await rawRows<{ allowed: boolean }>(
+    tx,
+    sql`select (r.rolsuper or r.rolbypassrls or current_user = pg_catalog.pg_get_userbyid(c.relowner))
+        as allowed
+      from pg_catalog.pg_roles r, pg_catalog.pg_class c
+      where r.rolname = current_user and c.oid = 'site_publications'::regclass`,
+  );
+  if (!role?.allowed)
+    throw new SitePublishingError("forbidden", `${what} needs ${SITE_OPERATOR_ROLE_REQUIREMENT}`);
+}
+
 /**
  * The platform's moderation queue across every workspace: open abuse reports
  * and publications whose last content scan was flagged, newest first. For
- * operator tooling only: it reads with row security off in a read-only
- * transaction and refuses unless the connection's role is a superuser or
- * bypasses RLS (the migrations or admin credential), so the application role
- * can never run it.
+ * operator tooling only, in a read-only transaction: the schema owner reads
+ * through owner-only policies (no BYPASSRLS needed); the application role is
+ * refused.
  */
 export async function listSiteModerationQueue(
   db: Database,
@@ -1905,16 +1948,7 @@ export async function listSiteModerationQueue(
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
     await tx.execute(sql`set local statement_timeout = '10s'`);
-    const [role] = await rawRows<{ global: boolean }>(
-      tx,
-      sql`select (rolsuper or rolbypassrls) as global from pg_roles where rolname = current_user`,
-    );
-    if (!role?.global)
-      throw new SitePublishingError(
-        "forbidden",
-        "The moderation queue needs the migrations or admin database credential",
-      );
-    await tx.execute(sql`set local row_security = off`);
+    await requireOperatorRole(tx, "The moderation queue");
     const reports = await rawRows<{
       account_id: string;
       workspace_id: string;
@@ -1995,16 +2029,7 @@ export async function findSitePublicationGlobally(
   if (!UUID.test(siteId)) return null;
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
-    const [role] = await rawRows<{ global: boolean }>(
-      tx,
-      sql`select (rolsuper or rolbypassrls) as global from pg_roles where rolname = current_user`,
-    );
-    if (!role?.global)
-      throw new SitePublishingError(
-        "forbidden",
-        "Finding a Site by id needs the migrations or admin database credential",
-      );
-    await tx.execute(sql`set local row_security = off`);
+    await requireOperatorRole(tx, "Finding a Site by id");
     const [row] = await rawRows<{ account_id: string; workspace_id: string; label: string }>(
       tx,
       sql`select account_id, workspace_id, label from site_publications where site_id = ${siteId}`,
