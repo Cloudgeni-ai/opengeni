@@ -50,7 +50,8 @@ function concrete(route: string): string {
 
 // A Site-started agent's writes are an allowlist: every route not listed here
 // is refused to it, including routes added later. Opening one is a
-// deliberate edit to SITE_AGENT_WRITES and to this list. (A Site's versions,
+// deliberate edit to SITE_AGENT_WRITES (or SITE_AGENT_METHOD_WRITES) and to
+// this list. (A Site's versions,
 // rollback, status and audience are not here: the guard checks them against
 // the Sites the agent was started from.)
 const OPEN = [
@@ -92,6 +93,7 @@ const OPEN = [
   "POST /published-artifacts/:artifactId/data/query",
   "POST /published-artifacts/:artifactId/data/write",
   "POST /published-artifacts/:artifactId/files",
+  "POST /published-artifacts/:artifactId/sql/queries/:name",
   "POST /published-artifacts/uploads",
   "POST /sessions",
   "POST /sessions/:sessionId/artifacts/publish",
@@ -140,8 +142,18 @@ test("a Site-started agent's writes are exactly the allowlist; every other works
   const writes = workspaceWrites();
   // The inventory is the real route table, not an empty one.
   expect(writes.length).toBeGreaterThan(300);
-  const open = writes.filter((route) => siteAgentMayWrite(concrete(route.split(" ")[1]!)));
+  const open = writes.filter((route) => {
+    const [method, path] = route.split(" ") as [string, string];
+    return siteAgentMayWrite(concrete(path), method);
+  });
   expect(open).toEqual(OPEN);
+  // Site SQL: only running a named query, as the Site's page does. Defining,
+  // deleting, settings, migrations, ad hoc statements, import and reset stay closed.
+  const sql = writes.filter((route) => route.includes("/sql"));
+  expect(sql.length).toBeGreaterThan(5);
+  expect(sql.filter((route) => OPEN.includes(route))).toEqual([
+    "POST /published-artifacts/:artifactId/sql/queries/:name",
+  ]);
   // Families the earlier block list did not name are closed.
   for (const family of [
     "variable-sets",
@@ -197,6 +209,21 @@ test("paths outside the allowlist are closed, matched as the router decodes them
     expect({ path, open: siteAgentMayWrite(path) }).toEqual({ path, open: false });
   expect(siteAgentMayWrite(`${ws}/sessions/${ID}/events`)).toBe(true);
   expect(siteAgentMayWrite(`${ws}/mcp`)).toBe(true);
+  // A named query's path is open for POST (run) only.
+  const query = `${ws}/published-artifacts/${ID}/sql/queries/recent`;
+  expect(siteAgentMayWrite(query, "POST")).toBe(true);
+  expect(siteAgentMayWrite(query, "post")).toBe(true);
+  for (const method of ["PUT", "DELETE", "PATCH", undefined])
+    expect({ method, open: siteAgentMayWrite(query, method) }).toEqual({ method, open: false });
+  for (const route of ["settings", "migrations", "query", "execute", "import", "reset"])
+    expect({
+      route,
+      open: siteAgentMayWrite(`${ws}/published-artifacts/${ID}/sql/${route}`, "POST"),
+    }).toEqual({
+      route,
+      open: false,
+    });
+  expect(siteAgentMayWrite(`${ws}/published-artifacts/${ID}/sql/queries/a/b`, "POST")).toBe(false);
 });
 
 test("a refusal names what the write would change", () => {

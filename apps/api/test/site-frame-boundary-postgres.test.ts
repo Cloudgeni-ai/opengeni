@@ -1285,6 +1285,42 @@ test("agents started from a Site write only on the allowlist; other workspace wr
       ?.details?.code,
   }).toEqual({ status: 403, code: "site_agent_forbidden" });
 
+  // Site SQL: managing the database is closed at the guard (as a Site
+  // publication); running a named query, as the page does, passes the guard
+  // (Site SQL then applies its own clamp and the query's audience; this
+  // deployment has no Site SQL, so it answers 503).
+  const refusalCode = (text: string) =>
+    (JSON.parse(text) as { error?: { details?: { code?: string } } }).error?.details?.code;
+  const sqlBase = `/published-artifacts/${own.siteId}/sql`;
+  for (const [method, path, body] of [
+    ["PUT", `${sqlBase}/settings`, { enabled: true }],
+    ["POST", `${sqlBase}/migrations`, { name: "init", sql: "CREATE TABLE t (a);" }],
+    ["PUT", `${sqlBase}/queries/recent`, { sql: "SELECT 1 AS one" }],
+    ["DELETE", `${sqlBase}/queries/recent`, undefined],
+    ["POST", `${sqlBase}/query`, { sql: "SELECT 1" }],
+    ["POST", `${sqlBase}/execute`, { sql: "DELETE FROM t" }],
+    ["POST", `${sqlBase}/import`, { format: "json", table: "t", rows: [] }],
+    ["POST", `${sqlBase}/reset`, { confirm: true }],
+  ] as const) {
+    const route = `${method} ${path}`;
+    const clamped = await as(clampedAgent, method, path, body);
+    expect({ route, status: clamped.status, code: refusalCode(clamped.text) }).toEqual({
+      route,
+      status: 403,
+      code: "site_agent_forbidden",
+    });
+    const other = await as(plainAgent, method, path, body);
+    expect({ route, refused: refusalCode(other.text) === "site_agent_forbidden" }).toEqual({
+      route,
+      refused: false,
+    });
+  }
+  const run = await as(clampedAgent, "POST", `${sqlBase}/queries/recent`, { params: {} });
+  expect({ status: run.status, code: refusalCode(run.text) }).toEqual({
+    status: 503,
+    code: "unavailable",
+  });
+
   // The allowlist still serves the agent's work: its tools, its
   // conversations, files, content and reads sent as POST.
   const mcp = await as(

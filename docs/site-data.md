@@ -556,6 +556,12 @@ turn came from the page) gets the page's reach, as with Site Data: every
 management tool and route refuses it (`forbidden`), and `site_sql_run` runs
 only the named queries the page itself could run, on that Site only, with
 `:viewer` bound to the agent's person.
+Over HTTP, the Site agent guard (`SITE_AGENT_METHOD_WRITES` in
+`apps/api/src/site-agent-guard.ts`) opens only
+`POST .../sql/queries/:name` to such an agent; every other Site SQL write
+(settings, defining or deleting a query, migrations, ad hoc statements,
+import and reset) is refused with `site_agent_forbidden` before the route
+runs.
 
 Exports come in pieces: one response holds about `maxBytes` (16 MiB at most;
 the HTTP route defaults to 1 MiB for SQL, so every piece re-imports in one

@@ -70,6 +70,19 @@ export const SITE_AGENT_WRITES: readonly RegExp[] = [
   /^\/feedback\/?$/u,
 ];
 
+/**
+ * Writes open to a Site-started agent for one method only, where the same
+ * path also manages something. A Site's named query runs with `POST`
+ * (exactly what its page may call, under the query's audience; Site SQL's
+ * own clamp limits it to the Site the agent was started from), while `PUT`
+ * and `DELETE` on that path define and delete the query and stay closed, as
+ * does every other Site SQL route (settings, migrations, ad hoc statements,
+ * import and reset).
+ */
+export const SITE_AGENT_METHOD_WRITES: readonly { method: string; pattern: RegExp }[] = [
+  { method: "POST", pattern: /^\/published-artifacts\/[^/]+\/sql\/queries\/[^/]+\/?$/u },
+];
+
 /** A published Site's content: versions, rollback, status and audience. */
 const SITE_CONTENT_CHANGE =
   /^\/published-artifacts\/([0-9a-f-]{36})\/(?:versions|rollback|status|visibility)\/?$/iu;
@@ -141,10 +154,19 @@ function workspaceRoute(path: string): string | null {
   return match ? (match[1] ?? "") : null;
 }
 
-/** Whether a Site-started agent may send a write to `path` (before the Site content rule). */
-export function siteAgentMayWrite(path: string): boolean {
+/**
+ * Whether a Site-started agent may send a `method` write to `path` (before
+ * the Site content rule). Without a method only the path-wide allowlist
+ * applies.
+ */
+export function siteAgentMayWrite(path: string, method?: string): boolean {
   const route = workspaceRoute(path);
-  return route !== null && SITE_AGENT_WRITES.some((pattern) => pattern.test(route));
+  if (route === null) return false;
+  if (SITE_AGENT_WRITES.some((pattern) => pattern.test(route))) return true;
+  const upper = method?.toUpperCase();
+  return SITE_AGENT_METHOD_WRITES.some(
+    (entry) => entry.method === upper && entry.pattern.test(route),
+  );
 }
 
 /** What a refused write to `path` names. */
@@ -162,7 +184,8 @@ export function siteAgentWriteResource(path: string): SiteClampedResource {
  * does not learn and cannot widen anyone's access. Under
  * `/v1/workspaces/:workspaceId` it may send only the writes in
  * `SITE_AGENT_WRITES` (its tools, its conversations, files and content, and
- * reads sent as POST); any other write, including `PATCH` or `DELETE` on the
+ * reads sent as POST) and `SITE_AGENT_METHOD_WRITES` (running a Site's named
+ * SQL queries); any other write, including `PATCH` or `DELETE` on the
  * workspace itself and browser or computer sessions (which can drive the
  * viewer's Chrome or screen), is refused with 403 before the route runs. It also
  * changes a published Site's content only for a Site it was started from.
@@ -186,7 +209,7 @@ export function siteClampedAgentGuard(deps: ApiRouteDeps) {
     const path = c.req.path;
     const siteContent =
       SITE_CONTENT_CHANGE.exec(workspaceRoute(path) ?? "")?.[1]?.toLowerCase() ?? null;
-    if (!siteContent && siteAgentMayWrite(path)) {
+    if (!siteContent && siteAgentMayWrite(path, c.req.method)) {
       await next();
       return;
     }
