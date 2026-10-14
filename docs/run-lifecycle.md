@@ -1673,6 +1673,18 @@ Steer cooperatively settles the ordinary turn as `superseded` before another
 model request. A claimed standalone compaction instead completes its maintenance
 turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
 interruption fences.
+A compaction cut short by its own attempt's cancellation (graceful worker
+shutdown during a deploy, or any other Temporal activity cancellation) is not a
+summarization failure. The worker classifies it structurally, from the attempt's
+aborted cancellation signal or a typed turn cancellation error and never from
+message text, and settles the started landmark as
+`session.context.compaction.skipped(reason="interrupted")` without consuming an
+explicit `/compact` request, then lets the cancellation propagate unchanged. The
+landmark write is best effort: if a control already closed the attempt, or the
+write fails, nothing is recorded and the cancellation still wins. Same-turn
+recovery is unchanged; the recovered attempt re-evaluates the threshold or the
+still-pending request and compacts again if needed
+(`apps/worker/src/activities/agent-turn/compaction-interruption.ts`).
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
