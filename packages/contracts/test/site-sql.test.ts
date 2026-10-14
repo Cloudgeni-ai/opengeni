@@ -102,23 +102,85 @@ describe("compileSiteSql", () => {
     expect(
       problem("WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c) SELECT n FROM c"),
     ).toBe("recursive");
-    expect(problem("CREATE TABLE x (a)", "agent")).toBeNull();
+    // Agents change the schema through migrations, so the database can be rebuilt.
+    const agentSchema = compileSiteSql("CREATE TABLE x (a)", "agent");
+    expect(agentSchema).toMatchObject({ ok: false, problem: "statement_not_allowed" });
+    expect(agentSchema.ok ? "" : agentSchema.message).toContain("site_sql_migrate");
+    expect(problem("DROP TABLE x", "agent")).toBe("statement_not_allowed");
+    expect(problem("CREATE TABLE x (a)", "script")).toBeNull();
     expect(problem("EXPLAIN QUERY PLAN SELECT 1", "agent")).toBeNull();
     expect(problem("EXPLAIN ATTACH 'x' AS y", "agent")).toBe("attach");
+  });
+
+  test("named queries cannot recurse without the RECURSIVE keyword", () => {
+    for (const sql of [
+      "WITH c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c LIMIT 10) SELECT x FROM c",
+      'WITH c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM "C") SELECT x FROM c',
+      "WITH a AS (SELECT 1), c(x) AS (SELECT 1 FROM [c]) SELECT * FROM c",
+      "WITH c AS (SELECT 1 INTERSECT SELECT 1) SELECT * FROM c",
+      "WITH c AS NOT MATERIALIZED (SELECT 1 EXCEPT SELECT 2) SELECT * FROM c",
+      "SELECT * FROM (WITH c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c)",
+      "INSERT INTO t SELECT * FROM (WITH 'c'(x) AS (SELECT 1 UNION SELECT x FROM 'c') SELECT x FROM c)",
+    ])
+      expect(problem(sql)).toBe("recursive");
+    expect(problem("SELECT 1 AS recursive")).toBe("recursive");
+    expect(problem('SELECT 1 AS "recursive"')).toBeNull();
+    // Compound selects outside a WITH table, and WITH tables that only read others, are fine.
+    expect(problem("WITH a AS (SELECT 1 AS n), b AS (SELECT n FROM a) SELECT n FROM b")).toBeNull();
+    expect(
+      problem("WITH a AS MATERIALIZED (SELECT 1 AS n) SELECT n FROM a UNION SELECT 2"),
+    ).toBeNull();
+    // Agents and scripts may recurse.
+    expect(
+      problem(
+        "WITH c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c LIMIT 5) SELECT x FROM c",
+        "agent",
+      ),
+    ).toBeNull();
+    expect(problem("WITH c AS SELECT 1 SELECT 2")).toBe("syntax");
+    expect(problem("WITH c AS (SELECT 1)")).toBe("syntax");
+  });
+
+  test("WITH tables named like keywords do not change the statement kind", () => {
+    expect(
+      compiled("WITH replace AS (SELECT 1 AS n) SELECT n FROM replace").statements[0]!.kind,
+    ).toBe("read");
+    expect(
+      compiled('WITH "delete"(n) AS (SELECT 1) SELECT n FROM "delete"').statements[0]!.kind,
+    ).toBe("read");
+    expect(
+      compiled("WITH x AS (SELECT 1 AS n) REPLACE INTO kv (k) SELECT n FROM x").statements[0]!.kind,
+    ).toBe("write");
   });
 
   test("reserved names and parameter styles", () => {
     expect(problem("SELECT * FROM _cf_KV")).toBe("reserved_name");
     expect(problem('SELECT * FROM "_og_migrations"')).toBe("reserved_name");
+    // SQLite reads a string literal as a table name, so identifier-shaped strings are reserved too.
+    expect(problem("SELECT * FROM '_og_migrations'")).toBe("reserved_name");
+    expect(problem("SELECT * FROM '_CF_KV'", "agent")).toBe("reserved_name");
+    expect(
+      problem("CREATE TRIGGER t AFTER INSERT ON '_og_requests' BEGIN DELETE FROM x; END", "script"),
+    ).toBe("reserved_name");
+    expect(problem("SELECT '_og_ is a prefix', 'my _cf_ note'")).toBeNull();
     expect(problem("SELECT * FROM t WHERE a = ?")).toBe("parameter_style");
     expect(problem("SELECT * FROM t WHERE a = ?1")).toBe("parameter_style");
     expect(problem("SELECT * FROM t WHERE a = @a")).toBe("parameter_style");
     expect(problem("SELECT * FROM t WHERE a = $a")).toBe("parameter_style");
+    expect(problem("SELECT * FROM t WHERE a = #a")).toBe("parameter_style");
     expect(problem(`SELECT * FROM t WHERE a = :${"x".repeat(65)}`)).toBe("parameter_name");
     const many = Array.from({ length: SITE_SQL_MAX_PARAMETERS + 1 }, (_, i) => `:p${i}`).join(", ");
     expect(problem(`SELECT ${many}`)).toBe("too_many_parameters");
     expect(problem("SELECT 'unterminated")).toBe("syntax");
     expect(problem("SELECT 1 /* unterminated")).toBe("syntax");
+  });
+
+  test("pragma_ functions: only the schema readers", () => {
+    expect(problem("SELECT name FROM pragma_table_info('votes')")).toBeNull();
+    expect(problem("SELECT * FROM pragma_table_list")).toBeNull();
+    expect(problem("SELECT * FROM pragma_compile_options")).toBe("pragma");
+    expect(problem('SELECT * FROM "pragma_database_list"', "agent")).toBe("pragma");
+    expect(problem("SELECT * FROM PRAGMA_FOREIGN_KEYS()", "script")).toBe("pragma");
   });
 
   test("scripts: many statements, trigger bodies keep their semicolons", () => {
@@ -140,6 +202,41 @@ describe("compileSiteSql", () => {
     ]);
     expect(script.statements[2]!.sql).toContain("UPDATE counters SET n = n + 1;");
     expect(script.statements[2]!.sql.endsWith("END")).toBe(true);
+    const conditional = compiled(
+      "CREATE TRIGGER c AFTER UPDATE ON t WHEN CASE WHEN NEW.a THEN 1 END BEGIN SELECT CASE WHEN 1 THEN 2 END; END; SELECT 1",
+      "script",
+    );
+    expect(conditional.statements.map((statement) => statement.kind)).toEqual(["schema", "read"]);
+    expect(
+      compiled(
+        'CREATE TRIGGER q AFTER INSERT ON t BEGIN UPDATE t SET "begin" = 1, "end" = 2; END',
+        "script",
+      ).statements,
+    ).toHaveLength(1);
+  });
+
+  test("trigger bodies cannot hide statements behind columns named begin or end", () => {
+    // SQLite reads `begin` here as a column, so counting it as a nested BEGIN
+    // would swallow the PRAGMA into the trigger.
+    expect(
+      problem(
+        "CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET begin = 1; END; INSERT INTO t VALUES (1); PRAGMA foreign_keys = OFF",
+        "script",
+      ),
+    ).toBe("syntax");
+    expect(
+      problem(
+        "CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET end = 1; END; PRAGMA foreign_keys = OFF",
+        "script",
+      ),
+    ).toBe("syntax");
+    expect(
+      problem("CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END x; SELECT 2", "script"),
+    ).toBe("syntax");
+    expect(problem("CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1;", "script")).toBe("syntax");
+    expect(problem("CREATE TEMP TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE 1", "script")).toBe(
+      "syntax",
+    );
   });
 
   test("bindings follow the compiled order; booleans bind as integers", () => {

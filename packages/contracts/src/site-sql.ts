@@ -26,10 +26,13 @@ export type SiteSqlStatementKind = "read" | "write" | "schema";
 /**
  * Who wrote the SQL, which decides what it may do:
  * - `named`: a named query Site pages call. One read or write statement; no
- *   schema changes, PRAGMA, EXPLAIN or recursive CTEs.
- * - `agent`: one statement an owner's agent runs (query, execute). Schema
- *   changes and read-only PRAGMA/EXPLAIN allowed.
- * - `script`: migrations and SQL imports. Many statements, run together.
+ *   schema changes, PRAGMA, EXPLAIN or recursive CTEs (no RECURSIVE keyword,
+ *   no CTE that refers to itself and no UNION/INTERSECT/EXCEPT inside a CTE).
+ * - `agent`: one read or write statement an owner's agent runs (query,
+ *   execute), plus read-only PRAGMA and EXPLAIN. Schema changes go through
+ *   migrations so the database can always be rebuilt from Postgres.
+ * - `script`: migrations and SQL imports. Many statements, run together,
+ *   schema changes included.
  */
 export type SiteSqlProfile = "named" | "agent" | "script";
 
@@ -96,7 +99,7 @@ const PROFILE_RULES: Readonly<Record<SiteSqlProfile, ProfileRules>> = Object.fre
   agent: {
     maxLength: SITE_SQL_MAX_AGENT_LENGTH,
     maxStatements: 1,
-    kinds: ["read", "write", "schema"],
+    kinds: ["read", "write"],
     pragma: true,
     explain: true,
     recursive: true,
@@ -124,9 +127,14 @@ export const SITE_SQL_READ_PRAGMAS: readonly string[] = Object.freeze([
 
 /**
  * Identifier prefixes Site SQL may not name: Cloudflare's own tables
- * (`_cf_`) and the Durable Object's bookkeeping (`_og_`).
+ * (`_cf_`) and names kept for Opengeni (`_og_`). Quoted identifiers count,
+ * and so do string literals shaped like such a name (SQLite accepts
+ * `FROM '_cf_KV'`), so a value like `'_og_x'` must be passed as a parameter.
  */
 export const SITE_SQL_RESERVED_PREFIXES: readonly string[] = Object.freeze(["_cf_", "_og_"]);
+
+/** A string literal that SQLite could read as a reserved table name. */
+const RESERVED_STRING = /^_(?:cf|og)_[A-Za-z0-9_]*$/iu;
 
 /**
  * Parameters the API binds from the verified viewer; a Site may never supply
@@ -160,7 +168,7 @@ type Token = {
     | "op"
     | "space";
   text: string;
-  /** Uppercase word, or the unquoted identifier for quoted tokens. */
+  /** Uppercase word, or the unquoted content of quoted identifiers and strings. */
   value: string;
 };
 
@@ -218,7 +226,8 @@ function tokenize(sql: string): Token[] {
       tokens.push({ kind: "space", text: " ", value: "" });
       index = close + 2;
     } else if (char === "'") {
-      push("string", readQuoted(sql, index, "'"));
+      const end = readQuoted(sql, index, "'");
+      push("string", end, unquote(sql.slice(index, end)));
     } else if (char === '"' || char === "`") {
       const end = readQuoted(sql, index, char);
       push("quoted", end, unquote(sql.slice(index, end)));
@@ -234,7 +243,14 @@ function tokenize(sql: string): Token[] {
       let end = index + 1;
       while (end < sql.length && WORD_PART.test(sql[end]!)) end += 1;
       push("word", end, sql.slice(index, end).toUpperCase());
-    } else if (char === "?" || char === ":" || char === "@" || char === "$") {
+    } else if (
+      char === "?" ||
+      char === ":" ||
+      char === "@" ||
+      char === "$" ||
+      // SQLite reads `#name` as a parameter too.
+      (char === "#" && WORD_START.test(next ?? ""))
+    ) {
       let end = index + 1;
       if (char === "?") while (end < sql.length && /\d/u.test(sql[end]!)) end += 1;
       else while (end < sql.length && WORD_PART.test(sql[end]!)) end += 1;
@@ -257,11 +273,20 @@ function significant(tokens: Token[]): Token[] {
   return tokens.filter((token) => token.kind !== "space");
 }
 
-/** Split on top-level semicolons; a CREATE TRIGGER body (BEGIN ... END) keeps its own. */
+/**
+ * Split on top-level semicolons; a CREATE TRIGGER body (BEGIN ... END) keeps
+ * its own. Only the first BEGIN outside a CASE opens the body; inside it CASE
+ * and END nest, an unquoted BEGIN is refused (quote a column named begin),
+ * and the END that closes the body must be followed by `;` or the end of
+ * the SQL. That way a statement boundary is never in doubt: anything SQLite
+ * could read differently is refused rather than guessed.
+ */
 function splitStatements(tokens: Token[]): Token[][] {
   const statements: Token[][] = [];
   let current: Token[] = [];
   let words: string[] = [];
+  let phase: "head" | "body" | "after" = "head";
+  let caseDepth = 0;
   let depth = 0;
   const isTrigger = () => {
     const [first, second, third] = words;
@@ -272,29 +297,139 @@ function splitStatements(tokens: Token[]): Token[][] {
     );
   };
   for (const token of tokens) {
-    if (token.kind === "semi" && !(depth > 0 && isTrigger())) {
+    if (token.kind === "semi" && phase !== "body") {
       statements.push(current);
       current = [];
       words = [];
+      phase = "head";
+      caseDepth = 0;
       depth = 0;
       continue;
     }
+    if (phase === "after" && token.kind !== "space")
+      throw new SiteSqlSyntaxError(
+        "A trigger's END must end the statement; quote identifiers named begin or end",
+      );
     current.push(token);
-    if (token.kind === "word") {
-      if (words.length < 3) words.push(token.value);
-      if (isTrigger()) {
-        if (token.value === "BEGIN" || token.value === "CASE") depth += 1;
-        else if (token.value === "END" && depth > 0) depth -= 1;
+    if (token.kind !== "word") continue;
+    if (words.length < 3) words.push(token.value);
+    if (!isTrigger()) continue;
+    if (phase === "head") {
+      if (token.value === "CASE") caseDepth += 1;
+      else if (token.value === "END" && caseDepth > 0) caseDepth -= 1;
+      else if (token.value === "BEGIN" && caseDepth === 0) {
+        phase = "body";
+        depth = 1;
+      }
+    } else if (phase === "body") {
+      if (token.value === "BEGIN")
+        throw new SiteSqlSyntaxError(
+          "A trigger body cannot contain BEGIN; quote identifiers named begin or end",
+        );
+      if (token.value === "CASE") depth += 1;
+      else if (token.value === "END") {
+        depth -= 1;
+        if (depth === 0) phase = "after";
       }
     }
   }
+  if (phase === "body") throw new SiteSqlSyntaxError("A trigger body is missing its END");
   statements.push(current);
   return statements.filter((statement) => significant(statement).length > 0);
 }
 
 const DML = new Set(["INSERT", "UPDATE", "DELETE", "REPLACE"]);
+const COMPOUND = new Set(["UNION", "INTERSECT", "EXCEPT"]);
 
 type Refusal = { problem: SiteSqlProblem; message: string };
+
+type Cte = { name: string; body: Token[] };
+
+function isName(token: Token | undefined): token is Token {
+  return token?.kind === "word" || token?.kind === "quoted" || token?.kind === "string";
+}
+
+/** A name as SQLite compares it (ASCII case-insensitive; Unicode folding only refuses more). */
+function nameKey(token: Token): string {
+  return (token.kind === "word" ? token.text : token.value).toUpperCase();
+}
+
+/** Index of the `)` matching the `(` at `open`, or -1. */
+function closingParen(sig: Token[], open: number): number {
+  let depth = 0;
+  for (let index = open; index < sig.length; index += 1) {
+    if (sig[index]!.kind === "lparen") depth += 1;
+    else if (sig[index]!.kind === "rparen") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The common table expressions after the WITH at `at`:
+ * `WITH [RECURSIVE] name [(columns)] AS [NOT] [MATERIALIZED] (body), ...`,
+ * and the index of the statement keyword that follows them.
+ */
+function parseCtes(sig: Token[], at: number): { ctes: Cte[]; main: number } | Refusal {
+  const malformed: Refusal = { problem: "syntax", message: "Malformed WITH clause" };
+  const ctes: Cte[] = [];
+  let index = at + 1;
+  if (sig[index]?.kind === "word" && sig[index]!.value === "RECURSIVE") index += 1;
+  for (;;) {
+    const name = sig[index];
+    if (!isName(name)) return malformed;
+    index += 1;
+    if (sig[index]?.kind === "lparen") {
+      const close = closingParen(sig, index);
+      if (close < 0) return malformed;
+      index = close + 1;
+    }
+    if (sig[index]?.value !== "AS" || sig[index]?.kind !== "word") return malformed;
+    index += 1;
+    if (sig[index]?.kind === "word" && sig[index]!.value === "NOT") index += 1;
+    if (sig[index]?.kind === "word" && sig[index]!.value === "MATERIALIZED") index += 1;
+    if (sig[index]?.kind !== "lparen") return malformed;
+    const close = closingParen(sig, index);
+    if (close < 0) return malformed;
+    ctes.push({ name: nameKey(name), body: sig.slice(index + 1, close) });
+    index = close + 1;
+    if (sig[index]?.kind === "op" && sig[index]!.text === ",") {
+      index += 1;
+      continue;
+    }
+    return { ctes, main: index };
+  }
+}
+
+/**
+ * Named queries may not recurse: besides the RECURSIVE keyword, refuse any
+ * CTE (at any nesting level) whose body names the CTE itself or combines
+ * selects, since SQLite runs `name AS (... UNION ALL ... FROM name)`
+ * recursively without the keyword.
+ */
+function refuseRecursion(sig: Token[]): Refusal | null {
+  for (let index = 0; index < sig.length; index += 1) {
+    if (sig[index]!.kind !== "word" || sig[index]!.value !== "WITH") continue;
+    const parsed = parseCtes(sig, index);
+    if ("problem" in parsed) return parsed;
+    for (const cte of parsed.ctes)
+      if (
+        cte.body.some(
+          (token) =>
+            (token.kind === "word" && COMPOUND.has(token.value)) ||
+            (isName(token) && nameKey(token) === cte.name),
+        )
+      )
+        return {
+          problem: "recursive",
+          message:
+            "Named queries cannot recurse: a WITH table may not refer to itself or use UNION, INTERSECT or EXCEPT",
+        };
+  }
+  return null;
+}
 
 /** The statement kind, or why it is refused. `at` indexes the first significant token. */
 function classify(
@@ -315,17 +450,18 @@ function classify(
     case "DELETE":
       return { kind: "write" };
     case "WITH": {
-      let depth = 0;
-      for (let index = at + 1; index < sig.length; index += 1) {
-        const token = sig[index]!;
-        if (token.kind === "lparen") depth += 1;
-        else if (token.kind === "rparen") depth -= 1;
-        else if (depth === 0 && token.kind === "word") {
-          if (token.value === "SELECT" || token.value === "VALUES") return { kind: "read" };
-          if (DML.has(token.value) && sig[index + 1]?.kind !== "lparen") return { kind: "write" };
-        }
+      // Skip the `name AS (...)` definitions, then classify the statement itself.
+      const parsed = parseCtes(sig, at);
+      if ("problem" in parsed) return parsed;
+      const main = sig[parsed.main];
+      if (main?.kind === "word") {
+        if (main.value === "SELECT" || main.value === "VALUES") return { kind: "read" };
+        if (DML.has(main.value)) return { kind: "write" };
       }
-      return { problem: "syntax", message: "A WITH clause must end in a statement" };
+      return {
+        problem: "syntax",
+        message: "A WITH clause must end in SELECT, VALUES, INSERT, REPLACE, UPDATE or DELETE",
+      };
     }
     case "CREATE":
     case "DROP":
@@ -386,10 +522,11 @@ const KIND_LABEL: Record<SiteSqlStatementKind, string> = {
 
 /**
  * Check and compile Site SQL. Refuses ATTACH/DETACH, VACUUM, transaction
- * control, PRAGMA writes, load_extension, reserved table names, positional or
- * `@`/`$` parameters and, per profile, more than one statement, schema
- * changes and recursive CTEs. Parameters are `:name` only and are rewritten
- * to `?` with their bind order, so values are always bound, never spliced.
+ * control, PRAGMA writes, `pragma_*` functions outside the schema readers,
+ * load_extension, reserved table names, positional or `@`/`$`/`#`
+ * parameters and, per profile, more than one statement, schema changes and
+ * recursive CTEs. Parameters are `:name` only and are rewritten to `?` with
+ * their bind order, so values are always bound, never spliced.
  */
 export function compileSiteSql(sql: string, profile: SiteSqlProfile): SiteSqlCompileResult {
   const rules = PROFILE_RULES[profile];
@@ -401,13 +538,12 @@ export function compileSiteSql(sql: string, profile: SiteSqlProfile): SiteSqlCom
   if (typeof sql !== "string") return refuse("empty", "Give a SQL statement");
   if (sql.length > rules.maxLength)
     return refuse("too_long", `SQL is limited to ${rules.maxLength} characters here`);
-  let tokens: Token[];
+  let statements: Token[][];
   try {
-    tokens = tokenize(sql);
+    statements = splitStatements(tokenize(sql));
   } catch (error) {
     return refuse("syntax", error instanceof Error ? error.message : "Invalid SQL");
   }
-  const statements = splitStatements(tokens);
   if (statements.length === 0) return refuse("empty", "Give a SQL statement");
   if (statements.length > rules.maxStatements)
     return rules.maxStatements === 1
@@ -418,6 +554,14 @@ export function compileSiteSql(sql: string, profile: SiteSqlProfile): SiteSqlCom
   for (const statement of statements) {
     const sig = significant(statement);
     for (const token of sig) {
+      if (token.kind === "string") {
+        if (RESERVED_STRING.test(token.value))
+          return refuse(
+            "reserved_name",
+            `Names starting with ${SITE_SQL_RESERVED_PREFIXES.join(" or ")} are reserved (pass such a value as a parameter)`,
+          );
+        continue;
+      }
       if (token.kind !== "word" && token.kind !== "quoted") continue;
       const name = (token.kind === "word" ? token.text : token.value).toLowerCase();
       if (name === "load_extension")
@@ -427,19 +571,35 @@ export function compileSiteSql(sql: string, profile: SiteSqlProfile): SiteSqlCom
           "reserved_name",
           `Names starting with ${SITE_SQL_RESERVED_PREFIXES.join(" or ")} are reserved`,
         );
+      // Table-valued PRAGMA functions: only the schema readers.
+      if (name.startsWith("pragma_") && !SITE_SQL_READ_PRAGMAS.includes(name.slice(7)))
+        return refuse(
+          "pragma",
+          `Only these pragma_ functions are allowed: ${SITE_SQL_READ_PRAGMAS.map((pragma) => `pragma_${pragma}`).join(", ")}`,
+        );
     }
     const classified = classify(sig, rules);
     if ("problem" in classified) return refuse(classified.problem, classified.message);
-    if (!rules.kinds.includes(classified.kind))
+    if (!rules.kinds.includes(classified.kind)) {
+      if (profile === "agent" && classified.kind === "schema")
+        return refuse(
+          "statement_not_allowed",
+          "Change the schema with a migration (site_sql_migrate) so the database can be rebuilt",
+        );
       return refuse(
         "statement_not_allowed",
         `A ${profile === "named" ? "named query" : "statement"} cannot be a ${KIND_LABEL[classified.kind]}`,
       );
-    if (
-      !rules.recursive &&
-      sig.some((token) => token.kind === "word" && token.value === "RECURSIVE")
-    )
-      return refuse("recursive", "Recursive queries are not allowed in named queries");
+    }
+    if (!rules.recursive) {
+      if (sig.some((token) => token.kind === "word" && token.value === "RECURSIVE"))
+        return refuse(
+          "recursive",
+          "Recursive queries are not allowed in named queries (quote an identifier named recursive)",
+        );
+      const recursion = refuseRecursion(sig);
+      if (recursion) return refuse(recursion.problem, recursion.message);
+    }
     const params: string[] = [];
     let text = "";
     for (const token of statement) {
@@ -448,7 +608,10 @@ export function compileSiteSql(sql: string, profile: SiteSqlProfile): SiteSqlCom
         continue;
       }
       if (token.text[0] !== ":")
-        return refuse("parameter_style", "Use named parameters like :name (not ?, @name or $name)");
+        return refuse(
+          "parameter_style",
+          "Use named parameters like :name (not ?, @name, $name or #name)",
+        );
       const name = token.text.slice(1);
       if (!PARAM_NAME.test(name))
         return refuse(
@@ -850,6 +1013,8 @@ export type SiteDbMigrateRequest = SiteDbBase & {
    * Migrations to apply in order; ones already applied (same checksum) are
    * skipped. `position` is the migration's ordinal in Postgres, so the
    * database keeps the order when the API sends only the missing ones.
+   * `checksum` is the lowercase hex SHA-256 of `sql` (UTF-8); the Durable
+   * Object recomputes it and refuses a mismatch.
    */
   migrations: Array<{ name: string; sql: string; checksum: string; position?: number }>;
   /**
@@ -944,7 +1109,9 @@ export type SiteDbErrorCode =
   | "replayed"
   | "too_large"
   | "unauthorized"
-  | "not_found";
+  | "not_found"
+  /** SQLite or Durable Object failures that are not the caller's (busy, I/O, corruption); 500. */
+  | "internal";
 
 export type SiteDbErrorBody = { error: { code: SiteDbErrorCode; message: string } };
 
