@@ -1,5 +1,7 @@
 # @opengeni/artifact-kernel-wasm-presentation
 
+## 2.0.1
+
 ## 2.0.0
 
 ### Patch Changes
