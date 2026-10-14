@@ -944,7 +944,11 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
-export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
+export {
+  isStoredVerbatimAsLosslessJsonString,
+  LOSSLESS_TEXT_PREFIX,
+  toPostgresLosslessJson,
+} from "./lossless-json";
 import {
   projectSessionMcpProgressText,
   projectSessionTextPrefix,

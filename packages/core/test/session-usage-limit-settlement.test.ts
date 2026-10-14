@@ -2,6 +2,10 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
+import { toPostgresLosslessJson } from "@opengeni/db";
+
+/** The lossless codec's JSON string tag (packages/db/src/lossless-json.ts). */
+const LOSSLESS_JSON_STRING_PREFIX = "opengeni_lossless_json_string_v2_81f06e15:";
 import { normalizeModelCallUsage } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
@@ -278,6 +282,28 @@ describe("per-task usage limit settlement across funding paths", () => {
     const receipts = active.calls.filter((call) => call.fn === "receipt");
     expect(receipts).toHaveLength(1);
     expect(receipts[0]!.input).toMatchObject({ sourceId: digest, amountMicros: 6_000 });
+  });
+
+  test("a source key PostgreSQL cannot store as given uses the event's stored encoding", () => {
+    const turnId = "00000000-0000-4000-8000-000000000002";
+    for (const key of [
+      `n3s-\ud800${"z".repeat(95)}`,
+      `n3n-\u0000${"w".repeat(20)}`,
+      `${LOSSLESS_JSON_STRING_PREFIX}${"p".repeat(40)}`,
+    ]) {
+      const stored = toPostgresLosslessJson(key) as string;
+      expect(stored).not.toBe(key);
+      // Exactly the identity the event trigger meters: `<turnId>:<stored sourceKey>`.
+      expect(sessionUsageReceiptSourceId(`${turnId}:${key}`, turnId)).toBe(`${turnId}:${stored}`);
+    }
+    // Encoded past the bound: a digest of the stored identity, still stable.
+    const long = `${turnId}:n3-\ud800${"y".repeat(400)}`;
+    const digest = sessionUsageReceiptSourceId(long, turnId);
+    expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(sessionUsageReceiptSourceId(long, turnId)).toBe(digest);
+    // Safe keys are untouched, with or without the turn.
+    expect(sessionUsageReceiptSourceId(`${turnId}:resp_1`, turnId)).toBe(`${turnId}:resp_1`);
+    expect(sessionUsageReceiptSourceId("model_call:req-1")).toBe("model_call:req-1");
   });
 
   test("a response that reported no usage is an unknown amount, never known free", async () => {

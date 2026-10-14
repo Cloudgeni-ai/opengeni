@@ -823,6 +823,93 @@ test("re-review N3: a final response whose direct receipt write keeps failing co
   expect(types).not.toContain("turn.failed");
 });
 
+/** One final-answer turn with a provider response id the lossless codec must encode. */
+async function codecEncodedKeyTurn(responseId: string, failDirectOnce: boolean) {
+  resetSessionUsageReceiptCustodyForTests();
+  const ctx = await fixture();
+  const session = await startSession(ctx, { message: "Answer directly" });
+  await setLimit(ctx, session.id, 1_000_000);
+  const scripted = new ScriptedModel([
+    { id: responseId, inputTokens: 100, output: [assistantMessage("done")] },
+    { inputTokens: 100, output: [assistantMessage("must never be requested")] },
+  ]);
+  const original = opengeniDb.settleSessionUsageReceipt;
+  let directCalls = 0;
+  const settle = spyOn(opengeniDb, "settleSessionUsageReceipt").mockImplementation(
+    async (db, input) => {
+      if (input.sessionId === session.id && ++directCalls === 1 && failDirectOnce) {
+        throw connectionClosed();
+      }
+      return await original(db, input);
+    },
+  );
+  let status: string | null = null;
+  let thrown: unknown = null;
+  try {
+    status = (await runTurn(ctx, session.id, scripted)).status;
+  } catch (error) {
+    thrown = error;
+  } finally {
+    settle.mockRestore();
+  }
+  const types = (await events(ctx, session.id)).map((event) => event.type);
+  const observed = {
+    status,
+    thrown: thrown === null ? null : String(thrown),
+    calls: scripted.calls,
+    held: heldSessionUsageReceiptCount(session.id),
+    receipts: (await receipts(session.id)).map((row) => row.amount_micros),
+    usage: await usage(ctx, session.id),
+    completed: types.includes("turn.completed"),
+    failed: types.includes("turn.failed"),
+    recovery: types.includes("turn.recovery.requested"),
+  };
+  return observed;
+}
+
+test("final guard: a lone-surrogate response id over the trigger bound once encoded never loses its known usage", async () => {
+  // 404 UTF-16 units decode to 1,022 bytes but are stored as a 1,122-byte
+  // encoded key, which the event trigger skips; the direct write is refused.
+  const observed = await codecEncodedKeyTurn(`n3-\ud800${"y".repeat(400)}`, false);
+  expect(observed.calls).toBe(1);
+  // Recorded once (under the digest of the stored identity), never $0 complete.
+  expect(observed).toMatchObject({ status: "idle", held: 0, completed: true, failed: false });
+  expect(observed.receipts).toEqual(["100"]);
+  expect(observed.usage).toMatchObject({ usedMicros: 100, pricedCalls: 1 });
+});
+
+test("final guard: a held receipt for a lone-surrogate id is not dropped because the event skipped it", async () => {
+  // The decoded key fits 1,024 bytes, but the event stores a 1,122-byte
+  // encoded key that the trigger skips. The hold must be written, not dropped.
+  const observed = await codecEncodedKeyTurn(`n3h-\ud800${"x".repeat(399)}`, true);
+  expect(observed.calls).toBe(1);
+  expect(observed).toMatchObject({ status: "idle", held: 0, completed: true, failed: false });
+  expect(observed.receipts).toEqual(["100"]);
+  expect(observed.usage).toMatchObject({ usedMicros: 100, pricedCalls: 1 });
+});
+
+test("final guard: a short lone-surrogate response id is not treated as metered under its raw identity", async () => {
+  const observed = await codecEncodedKeyTurn(`n3s-\ud800${"z".repeat(95)}`, false);
+  expect(observed.calls).toBe(1);
+  // The event trigger and the direct writer share the stored identity: once.
+  expect(observed).toMatchObject({ status: "idle", held: 0, completed: true, failed: false });
+  expect(observed.receipts).toEqual(["100"]);
+  expect(observed.usage).toMatchObject({ usedMicros: 100, pricedCalls: 1 });
+});
+
+test("final guard: a response id carrying the codec prefix is never counted as zero", async () => {
+  const observed = await codecEncodedKeyTurn(
+    `opengeni_lossless_json_string_v2_81f06e15:${"p".repeat(40)}`,
+    true,
+  );
+  expect(observed.calls).toBe(1);
+  // The held receipt is kept (the key is stored encoded) and its retry
+  // deduplicates against the event's receipt: counted exactly once.
+  expect(observed).toMatchObject({ status: "idle", held: 0, completed: true, failed: false });
+  expect(observed.receipts).toEqual(["100"]);
+  expect(observed.usage).toMatchObject({ usedMicros: 100, pricedCalls: 1 });
+});
+
 /** A runtime whose tool emulates a sandbox single model call that leaves a marker owed. */
 function custodyMarkerRuntime(
   scripted: ScriptedModel,

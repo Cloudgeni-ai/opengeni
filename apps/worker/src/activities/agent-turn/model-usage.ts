@@ -1,5 +1,6 @@
 import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
+  isStoredVerbatimAsLosslessJsonString,
   recordModelCallFact,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
@@ -680,6 +681,9 @@ const MAX_METERED_SOURCE_KEY_BYTES = 1024;
  * Drop a held receipt for that identity when the event carried exactly its
  * amount, mirroring the trigger's acceptance rules conservatively: anything
  * the trigger might value differently keeps the hold for the direct write.
+ * A source key the lossless codec stores encoded (NUL, a lone surrogate, the
+ * codec prefix) reaches the trigger as a different string and identity, so it
+ * never counts as metered here: the hold stays and fails closed.
  */
 function releaseReceiptMeteredByCommittedEvent(
   input: {
@@ -693,6 +697,7 @@ function releaseReceiptMeteredByCommittedEvent(
   },
   telemetry: { inputTokens?: number | null; outputTokens?: number | null },
 ): void {
+  if (!isStoredVerbatimAsLosslessJsonString(input.sourceKey)) return;
   const keyBytes = new TextEncoder().encode(input.sourceKey).byteLength;
   if (keyBytes < 1 || keyBytes > MAX_METERED_SOURCE_KEY_BYTES) return;
   const estimated = input.billingSnapshot?.estimatedProviderCostMicros ?? null;

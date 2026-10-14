@@ -19,8 +19,10 @@ import type { LatencyMode } from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
 import {
   applyCreditDebitUpToBalance,
+  isStoredVerbatimAsLosslessJsonString,
   recordUsageEvent,
   settleSessionUsageReceipt,
+  toPostgresLosslessJson,
   type Database,
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
@@ -135,12 +137,23 @@ export const SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES = 1100;
  * so their deduplication is untouched. Only a longer identity, which those
  * paths skip, is replaced by a stable digest, so a long provider response id
  * is recorded once instead of failing the receipt write on every retry.
+ *
+ * A source key PostgreSQL cannot store as given (NUL, a lone UTF-16
+ * surrogate, the lossless codec's own prefix) is stored by the event in its
+ * lossless encoding, and the trigger meters that encoded key. The receipt uses
+ * the same encoded key, so both writers share one identity instead of the
+ * direct write being refused.
  */
-export function sessionUsageReceiptSourceId(sourceId: string): string {
-  if (Buffer.byteLength(sourceId, "utf8") <= SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES) {
-    return sourceId;
+export function sessionUsageReceiptSourceId(sourceId: string, turnId?: string | null): string {
+  const turnPrefix = turnId && sourceId.startsWith(`${turnId}:`) ? `${turnId}:` : "";
+  const sourceKey = sourceId.slice(turnPrefix.length);
+  const stored = isStoredVerbatimAsLosslessJsonString(sourceKey)
+    ? sourceId
+    : `${turnPrefix}${toPostgresLosslessJson(sourceKey) as string}`;
+  if (Buffer.byteLength(stored, "utf8") <= SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES) {
+    return stored;
   }
-  return `sha256:${createHash("sha256").update(sourceId, "utf8").digest("hex")}`;
+  return `sha256:${createHash("sha256").update(stored, "utf8").digest("hex")}`;
 }
 
 export async function settleModelUsage(
@@ -277,7 +290,7 @@ export async function settleModelUsage(
     });
     const held: HeldSessionUsageReceipt = {
       sessionId: usageLimitSessionId,
-      sourceId: sessionUsageReceiptSourceId(input.sourceId),
+      sourceId: sessionUsageReceiptSourceId(input.sourceId, input.turnId),
       turnId: input.turnId ?? null,
       amountMicros: meterAmountMicros,
       pricingSource: meterAmountMicros === null ? null : pricingSource,
