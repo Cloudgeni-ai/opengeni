@@ -34,6 +34,11 @@ export class AppTray {
   }
 
   update(summary: TraySummary): void {
+    this.tray.setToolTip(
+      !summary.connected
+        ? this.config.productName
+        : `${this.config.productName}: ${summary.running ? "this computer is available to agents" : "this computer is paused"}`,
+    );
     const computer = !summary.connected
       ? []
       : [

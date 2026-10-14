@@ -2,7 +2,7 @@ import { Notification, powerMonitor } from "electron";
 import type { InboxItem, OpenGeniClient } from "@opengeni/sdk";
 
 import { actOnInboxItem } from "./inbox-actions";
-import { diffInbox, notificationPlan, type InboxAction } from "./inbox-model";
+import { bannerText, diffInbox, notificationPlan, type InboxAction } from "./inbox-model";
 
 const POLL_MS = 30_000;
 
@@ -102,8 +102,7 @@ export class InboxNotifier {
     state.banners.get(item.id)?.close();
     const banner = new Notification({
       title: plan.title,
-      subtitle: plan.subtitle,
-      body: plan.body,
+      ...bannerText(plan, process.platform),
       actions: plan.buttons.map((button) => ({ type: "button" as const, text: button.label })),
       hasReply: plan.reply,
       replyPlaceholder: "Your answer",
