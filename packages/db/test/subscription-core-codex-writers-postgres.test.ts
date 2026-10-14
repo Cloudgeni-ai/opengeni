@@ -1158,7 +1158,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
     expect(stale).toHaveLength(0);
   });
 
-  test("workspace route: SUB-OWN-04/09 workspace administrators create, reconnect and remove only the workspace's own account", async () => {
+  test("workspace route: SUB-OWN-04 and SUB-OWN-09 workspace administrators create, reconnect and remove only the workspace's own account", async () => {
     const org = await organization();
     await setCutover(org.accountId, true);
     const manager = await person(org, "admin");
