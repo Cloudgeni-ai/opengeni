@@ -76,8 +76,17 @@ export type SiteDataValidationAdmission = {
   collections?: readonly string[];
   /** Whether the request compiles a schema itself (defining a collection with one). */
   schema?: boolean;
-  /** Validation time to reserve: the request's budget. */
+  /** Validation time to reserve, sized to the request and capped at its budget. */
   reserveMs: number;
+};
+
+/**
+ * Validation time a write reserved at admission, and the one-minute window
+ * (epoch seconds of its start) it was reserved in; null when nothing was.
+ */
+export type SiteDataValidationReservation = {
+  reservedMs: number;
+  windowStartedAt: number | null;
 };
 
 export type SiteDataLimits = {
@@ -291,17 +300,19 @@ export interface SiteDataStore {
     operations: number,
     limits: SiteDataLimits,
     validation?: SiteDataValidationAdmission,
-  ): Promise<{ reservedMs: number }>;
+  ): Promise<SiteDataValidationReservation>;
   /**
    * Settle a write's validation time, whatever its outcome: replace the
    * reservation with the time spent on the Site's and workspace's validation
    * windows, and add one operation per started 5 ms spent (from 1 ms) to the
    * caller's write windows. Never refused: the work is done. Does nothing
-   * when nothing was reserved or spent.
+   * when nothing was reserved or spent. A reservation is refunded only in the
+   * window it was taken from: after the minute rolled over, only time spent
+   * beyond the reservation is charged, to the current window.
    */
   settleValidation(
     caller: SiteDataCaller,
-    time: { reservedMs: number; spentMs: number },
+    time: SiteDataValidationReservation & { spentMs: number },
     limits: SiteDataLimits,
   ): Promise<void>;
   deleteFile(caller: SiteDataCaller, fileId: string): Promise<SiteDataStoredFile>;
@@ -871,15 +882,19 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
 
   /**
    * Add (or, with a negative amount, refund) validation time on the Site's
-   * and the workspace's current one-minute windows and return both totals. A
-   * window from an earlier minute starts over; totals never go below zero.
+   * and the workspace's current one-minute windows and return both totals
+   * and the current window's start (epoch seconds). A window from an earlier
+   * minute starts over; totals never go below zero.
    */
   const addValidationTime = async (
     tx: Database,
     caller: SiteDataCaller,
     micros: number,
-  ): Promise<[number, number]> => {
-    const [site] = await rawRows<{ validation_micros: string | number }>(
+  ): Promise<[number, number, number]> => {
+    const [site] = await rawRows<{
+      validation_micros: string | number;
+      window_epoch: string | number;
+    }>(
       tx,
       sql`insert into site_data_validation_windows
           (account_id, workspace_id, site_id, window_started_at, validation_micros)
@@ -892,7 +907,8 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
               1000000000000000)
             else excluded.validation_micros end,
           window_started_at = excluded.window_started_at
-        returning validation_micros`,
+        returning validation_micros,
+          extract(epoch from window_started_at)::bigint as window_epoch`,
     );
     const [workspace] = await rawRows<{ validation_micros: string | number }>(
       tx,
@@ -910,7 +926,11 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           window_started_at = excluded.window_started_at
         returning validation_micros`,
     );
-    return [num(site?.validation_micros), num(workspace?.validation_micros)];
+    return [
+      num(site?.validation_micros),
+      num(workspace?.validation_micros),
+      num(site?.window_epoch),
+    ];
   };
 
   /** Serialize every write to one Site's data and return its totals. */
@@ -1163,11 +1183,11 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
             });
         }
         if (kind !== "write" || !validation || !(validation.reserveMs > 0))
-          return { reservedMs: 0 };
+          return { reservedMs: 0, windowStartedAt: null };
         if (!validation.schema && !(await touchesSchema(tx, caller, validation.collections ?? [])))
-          return { reservedMs: 0 };
+          return { reservedMs: 0, windowStartedAt: null };
         const micros = Math.ceil(validation.reserveMs * 1000);
-        const [site, workspace] = await addValidationTime(tx, caller, micros);
+        const [site, workspace, windowStartedAt] = await addValidationTime(tx, caller, micros);
         if (site > limits.siteValidationMsPerMinute * 1000)
           throw new SiteDataError(
             "rate_limited",
@@ -1180,7 +1200,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
             "This workspace's Sites have used their schema-checking time for this minute. Try again in a minute.",
             { retryAfterSeconds: 60, quota: "workspace_validation_time" },
           );
-        return { reservedMs: validation.reserveMs };
+        return { reservedMs: validation.reserveMs, windowStartedAt };
       });
     },
 
@@ -1189,12 +1209,27 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
       const spent = Math.max(0, time.spentMs);
       if (reserved === 0 && spent === 0) return;
       const extra = spent < 1 ? 0 : Math.ceil(spent / SITE_DATA_VALIDATION_MS_PER_OPERATION);
-      const delta = Math.ceil(spent * 1000) - Math.ceil(reserved * 1000);
+      const spentMicros = Math.ceil(spent * 1000);
+      const reservedMicros = Math.ceil(reserved * 1000);
       await scoped(caller, async (tx) => {
         if (extra > 0)
           for (const [principal] of writeWindows(caller, limits))
             await countRateWindow(tx, caller, principal, extra);
-        await addValidationTime(tx, caller, delta);
+        // Refund or charge the difference only within the window the
+        // reservation was taken from; once the minute rolled over, that
+        // window is gone and only the overrun lands on the current one.
+        const [now] = await rawRows<{ window_epoch: string | number }>(
+          tx,
+          sql`select extract(epoch from date_trunc('minute', now()))::bigint as window_epoch`,
+        );
+        const sameWindow =
+          reserved > 0 &&
+          time.windowStartedAt !== null &&
+          num(now?.window_epoch) === time.windowStartedAt;
+        const delta = sameWindow
+          ? spentMicros - reservedMicros
+          : Math.max(0, spentMicros - reservedMicros);
+        if (delta !== 0) await addValidationTime(tx, caller, delta);
       });
     },
 
