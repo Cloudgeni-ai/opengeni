@@ -13,6 +13,14 @@ import {
 import { OpenGeniClient } from "./client";
 import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
 import { createOpenGeniSiteData, type OpenGeniSiteData, type OpenGeniSiteFiles } from "./site-data";
+import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
+export {
+  OpenGeniSiteSqlError,
+  type OpenGeniSiteSql,
+  type OpenGeniSiteSqlErrorCode,
+  type OpenGeniSiteSqlResult,
+  type OpenGeniSiteSqlValue,
+} from "./site-sql";
 export {
   OpenGeniSiteDataError,
   SITE_DATA_PATH_PREFIX,
@@ -156,6 +164,12 @@ export type OpenGeniSiteClient = {
   /** Files stored with this published Site. */
   readonly files: OpenGeniSiteFiles;
   /**
+   * The Site's optional SQL database: run the named queries its owner
+   * defined (`await site.sql.run("top_votes", { limit: 10 })`). Served by
+   * hosts bound to a published Site, like `data`; the owner turns it on.
+   */
+  readonly sql: OpenGeniSiteSql;
+  /**
    * The person viewing this Site, resolved once from the host and cached for
    * the life of the client (`await site.viewer`). In the console this is the
    * signed-in workspace member; on a published Site it is the signed-in
@@ -221,6 +235,10 @@ export function createOpenGeniSiteClient(
     (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
     () => transport.siteDataSupported(),
   );
+  const siteSql = createOpenGeniSiteSql(
+    (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
+    () => transport.siteDataSupported(),
+  );
   let viewer: Promise<OpenGeniSiteViewer | null> | null = null;
   return {
     client: new OpenGeniClient({
@@ -232,6 +250,7 @@ export function createOpenGeniSiteClient(
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
     data: siteData.data,
     files: siteData.files,
+    sql: siteSql,
     get viewer() {
       if (!viewer) {
         const pending = transport.viewer();

@@ -55,7 +55,10 @@ export type SiteBridgeToolHandlers = {
   ) => Promise<ToolGatewayInvokeResponse>;
   /** Serves the ordinary SDK's HTTP requests (sessions, Site Data) over the Site HTTP channel. */
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
-  /** Advertise Site Data: `fetch` serves `published-artifacts/current` routes for the pinned Site. */
+  /**
+   * Advertise Site Data and Site SQL: `fetch` serves `published-artifacts/current`
+   * routes (data, files and `sql/queries/<name>`) for the pinned Site.
+   */
   siteData?: boolean;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
