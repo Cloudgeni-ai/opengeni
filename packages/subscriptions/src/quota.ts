@@ -94,8 +94,7 @@ export function quotaBlockClaim(
   modelId: ModelId | null,
 ): QuotaBlockClaim | null {
   const until = modelId === null ? quota.exhaustedUntil : quota.modelCooldowns[modelId];
-  const claim =
-    modelId === null ? quota.exhaustedClaim : quota.modelCooldownClaims?.[modelId];
+  const claim = modelId === null ? quota.exhaustedClaim : quota.modelCooldownClaims?.[modelId];
   return until !== null &&
     until !== undefined &&
     claim !== null &&

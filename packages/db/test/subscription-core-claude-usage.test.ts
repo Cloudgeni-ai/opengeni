@@ -281,7 +281,11 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     await fetchSubscriptionCoreClaudeUsage(connectionRead(oauth, () => Response.json(body)).read);
   const opus = "organization-claude-subscription/claude-opus-4-6";
   /** A block of `opus` claiming `windowIds`, observed `ago` ms before the reading. */
-  const block = (reading: SubscriptionCoreClaudeUsageReading, windowIds: string[], ago = 1_000) => ({
+  const block = (
+    reading: SubscriptionCoreClaudeUsageReading,
+    windowIds: string[],
+    ago = 1_000,
+  ) => ({
     modelId: opus,
     until: Date.parse(reading.checkedAt) + DAY,
     claim: {
@@ -356,18 +360,26 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
 
     // A claimed window the reading omits, or reports at the limit, stands.
     const omitted = await read({ five_hour: window(3), seven_day: window(41) });
-    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(omitted)(block(omitted, ["seven_day_opus"]))).toBe(false);
+    expect(
+      subscriptionCoreClaudeUsageEndsClaimedBlock(omitted)(block(omitted, ["seven_day_opus"])),
+    ).toBe(false);
     const full = await read({
       five_hour: window(3),
       seven_day: window(41),
       seven_day_opus: window(100),
     });
-    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(full)(block(full, ["seven_day_opus"]))).toBe(false);
+    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(full)(block(full, ["seven_day_opus"]))).toBe(
+      false,
+    );
 
     // A reading that does not confirm availability ends nothing.
     const refused = await read({ five_hour: window(100), seven_day: window(41) });
-    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(refused)(block(refused, ["seven_day"]))).toBe(false);
-    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(null)(block(reading, ["five_hour"]))).toBe(false);
+    expect(
+      subscriptionCoreClaudeUsageEndsClaimedBlock(refused)(block(refused, ["seven_day"])),
+    ).toBe(false);
+    expect(subscriptionCoreClaudeUsageEndsClaimedBlock(null)(block(reading, ["five_hour"]))).toBe(
+      false,
+    );
   });
 
   test("the header decoder claims each block's plan windows, and none for an unrecognized limit", () => {

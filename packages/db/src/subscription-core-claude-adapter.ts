@@ -204,8 +204,7 @@ export function subscriptionCoreClaudeAdapter(
     usageReadEndsQuotaExhaustion: true,
     usageReadConfirmsAvailability: (response) =>
       subscriptionCoreClaudeUsageConfirmsAvailability(response),
-    usageReadEndsClaimedBlock: (response) =>
-      subscriptionCoreClaudeUsageEndsClaimedBlock(response),
+    usageReadEndsClaimedBlock: (response) => subscriptionCoreClaudeUsageEndsClaimedBlock(response),
   };
 }
 

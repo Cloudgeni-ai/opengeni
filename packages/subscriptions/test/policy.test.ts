@@ -1640,7 +1640,11 @@ describe("quota freshness and observations", () => {
     // An earlier observation does not decide the kept deadline: its claim stands.
     const kept = applyQuotaObservation(
       { refreshGeneration: 1, quota: claimed },
-      quota({ observedAt: NOW, source: "usage_endpoint", modelCooldowns: { "claude/a": until - 1 } }),
+      quota({
+        observedAt: NOW,
+        source: "usage_endpoint",
+        modelCooldowns: { "claude/a": until - 1 },
+      }),
     )!;
     expect(quotaBlockClaim(kept, "claude/a")).toEqual(claim(["five_hour"]));
 
