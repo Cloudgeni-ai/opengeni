@@ -127,7 +127,8 @@ export function DesktopThisComputerCard({ workspaceId }: { workspaceId: string }
           <LaptopIcon className="mt-0.5 size-4 shrink-0 text-fg-muted" aria-hidden />
           <div className="min-w-0">
             <p className="text-sm font-medium text-fg">Use this computer</p>
-            <p className="mt-0.5 text-xs leading-snug text-fg-muted">
+            {/* Short windows keep room for the sessions list. */}
+            <p className="mt-0.5 text-xs leading-snug text-fg-muted [@media(max-height:640px)]:hidden">
               Let agents work on {status.machineName}.
             </p>
           </div>

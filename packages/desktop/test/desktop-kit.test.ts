@@ -14,7 +14,13 @@ import {
   parseServiceRunning,
   windowsInstallCommand,
 } from "../src/main/agent-cli";
-import { diffInbox, inboxItemPath, notificationPlan, plainText } from "../src/main/inbox-model";
+import {
+  bannerText,
+  diffInbox,
+  inboxItemPath,
+  notificationPlan,
+  plainText,
+} from "../src/main/inbox-model";
 import { localFile, localPageUrl } from "../src/main/local-pages";
 import { nativeSignInUrl, parseSignInCallback, pkcePair } from "../src/main/pkce";
 import { newestReleaseTag, resolveUpdateFeedUrl } from "../src/main/update-feed";
@@ -298,6 +304,14 @@ describe("inbox notifications", () => {
     expect(choice.subtitle).toBe("Fix the build · a@x.io · app");
     expect(notificationPlan(item({}), null).reply).toBe(true);
     expect(notificationPlan(item({ kind: "notification" }), null).buttons).toEqual([]);
+  });
+
+  test("keeps the banner's context where the platform has no subtitle", () => {
+    const plan = notificationPlan(item({}), "a@x.io · app");
+    expect(bannerText(plan, "darwin")).toEqual({ subtitle: plan.subtitle, body: plan.body });
+    expect(bannerText(plan, "win32")).toEqual({ body: `${plan.subtitle}\n${plan.body}` });
+    expect(bannerText({ ...plan, subtitle: "" }, "linux")).toEqual({ body: plan.body });
+    expect(bannerText({ ...plan, body: "" }, "win32")).toEqual({ body: plan.subtitle });
   });
 
   test("opens the session at the item's moment", () => {
