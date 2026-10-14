@@ -278,6 +278,9 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
       .boolean()
       .describe("Anonymous guests may start embedded agent conversations (public Sites)."),
     conversationsPerVisitorPerDay: NullableLimit("New agent conversations per visitor per day."),
+    conversationsPerSitePerDay: NullableLimit(
+      "New agent conversations per Site per UTC day, from every visitor together.",
+    ),
     turnsPerConversation: NullableLimit("Messages a viewer may send in one conversation."),
     agentMicrosPerConversation: NullableLimit("Agent spend per conversation, micro-USD."),
     agentMicrosPerVisitorPerDay: NullableLimit("Agent spend per visitor per UTC day, micro-USD."),
@@ -298,6 +301,7 @@ export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
   agentsEnabled: true,
   guestAgentsEnabled: true,
   conversationsPerVisitorPerDay: 10,
+  conversationsPerSitePerDay: 50,
   turnsPerConversation: 20,
   agentMicrosPerConversation: 20_000,
   agentMicrosPerVisitorPerDay: 200_000,
@@ -305,9 +309,10 @@ export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
   agentModels: null,
 });
 
-/** Hard caps that still apply under the unlimited profile. */
+/** Hard caps that still apply under every profile, unlimited included. */
 export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
   requestsPerMinutePerVisitor: 600,
+  conversationsPerSitePerDay: 10_000,
   agentMicrosPerConversation: 5_000_000,
 });
 
@@ -327,11 +332,31 @@ export const SiteEmbeddedAgent = /* @__PURE__ */ defineSchema(() =>
     model: z.string().min(1).max(200).nullable().default(null),
     /** Extra instructions for the Site's agent, appended to the platform's. */
     instructions: z.string().max(8000).nullable().default(null),
-    /** Workspace tools the agent may use; the Site's published tool list by default. */
+    /**
+     * Workspace MCP connections (server ids) the agent may use. null or empty:
+     * no workspace tools. Setting a non-empty list needs a workspace admin.
+     */
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().default(null),
+    /**
+     * Whether anonymous guests' conversations get `tools` too. Off by
+     * default: guests get no workspace tools. Setting it needs a workspace admin.
+     */
+    guestTools: z.boolean().default(false),
   }),
 );
 export type SiteEmbeddedAgent = z.infer<typeof SiteEmbeddedAgent>;
+
+/** Changes to the embedded agent; omitted fields keep their current value. */
+export const SiteEmbeddedAgentChanges = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    enabled: z.boolean().optional(),
+    model: z.string().min(1).max(200).nullable().optional(),
+    instructions: z.string().max(8000).nullable().optional(),
+    tools: z.array(z.string().min(1).max(300)).max(100).nullable().optional(),
+    guestTools: z.boolean().optional(),
+  }),
+);
+export type SiteEmbeddedAgentChanges = z.infer<typeof SiteEmbeddedAgentChanges>;
 
 export const SitePublication = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -372,7 +397,7 @@ export const UpsertSitePublicationRequest = /* @__PURE__ */ defineSchema(() =>
     access: SiteAccessMode.optional(),
     status: z.enum(["active", "unpublished"]).optional(),
     noindex: z.boolean().optional(),
-    agent: SiteEmbeddedAgent.partial().optional(),
+    agent: SiteEmbeddedAgentChanges.optional(),
     limitProfile: SiteLimitProfile.optional(),
     invitedEmails: z.array(z.string().email()).max(500).optional(),
   }),

@@ -39,6 +39,7 @@ export type {
   SiteAuthAuthorizeRequest,
   SiteAuthAuthorizeResponse,
   SiteEmbeddedAgent,
+  SiteEmbeddedAgentChanges,
   SiteHostnameAvailability,
   SiteHostnameAvailabilityProblem,
   SiteLimitProfile,

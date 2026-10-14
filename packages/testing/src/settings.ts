@@ -102,6 +102,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sitesFreeRequestsPerMinutePerVisitor: 120,
     sitesFreeGuestWritesPerMinute: 30,
     sitesFreeConversationsPerVisitorPerDay: 10,
+    sitesFreeConversationsPerSitePerDay: 50,
     sitesFreeTurnsPerConversation: 20,
     sitesFreeAgentMicrosPerConversation: 20_000,
     sitesFreeAgentMicrosPerVisitorPerDay: 200_000,

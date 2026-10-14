@@ -1601,6 +1601,7 @@ const SettingsSchema = z.object({
   sitesFreeRequestsPerMinutePerVisitor: z.coerce.number().int().positive().default(120),
   sitesFreeGuestWritesPerMinute: z.coerce.number().int().nonnegative().default(30),
   sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().default(10),
+  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().default(50),
   sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().default(20),
   sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().default(20_000),
   sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().default(200_000),
@@ -4990,6 +4991,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sitesFreeGuestWritesPerMinute: optional("OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE"),
     sitesFreeConversationsPerVisitorPerDay: optional(
       "OPENGENI_SITES_FREE_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesFreeConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_FREE_CONVERSATIONS_PER_SITE_PER_DAY",
     ),
     sitesFreeTurnsPerConversation: optional("OPENGENI_SITES_FREE_TURNS_PER_CONVERSATION"),
     sitesFreeAgentMicrosPerConversation: optional(

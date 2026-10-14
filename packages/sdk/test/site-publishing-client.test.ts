@@ -20,7 +20,7 @@ const publication: SitePublication = {
   access: "members",
   status: "active",
   noindex: true,
-  agent: { enabled: false, model: null, instructions: null, tools: null },
+  agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
   limitProfile: { kind: "free", overrides: null },
   effectiveLimits: { ...DEFAULT_FREE_SITE_LIMITS },
   invitedEmails: [],
