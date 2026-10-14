@@ -1,4 +1,0 @@
----
----
-
-Organization settings > Models now opens with "Models for: Defaults", a picker that switches between the defaults every workspace uses and one workspace's settings, instead of a workspace page that looked the same as the organization's. A workspace's settings sit under a tinted header that says changes apply only there, and each sharing rule says whether it uses the default or was changed for that workspace, with the default's value and one step back. On the Defaults, each rule says which workspaces use it ("Used by 2 of 3 workspaces · Research has its own (Off)"), and only workspaces that change something are listed. Accounts are now "Model providers" with "Connect provider", the sections are "New chats" and "Sharing subscriptions", and sharing work between a provider's subscriptions is a switch per provider.
