@@ -19,7 +19,7 @@ desktop app by pointing the kit at its own web app and branding.
 | Shell | Electron (current stable, 44.x) on all three platforms. One engine, one shell. |
 | Content | The deployment's own web app, loaded from the server the account belongs to, in a desktop layout. |
 | Native code | Electron APIs first; `objc-js` for small macOS gaps; a typed native module for anything larger. |
-| Look | Inset traffic lights and standard sidebar vibrancy on macOS; overlay window controls on Windows and Linux. No Liquid Glass. |
+| Look | Inset traffic lights and standard sidebar vibrancy on macOS; the system title bar on Windows and Linux. No Liquid Glass. |
 | Accounts | Several accounts on several servers, each in its own isolated browser session. |
 | Local machine | "Use this computer" installs (if needed) and connects the connected-machine agent in one click, using the deployment's own signed installer. The agent keeps its own updater and service. |
 | Background | The agent keeps running after the window closes, with a menu bar / tray item and a pause control. |
@@ -193,7 +193,7 @@ stable and beta channels. The signing identity is a release-time setting.
    notifications, "Use this computer", tray, updater, signed
    and notarized DMG, budgets measured. About 4–6 agent-hours.
 2. Linux: AppImage, deb and rpm, Wayland and X11 checks. A few hours.
-3. Windows: NSIS, Authenticode, overlay title bar, CUA computer use. A few hours.
+3. Windows: NSIS, Authenticode, CUA computer use; consider a custom title bar. A few hours.
 
 ## Risks
 

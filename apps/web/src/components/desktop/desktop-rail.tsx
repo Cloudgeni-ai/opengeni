@@ -23,6 +23,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
+import { useAppContext } from "@/context";
 import { desktopBridge, desktopCapability } from "@/lib/desktop";
 
 /** Keep the desktop app's links, notifications and computer on the open workspace. */
@@ -50,8 +51,16 @@ function bridgeErrorText(caught: unknown, fallback: string): string {
   return caught.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/u, "");
 }
 
+/** Where the app's menu bar item lives on this platform. */
+function trayName(): string {
+  return desktopBridge?.platform === "macos" ? "menu bar" : "tray";
+}
+
 function useThisComputer(workspaceId: string) {
-  const bridge = desktopCapability("thisComputer");
+  // Only where the deployment lets people connect their own computers.
+  const { clientConfig } = useAppContext();
+  const offered = clientConfig.connectedMachines !== false;
+  const bridge = offered ? desktopCapability("thisComputer") : null;
   const [status, setStatus] = useState<ThisComputerStatus | null>(null);
   const refresh = useCallback(() => {
     if (!bridge) return;
@@ -97,7 +106,7 @@ export function DesktopThisComputerCard({ workspaceId }: { workspaceId: string }
           onClick={() => {
             void bridge.thisComputer.resume().catch((caught: unknown) =>
               toast.error("Couldn't resume this computer", {
-                description: bridgeErrorText(caught, "Try again from the menu bar."),
+                description: bridgeErrorText(caught, `Try again from the ${trayName()}.`),
               }),
             );
           }}
@@ -153,10 +162,7 @@ export function DesktopThisComputerCard({ workspaceId }: { workspaceId: string }
           setStatus(next);
           setDialogOpen(false);
           toast.success("This computer is connected", {
-            description:
-              desktopBridge?.platform === "macos"
-                ? "Pause it any time from the menu bar."
-                : "Pause it any time from the tray.",
+            description: `Pause it any time from the ${trayName()}.`,
           });
         }}
       />
@@ -181,7 +187,6 @@ function ThisComputerDialog({
   const [screenControl, setScreenControl] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const mac = desktopBridge?.platform === "macos";
   const installing = status.state === "not_installed";
 
   async function connect() {
@@ -207,14 +212,14 @@ function ThisComputerDialog({
           <DialogDescription>
             Agents in this workspace can work on {status.machineName}: run commands, edit files and
             use your browser. Only you can use it, and you can pause it any time from the{" "}
-            {mac ? "menu bar" : "tray"}.
+            {trayName()}.
           </DialogDescription>
         </DialogHeader>
         <label className="mt-4 flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border p-3">
           <span className="grid gap-0.5">
             <span className="text-sm font-medium text-fg">See and control the screen</span>
             <span className="text-xs leading-snug text-fg-muted">
-              {mac
+              {desktopBridge?.platform === "macos"
                 ? "Lets agents use apps. macOS asks for Screen Recording and Accessibility the first time."
                 : "Lets agents use apps, not only the command line."}
             </span>

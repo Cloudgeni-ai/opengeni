@@ -518,17 +518,14 @@ html[data-desktop] [data-window-drag] :is(a, button, input, select, textarea, la
   app-region: no-drag;
 }
 
-/* A thin strip along the top of the canvas drags the window on pages without
-   a header of their own. */
-html[data-desktop] [data-canvas] {
-  position: relative;
-}
-
-html[data-desktop] [data-canvas]::before {
+/* On macOS the page runs under the title bar: a strip along the top of every
+   page drags the window, including pages without a header of their own.
+   Windows and Linux keep the system title bar. */
+html[data-desktop="macos"] body::before {
   content: "";
-  position: absolute;
+  position: fixed;
   inset: 0 0 auto;
-  z-index: 60;
+  z-index: 2147483000;
   height: 10px;
   -webkit-app-region: drag;
   app-region: drag;
@@ -546,12 +543,6 @@ html[data-desktop="macos"] body {
       radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach-quiet), transparent 85%),
       color-mix(in srgb, var(--og-color-bg) 62%, transparent);
   }
-}
-
-/* Windows and Linux draw the window controls over the top-right corner. */
-html[data-desktop="windows"] [data-canvas],
-html[data-desktop="linux"] [data-canvas] {
-  padding-top: env(titlebar-area-height, 0px);
 }
 
 /* macOS draws the traffic lights over the rail's top-left corner: the brand
