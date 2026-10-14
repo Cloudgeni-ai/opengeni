@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { dialog, Notification } from "electron";
 import type { AppUpdater } from "electron-updater";
 
@@ -6,6 +9,24 @@ import { resolveUpdateFeedUrl } from "./update-feed";
 
 const CHECK_EVERY_MS = 4 * 60 * 60 * 1000;
 const FIRST_CHECK_DELAY_MS = 15_000;
+
+/**
+ * Whether installing an update needs the person's password: Linux deb and rpm
+ * installs update through the package manager (electron-builder records the
+ * package type next to the app). AppImage, macOS and Windows don't.
+ */
+export function updateNeedsPassword(
+  platform: NodeJS.Platform = process.platform,
+  readPackageType: () => string = () =>
+    readFileSync(join(process.resourcesPath, "package-type"), "utf8"),
+): boolean {
+  if (platform !== "linux" || process.env.APPIMAGE) return false;
+  try {
+    return ["deb", "rpm", "pacman"].includes(readPackageType().trim());
+  } catch {
+    return false;
+  }
+}
 
 /** What the menu shows for updates. */
 export type UpdateMenuState =
@@ -25,6 +46,7 @@ export class AppUpdates {
   private lastUrl: string | null = null;
   private state: UpdateMenuState = { kind: "idle" };
   private announced = false;
+  private readonly needsPassword = updateNeedsPassword();
 
   constructor(
     private readonly productName: string,
@@ -112,7 +134,8 @@ export class AppUpdates {
     this.loading ??= import("electron-updater")
       .then(({ autoUpdater }) => {
         autoUpdater.autoDownload = true;
-        autoUpdater.autoInstallOnAppQuit = true;
+        // Quitting never asks for a password; those updates wait for Restart.
+        autoUpdater.autoInstallOnAppQuit = !this.needsPassword;
         autoUpdater.on("update-downloaded", (info) => {
           this.setState({ kind: "ready", version: info.version });
           this.announce(info.version);
@@ -133,7 +156,9 @@ export class AppUpdates {
     this.announced = true;
     const notification = new Notification({
       title: `${this.productName} ${version} is ready`,
-      body: "Restart to update. It also installs the next time you quit.",
+      body: this.needsPassword
+        ? "Restart to install it. You'll be asked for your password."
+        : "Restart to update. It also installs the next time you quit.",
     });
     notification.on("click", () => this.restart());
     notification.show();

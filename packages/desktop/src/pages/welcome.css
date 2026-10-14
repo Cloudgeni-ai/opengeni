@@ -101,6 +101,7 @@ h1 {
   margin: 0 0 22px;
   color: var(--muted);
   line-height: 1.45;
+  text-wrap: pretty;
 }
 
 .lead strong {

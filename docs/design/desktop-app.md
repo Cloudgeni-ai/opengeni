@@ -170,7 +170,7 @@ Headless machines keep the one-line installer and need no desktop app.
 |---|---|---|---|
 | macOS (universal) | DMG and ZIP | Developer ID, hardened runtime, notarized | electron-updater from ZIP |
 | Windows (x64, arm64) | NSIS installer | Authenticode through the existing Azure signing | electron-updater, differential |
-| Linux (x64, arm64) | AppImage, deb, rpm | Signed checksums | AppImage self-update; deb and rpm through the package manager |
+| Linux (x64, arm64) | AppImage, deb, rpm | SHA-256 checksums and GitHub build provenance attestations | AppImage self-update; deb and rpm download in the app and install with the user's password |
 
 Each version is published as its own GitHub release, `desktop-v<version>`,
 next to the agent releases. Releases in the repository are immutable once
@@ -178,6 +178,24 @@ published, so the workflow fills a draft and then publishes it, and installed
 apps look up the newest stable `desktop-v` tag and read that release's update
 files. Products configure their own feed (a fixed URL or a repository and tag
 prefix). The signing identity is a release-time setting.
+
+### Linux notes
+
+- The window class (Wayland app id and X11 `WM_CLASS`) is the executable
+  name, and the packaged desktop entry declares the same `StartupWMClass`, so
+  the dock and overview match the running window to its entry and icon.
+- Icons ship in the standard hicolor sizes up to 512 px; larger sizes are
+  not looked up by desktops.
+- An AppImage registers itself on first launch: it writes a user desktop
+  entry (with the URL scheme handler) and icon, and rewrites them when the
+  file moves. deb and rpm installs register through the package.
+- The system title bar is kept. On Wayland, GNOME may maximize a large
+  window while mapping it without a resize event, so layout follows the
+  content view's own bounds. A restored maximized window is maximized once
+  it is shown, since a maximize issued while hidden is dropped on X11.
+- Ubuntu 24.04 restricts unprivileged user namespaces: the deb installs an
+  AppArmor profile, and the AppImage falls back to running without the
+  Chromium sandbox when namespaces are unavailable.
 
 ## Repository layout
 

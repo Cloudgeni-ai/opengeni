@@ -15,6 +15,11 @@ export interface DesktopAppConfig {
    * `name@2x.png` next to it), a colored icon elsewhere.
    */
   trayIconPath: string;
+  /**
+   * The app icon as a PNG (512 px works well). Linux shows it for the window
+   * and in the AppImage's desktop entry; other platforms use the packaged icon.
+   */
+  appIconPath: string;
   /** Window background before the web app paints, per appearance. */
   background: { light: string; dark: string };
   /** Connect this computer through the server's agent installer. */

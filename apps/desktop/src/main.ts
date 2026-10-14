@@ -16,6 +16,7 @@ createDesktopApp({
     "assets",
     process.platform === "darwin" ? "trayTemplate.png" : "tray.png",
   ),
+  appIconPath: join(here, "assets", "icon.png"),
   background: { light: "#ffffff", dark: "#202020" },
   thisComputer: true,
   updates: { githubRepository: "Cloudgeni-ai/opengeni", tagPrefix: "desktop-v" },

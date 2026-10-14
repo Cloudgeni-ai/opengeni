@@ -34,6 +34,7 @@ import { AccountStore, type StoredAccount } from "./accounts";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
+import { installAppImageIntegration } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
@@ -71,6 +72,19 @@ function desktopPlatform(): DesktopPlatform {
   if (process.platform === "darwin") return "macos";
   if (process.platform === "win32") return "windows";
   return "linux";
+}
+
+/** The AppImage file this process runs from, on Linux. */
+function appImagePath(): string | null {
+  return process.platform === "linux" && app.isPackaged ? process.env.APPIMAGE || null : null;
+}
+
+/**
+ * The Wayland app id (and X11 WM_CLASS) Chromium gives the window: the desktop
+ * entry name Electron publishes from package.json's desktopName.
+ */
+function linuxWindowClass(): string {
+  return (process.env.CHROME_DESKTOP || `${app.getName()}.desktop`).replace(/\.desktop$/, "");
 }
 
 function errorMessage(caught: unknown, fallback: string): string {
@@ -179,7 +193,8 @@ export class DesktopShell {
     registerLocalScheme();
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
-    } else {
+    } else if (!appImagePath()) {
+      // An AppImage registers through its own desktop entry instead (see start()).
       app.setAsDefaultProtocolClient(config.scheme);
     }
     const queued: string[] = [];
@@ -233,6 +248,20 @@ export class DesktopShell {
       Menu.setApplicationMenu(this.menu());
       this.inbox.start();
       void this.refreshTray();
+      const appImage = appImagePath();
+      if (appImage) {
+        try {
+          installAppImageIntegration({
+            productName: this.config.productName,
+            scheme: this.config.scheme,
+            appImagePath: appImage,
+            iconPath: this.config.appIconPath,
+            windowClass: linuxWindowClass(),
+          });
+        } catch {
+          // Links and the dock icon degrade; the app itself still works.
+        }
+      }
     }, 0);
   }
 
