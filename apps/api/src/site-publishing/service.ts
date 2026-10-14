@@ -484,6 +484,13 @@ export async function upsertSitePublicationForManager(
   requireSiteManager(management);
   const { scope, record } = management;
   const existing = await getSitePublication(deps.db, scope, record.id);
+  if (existing?.status === "suspended" && request.status !== undefined)
+    throw sitePublishingError(
+      409,
+      "conflict",
+      "site_suspended",
+      "This Site was taken down; restore it first",
+    );
   const activating =
     (request.status ?? existing?.status ?? "active") === "active" &&
     existing?.status !== "suspended";

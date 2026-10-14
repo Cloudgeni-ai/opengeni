@@ -180,12 +180,13 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
   const base = "/v1/workspaces/:workspaceId/published-artifacts";
   // A published Site follows its Site: a new version, rollback, archive or
   // restore advances its host map (after commit, never blocking the change).
-  const publishedSiteChanged = <T extends WorkspaceArtifactMutationResponse>(
+  // Recorded before the response so the next host lookup sees the change.
+  const publishedSiteChanged = async <T extends WorkspaceArtifactMutationResponse>(
     result: T,
     newVersion = false,
-  ): T => {
+  ): Promise<T> => {
     if (!result.replayed)
-      void notifySitePublicationChanged(
+      await notifySitePublicationChanged(
         deps,
         { accountId: result.artifact.accountId, workspaceId: result.artifact.workspaceId },
         result.artifact.id,
@@ -454,7 +455,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         await mutationResponse(
           deps,
           grant,
-          publishedSiteChanged(
+          await publishedSiteChanged(
             await publishWorkspaceArtifactVersion(deps.db, {
               accountId: grant.accountId,
               workspaceId,
@@ -491,7 +492,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         await mutationResponse(
           deps,
           grant,
-          publishedSiteChanged(
+          await publishedSiteChanged(
             await rollbackWorkspaceArtifact(deps.db, {
               accountId: grant.accountId,
               workspaceId,
@@ -526,7 +527,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         await mutationResponse(
           deps,
           grant,
-          publishedSiteChanged(
+          await publishedSiteChanged(
             await setWorkspaceArtifactStatus(deps.db, {
               accountId: grant.accountId,
               workspaceId,
@@ -567,7 +568,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         viewer,
         visibility,
       });
-      void notifySitePublicationChanged(deps, { accountId: grant.accountId, workspaceId }, id);
+      await notifySitePublicationChanged(deps, { accountId: grant.accountId, workspaceId }, id);
       const projected = await projectWorkspaceArtifactDetailProvenance(
         { artifact, versions: [], events: [], versionsTruncated: false, eventsTruncated: false },
         (sessionId) => canReadProvenanceSession(deps, grant, sessionId),

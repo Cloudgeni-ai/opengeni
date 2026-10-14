@@ -51,6 +51,7 @@ import {
   type SiteGatewayFields,
 } from "../site-publishing/gateway-signature";
 import {
+  applySiteRuntimeConversationLimit,
   enforceSiteRuntimeRate,
   findSiteRuntimeHost,
   meterSiteRuntime,
@@ -710,7 +711,6 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(agent.model ? { model: agent.model } : {}),
         ...(agent.instructions?.trim() ? { instructions: agent.instructions.trim() } : {}),
         ...(tools.length > 0 ? { tools } : {}),
-        usageLimitMicros: limits.agentMicrosPerConversation,
         metadata: {
           opengeniPublishedSite: {
             siteId: host.site.id,
@@ -741,6 +741,27 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewerPrincipal: viewer.principal,
       });
       if (!existing) {
+        // The cap first: it is what bounds the conversation's spend.
+        const capped = await applySiteRuntimeConversationLimit(
+          deps,
+          host,
+          session.id,
+          limits.agentMicrosPerConversation,
+        );
+        if (!capped) {
+          // An uncapped conversation does not continue.
+          await forward("POST", `${base}/${session.id}/control`, {
+            action: "cancel",
+            clientEventId: `site-runtime-uncapped:${session.id}`,
+            reason: "The conversation could not be capped",
+          }).then((response) => response.body?.cancel());
+          throw sitePublishingError(
+            503,
+            "upstream_unavailable",
+            "site_conversation_failed",
+            "The conversation could not be started",
+          );
+        }
         await insertSiteRuntimeConversation(deps.db, host.scope, {
           sessionId: session.id,
           siteId: host.site.id,

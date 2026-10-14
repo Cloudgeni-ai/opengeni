@@ -9,7 +9,7 @@ import {
   type SiteLimits,
 } from "@opengeni/contracts";
 import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { sessionUsageLimitsProducerEnabled, type ApiRouteDeps } from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
   findSiteHostname,
@@ -19,8 +19,10 @@ import {
   isSiteWorkspaceMember,
   readSessionUsageLimit,
   recordUsageEvent,
+  setSessionUsageLimitInTransaction,
   settleSiteRuntimeConversationSpend,
   withRlsContext,
+  withWorkspaceSessionActivityRls,
   type PublishedSiteRecord,
   type SitePublicationRecord,
   type SitePublishingScope,
@@ -214,6 +216,9 @@ export function siteAgentRefusal(
   limits: SiteLimits,
 ): string | null {
   if (!host.publication.agent.enabled || !limits.agentsEnabled) return "agent_disabled";
+  // Every conversation is capped by its own task usage limit; without the
+  // producer that cap cannot be stored, so Site agents stay off.
+  if (!sessionUsageLimitsProducerEnabled(deps.settings)) return "usage_limits_disabled";
   if (viewer.kind === "guest" && !limits.guestAgentsEnabled) return "guest_agents_disabled";
   if (viewer.kind === "user" && !deps.settings.sitesPublicAgentsEnabled)
     return "public_agents_disabled";
@@ -325,6 +330,51 @@ export function siteTurnsExhausted() {
     "turns_per_conversation",
     "This conversation has reached its message limit; start a new one",
   );
+}
+
+/**
+ * Cap a new conversation with its own task usage limit (the effective
+ * per-conversation budget). Session create refuses limits from service
+ * principals, so site-runtime, the trusted server here, sets it right after
+ * create as the host actor `site:<siteId>`. The initial turn is admitted per
+ * model call against the limit; the limit lands before the first call in
+ * practice, and the Site budgets are checked again on every message.
+ */
+export async function applySiteRuntimeConversationLimit(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+  sessionId: string,
+  limitMicros: number | null,
+): Promise<boolean> {
+  if (limitMicros === null) return true;
+  try {
+    const result = await withWorkspaceSessionActivityRls(
+      deps.db,
+      host.scope.workspaceId,
+      async (tx) =>
+        await setSessionUsageLimitInTransaction(tx, {
+          accountId: host.scope.accountId,
+          workspaceId: host.scope.workspaceId,
+          sessionId,
+          limitMicros,
+          expectedVersion: 0,
+          operationId: `site-runtime:${sessionId}`,
+          actor: { type: "host", subjectId: `site:${host.site.id}` },
+          producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
+        }),
+    );
+    if (result.outcome === "ok" || result.outcome === "replayed") return true;
+    console.warn("[site-runtime] could not cap a conversation", {
+      siteId: host.site.id,
+      outcome: result.outcome,
+    });
+  } catch (error) {
+    console.warn("[site-runtime] could not cap a conversation", {
+      siteId: host.site.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return false;
 }
 
 /** Usage-only metering for Site runtime events (agent spend is metered by the session itself). */
