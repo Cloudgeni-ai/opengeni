@@ -716,6 +716,8 @@ Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotatio
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
 larger budget plus reaper period, even for historical Modal leases after backend
 changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling.
+Drain captures stop local host-spool reads at that budget, and a worker never
+runs two drain captures of one lease epoch at once (see `docs/run-lifecycle.md`).
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
