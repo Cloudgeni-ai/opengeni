@@ -5,8 +5,10 @@
 -- owner turned it on, the ordered migrations and the named queries, so a
 -- Site's database can always be rebuilt and re-migrated. Usage counters and
 -- rate windows live here too, so quotas are enforced by the API. Every table
--- is workspace-owned, FORCE RLS, kept in its own `site_sql_*` set and removed
--- with its Site's workspace.
+-- is workspace-owned, FORCE RLS and kept in its own `site_sql_*` set. These
+-- rows cascade away with the Site's artifact or workspace; the Durable
+-- Object's data does not, so the API drops it after a workspace deletion
+-- commits (best effort; see docs/site-data.md).
 -- New tables only: no lock on existing tables beyond the FK validation.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -16,13 +18,9 @@ CREATE TABLE site_sql_databases (
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   site_id uuid NOT NULL,
   enabled boolean NOT NULL DEFAULT false,
-  -- The database size the Durable Object last reported.
-  storage_bytes bigint NOT NULL DEFAULT 0 CHECK (storage_bytes >= 0),
-  -- Monthly row counters, reset when usage_month moves on.
-  usage_month date NOT NULL DEFAULT (date_trunc('month', now()))::date,
-  rows_read_month bigint NOT NULL DEFAULT 0 CHECK (rows_read_month >= 0),
-  rows_written_month bigint NOT NULL DEFAULT 0 CHECK (rows_written_month >= 0),
-  -- Highest migration ordinal handed out; migrations append under this row's lock.
+  -- Highest migration ordinal handed out. Migrations, rebuilds and resets
+  -- hold this row's lock across their Durable Object calls; per-call usage
+  -- goes to site_sql_usage so Site pages never wait on that lock.
   migration_count integer NOT NULL DEFAULT 0 CHECK (migration_count >= 0),
   rebuilt_at timestamptz,
   created_by text NOT NULL,
@@ -36,7 +34,33 @@ CREATE TABLE site_sql_databases (
     REFERENCES workspace_artifacts(workspace_id, id) ON DELETE CASCADE
 );
 
+-- Usage per Site: the database size the Durable Object last reported, its
+-- high-water mark (storage growth is metered past it, so calls completing
+-- out of order never count the same bytes twice) and the monthly row
+-- counters of Site page calls, which the monthly caps read. Management calls
+-- (export, inspect, migrations, resets, ad hoc SQL, imports) are metered as
+-- usage events but never added here.
+CREATE TABLE site_sql_usage (
+  account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  site_id uuid NOT NULL,
+  storage_bytes bigint NOT NULL DEFAULT 0 CHECK (storage_bytes >= 0),
+  storage_peak_bytes bigint NOT NULL DEFAULT 0 CHECK (storage_peak_bytes >= 0),
+  -- Monthly row counters, reset when usage_month moves on.
+  usage_month date NOT NULL DEFAULT (date_trunc('month', now()))::date,
+  rows_read_month bigint NOT NULL DEFAULT 0 CHECK (rows_read_month >= 0),
+  rows_written_month bigint NOT NULL DEFAULT 0 CHECK (rows_written_month >= 0),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, site_id),
+  CONSTRAINT site_sql_usage_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
+  CONSTRAINT site_sql_usage_database_fk FOREIGN KEY (workspace_id, site_id)
+    REFERENCES site_sql_databases(workspace_id, site_id) ON DELETE CASCADE
+);
+
 -- Applied in ordinal order; a rebuild replays them all on an empty database.
+-- A Site's migrations hold at most 6 MiB of SQL together (checked by the API
+-- under the database row lock), so a rebuild fits in bounded gateway calls.
 CREATE TABLE site_sql_migrations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
@@ -104,7 +128,8 @@ DECLARE
   site_sql_table text;
 BEGIN
   FOREACH site_sql_table IN ARRAY ARRAY[
-    'site_sql_databases', 'site_sql_migrations', 'site_sql_queries', 'site_sql_rate_windows'
+    'site_sql_databases', 'site_sql_usage', 'site_sql_migrations', 'site_sql_queries',
+    'site_sql_rate_windows'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', site_sql_table);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', site_sql_table);

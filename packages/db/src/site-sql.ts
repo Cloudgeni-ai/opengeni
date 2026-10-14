@@ -1,11 +1,14 @@
 import { sql } from "drizzle-orm";
+import { SITE_SQL_HARD_LIMITS } from "@opengeni/contracts";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 /**
  * Site SQL definitions in Postgres (migration 0779): whether the owner turned
  * a Site's Cloudflare database on, its ordered migrations, its named queries,
- * its usage counters and its call windows. The rows themselves live in the
- * Site's Durable Object; everything here is what rebuilds it.
+ * its usage counters (site_sql_usage, apart from the database row so Site
+ * page calls never wait on a migration's lock) and its call windows. The rows
+ * themselves live in the Site's Durable Object; everything here is what
+ * rebuilds it.
  */
 
 export type SiteSqlScope = { accountId: string; workspaceId: string; siteId: string };
@@ -64,7 +67,7 @@ type DatabaseRow = {
   site_id: string;
   enabled: boolean;
   storage_bytes: string | number;
-  usage_month: string | Date;
+  usage_month: string | Date | null;
   rows_read_month: string | number;
   rows_written_month: string | number;
   current_month: string | Date;
@@ -80,7 +83,7 @@ const day = (value: Date | string) =>
 
 function toDatabase(row: DatabaseRow): SiteSqlDatabase {
   // Counters from an earlier month read as zero until the next write resets them.
-  const current = day(row.usage_month) === day(row.current_month);
+  const current = row.usage_month !== null && day(row.usage_month) === day(row.current_month);
   return {
     siteId: row.site_id,
     enabled: row.enabled,
@@ -144,11 +147,18 @@ const toQuery = (row: QueryRow): SiteSqlStoredQuery => ({
 const scoped = <T>(db: Database, scope: SiteSqlScope, fn: (tx: Database) => Promise<T>) =>
   withRlsContext(db, { accountId: scope.accountId, workspaceId: scope.workspaceId }, fn);
 
+// `for no key update` keeps usage inserts (whose foreign key takes a key-share
+// lock on this row) from waiting on a migration that holds it.
 const selectDatabase = (scope: SiteSqlScope, lock: boolean) =>
-  sql`select d.*, (date_trunc('month', now()))::date as current_month
+  sql`select d.site_id, d.enabled, d.migration_count, d.rebuilt_at, d.created_at, d.updated_at,
+      coalesce(u.storage_bytes, 0) as storage_bytes, u.usage_month,
+      coalesce(u.rows_read_month, 0) as rows_read_month,
+      coalesce(u.rows_written_month, 0) as rows_written_month,
+      (date_trunc('month', now()))::date as current_month
     from site_sql_databases d
+    left join site_sql_usage u on u.workspace_id = d.workspace_id and u.site_id = d.site_id
     where d.workspace_id = ${scope.workspaceId} and d.site_id = ${scope.siteId}
-    ${lock ? sql`for update` : sql``}`;
+    ${lock ? sql`for no key update of d` : sql``}`;
 
 export async function getSiteSqlDatabase(
   db: Database,
@@ -177,15 +187,37 @@ export async function setSiteSqlEnabled(
           enabled = excluded.enabled, updated_by = excluded.updated_by, updated_at = now()
         returning site_id`,
     );
+    await rawRows(
+      tx,
+      sql`insert into site_sql_usage (account_id, workspace_id, site_id)
+        values (${scope.accountId}, ${scope.workspaceId}, ${scope.siteId})
+        on conflict (workspace_id, site_id) do nothing
+        returning site_id`,
+    );
     const [row] = await rawRows<DatabaseRow>(tx, selectDatabase(scope, false));
     return toDatabase(row!);
+  });
+}
+
+/** The ids of a workspace's Sites that ever turned Site SQL on. */
+export async function listSiteSqlSiteIds(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+): Promise<string[]> {
+  return withRlsContext(db, scope, async (tx) => {
+    const rows = await rawRows<{ site_id: string }>(
+      tx,
+      sql`select site_id from site_sql_databases where workspace_id = ${scope.workspaceId}
+        order by site_id`,
+    );
+    return rows.map((row) => row.site_id);
   });
 }
 
 /**
  * Run `fn` holding the Site's database row lock, so migrations, rebuilds and
  * resets of one Site never interleave. The row must exist (Site SQL turned on
- * at least once).
+ * at least once). Site page calls never take this lock.
  */
 export async function withSiteSqlDatabaseLock<T>(
   db: Database,
@@ -214,9 +246,31 @@ export async function listSiteSqlMigrations(
   });
 }
 
+/** UTF-8 bytes of SQL a Site's migrations hold together. */
+export async function siteSqlMigrationBytes(tx: Database, scope: SiteSqlScope): Promise<number> {
+  const [row] = await rawRows<{ bytes: string | number }>(
+    tx,
+    sql`select coalesce(sum(octet_length(sql)), 0) as bytes from site_sql_migrations
+      where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}`,
+  );
+  return Number(row?.bytes ?? 0);
+}
+
+/** The error for a migration that would pass a Site's migration SQL cap. */
+export function siteSqlMigrationQuotaError(): SiteSqlStoreError {
+  const limit = SITE_SQL_HARD_LIMITS.migrationBytesPerSite;
+  return new SiteSqlStoreError(
+    "quota_exceeded",
+    `A Site's migrations hold at most ${limit / (1024 * 1024)} MiB of SQL together; load data with site_sql_import instead of a migration, or reset with schema "drop" and start from one consolidated migration`,
+    { quota: "migration_bytes_per_site", limit },
+  );
+}
+
 /**
  * Append a migration under the database row lock `tx` holds (from
- * withSiteSqlDatabaseLock). A name already used is a conflict.
+ * withSiteSqlDatabaseLock). A name already used is a conflict; SQL past the
+ * Site's migration cap (SITE_SQL_HARD_LIMITS.migrationBytesPerSite) is
+ * quota_exceeded.
  */
 export async function appendSiteSqlMigration(
   tx: Database,
@@ -233,6 +287,11 @@ export async function appendSiteSqlMigration(
     throw new SiteSqlStoreError("conflict", `A migration named ${migration.name} already exists`, {
       reason: "migration_exists",
     });
+  if (
+    (await siteSqlMigrationBytes(tx, scope)) + Buffer.byteLength(migration.sql, "utf8") >
+    SITE_SQL_HARD_LIMITS.migrationBytesPerSite
+  )
+    throw siteSqlMigrationQuotaError();
   const [counter] = await rawRows<{ migration_count: number }>(
     tx,
     sql`update site_sql_databases set migration_count = migration_count + 1, updated_by = ${actor}, updated_at = now()
@@ -277,16 +336,29 @@ export async function clearSiteSqlDefinitions(
   );
 }
 
-/** Record that the Durable Object was rebuilt from Postgres, under the row lock. */
+/**
+ * Record that the Durable Object was rebuilt from Postgres, under the row
+ * lock: its size, which is also the new storage high-water mark.
+ */
 export async function markSiteSqlRebuilt(
   tx: Database,
   scope: SiteSqlScope,
   storageBytes: number,
 ): Promise<void> {
+  const bytes = Math.max(0, Math.floor(storageBytes));
   await rawRows(
     tx,
-    sql`update site_sql_databases set rebuilt_at = now(), storage_bytes = ${Math.max(0, Math.floor(storageBytes))}, updated_at = now()
+    sql`update site_sql_databases set rebuilt_at = now(), updated_at = now()
       where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId} returning site_id`,
+  );
+  await rawRows(
+    tx,
+    sql`insert into site_sql_usage (account_id, workspace_id, site_id, storage_bytes, storage_peak_bytes)
+      values (${scope.accountId}, ${scope.workspaceId}, ${scope.siteId}, ${bytes}, ${bytes})
+      on conflict (workspace_id, site_id) do update set
+        storage_bytes = excluded.storage_bytes, storage_peak_bytes = excluded.storage_peak_bytes,
+        updated_at = now()
+      returning site_id`,
   );
 }
 
@@ -373,8 +445,9 @@ export async function deleteSiteSqlQuery(
 /**
  * Count one call against fixed one-minute windows, each `[principal key,
  * limit, message]`; a null limit only counts. Counted in its own transaction
- * before any work, so refused calls count too. Throws rate_limited when a
- * window is over its limit.
+ * after the request is checked and before the database call, so calls the
+ * monthly caps or the database refuse still count. Throws rate_limited when
+ * a window is over its limit.
  */
 export async function consumeSiteSqlRate(
   db: Database,
@@ -416,40 +489,57 @@ export type SiteSqlUsageDelta = {
 };
 
 /**
- * Add a call's rows to this month's counters and store the database size,
- * rolling the counters over when the month changed. `meter` runs in the same
- * transaction (usage events) with the size before and after. Returns the
- * updated database.
+ * Record one Durable Object call's usage: store the database size and, for
+ * Site page calls (`countTowardCaps`, the default), add its rows to this
+ * month's counters the monthly caps read, rolling them over when the month
+ * changed. Storage growth is measured past the high-water mark, so calls
+ * completing out of order never count the same bytes twice. `meter` runs in
+ * the same transaction (usage events). Takes only the Site's usage row lock.
+ * Returns the updated database, or null when Site SQL was never turned on.
  */
 export async function recordSiteSqlUsage(
   db: Database,
   scope: SiteSqlScope,
   delta: SiteSqlUsageDelta,
-  meter?: (tx: Database, change: { storageBytesBefore: number }) => Promise<void>,
+  options: {
+    countTowardCaps?: boolean;
+    meter?: (tx: Database, change: { storageGrowthBytes: number }) => Promise<void>;
+  } = {},
 ): Promise<SiteSqlDatabase | null> {
-  const rowsRead = Math.max(0, Math.floor(delta.rowsRead));
-  const rowsWritten = Math.max(0, Math.floor(delta.rowsWritten));
+  const counted = options.countTowardCaps ?? true;
+  const rowsRead = counted ? Math.max(0, Math.floor(delta.rowsRead)) : 0;
+  const rowsWritten = counted ? Math.max(0, Math.floor(delta.rowsWritten)) : 0;
   const bytes = Math.max(0, Math.floor(delta.databaseBytes));
   return scoped(db, scope, async (tx) => {
-    const [before] = await rawRows<{ storage_bytes: string | number }>(
+    const [before] = await rawRows<{ storage_peak_bytes: string | number }>(
       tx,
-      sql`select storage_bytes from site_sql_databases
+      sql`select storage_peak_bytes from site_sql_usage
         where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId} for update`,
     );
     if (!before) return null;
     await rawRows(
       tx,
-      sql`update site_sql_databases set
-          rows_read_month = case when usage_month = (date_trunc('month', now()))::date
-            then least(rows_read_month + ${rowsRead}, 9000000000000000000) else ${rowsRead} end,
-          rows_written_month = case when usage_month = (date_trunc('month', now()))::date
-            then least(rows_written_month + ${rowsWritten}, 9000000000000000000) else ${rowsWritten} end,
-          usage_month = (date_trunc('month', now()))::date,
-          storage_bytes = ${bytes}
-        where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}
-        returning site_id`,
+      counted
+        ? sql`update site_sql_usage set
+            rows_read_month = case when usage_month = (date_trunc('month', now()))::date
+              then least(rows_read_month + ${rowsRead}, 9000000000000000000) else ${rowsRead} end,
+            rows_written_month = case when usage_month = (date_trunc('month', now()))::date
+              then least(rows_written_month + ${rowsWritten}, 9000000000000000000) else ${rowsWritten} end,
+            usage_month = (date_trunc('month', now()))::date,
+            storage_bytes = ${bytes}, storage_peak_bytes = greatest(storage_peak_bytes, ${bytes}),
+            updated_at = now()
+          where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}
+          returning site_id`
+        : sql`update site_sql_usage set
+            storage_bytes = ${bytes}, storage_peak_bytes = greatest(storage_peak_bytes, ${bytes}),
+            updated_at = now()
+          where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}
+          returning site_id`,
     );
-    if (meter) await meter(tx, { storageBytesBefore: Number(before.storage_bytes) });
+    if (options.meter)
+      await options.meter(tx, {
+        storageGrowthBytes: Math.max(0, bytes - Number(before.storage_peak_bytes)),
+      });
     const [row] = await rawRows<DatabaseRow>(tx, selectDatabase(scope, false));
     return row ? toDatabase(row) : null;
   });

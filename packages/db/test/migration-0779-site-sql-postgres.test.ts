@@ -1,4 +1,4 @@
-// Migration 0779: Site SQL definitions. The four site_sql_* tables are
+// Migration 0779: Site SQL definitions. The five site_sql_* tables are
 // workspace-owned, FORCE RLS and reachable by the application role only inside
 // a workspace context; definitions follow their Site and are removed with the
 // workspace. Also covers the store in src/site-sql.ts.
@@ -17,6 +17,7 @@ import {
   getSiteSqlQuery,
   listSiteSqlMigrations,
   listSiteSqlQueries,
+  markSiteSqlRebuilt,
   recordSiteSqlUsage,
   setSiteSqlEnabled,
   SiteSqlStoreError,
@@ -34,6 +35,7 @@ const TABLES = [
   "site_sql_migrations",
   "site_sql_queries",
   "site_sql_rate_windows",
+  "site_sql_usage",
 ];
 const CHECKSUM = "b".repeat(64);
 
@@ -278,16 +280,18 @@ test("rate windows refuse past their limit and usage rolls up per month", async 
   // Another principal has its own window.
   await consumeSiteSqlRate(client.db, scope, [["user:b", 2, "Too many calls."]]);
 
-  let meteredBefore = -1;
+  let growth = -1;
   await recordSiteSqlUsage(
     client.db,
     scope,
     { rowsRead: 5, rowsWritten: 2, databaseBytes: 8192 },
-    async (_tx, change) => {
-      meteredBefore = change.storageBytesBefore;
+    {
+      meter: async (_tx, change) => {
+        growth = change.storageGrowthBytes;
+      },
     },
   );
-  expect(meteredBefore).toBe(0);
+  expect(growth).toBe(8192);
   const after = await recordSiteSqlUsage(client.db, scope, {
     rowsRead: 1,
     rowsWritten: 0,
@@ -299,7 +303,7 @@ test("rate windows refuse past their limit and usage rolls up per month", async 
     storageBytes: 12288,
   });
   // Counters from an earlier month restart.
-  await shared.admin`update site_sql_databases set usage_month = '2000-01-01'
+  await shared.admin`update site_sql_usage set usage_month = '2000-01-01'
     where workspace_id = ${scope.workspaceId} and site_id = ${scope.siteId}`;
   expect(await getSiteSqlDatabase(client.db, scope)).toMatchObject({
     rowsReadThisMonth: 0,
@@ -311,6 +315,76 @@ test("rate windows refuse past their limit and usage rolls up per month", async 
     databaseBytes: 12288,
   });
   expect(rolled).toMatchObject({ rowsReadThisMonth: 3, rowsWrittenThisMonth: 1 });
+}, 30_000);
+
+test("storage growth counts past the high-water mark and management usage skips the caps", async () => {
+  const scope = await site();
+  await setSiteSqlEnabled(client.db, scope, true, "user:owner");
+  const growths: number[] = [];
+  const record = (databaseBytes: number, countTowardCaps = true) =>
+    recordSiteSqlUsage(
+      client.db,
+      scope,
+      { rowsRead: 1, rowsWritten: 1, databaseBytes },
+      {
+        countTowardCaps,
+        meter: async (_tx, change) => {
+          growths.push(change.storageGrowthBytes);
+        },
+      },
+    );
+  await record(10_000);
+  // Calls completing out of order: a smaller size, then the same peak again.
+  await record(8_000);
+  await record(10_000);
+  await record(12_000);
+  expect(growths).toEqual([10_000, 0, 0, 2_000]);
+  expect(await getSiteSqlDatabase(client.db, scope)).toMatchObject({
+    storageBytes: 12_000,
+    rowsReadThisMonth: 4,
+    rowsWrittenThisMonth: 4,
+  });
+  // Management calls still store the size but leave the monthly counters alone.
+  const managed = await record(13_000, false);
+  expect(growths.at(-1)).toBe(1_000);
+  expect(managed).toMatchObject({
+    storageBytes: 13_000,
+    rowsReadThisMonth: 4,
+    rowsWrittenThisMonth: 4,
+  });
+  // A rebuild lowers the mark, so growth after it counts again.
+  await withSiteSqlDatabaseLock(client.db, scope, (tx) => markSiteSqlRebuilt(tx, scope, 4_000));
+  await record(6_000);
+  expect(growths.at(-1)).toBe(2_000);
+}, 30_000);
+
+test("a Site's migrations hold at most the migration SQL cap together", async () => {
+  const scope = await site();
+  await setSiteSqlEnabled(client.db, scope, true, "user:owner");
+  // Each migration holds at most 2 MiB of SQL; three fit under the 6 MiB cap, a fourth does not.
+  const chunk = `SELECT '${"x".repeat(2_000_000)}'`;
+  for (const name of ["big_1", "big_2", "big_3"])
+    await withSiteSqlDatabaseLock(client.db, scope, (tx) =>
+      appendSiteSqlMigration(tx, scope, { name, sql: chunk, checksum: CHECKSUM }, "o"),
+    );
+  let error: unknown = null;
+  try {
+    await withSiteSqlDatabaseLock(client.db, scope, (tx) =>
+      appendSiteSqlMigration(tx, scope, { name: "big_4", sql: chunk, checksum: CHECKSUM }, "o"),
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toBeInstanceOf(SiteSqlStoreError);
+  expect((error as SiteSqlStoreError).code).toBe("quota_exceeded");
+  expect((error as SiteSqlStoreError).details).toMatchObject({
+    quota: "migration_bytes_per_site",
+  });
+  expect((await listSiteSqlMigrations(client.db, scope)).map((entry) => entry.name)).toEqual([
+    "big_1",
+    "big_2",
+    "big_3",
+  ]);
 }, 30_000);
 
 test("a query or migration cannot point at a Site without a database row", async () => {

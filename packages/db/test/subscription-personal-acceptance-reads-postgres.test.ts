@@ -643,6 +643,7 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_sql_migrations",
       "site_sql_queries",
       "site_sql_rate_windows",
+      "site_sql_usage",
       "site_viewer_sessions",
     ].join(", ");
     heldBack.push(

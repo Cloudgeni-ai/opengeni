@@ -413,6 +413,7 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_sql_migrations",
       "site_sql_queries",
       "site_sql_rate_windows",
+      "site_sql_usage",
       "site_viewer_sessions",
     ];
     const missing0735Routines = [
