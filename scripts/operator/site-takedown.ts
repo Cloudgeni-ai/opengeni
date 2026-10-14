@@ -1,5 +1,5 @@
 /**
- * Platform takedown of a published Site, across workspaces (OpenGeni has no
+ * Platform takedown of a published Site, across workspaces (Opengeni has no
  * platform-admin API). Suspends the Site at once, actions its open abuse
  * reports, records an audit event in its workspace and syncs the edge (KV
  * host map and cache purge) when Cloudflare settings are present. Only this

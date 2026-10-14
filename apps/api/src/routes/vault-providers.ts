@@ -385,7 +385,7 @@ export function registerVaultProviderRoutes(
     );
   });
 
-  // The vaults a stored 1Password connection reaches, with the OpenGeni vault
+  // The vaults a stored 1Password connection reaches, with the Opengeni vault
   // each one is linked to (if any). One `vaults.list` request.
   app.get("/v1/workspaces/:workspaceId/connections/:connectionId/provider-vaults", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -427,7 +427,7 @@ export function registerVaultProviderRoutes(
   });
 
   /**
-   * Link a provider vault as an OpenGeni vault, then mirror its metadata.
+   * Link a provider vault as an Opengeni vault, then mirror its metadata.
    * The link stands even if the first sync fails; its status says why.
    */
   app.post("/v1/workspaces/:workspaceId/vaults/link", async (c) => {
@@ -555,7 +555,7 @@ export function registerVaultProviderRoutes(
       }
       const created = await provider.createVault(routeProviderContext(connectionId), {
         name: payload.name,
-        description: "Managed by OpenGeni",
+        description: "Managed by Opengeni",
         allowAdminsAccess: true,
         ...(payload.groupId ? { groupId: payload.groupId } : {}),
       });

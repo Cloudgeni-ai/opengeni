@@ -6,7 +6,7 @@
 
 Opengeni gains a first-class integrations layer: users connect external services (one browser OAuth round-trip or a pasted key), agents use them through MCP, and credentials live behind a single broker that no model, sandbox, or workflow payload can see.
 
-Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero OpenGeni-side provider registration. OpenGeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
+Strategy (decided): **MCP-first.** We implement the MCP authorization spec (revision 2025-11-25) _client side_ once; every vendor-hosted remote MCP server becomes installable by URL or domain with zero Opengeni-side provider registration. Opengeni-registered provider apps (GitHub App today, Slack bot later) are a selective add-on, not the default path. No third-party iPaaS in the core.
 
 Three layers, kept distinct throughout this doc:
 
@@ -75,14 +75,14 @@ authority. This ownership-value helper and `requireConnectionAuthorityOwner`
 share the core checks: `contextIntegrity`, exact authenticated/grant subject
 identity, `principalKind: "human_session"`, and no service-initiator provenance.
 They are intentionally not identical: this helper additionally rejects every
-OpenGeni-reserved machine-subject namespace as defence-in-depth. Start-time
+Opengeni-reserved machine-subject namespace as defence-in-depth. Start-time
 ownership-value rejection is a 422; the sibling self-owner authority surface
 uses a 403.
 
 A reserved-namespace check on the subject (`api_key:`, `configured:`, `worker:`,
 `sandbox:`, `scheduled_task:`, `attempt:`, `service:`) is defence-in-depth
 against a delegation-secret holder signing a human claim over an
-OpenGeni-minted machine subject. It is deliberately **not** an allow-list of
+Opengeni-minted machine subject. It is deliberately **not** an allow-list of
 human subjects: `docs/embedding.md` states that `subjectId` "remains opaque to
 Opengeni" and that hosts must not have the kind inferred from a subject-id
 prefix, so a trusted embedding host legitimately signs `human_session` over a

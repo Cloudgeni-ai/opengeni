@@ -1,6 +1,6 @@
 # Credit boundaries and optional usage charges
 
-This change separates OpenGeni-funded model/video usage from sandbox warm time,
+This change separates Opengeni-funded model/video usage from sandbox warm time,
 Knowledge embedding, and unpriced source preparation. Do not activate a new
 customer charge simply by deploying the migration or enabling Stripe.
 
@@ -12,7 +12,7 @@ Keep `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false`,
 posture, existing model/video rails remain the only charged resources. The new
 warm/embedding usage facts can be observed without a customer debit. A zero
 balance must not prevent an unpriced sandbox or document source from working;
-model and OpenGeni-funded video admission still enforce their own credits.
+model and Opengeni-funded video admission still enforce their own credits.
 
 The signed ledger is account-wide. A new verified managed human completing the
 first self-service organization setup can receive exactly one $10 grant once

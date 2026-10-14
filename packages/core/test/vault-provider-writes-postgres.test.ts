@@ -221,7 +221,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       );
       expect(saved.item.vaultId).toBe(local.id);
 
-      // OpenGeni -> connected: the value lands in the provider, the source is archived.
+      // Opengeni -> connected: the value lands in the provider, the source is archived.
       const moved = await service.moveForAgent(principal, {
         reference: "Team/Billing login",
         toVault: "Host RW",
@@ -256,7 +256,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       });
       expect(seen).toEqual([subjectId]);
 
-      // Connected -> OpenGeni copy keeps the provider item and stores the value locally.
+      // Connected -> Opengeni copy keeps the provider item and stores the value locally.
       const copied = await service.moveForAgent(principal, {
         reference: "Host RW/Billing login",
         toVault: "Team",

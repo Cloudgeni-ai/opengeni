@@ -431,7 +431,7 @@ and provenance never imply human authority. Turns freeze initiating principals
 and execution/recovery authority snapshots.
 
 An effective first-party permission ceiling of `[]` remains zero delegated
-Opengeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
+Opengeni authority. Runtime skips only remote Opengeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
 See [automation defaults](automations.md#empty-first-party-authority).
@@ -1395,6 +1395,7 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | `apps/api` | `@opengeni/api-router` | Hono HTTP composition, middleware, routes, MCP transport, SSE, and API-side control adapters over core |
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
+| `apps/desktop` | `@opengeni/desktop-app` | Opengeni desktop app for macOS, Windows and Linux, built on `@opengeni/desktop` |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
 | `apps/site-gateway` | `@opengeni/site-gateway` | Cloudflare Worker serving published Sites on `<label>.<sites domain>`: host lookup, viewer sign-in cookies, signed forwarding to `/v1/site-runtime`, immutable HTML caching and edge headers; no authorization of its own ([README](../apps/site-gateway/README.md)) |
 | `apps/mobile` | Standalone Expo app `opengeni-mobile` (own `bun.lock`) | iOS and Android client: web sign-in for its own app credential, accounts, workspace switching, settings, and push; a leaf client ([README](../apps/mobile/README.md)) |
@@ -1457,6 +1458,7 @@ behind a generic 500, so its session lookups run through
 | `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, event streaming, and transport helpers |
 | `packages/react` | `@opengeni/react` | React hooks and styled session, composer, artifact, and machine surfaces |
 | `packages/react-native` | `@opengeni/react-native` | Native session timeline, composer, and attention renderers over the renderer-neutral `@opengeni/react` models, plus Expo adapters |
+| `packages/desktop` | `@opengeni/desktop` | Electron kit for desktop apps: accounts, server windows, notifications, deep links, updates, and Connected Machine setup |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
 | `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
@@ -2059,8 +2061,10 @@ creation. Leases track provider identity, epoch, holders, workspace mutation
 generation, archive/recovery state and teardown authority. Active-target selection
 never rewrites durable home policy.
 
-Repository skill discovery skips definite path misses. Other failures reach
-turn settlement; rotation resumes through the durable lifecycle wake.
+Repository skill discovery skips definite path misses. A typed unreachable
+Connected Machine (offline or control timeout) degrades that run's repository
+index to an "unavailable" notice instead of blocking the model. Other failures
+reach turn settlement; rotation resumes through the durable lifecycle wake.
 
 Immutable environment setup is lease-boundary single-flight: exact lease epoch,
 provider instance and non-secret setup hash bind durable claim/revision/settlement

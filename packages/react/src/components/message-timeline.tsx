@@ -26,9 +26,9 @@ import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timelin
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
-  COMPACTION_FAILURE_TITLE,
   compactionFailureDetails,
   compactionSkipSubtitle,
+  compactionSkipTitle,
 } from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
@@ -4234,7 +4234,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
         ? before && after
           ? `Conversation history compacted · ~${before} → ~${after} estimated history tokens`
           : "Conversation history compacted"
-        : COMPACTION_FAILURE_TITLE;
+        : compactionSkipTitle(item.skipReason);
   const subtitle =
     item.phase === "compacted"
       ? "Chat history above is unchanged"

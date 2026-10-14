@@ -78,6 +78,14 @@ Workflow activity and signal names (`getCodexCapacityWait`,
 `reconcileCodexCapacityWait`, `codexCapacityChanged`) remain stable. The reference
 carries waiter id, generation, next check and wake revision, so pre-cutover
 histories reconcile afterwards. Outbox-backed wakes re-place the accepted turn.
+OpenAI can reset a limit before the reset it reported, so a parked turn never
+sleeps until a stored reset: the waiter rechecks on the bounded backoff (1
+minute doubling to 15) and each reconcile first re-reads `/wham/usage` for the
+exhausted connections the turn can use whose last reading is 30 minutes old
+(each worker attempts one workspace or owner at most every 5 minutes). A
+reading below the limit replaces the stored windows and wakes the waiters; it
+ends a refusal's stored deadline only when it also confirms the account may
+serve (not `allowed: false`, no spent feature limit).
 For a stalled waiter check `next_check_at`, `wake_revision`,
 `observed_wake_revision`, and the organization's cutover row; see the
 [wait design](design/subscription-core-2026-10-07.md#pr-2a-codex-chat-waits-wakes-re-placement-and-health-dormant).

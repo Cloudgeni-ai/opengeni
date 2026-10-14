@@ -96,6 +96,9 @@ const subscriptionCoreMigrations = [
   "0761_exhausted_scheduled_tasks.sql",
   "0768_private_visibility_ignores_leftovers.sql",
   "0769_private_visibility_never_blocks.sql",
+  // Policies and the disconnect routine over the shared connection table and
+  // owner-capability helper from withheld 0642/0645/0707.
+  "0777_workspace_admin_subscription_connections.sql",
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

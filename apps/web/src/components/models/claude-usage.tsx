@@ -7,6 +7,7 @@ import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/
 import {
   UsageMeterGroup,
   UsageReadout,
+  usageResets,
   type UsageWindowReading,
 } from "@/components/ui/usage-meter";
 import {
@@ -267,7 +268,9 @@ export function claudeUsageReadings(
       window.usedPercent === null
         ? { valueLabel: "Unavailable" }
         : {}),
-      ...(reset !== null && !expired ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
+      ...(reset !== null && !expired
+        ? { resetsLabel: formatAbsoluteTime(reset, { now }), resetsAt: reset }
+        : {}),
     };
   });
 }
@@ -299,12 +302,20 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
     planReadings.find((item) => item.limitReached || item.percent === 0) ??
     planReadings.find((item) => item.percent !== null) ??
     readings[0]!;
+  // The shown window's reset, then the plan's other main limit.
+  const resetWindows = [
+    reading,
+    ...readings.filter(
+      (item) =>
+        item !== reading && (item.label === labels.five_hour || item.label === labels.seven_day),
+    ),
+  ];
   return (
     <UsageReadout
       window={reading.label.replace(/^Weekly/, "this week").replace(/^5-hour$/, "this period")}
       percent={reading.percent}
       limitReached={reading.limitReached}
-      resetsLabel={reading.resetsLabel}
+      resets={usageResets(resetWindows, reading.label)}
       loading={state.loading}
     />
   );

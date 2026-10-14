@@ -125,6 +125,7 @@ export class TurnMediaArtifacts {
     const publish = this.deps.getPublish();
     const fence = this.deps.toolCancellationFenceRef.current;
     const materialized = await materializeSandboxFileDownloads(sessionForDownload, [download], {
+      sandboxBackend: this.sandboxFileDownloadBackend,
       onRuntimeEvent: async (event) => {
         await publish?.([{ type: event.type, payload: event.payload }], true);
       },

@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { computerRuntimeConfig } from "../src/main";
 
-test("desktop configuration selects CUA on Mac without changing the Linux host desktop", () => {
+test("desktop configuration selects CUA on Mac and Windows without changing the Linux host desktop", () => {
   expect(computerRuntimeConfig({}, "darwin")).toEqual({
     computerBackend: "cua",
     computerEnvironmentMode: "existing",
@@ -13,7 +13,7 @@ test("desktop configuration selects CUA on Mac without changing the Linux host d
     computerEnvironmentMode: "existing",
   });
   expect(computerRuntimeConfig({}, "win32")).toEqual({
-    computerBackend: "native",
+    computerBackend: "cua",
     computerEnvironmentMode: "existing",
   });
 });
@@ -28,7 +28,7 @@ test("explicit desktop and backend choices remain authoritative", () => {
   expect(
     computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE: "existing" }, "linux"),
   ).toEqual({ computerBackend: "native", computerEnvironmentMode: "existing" });
-  for (const platform of ["darwin", "linux"] as const) {
+  for (const platform of ["darwin", "linux", "win32"] as const) {
     expect(
       computerRuntimeConfig({ OPENGENI_BROWSERD_COMPUTER_BACKEND: "native" }, platform),
     ).toEqual({ computerBackend: "native", computerEnvironmentMode: "existing" });

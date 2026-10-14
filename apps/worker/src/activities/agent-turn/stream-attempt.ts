@@ -57,6 +57,10 @@ import {
 } from "@opengeni/runtime";
 import { serviceTierForLatencyMode, type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
+import {
+  isContextCompactionInterruption,
+  settleContextCompactionInterruption,
+} from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
@@ -2319,6 +2323,25 @@ export async function runTurnStreamAttempt(
           )
             throw compactError;
           if (compactError instanceof TurnAttemptFencedError) throw compactError;
+          if (isContextCompactionInterruption(compactError, cancellationSignal)) {
+            // Graceful worker shutdown (or a control's activity cancellation)
+            // aborted the in-flight checkpoint request. That is not a
+            // summarization failure: record it truthfully, keep any operator
+            // request pending, and let the same-turn recovery path run.
+            await settleContextCompactionInterruption(
+              db,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId!,
+                executionGeneration: attempt.executionGeneration,
+                attemptId: input.attemptId,
+              },
+              { publishLiveEvents: publishCompactionLiveEvents, observability },
+            );
+            throw compactError;
+          }
           const landmark = await settleFailedContextCompactionLandmark(
             db,
             {

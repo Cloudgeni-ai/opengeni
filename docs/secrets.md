@@ -131,7 +131,7 @@ implementation: `packages/contracts/src/secret-references.ts`,
 
 | Surface | Behaviour |
 |---|---|
-| `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where OpenGeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
+| `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where Opengeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
 | `run_on` | Exec splices for the target's shell; file writes resolve content; reads resolve nothing. |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
@@ -166,7 +166,7 @@ vault name.
   human answering.
 - Slack, push and email show a link to the card instead of collecting values;
   a value pasted into a Slack thread is never saved as an answer or to a vault,
-  though the message itself stays in Slack and in OpenGeni's Slack inbox. Voice
+  though the message itself stays in Slack and in Opengeni's Slack inbox. Voice
   tells the person to answer in the app.
 - `session_human_input_respond` from another agent accepts only a reference or
   a generate request, never a raw value.
@@ -212,7 +212,7 @@ read-write) or create a managed vault with
   `provider_conflict`.
 - `DELETE /connections/:connectionId/1password` unlinks every vault linked
   through the connection, then revokes it. Nothing is deleted in 1Password.
-- OpenGeni mirrors item metadata only; values are fetched live and cached per
+- Opengeni mirrors item metadata only; values are fetched live and cached per
   attempt for at most 60 seconds, with at most 50 provider reads per attempt.
 - Edits in a read-write linked vault are written to 1Password first, then the
   mirror refreshes. A changed item returns `provider_conflict`.
@@ -224,7 +224,7 @@ read-write) or create a managed vault with
 - Not yet supported in linked vaults: `secret_move` into or out of them,
   restoring field history, and file fields.
 
-**Host provider (embedders).** Products that embed OpenGeni can supply a
+**Host provider (embedders).** Products that embed Opengeni can supply a
 `vaultProvider` implementing `VaultProvider` from `@opengeni/vaults`; link its
 vaults with `provider: "host"`. This replaces the removed `sandboxSecrets` port.
 See [embedding.md](embedding.md).

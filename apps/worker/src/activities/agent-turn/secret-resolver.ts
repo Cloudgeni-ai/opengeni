@@ -109,7 +109,7 @@ const SAVE_TO_OWNER = { user: "user", task: "task", workspace: "workspace" } as 
 
 /**
  * Ask-card vault check (Q-05): a named vault must be reachable by this
- * attempt, belong to the chosen saveTo scope, and be a writable OpenGeni vault.
+ * attempt, belong to the chosen saveTo scope, and be a writable Opengeni vault.
  * Returns a model-facing reason, or null when the vault can take the answer.
  */
 export function attemptQuestionVaultValidator(

@@ -2596,7 +2596,7 @@ The chart defaults API, worker, and web deployments to zero-surge rolling update
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
-Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
+Production self-hosted platform dependencies should use mature upstream projects rather than Opengeni-owned replicas of those systems:
 
 - NATS: official NATS Helm chart, or an existing managed/customer NATS endpoint.
 - Temporal: Temporal Cloud, an existing customer endpoint, or the official Temporal Helm chart connected to external persistence.
@@ -2727,7 +2727,7 @@ example `OPENGENI_DATABASE_URL=postgres://.../opengeni?sslmode=require` for AWS
 RDS. If a different provider or customer database requires a custom CA, mount
 that CA through a private ConfigMap/Secret before running
 `bun run deployment:temporal-values`. That database-to-Temporal-server TLS is
-separate from the OpenGeni-to-Temporal client settings below.
+separate from the Opengeni-to-Temporal client settings below.
 
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
@@ -3434,7 +3434,7 @@ Product access is controlled by `OPENGENI_PRODUCT_ACCESS_MODE`:
 
 - `local` bootstraps a local default account/workspace.
 - `configured` supports self-hosted embedded deployments with delegated bearer tokens or the deployment shared-key boundary.
-- `managed` uses Better Auth for browser human auth, OpenGeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
+- `managed` uses Better Auth for browser human auth, Opengeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
 
 Configured deployments using `OPENGENI_AUTH_REQUIRED=true` reuse
 `OPENGENI_ACCESS_KEY` to sign internal first-party delegation when

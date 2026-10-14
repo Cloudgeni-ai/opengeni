@@ -110,14 +110,14 @@ async function renderPage(props: Partial<PageProps> & Pick<PageProps, "client" |
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  const published: SitePublication[] = [];
+  const publications: SitePublication[] = [];
   await act(async () =>
     root.render(
       <module.SitePublishPage
         workspaceId="ws"
         workspaceName="Sales"
         site={{ id: "site", title: "Team CRM", visibility: "workspace" }}
-        onPublication={(next) => published.push(next)}
+        onPublication={(next) => publications.push(next)}
         onReload={() => {}}
         onBack={() => {}}
         canManage
@@ -129,7 +129,7 @@ async function renderPage(props: Partial<PageProps> & Pick<PageProps, "client" |
   );
   return {
     host,
-    published,
+    published: publications,
     unmount: async () => {
       await act(async () => root.unmount());
       host.remove();

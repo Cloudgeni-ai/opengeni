@@ -25,7 +25,7 @@ import { Switch } from "@/components/ui/switch";
 import { UsageReadout } from "@/components/ui/usage-meter";
 import { cn } from "@/lib/utils";
 
-import { currentWorkspace, organization } from "../../fixtures";
+import { KIT_NOW, currentWorkspace, organization } from "../../fixtures";
 import {
   CodexAccountDetail,
   GatewayDetail,
@@ -868,7 +868,16 @@ function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Sc
           <UsageReadout
             percent={weekly.percentLeft}
             window="this week"
-            resetsLabel={weekly.resetsLabel}
+            resets={account.usage.flatMap((window) =>
+              window.resetsAt
+                ? [
+                    window === weekly
+                      ? { at: window.resetsAt }
+                      : { label: window.label, at: window.resetsAt },
+                  ]
+                : [],
+            )}
+            now={KIT_NOW.getTime()}
           />
         ) : null,
       }}

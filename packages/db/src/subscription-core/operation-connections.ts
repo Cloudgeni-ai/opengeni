@@ -496,7 +496,9 @@ export const subscriptionCoreOperationConnections = memoByProvider(
       });
       if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
       const applied = await operations()
-        .recordSubscriptionCoreUsageObservation(db, scope, connectionId, quota)
+        .recordSubscriptionCoreUsageObservation(db, scope, connectionId, quota, {
+          confirmsAvailability: provider.adapter.usageReadConfirmsAvailability?.(response),
+        })
         .catch(() => ({ applied: false, recovered: false }));
       return {
         kind: "read",

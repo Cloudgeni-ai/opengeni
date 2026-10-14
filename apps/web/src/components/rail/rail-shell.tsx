@@ -25,6 +25,7 @@ import { toast } from "sonner";
 
 import { RailHeader } from "@/components/rail/rail-header";
 import { RailFooter } from "@/components/rail/rail-footer";
+import { DesktopThisComputerCard, useDesktopWorkspace } from "@/components/desktop/desktop-rail";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
 import { OpenInAppBanner } from "@/components/rail/open-in-app-banner";
 import { SessionHeader } from "@/components/rail/session-header";
@@ -194,6 +195,7 @@ function RailBody() {
           sibling of the clipped viewport, so it can stay transparent and let
           the rail glow run to the bottom edge. */}
       <div data-rail-footer className="relative z-10 shrink-0 border-t border-border">
+        {!rail.collapsed ? <DesktopThisComputerCard workspaceId={rail.workspaceId} /> : null}
         <RailFooter />
       </div>
     </div>
@@ -240,6 +242,7 @@ function RailResizeHandle({
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
   const context = useAppContext();
+  useDesktopWorkspace(rail.workspaceId);
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });

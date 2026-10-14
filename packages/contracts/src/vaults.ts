@@ -1,6 +1,6 @@
 import { defineSchema } from "./define-schema";
 /**
- * Vaults: the OpenGeni secrets model (replaces variable sets).
+ * Vaults: the Opengeni secrets model (replaces variable sets).
  *
  * A vault holds a flat list of items; an item holds named fields; hosted
  * fields keep encrypted versions. Every type here is `z.infer` of its schema.

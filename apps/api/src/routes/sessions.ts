@@ -606,7 +606,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // Every deployment has one fail-closed authorization seam for every HTTP
-  // session surface. The core boundary always enforces durable OpenGeni-owned
+  // session surface. The core boundary always enforces durable Opengeni-owned
   // private-session rules; an embedding host port can add narrower policy.
   // Register it before the routes so a newly added path cannot accidentally
   // inherit workspace access without an explicit operation classification. The

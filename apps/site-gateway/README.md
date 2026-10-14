@@ -1,9 +1,9 @@
 # Published Sites gateway
 
-A Cloudflare Worker that serves published OpenGeni Sites on their own
+A Cloudflare Worker that serves published Opengeni Sites on their own
 hostnames (`<label>.<sites domain>`). It is deliberately thin: host lookup,
 cookies, sign-in redirects, request signing, caching of immutable Site HTML,
-and security headers. Every authorization decision stays in the OpenGeni API
+and security headers. Every authorization decision stays in the Opengeni API
 (`/v1/site-runtime/*`). Design record:
 [docs/design/published-sites-2026-10-14.md](../../docs/design/published-sites-2026-10-14.md);
 shared contracts: `packages/contracts/src/site-publishing.ts`.
@@ -45,8 +45,8 @@ Vars (`[vars]` in `wrangler.toml`):
 | Name | Meaning |
 | --- | --- |
 | `SITES_DOMAIN` | Parent domain of Site hostnames; the gateway answers 404 for anything else |
-| `API_ORIGIN` | OpenGeni API origin (https; plain http only on loopback) |
-| `APP_ORIGIN` | OpenGeni console origin that hosts `/site-auth/authorize` |
+| `API_ORIGIN` | Opengeni API origin (https; plain http only on loopback) |
+| `APP_ORIGIN` | Opengeni console origin that hosts `/site-auth/authorize` |
 | `ENVIRONMENT` | `development` or `test` allow plain-HTTP Site origins and omit HSTS; anything else redirects to https |
 | `FORCE_NOINDEX` | `true` adds `X-Robots-Tag: noindex` and a disallow-all robots.txt for every Site |
 | `LOGIN_ONLY` | `true` makes public Sites require sign-in (staging) |

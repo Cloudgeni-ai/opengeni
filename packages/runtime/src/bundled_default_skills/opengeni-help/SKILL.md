@@ -95,17 +95,17 @@ command on that machine (`connected_machine_enroll_token` with
 `allowScreenControl: true`).
 
 On a Mac the OS also needs Screen Recording, Accessibility and Input Monitoring
-for OpenGeni; the machine list reports them as `runtime.macPermissions`. Open
+for Opengeni; the machine list reports them as `runtime.macPermissions`. Open
 each missing pane on the Mac with
 `POST /v1/workspaces/{workspaceId}/machines/{enrollmentId}/privacy-settings`
 (`pane`: `screen_recording`, `accessibility` or `input_monitoring`), or with
 `run_on` (`open 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'`,
 `Privacy_Accessibility`, `Privacy_ListenEvent`). Then ask the person to switch
-OpenGeni on there, choosing Quit & Reopen if macOS asks; only they can flip
+Opengeni on there, choosing Quit & Reopen if macOS asks; only they can flip
 those OS switches.
 
 To let agents use the person's own Chrome, the machine must be connected first;
-then they install the OpenGeni Browser extension from the Chrome Web Store:
+then they install the Opengeni Browser extension from the Chrome Web Store:
 https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch.
 Chrome requires the person to click "Add to Chrome"; an agent cannot install it.
 `interaction_discover` with `scope: "attached_browsers"` shows when it is linked.

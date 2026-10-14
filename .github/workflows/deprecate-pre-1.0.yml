@@ -20,6 +20,7 @@ permissions:
 
 jobs:
   deprecate:
+    environment: package-release
     name: Deprecate pre-1.0 versions
     runs-on: ubuntu-latest
     timeout-minutes: 30
