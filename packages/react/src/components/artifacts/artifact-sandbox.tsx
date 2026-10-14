@@ -7,6 +7,7 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import type { SiteViewer } from "@opengeni/contracts";
 
 import { cn } from "../../lib/cn";
 import { ArtifactBadge, ArtifactButton, useArtifactLabels } from "./artifact-chrome";
@@ -30,10 +31,19 @@ export type ArtifactSandboxProps = {
   editDisabled?: boolean | undefined;
   onEdit?: (() => void) | undefined;
   toolBridge?: PublishedHtmlArtifactToolBridge | undefined;
+  /** Who is viewing, answered to the Site's `site.viewer` over the bridge. */
+  viewer?: SiteViewer | undefined;
   connectedToolCount?: number | undefined;
   sourceFileCount?: number | undefined;
   fill?: boolean | undefined;
 };
+
+/**
+ * The frame's viewer props. `PublishedHtmlArtifactFrame` gains `viewer` with
+ * the published-Sites bridge additions; until then this typed object carries
+ * it so hosts can already pass the signed-in member.
+ */
+type SiteFrameViewerProps = { viewer?: SiteViewer };
 
 /**
  * The Site/preview frame chrome shared by the console and embedding hosts:
@@ -174,6 +184,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
         {...(props.theme ? { theme: props.theme } : {})}
         {...(!focused && props.height ? { style: { height: props.height } } : {})}
         {...(props.toolBridge ? { toolBridge: props.toolBridge } : {})}
+        {...((props.viewer ? { viewer: props.viewer } : {}) satisfies SiteFrameViewerProps)}
         className={cn(
           "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
           props.fill && "h-0 min-h-0 flex-1",
