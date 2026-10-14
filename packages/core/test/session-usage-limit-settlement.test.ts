@@ -5,7 +5,9 @@ import type { Database } from "@opengeni/db";
 import { normalizeModelCallUsage } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
+  SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES,
   settleModelUsage,
+  sessionUsageReceiptSourceId,
   type ModelUsageSettlementInput,
 } from "../src/billing/model-usage-settlement";
 import { SESSION_USAGE_LIMIT_EVENTS_METRIC } from "../src/session-usage-limit-metrics";
@@ -251,6 +253,31 @@ describe("per-task usage limit settlement across funding paths", () => {
     // Usage attribution (no sessionId on the usage event) is unchanged.
     const usageEvents = active.calls.filter((call) => call.fn === "usage");
     for (const event of usageEvents) expect(event.input.sessionId).toBeUndefined();
+  });
+
+  test("a source identity past the receipt bound is recorded under a stable digest", async () => {
+    const turnId = "00000000-0000-4000-8000-000000000001";
+    // The longest identity the event trigger and legacy import accept is kept as is.
+    const longestShared = `${turnId}:${"r".repeat(1024)}`;
+    expect(sessionUsageReceiptSourceId(longestShared)).toBe(longestShared);
+    const atBound = "é".repeat(SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES / 2);
+    expect(sessionUsageReceiptSourceId(atBound)).toBe(atBound);
+    // Past the bound (counted in UTF-8 bytes), a digest the column accepts.
+    const tooLong = `${turnId}:${"é".repeat(600)}`;
+    const digest = sessionUsageReceiptSourceId(tooLong);
+    expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(sessionUsageReceiptSourceId(tooLong)).toBe(digest);
+    expect(sessionUsageReceiptSourceId(`${tooLong}x`)).not.toBe(digest);
+
+    active = spyWrites();
+    await settleModelUsage(
+      testSettings({ billingMode: "disabled", modelPricingJson: PRICED }),
+      db,
+      { ...settlementInput({ model: "priced-model" }, "session-1"), sourceId: tooLong },
+    );
+    const receipts = active.calls.filter((call) => call.fn === "receipt");
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]!.input).toMatchObject({ sourceId: digest, amountMicros: 6_000 });
   });
 
   test("a response that reported no usage is an unknown amount, never known free", async () => {

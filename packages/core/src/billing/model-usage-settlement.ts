@@ -14,6 +14,7 @@ import {
   WORKSPACE_OPPER_PROVIDER_ID,
   type Settings,
 } from "@opengeni/config";
+import { createHash } from "node:crypto";
 import type { LatencyMode } from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
 import {
@@ -122,6 +123,24 @@ export function sessionUsageMeterAmountMicros(input: {
   return (input.inputTokens ?? 0) + (input.outputTokens ?? 0) > 0
     ? input.estimatedProviderCostMicros
     : null;
+}
+
+/** The receipt table's `source_id` byte bound. */
+export const SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES = 1100;
+
+/**
+ * The per-task receipt identity for a producer source. Every identity the
+ * event trigger or the legacy import can produce (`<turnId>:<sourceKey>` with
+ * a source key of at most 1024 bytes) fits the bound and is used unchanged,
+ * so their deduplication is untouched. Only a longer identity, which those
+ * paths skip, is replaced by a stable digest, so a long provider response id
+ * is recorded once instead of failing the receipt write on every retry.
+ */
+export function sessionUsageReceiptSourceId(sourceId: string): string {
+  if (Buffer.byteLength(sourceId, "utf8") <= SESSION_USAGE_RECEIPT_SOURCE_ID_MAX_BYTES) {
+    return sourceId;
+  }
+  return `sha256:${createHash("sha256").update(sourceId, "utf8").digest("hex")}`;
 }
 
 export async function settleModelUsage(
@@ -258,7 +277,7 @@ export async function settleModelUsage(
     });
     const held: HeldSessionUsageReceipt = {
       sessionId: usageLimitSessionId,
-      sourceId: input.sourceId,
+      sourceId: sessionUsageReceiptSourceId(input.sourceId),
       turnId: input.turnId ?? null,
       amountMicros: meterAmountMicros,
       pricingSource: meterAmountMicros === null ? null : pricingSource,
