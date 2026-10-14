@@ -267,10 +267,30 @@ Operations:
     404 `site_conversation_not_found`.
   - **Site-safe views.** `get`, `list` and `create` return a projection
     without account or workspace ids, instructions, tools or policies,
-    metadata, creator, sandbox ids or diagnostics. Query parameters are
-    allowlisted: event pages are always `mode=monitoring` with summarized
-    payloads (`payloadMode=summary`, or `none`), streams accept only `after`
-    and `transport`, the queue takes none and human input only `status`.
+    metadata, creator, sandbox ids or diagnostics.
+  - **Site-safe events.** Event pages and the stream (live SSE and the
+    finite `transport=http1-bounded` batch) carry one projection:
+    - Delivered event types: messages and their text deltas, tool-call
+      receipts, turn and session lifecycle, the queue and usage notices.
+    - Payloads keep allowlisted fields: message text, a tool call's id and
+      name and whether it failed (never its arguments or output), and short
+      status codes (never error text).
+    - Every other event (reasoning, sandbox and terminal output, model and
+      provider-account telemetry, setup, goals, memory, policies, late or
+      duplicate deliveries) arrives as a `session.event.envelope_omitted`
+      placeholder with an empty payload, at its own sequence. Sequences stay
+      contiguous, so gap detection, backfill and `Last-Event-ID` resume work.
+    - The envelope has no workspace id, attempt ids or generations, or
+      duplicate, codec or read-bound diagnostics.
+  - **Query parameters are allowlisted.**
+    - Event pages take `after`, `before`, `direction`, `limit` (default 40,
+      at most 500, newest first without a cursor), `compact`, `excludeTypes`,
+      `includeTypes` (only visible types; asking for hidden types only
+      returns an empty page) and `payloadMode=none`. Read modes, full
+      payloads, class filters and `latest` are not offered; responses report
+      `monitoring` and `summary`.
+    - Streams accept only `after` and `transport`, the queue takes none and
+      human input only `status`.
   - **Streams** resume after the gateway-forwarded `Last-Event-ID` when the
     query has no `after`.
   - **Composer drafts** are text only. A draft or submit with resources,

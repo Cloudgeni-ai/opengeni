@@ -94,6 +94,12 @@ import {
   sitePublishingError,
 } from "../site-publishing/service";
 import {
+  siteSessionEventPage,
+  siteSessionEventPageResponse,
+  siteSessionEventStreamResponse,
+  SITE_VISIBLE_SESSION_EVENT_TYPES,
+} from "../site-publishing/session-events";
+import {
   effectiveSiteAccess,
   publicSiteViewer,
   signedInSiteViewerKind,
@@ -297,18 +303,15 @@ export function siteSessionProjection(session: unknown): Record<string, unknown>
   return projected;
 }
 
-/** Query parameters forwarded per session read (anything else is dropped). */
-const EVENT_QUERY = [
-  "after",
-  "before",
-  "limit",
-  "direction",
-  "latest",
-  "includeTypes",
-  "excludeTypes",
-  "includeClasses",
-  "excludeClasses",
-] as const;
+/**
+ * Query parameters a Site viewer may pass to an event page (anything else is
+ * dropped). Class filters and `latest` are not offered: they select hidden
+ * event types by class, and the Site projection hides those anyway.
+ */
+const EVENT_QUERY = ["after", "before", "direction", "excludeTypes", "compact"] as const;
+/** Monitoring-read page sizes: the default, and the most one page returns. */
+const SITE_EVENT_PAGE_DEFAULT = 40;
+const SITE_EVENT_PAGE_MAX = 500;
 
 function allowedQuery(url: URL, names: readonly string[], extra: Record<string, string> = {}) {
   const params = new URLSearchParams();
@@ -1034,16 +1037,39 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       return allowedQuery(url, ["after", "transport"], extra);
     };
     /**
-     * Event pages are monitoring reads: bounded pages, summarized oversized
-     * payloads, never a forensic or full-payload read. The stream delivers
-     * complete events.
+     * Event pages and the stream deliver the same Site-safe projection
+     * (site-publishing/session-events.ts): allowlisted event types and
+     * payload fields, with hidden events as placeholders so sequences stay
+     * contiguous. The page is read whole from the API (every type, stored
+     * payloads) because the projection, not the read mode, decides what a
+     * viewer sees, and message text must not be cut to a preview. Page sizes
+     * and the default newest-first order are those of a monitoring read;
+     * `payloadMode=none` drops payloads.
      */
-    const eventQuery = () => {
-      const payloadMode = url.searchParams.get("payloadMode");
+    const payloadNone = url.searchParams.get("payloadMode") === "none";
+    const eventQuery = (includeTypes: string | null) => {
+      const requested = Number(url.searchParams.get("limit") ?? SITE_EVENT_PAGE_DEFAULT);
+      const limit = Number.isFinite(requested)
+        ? Math.min(SITE_EVENT_PAGE_MAX, Math.max(1, Math.floor(requested)))
+        : SITE_EVENT_PAGE_DEFAULT;
+      const ordered = ["after", "before", "direction"].some((name) => url.searchParams.has(name));
       return allowedQuery(url, EVENT_QUERY, {
-        mode: "monitoring",
-        ...(payloadMode === "none" ? { payloadMode: "none" } : { payloadMode: "summary" }),
+        mode: "forensic",
+        payloadMode: payloadNone ? "none" : "full",
+        limit: String(limit),
+        ...(ordered ? {} : { direction: "before" }),
+        ...(includeTypes ? { includeTypes } : {}),
       });
+    };
+    /** Requested types a viewer can see; null when none of them is visible. */
+    const visibleIncludeTypes = (): string | null | undefined => {
+      const raw = url.searchParams.get("includeTypes");
+      if (raw === null) return undefined;
+      const visible = raw
+        .split(",")
+        .map((type) => type.trim())
+        .filter((type) => SITE_VISIBLE_SESSION_EVENT_TYPES.has(type));
+      return visible.length > 0 ? [...new Set(visible)].join(",") : null;
     };
     // The agent and budget checks every message-bearing operation passes.
     const admitAgentWork = async (newTurn: boolean) => {
@@ -1103,10 +1129,20 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sessions.get":
         await settleSiteRuntimeSpend(deps, host, conversation);
         return await projected(await send("GET", target));
-      case "sessions.events":
-        return await forward("GET", `${target}/events${eventQuery()}`);
+      case "sessions.events": {
+        const payload = payloadNone ? ("none" as const) : ("summary" as const);
+        const includeTypes = visibleIncludeTypes();
+        // Asking only for hidden types yields nothing rather than everything.
+        if (includeTypes === null) return siteSessionEventPage([], { payload });
+        return await siteSessionEventPageResponse(
+          await send("GET", `${target}/events${eventQuery(includeTypes ?? null)}`),
+          { payload },
+        );
+      }
       case "sessions.stream":
-        return await forward("GET", `${target}/events/stream${streamQuery()}`);
+        return siteSessionEventStreamResponse(
+          await send("GET", `${target}/events/stream${streamQuery()}`),
+        );
       case "sessions.queue":
         return await forward("GET", `${target}/queue`);
       case "sessions.humanInput":

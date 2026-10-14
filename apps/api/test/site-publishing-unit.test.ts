@@ -18,6 +18,10 @@ import { siteAgentToolRefs } from "../src/routes/site-runtime";
 import { effectiveSiteLimits, freeSiteLimits } from "../src/site-publishing/limits";
 import { siteAccessNarrowed } from "../src/site-publishing/service";
 import {
+  siteSessionEventProjection,
+  siteSessionEventSseTransform,
+} from "../src/site-publishing/session-events";
+import {
   effectiveSiteAccess,
   signedInSiteViewerKind,
   siteGuestsAllowed,
@@ -336,5 +340,170 @@ describe("Site agents", () => {
     expect(siteAccessNarrowed(base, { ...base, agent: { ...base.agent, enabled: false } })).toBe(
       "agent_disabled",
     );
+  });
+});
+
+describe("Site-safe session events", () => {
+  const SECRET = "sk-live-secret-argument";
+  const base = {
+    id: "5b0d6f8e-0d37-4b8f-9c43-0f1c6c1f7a01",
+    workspaceId: "0e4c3a4d-6c50-4d1b-8f4e-2a5d8f1c9b11",
+    sessionId: "9a1f2b3c-4d5e-4f60-8a7b-1c2d3e4f5a6b",
+    occurredAt: "2026-10-14T12:00:00.000Z",
+    turnId: "1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9",
+    turnGeneration: 3,
+    turnAttemptId: "7c6b5a49-3827-4615-9a04-8f7e6d5c4b3a",
+    turnAssociation: "current",
+    duplicateOfEventId: null,
+    duplicateReason: null,
+    payloadCodecVersion: 1,
+    payloadReadBounded: false,
+    clientEventId: "opengeni:internal-key",
+  };
+  const envelopeKeys = ["id", "sessionId", "sequence", "occurredAt", "type", "turnId", "payload"];
+
+  test("keeps message text and tool names, never tool arguments, outputs or internal ids", () => {
+    const longText = "word ".repeat(2000);
+    const message = siteSessionEventProjection({
+      ...base,
+      sequence: 4,
+      type: "agent.message.completed",
+      payload: { text: longText, messageId: "msg_1", phase: "final_answer", usage: { cost: 9 } },
+    });
+    expect(message).toEqual({
+      id: base.id,
+      sessionId: base.sessionId,
+      sequence: 4,
+      occurredAt: base.occurredAt,
+      type: "agent.message.completed",
+      turnId: base.turnId,
+      payload: { text: longText, messageId: "msg_1", phase: "final_answer" },
+    });
+    const call = siteSessionEventProjection({
+      ...base,
+      sequence: 5,
+      type: "agent.toolCall.created",
+      payload: { id: "call_1", name: "crm_lookup", arguments: { token: SECRET }, raw: SECRET },
+    });
+    expect(call?.payload).toEqual({ id: "call_1", name: "crm_lookup" });
+    const output = siteSessionEventProjection({
+      ...base,
+      sequence: 6,
+      type: "agent.toolCall.output",
+      payload: { id: "call_1", output: { isError: true, content: [{ text: SECRET }] } },
+    });
+    expect(output?.payload).toEqual({ id: "call_1", error: true });
+    const failed = siteSessionEventProjection({
+      ...base,
+      sequence: 7,
+      type: "turn.failed",
+      payload: { code: "provider_error", error: `upstream said ${SECRET}`, retryable: true },
+    });
+    expect(failed?.payload).toEqual({ code: "provider_error", retryable: true });
+    const user = siteSessionEventProjection({
+      ...base,
+      sequence: 8,
+      type: "user.message",
+      payload: { text: "Hi", resources: [{ id: SECRET }], initiator: { userId: SECRET } },
+    });
+    expect(user).toMatchObject({ clientEventId: base.clientEventId, payload: { text: "Hi" } });
+    for (const event of [message, call, output, failed, user]) {
+      expect(JSON.stringify(event)).not.toContain(SECRET);
+      expect(Object.keys(event!).filter((key) => !envelopeKeys.includes(key))).toEqual(
+        event === user ? ["clientEventId"] : [],
+      );
+    }
+    expect(
+      siteSessionEventProjection(
+        { ...base, sequence: 9, type: "user.message", payload: { text: "Hi" } },
+        { payload: "none" },
+      )?.payload,
+    ).toEqual({});
+  });
+
+  test("hidden, late and duplicate events become placeholders at the same sequence", () => {
+    const placeholder = (sequence: number, coveredThrough?: number) => ({
+      id: base.id,
+      sessionId: base.sessionId,
+      sequence,
+      ...(coveredThrough ? { coveredThrough } : {}),
+      occurredAt: base.occurredAt,
+      type: "session.event.envelope_omitted",
+      turnId: null,
+      payload: {},
+    });
+    expect(
+      siteSessionEventProjection({
+        ...base,
+        sequence: 2,
+        type: "sandbox.box.created",
+        payload: { sandboxId: SECRET },
+      }),
+    ).toEqual(placeholder(2));
+    expect(
+      siteSessionEventProjection({
+        ...base,
+        sequence: 3,
+        coveredThrough: 9,
+        type: "agent.reasoning.delta",
+        payload: { text: SECRET },
+      }),
+    ).toEqual(placeholder(3, 9));
+    expect(
+      siteSessionEventProjection({
+        ...base,
+        sequence: 10,
+        type: "agent.message.completed",
+        turnAssociation: "late_rejected",
+        payload: { text: SECRET },
+      }),
+    ).toEqual(placeholder(10));
+    expect(
+      siteSessionEventProjection({
+        ...base,
+        sequence: 11,
+        type: "agent.message.completed",
+        duplicateOfEventId: base.id,
+        payload: { text: SECRET },
+      }),
+    ).toEqual(placeholder(11));
+    expect(siteSessionEventProjection({ ...base, type: "user.message" })).toBeNull();
+    expect(siteSessionEventProjection("not an event")).toBeNull();
+  });
+
+  test("the stream transform rewrites split SSE frames and keeps ids and comments", async () => {
+    const frame = (sequence: number, covered: number, type: string, payload: unknown) =>
+      `id: ${covered}\nevent: ${type}\ndata: ${JSON.stringify({ ...base, sequence, type, payload })}\n\n`;
+    const upstream =
+      ": connected\n\n" +
+      frame(1, 1, "user.message", { text: "Grüße 👋", resources: [SECRET] }) +
+      frame(2, 4, "agent.reasoning.delta", { text: SECRET }) +
+      frame(5, 5, "agent.toolCall.created", { id: "call_1", name: "crm", arguments: SECRET }) +
+      ": heartbeat\n\n";
+    const bytes = new TextEncoder().encode(upstream);
+    // One byte per chunk: every frame and multi-byte character is split.
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let index = 0; index < bytes.length; index += 1)
+          controller.enqueue(bytes.slice(index, index + 1));
+        controller.close();
+      },
+    });
+    const text = await new Response(source.pipeThrough(siteSessionEventSseTransform())).text();
+    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain(base.workspaceId);
+    expect(text).not.toContain(base.turnAttemptId);
+    expect(text.startsWith(": connected\n\n")).toBe(true);
+    expect(text.endsWith(": heartbeat\n\n")).toBe(true);
+    const frames = [...text.matchAll(/^id: (\d+)\nevent: (\S+)\ndata: (.+)$/gmu)].map(
+      ([, id, type, data]) => ({ id: Number(id), type, event: JSON.parse(data!) }),
+    );
+    expect(frames.map(({ id, type }) => [id, type])).toEqual([
+      [1, "user.message"],
+      [4, "session.event.envelope_omitted"],
+      [5, "agent.toolCall.created"],
+    ]);
+    expect(frames[0]!.event.payload).toEqual({ text: "Grüße 👋" });
+    expect(frames[2]!.event.payload).toEqual({ id: "call_1", name: "crm" });
   });
 });

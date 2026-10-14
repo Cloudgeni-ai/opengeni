@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SITE_GATEWAY_CALLBACK_PATH, type AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import {
+  appendSessionEvents,
   createDb,
   createOrganizationApiKey,
   createSession,
@@ -1680,6 +1681,166 @@ test("a viewer's own conversation serves the composer draft, queue and human-inp
   const fromStart = await firstEventId();
   expect(fromStart).not.toBeNull();
   expect(await firstEventId({ "last-event-id": String(fromStart) })).toBeGreaterThan(fromStart!);
+}, 60_000);
+
+test("a viewer's event stream and pages carry only the Site-safe projection", async () => {
+  const f = await fixture();
+  const site = await f.live("Projected", { access: "public", agent: { enabled: true } });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "Hello" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(202);
+  const sessionId = String(created.json.id);
+  const conversation = `/sessions/${sessionId}`;
+  // What a running agent writes: tool calls with arguments and output,
+  // reasoning, sandbox and model telemetry, and a long answer.
+  const HIDDEN = `site-secret-${randomBytes(6).toString("hex")}`;
+  const answer = `${"A long answer. ".repeat(600)}The end.`;
+  await appendSessionEvents(db.db, f.workspace.id, sessionId, [
+    { type: "agent.reasoning.delta", payload: { text: `thinking about ${HIDDEN}` } },
+    {
+      type: "agent.toolCall.created",
+      payload: { id: "call_1", name: "crm_lookup", arguments: { apiKey: HIDDEN } },
+    },
+    {
+      type: "agent.toolCall.output",
+      payload: { id: "call_1", output: { isError: true, content: [{ text: HIDDEN }] } },
+    },
+    { type: "sandbox.box.created", payload: { sandboxId: HIDDEN, hydrated: "none" } },
+    { type: "agent.model.usage", payload: { provider: HIDDEN, inputTokens: 12 } },
+    { type: "agent.message.delta", payload: { text: "A long", messageId: "msg_1" } },
+    { type: "agent.message.completed", payload: { text: answer, messageId: "msg_1" } },
+    { type: "turn.failed", payload: { code: "provider_error", error: `${HIDDEN} trace` } },
+  ]);
+  const [{ count }] = await shared.admin<{ count: number }[]>`
+    select count(*)::int as count from session_events where session_id = ${sessionId}`;
+  const internal = [HIDDEN, f.workspace.id, f.accountId, '"workspaceId"', '"turnAttemptId"'];
+  /** Every sequence from 1 up, in order, each delivered event Site-safe. */
+  const expectSiteSafe = (events: Array<Record<string, any>>, covered: number[]) => {
+    const text = JSON.stringify(events);
+    for (const value of internal)
+      expect({ value, leaked: text.includes(value) }).toEqual({
+        value,
+        leaked: false,
+      });
+    let next = 1;
+    events.forEach((event, index) => {
+      expect(event.sequence).toBe(next);
+      next = covered[index]! + 1;
+    });
+    expect(next - 1).toBe(count);
+    const byType = (type: string) => events.filter((event) => event.type === type);
+    expect(byType("agent.toolCall.created").map((event) => event.payload)).toEqual([
+      { id: "call_1", name: "crm_lookup" },
+    ]);
+    expect(byType("agent.toolCall.output").map((event) => event.payload)).toEqual([
+      { id: "call_1", error: true },
+    ]);
+    expect(byType("agent.message.completed").map((event) => event.payload)).toEqual([
+      { text: answer, messageId: "msg_1" },
+    ]);
+    expect(byType("turn.failed").map((event) => event.payload)).toEqual([
+      { code: "provider_error" },
+    ]);
+    // Reasoning, sandbox and model telemetry are placeholders.
+    expect(byType("session.event.envelope_omitted").length).toBeGreaterThanOrEqual(3);
+    for (const type of ["agent.reasoning.delta", "sandbox.box.created", "agent.model.usage"])
+      expect(byType(type)).toEqual([]);
+  };
+  const sseFrames = (text: string) =>
+    [...text.matchAll(/^id: (\d+)\nevent: (\S+)\ndata: (.+)$/gmu)].map(([, id, type, data]) => {
+      const event = JSON.parse(data!);
+      expect(event.type).toBe(type);
+      return { covered: Number(id), event };
+    });
+
+  // The finite browser batch.
+  const batch = await f.gatewayRaw(
+    site.host,
+    "GET",
+    `${conversation}/events/stream?transport=http1-bounded`,
+    { visitor },
+  );
+  expect(batch.status).toBe(200);
+  expect(batch.headers.get("content-length")).toBeNull();
+  const batched = sseFrames(await batch.text());
+  expectSiteSafe(
+    batched.map((frame) => frame.event),
+    batched.map((frame) => frame.covered),
+  );
+
+  // The live stream replays the same projection before it reports connected.
+  const live = await f.gatewayRaw(site.host, "GET", `${conversation}/events/stream`, { visitor });
+  expect(live.status).toBe(200);
+  const reader = live.body!.getReader();
+  const decoder = new TextDecoder();
+  let streamed = "";
+  const deadline = Date.now() + 10_000;
+  try {
+    while (Date.now() < deadline && !streamed.includes(": connected\n\n")) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      streamed += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  expect(streamed).toContain(": connected\n\n");
+  const replayed = sseFrames(streamed);
+  expect(replayed).toEqual(batched);
+
+  // Event pages: the same projection, whatever read mode the viewer asks for.
+  const page = await f.gateway(
+    site.host,
+    "GET",
+    `${conversation}/events?after=0&limit=500&mode=forensic&payloadMode=full`,
+    { visitor },
+  );
+  expect(page.status, JSON.stringify(page.json)).toBe(200);
+  expect(page.headers.get("x-opengeni-payload-mode")).toBe("summary");
+  expect(page.headers.get("x-opengeni-forensic-exact")).toBe("false");
+  const events = page.json as Array<Record<string, any>>;
+  expectSiteSafe(
+    events,
+    events.map((event) => event.sequence),
+  );
+  const compact = await f.gateway(site.host, "GET", `${conversation}/events?after=0&compact=1`, {
+    visitor,
+  });
+  expect(compact.json).toEqual(batched.map((frame) => frame.event));
+  const newest = await f.gateway(site.host, "GET", `${conversation}/events?limit=2`, { visitor });
+  expect((newest.json as Array<{ sequence: number }>).map((event) => event.sequence)).toEqual([
+    count - 1,
+    count,
+  ]);
+  const hiddenOnly = await f.gateway(
+    site.host,
+    "GET",
+    `${conversation}/events?includeTypes=sandbox.box.created`,
+    { visitor },
+  );
+  expect(hiddenOnly.json).toEqual([]);
+  const toolsOnly = await f.gateway(
+    site.host,
+    "GET",
+    `${conversation}/events?after=0&includeTypes=agent.toolCall.created,sandbox.box.created`,
+    { visitor },
+  );
+  expect((toolsOnly.json as Array<{ type: string }>).map((event) => event.type)).toEqual([
+    "agent.toolCall.created",
+  ]);
+  const bare = await f.gateway(
+    site.host,
+    "GET",
+    `${conversation}/events?after=0&payloadMode=none`,
+    {
+      visitor,
+    },
+  );
+  expect(bare.headers.get("x-opengeni-payload-mode")).toBe("none");
+  for (const event of bare.json as Array<{ payload: unknown }>) expect(event.payload).toEqual({});
 }, 60_000);
 
 test("version HTML is this Site's immutable bytes, without cookies; scanning is off by default", async () => {
