@@ -26,7 +26,17 @@ export function nativeCallbackUrl(redirectUri: string | undefined): URL | null {
 export function nativeDeviceLabel(search: NativeSignInSearch): string {
   const name = search.device_name?.trim();
   if (name) return name;
-  return search.platform === "android" ? "this Android device" : "this iPhone or iPad";
+  switch (search.platform) {
+    case "android":
+      return "this Android device";
+    case "macos":
+      return "this Mac";
+    case "windows":
+    case "linux":
+      return "this computer";
+    default:
+      return "this iPhone or iPad";
+  }
 }
 
 export function NativeSignInRoute({ search }: { search: NativeSignInSearch }) {

@@ -6294,7 +6294,7 @@ export type MemberNotificationsSetting = {
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
-export type NativeAppPlatform = "ios" | "android";
+export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux";
 
 export type NativeAppAuthorizeInput = {
   /** Exactly `<registered scheme>://auth/callback`. */

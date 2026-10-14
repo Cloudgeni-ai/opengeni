@@ -68,7 +68,7 @@ import {
   type KnowledgeSearch,
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
-import type { NativeSignInSearch } from "@/lib/native-sign-in-context";
+import { isNativeAppPlatform, type NativeSignInSearch } from "@/lib/native-sign-in-context";
 import {
   parseAgentParam,
   parseServiceAccountParam,
@@ -332,9 +332,7 @@ const nativeSignInRoute = createRoute({
       ...text("code_challenge"),
       ...text("state"),
       ...text("device_name"),
-      ...(search.platform === "ios" || search.platform === "android"
-        ? { platform: search.platform }
-        : {}),
+      ...(isNativeAppPlatform(search.platform) ? { platform: search.platform } : {}),
     };
   },
   component: NativeSignIn,
