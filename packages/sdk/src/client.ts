@@ -81,6 +81,8 @@ import {
   OpenGeniSessionUsageLimitReachedError,
   OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
+  rejectsStartModeField,
+  sessionUsageLimitNotConfirmed,
   sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
@@ -1350,8 +1352,7 @@ export class OpenGeniClient {
         limited &&
         body.startMode === "standard" &&
         error instanceof OpenGeniApiError &&
-        error.status === 400 &&
-        error.body.includes("startMode")
+        rejectsStartModeField(error)
       ) {
         throw new OpenGeniSessionUsageLimitUnsupportedError(
           "This server does not support task usage limits, so the session was not created. Create it without a usage limit, or upgrade the server.",
@@ -1400,9 +1401,7 @@ export class OpenGeniClient {
       request,
     );
     if (committed.limitMicros !== request.limitMicros) {
-      throw new Error(
-        "The server did not confirm the requested usage limit; it may not support usage limits.",
-      );
+      throw sessionUsageLimitNotConfirmed(sessionId);
     }
     return committed;
   }

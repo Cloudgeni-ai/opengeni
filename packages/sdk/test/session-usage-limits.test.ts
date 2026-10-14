@@ -119,8 +119,56 @@ describe("createSession usage limit echo", () => {
   });
 
   test("an older server rejects the whole limited create before starting work: typed, no session", async () => {
-    // An older server accepts only `realtime` and answers with its ordinary
-    // request-body validation envelope; nothing is created or dispatched.
+    // Exact status and body captured from main 7ca987b20 (before usage
+    // limits) for the body a limited create sends: its create route parses
+    // the request and answers 422 before creating or dispatching anything.
+    const { og, requests } = client(
+      () =>
+        new Response(
+          '{"code":"INVALID_SESSION_CREATE_REQUEST","message":"Invalid session create request: startMode failed schema validation"}',
+          { status: 422, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const error = await og
+      .createSession(WORKSPACE_ID, { initialMessage: "hi", usageLimitMicros: 5 })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(OpenGeniSessionUsageLimitUnsupportedError);
+    expect(error).toMatchObject({ code: "session_usage_limit_unsupported", sessionId: null });
+    expect((error as Error).cause).toBeInstanceOf(OpenGeniApiError);
+    expect(requests).toHaveLength(1);
+  });
+
+  test("other create validation errors stay ordinary API errors", async () => {
+    for (const message of [
+      "Invalid session create request: usageLimitMicros failed schema validation",
+      "Invalid session create request: startModeOptions failed schema validation",
+    ]) {
+      const { og } = client(() =>
+        Response.json({ code: "INVALID_SESSION_CREATE_REQUEST", message }, { status: 422 }),
+      );
+      const error = await og
+        .createSession(WORKSPACE_ID, { initialMessage: "hi", usageLimitMicros: 5 })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(OpenGeniApiError);
+      expect(error).not.toBeInstanceOf(OpenGeniSessionUsageLimitUnsupportedError);
+    }
+    // An unlimited create never reinterprets a startMode error.
+    const unlimited = client(() =>
+      Response.json(
+        {
+          code: "INVALID_SESSION_CREATE_REQUEST",
+          message: "Invalid session create request: startMode failed schema validation",
+        },
+        { status: 422 },
+      ),
+    );
+    const error = await unlimited.og
+      .createSession(WORKSPACE_ID, { initialMessage: "hi", startMode: "realtime" })
+      .catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(OpenGeniSessionUsageLimitUnsupportedError);
+  });
+
+  test("a request-body validator naming startMode is also typed", async () => {
     const { og, requests } = client(() =>
       Response.json(
         {

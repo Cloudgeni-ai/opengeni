@@ -8,6 +8,7 @@
 // checked before each new model request: requests already running can take
 // recorded usage above it. See docs/session-usage-limits.md.
 import type { OpenGeniClient, OpenGeniRequestOptions } from "./client";
+import { sessionUsageLimitNotConfirmed } from "./errors";
 import type {
   SessionUsageLimit,
   SetSessionUsageLimitRequest,
@@ -64,9 +65,7 @@ export async function setSessionUsageLimit(
     request,
   );
   if (committed.limitMicros !== request.limitMicros) {
-    throw new Error(
-      "The server did not confirm the requested usage limit; it may not support usage limits.",
-    );
+    throw sessionUsageLimitNotConfirmed(sessionId);
   }
   return committed;
 }
