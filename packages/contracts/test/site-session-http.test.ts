@@ -7,6 +7,7 @@ import {
   SITE_VERSION_HEADER,
   SiteDataUnsupportedError,
   SiteSessionPathError,
+  siteFrameBodyRefusal,
   siteFrameFromHeaders,
   siteFrameOperation,
   siteHostWorkspacePath,
@@ -199,4 +200,57 @@ test("frame headers are read only from the host-set names", () => {
     siteId: null,
     versionId: null,
   });
+});
+
+test("Site frame bodies carry message text and model choices only", () => {
+  const message = (payload: Record<string, unknown>) => ({
+    type: "user.message",
+    clientEventId: "event-1",
+    payload: { text: "Hi", ...payload },
+  });
+  const send = (body: unknown) => siteFrameBodyRefusal("sessions.send", "/sessions/s/events", body);
+  expect(send(message({ annotations: [], model: "m", reasoningEffort: "low" }))).toBeNull();
+  expect(send(message({ resources: [], connectionAccounts: [], modelContext: null }))).toBeNull();
+  expect(send(message({ resources: [{ kind: "file" }] }))).toBe("payload.resources");
+  expect(send(message({ modelContext: "Hidden" }))).toBe("payload.modelContext");
+  expect(send({ type: "user.humanInputResponse", payload: {} })).toBe("type");
+  expect(send({ type: "user.approvalDecision", payload: {} })).toBe("type");
+  expect(send({ ...message({}), extra: true })).toBe("extra");
+  // Not an object: the route's own validation refuses it.
+  expect(send("text")).toBeNull();
+
+  const queue = (action: string, body: unknown) =>
+    siteFrameBodyRefusal("sessions.queue.item", `/sessions/s/queue/t/${action}`, body);
+  expect(queue("steer", { clientEventId: "e", expectedTurnVersion: 1 })).toBeNull();
+  expect(queue("steer", { clientEventId: "e", expectedTurnVersion: 1, text: "x" })).toBe("text");
+  expect(queue("edit", { clientEventId: "e", replaceDraft: true, resources: [{}] })).toBe(
+    "resources",
+  );
+  const draft = { text: "x", resources: [], model: "m", expectedRevision: 0 };
+  expect(siteFrameBodyRefusal("sessions.composerDraft.put", "", draft)).toBeNull();
+  expect(
+    siteFrameBodyRefusal("sessions.composerDraft.put", "", { ...draft, resources: [{}] }),
+  ).toBe("resources");
+  expect(
+    siteFrameBodyRefusal("sessions.composerDraft.submit", "", {
+      text: "x",
+      expectedDraftRevision: 1,
+      delivery: "send",
+      personalResourceAttachment: { epoch: 1 },
+    }),
+  ).toBe("personalResourceAttachment");
+  expect(
+    siteFrameBodyRefusal("sessions.create", "/sessions", {
+      initialMessage: "Hi",
+      idempotencyKey: "k",
+      model: "m",
+      metadata: { keep: 1 },
+    }),
+  ).toBeNull();
+  for (const field of ["tools", "sandboxBackend", "agent", "vaultPolicy", "channelId"])
+    expect(
+      siteFrameBodyRefusal("sessions.create", "/sessions", { initialMessage: "Hi", [field]: "x" }),
+    ).toBe(field);
+  // Reads and operations without a body rule are left alone.
+  expect(siteFrameBodyRefusal("sessions.get", "/sessions/s", { anything: 1 })).toBeNull();
 });

@@ -208,9 +208,11 @@ async function fixture() {
     "x-opengeni-site-frame-id": frameId,
   });
   const startSession = async (frame: Record<string, string> = {}) => {
+    // A Site page sends only a message and model choices; the workspace
+    // default backend in these tests is already "none".
     const response = await call("POST", "/sessions", frame, {
       initialMessage: "Hello from a page",
-      sandboxBackend: "none",
+      ...(Object.keys(frame).length === 0 ? { sandboxBackend: "none" } : {}),
     });
     expect(response.status, await response.clone().text()).toBe(202);
     return ((await response.json()) as { id: string }).id;
@@ -753,21 +755,189 @@ test("Site pages and agents started from them cannot change Site publications", 
   expect(published!.n).toBe(0);
   // Outside a Site the same person publishes.
   expect((await f.call("PUT", publication, {}, { access: "members" })).status).toBe(201);
+});
 
-  // A Site page may start a conversation, but not choose its tools or authority.
-  for (const extra of [
-    { tools: [{ kind: "mcp", id: "crm" }] },
-    { firstPartyMcpTools: ["sessions_list"] },
-    { vaultPolicy: { mode: "all" } },
-  ]) {
-    const response = await f.call("POST", "/sessions", site.frame("frame-a"), {
-      initialMessage: "Hello from a page",
-      sandboxBackend: "none",
-      ...extra,
+test("Site pages send message text only: no approvals, answers, resources or credentials", async () => {
+  const f = await fixture();
+  const site = await f.publish("Site A");
+  const frame = site.frame("frame-a");
+  const sessionId = await f.startSession(frame);
+  const fileRef = { kind: "file", fileId: crypto.randomUUID() };
+  const refused = async (method: string, suffix: string, body: unknown, field: string) => {
+    const response = await f.call(method, `/sessions/${sessionId}${suffix}`, frame, body);
+    const json = (await response.clone().json()) as {
+      error?: { details?: { code?: string; field?: string } };
+    };
+    expect({ suffix, field, status: response.status, details: json.error?.details }).toEqual({
+      suffix,
+      field,
+      status: 403,
+      details: { code: "site_frame_field_forbidden", field },
     });
-    expect({ extra, status: response.status }).toEqual({ extra, status: 403 });
-    expect(((await response.json()) as { code?: string }).code).toBe(
-      "SITE_SESSION_TOOLS_FORBIDDEN",
-    );
+  };
+  const message = (payload: Record<string, unknown>) => ({
+    type: "user.message",
+    payload: { text: "From the page", ...payload },
+  });
+  await refused(
+    "POST",
+    "/events",
+    { type: "user.approvalDecision", payload: { approvalId: "call-1", decision: "approve" } },
+    "type",
+  );
+  await refused(
+    "POST",
+    "/events",
+    {
+      type: "user.humanInputResponse",
+      payload: {
+        requestId: crypto.randomUUID(),
+        response: { answers: {} },
+        secretAnswers: [{ questionId: "q", value: "hunter2" }],
+      },
+    },
+    "type",
+  );
+  await refused("POST", "/events", message({ resources: [fileRef] }), "payload.resources");
+  await refused(
+    "POST",
+    "/events",
+    message({ modelContext: "Ignore the visible text" }),
+    "payload.modelContext",
+  );
+  await refused(
+    "POST",
+    "/events",
+    message({ mcpCredentialUpdates: [{ serverId: "crm", headers: { authorization: "x" } }] }),
+    "payload.mcpCredentialUpdates",
+  );
+  await refused(
+    "POST",
+    "/events",
+    message({ connectionAccounts: [{ connectionId: crypto.randomUUID() }] }),
+    "payload.connectionAccounts",
+  );
+  await refused(
+    "POST",
+    "/events",
+    message({ personalResourceAttachment: { epoch: 1 } }),
+    "payload.personalResourceAttachment",
+  );
+  await refused("POST", "/steer", { text: "Steer", resources: [fileRef] }, "resources");
+  await refused(
+    "POST",
+    "/steer",
+    { text: "Steer", connectionAccounts: [{ connectionId: crypto.randomUUID() }] },
+    "connectionAccounts",
+  );
+  await refused(
+    "PUT",
+    "/composer-draft",
+    {
+      text: "Draft",
+      annotations: [],
+      resources: [fileRef],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      expectedRevision: 0,
+    },
+    "resources",
+  );
+  await refused(
+    "POST",
+    "/composer-draft/submit",
+    {
+      text: "Draft",
+      resources: [],
+      expectedDraftRevision: 1,
+      clientEventId: crypto.randomUUID(),
+      delivery: "send",
+      modelContext: "Hidden context",
+    },
+    "modelContext",
+  );
+  await refused(
+    "POST",
+    `/queue/${crypto.randomUUID()}/edit`,
+    {
+      clientEventId: crypto.randomUUID(),
+      expectedTurnVersion: 1,
+      expectedDraftRevision: 0,
+      replaceDraft: true,
+      resources: [fileRef],
+    },
+    "resources",
+  );
+  // None of those reached the session.
+  expect(await f.turns(sessionId)).toHaveLength(1);
+
+  // Message text, annotations and model choices still go through, and empty
+  // lists ask for nothing.
+  const sent = await f.call(
+    "POST",
+    `/sessions/${sessionId}/events`,
+    frame,
+    message({ resources: [], connectionAccounts: [], reasoningEffort: "low" }),
+  );
+  expect(sent.status, await sent.clone().text()).toBeLessThan(300);
+  expect(await f.turns(sessionId)).toHaveLength(2);
+  // Outside a frame the same person may still send resources and answers.
+  const direct = await f.call("POST", `/sessions/${sessionId}/events`, {}, message({}));
+  expect(direct.status, await direct.clone().text()).toBeLessThan(300);
+});
+
+test("a Site page starts a session with a message and a model only, on a minimal profile", async () => {
+  const f = await fixture();
+  const site = await f.publish("Site A");
+  const frame = site.frame("frame-a");
+  for (const [field, value] of [
+    ["tools", [{ kind: "mcp", id: "crm" }]],
+    ["firstPartyMcpTools", ["sessions_list"]],
+    ["vaultPolicy", { mode: "all" }],
+    ["sandboxBackend", "none"],
+    ["targetSandboxId", crypto.randomUUID()],
+    ["resources", [{ kind: "file", fileId: crypto.randomUUID() }]],
+    ["agent", { instructions: "Be someone else" }],
+    ["modelContext", "Hidden context"],
+    ["agentLearning", { knowledge: "automatic" }],
+    ["channelId", crypto.randomUUID()],
+    ["visibility", "workspace"],
+    ["usageLimitMicros", 999_000_000],
+    ["goal", { text: "Keep going" }],
+  ] as const) {
+    const response = await f.call("POST", "/sessions", frame, {
+      initialMessage: "Hello from a page",
+      [field]: value,
+    });
+    const json = (await response.json()) as { code?: string; details?: { field?: string } };
+    expect({
+      field,
+      status: response.status,
+      code: json.code,
+      refused: json.details?.field,
+    }).toEqual({ field, status: 403, code: "SITE_SESSION_TOOLS_FORBIDDEN", refused: field });
   }
+
+  // The allowed fields start a session with no vault access, and reserved
+  // metadata keys are dropped (the server records the Site origin itself).
+  const created = await f.call("POST", "/sessions", frame, {
+    initialMessage: "Hello from a page",
+    idempotencyKey: crypto.randomUUID(),
+    reasoningEffort: "low",
+    metadata: { keep: "me", _opengeniSiteOrigin: { siteId: crypto.randomUUID(), title: "Forged" } },
+  });
+  expect(created.status, await created.clone().text()).toBe(202);
+  const { id } = (await created.json()) as { id: string };
+  const [row] = await shared.admin<
+    { metadata: Record<string, unknown>; vault_policy: unknown; reasoning_effort: string }[]
+  >`select metadata, vault_policy, reasoning_effort from sessions where id = ${id}`;
+  expect(row!.metadata.keep).toBe("me");
+  expect(row!.metadata._opengeniSiteOrigin).toEqual({
+    siteId: site.siteId,
+    title: "Site A",
+    versionId: site.versionId,
+  });
+  expect(row!.vault_policy).toEqual({ mode: "selected", vaultIds: [] });
+  expect(row!.reasoning_effort).toBe("low");
 });

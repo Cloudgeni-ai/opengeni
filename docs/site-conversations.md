@@ -43,11 +43,45 @@ gateway uses the same scope. Concurrent requests remain isolated, including
 the in-memory MCP transport. Caller-provided origin metadata is discarded.
 Historical versions remain valid provenance after publication/archive so normal
 response-loss retries are not broken by a mutable current-version check.
-The Site SDK has no workspace endpoint or HTTP-method allowlist. The host binds
-requests to its workspace and rejects unsafe URL paths; ordinary API handlers
-authorize operations as the viewer. Sandbox previews use the same routing with
+Site code reaches only the `SITE_OPERATIONS` allowlist (method plus exact path
+shape, in `packages/contracts/src/site-operations.ts`). The host binds requests
+to its workspace and rejects unsafe URL paths, and the API enforces the same
+allowlist again for every request carrying the host's frame headers
+(`apps/api/src/site-frame-guard.ts`); ordinary API handlers then authorize the
+allowed operation as the viewer. Sandbox previews use the same routing with
 the agent's existing proxy permission ceiling, not viewer credentials.
 Integration-tool allowlists and ordinary approval rules remain separate and unchanged.
+
+A Site page sends message text, never authority. On messages, steering, queue
+changes and composer drafts it may set the text, annotations, model, reasoning
+effort, latency mode and the client ids and revisions that make a request
+retry-safe (`siteFrameBodyRefusal`). Anything else with a value is refused with
+403 `site_frame_field_forbidden`, naming the field: approval decisions, answers
+to human-input requests (with or without secret answers), resources, personal
+resource attachments, MCP credential updates, connection account choices and
+hidden model context. The console bridge refuses them before forwarding and the
+API refuses them again.
+
+Approvals and answers for a conversation started from a console Site happen in
+the console, in the conversation itself, not inside the Site. A Site that embeds
+`SessionConversation` shows the pending request, but its Approve, Reject and
+answer controls get the 403 above; the person opens the conversation in the
+console (the origin link on the Site's Conversations tab) to respond.
+
+A Site page starts a session with a message and a model only. Session create
+accepts `initialMessage`, `requestedSessionId`, `idempotencyKey`,
+`clientEventId`, `model`, `reasoningEffort`, `latencyMode`, `startMode` and
+`metadata` (keys starting with `_opengeni` are dropped), and refuses any other
+field with a value (tools, MCP servers, first-party tools and permissions,
+vault policy, connections, sandbox or environment choice, working directory,
+resources, Skills, agent overrides, model context, learning overrides, goal,
+project, visibility, usage limit, nesting). The session then runs on a minimal
+Site profile: no vault access and the workspace defaults for everything else.
+An agent started from a Site page is also clamped (`assertNotSiteClampedAgent`):
+it cannot create or change schedules, automations, Site publications,
+workspace instructions, Skills, Knowledge or secrets, so it does not learn.
+Published Sites start their agents as `site:<siteId>` with the publication's
+own tools and limits instead (see `docs/site-runtime-api.md`).
 
 ## Agent defaults
 

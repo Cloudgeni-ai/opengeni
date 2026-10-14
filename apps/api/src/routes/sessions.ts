@@ -14,6 +14,10 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
+import {
+  SITE_FRAME_SESSION_CREATE_FIELDS,
+  siteFrameBodyRefusal,
+} from "@opengeni/contracts/site-session-http";
 import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
@@ -740,23 +744,24 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           },
         ),
       );
-      // A Site page (or an agent it started) may start a conversation, but not
-      // choose its tools, servers, permissions or vault access: only the Site
-      // itself, running its published agent as `site:<siteId>`, does that.
+      // A Site page may start a conversation with a message and a model, and
+      // nothing else: the session gets the minimal Site profile. Only the Site
+      // itself, running its published agent as `site:<siteId>`, chooses tools.
       const siteOrigin = origin ?? currentSiteSessionOrigin();
-      if (
-        siteOrigin &&
-        grant.subjectId !== `site:${siteOrigin.siteId}` &&
-        siteRequestedSessionTools(payload)
-      )
-        return c.json(
-          {
-            code: "SITE_SESSION_TOOLS_FORBIDDEN",
-            message:
-              "A Site page cannot choose tools, MCP servers, connections, permissions or vault access for a session",
-          },
-          403,
-        );
+      if (siteOrigin && grant.subjectId !== `site:${siteOrigin.siteId}`) {
+        const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
+        if (refused)
+          return c.json(
+            {
+              code: "SITE_SESSION_TOOLS_FORBIDDEN",
+              message:
+                "A Site page can start a session with a message and a model only, not choose its tools, servers, connections, permissions, vaults, sandbox, resources, Skills or learning",
+              details: { code: "site_frame_field_forbidden", field: refused },
+            },
+            403,
+          );
+        payload = siteFrameSessionProfile(payload);
+      }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
       session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
@@ -6345,27 +6350,25 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
   return Math.floor(sequence);
 }
 
-/** Session create fields that choose tools or authority, refused from Site pages. */
-const SITE_REFUSED_SESSION_FIELDS = [
-  "tools",
-  "mcpServers",
-  "firstPartyMcpTools",
-  "firstPartyMcpPermissions",
-  "mcpApprovalPolicies",
-  "vaultPolicy",
-  "connectionAccounts",
-] as const;
-
-function siteRequestedSessionTools(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  const body = payload as Record<string, unknown>;
-  return SITE_REFUSED_SESSION_FIELDS.some((field) => {
-    const value = body[field];
-    if (value === undefined || value === null) return false;
-    if (Array.isArray(value)) return value.length > 0;
-    if (typeof value === "object") return Object.keys(value).length > 0;
-    return true;
-  });
+/**
+ * The minimal Site profile of a session a Site page starts: only the allowed
+ * create fields, metadata without reserved `_opengeni` keys, and no vault
+ * access. Everything else (tools, servers, sandbox, resources, Skills,
+ * learning, goals) is the workspace default for a plain chat, and agents
+ * started from a Site stay clamped (`assertNotSiteClampedAgent`).
+ */
+function siteFrameSessionProfile(payload: unknown): Record<string, unknown> {
+  const body = (payload ?? {}) as Record<string, unknown>;
+  const profile: Record<string, unknown> = {};
+  for (const field of SITE_FRAME_SESSION_CREATE_FIELDS)
+    if (body[field] !== undefined && body[field] !== null) profile[field] = body[field];
+  const metadata = body.metadata;
+  profile.metadata =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? Object.fromEntries(Object.entries(metadata).filter(([key]) => !key.startsWith("_opengeni")))
+      : {};
+  profile.vaultPolicy = { mode: "selected", vaultIds: [] };
+  return profile;
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
