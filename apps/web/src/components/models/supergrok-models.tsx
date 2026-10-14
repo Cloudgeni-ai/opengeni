@@ -193,9 +193,7 @@ export function SuperGrokRow({
           <UsageReadout
             percent={left}
             window="this period"
-            {...(account.quota?.periodEnd
-              ? { resetsLabel: formatReset(account.quota.periodEnd) }
-              : {})}
+            {...(account.quota?.periodEnd ? { resets: [{ at: account.quota.periodEnd }] } : {})}
           />
         ),
       }}
