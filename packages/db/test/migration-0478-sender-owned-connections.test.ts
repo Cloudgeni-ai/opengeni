@@ -112,6 +112,8 @@ const withheldMigrations = [
   "0750_subscription_waiter_candidates.sql",
   // Rewrites the visibility transition installed by withheld 0501; it follows 0501.
   "0738_private_sessions_share_sandboxes.sql",
+  // Policies and a routine over the shared connection table and owner helper from withheld 0645/0707.
+  "0777_workspace_admin_subscription_connections.sql",
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

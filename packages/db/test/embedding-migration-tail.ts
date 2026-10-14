@@ -261,4 +261,7 @@ export const embeddingMigrationTail = [
   "0738_private_sessions_share_sandboxes.sql",
   // Replaces the 0585 cursor trigger routine over its withheld column.
   "0775_session_usage_limit_attention_cursor.sql",
+  // Reads subscription_connections and the owner-capability routine from
+  // withheld 0645/0707 and later subscription-core migrations.
+  "0777_workspace_admin_subscription_connections.sql",
 ];
