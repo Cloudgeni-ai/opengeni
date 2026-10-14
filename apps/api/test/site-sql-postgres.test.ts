@@ -726,6 +726,16 @@ test("published hosts run named queries as the verified viewer; guests only ever
   // Reads and signed-in writes are not guest writes.
   expect((await run("results", { poll: "lunch" }, guest)).status).toBe(200);
   expect((await run("sign_guestbook", { note: "member" }, signedIn)).status).toBe(200);
+  // New visitor ids from the same client address share its guest write budget
+  // (SITE_GUEST_IP_LIMIT_FACTOR times the per-visitor limit).
+  let addressFlooded: Awaited<ReturnType<typeof run>> | null = null;
+  for (let attempt = 0; attempt < 12 && !addressFlooded; attempt += 1) {
+    const fresh = { visitor: randomBytes(18).toString("base64url") };
+    const signed = await run("sign_guestbook", { note: `fresh ${attempt}` }, fresh);
+    if (signed.status === 429) addressFlooded = signed;
+    else expect(signed.status, JSON.stringify(signed.json)).toBe(200);
+  }
+  expect(addressFlooded?.json.error.details).toMatchObject({ bucket: "guest_writes" });
 
   // The publication's limit profile decides the Site SQL limits.
   expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
