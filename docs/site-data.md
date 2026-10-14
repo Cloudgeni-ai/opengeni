@@ -181,19 +181,31 @@ and skips records already checked against the same schema; a record that
 changed in between is checked again inside the transaction, on the same
 budget. Nothing is compiled under the lock: if a collection's schema changed
 between the check and the lock, the write fails with a retryable `conflict`
-(409, reason `schema_changed`) and the caller sends it again.
+(409, reason `schema_changed`, `retryable: true`) and the caller sends it
+again. Imports commit in batches of 100, so an import error reports
+`details.imported`; once that is above zero the error is never retryable
+(sending the same import again would duplicate the committed batches) and its
+message says how many records were imported.
 
 Validation time has two windows per minute: one per Site (5 s by default)
 and one per workspace (20 s by default) as a ceiling across its Sites, so one
 busy Site cannot use up the whole workspace. A request that would validate
 (it writes records to a collection with a schema, defines a collection with a
-schema, or imports into one) reserves the request budget, 250 ms, on both
-windows in the same transaction that counts its rate windows, before any
-work. If either window cannot take the reservation, the request gets
-`rate_limited` (quota `site_validation_time` or `workspace_validation_time`)
-until the minute ends. Afterwards, whatever the outcome, the request settles
-to the time it actually spent, in the transaction that already records it:
-the unused part is refunded, or an overrun of at most one record is charged.
+schema, or imports into one) reserves validation time on both windows in
+the same transaction that counts its rate windows, before any work. The
+reservation is sized to the request: 25 ms plus 1 µs per byte of record JSON
+it carries (for a define, the schema's JSON; for an import, the CSV text or
+the records' JSON), capped at the 250 ms request budget. 1 µs per byte is
+about what the costliest allowed schema needs, so a request rarely spends
+more than it reserved. If either window cannot take the reservation, the
+request gets `rate_limited` (quota `site_validation_time` or
+`workspace_validation_time`) until the minute ends. Afterwards, whatever the
+outcome, the request settles to the time it actually spent in its own short
+transaction after the write: the unused part is refunded, or the overrun is
+charged. A refund applies only while the minute it was reserved in lasts;
+once the window rolled over, only time spent beyond the reservation is
+charged, to the new minute, so a late refund never frees time in a window it
+did not use.
 Each started 5 ms spent (from 1 ms; quicker checks, which are the normal case,
 are free) also counts one more operation on the caller's write windows, for
 viewers and managers alike. Schema compile time is part of the time spent and
@@ -206,10 +218,16 @@ collections without a schema, and defining a collection without one, so a
 manager can always remove a schema that causes trouble. Requests without a
 schema never touch the validation windows, neither at admission nor
 afterwards. Because requests reserve before they start, concurrent bursts
-cannot overshoot: at most window ÷ 250 ms requests (20 per Site, 80 per
-workspace with the defaults) are in flight at once, and each can overshoot
-its reservation by at most one record and its compile (about 0.2 s), so a
-Site's validation per minute stays within about 5 s plus that overrun.
+are bounded by the windows: with the defaults up to 200 small validating
+requests (25 ms each) can be in flight on one Site, and up to 20 of the
+largest (250 ms each), so a page that inserts many items at once with
+`Promise.all` is not refused. A request can spend more than it reserved only
+when its cost is not in the bytes it sent: a patch or increment merged into a
+larger stored record, or a cold compile of a large schema. Even then it stops
+at the request budget plus one record and its compile (about 0.45 s at
+worst), the overrun is charged when it settles, and further requests are
+refused until the window has room again. So a Site's validation per minute
+stays within about 5 s plus the overrun of the requests already in flight.
 Data paths (filters, sorts, keys, increments, indexes, CSV headers) refuse
 `__proto__`, `prototype` and `constructor`.
 
@@ -318,7 +336,9 @@ mode are added.
   principal, the manager write window, worst-case validation cost under the
   schema cost model, validation-time charging, the per-Site and workspace
   validation windows (only validating requests are refused; schema-less writes
-  touch no window row), reservation under concurrent admission, compile-only
+  touch no window row), reservation under concurrent admission,
+  request-sized reservations (25 concurrent small writes succeed), refunds
+  only within the reserved minute, non-retryable partial imports, compile-only
   operations on the budget, the retryable schema-changed conflict, the budget
   order, CSV import counting, and the lineage under the production session
   RLS context. Budgets and charges use an injected validation clock, never
