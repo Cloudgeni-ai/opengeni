@@ -1,3 +1,4 @@
+import type { SubscriptionQuotaBlock } from "./quota";
 import type { CacheFacts, ModelId, ModelTier, ProviderId, SubscriptionQuota } from "./types";
 
 /**
@@ -285,15 +286,21 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    */
   usageReadConfirmsAvailability?(response: unknown): boolean;
   /**
-   * With `usageReadEndsQuotaExhaustion`: which stored model cooldowns one
-   * `fetchUsage` response that confirms availability shows have ended. The
-   * returned predicate is true for a product model only when the response
-   * reports every limit that can cool that model, each below it. A cooldown
-   * the reading itself reports stands, and so does every cooldown the
-   * predicate does not end (an explicit, revision-fenced store write).
-   * Absent: a reading ends no cooldown; each runs until its own end.
+   * With `usageReadEndsQuotaExhaustion`: which stored blocks one `fetchUsage`
+   * response that confirms availability shows have ended, judged from each
+   * block's own claim (the limits the observation that set it named, tied
+   * to its exact deadline: `QuotaBlockClaim`). `modelId` is the cooled
+   * product model, or null for the quota exhaustion deadline. The predicate
+   * must be false for a block without a claim, for a claim observed no
+   * earlier than the response, and unless the response reports every
+   * claimed limit numerically below it (an explicit "no such limit" does
+   * not clear a limit that refused). A cooldown the reading itself reports
+   * stands, and so does every block the predicate does not end.
+   * When defined, a stored quota exhaustion deadline ends only where it
+   * returns true. Absent: a reading ends no cooldown (each runs until its
+   * own end), and `usageReadEndsQuotaExhaustion` alone decides the deadline.
    */
-  usageReadEndsModelCooldowns?(response: unknown): (modelId: ModelId) => boolean;
+  usageReadEndsClaimedBlock?(response: unknown): (block: SubscriptionQuotaBlock) => boolean;
   /**
    * The provider's usage-endpoint readings are complete: each reports every
    * window that limits the connection, so a stored exhausted window that a

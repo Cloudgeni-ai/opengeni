@@ -5,6 +5,7 @@ import type {
   ConnectionOwnership,
   InferencePool,
   ProviderId,
+  QuotaBlockClaim,
   SubscriptionConnection,
   SubscriptionQuota,
   SubscriptionSettingValues,
@@ -342,7 +343,7 @@ export function decodeSubscriptionQuota(row: {
     )
   )
     return null;
-  return {
+  const quota: SubscriptionQuota = {
     windows: parsedWindows,
     modelCooldowns,
     exhaustedUntil,
@@ -354,6 +355,41 @@ export function decodeSubscriptionQuota(row: {
         ? null
         : Number(row.quota_observed_refresh_generation),
     source,
+  };
+  // Block evidence is optional and fails closed: a malformed claim is
+  // dropped (its block runs to its own deadline), never the quota.
+  const claims = raw.modelCooldownClaims;
+  if (claims !== null && typeof claims === "object" && !Array.isArray(claims)) {
+    const parsed: Record<string, QuotaBlockClaim> = {};
+    for (const [modelId, claim] of Object.entries(claims)) {
+      const decoded = decodeQuotaBlockClaim(claim);
+      if (decoded && modelCooldowns[modelId] !== undefined) parsed[modelId] = decoded;
+    }
+    if (Object.keys(parsed).length > 0) quota.modelCooldownClaims = parsed;
+  }
+  const exhaustedClaim = exhaustedUntil === null ? null : decodeQuotaBlockClaim(raw.exhaustedClaim);
+  if (exhaustedClaim) quota.exhaustedClaim = exhaustedClaim;
+  return quota;
+}
+
+function decodeQuotaBlockClaim(value: unknown): QuotaBlockClaim | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const claim = value as Record<string, unknown>;
+  if (
+    typeof claim.until !== "number" ||
+    !Number.isFinite(claim.until) ||
+    typeof claim.observedAt !== "number" ||
+    !Number.isFinite(claim.observedAt) ||
+    !Array.isArray(claim.windowIds) ||
+    claim.windowIds.length === 0 ||
+    claim.windowIds.length > 16 ||
+    !claim.windowIds.every((id) => typeof id === "string" && id.length > 0 && id.length <= 128)
+  )
+    return null;
+  return {
+    until: claim.until,
+    observedAt: claim.observedAt,
+    windowIds: [...new Set(claim.windowIds as string[])],
   };
 }
 
