@@ -104,13 +104,19 @@ async function fixture() {
 }
 type Scope = Awaited<ReturnType<typeof fixture>>;
 
-function offlineModel() {
+function offlineModel(
+  options: {
+    credentialSource?: Record<string, unknown>;
+    admission?: () => Promise<unknown>;
+    credentials?: () => Promise<unknown>;
+  } = {},
+) {
   const selection = {
     model: {
       id: "scripted-model",
       label: "Scripted",
       providerLabel: "Offline",
-      credentialSource: { kind: "deployment" },
+      credentialSource: options.credentialSource ?? { kind: "deployment" },
       billing: { metering: "none", upstreamPayer: "deployment" },
       capabilities: { inputModalities: ["text"], structuredOutput: { runnable: true } },
     },
@@ -123,8 +129,8 @@ function offlineModel() {
   spy(core, "resolveWorkspaceCatalogSettings", async () => ({ settings }));
   spy(core, "resolveCallerWorkspaceModelSelections", async () => [selection]);
   spy(core, "admissibleWorkspaceModel", () => selection);
-  spy(core, "admitModelCall", async () => ({ allowed: true }));
-  spy(core, "settingsWithModelProviderCredentials", async () => settings);
+  spy(core, "admitModelCall", options.admission ?? (async () => ({ allowed: true })));
+  spy(core, "settingsWithModelProviderCredentials", options.credentials ?? (async () => settings));
   spy(runtimeModelCall.MultiProviderModelProvider.prototype, "resolveBinding", () => ({
     client: {},
     provider: { id: "offline" },
@@ -268,3 +274,52 @@ test("a provider error releases the marker on the real database", async () => {
     { source_id: "model_call:reset-2", status: "priced", fenced: false },
   ]);
 });
+
+// Re-review (marker leak): every exit after admission opens the marker and
+// before the request is dispatched releases it, so a refused call never blocks
+// the task later or turns into a phantom unpriced call.
+for (const [name, options] of [
+  [
+    "the credit or token admission throws",
+    {
+      admission: async () => {
+        throw new Error("admission store unavailable");
+      },
+    },
+  ],
+  [
+    "the credit or token admission denies the call",
+    {
+      admission: async () => ({
+        allowed: false,
+        denial: "insufficient_credits",
+        message: "No credits",
+      }),
+    },
+  ],
+  [
+    "loading provider credentials throws",
+    {
+      credentials: async () => {
+        throw new Error("provider credential could not be loaded");
+      },
+    },
+  ],
+  [
+    "a Claude subscription single call fails closed",
+    { credentialSource: { kind: "connected_subscription", provider: "claude" } },
+  ],
+] as const) {
+  test(`an undispatched call releases its marker when ${name}`, async () => {
+    const scope = await fixture();
+    const provider = offlineModel(options);
+    const { service } = replica();
+    await expect(call(service, scope, "undispatched")).rejects.toBeDefined();
+    expect(provider).not.toHaveBeenCalled();
+    // Nothing is owed: no marker can go overdue (blocking the task) or be
+    // disclosed later as a phantom unpriced call.
+    expect(await markers(scope)).toEqual([]);
+    await maintainSessionUsageLimits(client.db, { limit: 50, budget: 50 });
+    expect(await state(scope)).toMatchObject({ usedMicros: 0, unpricedCalls: 0 });
+  });
+}

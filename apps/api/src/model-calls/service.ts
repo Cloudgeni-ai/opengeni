@@ -199,33 +199,46 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           // then disclosed as unpriced by maintenance; never fails the call.
         });
       };
-      const admission = await admitModelCall(deps, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        model: model.id,
-        chargesOpenGeniCredits,
-        countsTowardTokenCap,
-        subjectId: input.subjectId,
-      });
-      if (!admission.allowed) {
-        await releaseMarker();
-        throw new ModelCallError({
-          status: admission.denial === "insufficient_credits" ? 402 : 429,
-          type: "insufficient_quota",
-          code: admission.denial,
-          message: admission.message,
+      // Everything between opening the marker and dispatching the request can
+      // refuse the call. No request was sent on those exits, so the marker is
+      // released; once dispatch starts, custody stays until settlement.
+      const prepareDispatch = async () => {
+        const admission = await admitModelCall(deps, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          model: model.id,
+          chargesOpenGeniCredits,
+          countsTowardTokenCap,
+          subjectId: input.subjectId,
         });
+        if (!admission.allowed) {
+          throw new ModelCallError({
+            status: admission.denial === "insufficient_credits" ? 402 : 429,
+            type: "insufficient_quota",
+            code: admission.denial,
+            message: admission.message,
+          });
+        }
+        const settings = await settingsWithModelProviderCredentials(deps.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          settings: catalogSettings,
+          productModelId: model.id,
+          codexSubscriptionActive: subscription === "codex",
+        });
+        // A single Claude subscription call has no shared-core operation path
+        // yet and the legacy Claude pool is deleted (C4): fail closed.
+        if (subscription === "claude") throw subscriptionCapacityUnavailable("Claude");
+        return { admission, settings };
+      };
+      let prepared: Awaited<ReturnType<typeof prepareDispatch>>;
+      try {
+        prepared = await prepareDispatch();
+      } catch (error) {
+        await releaseMarker();
+        throw error;
       }
-      let settings = await settingsWithModelProviderCredentials(deps.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        settings: catalogSettings,
-        productModelId: model.id,
-        codexSubscriptionActive: subscription === "codex",
-      });
-      // A single Claude subscription call has no shared-core operation path
-      // yet and the legacy Claude pool is deleted (C4): fail closed.
-      if (subscription === "claude") throw subscriptionCapacityUnavailable("Claude");
+      const { admission, settings } = prepared;
       const request = {
         ...input.request,
         ...reasoningEffortFor(model, input.request.reasoningEffort),
