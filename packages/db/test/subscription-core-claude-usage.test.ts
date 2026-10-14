@@ -27,6 +27,8 @@ import {
   SUBSCRIPTION_CORE_CLAUDE_USAGE_URL,
   SubscriptionCoreClaudeUsageVersionMissing,
   subscriptionCoreClaudeUpstreamModelIds,
+  subscriptionCoreClaudeUsageConfirmsAvailability,
+  subscriptionCoreClaudeUsageEndsModelCooldowns,
   subscriptionCoreClaudeUsageScopeMissing,
   type SubscriptionCoreClaudeUsageReading,
   type SubscriptionCoreClaudeUsageRow,
@@ -264,6 +266,104 @@ describe("decodeQuota", () => {
         "claude-c",
       ]),
     ).toEqual(["claude-a", "claude-b"]);
+  });
+});
+
+describe("early reset: availability and model cooldowns a reading ends", () => {
+  const window = (utilization: number) => ({
+    utilization,
+    resets_at: "2026-10-15T00:00:00.000Z",
+  });
+  const read = async (body: Record<string, unknown>) =>
+    await fetchSubscriptionCoreClaudeUsage(connectionRead(oauth, () => Response.json(body)).read);
+  const opus = "organization-claude-subscription/claude-opus-4-6";
+  const workspaceOpus = "workspace-claude-subscription/claude-opus-4-6";
+  const sonnet = "organization-claude-subscription/claude-sonnet-4-6";
+  const haiku = "organization-claude-subscription/claude-haiku-4-5";
+
+  test("the adapter opts in: a usage read ends a quota exhaustion and covered cooldowns", () => {
+    const adapter = SUBSCRIPTION_CORE_CLAUDE.adapter;
+    expect(adapter.usageReadEndsQuotaExhaustion).toBe(true);
+    expect(typeof adapter.usageReadConfirmsAvailability).toBe("function");
+    expect(typeof adapter.usageReadEndsModelCooldowns).toBe("function");
+    // Readings stay partial: an omitted exhausted window is kept.
+    expect(adapter.usageReadingsComplete).toBe(false);
+  });
+
+  test("explicit null windows are recorded; omitted ones are not", async () => {
+    const reading = await read({
+      five_hour: window(3),
+      seven_day: window(41),
+      seven_day_opus: null,
+    });
+    expect(reading.status).toBe("available");
+    expect(reading.noLimitWindowIds).toEqual(["seven_day_opus"]);
+    const without = await read({ five_hour: window(3), seven_day: window(41) });
+    expect(without.noLimitWindowIds).toBeUndefined();
+    // A reading without any window is unavailable and records nothing.
+    const empty = await read({ five_hour: null, seven_day: null });
+    expect(empty).toMatchObject({ status: "unavailable", observation: null });
+    expect(empty.noLimitWindowIds).toBeUndefined();
+  });
+
+  test("availability needs both account windows reported below the limit", async () => {
+    expect(
+      subscriptionCoreClaudeUsageConfirmsAvailability(
+        await read({ five_hour: window(3), seven_day: window(99.9) }),
+      ),
+    ).toBe(true);
+    for (const body of [
+      { five_hour: window(3) },
+      { seven_day: window(41) },
+      { five_hour: window(3), seven_day: null },
+      { five_hour: window(100), seven_day: window(41) },
+      { five_hour: window(3), seven_day: window(100) },
+      { five_hour: { utilization: null, resets_at: "2026-10-15T00:00:00.000Z" }, seven_day: window(1) },
+    ]) {
+      expect(subscriptionCoreClaudeUsageConfirmsAvailability(await read(body))).toBe(false);
+    }
+    for (const response of [
+      { status: "unavailable", observation: null, checkedAt: new Date().toISOString() },
+      { status: "scope_required", observation: null, checkedAt: new Date().toISOString() },
+      null,
+      "not a reading",
+    ]) {
+      expect(subscriptionCoreClaudeUsageConfirmsAvailability(response)).toBe(false);
+    }
+  });
+
+  test("a cooldown ends only when the model's family window is below the limit or has no limit", async () => {
+    const ends = subscriptionCoreClaudeUsageEndsModelCooldowns(
+      await read({
+        five_hour: window(3),
+        seven_day: window(41),
+        seven_day_opus: null,
+        seven_day_sonnet: window(100),
+      }),
+    );
+    expect(ends(opus)).toBe(true);
+    expect(ends(workspaceOpus)).toBe(true);
+    // No family window limits Haiku: the account windows decide.
+    expect(ends(haiku)).toBe(true);
+    // The Sonnet weekly window is full.
+    expect(ends(sonnet)).toBe(false);
+    // Not a Claude product model.
+    expect(ends("codex/gpt-5.5")).toBe(false);
+    expect(ends("claude-opus-4-6")).toBe(false);
+
+    // A family window the reading does not name is unknown: kept.
+    const unnamed = subscriptionCoreClaudeUsageEndsModelCooldowns(
+      await read({ five_hour: window(3), seven_day: window(41), seven_day_sonnet: window(12) }),
+    );
+    expect(unnamed(opus)).toBe(false);
+    expect(unnamed(sonnet)).toBe(true);
+
+    // A reading that does not confirm availability ends nothing.
+    const refused = subscriptionCoreClaudeUsageEndsModelCooldowns(
+      await read({ five_hour: window(100), seven_day: window(41), seven_day_opus: null }),
+    );
+    expect([opus, sonnet, haiku].map(refused)).toEqual([false, false, false]);
+    expect(subscriptionCoreClaudeUsageEndsModelCooldowns(null)(opus)).toBe(false);
   });
 });
 

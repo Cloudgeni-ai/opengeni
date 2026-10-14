@@ -206,7 +206,41 @@ export type SubscriptionCoreUsageMergeOptions = {
    * a stored quota exhaustion.
    */
   confirmsAvailability?: boolean | undefined;
+  /**
+   * The adapter's `usageReadEndsModelCooldowns` for the response that was
+   * decoded (undefined: the adapter has none, and no cooldown ends early).
+   * Applied only with a reading that may end a stored quota exhaustion.
+   */
+  endsModelCooldown?: ((modelId: string) => boolean) | undefined;
 };
+
+/** The merge options one decoded `fetchUsage` response carries, from the adapter. */
+export function subscriptionCoreUsageMergeOptions(
+  adapter: SubscriptionCoreProvider["adapter"],
+  response: unknown,
+): SubscriptionCoreUsageMergeOptions {
+  return {
+    confirmsAvailability: adapter.usageReadConfirmsAvailability?.(response),
+    endsModelCooldown: adapter.usageReadEndsModelCooldowns?.(response),
+  };
+}
+
+/**
+ * A stored quota a usage re-read can end now: it is exhausted, or (for an
+ * adapter whose reading can end model cooldowns) a model cooldown runs.
+ */
+export function subscriptionCoreQuotaBlocksNow(
+  adapter: SubscriptionCoreProvider["adapter"],
+  quota: SubscriptionQuota | null,
+  now: number,
+): boolean {
+  if (!quota) return false;
+  if (quotaCapacity(quota, now).kind === "exhausted") return true;
+  return (
+    adapter.usageReadEndsModelCooldowns !== undefined &&
+    Object.values(quota.modelCooldowns).some((until) => until > now)
+  );
+}
 
 /** The quota write one usage observation makes. */
 export type SubscriptionCoreUsageObservationWrite = {
@@ -866,20 +900,42 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     // (adapter opt-in; the caller holds the row, and the write bumps its
     // revision). An at-limit read without a known reset is not below the limit,
     // and neither is a reading the adapter says does not confirm availability.
-    const next =
+    const authoritative =
       provider.adapter.usageReadEndsQuotaExhaustion === true &&
       options.confirmsAvailability !== false &&
       observation.source === "usage_endpoint" &&
       observation.exhaustedUntil === null &&
-      observation.exhaustedKind === null &&
-      observed.exhaustedKind === "quota"
+      observation.exhaustedKind === null;
+    const ended =
+      authoritative && observed.exhaustedKind === "quota"
         ? { ...observed, exhaustedUntil: null, exhaustedKind: null }
         : observed;
+    // The same reading ends the stored model cooldowns the adapter says it
+    // shows have ended (a limit reset early that a refusal cooled the model
+    // for); a cooldown the reading itself reports stands.
+    const endsCooldown = authoritative ? options.endsModelCooldown : undefined;
+    const next = endsCooldown
+      ? {
+          ...ended,
+          modelCooldowns: Object.fromEntries(
+            Object.entries(ended.modelCooldowns).filter(
+              ([modelId]) =>
+                observation.modelCooldowns[modelId] !== undefined || !endsCooldown(modelId),
+            ),
+          ),
+        }
+      : ended;
     const observedAt = observation.observedAt ?? Date.now();
-    const recovered =
+    const cooldownEnded =
       current !== null &&
-      quotaCapacity(current, observedAt).kind === "exhausted" &&
-      quotaCapacity(next, observedAt).kind !== "exhausted";
+      Object.entries(current.modelCooldowns).some(
+        ([modelId, until]) => until > observedAt && next.modelCooldowns[modelId] === undefined,
+      );
+    const recovered =
+      cooldownEnded ||
+      (current !== null &&
+        quotaCapacity(current, observedAt).kind === "exhausted" &&
+        quotaCapacity(next, observedAt).kind !== "exhausted");
     return {
       stored: {
         windows: next.windows,

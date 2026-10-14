@@ -40,6 +40,8 @@ import type { SubscriptionCoreProvider } from "./subscription-core/provider";
 import {
   decodeSubscriptionCoreClaudeUsage,
   fetchSubscriptionCoreClaudeUsage,
+  subscriptionCoreClaudeUsageConfirmsAvailability,
+  subscriptionCoreClaudeUsageEndsModelCooldowns,
 } from "./subscription-core-claude-usage";
 
 /** Claude's provider id on the shared core and in the legacy tables. */
@@ -189,6 +191,16 @@ export function subscriptionCoreClaudeAdapter(
     decodeQuota: (input) => decodeSubscriptionCoreClaudeUsage(input),
     // A usage reading may omit a window that still runs: keep it (design 5.3).
     usageReadingsComplete: false,
+    // The usage endpoint is authoritative for the plan limits it reports:
+    // Anthropic can reset a limit before the reset a refused request
+    // reported, and a reading that reports both account windows below the
+    // limit ends a stored quota exhaustion, and the model cooldowns it shows
+    // have ended, before that stale reset.
+    usageReadEndsQuotaExhaustion: true,
+    usageReadConfirmsAvailability: (response) =>
+      subscriptionCoreClaudeUsageConfirmsAvailability(response),
+    usageReadEndsModelCooldowns: (response) =>
+      subscriptionCoreClaudeUsageEndsModelCooldowns(response),
   };
 }
 
@@ -217,6 +229,13 @@ const FAMILY_WINDOWS: Record<string, RegExp> = {
   seven_day_opus: /^claude-opus-/,
   seven_day_sonnet: /^claude-sonnet-/,
 };
+
+/** The model-family windows (Opus, Sonnet weekly) that can limit an upstream Claude model. */
+export function subscriptionCoreClaudeFamilyWindowIds(upstreamModelId: string): string[] {
+  return Object.entries(FAMILY_WINDOWS)
+    .filter(([, family]) => family.test(upstreamModelId))
+    .map(([id]) => id);
+}
 const allowed = (status: string | null | undefined) =>
   status === "allowed" || status === "allowed_warning";
 

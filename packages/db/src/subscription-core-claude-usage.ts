@@ -39,6 +39,7 @@ import {
 } from "@opengeni/subscriptions";
 import {
   decodeSubscriptionCoreClaudeQuota,
+  subscriptionCoreClaudeFamilyWindowIds,
   SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   type SubscriptionCoreClaudeCredential,
 } from "./subscription-core-claude-adapter";
@@ -56,6 +57,12 @@ export type SubscriptionCoreClaudeUsageReading = {
   status: "available" | "unavailable" | "scope_required" | "reconnect";
   observation: ClaudeUsageObservation | null;
   checkedAt: string;
+  /**
+   * With an available observation: the windows the endpoint answered with an
+   * explicit `null` (the plan has no such limit). A window the response does
+   * not name at all is unknown, never absent.
+   */
+  noLimitWindowIds?: string[];
 };
 
 /** The adapter's `fetchUsage`: one usage read with the connection's current bearer. */
@@ -69,6 +76,7 @@ export async function fetchSubscriptionCoreClaudeUsage(
     return { status: "scope_required", observation: null, checkedAt };
   let status: SubscriptionCoreClaudeUsageReading["status"] = "unavailable";
   let observation: ClaudeUsageObservation | null = null;
+  let noLimitWindowIds: string[] = [];
   try {
     const signal = AbortSignal.timeout(USAGE_DEADLINE_MS);
     const response = await read.fetch(SUBSCRIPTION_CORE_CLAUDE_USAGE_URL, {
@@ -90,6 +98,11 @@ export async function fetchSubscriptionCoreClaudeUsage(
       if (response.ok) {
         observation = parseClaudeUsageResponse(body, new Date(checkedAt));
         status = observation ? "available" : "unavailable";
+        if (observation && body && typeof body === "object" && !Array.isArray(body)) {
+          noLimitWindowIds = ClaudeUsageWindowId.options.filter(
+            (id) => (body as Record<string, unknown>)[id] === null,
+          );
+        }
       } else {
         const error = body && typeof body === "object" && "error" in body ? body.error : null;
         const message =
@@ -109,8 +122,14 @@ export async function fetchSubscriptionCoreClaudeUsage(
     // Keep the stored observation; never imply an unavailable quota is zero.
     status = "unavailable";
     observation = null;
+    noLimitWindowIds = [];
   }
-  return { status, observation, checkedAt };
+  return {
+    status,
+    observation,
+    checkedAt,
+    ...(observation && noLimitWindowIds.length > 0 ? { noLimitWindowIds } : {}),
+  };
 }
 
 function isUsageReading(value: unknown): value is SubscriptionCoreClaudeUsageReading {
@@ -154,6 +173,51 @@ export function decodeSubscriptionCoreClaudeUsage(input: {
       upstreamModelIds: subscriptionCoreClaudeUpstreamModelIds(input.modelIds ?? []),
     }),
     revision: 0,
+  };
+}
+
+/** The account windows that decide whether a Claude connection may serve. */
+const ACCOUNT_WINDOW_IDS = ["five_hour", "seven_day"] as const;
+
+function reportsBelowLimit(reading: SubscriptionCoreClaudeUsageReading, id: string): boolean {
+  const window = reading.observation?.windows.find((candidate) => candidate.id === id);
+  return window !== undefined && window.usedPercent !== null && window.usedPercent < 100;
+}
+
+/**
+ * The adapter's `usageReadConfirmsAvailability`: an available reading that
+ * reports both account windows (five hours, seven days) below the limit. A
+ * reading that omits one, or reports it without a percentage, says nothing
+ * about the limit that refused the connection, so it ends nothing.
+ */
+export function subscriptionCoreClaudeUsageConfirmsAvailability(response: unknown): boolean {
+  return (
+    isUsageReading(response) &&
+    response.status === "available" &&
+    ACCOUNT_WINDOW_IDS.every((id) => reportsBelowLimit(response, id))
+  );
+}
+
+/**
+ * The adapter's `usageReadEndsModelCooldowns`: with a reading that confirms
+ * availability, a Claude product model's cooldown has ended when its
+ * family's weekly window (Opus, Sonnet), if it has one, is reported below the
+ * limit or answered as `null` (the plan has no such limit). A family window
+ * the reading does not name, another provider's model, or a reading that
+ * does not confirm availability ends nothing (fail closed).
+ */
+export function subscriptionCoreClaudeUsageEndsModelCooldowns(
+  response: unknown,
+): (modelId: string) => boolean {
+  if (!subscriptionCoreClaudeUsageConfirmsAvailability(response)) return () => false;
+  const reading = response as SubscriptionCoreClaudeUsageReading;
+  const noLimit = new Set(reading.noLimitWindowIds ?? []);
+  return (modelId) => {
+    const [upstreamModelId] = subscriptionCoreClaudeUpstreamModelIds([modelId]);
+    if (upstreamModelId === undefined) return false;
+    return subscriptionCoreClaudeFamilyWindowIds(upstreamModelId).every(
+      (id) => noLimit.has(id) || reportsBelowLimit(reading, id),
+    );
   };
 }
 

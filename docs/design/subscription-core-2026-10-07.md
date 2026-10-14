@@ -5890,12 +5890,27 @@ like C1a.
   (only a Claude core waiter), then the legacy Claude waiter. Compaction
   never parks (C1a). The shared conformance suite runs its session-wait
   scenarios for both Claude subjects.
-  A Claude core waiter sleeps until its stored reset
-  (`recheckBeforeReset: false`): the Claude adapter reads no usage that can
-  end an exhaustion early (its quota comes from response headers, so it
-  does not declare `usageReadEndsQuotaExhaustion`), and its wait binding has
-  no `refreshBeforeReconcile`. A header observation on another turn still
-  wakes the waiter (`quota_observed_available`).
+  A Claude core waiter rechecks before its stored reset (amended
+  2026-10-14; it previously slept until the reset, which left a parked turn
+  in a quiet organization waiting days after Anthropic reset a limit early).
+  Since C2a the adapter reads `/api/oauth/usage`, and it declares
+  `usageReadEndsQuotaExhaustion`. Its `usageReadConfirmsAvailability` admits
+  only an available reading that reports both account windows (five hours,
+  seven days) below the limit. Its `usageReadEndsModelCooldowns` also ends
+  the model cooldowns a 429 left. A Claude refusal cools the accepted model,
+  not the connection, so ending the exhaustion alone would not resume the
+  turn. A cooldown ends only when the model's family weekly window (Opus,
+  Sonnet), if any, is reported below the limit or answered as `null`. A
+  window the reading does not name keeps the cooldown, and so does a
+  cooldown the reading itself reports. The core probe therefore also selects
+  connections whose only block is a running model cooldown
+  (`subscriptionCoreQuotaBlocksNow`), for adapters that can end one. Its
+  binding's `refreshBeforeReconcile` uses the provider-neutral
+  `refreshBlockedCoreQuotaBeforeReconcile`, the same helper as Codex. That
+  helper re-reads a connection at most every 30 minutes after its last
+  stored reading and tries each probe scope at most every 5 minutes per
+  worker. A header observation on another turn still wakes the waiter
+  (`quota_observed_available`).
   Before the receipt a v1 Claude waiter lives in its own table: the exact-id
   core lookup finds nothing, so the v1 reconcile runs unchanged, and a core
   Claude wake fails closed while Claude is unregistered (a real-PostgreSQL

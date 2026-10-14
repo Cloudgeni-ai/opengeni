@@ -24151,10 +24151,10 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       },
     }),
     cancelledBy: "claude_capacity_reconcile",
-    // Claude's adapter reads no usage that can end an exhaustion before its
-    // stored reset (its quota comes from response headers), so its waiter
-    // sleeps until the reset.
-    recheckBeforeReset: false,
+    // Anthropic can reset a plan limit before the reset a refused request
+    // reported, and Claude's usage read ends the stored exhaustion and model
+    // cooldowns then, so its waiter rechecks on the bounded backoff.
+    recheckBeforeReset: true,
   },
 };
 

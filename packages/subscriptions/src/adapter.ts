@@ -285,6 +285,16 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    */
   usageReadConfirmsAvailability?(response: unknown): boolean;
   /**
+   * With `usageReadEndsQuotaExhaustion`: which stored model cooldowns one
+   * `fetchUsage` response that confirms availability shows have ended. The
+   * returned predicate is true for a product model only when the response
+   * reports every limit that can cool that model, each below it. A cooldown
+   * the reading itself reports stands, and so does every cooldown the
+   * predicate does not end (an explicit, revision-fenced store write).
+   * Absent: a reading ends no cooldown; each runs until its own end.
+   */
+  usageReadEndsModelCooldowns?(response: unknown): (modelId: ModelId) => boolean;
+  /**
    * The provider's usage-endpoint readings are complete: each reports every
    * window that limits the connection, so a stored exhausted window that a
    * newer reading omits has ended and is dropped. Absent or false: a
