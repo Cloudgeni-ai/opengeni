@@ -198,7 +198,8 @@ export class DesktopShell {
       Menu.setApplicationMenu(this.menu());
       this.inbox.start();
       void this.refreshTray();
-      if (this.config.updates && app.isPackaged) startUpdates(this.config.productName);
+      if (this.config.updates && app.isPackaged)
+        startUpdates(this.config.productName, this.config.updates);
     }, 0);
   }
 

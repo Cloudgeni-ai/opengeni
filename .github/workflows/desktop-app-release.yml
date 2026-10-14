@@ -2,9 +2,10 @@
 #
 # A tag desktop-v<version> (or a manual run) builds the macOS app as a universal
 # DMG and ZIP signed with the Developer ID certificate and notarized with the
-# App Store Connect key. It publishes a versioned release desktop-v<version>
-# and refreshes the fixed desktop-stable release the installed apps read their
-# updates from (see apps/desktop/electron-builder.yml).
+# App Store Connect key, and publishes them as the release desktop-v<version>.
+# Installed apps update from the newest desktop-v release. Releases in this
+# repository are immutable once published, so the release is created as a
+# draft, filled, and only then published.
 name: desktop-app-release
 
 on:
@@ -132,13 +133,13 @@ jobs:
         run: |
           files=(Opengeni-"$VERSION"-mac.dmg Opengeni-"$VERSION"-mac.zip Opengeni-"$VERSION"-mac.zip.blockmap latest-mac.yml)
           tag="desktop-v$VERSION"
+          if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            echo "$tag is already published; releases are immutable, so build a new version." >&2
+            exit 1
+          fi
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$GITHUB_SHA" --title "Opengeni desktop $VERSION" --latest=false \
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Opengeni desktop $VERSION" --latest=false \
               --notes "Opengeni for macOS $VERSION. Download the DMG, open it and drag Opengeni to Applications."
           fi
           gh release upload "$tag" "${files[@]}" --clobber
-          if ! gh release view desktop-stable >/dev/null 2>&1; then
-            gh release create desktop-stable --target "$GITHUB_SHA" --title "Opengeni desktop (update feed)" --latest=false \
-              --notes "The update feed installed Opengeni desktop apps read. Downloads are on the desktop-v releases."
-          fi
-          gh release upload desktop-stable "${files[@]}" --clobber
+          gh release edit "$tag" --draft=false --latest=false
