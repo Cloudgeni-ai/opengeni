@@ -1,6 +1,7 @@
 import {
   runWithToolCallCorrelation,
   sanitizeOpIdToken,
+  type ForegroundPollFloor,
   type RemoteOperationControl,
   type RemoteOperationObservation,
 } from "./op-correlation";
@@ -71,9 +72,28 @@ const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
  * already returned inline: in DeepSWE runs, output-then-silence gaps of 5-30 s
  * are common in builds and tests, and a shorter floor would add model polls.
  */
-const CUT_POLLING_OUTPUT_QUIET_MS = 5_000;
+export const CUT_POLLING_OUTPUT_QUIET_MS = 5_000;
 /** Output that ends in an input prompt returns after this much silence. */
-const CUT_POLLING_PROMPT_QUIET_MS = 2_000;
+export const CUT_POLLING_PROMPT_QUIET_MS = 2_000;
+/**
+ * Poll floor (settings.experimentPollFloor, off by default, opt in with
+ * `OPENGENI_EXPERIMENT_POLL_FLOOR=true`): the minimum effective foreground wait
+ * for a non-TTY `exec_command` and for an empty `write_stdin` poll of a
+ * non-TTY command. Some models ask for 1-second yields on builds and test runs
+ * and then poll, and each poll is a full-context model request. The wait still
+ * returns on exit, and the cut-polling quiet signals apply from the model's own
+ * requested window: output followed by CUT_POLLING_OUTPUT_QUIET_MS of silence
+ * (a dev server that printed its URL) or an input prompt returns control
+ * early. Interactive (TTY) commands and calls that send input keep the
+ * requested wait, and cancellation is still checked between provider slices.
+ */
+export const POLL_FLOOR_MS = 30_000;
+const CONNECTED_MACHINE_POLL_FLOOR: ForegroundPollFloor = {
+  floorMs: POLL_FLOOR_MS,
+  outputQuietMs: CUT_POLLING_OUTPUT_QUIET_MS,
+  promptQuietMs: CUT_POLLING_PROMPT_QUIET_MS,
+  looksLikeInputPrompt: (output) => looksLikeInputPrompt(output),
+};
 const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
@@ -402,11 +422,22 @@ export function looksLikeInputPrompt(output: string): boolean {
   return visible.trim().length > 0 && visible.length <= 200 && INPUT_PROMPT_TAIL.test(visible);
 }
 
-/** Model-facing foreground wait for one exec/read call. */
-function foregroundWait(
+/**
+ * Model-facing foreground wait for one exec/read call. `pollFloor` is true only
+ * when the poll-floor experiment is on and the call is a non-TTY exec or an
+ * empty read of a non-TTY command.
+ */
+export function foregroundWait(
   value: unknown,
   cutPolling: boolean,
+  pollFloor = false,
 ): { waitMs: number; quietReturnAfterMs?: number } {
+  if (pollFloor) {
+    return {
+      waitMs: Math.max(modelWaitMs(value, cutPolling), POLL_FLOOR_MS),
+      quietReturnAfterMs: modelWaitMs(value, false),
+    };
+  }
   if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
   return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
 }
@@ -968,12 +999,20 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
   private readonly cutPolling: boolean;
+  private readonly pollFloor: boolean;
+  /**
+   * Provider session ids this turn launched with `tty: false`. Kept after
+   * background adoption (which removes the shellSessions entry) so a later
+   * empty `write_stdin` poll of the same command gets the poll floor.
+   */
+  private readonly nonTtySessionIds = new Set<number>();
   private readonly secretResolver: SecretResolver | null;
   private readonly secretFileSessions = new Set<CommandCancellationSession>();
 
   constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
     this.cutPolling = options.cutPolling === true;
+    this.pollFloor = options.pollFloor === true;
     this.secretResolver = options.secretResolver ?? null;
     if (signal?.aborted) {
       this.cancel(signal.reason);
@@ -1641,6 +1680,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
                     onRemoteOperationTransportSelected: (transport) =>
                       remoteExec?.bindTransport(transport),
+                    // Connected Machine exec owns its foreground wait in the
+                    // op-stream transport and never has a TTY.
+                    ...(this.pollFloor && useRemoteOpCancellation
+                      ? { foregroundPollFloor: CONNECTED_MACHINE_POLL_FLOOR }
+                      : {}),
                   },
                 ),
               );
@@ -1747,6 +1791,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               // throughout eager waiting; successful adoption removes it below
               // immediately before the running receipt is returned.
               this.shellSessions.set(sessionId, state);
+              if (interactive) this.nonTtySessionIds.delete(sessionId);
+              else this.nonTtySessionIds.add(sessionId);
               pendingStart?.settle(sessionId);
               // A provider-specific numeric session is not an op-stream
               // terminal result. Transfer its cancellation fence to the
@@ -1756,7 +1802,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 state,
                 initialOutput: output,
                 startedAt,
-                ...foregroundWait(parsed.yield_time_ms, this.cutPolling),
+                ...foregroundWait(
+                  parsed.yield_time_ms,
+                  this.cutPolling,
+                  this.pollFloor && !interactive,
+                ),
                 maxOutputTokens:
                   typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
               });
@@ -1902,7 +1952,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   initialOutput: output,
                   ...(initialObservationFailure ? { initialObservationFailure } : {}),
                   startedAt,
-                  ...foregroundWait(parsed?.yield_time_ms, this.cutPolling),
+                  ...foregroundWait(
+                    parsed?.yield_time_ms,
+                    this.cutPolling,
+                    // Only an empty poll of a command this turn launched
+                    // without a TTY; input and interactive sessions keep the
+                    // requested wait.
+                    this.pollFloor &&
+                      (typeof parsed?.chars !== "string" || parsed.chars === "") &&
+                      sessionId !== null &&
+                      this.nonTtySessionIds.has(sessionId),
+                  ),
                   maxOutputTokens:
                     typeof parsed?.max_output_tokens === "number"
                       ? parsed.max_output_tokens
@@ -2936,6 +2996,12 @@ export type TurnToolCancellationControllerOptions = {
    * Omitted means the ordinary 30-second cap.
    */
   cutPolling?: boolean;
+  /**
+   * Minimum 30-second foreground wait for non-TTY exec and empty polls
+   * (settings.experimentPollFloor, OPENGENI_EXPERIMENT_POLL_FLOOR; off by
+   * default). Omitted means off.
+   */
+  pollFloor?: boolean;
   /**
    * The attempt's secret resolver. Commands, stdin, patches and image paths
    * holding `{{secret:…}}` / `{{secretfile:…}}` references are resolved below

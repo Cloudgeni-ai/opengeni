@@ -42,7 +42,24 @@ interface ToolCallCorrelation {
   onRemoteOperationNotDispatched?: (opId: string) => void;
   /** Pins cancellation/observation to the exact backend selected for this op. */
   onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
+  /** Poll-floor foreground wait policy for this model-facing exec. */
+  foregroundPollFloor?: ForegroundPollFloor;
 }
+
+/**
+ * Poll floor (settings.experimentPollFloor) for one model-facing exec on a
+ * transport that owns its own foreground wait (Connected Machine op-stream).
+ * The wait lasts at least `floorMs` (within the transport's own cap), still
+ * ends on exit, and ends early once output produced by this command has been
+ * quiet for `outputQuietMs` after the model's own requested wait, or has been
+ * quiet for `promptQuietMs` while ending in an input prompt.
+ */
+export type ForegroundPollFloor = {
+  floorMs: number;
+  outputQuietMs: number;
+  promptQuietMs: number;
+  looksLikeInputPrompt: (output: string) => boolean;
+};
 
 export type RemoteOperationObservation =
   | { status: "running"; result?: unknown }
@@ -83,6 +100,7 @@ export function runWithToolCallCorrelation<T>(
     onDurableOpOwnershipTransferred?: (opId: string) => void;
     onRemoteOperationNotDispatched?: (opId: string) => void;
     onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
+    foregroundPollFloor?: ForegroundPollFloor;
   } = {},
 ): T {
   return storage.run(
@@ -105,9 +123,15 @@ export function runWithToolCallCorrelation<T>(
       ...(options.onRemoteOperationTransportSelected
         ? { onRemoteOperationTransportSelected: options.onRemoteOperationTransportSelected }
         : {}),
+      ...(options.foregroundPollFloor ? { foregroundPollFloor: options.foregroundPollFloor } : {}),
     },
     fn,
   );
+}
+
+/** The poll-floor policy bound to the current model-facing exec, if any. */
+export function currentForegroundPollFloor(): ForegroundPollFloor | null {
+  return storage.getStore()?.foregroundPollFloor ?? null;
 }
 
 /** The exact tool whose result owns this async chain's foreground op output. */

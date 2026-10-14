@@ -115,6 +115,9 @@ export interface FakeOpScript {
   live?: boolean;
   /** Keep a live op RUNNING with no frames until OpCancel is received. */
   holdUntilCancel?: boolean;
+  /** Live op emits only its first N scripted frames on attach, then stays
+   *  RUNNING until OpCancel or `releaseHeld(opId)` emits the rest and exits. */
+  holdAfterFrames?: number;
   /** Seqs whose LIVE emission is dropped (retention keeps them). */
   dropLiveSeqs?: ReadonlySet<number>;
   /** Seqs whose LIVE emission is duplicated (delivered twice back-to-back). */
@@ -138,6 +141,8 @@ interface FakeOpRun {
   attachCount: number;
   drainingRemaining: number;
   liveEmitted: boolean;
+  /** Frames already emitted by a `holdAfterFrames` op. */
+  heldEmitted: number;
   finalAcked: boolean;
   acks: OpAck[];
   highestGeneration: bigint;
@@ -350,7 +355,13 @@ export class FakeOpRunner implements ControlRpc {
     if (run.script.live && !run.liveEmitted) {
       // First attach on a live op: nothing retained yet worth replaying — the
       // child "runs now" and the (faulty) live flow begins.
-      if (!run.script.holdUntilCancel) this.emitLive(opId, run, subject);
+      if (run.script.holdUntilCancel) {
+        // Nothing is produced until OpCancel.
+      } else if (run.script.holdAfterFrames !== undefined) {
+        if (run.heldEmitted === 0) this.emitHeldPrefix(run, subject);
+      } else {
+        this.emitLive(opId, run, subject);
+      }
       return statusOnly(requestId, this.statusOf(opId, run));
     }
     // A heal (or completed-op collection): replay from RETENTION — every frame
@@ -404,23 +415,46 @@ export class FakeOpRunner implements ControlRpc {
         "operation belongs to a different connection instance",
       );
     }
-    if (!run.liveEmitted && run.script.holdUntilCancel) {
+    if (
+      !run.liveEmitted &&
+      (run.script.holdUntilCancel || run.script.holdAfterFrames !== undefined)
+    ) {
       run.exit.exitCode = -1;
       run.exit.cancelled = true;
-      run.liveEmitted = true;
-      const subject = opFrameSubject(
-        this.workspaceId,
-        this.agentId,
-        opId,
-        run.connectionInstanceId,
-      );
-      queueMicrotask(() => {
-        for (const frame of run.frames) {
-          this.transport.deliver(subject, OpFrame.encode(frame).finish());
-        }
-      });
+      this.emitHeldRest(opId, run);
     }
     return statusOnly(requestId, this.statusOf(opId, run));
+  }
+
+  /** Release a `holdAfterFrames` op: emit its remaining frames and exit. */
+  releaseHeld(opId: string): void {
+    const run = this.runs.get(opId);
+    if (!run || run.liveEmitted) return;
+    this.emitHeldRest(opId, run);
+  }
+
+  private emitHeldPrefix(run: FakeOpRun, subject: string): void {
+    const prefix = run.frames.slice(
+      0,
+      Math.min(run.script.holdAfterFrames ?? 0, run.frames.length - 1),
+    );
+    run.heldEmitted = prefix.length;
+    queueMicrotask(() => {
+      for (const frame of prefix) {
+        this.transport.deliver(subject, OpFrame.encode(frame).finish());
+      }
+    });
+  }
+
+  private emitHeldRest(opId: string, run: FakeOpRun): void {
+    run.liveEmitted = true;
+    const subject = opFrameSubject(this.workspaceId, this.agentId, opId, run.connectionInstanceId);
+    const rest = run.frames.slice(run.heldEmitted);
+    queueMicrotask(() => {
+      for (const frame of rest) {
+        this.transport.deliver(subject, OpFrame.encode(frame).finish());
+      }
+    });
   }
 
   /** The LIVE flow: fault filters applied (drops, duplicates, adjacent
@@ -520,6 +554,7 @@ export class FakeOpRunner implements ControlRpc {
       attachCount: 0,
       drainingRemaining: script.drainingStarts ?? 0,
       liveEmitted: false,
+      heldEmitted: 0,
       finalAcked: false,
       acks: [],
       highestGeneration: 0n,

@@ -224,6 +224,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     experimentCutPolling: true,
     experimentOutputCost: true,
     experimentExecOutputSpill: false,
+    experimentPollFloor: false,
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
     supergrokResponseStreamIdleTimeoutMs: 300_000,

@@ -303,6 +303,7 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  getSessionBackgroundCommand,
   readSessionBackgroundCommandOutput,
   COMMAND_OUTPUT_MAX_BYTES,
 } from "@opengeni/db/session-background-commands";
@@ -369,7 +370,13 @@ import {
 } from "@opengeni/contracts/allowance-refusal";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
-import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
+import {
+  CUT_POLLING_OUTPUT_QUIET_MS,
+  CUT_POLLING_PROMPT_QUIET_MS,
+  looksLikeInputPrompt,
+  mintSandboxCodemodeToken,
+  POLL_FLOOR_MS,
+} from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
@@ -5710,13 +5717,36 @@ function registerWorkspaceOrchestrationTools(
           async ({ commandId, cursor, waitSeconds, maxOutputBytes }, extra) => {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
             let initialRead = true;
+            const effectiveWaitSeconds =
+              waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0);
+            // Poll floor (settings.experimentPollFloor, off by default): only
+            // Connected Machine commands are known to run without a TTY here;
+            // a managed command's TTY mode is not recorded on the command row.
+            const pollFloor =
+              deps.settings.experimentPollFloor &&
+              effectiveWaitSeconds > 0 &&
+              (
+                await getSessionBackgroundCommand(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId: grant.workspaceId,
+                  sessionId: callerSessionId,
+                  commandId,
+                })
+              )?.provider === "connected_machine"
+                ? {
+                    floorMs: POLL_FLOOR_MS,
+                    outputQuietMs: CUT_POLLING_OUTPUT_QUIET_MS,
+                    promptQuietMs: CUT_POLLING_PROMPT_QUIET_MS,
+                    looksLikeInputPrompt,
+                  }
+                : undefined;
             return json(
               await readCommandWithWait({
                 commandId,
-                waitSeconds:
-                  waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0),
+                waitSeconds: effectiveWaitSeconds,
                 ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
                 ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+                ...(pollFloor ? { pollFloor } : {}),
                 read: async () => {
                   if (!initialRead)
                     await authorizeFirstPartySession(

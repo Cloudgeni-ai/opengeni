@@ -4292,6 +4292,7 @@ function buildAgentCapabilitiesFromComposition(
     options.turnCancellationSignal || options.onToolCancellationFence || options.secretResolver
       ? createTurnToolCancellationController(options.turnCancellationSignal, {
           cutPolling: settings.experimentCutPolling,
+          pollFloor: settings.experimentPollFloor,
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
         })
       : null;

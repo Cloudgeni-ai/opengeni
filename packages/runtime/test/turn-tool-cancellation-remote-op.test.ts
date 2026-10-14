@@ -591,3 +591,43 @@ describe("remote synchronous command custody", () => {
     },
   );
 });
+
+describe("poll floor on the Connected Machine exec path", () => {
+  test.each([false, true])(
+    "binds the floor policy to the op-stream wait only with the flag (pollFloor=%p)",
+    async (pollFloor) => {
+      const rig = makeRig({});
+      const { currentForegroundPollFloor } = await import("../src/sandbox/op-correlation");
+      const seen: Array<ReturnType<typeof currentForegroundPollFloor>> = [];
+      rig.session.execCommand = async () => {
+        seen.push(currentForegroundPollFloor());
+        return "Process exited with code 0\nOutput:\nok";
+      };
+      const controller = createTurnToolCancellationController(undefined, { pollFloor });
+      await sdkExec(controller, rig.session).invoke(
+        {} as never,
+        JSON.stringify({ cmd: "npm run build", yield_time_ms: 1_000 }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: `poll_floor_${pollFloor}`,
+            name: "exec_command",
+            arguments: "{}",
+          },
+        },
+      );
+      await controller.waitForQuiescence();
+      expect(seen).toHaveLength(1);
+      if (pollFloor) {
+        expect(seen[0]).toMatchObject({
+          floorMs: 30_000,
+          outputQuietMs: 5_000,
+          promptQuietMs: 2_000,
+        });
+        expect(seen[0]!.looksLikeInputPrompt("Continue? [y/N] ")).toBe(true);
+      } else {
+        expect(seen[0]).toBeNull();
+      }
+    },
+  );
+});

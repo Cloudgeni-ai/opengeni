@@ -872,6 +872,11 @@ const SettingsSchema = z.object({
   // Spill large `exec_command`/`write_stdin` output bodies to a sandbox file and
   // show the model a head/tail preview with the file path (off by default).
   experimentExecOutputSpill: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_EXEC_OUTPUT_SPILL
+  // Minimum 30-second effective wait for non-TTY `exec_command` calls and empty
+  // polls (`write_stdin` with no input, Connected Machine `command_wait`), still
+  // returning on exit, quiet-after-output and input prompts. Connected Machine
+  // exec keeps its 30-second cap (off by default; set on worker and API).
+  experimentPollFloor: EnvBoolean.default(false), // OPENGENI_EXPERIMENT_POLL_FLOOR
   // Explicit operator opt-in for active turns to continue using provider extra credits.
   // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
@@ -4657,6 +4662,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     experimentExecOutputSpill: optional("OPENGENI_EXPERIMENT_EXEC_OUTPUT_SPILL"),
+    experimentPollFloor: optional("OPENGENI_EXPERIMENT_POLL_FLOOR"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(

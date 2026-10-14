@@ -869,6 +869,74 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
     });
     expect(immediateCommandResult.waitedMs).toBeLessThan(1_000);
 
+    // Poll floor (settings.experimentPollFloor): a waiting read of a running
+    // Connected Machine command is held past the model's short wait; abort
+    // still ends it. With the flag off the same call times out at 1 second.
+    const floorCommandId = crypto.randomUUID();
+    const floorOpId = "session-wait-poll-floor-op";
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      turnId: turn!.id,
+      executionGeneration,
+      attemptId,
+      commandId: floorCommandId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId: floorOpId,
+      command: "sleep 600",
+    });
+    const unflooredWait = await callCommandWait(
+      { commandId: floorCommandId, waitSeconds: 1 },
+      {},
+      attemptServer,
+    );
+    expect(unflooredWait).toMatchObject({ terminal: false, timedOut: true });
+    expect(unflooredWait.waitedMs).toBeLessThan(2_000);
+    const flooredDeps = fakeDeps(attemptBus);
+    flooredDeps.settings = { ...flooredDeps.settings, experimentPollFloor: true };
+    const flooredServer = buildOpenGeniMcpServer(flooredDeps, attemptGrant);
+    const floorAbort = new AbortController();
+    setTimeout(() => floorAbort.abort(), 2_500);
+    const flooredWait = await callCommandWait(
+      { commandId: floorCommandId, waitSeconds: 1 },
+      { signal: floorAbort.signal },
+      flooredServer,
+    );
+    expect(flooredWait.terminal).toBe(false);
+    expect(flooredWait.waitedMs).toBeGreaterThanOrEqual(2_000);
+    expect(flooredWait.waitedMs).toBeLessThan(3_500);
+    const flooredImmediate = await callCommandWait(
+      { commandId: floorCommandId },
+      {},
+      flooredServer,
+      "command_read",
+    );
+    expect(flooredImmediate.waitedMs).toBeLessThan(1_000);
+    const floorSettlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      commandId: floorCommandId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId: floorOpId,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_completed",
+    });
+    expect(floorSettlement).not.toBeNull();
+    const flooredTerminal = await callCommandWait(
+      { commandId: floorCommandId, waitSeconds: 20 },
+      {},
+      flooredServer,
+    );
+    expect(flooredTerminal).toMatchObject({ terminal: true, state: "exited" });
+    expect(flooredTerminal.waitedMs).toBeLessThan(1_000);
+
     let authorizationCalls = 0;
     const revokingDeps = fakeDeps(attemptBus);
     revokingDeps.sessionAuthorization = {

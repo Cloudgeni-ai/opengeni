@@ -1927,3 +1927,158 @@ test("output release refuses divergent, malformed and nonterminal frontiers befo
   expect(rig.transport.decodedAcks().some((value) => value.final)).toBe(false);
   expect(rig.runner.runs.get(rig.opId)!.startCount).toBe(1);
 });
+
+describe("op-stream exec poll floor (settings.experimentPollFloor)", () => {
+  // Small, test-scale values; production binds POLL_FLOOR_MS / cut-polling quiet
+  // thresholds through CONNECTED_MACHINE_POLL_FLOOR in turn-tool-cancellation.ts.
+  const floor = {
+    floorMs: 2_000,
+    outputQuietMs: 300,
+    promptQuietMs: 200,
+    looksLikeInputPrompt: (output: string) => /\[y\/N\]\s*$/.test(output),
+  };
+
+  async function timedExec(
+    opId: string,
+    script: Parameters<FakeOpRunner["script"]>[1],
+    options: {
+      yieldTimeMs: number;
+      pollFloor?: typeof floor;
+      during?: (runner: FakeOpRunner) => void;
+    },
+  ) {
+    const adopted: string[] = [];
+    const { runner, session } = buildRig({
+      execTimeoutMs: 20_000,
+      adoptBackgroundCommand: async ({ opId: adoptedOpId }) => {
+        adopted.push(adoptedOpId);
+        return { commandId: `cmd-${adoptedOpId}` };
+      },
+    });
+    runner.script(`${opId}:0`, script);
+    options.during?.(runner);
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const startedAt = performance.now();
+    const output = await runWithToolCallCorrelation(
+      opId,
+      () => session.execCommand({ cmd: "work", yieldTimeMs: options.yieldTimeMs }),
+      options.pollFloor ? { foregroundPollFloor: options.pollFloor } : {},
+    );
+    const elapsedMs = performance.now() - startedAt;
+    if (runner.runs.get(`${opId}:0`) && !runner.runs.get(`${opId}:0`)!.liveEmitted) {
+      runner.releaseHeld(`${opId}:0`);
+    }
+    return { output, elapsedMs, adopted };
+  }
+
+  test("flag off: a 100 ms request still yields at 100 ms", async () => {
+    const { output, elapsedMs, adopted } = await timedExec(
+      "floor_off",
+      { live: true, holdAfterFrames: 1, frames: [{ channel: "stdout", bytes: "building\n" }] },
+      { yieldTimeMs: 100 },
+    );
+    expect(elapsedMs).toBeLessThan(900);
+    expect(adopted).toEqual(["floor_off:0"]);
+    expect(output).toContain("Command running in background");
+  });
+
+  test("floor holds a silent command to the floor", async () => {
+    const { elapsedMs, adopted } = await timedExec(
+      "floor_silent",
+      { live: true, holdUntilCancel: true, frames: [] },
+      { yieldTimeMs: 100, pollFloor: floor },
+    );
+    expect(elapsedMs).toBeGreaterThanOrEqual(1_900);
+    expect(elapsedMs).toBeLessThan(3_500);
+    expect(adopted).toEqual(["floor_silent:0"]);
+  });
+
+  test("floor returns early once output goes quiet (dev server)", async () => {
+    const { output, elapsedMs, adopted } = await timedExec(
+      "floor_quiet",
+      {
+        live: true,
+        holdAfterFrames: 1,
+        frames: [{ channel: "stdout", bytes: "ready on http://0.0.0.0:3000\n" }],
+      },
+      { yieldTimeMs: 100, pollFloor: floor },
+    );
+    expect(elapsedMs).toBeGreaterThanOrEqual(250);
+    expect(elapsedMs).toBeLessThan(1_500);
+    expect(adopted).toEqual(["floor_quiet:0"]);
+    expect(output).toContain("ready on http://0.0.0.0:3000");
+  });
+
+  test("floor returns early on an input prompt", async () => {
+    const { output, elapsedMs } = await timedExec(
+      "floor_prompt",
+      { live: true, holdAfterFrames: 1, frames: [{ channel: "stdout", bytes: "Proceed? [y/N] " }] },
+      // The model's own window (afterMs) is longer than the floor wait; only the
+      // prompt signal can end it early.
+      { yieldTimeMs: 1_500, pollFloor: floor },
+    );
+    expect(elapsedMs).toBeLessThan(1_000);
+    expect(output).toContain("Proceed? [y/N]");
+  });
+
+  test("floor returns as soon as the command exits", async () => {
+    const { output, elapsedMs, adopted } = await timedExec(
+      "floor_exit",
+      { live: true, frames: [{ channel: "stdout", bytes: "done\n" }] },
+      { yieldTimeMs: 100, pollFloor: floor },
+    );
+    expect(elapsedMs).toBeLessThan(800);
+    expect(adopted).toEqual([]);
+    expect(output).toContain("done");
+    expect(output).not.toContain("Command running in background");
+  });
+
+  test("floor returns when a held command exits mid-floor", async () => {
+    const { output, elapsedMs, adopted } = await timedExec(
+      "floor_mid_exit",
+      {
+        live: true,
+        holdAfterFrames: 1,
+        frames: [
+          { channel: "stdout", bytes: "compiling\n" },
+          { channel: "stdout", bytes: "built\n" },
+        ],
+      },
+      {
+        yieldTimeMs: 100,
+        // Quiet return disabled so only the exit can end the wait early.
+        pollFloor: { ...floor, outputQuietMs: 60_000, promptQuietMs: 60_000 },
+        during: (runner) => {
+          setTimeout(() => runner.releaseHeld("floor_mid_exit:0"), 700);
+        },
+      },
+    );
+    expect(elapsedMs).toBeGreaterThanOrEqual(650);
+    expect(elapsedMs).toBeLessThan(1_500);
+    expect(adopted).toEqual([]);
+    expect(output).toContain("compiling\nbuilt");
+  });
+
+  test("a cancel during the floor ends the wait promptly", async () => {
+    const adopted: string[] = [];
+    const { runner, session } = buildRig({
+      execTimeoutMs: 20_000,
+      adoptBackgroundCommand: async ({ opId }) => {
+        adopted.push(opId);
+        return { commandId: "never" };
+      },
+    });
+    runner.script("floor_cancel:0", { live: true, holdUntilCancel: true, frames: [] });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const startedAt = performance.now();
+    setTimeout(() => void session.cancelExecCommand("floor_cancel:0"), 300);
+    await runWithToolCallCorrelation(
+      "floor_cancel",
+      () => session.execCommand({ cmd: "sleep 60", yieldTimeMs: 100 }),
+      { foregroundPollFloor: floor },
+    ).catch(() => undefined);
+    const elapsedMs = performance.now() - startedAt;
+    expect(elapsedMs).toBeLessThan(1_200);
+    expect(adopted).toEqual([]);
+  });
+});

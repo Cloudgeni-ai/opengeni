@@ -21,3 +21,11 @@ test("exec output spill is off by default and can be turned on", () => {
       .experimentExecOutputSpill,
   ).toBe(true);
 });
+
+test("poll floor is off by default and can be turned on", () => {
+  expect(getSettings({ OPENGENI_ENV: "test" }).experimentPollFloor).toBe(false);
+  expect(
+    getSettings({ OPENGENI_ENV: "test", OPENGENI_EXPERIMENT_POLL_FLOOR: "true" })
+      .experimentPollFloor,
+  ).toBe(true);
+});

@@ -94,6 +94,9 @@ const OP_STREAM_STASH_WINDOW_MULTIPLIER = 2;
  *  is idempotent by op id, so pre-dispatch timeout blips are also safe to
  *  re-issue with the same small bounded budget. */
 const OP_START_DRAINING_MAX_RETRIES = 10;
+/** Poll-floor quiet-return check cadence and retained output tail. */
+const QUIET_RETURN_CHECK_MS = 250;
+const OUTPUT_TAIL_CHARS = 512;
 const OP_START_BLIP_MAX_RETRIES = 3;
 
 /**
@@ -184,6 +187,17 @@ export type OpStreamOutputReceipt = { exitSeq: string; attachGeneration: string 
 
 export type OpStreamYieldOptions = {
   yieldMs: number;
+  /**
+   * Poll floor only: end the wait before `yieldMs` once this command's output
+   * has gone quiet (see ForegroundPollFloor in op-correlation.ts). Exit still
+   * settles first; an early end takes the same adoption path as the timer.
+   */
+  quietReturn?: {
+    afterMs: number;
+    outputQuietMs: number;
+    promptQuietMs: number;
+    looksLikeInputPrompt: (output: string) => boolean;
+  };
   /** Durable ownership transfer. It runs while the exact consumer is still
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
@@ -599,6 +613,10 @@ class OpConsumer {
   };
   private readonly outputFrames: OpStreamOutputFrame[] = [];
   private readonly outputDecoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+  /** When decoded output last arrived, and its bounded tail (poll floor only). */
+  private trackOutputQuiet = false;
+  private lastOutputAt: number | undefined;
+  private outputTail = "";
   private readonly hashes = { stdout: blake3.create(), stderr: blake3.create() };
   private readonly totals = { stdout: 0n, stderr: 0n };
   private captureOnly = false;
@@ -678,6 +696,7 @@ class OpConsumer {
     | Extract<OpStreamExecResult, { status: "running" }>
   > {
     this.captureOnly = exec === null;
+    this.trackOutputQuiet = Boolean(yieldOptions?.quietReturn);
     // Arm the settle promise FIRST: frames can start applying the moment the
     // attach below returns (replay is asynchronous), and a completion that
     // fires before the resolver exists would strand the op on its wall.
@@ -711,14 +730,30 @@ class OpConsumer {
     }, this.ackIntervalMs);
     const liveness = this.watchLiveness(wallMs);
     let yieldTimer: ReturnType<typeof setTimeout> | undefined;
+    let quietTimer: ReturnType<typeof setInterval> | undefined;
     let adopted = false;
     try {
       if (yieldOptions && yieldOptions.yieldMs > 0) {
+        const quietReturn = yieldOptions.quietReturn;
+        const waitStartedAt = Date.now();
         const phase = await Promise.race([
           settled.then(() => "settled" as const),
           liveness.wall,
           new Promise<"yield">((resolve) => {
             yieldTimer = setTimeout(() => resolve("yield"), yieldOptions.yieldMs);
+            if (!quietReturn) return;
+            quietTimer = setInterval(() => {
+              if (this.lastOutputAt === undefined) return;
+              const now = Date.now();
+              const quietMs = now - this.lastOutputAt;
+              if (
+                (quietMs >= quietReturn.promptQuietMs &&
+                  quietReturn.looksLikeInputPrompt(this.outputTail)) ||
+                (now - waitStartedAt >= quietReturn.afterMs && quietMs >= quietReturn.outputQuietMs)
+              ) {
+                resolve("yield");
+              }
+            }, QUIET_RETURN_CHECK_MS);
           }),
         ]);
         if (phase === "yield" && this.exitSeq === undefined) {
@@ -762,6 +797,9 @@ class OpConsumer {
     } finally {
       if (yieldTimer) {
         clearTimeout(yieldTimer);
+      }
+      if (quietTimer) {
+        clearInterval(quietTimer);
       }
       liveness.stop();
     }
@@ -1107,7 +1145,13 @@ class OpConsumer {
             this.chunks[channel].push(body.data.bytes);
           }
           const chunk = this.outputDecoders[channel].decode(body.data.bytes, { stream: true });
-          if (chunk) this.outputFrames.push({ sequence: frame.seq, stream: channel, chunk });
+          if (chunk) {
+            this.outputFrames.push({ sequence: frame.seq, stream: channel, chunk });
+            if (this.trackOutputQuiet) {
+              this.lastOutputAt = Date.now();
+              this.outputTail = (this.outputTail + chunk).slice(-OUTPUT_TAIL_CHARS);
+            }
+          }
         }
         this.receivedPayloadBytes += BigInt(body.data.bytes.byteLength);
         break;

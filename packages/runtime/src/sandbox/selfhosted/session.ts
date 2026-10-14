@@ -62,6 +62,7 @@ import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observe
 import { selfhostedFaultClass } from "./fault-rendering";
 import {
   nextDurableOpId,
+  currentForegroundPollFloor,
   notifyRemoteOperationTransportSelected,
   notifyDurableOpOwnershipTransferStarted,
   notifyDurableOpOwnershipTransferFailed,
@@ -76,6 +77,7 @@ import {
   type OpStreamJournal,
   type OpStreamOutputFrame,
   type OpStreamOutputReceipt,
+  type OpStreamYieldOptions,
 } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
@@ -1084,20 +1086,37 @@ export class SelfhostedSession {
       notifyRemoteOperationNotDispatched(opId);
       throw error;
     }
+    const requestedYieldMs = allowBackground
+      ? Math.min(
+          SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
+          Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
+        )
+      : 0;
+    // Poll floor (settings.experimentPollFloor, bound by the turn tool
+    // controller): wait at least the floor, within the same 30-second cap, and
+    // end early on quiet output or a prompt from the model's own window.
+    // Connected Machine commands never have a TTY.
+    const pollFloor = allowBackground ? currentForegroundPollFloor() : null;
+    const backgroundYieldMs = pollFloor
+      ? Math.max(requestedYieldMs, Math.min(pollFloor.floorMs, SELFHOSTED_BACKGROUND_MAX_YIELD_MS))
+      : requestedYieldMs;
     try {
       return await this.execViaOpStream(
         opStreamClient,
         admission,
         execReq,
         executionTimeoutMs,
-        allowBackground
-          ? Math.min(
-              SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
-              Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
-            )
-          : 0,
+        backgroundYieldMs,
         args.cmd,
         opId,
+        pollFloor
+          ? {
+              afterMs: requestedYieldMs,
+              outputQuietMs: pollFloor.outputQuietMs,
+              promptQuietMs: pollFloor.promptQuietMs,
+              looksLikeInputPrompt: pollFloor.looksLikeInputPrompt,
+            }
+          : undefined,
       );
     } catch (error) {
       if (error instanceof OpStreamUnavailableError) {
@@ -1124,6 +1143,7 @@ export class SelfhostedSession {
     backgroundYieldMs: number,
     command: string,
     opId: string,
+    quietReturn?: OpStreamYieldOptions["quietReturn"],
   ): Promise<SelfhostedExecResult> {
     const startedAt = Date.now();
     let adoptedCommandId: string | null = null;
@@ -1160,6 +1180,7 @@ export class SelfhostedSession {
         backgroundYieldMs > 0 && this.adoptBackgroundCommand
           ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
               yieldMs: backgroundYieldMs,
+              ...(quietReturn ? { quietReturn } : {}),
               captureOutput: async (frames) => {
                 if (adoptedCommandId)
                   await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);

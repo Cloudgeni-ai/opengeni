@@ -2441,6 +2441,36 @@ durable `agent.toolCall.output` event and is released with the MCP result
 marker after the append. Smaller output, errors and a failed file write keep
 today's output.
 
+An opt-in experiment (`OPENGENI_EXPERIMENT_POLL_FLOOR=true`,
+settings.experimentPollFloor, off by default) sets a 30-second floor on
+model-facing waits for commands without a TTY (`POLL_FLOOR_MS` in
+`sandbox/turn-tool-cancellation.ts`). Some models request 1-second yields and
+then poll, and every poll is a full-context model request. Under the flag a
+non-TTY `exec_command` (`tty: false`, including the lean default) and an empty
+`write_stdin` poll of a session this turn started without a TTY wait
+`max(requested, 30 s)` (still capped at 4 minutes). The wait still ends at exit,
+and the cut-polling quiet signals apply from the model's own requested window:
+output followed by 5 seconds of silence, or an input prompt after 2 seconds of
+silence, returns control early, so dev servers and prompts hand back promptly.
+TTY commands, writes that send input, sessions from earlier turns and
+Pause/Steer cancellation (still checked between 250 ms slices) are unchanged.
+Connected Machine exec keeps its 30-second background cap: the op-stream wait
+(`SelfhostedSession.execInternal`, `OpStreamYieldOptions.quietReturn`) becomes
+`max(requested, 30 s)` with the same exit/quiet/prompt early return. The cap is
+not raised because Connected Machine foreground output reaches the command card
+only after adoption or exit. `command_wait`/`command_read` waits on Connected
+Machine commands (`apps/api/src/mcp/command-read.ts`) last at least 30 seconds
+instead of returning on the first new chunk, with the same early returns and
+immediate return on exit, abort or a full page; managed command rows do not
+record a TTY mode and keep today's behavior. Output already
+waiting at the caller's cursor counts as new, so a waiting read of a quiet
+command returns after the quiet window rather than at once. Known costs of the
+experiment: a command stays in the foreground longer, so a Pause/Steer during
+the floor window cancels it instead of leaving it adopted, and a Connected
+Machine command card shows no output until the floor wait ends. The API reads
+the flag for `command_wait`, so a benchmark sets it on both the worker and the
+API.
+
 Internal synchronous filesystem commands use `sandbox/synchronous-command.ts`
 to collect complete output from the same invocation until provider terminal/EOF
 proof. Routing retains and atomically captures the raw initial receipt before
