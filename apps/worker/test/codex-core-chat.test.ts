@@ -76,6 +76,11 @@ import {
 import { resolveTurnExecutionPolicyV1, withCodexCatalogProvider } from "@opengeni/config";
 import { CODEX_FALLBACK_MODEL_SLUGS } from "@opengeni/codex/constants";
 import { SUBSCRIPTION_CORE_CODEX } from "../../../packages/db/src/subscription-core-codex-adapter";
+import OpenAI from "openai";
+import {
+  CompactionProviderResponseError,
+  compactionProviderFailureDiagnostics,
+} from "@opengeni/runtime";
 
 const restores: Array<{ mockRestore(): void }> = [];
 beforeEach(() => {
@@ -90,6 +95,60 @@ function spy<T extends object, K extends keyof T>(target: T, key: K) {
 }
 afterEach(() => {
   while (restores.length > 0) restores.pop()!.mockRestore();
+});
+
+/**
+ * The context checkpoint request when the pre-dispatch usage check cannot
+ * verify included usage: the credit guard refuses inside the Codex
+ * transport's token resolution, the OpenAI client wraps that refusal, and the
+ * runtime wraps the result as a compaction provider failure. Nothing was sent.
+ */
+async function checkpointRequestUsageVerificationFailure(
+  refusal: () => Error = () => new CodexIncludedUsageUnknownError(),
+): Promise<CompactionProviderResponseError> {
+  let dispatched = 0;
+  const client = new OpenAI({
+    apiKey: "fixture",
+    baseURL: "https://fixture.invalid",
+    maxRetries: 0,
+    fetch: codexSubscriptionFetch(async () => {
+      dispatched += 1;
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    }),
+  });
+  const error = await codexRequestStorage.run(
+    {
+      clientVersion: "fixture",
+      getToken: async () => {
+        throw refusal();
+      },
+      refresh: async () => {
+        throw refusal();
+      },
+      resolveModel: (model) => model,
+    },
+    () =>
+      client.responses.create({ model: "fixture", input: "checkpoint" }).then(
+        () => null,
+        (rejection: unknown) => rejection,
+      ),
+  );
+  expect(dispatched).toBe(0);
+  return new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+}
+
+describe("checkpoint request refused by the included-usage policy", () => {
+  test.each([
+    ["unverifiable", () => new CodexIncludedUsageUnknownError()],
+    ["exhausted", () => new CodexIncludedUsageExhaustedError(3600)],
+  ] as const)(
+    "%s included usage recovers the same turn instead of ending it",
+    async (_label, refusal) => {
+      const error = await checkpointRequestUsageVerificationFailure(refusal);
+      expect(error.code).toBe(refusal().code);
+      expect(turnErrors.shouldRecoverCompactionProviderFailure(error)).toBe(true);
+    },
+  );
 });
 
 const identity: db.SubscriptionCoreTurnIdentity = {
@@ -1932,6 +1991,10 @@ describe("core Codex failure settlement", () => {
   test.each([
     ["provider quota refusal", () => usageCap()],
     ["unverifiable included usage", () => new CodexIncludedUsageUnknownError()],
+    [
+      "unverifiable included usage on the checkpoint request",
+      () => checkpointRequestUsageVerificationFailure(),
+    ],
   ] as const)(
     "%s re-places the turn while a cancelled session-title request is unsettled",
     async (_label, makeError) => {
@@ -1950,7 +2013,7 @@ describe("core Codex failure settlement", () => {
         settle: async () => {},
       });
       await titleRequests.reserve({ requestId: "turn-1:title:1", transportAttempt: 1 });
-      const { deps, settle } = failureDeps(makeError(), { ...core, titleRequests });
+      const { deps, settle } = failureDeps(await makeError(), { ...core, titleRequests });
       expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
       expect(recovery).toHaveBeenCalledWith(
         {},
