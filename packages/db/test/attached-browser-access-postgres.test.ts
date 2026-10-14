@@ -251,12 +251,8 @@ describe("ending a browser whose controller can never be reached again", () => {
     expect(await interactionControllerGone(client.db, asOwner, managed)).toBe(true);
     expect(await interactionControllerGone(client.db, asOwner, attached)).toBe(true);
     expect(await interactionControllerGone(client.db, viewer(org, org.member), managed)).toBe(true);
-    expect(
-      await interactionControllerGone(client.db, asOwner, {
-        kind: "sandbox_group",
-        sandboxGroupId: crypto.randomUUID(),
-      }),
-    ).toBe(false);
+    const sandboxGroup = { kind: "sandbox_group", sandboxGroupId: crypto.randomUUID() };
+    expect(await interactionControllerGone(client.db, asOwner, sandboxGroup)).toBe(false);
   });
 
   test("a disconnected Chrome device is gone while its machine stays enrolled", async () => {
