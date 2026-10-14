@@ -299,6 +299,11 @@ can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it
 can explain the outage, choose another available tool or compute target, or help
 recover the machine. The transport failure must not replace the agent loop.
+The same holds for sessions with repository resources, whose repository Skill
+index is built through the sandbox before the first model call: a typed
+offline/timeout control error during that discovery degrades to a short
+"repository skills unavailable" instruction for that run instead of failing the
+turn, and the next run discovers again.
 
 ## Create a session on a machine
 
