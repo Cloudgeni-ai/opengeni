@@ -24,6 +24,19 @@ import type {
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
+  SiteDataCollectionDefinitionRequest,
+  SiteDataCollectionResponse,
+  SiteDataDescribeResponse,
+  SiteDataFileListResponse,
+  SiteDataFileUrlResponse,
+  SiteDataImportRequest,
+  SiteDataImportResponse,
+  SiteDataQueryRequest,
+  SiteDataQueryResponse,
+  SiteDataWriteRequest,
+  SiteDataWriteResponse,
+} from "@opengeni/contracts";
+import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
   SessionMessagePreview,
@@ -8217,6 +8230,189 @@ export class OpenGeniClient {
     );
   }
 
+  /** A Site's data collections, usage and limits. Needs a manager of the Site. */
+  async getSiteData(
+    workspaceId: string,
+    siteId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataDescribeResponse> {
+    return await this.requestJson<SiteDataDescribeResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/data`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Create or change a Site Data collection. Needs a manager of the Site. */
+  async defineSiteDataCollection(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteDataCollectionDefinitionRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataCollectionResponse> {
+    return await this.requestJson<SiteDataCollectionResponse>(
+      "PUT",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Delete a collection and all of its records. */
+  async deleteSiteDataCollection(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deletedRecords: number }> {
+    return await this.requestJson<{ deletedRecords: number }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}`,
+      undefined,
+      { confirm: "true" },
+      options,
+    );
+  }
+
+  /** Remove every record from a collection and keep its definition. */
+  async resetSiteDataCollection(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deletedRecords: number }> {
+    return await this.requestJson<{ deletedRecords: number }>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}/reset`,
+      { confirm: true },
+      undefined,
+      options,
+    );
+  }
+
+  /** Query records with the caller's access to the collection. */
+  async querySiteData(
+    workspaceId: string,
+    siteId: string,
+    request: SiteDataQueryRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataQueryResponse> {
+    return await this.requestJson<SiteDataQueryResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/query`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Apply up to 100 record operations together or not at all. */
+  async writeSiteData(
+    workspaceId: string,
+    siteId: string,
+    request: SiteDataWriteRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataWriteResponse> {
+    return await this.requestJson<SiteDataWriteResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/write`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Import JSON or CSV records into a collection. */
+  async importSiteData(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    request: SiteDataImportRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataImportResponse> {
+    return await this.requestJson<SiteDataImportResponse>(
+      "POST",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}/import`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /** Export a collection as JSON or CSV text (bounded; check `truncated`). */
+  async exportSiteData(
+    workspaceId: string,
+    siteId: string,
+    name: string,
+    options: { format?: "json" | "csv"; signal?: AbortSignal } = {},
+  ): Promise<{ content: string; contentType: string; truncated: boolean }> {
+    const format = options.format ?? "json";
+    const response = await this.requestResponse(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/data/collections/${encodeURIComponent(name)}/export`,
+      { format },
+      { ...options, accept: format === "csv" ? "text/csv" : "application/json" },
+    );
+    return {
+      content: await response.text(),
+      contentType: response.headers.get("content-type") ?? "",
+      truncated: response.headers.get("x-opengeni-export-truncated") === "true",
+    };
+  }
+
+  /** Files stored with a Site that the caller may see. */
+  async listSiteDataFiles(
+    workspaceId: string,
+    siteId: string,
+    options: { limit?: number; cursor?: string; signal?: AbortSignal } = {},
+  ): Promise<SiteDataFileListResponse> {
+    return await this.requestJson<SiteDataFileListResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/files`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+      },
+      options,
+    );
+  }
+
+  /** A short-lived download URL for one Site file. */
+  async getSiteDataFileUrl(
+    workspaceId: string,
+    siteId: string,
+    fileId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SiteDataFileUrlResponse> {
+    return await this.requestJson<SiteDataFileUrlResponse>(
+      "GET",
+      `${siteDataPath(workspaceId, siteId)}/files/${encodeURIComponent(fileId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  async deleteSiteDataFile(
+    workspaceId: string,
+    siteId: string,
+    fileId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ deleted: { id: string } }> {
+    return await this.requestJson<{ deleted: { id: string } }>(
+      "DELETE",
+      `${siteDataPath(workspaceId, siteId)}/files/${encodeURIComponent(fileId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
   /** Search the official MCP registry for installable capabilities. */
   async discoverMcpCapabilities(
     workspaceId: string,
@@ -10866,4 +11062,8 @@ async function readBoundedResponseBytes(
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+function siteDataPath(workspaceId: string, siteId: string): string {
+  return `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(siteId)}`;
 }

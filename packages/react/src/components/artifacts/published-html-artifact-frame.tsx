@@ -8,6 +8,7 @@ import {
   isOpenGeniSiteBridgeRequestMessage,
   sanitizeOpenGeniSiteToolCallRequest,
   sanitizeOpenGeniSiteToolInvokeRequest,
+  type OpenGeniSiteBridgeReadyMessage,
   type OpenGeniSiteBridgeRequestMessage,
   isSiteHttpRequest,
   serveSiteHttp,
@@ -59,6 +60,8 @@ export type PublishedHtmlArtifactToolBridge = {
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayInvokeResponse>;
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
+  /** Advertise Site Data: `fetch` forwards `published-artifacts/current` routes to the pinned Site. */
+  siteData?: boolean;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -66,6 +69,18 @@ export type PublishedHtmlArtifactToolBridge = {
   ) => Promise<ToolGatewayCallResponse>;
   declarations?: (options: { signal: AbortSignal }) => Promise<ToolGatewayDeclarationsResponse>;
 };
+
+/** Capabilities the host advertises when a Site connects; Sites never ask for more. */
+export function siteBridgeReadyMessage(
+  bridge: PublishedHtmlArtifactToolBridge | undefined,
+): OpenGeniSiteBridgeReadyMessage {
+  return {
+    type: OPENGENI_SITE_BRIDGE_READY,
+    version: OPENGENI_SITE_BRIDGE_VERSION,
+    ...(bridge?.resolve && bridge?.invoke ? { targetTools: 1 as const } : {}),
+    ...(bridge?.fetch && bridge.siteData ? { siteData: 1 as const } : {}),
+  };
+}
 
 const SITE_BRIDGE_BOOTSTRAP_SCRIPT = `<script>(()=>{const key=${JSON.stringify(
   OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
@@ -208,11 +223,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       });
       port.addEventListener("messageerror", () => requests.closePort(port));
       port.start();
-      port.postMessage({
-        type: OPENGENI_SITE_BRIDGE_READY,
-        version: OPENGENI_SITE_BRIDGE_VERSION,
-        ...(bridgeRef.current?.resolve && bridgeRef.current?.invoke ? { targetTools: 1 } : {}),
-      });
+      port.postMessage(siteBridgeReadyMessage(bridgeRef.current));
     };
     const documentLease = new SiteBridgeDocumentLease(attachToolPort, () => requests.closeAll());
     const onFrameLoad = () => {

@@ -1911,6 +1911,13 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
+Site Data gives each published Site persistent JSON collections and files
+(Postgres `site_data_*` tables behind the backend-neutral `SiteDataStore`,
+bytes in object storage). Data belongs to the Site, not a version; collection
+access modes are enforced only in the API, Site frames reach it through the
+existing Site HTTP channel with host-pinned `current` routes only and always
+with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
+
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
@@ -2344,6 +2351,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Knowledge retrieval, source preparation, or review | `packages/db/src/knowledge-entries.ts`, `packages/core/src/domain/knowledge*.ts`, `apps/api/src/routes/knowledge.ts` | [`knowledge.md`](knowledge.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
 | Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
+| Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |

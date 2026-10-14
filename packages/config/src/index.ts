@@ -1545,6 +1545,43 @@ const SettingsSchema = z.object({
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Site Data quotas and write rate limits. Usage is recorded in the
+  // usage ledger only; shadow and paid modes are a later rollout step.
+  siteDataRecordBytesPerSite: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(100 * 1024 * 1024),
+  siteDataMaxRecordBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(256 * 1024),
+  siteDataMaxCollectionsPerSite: z.coerce.number().int().positive().default(50),
+  siteDataFileBytesPerSite: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1024 * 1024 * 1024),
+  siteDataMaxFileBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10 * 1024 * 1024),
+  siteDataWorkspaceBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1024 * 1024 * 1024),
+  siteDataViewerWritesPerMinute: z.coerce.number().int().positive().default(120),
+  siteDataSiteWritesPerMinute: z.coerce.number().int().positive().default(600),
+  siteDataViewerReadsPerMinute: z.coerce.number().int().positive().default(600),
+  siteDataManagerWritesPerMinute: z.coerce.number().int().positive().default(6_000),
+  // Schema-validation time one Site may spend per minute.
+  siteDataSiteValidationMsPerMinute: z.coerce.number().int().positive().default(5_000),
+  // Schema-validation time all of a workspace's Sites may spend per minute.
+  siteDataWorkspaceValidationMsPerMinute: z.coerce.number().int().positive().default(20_000),
+  siteDataMaxRecordsPerCollection: z.coerce.number().int().positive().default(100_000),
   // Explicit commercial cutover. Existing queued revisions remain unpriced;
   // only jobs created at or after this instant may enter the paid rail.
   documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
@@ -4876,6 +4913,21 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
+    siteDataRecordBytesPerSite: optional("OPENGENI_SITE_DATA_RECORD_BYTES_PER_SITE"),
+    siteDataMaxRecordBytes: optional("OPENGENI_SITE_DATA_MAX_RECORD_BYTES"),
+    siteDataMaxCollectionsPerSite: optional("OPENGENI_SITE_DATA_MAX_COLLECTIONS_PER_SITE"),
+    siteDataFileBytesPerSite: optional("OPENGENI_SITE_DATA_FILE_BYTES_PER_SITE"),
+    siteDataMaxFileBytes: optional("OPENGENI_SITE_DATA_MAX_FILE_BYTES"),
+    siteDataWorkspaceBytes: optional("OPENGENI_SITE_DATA_WORKSPACE_BYTES"),
+    siteDataViewerWritesPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_WRITES_PER_MINUTE"),
+    siteDataSiteWritesPerMinute: optional("OPENGENI_SITE_DATA_SITE_WRITES_PER_MINUTE"),
+    siteDataViewerReadsPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_READS_PER_MINUTE"),
+    siteDataManagerWritesPerMinute: optional("OPENGENI_SITE_DATA_MANAGER_WRITES_PER_MINUTE"),
+    siteDataSiteValidationMsPerMinute: optional("OPENGENI_SITE_DATA_SITE_VALIDATION_MS_PER_MINUTE"),
+    siteDataWorkspaceValidationMsPerMinute: optional(
+      "OPENGENI_SITE_DATA_WORKSPACE_VALIDATION_MS_PER_MINUTE",
+    ),
+    siteDataMaxRecordsPerCollection: optional("OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION"),
     documentEmbeddingCreditsActivatedAt: optional(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
     ),

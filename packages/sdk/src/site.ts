@@ -12,6 +12,24 @@ import {
 } from "./tools";
 import { OpenGeniClient } from "./client";
 import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
+import { createOpenGeniSiteData, type OpenGeniSiteData, type OpenGeniSiteFiles } from "./site-data";
+export {
+  OpenGeniSiteDataError,
+  SITE_DATA_PATH_PREFIX,
+  type OpenGeniSiteData,
+  type OpenGeniSiteDataCollection,
+  type OpenGeniSiteDataErrorCode,
+  type OpenGeniSiteDataFilter,
+  type OpenGeniSiteDataListOptions,
+  type OpenGeniSiteDataOperation,
+  type OpenGeniSiteDataPage,
+  type OpenGeniSiteDataRecord,
+  type OpenGeniSiteDataRef,
+  type OpenGeniSiteDataScalar,
+  type OpenGeniSiteDataWriteResult,
+  type OpenGeniSiteFile,
+  type OpenGeniSiteFiles,
+} from "./site-data";
 export {
   isSiteHttpRequest,
   serveSiteHttp,
@@ -47,6 +65,8 @@ export type OpenGeniSiteBridgeReadyMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_READY;
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
   targetTools?: 1;
+  /** The host serves Site Data for this published Site over the Site HTTP channel. */
+  siteData?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -110,6 +130,10 @@ export type OpenGeniSiteClient = {
   readonly workspaceId: string;
   /** Workspace-bound typed facade. The parent host owns workspace identity and credentials. */
   readonly tools: OpenGeniSiteWorkspaceTools;
+  /** Persistent collections of JSON records that belong to this published Site. */
+  readonly data: OpenGeniSiteData;
+  /** Files stored with this published Site. */
+  readonly files: OpenGeniSiteFiles;
   close(): void;
 };
 
@@ -154,6 +178,10 @@ export function createOpenGeniSiteClient(
   const transport = shouldUseLocalCodemode(options)
     ? new OpenGeniSiteLocalCodemodeTransport(options)
     : new OpenGeniSiteBridgeTransport(options);
+  const siteData = createOpenGeniSiteData(
+    (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
+    () => transport.siteDataSupported(),
+  );
   return {
     client: new OpenGeniClient({
       baseUrl: "https://site.opengeni.invalid",
@@ -162,6 +190,8 @@ export function createOpenGeniSiteClient(
     }),
     workspaceId: SITE_WORKSPACE,
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
+    data: siteData.data,
+    files: siteData.files,
     close: () => transport.close(),
   };
 }
@@ -181,6 +211,11 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
   }
 
   close(): void {}
+
+  /** Local previews have no published Site, so no Site Data. */
+  async siteDataSupported(): Promise<boolean> {
+    return false;
+  }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const request = new Request(input, init);
@@ -309,6 +344,7 @@ export function sanitizeOpenGeniSiteToolInvokeRequest(
 class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   readonly toolGatewayMode: "catalog" | "target";
   private targetTools = false;
+  private siteData = false;
   private readonly options: OpenGeniSiteClientOptions;
   private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
@@ -323,6 +359,11 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     return sitePortFetch(await this.connect(), input, init);
+  }
+
+  async siteDataSupported(): Promise<boolean> {
+    await this.connect();
+    return this.siteData;
   }
 
   async requestJson<T>(
@@ -486,6 +527,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
         }
         cleanup();
         this.targetTools = message.targetTools === 1;
+        this.siteData = message.siteData === 1;
         this.port = channel.port1;
         resolve(channel.port1);
       };

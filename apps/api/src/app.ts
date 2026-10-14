@@ -339,6 +339,7 @@ import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
+import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
@@ -769,6 +770,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Session-Csrf",
       // Session scope for a session proxy; the API itself ignores it.
       "X-OpenGeni-Session-Id",
+      // Set by Site bridges on every bridged request (Site Data frame clamp).
+      "X-OpenGeni-Site-Frame",
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
@@ -853,12 +856,13 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    // The anonymous web beacons enforce their own small limits on the
-    // streamed body; the generic ceiling would buffer far more first.
+    // The anonymous web beacons and Site Data uploads enforce their own limits
+    // on the streamed body; the generic ceiling would buffer far more first.
     if (
       isClientErrorReportRequest(c.req.method, pathname) ||
       isAnalyticsConsentReportRequest(c.req.method, pathname) ||
-      isSessionHistoryImportRequest(c.req.method, pathname)
+      isSessionHistoryImportRequest(c.req.method, pathname) ||
+      isSiteDataFileUploadRequest(c.req.method, pathname)
     ) {
       await next();
       return;
@@ -2190,6 +2194,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
+  registerSiteDataRoutes(app, routeDeps);
   registerArtifactCatalogRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);

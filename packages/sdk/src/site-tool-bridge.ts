@@ -1,4 +1,4 @@
-import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
+import { SITE_FRAME_HEADER, siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import { OpenGeniApiError } from "./errors";
 import { createSharedCatalogLoader } from "./shared-catalog-loader";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
@@ -34,6 +34,8 @@ export type SiteToolBridge = {
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayInvokeResponse>;
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
+  /** The host serves Site Data for its pinned published Site through `fetch`. */
+  siteData?: boolean;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -159,6 +161,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
   };
   return {
     ...(targeted ? { resolve, invoke } : {}),
+    ...(input.fetchResponse && input.artifactId ? { siteData: true } : {}),
     ...(input.fetchResponse
       ? {
           fetch: async (message: SiteHttpRequest, signal: AbortSignal) => {
@@ -169,6 +172,8 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
               input.artifactId,
             );
             const headers = siteRequestHeaders(message.headers);
+            // Host-set marker: the API treats every bridged request as a Site frame.
+            headers.set(SITE_FRAME_HEADER, "1");
             if (input.artifactId) {
               headers.set("x-opengeni-site-id", input.artifactId);
               headers.set("x-opengeni-site-version", input.siteVersionId);

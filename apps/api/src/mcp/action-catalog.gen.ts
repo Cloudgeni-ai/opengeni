@@ -1230,6 +1230,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "defineSiteDataCollection",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name",
+    "request": [
+      "SiteDataCollectionDefinitionRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -1435,6 +1444,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteSession",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteDataCollection",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteDataFile",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
     "request": [],
     "response": []
   },
@@ -1777,6 +1800,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CompanyBrainContextReceiptPage",
       "CompanyBrainKnowledgeProposalPage"
     ]
+  },
+  {
+    "id": "exportSiteData",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/export",
+    "request": [],
+    "response": []
   },
   {
     "id": "exportWorkspaceState",
@@ -3138,6 +3168,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSiteData",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "getSiteDataFileUrl",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "getSlackUserLinkAccess",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId",
@@ -3562,6 +3606,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyRevision"
     ]
+  },
+  {
+    "id": "importSiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/import",
+    "request": [
+      "SiteDataImportRequest"
+    ],
+    "response": []
   },
   {
     "id": "inspectMcpAuthentication",
@@ -4437,6 +4490,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listSiteDataFiles",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "listSlackInstallationBindings",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/slack-bot/bindings",
@@ -5171,6 +5231,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/published-artifacts/uploads",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/uploads",
@@ -5666,6 +5740,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "querySiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/query",
+    "request": [
+      "SiteDataQueryRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "readBrowserClipboard",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/clipboard",
@@ -5970,6 +6053,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SlackUserLinkAccessRequest"
     ]
+  },
+  {
+    "id": "resetSiteDataCollection",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/reset",
+    "request": [],
+    "response": []
   },
   {
     "id": "resolveInteractionIntervention",
@@ -7689,5 +7779,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "RigChange"
     ]
+  },
+  {
+    "id": "writeSiteData",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/write",
+    "request": [
+      "SiteDataWriteRequest"
+    ],
+    "response": []
   }
 ];

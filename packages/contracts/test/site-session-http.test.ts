@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { siteSessionPath } from "../src/site-session-http";
+import {
+  SiteDataUnsupportedError,
+  SiteSessionPathError,
+  siteSessionPath,
+} from "../src/site-session-http";
 
 test("workspace endpoints and methods are authorized by the API, not the bridge", () => {
   for (const suffix of [
@@ -42,4 +46,48 @@ test("foreign workspaces and unsafe paths remain rejected", () => {
     expect(() => siteSessionPath(path, "ws")).toThrow();
     expect(() => siteSessionPath(path, "ws", "POST", "site-1")).toThrow();
   }
+});
+
+test("Site Data paths reach only the host's own Site, as current", () => {
+  const id = "11111111-2222-4333-8444-555555555555";
+  for (const suffix of [
+    "/data",
+    "/data/query",
+    "/data/collections/x/export",
+    "/files",
+    "/files/abc",
+  ]) {
+    // Every host refuses an explicit Site id, pinned or not.
+    expect(() =>
+      siteSessionPath(
+        `/v1/workspaces/site-host/published-artifacts/${id}${suffix}`,
+        "ws",
+        "POST",
+        "site-1",
+      ),
+    ).toThrow(SiteSessionPathError);
+    expect(() =>
+      siteSessionPath(`/v1/workspaces/site-host/published-artifacts/${id}${suffix}`, "ws"),
+    ).toThrow(SiteSessionPathError);
+    expect(() =>
+      siteSessionPath(`/v1/workspaces/site-host/published-artifacts/${id}${suffix}`, "site-host"),
+    ).toThrow(SiteSessionPathError);
+    // A pinned host resolves current to its own Site.
+    expect(
+      siteSessionPath(
+        `/v1/workspaces/site-host/published-artifacts/current${suffix}`,
+        "ws",
+        "POST",
+        "site-1",
+      ),
+    ).toBe(`/v1/workspaces/ws/published-artifacts/site-1${suffix}`);
+    // An unpinned host (inline HTML, previews) serves no Site Data.
+    expect(() =>
+      siteSessionPath(`/v1/workspaces/site-host/published-artifacts/current${suffix}`, "ws"),
+    ).toThrow(SiteDataUnsupportedError);
+  }
+  // Other published-artifact routes are unchanged.
+  expect(siteSessionPath(`/v1/workspaces/site-host/published-artifacts/${id}`, "ws")).toBe(
+    `/v1/workspaces/ws/published-artifacts/${id}`,
+  );
 });
