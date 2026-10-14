@@ -5896,21 +5896,41 @@ like C1a.
   Since C2a the adapter reads `/api/oauth/usage`, and it declares
   `usageReadEndsQuotaExhaustion`. Its `usageReadConfirmsAvailability` admits
   only an available reading that reports both account windows (five hours,
-  seven days) below the limit. Its `usageReadEndsModelCooldowns` also ends
-  the model cooldowns a 429 left. A Claude refusal cools the accepted model,
+  seven days) below the limit. A Claude refusal cools the accepted model,
   not the connection, so ending the exhaustion alone would not resume the
-  turn. A cooldown ends only when the model's family weekly window (Opus,
-  Sonnet), if any, is reported below the limit or answered as `null`. A
-  window the reading does not name keeps the cooldown, and so does a
-  cooldown the reading itself reports. The core probe therefore also selects
-  connections whose only block is a running model cooldown
-  (`subscriptionCoreQuotaBlocksNow`), for adapters that can end one. Its
+  turn; its `usageReadEndsClaimedBlock` decides, per stored block (a model
+  cooldown, or the exhaustion deadline), whether a reading ends it. A block
+  ends early only through its claim (`QuotaBlockClaim` in the stored quota):
+  the window ids the refusal's own headers named (`representative-claim`
+  among `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, and
+  any family window reported full), tied to the block's exact deadline. The
+  reading must be requested after the claim was observed and report every
+  claimed window numerically below the limit; `null` or an omitted window
+  never clears a claimed one, so a stored Opus limit answered later as
+  `null` keeps its cooldown, while a refusal that claimed only an account
+  window still recovers on a plan without a family limit. A block without a
+  claim runs to its own deadline: an unrecognized or missing claim, a 429
+  without usage headers (the settlement cooldown), or a deadline a later
+  unexplained refusal extended. Applying an observation joins claims only
+  when every observation that set the merged deadline carried one. The
+  settlement writer keeps the model's claim (re-tied to the extended
+  deadline) only when the same refusal's headers were stored within 2
+  minutes before it; a concurrent headerless 429 of the same model inside
+  that window shares the claim. Newer, undocumented window keys and the
+  `limits[]` array are not parsed, so a refusal naming them stays
+  unclaimed. The core probe also selects connections whose only block is a
+  running claimed model cooldown (`subscriptionCoreQuotaBlocksNow`) for
+  adapters that can end one; unclaimed cooldowns never trigger a read. Its
   binding's `refreshBeforeReconcile` uses the provider-neutral
   `refreshBlockedCoreQuotaBeforeReconcile`, the same helper as Codex. That
   helper re-reads a connection at most every 30 minutes after its last
   stored reading and tries each probe scope at most every 5 minutes per
-  worker. A header observation on another turn still wakes the waiter
-  (`quota_observed_available`).
+  worker. Every waiting turn probes the workspace's shared pool, a personal
+  Claude turn included (it then also reads its owner's personal
+  connection), and an ended block wakes every Claude waiter of the account
+  at the fresh generation (`usage_recovered`), each of which re-places and
+  may park again. A header observation on another turn still wakes the
+  waiter (`quota_observed_available`).
   Before the receipt a v1 Claude waiter lives in its own table: the exact-id
   core lookup finds nothing, so the v1 reconcile runs unchanged, and a core
   Claude wake fails closed while Claude is unregistered (a real-PostgreSQL
