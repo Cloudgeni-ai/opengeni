@@ -301,3 +301,54 @@ test("an unpinned host (inline HTML) forwards no Site Data and marks its request
   expect(second).toBeTruthy();
   expect(second).not.toBe(first);
 });
+
+test("the bridge refuses Site bodies with approvals, answers, resources or credentials", async () => {
+  const requests: string[] = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async () => {
+      throw new Error("unexpected tool call");
+    },
+    fetchResponse: async (path: string) => {
+      requests.push(path);
+      return new Response("ok");
+    },
+  } as unknown as Parameters<typeof createSiteToolBridge>[0]);
+  const send = (path: string, body: unknown, method = "POST") =>
+    bridge.fetch!(
+      {
+        type: "opengeni.site.http" as const,
+        requestId: "request",
+        method,
+        path: `/v1/workspaces/site-host${path}`,
+        headers: [["content-type", "application/json"]] as [string, string][],
+        body: JSON.stringify(body),
+      },
+      new AbortController().signal,
+    );
+  for (const [path, body, field] of [
+    [
+      "/sessions/one/events",
+      { type: "user.approvalDecision", payload: { approvalId: "a", decision: "approve" } },
+      "type",
+    ],
+    [
+      "/sessions/one/events",
+      { type: "user.message", payload: { text: "Hi", resources: [{ kind: "file" }] } },
+      "payload.resources",
+    ],
+    ["/sessions/one/steer", { text: "Hi", mcpCredentialUpdates: [{}] }, "mcpCredentialUpdates"],
+    ["/sessions", { initialMessage: "Hi", tools: [{ kind: "mcp", id: "crm" }] }, "tools"],
+  ] as const) {
+    const response = await send(path, body);
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: { details: unknown } }).error.details).toEqual({
+      code: "site_frame_field_forbidden",
+      field,
+    });
+  }
+  expect(requests).toHaveLength(0);
+  await send("/sessions/one/events", { type: "user.message", payload: { text: "Hi" } });
+  expect(requests).toEqual(["/v1/workspaces/workspace/sessions/one/events"]);
+});

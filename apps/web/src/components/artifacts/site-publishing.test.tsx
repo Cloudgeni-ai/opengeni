@@ -363,7 +363,7 @@ test("a taken-down Site keeps its address, and only admins restore an admin's ta
   await admin.unmount();
 });
 
-test("admins let guests use the agent's tools; others can't turn it on or change limits", async () => {
+test("admins let everyone use the agent's tools; others can't turn it on or change limits", async () => {
   const withTools = published({
     access: "public",
     agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
@@ -374,7 +374,7 @@ test("admins let guests use the agent's tools; others can't turn it on or change
     load: { state: "ready", publication: withTools },
   });
   expect(admin.host.textContent).toContain("Uses 1 workspace connection.");
-  await act(async () => checkbox(admin.host, "Let guests use these tools")!.click());
+  await act(async () => checkbox(admin.host, "Let everyone use these tools")!.click());
   await act(async () => button(admin.host, "Save changes")!.click());
   await flush();
   expect(calls.updates.at(-1)).toEqual({ agent: { enabled: true, model: null, guestTools: true } });
@@ -385,7 +385,7 @@ test("admins let guests use the agent's tools; others can't turn it on or change
     load: { state: "ready", publication: withTools },
     isAdmin: false,
   });
-  expect(checkbox(member.host, "Let guests use these tools")?.disabled).toBe(true);
+  expect(checkbox(member.host, "Let everyone use these tools")?.disabled).toBe(true);
   expect(member.host.textContent).toContain("Only workspace admins can turn this on.");
   expect(member.host.textContent).toContain("Only workspace admins change limits.");
   await member.unmount();
@@ -405,7 +405,7 @@ test("an admin-only refusal shows next to the agent's tools", async () => {
     client: client as never,
     load: { state: "ready", publication: withTools },
   });
-  await act(async () => checkbox(page.host, "Let guests use these tools")!.click());
+  await act(async () => checkbox(page.host, "Let everyone use these tools")!.click());
   await act(async () => button(page.host, "Save changes")!.click());
   await flush();
   expect(page.host.textContent).toContain(

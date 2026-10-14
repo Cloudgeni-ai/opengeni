@@ -8,8 +8,11 @@
  *   bun scripts/operator/site-moderation-queue.ts [--limit 100] [--json]
  *
  * Take a Site down with `scripts/operator/site-takedown.ts --site-id <id>`.
- * Needs OPENGENI_MIGRATIONS_DATABASE_URL or OPENGENI_DATABASE_ADMIN_URL (the
- * application role is refused: the queue reads across workspaces).
+ * Needs the database role that owns the Opengeni schema (the migrations
+ * credential, OPENGENI_MIGRATIONS_DATABASE_URL), which reads across
+ * workspaces through owner-only read policies (migration 0782), no BYPASSRLS
+ * needed; or OPENGENI_DATABASE_ADMIN_URL when that is a superuser or
+ * BYPASSRLS role. The application role is refused.
  */
 import { parseArgs } from "node:util";
 import { dbSearchPath, getSettings } from "@opengeni/config";
@@ -28,7 +31,10 @@ if (!Number.isInteger(limit) || limit < 1 || limit > 500)
   throw new Error("--limit must be a whole number from 1 to 500");
 const settings = getSettings();
 const url = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_ADMIN_URL;
-if (!url) throw new Error("Set OPENGENI_MIGRATIONS_DATABASE_URL or OPENGENI_DATABASE_ADMIN_URL");
+if (!url)
+  throw new Error(
+    "Set OPENGENI_MIGRATIONS_DATABASE_URL (the schema owner) or OPENGENI_DATABASE_ADMIN_URL (a superuser or BYPASSRLS role)",
+  );
 const searchPath = dbSearchPath(settings);
 const client = createDb(url, { max: 1, ...(searchPath ? { searchPath } : {}) });
 try {

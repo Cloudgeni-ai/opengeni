@@ -206,3 +206,136 @@ export function siteRequestHeaders(input: HeadersInit): Headers {
   }
   return headers;
 }
+
+// ---------------------------------------------------------------------------
+// What a Site frame may put in a request body
+// ---------------------------------------------------------------------------
+
+/** Message fields a Site page may set: the text and how the model answers it. */
+const SITE_FRAME_MESSAGE_FIELDS = [
+  "text",
+  "annotations",
+  "model",
+  "reasoningEffort",
+  "latencyMode",
+  "controlEtag",
+  "expectedDraftRevision",
+] as const;
+
+/**
+ * Body fields a Site frame may send per operation. Anything else with a
+ * value (resources, personal resource attachments, MCP credential updates,
+ * connection accounts, model context, approval decisions, human-input
+ * answers) is the person's to give in the console, never a Site page's.
+ */
+const SITE_FRAME_BODY_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  "sessions.send": ["type", "payload", "clientEventId"],
+  "sessions.steer": [...SITE_FRAME_MESSAGE_FIELDS, "clientEventId"],
+  "sessions.control": ["action", "reason", "clientEventId", "expectedControlEtag"],
+  "sessions.composerDraft.put": [
+    "text",
+    "annotations",
+    "resources",
+    "model",
+    "reasoningEffort",
+    "latencyMode",
+    "expectedRevision",
+  ],
+  "sessions.composerDraft.submit": [
+    ...SITE_FRAME_MESSAGE_FIELDS,
+    "resources",
+    "connectionAccounts",
+    "clientEventId",
+    "delivery",
+  ],
+  "sessions.queue.move": ["clientEventId", "expectedQueueVersion", "beforeTurnId"],
+  "sessions.queue.edit": [
+    "clientEventId",
+    "expectedTurnVersion",
+    "expectedDraftRevision",
+    "replaceDraft",
+  ],
+  "sessions.queue.steer": ["clientEventId", "expectedTurnVersion", "controlEtag"],
+  "sessions.queue.delete": ["clientEventId", "expectedTurnVersion", "reason"],
+});
+
+/** Fields allowed above only while empty: a draft carries no resources or accounts. */
+const SITE_FRAME_EMPTY_ONLY_FIELDS = new Set(["resources", "connectionAccounts"]);
+
+/**
+ * Session create fields a Site frame may send. The API starts the session
+ * with a minimal Site profile: no tools, servers, connections, permissions,
+ * vaults, sandbox or environment choice, resources, Skills, agent overrides,
+ * hidden model context, learning overrides, goals, channels, visibility,
+ * usage limits or nesting. Metadata keeps only keys outside `_opengeni`.
+ */
+export const SITE_FRAME_SESSION_CREATE_FIELDS: readonly string[] = Object.freeze([
+  "initialMessage",
+  "requestedSessionId",
+  "idempotencyKey",
+  "clientEventId",
+  "model",
+  "reasoningEffort",
+  "latencyMode",
+  "startMode",
+  "metadata",
+]);
+
+function bodyRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Absent, null, an empty list or an empty object asks for nothing. */
+function emptyBodyValue(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value).length === 0;
+  return false;
+}
+
+function refusedField(
+  body: Record<string, unknown>,
+  allowed: readonly string[],
+  prefix = "",
+): string | null {
+  for (const [name, value] of Object.entries(body)) {
+    if (emptyBodyValue(value)) continue;
+    if (!allowed.includes(name) || SITE_FRAME_EMPTY_ONLY_FIELDS.has(name))
+      return `${prefix}${name}`;
+  }
+  return null;
+}
+
+/**
+ * The first body field a Site frame may not send for this operation (for
+ * example `payload.resources` or `type`), or null when the body is allowed.
+ * `suffix` is the operation's site-host suffix (from `siteFrameOperation` or
+ * `matchSiteOperation`). A body that is not a JSON object is left to the
+ * route, which refuses it. Only `user.message` events are allowed:
+ * approvals and answers to questions happen in the console.
+ */
+export function siteFrameBodyRefusal(
+  operationId: string,
+  suffix: string,
+  body: unknown,
+): string | null {
+  const record = bodyRecord(body);
+  if (!record) return null;
+  if (operationId === "sessions.create")
+    return refusedField(record, SITE_FRAME_SESSION_CREATE_FIELDS);
+  const action =
+    operationId === "sessions.queue.item"
+      ? /\/queue\/[^/]+\/(move|edit|steer|delete)$/u.exec(suffix)?.[1]
+      : undefined;
+  const key = action ? `sessions.queue.${action}` : operationId;
+  const allowed = SITE_FRAME_BODY_FIELDS[key];
+  if (!allowed) return null;
+  const refused = refusedField(record, allowed);
+  if (refused) return refused;
+  if (operationId !== "sessions.send") return null;
+  if (record.type !== "user.message") return "type";
+  const payload = bodyRecord(record.payload);
+  return payload ? refusedField(payload, SITE_FRAME_MESSAGE_FIELDS, "payload.") : null;
+}

@@ -2,7 +2,11 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { SITE_GATEWAY_CALLBACK_PATH, type AccessGrant } from "@opengeni/contracts";
+import {
+  SITE_GATEWAY_BODY_SHA256_HEADER,
+  SITE_GATEWAY_CALLBACK_PATH,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import {
   appendSessionEvents,
@@ -23,7 +27,7 @@ import {
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
+import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import {
@@ -533,13 +537,80 @@ test("site-runtime checks the gateway signature before anything else", async () 
   });
   expect(stale.status).toBe(401);
   expect(reason(stale)).toBe("skew");
+  // The signature is checked from the headers before the body is read: the
+  // gateway signs the body hash and sends it as a header.
+  const reportPath = "/v1/site-runtime/site/reports";
+  const reportBody = JSON.stringify({ category: "spam" });
+  const unreadable = () =>
+    new ReadableStream(
+      {
+        pull() {
+          throw new Error("the body must not be read before the signature is checked");
+        },
+      },
+      { highWaterMark: 0 },
+    );
+  const signedReport = (secret: string) =>
+    signSiteGatewayRequest({
+      secret,
+      method: "POST",
+      pathWithQuery: reportPath,
+      host: site.host,
+      body: reportBody,
+      visitor,
+    });
+  const sendUnread = async (headers: Record<string, string>) =>
+    await read(
+      await f.app.request(reportPath, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-type": "application/json",
+          "content-length": String(reportBody.length),
+        },
+        body: unreadable(),
+        duplex: "half",
+      } as RequestInit),
+    );
+  const unreadSigned = await sendUnread(signedReport("f".repeat(40)));
+  expect(unreadSigned.status, JSON.stringify(unreadSigned.json)).toBe(401);
+  expect(reason(unreadSigned)).toBe("bad_signature");
+  // The body hash header is required: a correctly signed request without it
+  // is refused, still without reading the body.
+  const withoutHash = signedReport(SECRET);
+  delete withoutHash[SITE_GATEWAY_BODY_SHA256_HEADER];
+  const unhashed = await sendUnread(withoutHash);
+  expect(unhashed.status, JSON.stringify(unhashed.json)).toBe(401);
+  expect(reason(unhashed)).toBe("missing_headers");
+  for (const value of ["not-a-hash", sha256Hex(new Uint8Array()).toUpperCase(), "0".repeat(63)]) {
+    const malformed = await sendUnread({
+      ...signedReport(SECRET),
+      [SITE_GATEWAY_BODY_SHA256_HEADER]: value,
+    });
+    expect(malformed.status).toBe(401);
+    expect(reason(malformed)).toBe("bad_body_hash");
+  }
+  // A body other than the signed one fails after it is read; re-hashing the
+  // swapped body does not help, because the hash is signed.
+  const phishing = JSON.stringify({ category: "phishing" });
   const tampered = await f.gateway(site.host, "POST", "/site/reports", {
     body: { category: "spam" },
-    sendBody: JSON.stringify({ category: "phishing" }),
+    sendBody: phishing,
     visitor,
   });
   expect(tampered.status).toBe(401);
-  expect(reason(tampered)).toBe("bad_signature");
+  expect(reason(tampered)).toBe("body_mismatch");
+  const rehashed = await f.gateway(site.host, "POST", "/site/reports", {
+    body: { category: "spam" },
+    sendBody: phishing,
+    visitor,
+    headers: { [SITE_GATEWAY_BODY_SHA256_HEADER]: sha256Hex(new TextEncoder().encode(phishing)) },
+  });
+  expect(rehashed.status).toBe(401);
+  expect(reason(rehashed)).toBe("bad_signature");
+  // GET requests carry the hash of the empty body.
+  const hashed = await f.gateway(site.host, "GET", "/site/config", { visitor });
+  expect(hashed.status, JSON.stringify(hashed.json)).toBe(200);
   // A signed request must not also carry app credentials.
   for (const headers of [
     { authorization: "Bearer anything" },
@@ -1303,12 +1374,29 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect((await f.publication(f.owner, site.id, "POST", {}, "/restore")).status).toBe(200);
 
   // A platform takedown (operator script) holds against the owner and admins.
-  const platform = await moderateSiteAsPlatform(f.deps, {
-    host: `${site.host}.`,
-    operator: "trust-and-safety",
-    action: "takedown",
-    reason: "Confirmed phishing",
-  });
+  // It places a hostname hold, which only the schema owner (the operator's
+  // migrations credential; a superuser in these tests) may write.
+  await expect(
+    moderateSiteAsPlatform(f.deps, {
+      host: `${site.host}.`,
+      operator: "trust-and-safety",
+      action: "takedown",
+      reason: "Confirmed phishing",
+    }),
+  ).rejects.toBeDefined();
+  const operatorDb = createDb(shared.adminUrl);
+  const operatorDeps = { ...f.deps, db: operatorDb.db };
+  let platform: Awaited<ReturnType<typeof moderateSiteAsPlatform>>;
+  try {
+    platform = await moderateSiteAsPlatform(operatorDeps, {
+      host: `${site.host}.`,
+      operator: "trust-and-safety",
+      action: "takedown",
+      reason: "Confirmed phishing",
+    });
+  } finally {
+    await operatorDb.close();
+  }
   expect(platform).toMatchObject({ status: "suspended", suspendedBy: "platform" });
   const ownerRestore = await f.publication(f.owner, site.id, "POST", {}, "/restore");
   expect(ownerRestore.status).toBe(403);
@@ -1330,7 +1418,7 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect(platformAudit!.metadata).toMatchObject({ by: "platform", reason: "Confirmed phishing" });
   expect(JSON.parse(hostRecord() ?? "null")).toMatchObject({ status: "suspended" });
   // The operator finds a Site by id too; that lookup reads across workspaces
-  // and so needs the migrations (admin) credential.
+  // and so needs the schema owner (or a superuser), never the app role.
   await expect(
     moderateSiteAsPlatform(f.deps, {
       host: site.id,
@@ -1351,6 +1439,72 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   expect((await f.gateway(site.host, "GET", "/site/config", { visitor: reporter })).status).toBe(
     200,
   );
+}, 60_000);
+
+test("edge writes hold no database lock and catch up with changes made meanwhile", async () => {
+  const kv = new Map<string, string>();
+  let gate: Promise<void> | null = null;
+  let openGate = () => {};
+  let writeStarted = () => {};
+  const writing = new Promise<void>((resolve) => {
+    writeStarted = resolve;
+  });
+  const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const key = url.split("?")[0]!;
+    if (!url.includes("/storage/kv/")) return new Response("{}", { status: 200 });
+    if (method === "GET")
+      return kv.has(key) ? new Response(kv.get(key)) : new Response("", { status: 404 });
+    if (gate) {
+      writeStarted();
+      await gate;
+    }
+    kv.set(key, typeof init?.body === "string" ? init.body : "");
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const f = await fixture({
+    sitesCloudflareApiToken: "cf-token",
+    sitesCloudflareAccountId: "cf-account",
+    sitesCloudflareKvNamespaceId: "cf-namespace",
+  });
+  const effects = configureSitePublishingEffects(f.settings, { fetch: fakeFetch, backoffMs: 0 });
+  const site = await f.live("Edge lock", { access: "public" });
+  await effects.flush();
+  const generations = async () => {
+    const [row] = await shared.admin`select generation, edge_synced_generation
+      from site_publications where site_id = ${site.id}`;
+    return { generation: Number(row!.generation), synced: Number(row!.edge_synced_generation) };
+  };
+  expect((await generations()).synced).toBe((await generations()).generation);
+
+  // The next edge write hangs on Cloudflare.
+  gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  expect((await f.publication(f.owner, site.id, "PUT", { access: "members" })).status).toBe(200);
+  await writing;
+  // Another change to the same hostname commits while that write is in flight.
+  const changed = await Promise.race([
+    f.publication(f.owner, site.id, "PUT", { access: "public" }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("publication update waited on the edge write")), 10_000),
+    ),
+  ]);
+  expect(changed.status).toBe(200);
+  gate = null;
+  openGate();
+  await effects.flush();
+  // The edge ends on the newest generation, and the database records it.
+  const latest = await generations();
+  expect(latest.synced).toBe(latest.generation);
+  const [record] = [...kv.values()].map((value) => JSON.parse(value));
+  expect(kv.size).toBe(1);
+  expect(record).toMatchObject({
+    siteId: site.id,
+    generation: latest.generation,
+    access: "public",
+  });
 }, 60_000);
 
 test("Site budgets hold across rotated visitors and addresses; requests are capped", async () => {
@@ -1513,6 +1667,126 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(removed.json.agent.tools).toBeNull();
 }, 90_000);
 
+test("finished conversations free the Site budget; a lowered cap lowers running conversations", async () => {
+  const f = await fixture();
+  const site = await f.live("Sweep", { access: "public", agent: { enabled: true } });
+  const setLimits = async (overrides: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, site.id, "PUT", {
+      limitProfile: { kind: "custom", overrides },
+    });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  };
+  let address = 0;
+  const visit = () => ({ visitor: visitorId(), clientIp: `198.51.100.${(address += 1)}` });
+  const start = async (who: { visitor: string; clientIp: string }) =>
+    await f.gateway(site.host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const reserved = async (sessionId: string) => {
+    const [row] = await shared.admin`select reserved_micros, limit_micros
+      from site_runtime_conversations where session_id = ${sessionId}`;
+    return { reserved: Number(row!.reserved_micros), limit: Number(row!.limit_micros) };
+  };
+  // Room for two conversations of 20_000 in the Site's month.
+  await setLimits({ agentMicrosPerSitePerMonth: 40_000 });
+  const [alice, bob, carol] = [visit(), visit(), visit()];
+  const first = await start(alice);
+  expect(first.status, JSON.stringify(first.json)).toBe(202);
+  const second = await start(bob);
+  expect(second.status, JSON.stringify(second.json)).toBe(202);
+
+  // A lowered per-conversation limit lowers the session's own limit before
+  // the next message runs.
+  await setLimits({ agentMicrosPerSitePerMonth: 40_000, agentMicrosPerConversation: 5_000 });
+  const sent = await f.gateway(site.host, "POST", `/sessions/${second.json.id}/events`, {
+    ...bob,
+    body: { type: "user.message", payload: { text: "More" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+  expect(await reserved(second.json.id)).toEqual({ reserved: 5_000, limit: 5_000 });
+  const usage = await f.api(
+    f.owner,
+    "GET",
+    `/v1/workspaces/${f.workspace.id}/sessions/${second.json.id}`,
+  );
+  expect(usage.json.usageLimit).toMatchObject({ limitMicros: 5_000 });
+  await setLimits({ agentMicrosPerSitePerMonth: 25_000 });
+
+  // The first conversation finished (its session went idle) without anyone
+  // settling it: a refused start sweeps it and then succeeds.
+  await shared.admin`update sessions set status = 'idle' where id = ${first.json.id}`;
+  const third = await start(carol);
+  expect(third.status, JSON.stringify(third.json)).toBe(202);
+  expect((await reserved(first.json.id)).reserved).toBe(0);
+  // Cancelling releases a conversation's reservation at once.
+  const cancelled = await f.gateway(site.host, "POST", `/sessions/${second.json.id}/control`, {
+    ...bob,
+    body: { action: "cancel", clientEventId: `cancel-${randomBytes(4).toString("hex")}` },
+  });
+  expect(cancelled.status, JSON.stringify(cancelled.json)).toBeLessThan(300);
+  expect((await reserved(second.json.id)).reserved).toBe(0);
+}, 60_000);
+
+test("narrowing a Site's tools stops the conversations that hold tools they would not get now", async () => {
+  const f = await fixture();
+  const effects = configureSitePublishingEffects(f.settings, {});
+  const site = await f.live("Tools", { access: "public", agent: { enabled: true } });
+  const change = async (agent: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, site.id, "PUT", { agent });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+    await effects.flush();
+  };
+  const conversation = async (sessionId: string) => {
+    const [row] = await shared.admin`select c.viewer_kind, c.tool_ids, s.status
+      from site_runtime_conversations c join sessions s on s.id = c.session_id
+      where c.session_id = ${sessionId}`;
+    return { kind: row!.viewer_kind, tools: row!.tool_ids, cancelled: row!.status === "cancelled" };
+  };
+  await change({ tools: ["crm", "billing"], guestTools: true });
+  const guest = { visitor: visitorId(), clientIp: "198.51.100.40" };
+  const member = { session: await f.signIn(f.member, site.host) };
+  const start = async (who: Record<string, string>) => {
+    const started = await f.gateway(site.host, "POST", "/sessions", {
+      ...who,
+      body: { initialMessage: "Hi" },
+    });
+    expect(started.status, JSON.stringify(started.json)).toBe(202);
+    return String(started.json.id);
+  };
+  const send = async (who: Record<string, string>, sessionId: string) =>
+    await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      ...who,
+      body: { type: "user.message", payload: { text: "More" } },
+    });
+  const guestChat = await start(guest);
+  const memberChat = await start(member);
+  expect(await conversation(guestChat)).toEqual({
+    kind: "guest",
+    tools: ["crm", "billing"],
+    cancelled: false,
+  });
+  expect(await conversation(memberChat)).toMatchObject({ kind: "member", cancelled: false });
+
+  // Tools no longer for everyone: the guest's conversation stops and takes no
+  // more messages; the member's goes on. Nobody is signed out.
+  await change({ guestTools: false });
+  expect((await conversation(guestChat)).cancelled).toBe(true);
+  expect((await conversation(memberChat)).cancelled).toBe(false);
+  const outdated = await send(guest, guestChat);
+  expect(outdated.status, JSON.stringify(outdated.json)).toBe(409);
+  expect(code(outdated)).toBe("site_conversation_outdated");
+  expect((await send(member, memberChat)).status).toBeLessThan(300);
+  // A new guest conversation starts without tools.
+  expect((await conversation(await start(guest))).tools).toEqual([]);
+
+  // A removed tool stops the member's conversation too; a new one gets what is left.
+  await change({ tools: ["crm"] });
+  expect((await conversation(memberChat)).cancelled).toBe(true);
+  expect(code(await send(member, memberChat))).toBe("site_conversation_outdated");
+  expect((await conversation(await start(member))).tools).toEqual(["crm"]);
+  const [signedIn] = await shared.admin`select count(*)::int as n from site_viewer_sessions
+    where site_id = ${site.id} and revoked_at is null`;
+  expect(signedIn!.n).toBe(1);
+}, 60_000);
+
 test("abuse reports and flagged scans reach the platform, at most once an hour per Site", async () => {
   const sent: Array<{ kind: string; to: string; subject: string }> = [];
   const transport = {
@@ -1610,6 +1884,17 @@ test("a viewer's own conversation serves the composer draft, queue and human-inp
     },
   });
   expect(submitted.status, JSON.stringify(submitted.json)).toBe(202);
+  // Every answer is a Site-safe view: nothing names the workspace behind it.
+  const [turnRow] = await shared.admin`select temporal_workflow_id from session_turns
+    where session_id = ${sessionId} limit 1`;
+  const internal = [f.workspace.id, String(turnRow!.temporal_workflow_id)];
+  const siteSafe = (result: Result) => {
+    const text = JSON.stringify(result.json);
+    for (const value of internal) expect(text).not.toContain(value);
+    expect(text).not.toContain('"metadata":{"');
+  };
+  for (const result of [draft, saved, submitted]) siteSafe(result);
+  expect(submitted.json.turn).toMatchObject({ prompt: "A draft", tools: [], metadata: {} });
   const [ownership] = await shared.admin`select turns from site_runtime_conversations
     where session_id = ${sessionId}`;
   expect(ownership).toMatchObject({ turns: 2 });
@@ -1628,6 +1913,8 @@ test("a viewer's own conversation serves the composer draft, queue and human-inp
   // Queue item and human-input reads reach the API for the owner only.
   const queued = await f.gateway(site.host, "GET", `${conversation}/queue`, { visitor });
   expect(queued.status, JSON.stringify(queued.json)).toBe(200);
+  siteSafe(queued);
+  expect(queued.json.pendingInputs).toEqual([]);
   // The submitted message waits behind the first turn (no worker runs here).
   const item = (queued.json.items as Array<{ id: string; version: number }>).at(-1);
   expect(item, JSON.stringify(queued.json.items)).toBeDefined();
@@ -1644,6 +1931,8 @@ test("a viewer's own conversation serves the composer draft, queue and human-inp
       body: { clientEventId: crypto.randomUUID(), expectedTurnVersion: item!.version },
     });
     expect(deleted.status, JSON.stringify(deleted.json)).toBe(200);
+    siteSafe(deleted);
+    expect(deleted.json.snapshot.version).toBeGreaterThan(queued.json.version);
   }
   const missingRequest = await f.gateway(
     site.host,

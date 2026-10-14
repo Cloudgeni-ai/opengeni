@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_FREE_SITE_LIMITS,
+  SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_SIGNATURE_HEADER,
   SITE_GATEWAY_TIMESTAMP_HEADER,
   UNLIMITED_SITE_FLOOD_BRAKES,
@@ -10,17 +11,28 @@ import { testSettings } from "@opengeni/testing";
 import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/content-scanner";
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";
 import {
-  precheckSiteGatewayRequest,
+  sameSha256Hex,
+  sha256Hex,
   signSiteGatewayRequest,
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
 import { siteAgentToolRefs } from "../src/routes/site-runtime";
 import { effectiveSiteLimits, freeSiteLimits } from "../src/site-publishing/limits";
-import { siteAccessNarrowed } from "../src/site-publishing/service";
+import { siteClientAddressKey } from "../src/site-publishing/runtime";
+import { siteAccessNarrowed, siteAgentToolsNarrowed } from "../src/site-publishing/service";
 import {
   siteSessionEventProjection,
   siteSessionEventSseTransform,
 } from "../src/site-publishing/session-events";
+import {
+  siteAcceptedMessageView,
+  siteControlResultView,
+  siteDraftView,
+  siteHumanInputListView,
+  siteHumanInputRequestView,
+  siteQueueMutationView,
+  siteQueueView,
+} from "../src/site-publishing/session-views";
 import {
   effectiveSiteAccess,
   signedInSiteViewerKind,
@@ -39,7 +51,6 @@ function verify(
     method: "POST",
     pathWithQuery: PATH,
     headers: new Headers(headers),
-    body: new TextEncoder().encode('{"a":1}'),
     secrets: [CURRENT, PREVIOUS],
     ...overrides,
   });
@@ -73,6 +84,7 @@ describe("gateway signature", () => {
         clientIp: "203.0.113.9",
         human: false,
       },
+      bodySha256: sha256Hex(new TextEncoder().encode('{"a":1}')),
     });
     expect(verify(signed(PREVIOUS)).ok).toBe(true);
     expect(verify(signed(CURRENT, { human: true }))).toMatchObject({
@@ -92,10 +104,13 @@ describe("gateway signature", () => {
       ok: false,
       reason: "skew",
     });
-    // Body, path, method and viewer headers are all covered.
-    expect(verify(signed(), { body: new TextEncoder().encode('{"a":2}') })).toMatchObject({
-      reason: "bad_signature",
-    });
+    // The body hash, path, method and viewer headers are all covered.
+    expect(
+      verify({
+        ...signed(),
+        [SITE_GATEWAY_BODY_SHA256_HEADER]: sha256Hex(new TextEncoder().encode('{"a":2}')),
+      }),
+    ).toMatchObject({ reason: "bad_signature" });
     expect(verify(signed(), { pathWithQuery: `${PATH}?x=1` })).toMatchObject({
       reason: "bad_signature",
     });
@@ -119,21 +134,31 @@ describe("gateway signature", () => {
     });
   });
 
+  test("requires the signed body hash header, as lowercase hex", () => {
+    const headers = signed();
+    const hash = headers[SITE_GATEWAY_BODY_SHA256_HEADER]!;
+    expect(hash).toBe(sha256Hex(new TextEncoder().encode('{"a":1}')));
+    const withoutHash = { ...headers };
+    delete withoutHash[SITE_GATEWAY_BODY_SHA256_HEADER];
+    expect(verify(withoutHash)).toEqual({ ok: false, reason: "missing_headers" });
+    for (const value of ["", "ABC", hash.toUpperCase(), hash.slice(1), `${hash}0`])
+      expect(verify({ ...headers, [SITE_GATEWAY_BODY_SHA256_HEADER]: value })).toEqual({
+        ok: false,
+        reason: "bad_body_hash",
+      });
+    // GET and HEAD sign the hash of the empty body.
+    expect(signed(CURRENT, { body: "" })[SITE_GATEWAY_BODY_SHA256_HEADER]).toBe(
+      sha256Hex(new Uint8Array()),
+    );
+    // The body read afterwards is compared with the signed hash in constant time.
+    expect(sameSha256Hex(sha256Hex(new TextEncoder().encode('{"a":1}')), hash)).toBe(true);
+    expect(sameSha256Hex(sha256Hex(new TextEncoder().encode('{"a":2}')), hash)).toBe(false);
+    expect(sameSha256Hex("", hash)).toBe(false);
+  });
+
   test("refuses signed requests that also carry app credentials", () => {
     for (const name of ["authorization", "cookie", "x-api-key", "x-opengeni-external-actor"])
       expect(verify({ ...signed(), [name]: "x" })).toEqual({ ok: false, reason: "credentials" });
-  });
-
-  test("the body-free precheck refuses missing headers and stale clocks", () => {
-    const precheck = (headers: Record<string, string>, secrets = [CURRENT, PREVIOUS]) =>
-      precheckSiteGatewayRequest({ headers: new Headers(headers), secrets });
-    expect(precheck(signed())).toMatchObject({ ok: true, host: "demo-1a2b.sites.example.test" });
-    expect(precheck({})).toEqual({ ok: false, reason: "missing_headers" });
-    expect(precheck(signed(CURRENT, { nowMs: Date.now() - 31_000 }))).toEqual({
-      ok: false,
-      reason: "skew",
-    });
-    expect(precheck(signed(), [])).toEqual({ ok: false, reason: "not_configured" });
   });
 });
 
@@ -310,12 +335,15 @@ describe("content scanner", () => {
 });
 
 describe("Site agents", () => {
-  test("workspace tools reach signed-in viewers, and guests only when an admin opted in", () => {
+  test("workspace tools reach members and invited viewers; everyone else only when an admin opted in", () => {
     const tools = { tools: ["crm", "bad id!"], guestTools: false };
     const crm = [{ kind: "mcp", id: "crm", optional: true }];
     expect(siteAgentToolRefs(tools, { kind: "member" })).toEqual(crm);
-    expect(siteAgentToolRefs(tools, { kind: "user" })).toEqual(crm);
+    expect(siteAgentToolRefs(tools, { kind: "invited" })).toEqual(crm);
+    // A signed-in person outside the workspace on a public Site is not a member.
+    expect(siteAgentToolRefs(tools, { kind: "user" })).toEqual([]);
     expect(siteAgentToolRefs(tools, { kind: "guest" })).toEqual([]);
+    expect(siteAgentToolRefs({ ...tools, guestTools: true }, { kind: "user" })).toEqual(crm);
     expect(siteAgentToolRefs({ ...tools, guestTools: true }, { kind: "guest" })).toEqual(crm);
     expect(siteAgentToolRefs({ tools: null, guestTools: true }, { kind: "member" })).toEqual([]);
   });
@@ -340,6 +368,21 @@ describe("Site agents", () => {
     expect(siteAccessNarrowed(base, { ...base, agent: { ...base.agent, enabled: false } })).toBe(
       "agent_disabled",
     );
+  });
+
+  test("tools narrow when one is removed or they are no longer for everyone", () => {
+    const tools = { tools: ["crm", "billing"], guestTools: true };
+    expect(siteAgentToolsNarrowed(tools, tools)).toBe(false);
+    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: ["crm", "billing", "docs"] })).toBe(
+      false,
+    );
+    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: ["crm"] })).toBe(true);
+    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: null })).toBe(true);
+    expect(siteAgentToolsNarrowed(tools, { ...tools, guestTools: false })).toBe(true);
+    // Without tools, the opt-in changes nothing.
+    expect(
+      siteAgentToolsNarrowed({ tools: null, guestTools: true }, { tools: null, guestTools: false }),
+    ).toBe(false);
   });
 });
 
@@ -505,5 +548,164 @@ describe("Site-safe session events", () => {
     ]);
     expect(frames[0]!.event.payload).toEqual({ text: "Grüße 👋" });
     expect(frames[2]!.event.payload).toEqual({ id: "call_1", name: "crm" });
+  });
+});
+
+describe("Site-safe session views", () => {
+  const WORKSPACE = "0e4c3a4d-6c50-4d1b-8f4e-2a5d8f1c9b11";
+  const SECRET = "vault-item-secret-name";
+  const control = {
+    state: "paused",
+    controlVersion: 3,
+    controlEtag: "etag-3",
+    directState: "running",
+    primaryBlocker: {
+      kind: "workspace",
+      displayName: "Acme Corp workspace",
+      actor: "user:someone",
+      reason: "Budget review",
+      changedAt: "2026-10-14T10:00:00.000Z",
+      revision: 2,
+    },
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [
+      { scope: "workspace", selectedStateAfter: "running", impactCopy: "Resume Acme Corp" },
+      { scope: "session", selectedStateAfter: "running", impactCopy: "Resume this session" },
+    ],
+    override: { rootSessionId: WORKSPACE, revision: 1 },
+    settlement: null,
+  };
+  const turn = {
+    id: "5b0d6f8e-0d37-4b8f-9c43-0f1c6c1f7a01",
+    workspaceId: WORKSPACE,
+    sessionId: "6c1e7f9f-1e48-4c90-8d54-1f2d7d2f8b12",
+    temporalWorkflowId: "turn-workflow-internal",
+    status: "queued",
+    source: "user",
+    position: 2,
+    prompt: "Hello",
+    tools: [{ kind: "mcp", id: "crm" }],
+    metadata: { _opengeniSiteOrigin: { siteId: WORKSPACE } },
+    lineage: { parent: WORKSPACE },
+    initiator: { kind: "user", subjectId: "user:someone" },
+    cancelledBy: "user:someone",
+    cancelReason: "internal note",
+    sandboxBackend: "docker",
+    version: 1,
+  };
+
+  test("queues keep the viewer's turns and control state, not the workspace behind them", () => {
+    const view = siteQueueView({
+      version: 7,
+      effectiveControl: control,
+      activePersonalConnections: [{ id: "personal" }],
+      stoppingPreviousAttempt: false,
+      items: [turn],
+      pendingInputs: [{ id: "x", summary: "child finished in workspace" }],
+      pendingInputAttachment: { turnId: turn.id, inputIds: ["x"] },
+    });
+    const text = JSON.stringify(view);
+    for (const hidden of [WORKSPACE, "turn-workflow-internal", "user:someone", "Acme", "crm"])
+      expect(text).not.toContain(hidden);
+    expect(view).toMatchObject({
+      version: 7,
+      pendingInputs: [],
+      pendingInputAttachment: null,
+      items: [{ id: turn.id, prompt: "Hello", position: 2, tools: [], metadata: {} }],
+      effectiveControl: {
+        state: "paused",
+        controlEtag: "etag-3",
+        primaryBlocker: { kind: "workspace", displayName: "Workspace", actor: null, reason: null },
+        resumeOptions: [{ scope: "session", impactCopy: "Resume this conversation." }],
+        override: null,
+      },
+    });
+    expect(
+      siteQueueMutationView({ receipt: { id: "r", actor: "user:x" }, snapshot: {} }),
+    ).toMatchObject({ receipt: { id: "r" } });
+    expect(
+      siteControlResultView({ receipt: { id: "r" }, effectiveControl: control, wakeCount: 1 }),
+    ).toMatchObject({ wakeCount: 1, effectiveControl: { primaryBlocker: { actor: null } } });
+  });
+
+  test("drafts, accepted messages and human-input requests are text and states only", () => {
+    expect(
+      siteDraftView({
+        revision: 2,
+        text: "Draft",
+        resources: [{ kind: "artifact", id: WORKSPACE }],
+        annotations: [{ id: "a" }],
+        model: "m",
+      }),
+    ).toEqual({ revision: 2, text: "Draft", model: "m", annotations: [], resources: [] });
+    const accepted = siteAcceptedMessageView({
+      accepted: {
+        id: "e1",
+        sessionId: turn.sessionId,
+        sequence: 4,
+        type: "user.message",
+        payload: { text: "Hi", resources: [{ id: WORKSPACE }] },
+        workspaceId: WORKSPACE,
+      },
+      turn,
+      receipt: { id: "r" },
+      routing: "queued_for_execution",
+      interruptionCount: 0,
+      replay: false,
+    });
+    expect(JSON.stringify(accepted)).not.toContain(WORKSPACE);
+    expect(accepted).toMatchObject({
+      accepted: { type: "user.message", payload: { text: "Hi" } },
+      turn: { prompt: "Hello" },
+      routing: "queued_for_execution",
+    });
+    const request = {
+      id: "7d2f8a00-2f59-4da1-9e65-2a3e8e3f9c23",
+      workspaceId: WORKSPACE,
+      sessionId: turn.sessionId,
+      turnId: turn.id,
+      creationAttemptId: "attempt-internal",
+      toolCallId: "call-internal",
+      status: "answered",
+      questions: [
+        {
+          id: "q",
+          kind: "secret",
+          prompt: "Key?",
+          secret: { item: SECRET },
+          skillReview: { skillId: "s" },
+        },
+      ],
+      allowSkip: false,
+      response: { answers: [{ questionId: "q", value: SECRET }] },
+      respondedBy: "user:someone",
+      createdAt: "2026-10-14T10:00:00.000Z",
+    };
+    const listed = siteHumanInputListView({ requests: [request] });
+    const text = JSON.stringify(listed);
+    for (const hidden of [WORKSPACE, SECRET, "attempt-internal", "call-internal", "user:someone"])
+      expect(text).not.toContain(hidden);
+    expect(siteHumanInputRequestView(request)).toMatchObject({
+      status: "answered",
+      questions: [{ id: "q", kind: "secret", prompt: "Key?" }],
+      response: null,
+      respondedBy: null,
+    });
+  });
+});
+
+describe("client address rate keys", () => {
+  test("IPv6 counts per /64, IPv4 and mapped IPv4 per address", () => {
+    expect(siteClientAddressKey("203.0.113.7")).toBe("203.0.113.7");
+    expect(siteClientAddressKey(" 2001:DB8:1:2:aaaa:bbbb:cccc:dddd ")).toBe("2001:db8:1:2::/64");
+    expect(siteClientAddressKey("2001:db8:1:2::1")).toBe("2001:db8:1:2::/64");
+    expect(siteClientAddressKey("[2001:db8:1:2:ffff::9]")).toBe("2001:db8:1:2::/64");
+    expect(siteClientAddressKey("2001:db8::")).toBe("2001:db8:0:0::/64");
+    expect(siteClientAddressKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(siteClientAddressKey("::ffff:198.51.100.4")).toBe("198.51.100.4");
+    expect(siteClientAddressKey("64:ff9b::198.51.100.4")).toBe("64:ff9b:0:0::/64");
+    expect(siteClientAddressKey("")).toBe("unknown");
+    expect(siteClientAddressKey("not an address")).toBe("not an address");
   });
 });
