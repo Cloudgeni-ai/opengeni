@@ -37,7 +37,8 @@ and DML granted to the runtime role, so it could move to its own database:
 | `site_data_files` | file metadata, scope (`shared` or `private`), owner, object key |
 | `site_data_usage` | per-Site counters; its row is also the per-Site write lock |
 | `site_data_rate_windows` | fixed one-minute windows: writes per principal and per Site, Site-frame reads per principal |
-| `site_data_validation_windows` | fixed one-minute window of schema-validation time per workspace |
+| `site_data_validation_windows` | fixed one-minute window of schema-validation time per Site |
+| `site_data_workspace_validation_windows` | fixed one-minute window of schema-validation time per workspace, a ceiling across its Sites |
 
 Principals are abstract strings: `user:<subjectId>` for people and
 `service:<subjectId>` for personless keys. Agents are recorded as
@@ -163,27 +164,52 @@ reduced cap); the previous flat 100-node cap allowed schemas that took about
 
 Each write, batch or import request carries at most 4 MB of record JSON
 (`quota_exceeded`, quota `request_bytes`) and spends at most 250 ms compiling
-schemas and validating, checked before each record after the first, with a
-yield to the event loop between records. Past the budget the next record
-fails with `validation` (reason `validation_budget`) before it runs, so a
-request costs at most the budget plus one record and its schema compile; a
-request with one record always completes. Validation happens before the
+schemas and validating. Once anything was compiled or checked, the budget is
+checked before every later operation, including ones that only compile a
+schema and then skip their record (a patch of a missing record, an oversized
+insert), and the event loop gets a turn after every compile or check. Past
+the budget the next operation fails with `validation` (reason
+`validation_budget`) before it runs, so a request costs at most the budget
+plus one record and its schema compile; a request with one record always
+completes. A schema that fails to compile is remembered for the request and,
+as a negative entry, in the shared cache, so it is compiled once; the shared
+cache is looked up by content digest before the allowlist walk and cost
+model, so a cache hit does no work. Validation happens before the
 Site's lock: inserts and puts as sent, patches and increments merged from the
 record read just before. The write reuses the request's compiled validators
 and skips records already checked against the same schema; a record that
 changed in between is checked again inside the transaction, on the same
-budget.
+budget. Nothing is compiled under the lock: if a collection's schema changed
+between the check and the lock, the write fails with a retryable `conflict`
+(409, reason `schema_changed`) and the caller sends it again.
 
-Validation time is charged after every write, define and import, whatever
-its outcome. Each started 5 ms (from 1 ms; quicker checks, which are
-the normal case, are free) counts one more operation on the caller's write
-windows, for viewers and managers alike. The time also counts on a
-per-workspace window of validation time per minute across all its Sites
-(20 s by default); once it is spent, every further Site Data write in the
-workspace gets `rate_limited` (quota `workspace_validation_time`) until the
-minute ends. So one request costs at most about 0.25 s plus one record
-(about 0.2 s), and a workspace's Sites spend at most about 20 s of validation
-per minute plus what requests already in flight finish.
+Validation time has two windows per minute: one per Site (5 s by default)
+and one per workspace (20 s by default) as a ceiling across its Sites, so one
+busy Site cannot use up the whole workspace. A request that would validate
+(it writes records to a collection with a schema, defines a collection with a
+schema, or imports into one) reserves the request budget, 250 ms, on both
+windows in the same transaction that counts its rate windows, before any
+work. If either window cannot take the reservation, the request gets
+`rate_limited` (quota `site_validation_time` or `workspace_validation_time`)
+until the minute ends. Afterwards, whatever the outcome, the request settles
+to the time it actually spent, in the transaction that already records it:
+the unused part is refunded, or an overrun of at most one record is charged.
+Each started 5 ms spent (from 1 ms; quicker checks, which are the normal case,
+are free) also counts one more operation on the caller's write windows, for
+viewers and managers alike. Schema compile time is part of the time spent and
+is charged to the request that compiled it, even when a later request reuses
+the cached validator.
+
+Everything that would not validate goes through when a validation window is
+spent: uploads, file deletes, deleting or resetting a collection, writes to
+collections without a schema, and defining a collection without one, so a
+manager can always remove a schema that causes trouble. Requests without a
+schema never touch the validation windows, neither at admission nor
+afterwards. Because requests reserve before they start, concurrent bursts
+cannot overshoot: at most window ÷ 250 ms requests (20 per Site, 80 per
+workspace with the defaults) are in flight at once, and each can overshoot
+its reservation by at most one record and its compile (about 0.2 s), so a
+Site's validation per minute stays within about 5 s plus that overrun.
 Data paths (filters, sorts, keys, increments, indexes, CSV headers) refuse
 `__proto__`, `prototype` and `constructor`.
 
@@ -253,6 +279,7 @@ JSON as text, confirmed deletes with `expectedVersion`, and JSON/CSV export.
 | `OPENGENI_SITE_DATA_SITE_WRITES_PER_MINUTE` | 600 operations per Site |
 | `OPENGENI_SITE_DATA_VIEWER_READS_PER_MINUTE` | 600 Site-frame reads per viewer per Site |
 | `OPENGENI_SITE_DATA_MANAGER_WRITES_PER_MINUTE` | 6,000 operations per Site by all its managers (API and agent tools) |
+| `OPENGENI_SITE_DATA_SITE_VALIDATION_MS_PER_MINUTE` | 5,000 ms of schema validation per Site |
 | `OPENGENI_SITE_DATA_WORKSPACE_VALIDATION_MS_PER_MINUTE` | 20,000 ms of schema validation per workspace across its Sites |
 | `OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION` | 100,000 |
 
@@ -261,8 +288,9 @@ still count. Filter strings are at most 1,024 characters and `in` lists at most
 100 values. Write windows count every attempt, including refused ones:
 viewers and Site frames per person and per Site, and managers' API and agent
 calls (records, imports, uploads, collection changes) in one window per Site.
-CSV imports count one operation per line before parsing. Validation time adds
-operations afterwards and has its own workspace window (see Access rules).
+CSV imports count one operation per line before parsing. Validation time is
+reserved at admission on its per-Site and workspace windows and adds
+operations afterwards (see Access rules).
 The read window applies to Site frames only. Billing is always
 `usage_only` for now; a mode setting will arrive with `shadow`/`paid`. The workspace total is checked inside the Site's lock,
 not a workspace-wide one, so concurrent writes to different Sites can overshoot
@@ -288,10 +316,13 @@ mode are added.
   total, attempt counting, upload ordering and streaming caps, CSV import and
   export, Site-started agents and their fail-closed lineage, the schedule
   principal, the manager write window, worst-case validation cost under the
-  schema cost model, validation-time charging and the workspace window, the
-  budget order, CSV import counting, and the lineage under the production
-  session RLS context. Budgets and charges use an injected validation clock,
-  never wall-clock timing.
+  schema cost model, validation-time charging, the per-Site and workspace
+  validation windows (only validating requests are refused; schema-less writes
+  touch no window row), reservation under concurrent admission, compile-only
+  operations on the budget, the retryable schema-changed conflict, the budget
+  order, CSV import counting, and the lineage under the production session
+  RLS context. Budgets and charges use an injected validation clock, never
+  wall-clock timing.
 - `packages/db/test/migration-0773-site-data-postgres.test.ts`: FORCE RLS,
   the application role without context, a mismatched tenant context with no
   tenant filter, the record-to-collection Site key, and workspace cascade.

@@ -320,7 +320,8 @@ levels, 16 branches per `anyOf`/`oneOf`/`allOf` and 500 `enum` values in
 total. Wide objects are fine; keep schemas under `items` and
 `additionalProperties` simple (few branches and enum values), since they run
 on every element: a schema too costly per element is refused at definition.
-Expect `rate_limited` if writes spend too long validating. Field
+Expect `rate_limited` if writes spend too long validating (each Site has 5 s
+of schema checking a minute); removing the schema always works. Field
 paths cannot use `__proto__`, `prototype` or `constructor`. An Only me Site's data is reachable only by its owner.
 
 In the Site, use the same client:
@@ -362,7 +363,8 @@ Render them with `textContent` or React text, never `innerHTML`,
 `dangerouslySetInnerHTML`, or string-built HTML, and never `eval` them.
 
 Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
-schema), `conflict` (stale `expectedVersion` or a duplicate unique value),
+schema), `conflict` (stale `expectedVersion`, a duplicate unique value, or a
+schema changed mid-request: send it again),
 `not_found`, `forbidden` (the access mode does not allow it),
 `quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
 and 100,000 per collection; at most 4 MB of records per request; files 10 MB
