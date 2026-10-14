@@ -596,6 +596,7 @@ function ArtifactDetailPage({
           onReload={() => void publication.reload()}
           onBack={() => setView(undefined)}
           canManage={manageData && !archived}
+          isAdmin={hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin")}
           onShareWithWorkspace={showAudience ? audience.share : undefined}
           sites={sitesClientConfig(context.clientConfig)}
         />
