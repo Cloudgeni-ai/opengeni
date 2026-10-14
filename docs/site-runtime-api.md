@@ -248,9 +248,12 @@ Operations:
       (OPE-801 `SiteSessionOrigin`). The call runs inside
       `withSiteSessionOrigin` and carries the Site and version headers, which
       the Site frame guard validates again.
-    - Its workspace tools are the publication's `agent.tools` for signed-in
-      viewers, and for guests only when `agent.guestTools` is on. They are
-      optional references, so an unknown connection is skipped.
+    - Its workspace tools are the publication's `agent.tools` for workspace
+      members and invited viewers. Everyone else (signed-in `user` viewers
+      on a public Site and guests) gets them only when `agent.guestTools` is
+      on: tools for everyone who isn't a workspace member or invited (the
+      name is kept for compatibility). They are optional references, so an
+      unknown connection is skipped.
     - The create body may not choose tools, MCP servers, first-party tools
       or permissions, approval policies, vault policy or connection
       accounts for any other caller acting from a Site page: the session

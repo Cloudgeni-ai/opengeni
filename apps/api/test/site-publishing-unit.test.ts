@@ -310,12 +310,15 @@ describe("content scanner", () => {
 });
 
 describe("Site agents", () => {
-  test("workspace tools reach signed-in viewers, and guests only when an admin opted in", () => {
+  test("workspace tools reach members and invited viewers; everyone else only when an admin opted in", () => {
     const tools = { tools: ["crm", "bad id!"], guestTools: false };
     const crm = [{ kind: "mcp", id: "crm", optional: true }];
     expect(siteAgentToolRefs(tools, { kind: "member" })).toEqual(crm);
-    expect(siteAgentToolRefs(tools, { kind: "user" })).toEqual(crm);
+    expect(siteAgentToolRefs(tools, { kind: "invited" })).toEqual(crm);
+    // A signed-in person outside the workspace on a public Site is not a member.
+    expect(siteAgentToolRefs(tools, { kind: "user" })).toEqual([]);
     expect(siteAgentToolRefs(tools, { kind: "guest" })).toEqual([]);
+    expect(siteAgentToolRefs({ ...tools, guestTools: true }, { kind: "user" })).toEqual(crm);
     expect(siteAgentToolRefs({ ...tools, guestTools: true }, { kind: "guest" })).toEqual(crm);
     expect(siteAgentToolRefs({ tools: null, guestTools: true }, { kind: "member" })).toEqual([]);
   });

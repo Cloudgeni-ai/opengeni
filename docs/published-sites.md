@@ -125,9 +125,13 @@ agents.
 
 Workspace tools (MCP connections) act with the workspace's shared
 connections for whoever is viewing, so only a workspace admin can give them
-to a Site's agent. Signed-in viewers get them; guests get them only when an
-admin also turns on **guest tools** (`agent.guestTools`). A connection the
-workspace doesn't have is skipped rather than failing the conversation.
+to a Site's agent. Workspace members and invited viewers get them. Everyone
+else (people who sign in but aren't in the workspace, on a public Site, and
+guests) gets them only when an admin also turns on **Let everyone use these
+tools** (`agent.guestTools`, which means tools for everyone who isn't a
+workspace member or invited; the name is kept for compatibility). A
+connection the workspace doesn't have is skipped rather than failing the
+conversation.
 Unpublishing, taking down, or narrowing a Site's access signs its viewers out
 and cancels its running conversations; turning the agent off cancels the
 conversations only.

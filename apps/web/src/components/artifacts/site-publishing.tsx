@@ -573,8 +573,8 @@ function SitePublishForm({
                       </p>
                       {draft.access === "public" ? (
                         <CheckboxField
-                          label="Let guests use these tools"
-                          description="Visitors who don't sign in get them too."
+                          label="Let everyone use these tools"
+                          description="People outside the workspace get them too."
                           checked={draft.guestTools}
                           disabled={guestToolsLocked}
                           disabledReason="Only workspace admins can turn this on."

@@ -326,18 +326,28 @@ function allowedQuery(url: URL, names: readonly string[], extra: Record<string, 
 
 /**
  * The workspace tools a Site conversation gets: the Site's admin-chosen MCP
- * connections for signed-in viewers, and for guests only when an admin opted
- * them in (`guestTools`). Optional references: a connection the workspace
- * does not have is skipped rather than failing the conversation.
+ * connections for workspace members and invited viewers. Everyone else
+ * (signed-in people outside the workspace on a public Site, and anonymous
+ * guests) gets them only when an admin opted them in (`guestTools`). Optional
+ * references: a connection the workspace does not have is skipped rather
+ * than failing the conversation.
  */
 export function siteAgentToolRefs(
   agent: Pick<SiteEmbeddedAgent, "tools" | "guestTools">,
   viewer: Pick<SiteRuntimeViewer, "kind">,
 ): ToolRef[] {
-  const toolIds = viewer.kind !== "guest" || agent.guestTools ? (agent.tools ?? []) : [];
+  const toolIds = siteViewerGetsTools(agent, viewer) ? (agent.tools ?? []) : [];
   return toolIds
     .filter((tool) => SessionMcpServerIdPattern.test(tool))
     .map((tool) => ({ kind: "mcp", id: tool, optional: true }));
+}
+
+/** Members and invited viewers get the Site's tools; everyone else only with `guestTools`. */
+export function siteViewerGetsTools(
+  agent: Pick<SiteEmbeddedAgent, "guestTools">,
+  viewer: Pick<SiteRuntimeViewer, "kind">,
+): boolean {
+  return viewer.kind === "member" || viewer.kind === "invited" || agent.guestTools;
 }
 
 /** A session id derived from the viewer's create idempotency key (same key, same conversation). */

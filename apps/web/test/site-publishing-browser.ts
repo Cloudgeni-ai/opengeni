@@ -84,7 +84,7 @@ const shots: Shot[] = [
   {
     name: "publish-agent-guest-tools-nonadmin",
     scenario: "agent-nonadmin",
-    ready: (page) => text(page, "Let guests use these tools"),
+    ready: (page) => text(page, "Let everyone use these tools"),
   },
   {
     name: "publish-custom-limits",

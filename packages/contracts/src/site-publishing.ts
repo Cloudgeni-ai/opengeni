@@ -338,8 +338,11 @@ export const SiteEmbeddedAgent = /* @__PURE__ */ defineSchema(() =>
      */
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().default(null),
     /**
-     * Whether anonymous guests' conversations get `tools` too. Off by
-     * default: guests get no workspace tools. Setting it needs a workspace admin.
+     * Tools for everyone who isn't a workspace member or invited: whether
+     * conversations of signed-in people outside the workspace (on a public
+     * Site) and of anonymous guests get `tools` too. Off by default: only
+     * members and invited viewers get workspace tools. The name is kept for
+     * compatibility. Setting it needs a workspace admin.
      */
     guestTools: z.boolean().default(false),
   }),
