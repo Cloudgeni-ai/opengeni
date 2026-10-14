@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { encodeDocumentArtifactCommandBatch } from "@opengeni/contracts/document-artifact-commands";
 import { encodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
 import {
@@ -2458,6 +2459,7 @@ describe("Postgres editable artifact authority", () => {
           as "unordered",
         opengeni_private.editable_artifact_operation_id_list_valid(${json([a])}::text::jsonb)
           as "single",
+        opengeni_private.editable_artifact_operation_id_list_valid('[]'::jsonb) as "empty",
         opengeni_private.editable_artifact_operation_id_list_valid(${json([c, a, c])}::text::jsonb)
           as "duplicate",
         opengeni_private.editable_artifact_operation_id_list_valid(
@@ -2481,6 +2483,8 @@ describe("Postgres editable artifact authority", () => {
     expect(validators).toEqual({
       unordered: true,
       single: true,
+      // The count clauses, not the list validator, require at least one operation.
+      empty: true,
       duplicate: false,
       uppercase: false,
       zero: false,
@@ -2574,6 +2578,167 @@ describe("Postgres editable artifact authority", () => {
       where account_id = ${accountId} and workspace_id = ${workspaceId}
         and artifact_id = ${artifactId}`;
     expect(written?.count).toBe(0);
+  }, 60_000);
+
+  test("the commit trigger rejects operation identities moved after preflight", async () => {
+    // Every TypeScript preflight sees a consistent unsorted batch; a test-only
+    // BEFORE INSERT trigger then swaps the two identities as the operation rows
+    // are written, so only the database commit trigger can notice.
+    if (!available || !shared) return;
+    const admin = shared.admin;
+    const scope = { accountId, workspaceId };
+    const artifactId = nextId();
+    await store.createArtifact(
+      creationFixture({
+        scope,
+        artifactId,
+        receiptId: nextId(),
+        authorityKey: JSON.stringify(["human", "user:alice"]),
+        idempotencyKey: `create:${artifactId}`,
+        requestHash: hash("a"),
+        modality: "spreadsheet",
+        title: "Moved operation identities",
+        stateHash: hash("b"),
+        authorizationRevision: 1,
+        createdBySubjectId: "user:alice",
+      }),
+    );
+    const [low, high] = [nextId(), nextId()] as [string, string];
+    const unsorted = [high, low];
+    await admin.unsafe(
+      `CREATE FUNCTION public.editable_test_swap_operation_ids() RETURNS trigger
+       LANGUAGE plpgsql AS $fn$
+       BEGIN
+         IF NEW.operation_id = '${high}' THEN NEW.operation_id := '${low}';
+         ELSIF NEW.operation_id = '${low}' THEN NEW.operation_id := '${high}';
+         END IF;
+         RETURN NEW;
+       END
+       $fn$`,
+    );
+    let failure: unknown = null;
+    try {
+      await admin.unsafe(
+        `CREATE TRIGGER zz_editable_test_swap_operation_ids BEFORE INSERT
+         ON editable_artifact_operations
+         FOR EACH ROW EXECUTE FUNCTION public.editable_test_swap_operation_ids()`,
+      );
+      await applyTransaction({
+        artifactId,
+        clientTransactionId: "moved-operation-ids-1",
+        requestHash: "moved-operation-ids-1",
+        replicaId: "8888888888888888",
+        stateHash: hash("c"),
+        operationIds: unsorted,
+      });
+    } catch (error) {
+      failure = error;
+    } finally {
+      await admin.unsafe(
+        `DROP TRIGGER IF EXISTS zz_editable_test_swap_operation_ids ON editable_artifact_operations`,
+      );
+      await admin.unsafe(`DROP FUNCTION public.editable_test_swap_operation_ids()`);
+    }
+    type Chained = { code?: unknown; message?: string; cause?: unknown };
+    const chain: string[] = [];
+    for (
+      let cursor = failure as Chained | null | undefined;
+      cursor && chain.length < 6;
+      cursor = cursor.cause as Chained | undefined
+    ) {
+      chain.push(`[${String(cursor.code ?? "")}] ${cursor.message ?? ""}`);
+    }
+    expect(failure).not.toBeNull();
+    expect(chain).toContain(
+      "[23514] operation metadata differs from canonical transaction projection",
+    );
+    expect((await store.getArtifact(scope, artifactId))?.headSequence).toBe(0);
+    const [written] = await admin<{ transactions: number; operations: number }[]>`
+      select
+        (select count(*)::int from editable_artifact_transactions
+          where account_id = ${accountId} and workspace_id = ${workspaceId}
+            and artifact_id = ${artifactId}) as transactions,
+        (select count(*)::int from editable_artifact_operations
+          where account_id = ${accountId} and workspace_id = ${workspaceId}
+            and artifact_id = ${artifactId}) as operations`;
+    expect(written).toEqual({ transactions: 0, operations: 0 });
+
+    // Control: the identical unsorted batch commits when rows keep their positions.
+    const receipt = await applyTransaction({
+      artifactId,
+      clientTransactionId: "moved-operation-ids-2",
+      requestHash: "moved-operation-ids-2",
+      replicaId: "8888888888888888",
+      stateHash: hash("d"),
+      operationIds: unsorted,
+    });
+    expect(receipt).toMatchObject({ sequenceStart: 1, sequenceEnd: 2, operationCount: 2 });
+    const rows = await admin<{ operation_index: number; operation_id: string }[]>`
+      select operation_index, operation_id from editable_artifact_operations
+      where account_id = ${accountId} and workspace_id = ${workspaceId}
+        and artifact_id = ${artifactId}
+      order by sequence`;
+    expect(rows.map((row) => [row.operation_index, row.operation_id])).toEqual([
+      [0, high],
+      [1, low],
+    ]);
+  }, 60_000);
+
+  test("grants the operation identity validator to configured application roles only", async () => {
+    if (!available || !shared) return;
+    const migration = await readFile(
+      new URL("../drizzle/0784_editable_spreadsheet_ordered_operation_ids.sql", import.meta.url),
+      "utf8",
+    );
+    expect(migration).toContain("opengeni.migration_application_roles");
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    const runtimeRole = `editable_runtime_${suffix}`;
+    const bystanderRole = `editable_bystander_${suffix}`;
+    const rollback = new Error("roll back the re-applied migration");
+    let observed: Record<string, boolean | null> | undefined;
+    // Re-apply the migration as the migrator would, inside a transaction that
+    // is always rolled back, with one real and one unknown configured role.
+    await expect(
+      shared.admin.begin(async (tx) => {
+        await tx.unsafe(`CREATE ROLE ${runtimeRole} NOLOGIN`);
+        await tx.unsafe(`CREATE ROLE ${bystanderRole} NOLOGIN`);
+        await tx`select set_config(
+          'opengeni.migration_application_roles',
+          ${JSON.stringify([runtimeRole, `editable_missing_${suffix}`])},
+          true
+        )`;
+        await tx.unsafe(migration);
+        const [row] = await tx<Record<string, boolean | null>[]>`
+          select
+            has_function_privilege(${runtimeRole}, procedure.oid, 'EXECUTE') as "configured",
+            has_function_privilege(${bystanderRole}, procedure.oid, 'EXECUTE') as "bystander",
+            has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "app",
+            exists (
+              select 1 from aclexplode(procedure.proacl) acl where acl.grantee = 0
+            ) as "public",
+            procedure.prosecdef as "securityDefiner",
+            exists (
+              select 1 from pg_roles where rolname = ${`editable_missing_${suffix}`}
+            ) as "unknownCreated"
+          from pg_proc procedure
+          where procedure.oid =
+            'opengeni_private.editable_artifact_operation_id_list_valid(jsonb)'::regprocedure`;
+        observed = row;
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    expect(observed).toEqual({
+      configured: true,
+      bystander: false,
+      app: true,
+      public: false,
+      securityDefiner: false,
+      unknownCreated: false,
+    });
+    const [after] = await shared.admin<{ roles: number }[]>`
+      select count(*)::int as roles from pg_roles
+      where rolname in (${runtimeRole}, ${bystanderRole})`;
+    expect(after?.roles).toBe(0);
   }, 60_000);
 
   test("fences create and read authorization revisions without partial genesis writes", async () => {

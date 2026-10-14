@@ -10,11 +10,19 @@
 -- generic commit failure.
 --
 -- Only that predicate changes: identities stay well-formed, nonzero, unique
--- and bounded, and keep their command order. Selective undo targets remain a
--- canonically sorted set and every other clause is unchanged. Every existing
--- row already satisfies the stricter predicate, so the constraint is added NOT
--- VALID to avoid a history scan under the table lock; it still checks every
--- new or updated row. Expand only: rows from older writers satisfy both.
+-- and at most 4096, and keep their command order. The validator itself accepts
+-- an empty list; the unchanged count clauses (operation_count BETWEEN 1 AND
+-- 4096, equal to the list length) supply the lower bound. Selective undo
+-- targets remain a canonically sorted set and every other clause is unchanged.
+-- Every existing row already satisfies the stricter predicate, so the
+-- constraint is added NOT VALID to avoid a history scan under the table lock;
+-- it still checks every new or updated row. Expand only: rows from older
+-- writers satisfy both.
+--
+-- Every transaction insert evaluates the new validator, so the configured
+-- application roles receive EXECUTE in this migration rather than only at the
+-- next role provisioning; otherwise a custom runtime login could not write any
+-- editable transaction in between. Unknown configured names are skipped.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
@@ -43,14 +51,23 @@ $body$;
 
 REVOKE ALL ON FUNCTION
   opengeni_private.editable_artifact_operation_id_list_valid(jsonb) FROM PUBLIC;
-DO $grant$
+DO $grants$
+DECLARE application_role text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.editable_artifact_operation_id_list_valid(jsonb) TO opengeni_app;
-  END IF;
-END;
-$grant$;
+  FOR application_role IN
+    SELECT role_value.rolname
+    FROM jsonb_array_elements_text(coalesce(nullif(current_setting(
+      'opengeni.migration_application_roles', true), ''), '[]')::jsonb) configured(value)
+    JOIN pg_catalog.pg_roles role_value ON role_value.rolname = configured.value
+    UNION SELECT 'opengeni_app'
+    WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app')
+  LOOP
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_private.editable_artifact_operation_id_list_valid(jsonb) TO %I',
+      application_role);
+  END LOOP;
+END
+$grants$;
 
 ALTER TABLE "editable_artifact_transactions"
   DROP CONSTRAINT "editable_artifact_transactions_frontiers_chk",
