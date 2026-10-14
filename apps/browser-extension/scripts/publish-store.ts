@@ -135,7 +135,9 @@ export async function publishToStore(options: PublishOptions): Promise<PublishOu
   );
   const after = await fetchStatus();
   if (!revisionVersions(after.submittedItemRevisionStatus).includes(options.version)) {
-    throw new Error(`The store does not report ${options.version} as submitted: ${JSON.stringify(after)}`);
+    throw new Error(
+      `The store does not report ${options.version} as submitted: ${JSON.stringify(after)}`,
+    );
   }
   log(`Submitted ${options.version}: ${after.submittedItemRevisionStatus?.state}.`);
   return { kind: "submitted", status: after };
@@ -158,7 +160,8 @@ export async function federatedAccessToken(options: FederationOptions): Promise<
   const idResponse = await options.fetch(idUrl.toString(), {
     headers: { authorization: `Bearer ${options.idTokenRequestToken}` },
   });
-  if (!idResponse.ok) throw new Error(`GitHub OIDC token request failed with HTTP ${idResponse.status}.`);
+  if (!idResponse.ok)
+    throw new Error(`GitHub OIDC token request failed with HTTP ${idResponse.status}.`);
   const { value: subjectToken } = (await idResponse.json()) as { value?: string };
   if (!subjectToken) throw new Error("GitHub returned no OIDC token.");
 
@@ -175,7 +178,9 @@ export async function federatedAccessToken(options: FederationOptions): Promise<
     }),
   });
   if (!stsResponse.ok) {
-    throw new Error(`Token exchange failed with HTTP ${stsResponse.status}: ${await stsResponse.text()}`);
+    throw new Error(
+      `Token exchange failed with HTTP ${stsResponse.status}: ${await stsResponse.text()}`,
+    );
   }
   const { access_token: federatedToken } = (await stsResponse.json()) as { access_token?: string };
   if (!federatedToken) throw new Error("The token exchange returned no access token.");
@@ -185,7 +190,10 @@ export async function federatedAccessToken(options: FederationOptions): Promise<
     {
       method: "POST",
       headers: { authorization: `Bearer ${federatedToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ scope: ["https://www.googleapis.com/auth/chromewebstore"], lifetime: "900s" }),
+      body: JSON.stringify({
+        scope: ["https://www.googleapis.com/auth/chromewebstore"],
+        lifetime: "900s",
+      }),
     },
   );
   if (!impersonation.ok) {
@@ -206,8 +214,12 @@ function required(name: string): string {
 
 async function main(): Promise<void> {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as { version: string };
-  const zip = new Uint8Array(await readFile(resolve(root, "dist/opengeni-browser-extension-store.zip")));
+  const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as {
+    version: string;
+  };
+  const zip = new Uint8Array(
+    await readFile(resolve(root, "dist/opengeni-browser-extension-store.zip")),
+  );
   const publishType = (process.env.CWS_PUBLISH_TYPE || "DEFAULT_PUBLISH") as PublishType;
   if (publishType !== "DEFAULT_PUBLISH" && publishType !== "STAGED_PUBLISH") {
     throw new Error(`Unsupported CWS_PUBLISH_TYPE ${publishType}.`);
