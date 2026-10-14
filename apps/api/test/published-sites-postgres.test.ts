@@ -1869,6 +1869,17 @@ test("a viewer's own conversation serves the composer draft, queue and human-inp
     },
   });
   expect(submitted.status, JSON.stringify(submitted.json)).toBe(202);
+  // Every answer is a Site-safe view: nothing names the workspace behind it.
+  const [turnRow] = await shared.admin`select temporal_workflow_id from session_turns
+    where session_id = ${sessionId} limit 1`;
+  const internal = [f.workspace.id, String(turnRow!.temporal_workflow_id)];
+  const siteSafe = (result: Result) => {
+    const text = JSON.stringify(result.json);
+    for (const value of internal) expect(text).not.toContain(value);
+    expect(text).not.toContain('"metadata":{"');
+  };
+  for (const result of [draft, saved, submitted]) siteSafe(result);
+  expect(submitted.json.turn).toMatchObject({ prompt: "A draft", tools: [], metadata: {} });
   const [ownership] = await shared.admin`select turns from site_runtime_conversations
     where session_id = ${sessionId}`;
   expect(ownership).toMatchObject({ turns: 2 });
@@ -1887,6 +1898,8 @@ test("a viewer's own conversation serves the composer draft, queue and human-inp
   // Queue item and human-input reads reach the API for the owner only.
   const queued = await f.gateway(site.host, "GET", `${conversation}/queue`, { visitor });
   expect(queued.status, JSON.stringify(queued.json)).toBe(200);
+  siteSafe(queued);
+  expect(queued.json.pendingInputs).toEqual([]);
   // The submitted message waits behind the first turn (no worker runs here).
   const item = (queued.json.items as Array<{ id: string; version: number }>).at(-1);
   expect(item, JSON.stringify(queued.json.items)).toBeDefined();
@@ -1903,6 +1916,8 @@ test("a viewer's own conversation serves the composer draft, queue and human-inp
       body: { clientEventId: crypto.randomUUID(), expectedTurnVersion: item!.version },
     });
     expect(deleted.status, JSON.stringify(deleted.json)).toBe(200);
+    siteSafe(deleted);
+    expect(deleted.json.snapshot.version).toBeGreaterThan(queued.json.version);
   }
   const missingRequest = await f.gateway(
     site.host,

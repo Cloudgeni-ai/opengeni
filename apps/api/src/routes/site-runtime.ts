@@ -104,6 +104,17 @@ import {
   SITE_VISIBLE_SESSION_EVENT_TYPES,
 } from "../site-publishing/session-events";
 import {
+  siteAcceptedEventView,
+  siteAcceptedMessageView,
+  siteControlResultView,
+  siteControlView,
+  siteDraftView,
+  siteHumanInputListView,
+  siteHumanInputRequestView,
+  siteQueueMutationView,
+  siteQueueView,
+} from "../site-publishing/session-views";
+import {
   effectiveSiteAccess,
   publicSiteViewer,
   signedInSiteViewerKind,
@@ -301,6 +312,8 @@ export function siteSessionProjection(session: unknown): Record<string, unknown>
   if (!session || typeof session !== "object" || Array.isArray(session)) return {};
   const value = session as Record<string, unknown>;
   const projected = pick(value, SITE_SESSION_FIELDS);
+  if ("effectiveControl" in projected)
+    projected.effectiveControl = siteControlView(projected.effectiveControl);
   const usage = value.usageLimit;
   if (usage && typeof usage === "object" && !Array.isArray(usage))
     projected.usageLimit = pick(usage as Record<string, unknown>, SITE_USAGE_LIMIT_FIELDS);
@@ -901,12 +914,21 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           }),
         ),
       );
-    const forward = async (method: string, path: string, body?: unknown) =>
-      siteRuntimeForwardedResponse(await send(method, path, body));
     /** A forwarded session read, answered with the Site-safe projection. */
     const projected = async (response: Response, status = response.status) => {
       if (!response.ok) return siteRuntimeForwardedResponse(response);
       return context.json(siteSessionProjection(await response.json()), status as 200);
+    };
+    /** Forward, and answer a success with a Site-safe view of its body. */
+    const forwardView = async (
+      method: string,
+      path: string,
+      view: (value: unknown) => unknown,
+      body?: unknown,
+    ) => {
+      const response = await send(method, path, body);
+      if (!response.ok) return siteRuntimeForwardedResponse(response);
+      return context.json(view(await response.json()) as object, response.status as 200);
     };
     const notFound = () =>
       sitePublishingError(
@@ -1203,16 +1225,21 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           await send("GET", `${target}/events/stream${streamQuery()}`),
         );
       case "sessions.queue":
-        return await forward("GET", `${target}/queue`);
+        return await forwardView("GET", `${target}/queue`, siteQueueView);
       case "sessions.humanInput":
-        return await forward(
+        return await forwardView(
           "GET",
           `${target}/human-input-requests${allowedQuery(url, ["status"])}`,
+          siteHumanInputListView,
         );
       case "sessions.humanInput.get": {
         const requestId = /\/human-input-requests\/([^/]+)$/u.exec(request.suffix)?.[1];
         if (!requestId) throw unsupported();
-        return await forward("GET", `${target}/human-input-requests/${requestId}`);
+        return await forwardView(
+          "GET",
+          `${target}/human-input-requests/${requestId}`,
+          siteHumanInputRequestView,
+        );
       }
       case "sessions.queue.item": {
         const item = /\/queue\/([^/]+)\/(move|edit|steer|delete)$/u.exec(request.suffix);
@@ -1223,33 +1250,33 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           case "move": {
             const move = parseJson(request.body, MoveSessionQueueItemRequest);
             requireSiteAgent(deps, host, viewer, limits);
-            return await forward("POST", path, move);
+            return await forwardView("POST", path, siteQueueMutationView, move);
           }
           case "edit": {
             const edit = parseJson(request.body, EditSessionQueueItemRequest);
             requireSiteAgent(deps, host, viewer, limits);
-            return await forward("POST", path, edit);
+            return await forwardView("POST", path, siteQueueMutationView, edit);
           }
           case "delete": {
             const remove = parseJson(request.body, DeleteSessionQueueItemRequest);
             requireSiteAgent(deps, host, viewer, limits);
-            return await forward("POST", path, remove);
+            return await forwardView("POST", path, siteQueueMutationView, remove);
           }
           default: {
             // Steering a queued message runs it now: the message was counted
             // when it was sent, but the agent and spend checks still apply.
             const steer = parseJson(request.body, SteerSessionQueueItemRequest);
             await admitAgentWork(false);
-            return await forward("POST", path, steer);
+            return await forwardView("POST", path, siteQueueMutationView, steer);
           }
         }
       }
       case "sessions.composerDraft.get":
-        return await forward("GET", `${target}/composer-draft`);
+        return await forwardView("GET", `${target}/composer-draft`, siteDraftView);
       case "sessions.composerDraft.put": {
         const draft = parseJson(request.body, SaveComposerDraftRequest);
         requireSiteAgent(deps, host, viewer, limits);
-        return await forward("PUT", `${target}/composer-draft`, {
+        return await forwardView("PUT", `${target}/composer-draft`, siteDraftView, {
           ...(await siteDraft(draft)),
           expectedRevision: draft.expectedRevision,
         });
@@ -1265,18 +1292,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           throw invalid("Messages on a published Site are text only");
         const draft = await siteDraft(submit);
         await admitAgentWork(true);
-        return await forward("POST", `${target}/composer-draft/submit`, {
-          ...draft,
-          expectedDraftRevision: submit.expectedDraftRevision,
-          clientEventId: submit.clientEventId,
-          delivery: submit.delivery,
-          ...(submit.controlEtag ? { controlEtag: submit.controlEtag } : {}),
-        });
+        return await forwardView(
+          "POST",
+          `${target}/composer-draft/submit`,
+          siteAcceptedMessageView,
+          {
+            ...draft,
+            expectedDraftRevision: submit.expectedDraftRevision,
+            clientEventId: submit.clientEventId,
+            delivery: submit.delivery,
+            ...(submit.controlEtag ? { controlEtag: submit.controlEtag } : {}),
+          },
+        );
       }
       case "sessions.send": {
         const message = parseJson(request.body, SendMessageRequest);
         await admitAgentWork(true);
-        return await forward("POST", `${target}/events`, {
+        return await forwardView("POST", `${target}/events`, siteAcceptedEventView, {
           type: "user.message",
           ...(message.clientEventId ? { clientEventId: message.clientEventId } : {}),
           payload: { text: message.payload.text },
@@ -1285,7 +1317,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sessions.steer": {
         const steer = parseJson(request.body, SteerRequest);
         await admitAgentWork(false);
-        return await forward("POST", `${target}/steer`, {
+        return await forwardView("POST", `${target}/steer`, siteAcceptedMessageView, {
           text: steer.text,
           ...(steer.clientEventId ? { clientEventId: steer.clientEventId } : {}),
         });
@@ -1303,7 +1335,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         // its reservation at once.
         if (control.action !== "resume" && controlled.ok)
           await settleSiteRuntimeSpend(deps, host, conversation);
-        return siteRuntimeForwardedResponse(controlled);
+        if (!controlled.ok) return siteRuntimeForwardedResponse(controlled);
+        return context.json(
+          siteControlResultView(await controlled.json()) as object,
+          controlled.status as 200,
+        );
       }
       default:
         throw unsupported();

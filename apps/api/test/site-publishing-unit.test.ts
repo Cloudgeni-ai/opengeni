@@ -26,6 +26,15 @@ import {
   siteSessionEventSseTransform,
 } from "../src/site-publishing/session-events";
 import {
+  siteAcceptedMessageView,
+  siteControlResultView,
+  siteDraftView,
+  siteHumanInputListView,
+  siteHumanInputRequestView,
+  siteQueueMutationView,
+  siteQueueView,
+} from "../src/site-publishing/session-views";
+import {
   effectiveSiteAccess,
   signedInSiteViewerKind,
   siteGuestsAllowed,
@@ -545,6 +554,150 @@ describe("Site-safe session events", () => {
     ]);
     expect(frames[0]!.event.payload).toEqual({ text: "Grüße 👋" });
     expect(frames[2]!.event.payload).toEqual({ id: "call_1", name: "crm" });
+  });
+});
+
+describe("Site-safe session views", () => {
+  const WORKSPACE = "0e4c3a4d-6c50-4d1b-8f4e-2a5d8f1c9b11";
+  const SECRET = "vault-item-secret-name";
+  const control = {
+    state: "paused",
+    controlVersion: 3,
+    controlEtag: "etag-3",
+    directState: "running",
+    primaryBlocker: {
+      kind: "workspace",
+      displayName: "Acme Corp workspace",
+      actor: "user:someone",
+      reason: "Budget review",
+      changedAt: "2026-10-14T10:00:00.000Z",
+      revision: 2,
+    },
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [
+      { scope: "workspace", selectedStateAfter: "running", impactCopy: "Resume Acme Corp" },
+      { scope: "session", selectedStateAfter: "running", impactCopy: "Resume this session" },
+    ],
+    override: { rootSessionId: WORKSPACE, revision: 1 },
+    settlement: null,
+  };
+  const turn = {
+    id: "5b0d6f8e-0d37-4b8f-9c43-0f1c6c1f7a01",
+    workspaceId: WORKSPACE,
+    sessionId: "6c1e7f9f-1e48-4c90-8d54-1f2d7d2f8b12",
+    temporalWorkflowId: "turn-workflow-internal",
+    status: "queued",
+    source: "user",
+    position: 2,
+    prompt: "Hello",
+    tools: [{ kind: "mcp", id: "crm" }],
+    metadata: { _opengeniSiteOrigin: { siteId: WORKSPACE } },
+    lineage: { parent: WORKSPACE },
+    initiator: { kind: "user", subjectId: "user:someone" },
+    cancelledBy: "user:someone",
+    cancelReason: "internal note",
+    sandboxBackend: "docker",
+    version: 1,
+  };
+
+  test("queues keep the viewer's turns and control state, not the workspace behind them", () => {
+    const view = siteQueueView({
+      version: 7,
+      effectiveControl: control,
+      activePersonalConnections: [{ id: "personal" }],
+      stoppingPreviousAttempt: false,
+      items: [turn],
+      pendingInputs: [{ id: "x", summary: "child finished in workspace" }],
+      pendingInputAttachment: { turnId: turn.id, inputIds: ["x"] },
+    });
+    const text = JSON.stringify(view);
+    for (const hidden of [WORKSPACE, "turn-workflow-internal", "user:someone", "Acme", "crm"])
+      expect(text).not.toContain(hidden);
+    expect(view).toMatchObject({
+      version: 7,
+      pendingInputs: [],
+      pendingInputAttachment: null,
+      items: [{ id: turn.id, prompt: "Hello", position: 2, tools: [], metadata: {} }],
+      effectiveControl: {
+        state: "paused",
+        controlEtag: "etag-3",
+        primaryBlocker: { kind: "workspace", displayName: "Workspace", actor: null, reason: null },
+        resumeOptions: [{ scope: "session", impactCopy: "Resume this conversation." }],
+        override: null,
+      },
+    });
+    expect(
+      siteQueueMutationView({ receipt: { id: "r", actor: "user:x" }, snapshot: {} }),
+    ).toMatchObject({ receipt: { id: "r" } });
+    expect(
+      siteControlResultView({ receipt: { id: "r" }, effectiveControl: control, wakeCount: 1 }),
+    ).toMatchObject({ wakeCount: 1, effectiveControl: { primaryBlocker: { actor: null } } });
+  });
+
+  test("drafts, accepted messages and human-input requests are text and states only", () => {
+    expect(
+      siteDraftView({
+        revision: 2,
+        text: "Draft",
+        resources: [{ kind: "artifact", id: WORKSPACE }],
+        annotations: [{ id: "a" }],
+        model: "m",
+      }),
+    ).toEqual({ revision: 2, text: "Draft", model: "m", annotations: [], resources: [] });
+    const accepted = siteAcceptedMessageView({
+      accepted: {
+        id: "e1",
+        sessionId: turn.sessionId,
+        sequence: 4,
+        type: "user.message",
+        payload: { text: "Hi", resources: [{ id: WORKSPACE }] },
+        workspaceId: WORKSPACE,
+      },
+      turn,
+      receipt: { id: "r" },
+      routing: "queued_for_execution",
+      interruptionCount: 0,
+      replay: false,
+    });
+    expect(JSON.stringify(accepted)).not.toContain(WORKSPACE);
+    expect(accepted).toMatchObject({
+      accepted: { type: "user.message", payload: { text: "Hi" } },
+      turn: { prompt: "Hello" },
+      routing: "queued_for_execution",
+    });
+    const request = {
+      id: "7d2f8a00-2f59-4da1-9e65-2a3e8e3f9c23",
+      workspaceId: WORKSPACE,
+      sessionId: turn.sessionId,
+      turnId: turn.id,
+      creationAttemptId: "attempt-internal",
+      toolCallId: "call-internal",
+      status: "answered",
+      questions: [
+        {
+          id: "q",
+          kind: "secret",
+          prompt: "Key?",
+          secret: { item: SECRET },
+          skillReview: { skillId: "s" },
+        },
+      ],
+      allowSkip: false,
+      response: { answers: [{ questionId: "q", value: SECRET }] },
+      respondedBy: "user:someone",
+      createdAt: "2026-10-14T10:00:00.000Z",
+    };
+    const listed = siteHumanInputListView({ requests: [request] });
+    const text = JSON.stringify(listed);
+    for (const hidden of [WORKSPACE, SECRET, "attempt-internal", "call-internal", "user:someone"])
+      expect(text).not.toContain(hidden);
+    expect(siteHumanInputRequestView(request)).toMatchObject({
+      status: "answered",
+      questions: [{ id: "q", kind: "secret", prompt: "Key?" }],
+      response: null,
+      respondedBy: null,
+    });
   });
 });
 
