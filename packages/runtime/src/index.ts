@@ -10324,7 +10324,11 @@ export async function materializeSandboxFileDownloads(
       });
     } catch (error) {
       if (error instanceof TurnSandboxCommandCancelledError) throw error;
-      const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
+      const failure = explainFilesystemRootDownloadFailure(
+        sandboxFileDownloadFailure(download, targetPath, error, result),
+        workspaceRoot,
+        targetRelativePath,
+      );
       failures.push(failure);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.failed",
@@ -10356,6 +10360,38 @@ function sandboxFileDownloadFailure(
     reason: error instanceof Error ? error.message : String(error),
     ...(exitCode !== null ? { exitCode } : {}),
     ...(output ? { output } : {}),
+  };
+}
+
+const UNWRITABLE_DIRECTORY_OUTPUT =
+  /read-only file system|permission denied|operation not permitted/iu;
+
+/**
+ * A Connected Machine whose session working directory is the filesystem root
+ * (an older macOS LaunchAgent started by launchd at `/`, persisted on the
+ * session at attach time) cannot stage Opengeni-owned files there: `/` is a
+ * read-only system volume on macOS and unwritable for ordinary users elsewhere.
+ * The raw `mkdir: .opengeni: Read-only file system` tells neither the model nor
+ * the user what to do, so replace the reason with actionable guidance while
+ * keeping the exact command output and exit code. Nothing is written to any
+ * other host location: the cwd-relative `.opengeni/...` contract stays intact.
+ */
+function explainFilesystemRootDownloadFailure(
+  failure: SandboxFileDownloadFailure,
+  workspaceRoot: string,
+  targetRelativePath: string,
+): SandboxFileDownloadFailure {
+  if (posixPath.normalize(workspaceRoot) !== "/") return failure;
+  if (!UNWRITABLE_DIRECTORY_OUTPUT.test(`${failure.reason}\n${failure.output ?? ""}`)) {
+    return failure;
+  }
+  return {
+    ...failure,
+    reason: [
+      `The session's working directory is the filesystem root (/), which is not writable on this machine, so Opengeni could not stage the file at ${targetRelativePath}.`,
+      "This session keeps that folder; start a new session on this machine with a writable working folder (for example the home directory). An updated Opengeni agent defaults new sessions to the home directory.",
+      `Underlying error: ${failure.reason}`,
+    ].join(" "),
   };
 }
 

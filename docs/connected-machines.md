@@ -898,6 +898,14 @@ explicit `workingDir` to `createSession`). Historical attachments are not restag
 automatically; retrieve them explicitly through Files or attach them to a new
 message when needed.
 
+While a session keeps `/`, staging an attachment, spilled tool result or generated
+image into it still fails, but the failure the model and timeline receive names
+the filesystem-root working directory and this remedy instead of only a raw
+`mkdir: .opengeni: Read-only file system`; the original command output and exit
+code are retained. Opengeni never redirects those files to another host folder,
+so the cwd-relative `.opengeni/...` paths keep their meaning
+(`packages/runtime/src/index.ts`, `explainFilesystemRootDownloadFailure`).
+
 `opengeni-agent run` is the explicit foreground alternative.
 
 Self-update requires settled accepted work across every connection. Relay pumps,

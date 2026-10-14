@@ -97,6 +97,7 @@ import {
   elideSupersededViewImagePairs,
   generateSessionTitle,
   materializeSandboxFileDownloads,
+  sandboxFileDownloadFailureNote,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
@@ -5719,6 +5720,88 @@ describe("runtime event normalization", () => {
     expect(events[1]?.payload.exitCode).toBe(2);
     expect(events[1]?.payload.error).toContain("Illegal option");
     expect(JSON.stringify(events)).not.toContain("sig=secret");
+  });
+
+  test("explains an unwritable filesystem-root working directory instead of a raw mkdir error", async () => {
+    const workdirs: string[] = [];
+    const events: Array<{ type: string; payload: any }> = [];
+    const download = {
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename: "Invoice.pdf",
+      url: "https://storage.example/invoice.pdf?sig=secret",
+      sizeBytes: 5,
+    };
+    const result = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/" }) },
+        exec: async ({ workdir }: { workdir?: string }) => {
+          workdirs.push(workdir ?? "");
+          return {
+            output: "mkdir: .opengeni: Read-only file system",
+            stdout: "",
+            stderr: "mkdir: .opengeni: Read-only file system",
+            wallTimeSeconds: 0,
+            exitCode: 1,
+          };
+        },
+      } as any,
+      [download],
+      { onRuntimeEvent: (event) => events.push(event as any) },
+    );
+
+    expect(workdirs).toEqual(["/"]);
+    expect(result.failures).toHaveLength(1);
+    const failure = result.failures[0]!;
+    expect(failure.path).toBe("/.opengeni/files/file-1/Invoice.pdf");
+    expect(failure.exitCode).toBe(1);
+    expect(failure.output).toContain("Read-only file system");
+    expect(failure.reason).toContain("working directory is the filesystem root (/)");
+    expect(failure.reason).toContain(".opengeni/files/file-1/Invoice.pdf");
+    expect(failure.reason).toContain("start a new session on this machine");
+    expect(failure.reason).toContain("Underlying error: Sandbox file resource download file-1");
+    expect(failure.reason).toContain("Read-only file system");
+    expect(sandboxFileDownloadFailureNote(result.failures)).toContain(
+      "working directory is the filesystem root (/)",
+    );
+    expect(events[1]?.payload.error).toBe(failure.reason);
+    expect(JSON.stringify(events)).not.toContain("sig=secret");
+  });
+
+  test("keeps the raw reason for root working directories when the failure is not a write refusal", async () => {
+    const failRoot = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/" }) },
+        exec: async () => ({ output: "curl: (6) Could not resolve host", exitCode: 6 }),
+      } as any,
+      [
+        {
+          fileId: "file-1",
+          mountPath: ".opengeni/files/file-1",
+          filename: "input.txt",
+          url: "https://storage.example/input.txt",
+        },
+      ],
+    );
+    expect(failRoot.failures[0]?.reason).toContain("Could not resolve host");
+    expect(failRoot.failures[0]?.reason).not.toContain("filesystem root");
+
+    const failNested = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/Users/me" }) },
+        exec: async () => ({ output: "mkdir: .opengeni: Permission denied", exitCode: 1 }),
+      } as any,
+      [
+        {
+          fileId: "file-1",
+          mountPath: ".opengeni/files/file-1",
+          filename: "input.txt",
+          url: "https://storage.example/input.txt",
+        },
+      ],
+    );
+    expect(failNested.failures[0]?.reason).toContain("Permission denied");
+    expect(failNested.failures[0]?.reason).not.toContain("filesystem root");
   });
 
   test("propagates turn cancellation instead of downgrading it to a file-download failure", async () => {
