@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "17f62a74dd6c34f546e2d3c58ac7627097e81e1f20d5fa1626f7f4df5decd86a"
+      "sha256": "572e765a05233c2e2f84a137b032c1e8c9465c64650d557550a692e3fa841811"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -22,15 +22,15 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "85e676217eb98a03078a4e3ff44dbd02dff67e6a0abf203b12179c6e4b409b5e"
+      "sha256": "397b21065c0448aac95e8b9946d7168d7961d3291a2029826e162075f435d238"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
-      "sha256": "eefc69afb4a4e480515828d34069a8c7159c5c71b5db19f2c4a0924244757ba3"
+      "sha256": "8b901e666887c644b0be477cd3d15e7018353762fc354f3a61500a269169c910"
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "382bf6646647bc2601b72ee7808ef0939ff60b1b33b0ca3ea67030d57b5524e8"
+      "sha256": "7aaf97fd84c236922a11e40d55e5c5514f3e504763240f87d13a3205f6c21531"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -62,7 +62,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "0c604969879ae54c818df46818547548dbd48165aa8fc65e8d9f3907cac0d99a"
+      "sha256": "2fecee50c354d8567e750f0627de842e359298bb61c49396b6994341fbb9729e"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -70,11 +70,11 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "e9f07f7665ebdc9f841de20c361665b3fc485e8565b80a292fcbbc5b06b7ffe0"
+      "sha256": "e959f5658679e791841ad1af4a481b91ccba5e226bf86bef78743a39f7e96f10"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
-      "sha256": "1159f5b8fa72d596ae6e5ffb9f99b5d0c147a9771a614d9a7e0a7e2f93f45743"
+      "sha256": "892dc87af9b030ce92a848f4fc8faae97d6aa04f13b7e5b65f4957bb5bab64bb"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
@@ -106,7 +106,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "eb8c7dcba198651cda023f00621b53536cc3895b6973374acd47c523226f07b5"
+      "sha256": "0699567351803a79a314b65b66cf8895a18a4842e3e13cf25afc71bc3d0914b7"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",

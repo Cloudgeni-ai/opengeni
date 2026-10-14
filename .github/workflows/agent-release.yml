@@ -68,6 +68,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: guard
+    environment: agent-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -591,6 +592,7 @@ jobs:
   # combined SHA256SUMS, signs the channel manifest, and creates the GH Release with
   # the binaries + the install scripts attached.
   publish:
+    environment: agent-release
     name: Publish release
     needs: [guard, build]
     runs-on: ubuntu-latest
