@@ -82,6 +82,7 @@ import {
   ToolGatewayManifestRequest,
   type AccessGrant,
   type ClientAgentConfig,
+  type ClientSitesConfig,
   type ErrorCode,
   type FirstPartyMcpToolName,
   type Session,
@@ -343,6 +344,7 @@ import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
 import { registerSitePublishingRoutes } from "./routes/site-publishing";
+import { configuredSitesDomain } from "./site-publishing/service";
 import { registerSiteRuntimeRoutes } from "./routes/site-runtime";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
@@ -1566,6 +1568,7 @@ export function createAppComposition(deps: AppDependencies): {
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
         structuredServices: structuredServicesHint(deps.settings.sandboxBackend),
+        sites: clientSitesConfig(deps.settings),
       }),
     );
   });
@@ -4024,6 +4027,19 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   }
   const segments = pathname.split("/");
   return !segments.includes("mcp") && !segments.includes("codemode");
+}
+
+/** Published Sites deployment facts for the console; null while publishing is off. */
+function clientSitesConfig(settings: Settings): ClientSitesConfig | null {
+  const domain = configuredSitesDomain(settings);
+  if (!domain) return null;
+  return {
+    domain,
+    publicEnabled: settings.sitesPublicEnabled,
+    publicAgentsEnabled: settings.sitesPublicAgentsEnabled,
+    loginOnly: settings.sitesLoginOnly,
+    forceNoindex: settings.sitesForceNoindex,
+  };
 }
 
 /** Client-safe agent-configuration projection. */

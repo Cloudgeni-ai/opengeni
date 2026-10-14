@@ -1,6 +1,10 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  DeleteSessionQueueItemRequest,
+  EditSessionQueueItemRequest,
   matchSiteOperation,
+  MoveSessionQueueItemRequest,
+  SaveComposerDraftRequest,
   SessionControlRequest,
   SiteAbuseReportRequest,
   SiteAuthExchangeRequest,
@@ -11,11 +15,13 @@ import {
   SITE_GATEWAY_CALLBACK_PATH,
   SITE_RUNTIME_API_PREFIX,
   SITE_TOOL_METHODS,
+  SteerSessionQueueItemRequest,
+  SubmitComposerDraftRequest,
   type SiteAuthExchangeResponse,
   type SiteRuntimeConfig,
   type ToolRef,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { withSiteSessionOrigin, type ApiRouteDeps } from "@opengeni/core";
 import {
   admitSiteRuntimeConversationTurn,
   consumeSiteAuthCode,
@@ -253,10 +259,14 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     return await operation(request, matched.operation.id);
   };
 
-  /** The host map record for the signed host (the gateway's fallback on a KV miss). */
+  /**
+   * The host map record for the signed host (the gateway's fallback on a KV
+   * miss). The signed host header names it; an optional `host` query must agree.
+   */
   const hostLookup = async (request: RuntimeRequest): Promise<Response> => {
-    const asked = (request.url.searchParams.get("host") ?? "").trim().toLowerCase();
-    if (asked !== request.fields.host) throw invalid("host must be the signed Site host");
+    const asked = request.url.searchParams.get("host");
+    if (asked !== null && asked.trim().toLowerCase() !== request.fields.host)
+      throw invalid("host must be the signed Site host");
     const found = await findSiteRuntimeHost(deps, request.domain, request.fields.host);
     if (!found)
       throw sitePublishingError(404, "not_found", "site_not_found", "This Site does not exist");
@@ -385,8 +395,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   const logout = async (request: RuntimeRequest): Promise<Response> => {
     const host = await findSiteRuntimeHost(deps, request.domain, request.fields.host);
-    if (!host)
-      throw sitePublishingError(404, "not_found", "site_not_found", "This Site does not exist");
+    // Signing out always succeeds for the gateway, even for a Site that is gone.
+    if (!host) return request.context.json({ revoked: false });
     const revoked = request.fields.session
       ? await revokeSiteViewerSession(deps.db, host.scope, {
           siteId: host.site.id,
@@ -641,15 +651,21 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   ): Promise<Response> => {
     const { context, url } = request;
     const base = `/v1/workspaces/${host.scope.workspaceId}/sessions`;
+    // Every forwarded call runs inside the Site's origin (OPE-801), and also
+    // carries the Site and version headers the API's Site frame guard
+    // validates; sessions and turns it starts record this Site and version.
+    const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };
     const forward = async (method: string, path: string, body?: unknown) =>
       siteRuntimeForwardedResponse(
-        await dispatch(
-          await siteRuntimeSessionRequest(deps, host, viewer, {
-            origin: url.origin,
-            method,
-            path,
-            ...(body === undefined ? {} : { body }),
-          }),
+        await withSiteSessionOrigin(siteOrigin, async () =>
+          dispatch(
+            await siteRuntimeSessionRequest(deps, host, viewer, {
+              origin: url.origin,
+              method,
+              path,
+              ...(body === undefined ? {} : { body }),
+            }),
+          ),
         ),
       );
     const notFound = () =>
@@ -797,6 +813,75 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!conversation) throw notFound();
     const target = `${base}/${conversation.sessionId}`;
     const query = url.search;
+    // An EventSource reconnect resumes from Last-Event-ID (forwarded by the
+    // gateway); in-process dispatch carries it as the stream's `after` cursor.
+    const streamQuery = () => {
+      const params = new URLSearchParams(url.search);
+      const lastEventId = request.context.req.header("last-event-id")?.trim();
+      if (!params.has("after") && lastEventId && /^\d{1,15}$/u.test(lastEventId))
+        params.set("after", lastEventId);
+      const text = params.toString();
+      return text ? `?${text}` : "";
+    };
+    // The agent and budget checks every message-bearing operation passes.
+    const admitAgentWork = async (newTurn: boolean) => {
+      requireSiteAgent(deps, host, viewer, limits);
+      const spent = await settleSiteRuntimeSpend(deps, host, conversation.sessionId);
+      requireSiteRuntimeConversationBudget(limits, spent ?? conversation.meteredMicros);
+      requireSiteRuntimeBudgets(limits, await usage(), { newConversation: false });
+      if (
+        newTurn &&
+        !(await admitSiteRuntimeConversationTurn(deps.db, host.scope, {
+          sessionId: conversation.sessionId,
+          maxTurns: limits.turnsPerConversation,
+        }))
+      )
+        throw siteTurnsExhausted();
+    };
+    /**
+     * A Site's composer drafts are text only: no workspace resources,
+     * timeline annotations, credentials or connection accounts, and only a
+     * model the Site allows (or the conversation's own).
+     */
+    const siteDraft = async (draft: {
+      text: string;
+      annotations?: readonly unknown[] | undefined;
+      resources: readonly unknown[];
+      model: string;
+      reasoningEffort: unknown;
+      latencyMode: unknown;
+    }) => {
+      if (draft.text.length > MESSAGE_MAX_CHARS)
+        throw invalid(`A message is at most ${MESSAGE_MAX_CHARS} characters`);
+      if (draft.resources.length > 0 || (draft.annotations?.length ?? 0) > 0)
+        throw invalid("Messages on a published Site are text only");
+      const allowed = new Set(
+        [host.publication.agent.model, ...(limits.agentModels ?? [])].filter(
+          (model): model is string => typeof model === "string" && model.length > 0,
+        ),
+      );
+      if (!allowed.has(draft.model)) {
+        const current = await forward("GET", target);
+        const session = current.ok
+          ? ((await current.json().catch(() => null)) as { model?: unknown } | null)
+          : (await current.body?.cancel(), null);
+        if (session?.model !== draft.model)
+          throw sitePublishingError(
+            400,
+            "validation_failed",
+            "site_model_not_allowed",
+            "This Site's assistant cannot use that model",
+          );
+      }
+      return {
+        text: draft.text,
+        annotations: [],
+        resources: [],
+        model: draft.model,
+        reasoningEffort: draft.reasoningEffort,
+        latencyMode: draft.latencyMode,
+      };
+    };
     switch (id) {
       case "sessions.get":
         await settleSiteRuntimeSpend(deps, host, conversation.sessionId);
@@ -804,11 +889,77 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "sessions.events":
         return await forward("GET", `${target}/events${query}`);
       case "sessions.stream":
-        return await forward("GET", `${target}/events/stream${query}`);
+        return await forward("GET", `${target}/events/stream${streamQuery()}`);
       case "sessions.queue":
         return await forward("GET", `${target}/queue${query}`);
       case "sessions.humanInput":
         return await forward("GET", `${target}/human-input-requests${query}`);
+      case "sessions.humanInput.get": {
+        const requestId = /\/human-input-requests\/([^/]+)$/u.exec(request.suffix)?.[1];
+        if (!requestId) throw unsupported();
+        return await forward("GET", `${target}/human-input-requests/${requestId}`);
+      }
+      case "sessions.queue.item": {
+        const item = /\/queue\/([^/]+)\/(move|edit|steer|delete)$/u.exec(request.suffix);
+        if (!item) throw unsupported();
+        const [, turnId, action] = item;
+        const path = `${target}/queue/${turnId}/${action}`;
+        switch (action) {
+          case "move":
+            return await forward(
+              "POST",
+              path,
+              parseJson(request.body, MoveSessionQueueItemRequest),
+            );
+          case "edit":
+            return await forward(
+              "POST",
+              path,
+              parseJson(request.body, EditSessionQueueItemRequest),
+            );
+          case "delete":
+            return await forward(
+              "POST",
+              path,
+              parseJson(request.body, DeleteSessionQueueItemRequest),
+            );
+          default: {
+            // Steering a queued message runs it now: the message was counted
+            // when it was sent, but the agent and spend checks still apply.
+            const steer = parseJson(request.body, SteerSessionQueueItemRequest);
+            await admitAgentWork(false);
+            return await forward("POST", path, steer);
+          }
+        }
+      }
+      case "sessions.composerDraft.get":
+        return await forward("GET", `${target}/composer-draft`);
+      case "sessions.composerDraft.put": {
+        const draft = parseJson(request.body, SaveComposerDraftRequest);
+        return await forward("PUT", `${target}/composer-draft`, {
+          ...(await siteDraft(draft)),
+          expectedRevision: draft.expectedRevision,
+        });
+      }
+      case "sessions.composerDraft.submit": {
+        const submit = parseJson(request.body, SubmitComposerDraftRequest);
+        if (
+          submit.modelContext !== undefined ||
+          (submit.mcpCredentialUpdates?.length ?? 0) > 0 ||
+          submit.connectionAccounts.length > 0 ||
+          submit.personalResourceAttachment !== undefined
+        )
+          throw invalid("Messages on a published Site are text only");
+        const draft = await siteDraft(submit);
+        await admitAgentWork(true);
+        return await forward("POST", `${target}/composer-draft/submit`, {
+          ...draft,
+          expectedDraftRevision: submit.expectedDraftRevision,
+          clientEventId: submit.clientEventId,
+          delivery: submit.delivery,
+          ...(submit.controlEtag ? { controlEtag: submit.controlEtag } : {}),
+        });
+      }
       case "sessions.send":
       case "sessions.steer":
       case "sessions.control": {

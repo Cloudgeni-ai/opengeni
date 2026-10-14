@@ -240,23 +240,25 @@ async function fixture(overrides: Partial<Settings> = {}) {
     return { ...site, host: String(published.json.hostname), publication: published.json };
   };
   /** A request as the gateway sends it: signed over method, host, path, body and viewer fields. */
-  const gateway = async (
+  type GatewayOptions = {
+    body?: unknown;
+    session?: string;
+    visitor?: string;
+    human?: boolean;
+    clientIp?: string;
+    secret?: string;
+    nowMs?: number;
+    headers?: Record<string, string>;
+    sendBody?: string;
+    on?: ReturnType<typeof appWith>;
+  };
+  /** A request signed as the gateway signs it; the raw response. */
+  const gatewayRaw = async (
     host: string,
     method: string,
     path: string,
-    options: {
-      body?: unknown;
-      session?: string;
-      visitor?: string;
-      human?: boolean;
-      clientIp?: string;
-      secret?: string;
-      nowMs?: number;
-      headers?: Record<string, string>;
-      sendBody?: string;
-      on?: ReturnType<typeof appWith>;
-    } = {},
-  ) => {
+    options: GatewayOptions = {},
+  ): Promise<Response> => {
     const pathWithQuery = `/v1/site-runtime${path}`;
     const body = options.body === undefined ? "" : JSON.stringify(options.body);
     const signed = signSiteGatewayRequest({
@@ -272,18 +274,22 @@ async function fixture(overrides: Partial<Settings> = {}) {
       ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
     });
     const sent = options.sendBody ?? body;
-    return await read(
-      await (options.on ?? app).request(pathWithQuery, {
-        method,
-        headers: {
-          ...signed,
-          ...(sent ? { "content-type": "application/json" } : {}),
-          ...options.headers,
-        },
-        ...(sent ? { body: sent } : {}),
-      }),
-    );
+    return await (options.on ?? app).request(pathWithQuery, {
+      method,
+      headers: {
+        ...signed,
+        ...(sent ? { "content-type": "application/json" } : {}),
+        ...options.headers,
+      },
+      ...(sent ? { body: sent } : {}),
+    });
   };
+  const gateway = async (
+    host: string,
+    method: string,
+    path: string,
+    options: GatewayOptions = {},
+  ) => await read(await gatewayRaw(host, method, path, options));
   /** Viewer sign-in: authorize as the person, then exchange as the gateway. */
   const authorize = async (
     who: Who,
@@ -332,6 +338,7 @@ async function fixture(overrides: Partial<Settings> = {}) {
     publication,
     live,
     gateway,
+    gatewayRaw,
     authorize,
     exchange,
     signIn,
@@ -348,12 +355,30 @@ test("publishing is off without a Sites domain", async () => {
   const runtime = await f.gateway("x.sites.example.test", "GET", "/site/config");
   expect(runtime.status).toBe(404);
   expect(code(runtime)).toBe("sites_publishing_disabled");
+  // The console learns publishing is off from its client config.
+  const config = await read(await f.app.request("/v1/config/client"));
+  expect(config.status).toBe(200);
+  expect(config.json.sites).toBeNull();
 });
 
 test("managers publish workspace Sites under globally unique, held hostnames", async () => {
   const f = await fixture();
   const other = await fixture();
   const site = await f.publish("Team CRM");
+  // The console's client config describes the deployment's publishing.
+  expect((await read(await f.app.request("/v1/config/client"))).json.sites).toEqual({
+    domain: DOMAIN,
+    publicEnabled: true,
+    publicAgentsEnabled: true,
+    loginOnly: false,
+    forceNoindex: false,
+  });
+  const loginOnly = await read(
+    await f
+      .appWith(sitesSettings({ sitesLoginOnly: true, sitesPublicAgentsEnabled: false }))
+      .request("/v1/config/client"),
+  );
+  expect(loginOnly.json.sites).toMatchObject({ loginOnly: true, publicAgentsEnabled: false });
 
   // Viewers of the Site are not its managers; Only me Sites cannot be published.
   const denied = await f.publication(f.member, site.id, "PUT", {});
@@ -543,8 +568,10 @@ test("site-runtime checks the gateway signature before anything else", async () 
   });
   expect(rotated.status).toBe(200);
 
-  // The host lookup answers only for the signed host.
-  const lookup = await f.gateway(site.host, "GET", `/host?host=${site.host}`);
+  // The host lookup answers only for the signed host. The gateway sends no
+  // query (the signed host header names it); a query must agree with it.
+  const lookup = await f.gateway(site.host, "GET", "/host");
+  expect(lookup.status, JSON.stringify(lookup.json)).toBe(200);
   expect(lookup.json).toMatchObject({
     v: 1,
     hostname: site.host,
@@ -553,7 +580,11 @@ test("site-runtime checks the gateway signature before anything else", async () 
     access: "public",
     versionId: site.versionId,
   });
+  expect((await f.gateway(site.host, "GET", `/host?host=${site.host}`)).json).toEqual(lookup.json);
   expect((await f.gateway(site.host, "GET", `/host?host=other.${DOMAIN}`)).status).toBe(400);
+  const unknown = await f.gateway(`no-such-site.${DOMAIN}`, "GET", "/host");
+  expect(unknown.status).toBe(404);
+  expect(code(unknown)).toBe("site_not_found");
   // Paths outside the allowlist are refused even when signed.
   const outside = await f.gateway(site.host, "GET", "/v1/workspaces", { visitor });
   expect(outside.status).toBe(404);
@@ -680,6 +711,13 @@ test("viewer sign-in: one-time PKCE codes bound to their host, then revocable se
   const after = await f.gateway(site.host, "GET", "/site/config", { session });
   expect(after.status).toBe(401);
   expect(code(after)).toBe("site_sign_in_required");
+  // Signing out of a Site that no longer exists still succeeds for the gateway.
+  const gone = await f.gateway(`no-such-site.${DOMAIN}`, "POST", "/auth/logout", {
+    session,
+    body: {},
+  });
+  expect(gone.status).toBe(200);
+  expect(gone.json).toEqual({ revoked: false });
 }, 60_000);
 
 test("access modes: members, invited, public guests, login-only and public off", async () => {
@@ -907,6 +945,15 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
   const [row] = await shared.admin`select created_by_kind, created_by_subject_id, metadata
     from sessions where id = ${sessionId}`;
   expect(row!.created_by_subject_id).toBe(`site:${site.id}`);
+  // OPE-801 provenance: the Site, its title and the served version, on the
+  // session and on every turn the viewer starts.
+  const siteOrigin = { siteId: site.id, title: "Helpdesk", versionId: site.versionId };
+  expect(row!.metadata._opengeniSiteOrigin).toEqual(siteOrigin);
+  const turns = async () =>
+    await shared.admin<{ surface: string | null; metadata: Record<string, unknown> }[]>`
+      select surface, metadata from session_turns where session_id = ${sessionId}
+      order by created_at`;
+  expect((await turns()).map((turn) => turn.surface)).toEqual(["site"]);
   const [ownership] = await shared.admin`select viewer_principal, version_id, turns
     from site_runtime_conversations where session_id = ${sessionId}`;
   expect(ownership).toMatchObject({
@@ -970,6 +1017,9 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
   ).toBe(200);
   const second = await send({ visitor });
   expect(second.status, JSON.stringify(second.json)).toBeLessThan(300);
+  const followUp = (await turns()).at(-1)!;
+  expect(followUp.surface).toBe("site");
+  expect(followUp.metadata._opengeniSiteOrigin).toEqual(siteOrigin);
   const third = await send({ visitor });
   expect(third.status).toBe(429);
   expect(third.json.error.details).toMatchObject({
@@ -1244,6 +1294,145 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
     action: "restore",
   });
   expect(lifted.status).toBe("active");
+}, 60_000);
+
+test("a viewer's own conversation serves the composer draft, queue and human-input operations", async () => {
+  const f = await fixture();
+  const site = await f.live("Drafts", {
+    access: "public",
+    agent: { enabled: true, instructions: "Help with drafts." },
+  });
+  const visitor = visitorId();
+  const stranger = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "Hello" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(202);
+  const sessionId = String(created.json.id);
+  const conversation = `/sessions/${sessionId}`;
+
+  // The draft starts empty, on the conversation's own model.
+  const draft = await f.gateway(site.host, "GET", `${conversation}/composer-draft`, { visitor });
+  expect(draft.status, JSON.stringify(draft.json)).toBe(200);
+  const { model, reasoningEffort, latencyMode, revision } = draft.json;
+  expect(typeof model).toBe("string");
+  const save = (body: Record<string, unknown>, who = visitor) =>
+    f.gateway(site.host, "PUT", `${conversation}/composer-draft`, {
+      visitor: who,
+      body: {
+        text: "A draft",
+        annotations: [],
+        resources: [],
+        model,
+        reasoningEffort,
+        latencyMode,
+        expectedRevision: revision,
+        ...body,
+      },
+    });
+  // Text only, on an allowed model, and only the viewer's own conversation.
+  const withResource = await save({
+    resources: [{ kind: "artifact", id: crypto.randomUUID() }],
+  });
+  expect(withResource.status).toBe(400);
+  const otherModel = await save({ model: "not-a-site-model" });
+  expect(otherModel.status).toBe(400);
+  expect(code(otherModel)).toBe("site_model_not_allowed");
+  const foreign = await save({}, stranger);
+  expect(foreign.status).toBe(404);
+  expect(code(foreign)).toBe("site_conversation_not_found");
+  const saved = await save({});
+  expect(saved.status, JSON.stringify(saved.json)).toBe(200);
+  expect(saved.json).toMatchObject({ text: "A draft", resources: [] });
+
+  // Submitting the draft is a message: it counts as a turn and records the Site.
+  const submitted = await f.gateway(site.host, "POST", `${conversation}/composer-draft/submit`, {
+    visitor,
+    body: {
+      text: "A draft",
+      annotations: [],
+      resources: [],
+      model,
+      reasoningEffort,
+      latencyMode,
+      expectedDraftRevision: saved.json.revision,
+      clientEventId: crypto.randomUUID(),
+      delivery: "send",
+    },
+  });
+  expect(submitted.status, JSON.stringify(submitted.json)).toBe(202);
+  const [ownership] = await shared.admin`select turns from site_runtime_conversations
+    where session_id = ${sessionId}`;
+  expect(ownership).toMatchObject({ turns: 2 });
+  const [turn] = await shared.admin<
+    { surface: string | null; metadata: Record<string, unknown> }[]
+  >`
+    select surface, metadata from session_turns where session_id = ${sessionId}
+    order by created_at desc limit 1`;
+  expect(turn!.surface).toBe("site");
+  expect(turn!.metadata._opengeniSiteOrigin).toEqual({
+    siteId: site.id,
+    title: "Drafts",
+    versionId: site.versionId,
+  });
+
+  // Queue item and human-input reads reach the API for the owner only.
+  const queued = await f.gateway(site.host, "GET", `${conversation}/queue`, { visitor });
+  expect(queued.status, JSON.stringify(queued.json)).toBe(200);
+  // The submitted message waits behind the first turn (no worker runs here).
+  const item = (queued.json.items as Array<{ id: string; version: number }>).at(-1);
+  expect(item, JSON.stringify(queued.json.items)).toBeDefined();
+  {
+    const strangerDelete = await f.gateway(
+      site.host,
+      "POST",
+      `${conversation}/queue/${item!.id}/delete`,
+      { visitor: stranger, body: { clientEventId: crypto.randomUUID(), expectedTurnVersion: 1 } },
+    );
+    expect(code(strangerDelete)).toBe("site_conversation_not_found");
+    const deleted = await f.gateway(site.host, "POST", `${conversation}/queue/${item!.id}/delete`, {
+      visitor,
+      body: { clientEventId: crypto.randomUUID(), expectedTurnVersion: item!.version },
+    });
+    expect(deleted.status, JSON.stringify(deleted.json)).toBe(200);
+  }
+  const missingRequest = await f.gateway(
+    site.host,
+    "GET",
+    `${conversation}/human-input-requests/${crypto.randomUUID()}`,
+    { visitor },
+  );
+  expect(missingRequest.status).toBe(404);
+  expect(code(missingRequest)).not.toBe("site_operation_unsupported");
+
+  // A reconnecting stream resumes after the gateway-forwarded Last-Event-ID.
+  const firstEventId = async (headers: Record<string, string> = {}) => {
+    const response = await f.gatewayRaw(site.host, "GET", `${conversation}/events/stream`, {
+      visitor,
+      headers,
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const deadline = Date.now() + 10_000;
+    try {
+      while (Date.now() < deadline) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        const id = /^id: ?(\d+)$/mu.exec(text)?.[1];
+        if (id) return Number(id);
+      }
+      return null;
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  };
+  const fromStart = await firstEventId();
+  expect(fromStart).not.toBeNull();
+  expect(await firstEventId({ "last-event-id": String(fromStart) })).toBeGreaterThan(fromStart!);
 }, 60_000);
 
 test("version HTML is this Site's immutable bytes, without cookies; scanning is off by default", async () => {

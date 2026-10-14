@@ -494,6 +494,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "checkSiteHostname",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
+    "request": [],
+    "response": [
+      "SiteHostnameAvailability"
+    ]
+  },
+  {
     "id": "clearCodexAppsAccount",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/codex/apps",
@@ -2171,13 +2180,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
@@ -2201,20 +2203,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultItemSummary",
       "VaultSummary"
     ]
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/site-hostnames/:label",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/site-limit-profile",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
-    "request": [],
-    "response": []
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/slack-task-policy",
@@ -3215,6 +3203,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
     "request": [],
     "response": []
+  },
+  {
+    "id": "getSiteLimitProfile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [],
+    "response": [
+      "SiteLimitProfile"
+    ]
   },
   {
     "id": "getSlackUserLinkAccess",
@@ -5746,15 +5743,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "PUT /v1/workspaces/:workspaceId/site-limit-profile",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
-    "request": [
-      "SiteLimitProfile"
-    ],
-    "response": []
-  },
-  {
     "id": "PUT /v1/workspaces/:workspaceId/slack-task-policy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/slack-task-policy",
@@ -6735,6 +6723,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "sitePublicationPath",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "startApiIntegrationOAuth",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/oauth/start",
@@ -7668,6 +7663,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SiteAuthConnectionMutationResponse"
+    ]
+  },
+  {
+    "id": "updateSiteLimitProfile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [
+      "SiteLimitProfile"
+    ],
+    "response": [
+      "SiteLimitProfile"
     ]
   },
   {
