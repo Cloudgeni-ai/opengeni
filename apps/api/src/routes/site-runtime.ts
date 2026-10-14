@@ -47,6 +47,7 @@ import {
 } from "../site-data/operations";
 import type { PublishedSiteDataViewer } from "../site-data/service";
 import {
+  precheckSiteGatewayRequest,
   verifySiteGatewayRequest,
   type SiteGatewayFields,
 } from "../site-publishing/gateway-signature";
@@ -198,26 +199,31 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
     const url = new URL(context.req.url);
     const method = context.req.method.toUpperCase();
+    const secrets = [deps.settings.sitesGatewaySecret, deps.settings.sitesGatewaySecretPrevious];
+    const refuse = (reason: string) =>
+      sitePublishingError(
+        401,
+        "unauthenticated",
+        "site_gateway_signature_invalid",
+        "This request was not signed by the Site gateway",
+        { reason },
+      );
+    // The gateway signature first: nothing about the request is trusted before
+    // it. The header and clock checks run before the body is read.
+    const pre = precheckSiteGatewayRequest({ headers: context.req.raw.headers, secrets });
+    if (!pre.ok) throw refuse(pre.reason);
     const body =
       method === "GET" || method === "HEAD"
         ? new Uint8Array()
         : new Uint8Array(await context.req.arrayBuffer());
-    // The gateway signature first: nothing about the request is trusted before it.
     const verified = verifySiteGatewayRequest({
       method,
       pathWithQuery: `${url.pathname}${url.search}`,
       headers: context.req.raw.headers,
       body,
-      secrets: [deps.settings.sitesGatewaySecret, deps.settings.sitesGatewaySecretPrevious],
+      secrets,
     });
-    if (!verified.ok)
-      throw sitePublishingError(
-        401,
-        "unauthenticated",
-        "site_gateway_signature_invalid",
-        "This request was not signed by the Site gateway",
-        { reason: verified.reason },
-      );
+    if (!verified.ok) throw refuse(verified.reason);
     context.header("cache-control", "no-store");
     const runtime: RuntimeRequest = {
       context,

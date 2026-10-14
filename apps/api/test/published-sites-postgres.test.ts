@@ -471,6 +471,26 @@ test("site-runtime checks the gateway signature before anything else", async () 
   expect(unsigned.status).toBe(401);
   expect(code(unsigned)).toBe("site_gateway_signature_invalid");
   expect(reason(unsigned)).toBe("missing_headers");
+  // An unsigned body with a declared length is refused before it is read
+  // (chunked bodies are buffered by the API-wide body limit for every route).
+  const unread = await read(
+    await f.app.request("/v1/site-runtime/site/reports", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": "1048576" },
+      // highWaterMark 0: the stream is pulled only when something reads it.
+      body: new ReadableStream(
+        {
+          pull() {
+            throw new Error("the body must not be read before the signature headers are checked");
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      duplex: "half",
+    } as RequestInit),
+  );
+  expect(unread.status, JSON.stringify(unread.json)).toBe(401);
+  expect(reason(unread)).toBe("missing_headers");
 
   const foreign = await f.gateway(site.host, "GET", "/site/config", {
     visitor,

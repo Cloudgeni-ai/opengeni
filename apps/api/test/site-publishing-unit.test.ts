@@ -10,6 +10,7 @@ import { testSettings } from "@opengeni/testing";
 import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/content-scanner";
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";
 import {
+  precheckSiteGatewayRequest,
   signSiteGatewayRequest,
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
@@ -115,6 +116,18 @@ describe("gateway signature", () => {
   test("refuses signed requests that also carry app credentials", () => {
     for (const name of ["authorization", "cookie", "x-api-key", "x-opengeni-external-actor"])
       expect(verify({ ...signed(), [name]: "x" })).toEqual({ ok: false, reason: "credentials" });
+  });
+
+  test("the body-free precheck refuses missing headers and stale clocks", () => {
+    const precheck = (headers: Record<string, string>, secrets = [CURRENT, PREVIOUS]) =>
+      precheckSiteGatewayRequest({ headers: new Headers(headers), secrets });
+    expect(precheck(signed())).toMatchObject({ ok: true, host: "demo-1a2b.sites.example.test" });
+    expect(precheck({})).toEqual({ ok: false, reason: "missing_headers" });
+    expect(precheck(signed(CURRENT, { nowMs: Date.now() - 31_000 }))).toEqual({
+      ok: false,
+      reason: "skew",
+    });
+    expect(precheck(signed(), [])).toEqual({ ok: false, reason: "not_configured" });
   });
 });
 

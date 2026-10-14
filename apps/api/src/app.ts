@@ -4009,7 +4009,7 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     // The runner authenticates this protocol with its install-key proof, not
     // a browser cookie or the product-client revision header.
     pathname === "/v1/enrollments/renew" ||
-    // The Site gateway's signed protocol (OGSG1) carries its own version.
+    // The Site gateway's signed protocol carries its own signature version (v1).
     pathname.startsWith("/v1/site-runtime/")
   ) {
     return false;

@@ -78,14 +78,20 @@ function header(headers: Headers, name: string, max = 512): string | null {
   return value.length > max ? null : value;
 }
 
-export function verifySiteGatewayRequest(input: {
-  method: string;
-  pathWithQuery: string;
+type SiteGatewayPrecheck =
+  | { ok: true; secrets: string[]; signature: string; timestamp: number; host: string }
+  | Extract<SiteGatewayVerification, { ok: false }>;
+
+/**
+ * The checks that need no body: configuration, the signature headers and the
+ * timestamp window. The route runs this before it reads the body, so unsigned
+ * or replayed-late requests are refused without buffering it.
+ */
+export function precheckSiteGatewayRequest(input: {
   headers: Headers;
-  body: Uint8Array;
   secrets: readonly (string | undefined)[];
   nowMs?: number;
-}): SiteGatewayVerification {
+}): SiteGatewayPrecheck {
   const secrets = input.secrets.filter((secret): secret is string => Boolean(secret));
   if (secrets.length === 0) return { ok: false, reason: "not_configured" };
   const signature = header(input.headers, SITE_GATEWAY_SIGNATURE_HEADER, 128);
@@ -97,6 +103,20 @@ export function verifySiteGatewayRequest(input: {
   const now = Math.floor((input.nowMs ?? Date.now()) / 1000);
   if (Math.abs(now - timestamp) > SITE_GATEWAY_MAX_SKEW_SECONDS)
     return { ok: false, reason: "skew" };
+  return { ok: true, secrets, signature, timestamp, host };
+}
+
+export function verifySiteGatewayRequest(input: {
+  method: string;
+  pathWithQuery: string;
+  headers: Headers;
+  body: Uint8Array;
+  secrets: readonly (string | undefined)[];
+  nowMs?: number;
+}): SiteGatewayVerification {
+  const pre = precheckSiteGatewayRequest(input);
+  if (!pre.ok) return pre;
+  const { secrets, signature, timestamp, host } = pre;
   const session = header(input.headers, SITE_GATEWAY_SESSION_HEADER) ?? "";
   const visitor = header(input.headers, SITE_GATEWAY_VISITOR_HEADER) ?? "";
   const clientIp = header(input.headers, SITE_GATEWAY_CLIENT_IP_HEADER, 64) ?? "";
