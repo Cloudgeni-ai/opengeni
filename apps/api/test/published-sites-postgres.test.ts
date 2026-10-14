@@ -27,7 +27,7 @@ import {
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
+import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import {
@@ -258,8 +258,6 @@ async function fixture(overrides: Partial<Settings> = {}) {
     nowMs?: number;
     headers?: Record<string, string>;
     sendBody?: string;
-    /** Send the signed body hash header, as the gateway does. */
-    bodyHash?: boolean;
     on?: ReturnType<typeof appWith>;
   };
   /** A request signed as the gateway signs it; the raw response. */
@@ -282,7 +280,6 @@ async function fixture(overrides: Partial<Settings> = {}) {
       ...(options.human ? { human: true } : {}),
       clientIp: options.clientIp ?? "198.51.100.7",
       ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
-      ...(options.bodyHash ? { bodyHashHeader: true } : {}),
     });
     const sent = options.sendBody ?? body;
     return await (options.on ?? app).request(pathWithQuery, {
@@ -540,61 +537,79 @@ test("site-runtime checks the gateway signature before anything else", async () 
   });
   expect(stale.status).toBe(401);
   expect(reason(stale)).toBe("skew");
+  // The signature is checked from the headers before the body is read: the
+  // gateway signs the body hash and sends it as a header.
+  const reportPath = "/v1/site-runtime/site/reports";
+  const reportBody = JSON.stringify({ category: "spam" });
+  const unreadable = () =>
+    new ReadableStream(
+      {
+        pull() {
+          throw new Error("the body must not be read before the signature is checked");
+        },
+      },
+      { highWaterMark: 0 },
+    );
+  const signedReport = (secret: string) =>
+    signSiteGatewayRequest({
+      secret,
+      method: "POST",
+      pathWithQuery: reportPath,
+      host: site.host,
+      body: reportBody,
+      visitor,
+    });
+  const sendUnread = async (headers: Record<string, string>) =>
+    await read(
+      await f.app.request(reportPath, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-type": "application/json",
+          "content-length": String(reportBody.length),
+        },
+        body: unreadable(),
+        duplex: "half",
+      } as RequestInit),
+    );
+  const unreadSigned = await sendUnread(signedReport("f".repeat(40)));
+  expect(unreadSigned.status, JSON.stringify(unreadSigned.json)).toBe(401);
+  expect(reason(unreadSigned)).toBe("bad_signature");
+  // The body hash header is required: a correctly signed request without it
+  // is refused, still without reading the body.
+  const withoutHash = signedReport(SECRET);
+  delete withoutHash[SITE_GATEWAY_BODY_SHA256_HEADER];
+  const unhashed = await sendUnread(withoutHash);
+  expect(unhashed.status, JSON.stringify(unhashed.json)).toBe(401);
+  expect(reason(unhashed)).toBe("missing_headers");
+  for (const value of ["not-a-hash", sha256Hex(new Uint8Array()).toUpperCase(), "0".repeat(63)]) {
+    const malformed = await sendUnread({
+      ...signedReport(SECRET),
+      [SITE_GATEWAY_BODY_SHA256_HEADER]: value,
+    });
+    expect(malformed.status).toBe(401);
+    expect(reason(malformed)).toBe("bad_body_hash");
+  }
+  // A body other than the signed one fails after it is read; re-hashing the
+  // swapped body does not help, because the hash is signed.
+  const phishing = JSON.stringify({ category: "phishing" });
   const tampered = await f.gateway(site.host, "POST", "/site/reports", {
     body: { category: "spam" },
-    sendBody: JSON.stringify({ category: "phishing" }),
+    sendBody: phishing,
     visitor,
   });
   expect(tampered.status).toBe(401);
-  expect(reason(tampered)).toBe("bad_signature");
-  // With the signed body hash, the signature is checked before the body is
-  // read, and the body read afterwards must match the hash.
-  const reportPath = "/v1/site-runtime/site/reports";
-  const reportBody = JSON.stringify({ category: "spam" });
-  const unreadSigned = await read(
-    await f.app.request(reportPath, {
-      method: "POST",
-      headers: {
-        ...signSiteGatewayRequest({
-          secret: "f".repeat(40),
-          method: "POST",
-          pathWithQuery: reportPath,
-          host: site.host,
-          body: reportBody,
-          visitor,
-          bodyHashHeader: true,
-        }),
-        "content-type": "application/json",
-        "content-length": String(reportBody.length),
-      },
-      body: new ReadableStream(
-        {
-          pull() {
-            throw new Error("the body must not be read before the signature is checked");
-          },
-        },
-        { highWaterMark: 0 },
-      ),
-      duplex: "half",
-    } as RequestInit),
-  );
-  expect(unreadSigned.status, JSON.stringify(unreadSigned.json)).toBe(401);
-  expect(reason(unreadSigned)).toBe("bad_signature");
-  const swapped = await f.gateway(site.host, "POST", "/site/reports", {
+  expect(reason(tampered)).toBe("body_mismatch");
+  const rehashed = await f.gateway(site.host, "POST", "/site/reports", {
     body: { category: "spam" },
-    sendBody: JSON.stringify({ category: "phishing" }),
+    sendBody: phishing,
     visitor,
-    bodyHash: true,
+    headers: { [SITE_GATEWAY_BODY_SHA256_HEADER]: sha256Hex(new TextEncoder().encode(phishing)) },
   });
-  expect(swapped.status).toBe(401);
-  expect(reason(swapped)).toBe("body_mismatch");
-  const malformed = await f.gateway(site.host, "GET", "/site/config", {
-    visitor,
-    headers: { [SITE_GATEWAY_BODY_SHA256_HEADER]: "not-a-hash" },
-  });
-  expect(malformed.status).toBe(401);
-  expect(reason(malformed)).toBe("bad_signature");
-  const hashed = await f.gateway(site.host, "GET", "/site/config", { visitor, bodyHash: true });
+  expect(rehashed.status).toBe(401);
+  expect(reason(rehashed)).toBe("bad_signature");
+  // GET requests carry the hash of the empty body.
+  const hashed = await f.gateway(site.host, "GET", "/site/config", { visitor });
   expect(hashed.status, JSON.stringify(hashed.json)).toBe(200);
   // A signed request must not also carry app credentials.
   for (const headers of [

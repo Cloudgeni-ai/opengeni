@@ -11,9 +11,8 @@ import { testSettings } from "@opengeni/testing";
 import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/content-scanner";
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";
 import {
-  precheckSiteGatewayRequest,
-  sameBodySha256,
-  signedBodySha256,
+  sameSha256Hex,
+  sha256Hex,
   signSiteGatewayRequest,
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
@@ -52,7 +51,6 @@ function verify(
     method: "POST",
     pathWithQuery: PATH,
     headers: new Headers(headers),
-    body: new TextEncoder().encode('{"a":1}'),
     secrets: [CURRENT, PREVIOUS],
     ...overrides,
   });
@@ -86,6 +84,7 @@ describe("gateway signature", () => {
         clientIp: "203.0.113.9",
         human: false,
       },
+      bodySha256: sha256Hex(new TextEncoder().encode('{"a":1}')),
     });
     expect(verify(signed(PREVIOUS)).ok).toBe(true);
     expect(verify(signed(CURRENT, { human: true }))).toMatchObject({
@@ -105,10 +104,13 @@ describe("gateway signature", () => {
       ok: false,
       reason: "skew",
     });
-    // Body, path, method and viewer headers are all covered.
-    expect(verify(signed(), { body: new TextEncoder().encode('{"a":2}') })).toMatchObject({
-      reason: "bad_signature",
-    });
+    // The body hash, path, method and viewer headers are all covered.
+    expect(
+      verify({
+        ...signed(),
+        [SITE_GATEWAY_BODY_SHA256_HEADER]: sha256Hex(new TextEncoder().encode('{"a":2}')),
+      }),
+    ).toMatchObject({ reason: "bad_signature" });
     expect(verify(signed(), { pathWithQuery: `${PATH}?x=1` })).toMatchObject({
       reason: "bad_signature",
     });
@@ -132,39 +134,31 @@ describe("gateway signature", () => {
     });
   });
 
-  test("verifies the signed body hash before the body, then the body against it", () => {
-    const headers = new Headers(signed(CURRENT, { bodyHashHeader: true }));
-    const hash = signedBodySha256(headers);
-    expect(hash).toMatch(/^[0-9a-f]{64}$/u);
-    expect(verify(Object.fromEntries(headers), { body: { sha256: hash! } }).ok).toBe(true);
-    expect(sameBodySha256(new TextEncoder().encode('{"a":1}'), hash!)).toBe(true);
-    expect(sameBodySha256(new TextEncoder().encode('{"a":2}'), hash!)).toBe(false);
-    // A hash of another body, or no hash at all, does not verify.
-    expect(verify(signed(), { body: { sha256: "0".repeat(64) } })).toMatchObject({
-      reason: "bad_signature",
-    });
-    expect(verify(signed(), { body: { sha256: "" } })).toMatchObject({
-      reason: "bad_signature",
-    });
-    expect(signedBodySha256(new Headers(signed()))).toBeNull();
-    expect(signedBodySha256(new Headers({ [SITE_GATEWAY_BODY_SHA256_HEADER]: "ABC" }))).toBe("");
+  test("requires the signed body hash header, as lowercase hex", () => {
+    const headers = signed();
+    const hash = headers[SITE_GATEWAY_BODY_SHA256_HEADER]!;
+    expect(hash).toBe(sha256Hex(new TextEncoder().encode('{"a":1}')));
+    const withoutHash = { ...headers };
+    delete withoutHash[SITE_GATEWAY_BODY_SHA256_HEADER];
+    expect(verify(withoutHash)).toEqual({ ok: false, reason: "missing_headers" });
+    for (const value of ["", "ABC", hash.toUpperCase(), hash.slice(1), `${hash}0`])
+      expect(verify({ ...headers, [SITE_GATEWAY_BODY_SHA256_HEADER]: value })).toEqual({
+        ok: false,
+        reason: "bad_body_hash",
+      });
+    // GET and HEAD sign the hash of the empty body.
+    expect(signed(CURRENT, { body: "" })[SITE_GATEWAY_BODY_SHA256_HEADER]).toBe(
+      sha256Hex(new Uint8Array()),
+    );
+    // The body read afterwards is compared with the signed hash in constant time.
+    expect(sameSha256Hex(sha256Hex(new TextEncoder().encode('{"a":1}')), hash)).toBe(true);
+    expect(sameSha256Hex(sha256Hex(new TextEncoder().encode('{"a":2}')), hash)).toBe(false);
+    expect(sameSha256Hex("", hash)).toBe(false);
   });
 
   test("refuses signed requests that also carry app credentials", () => {
     for (const name of ["authorization", "cookie", "x-api-key", "x-opengeni-external-actor"])
       expect(verify({ ...signed(), [name]: "x" })).toEqual({ ok: false, reason: "credentials" });
-  });
-
-  test("the body-free precheck refuses missing headers and stale clocks", () => {
-    const precheck = (headers: Record<string, string>, secrets = [CURRENT, PREVIOUS]) =>
-      precheckSiteGatewayRequest({ headers: new Headers(headers), secrets });
-    expect(precheck(signed())).toMatchObject({ ok: true, host: "demo-1a2b.sites.example.test" });
-    expect(precheck({})).toEqual({ ok: false, reason: "missing_headers" });
-    expect(precheck(signed(CURRENT, { nowMs: Date.now() - 31_000 }))).toEqual({
-      ok: false,
-      reason: "skew",
-    });
-    expect(precheck(signed(), [])).toEqual({ ok: false, reason: "not_configured" });
   });
 });
 

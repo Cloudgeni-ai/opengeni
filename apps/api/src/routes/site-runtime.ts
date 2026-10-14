@@ -59,11 +59,8 @@ import {
 } from "../site-data/operations";
 import type { PublishedSiteDataViewer } from "../site-data/service";
 import {
-  precheckSiteGatewayRequest,
-  sameBodySha256,
-  signedBodySha256,
+  sameSha256Hex,
   verifySiteGatewayRequest,
-  type SiteGatewayVerification,
   type SiteGatewayFields,
 } from "../site-publishing/gateway-signature";
 import {
@@ -142,6 +139,8 @@ const MESSAGE_MAX_CHARS = 20_000;
 export const SITE_RUNTIME_JSON_BODY_LIMIT = 4 * 1024 * 1024;
 export const SITE_RUNTIME_FILE_BODY_LIMIT = 25 * 1024 * 1024;
 const FILE_UPLOAD_SUFFIX = "/published-artifacts/current/files";
+/** SHA-256 of the empty body: what the gateway signs for GET and HEAD. */
+const EMPTY_BODY_SHA256 = createHash("sha256").digest("hex");
 /** A version a publish or rollback replaced is still served this long (open pages keep loading). */
 export const SITE_VERSION_GRACE_SECONDS = 600;
 
@@ -229,14 +228,19 @@ function tooLarge(limit: number) {
 }
 
 /**
- * Read a request body of at most `limit` bytes: a larger declared length is
- * refused before reading, and the stream is cut off once it passes the cap.
+ * Read a request body of at most `limit` bytes, hashing it as it arrives: a
+ * larger declared length is refused before reading, and the stream is cut
+ * off once it passes the cap.
  */
-async function readCappedBody(request: Request, limit: number): Promise<Uint8Array> {
+async function readCappedBody(
+  request: Request,
+  limit: number,
+): Promise<{ body: Uint8Array; sha256: string }> {
+  const hash = createHash("sha256");
   const declared = request.headers.get("content-length")?.trim();
   if (declared && (!/^\d{1,15}$/u.test(declared) || Number(declared) > limit))
     throw tooLarge(limit);
-  if (!request.body) return new Uint8Array();
+  if (!request.body) return { body: new Uint8Array(), sha256: hash.digest("hex") };
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -249,6 +253,7 @@ async function readCappedBody(request: Request, limit: number): Promise<Uint8Arr
         await reader.cancel().catch(() => undefined);
         throw tooLarge(limit);
       }
+      hash.update(value);
       chunks.push(value);
     }
   } finally {
@@ -260,7 +265,7 @@ async function readCappedBody(request: Request, limit: number): Promise<Uint8Arr
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return body;
+  return { body, sha256: hash.digest("hex") };
 }
 
 /** Fields of a session a Site viewer sees: the conversation, not the workspace behind it. */
@@ -410,43 +415,26 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         { reason },
       );
     // The gateway signature first: nothing about the request is trusted before
-    // it. The header and clock checks run before the body is read, and so does
-    // the signature when the gateway sends the signed body hash; the body
-    // read afterwards must then match that hash.
+    // it. It is checked from the headers alone (the gateway signs the body
+    // hash and sends it as a header), so an unsigned request is refused
+    // before its body is read; the body is then read under the cap, hashed
+    // as it arrives, and must match the signed hash.
     const headers = context.req.raw.headers;
-    const pre = precheckSiteGatewayRequest({ headers, secrets });
-    if (!pre.ok) throw refuse(pre.reason);
+    const pathWithQuery = `${url.pathname}${url.search}`;
+    const verified = verifySiteGatewayRequest({ method, pathWithQuery, headers, secrets });
+    if (!verified.ok) throw refuse(verified.reason);
     const suffix = url.pathname.slice(SITE_RUNTIME_API_PREFIX.length);
-    const readBody = async () =>
+    const read =
       method === "GET" || method === "HEAD"
-        ? new Uint8Array()
+        ? { body: new Uint8Array(), sha256: EMPTY_BODY_SHA256 }
         : await readCappedBody(
             context.req.raw,
             method === "POST" && suffix === FILE_UPLOAD_SUFFIX
               ? SITE_RUNTIME_FILE_BODY_LIMIT
               : SITE_RUNTIME_JSON_BODY_LIMIT,
           );
-    const pathWithQuery = `${url.pathname}${url.search}`;
-    const signedSha256 = signedBodySha256(headers);
-    let body: Uint8Array;
-    let verified: SiteGatewayVerification;
-    if (signedSha256 !== null) {
-      verified = verifySiteGatewayRequest({
-        method,
-        pathWithQuery,
-        headers,
-        body: { sha256: signedSha256 },
-        secrets,
-      });
-      if (!verified.ok) throw refuse(verified.reason);
-      body = await readBody();
-      if (!sameBodySha256(body, signedSha256)) throw refuse("body_mismatch");
-    } else {
-      // Gateways that do not send the hash: read (capped), then verify.
-      body = await readBody();
-      verified = verifySiteGatewayRequest({ method, pathWithQuery, headers, body, secrets });
-      if (!verified.ok) throw refuse(verified.reason);
-    }
+    if (!sameSha256Hex(read.sha256, verified.bodySha256)) throw refuse("body_mismatch");
+    const body = read.body;
     context.header("cache-control", "no-store");
     const runtime: RuntimeRequest = {
       context,

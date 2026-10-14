@@ -16,9 +16,11 @@ import {
 /**
  * Verification of gateway-signed site-runtime requests. The gateway HMACs
  * `siteGatewayCanonicalString` with the shared secret; the API accepts the
- * current or the previous secret (rotation), within 30 s of its clock, over
- * the exact body bytes. Nothing else about the request is trusted before this
- * passes.
+ * current or the previous secret (rotation), within 30 s of its clock. The
+ * signed body hash travels in its own header, so the signature is checked
+ * from the headers alone, before the body is read; the route then hashes the
+ * body as it reads it and refuses a body that does not match. Nothing else
+ * about the request is trusted before this passes.
  */
 
 export type SiteGatewayFields = {
@@ -30,7 +32,12 @@ export type SiteGatewayFields = {
 };
 
 export type SiteGatewayVerification =
-  | { ok: true; fields: SiteGatewayFields }
+  | {
+      ok: true;
+      fields: SiteGatewayFields;
+      /** The signed hex SHA-256 the body read afterwards must match. */
+      bodySha256: string;
+    }
   | {
       ok: false;
       reason:
@@ -38,10 +45,13 @@ export type SiteGatewayVerification =
         | "missing_headers"
         | "bad_timestamp"
         | "skew"
+        | "bad_body_hash"
         | "bad_signature"
         | "body_mismatch"
         | "credentials";
     };
+
+const SHA256_HEX = /^[0-9a-f]{64}$/u;
 
 /** Request headers that carry Opengeni app credentials; site-runtime refuses them. */
 export const SITE_RUNTIME_REFUSED_HEADERS: readonly string[] = Object.freeze([
@@ -62,7 +72,7 @@ export function siteGatewaySignature(secret: string, canonical: string): string 
     .digest("base64url")}`;
 }
 
-function sameSignature(expected: string, presented: string): boolean {
+function sameText(expected: string, presented: string): boolean {
   const a = Buffer.from(expected, "utf8");
   const b = Buffer.from(presented, "utf8");
   // Equal-length compare; a length mismatch still spends a compare.
@@ -80,63 +90,33 @@ function header(headers: Headers, name: string, max = 512): string | null {
   return value.length > max ? null : value;
 }
 
-type SiteGatewayPrecheck =
-  | { ok: true; secrets: string[]; signature: string; timestamp: number; host: string }
-  | Extract<SiteGatewayVerification, { ok: false }>;
-
 /**
- * The checks that need no body: configuration, the signature headers and the
- * timestamp window. The route runs this before it reads the body, so unsigned
- * or replayed-late requests are refused without buffering it.
- */
-export function precheckSiteGatewayRequest(input: {
-  headers: Headers;
-  secrets: readonly (string | undefined)[];
-  nowMs?: number;
-}): SiteGatewayPrecheck {
-  const secrets = input.secrets.filter((secret): secret is string => Boolean(secret));
-  if (secrets.length === 0) return { ok: false, reason: "not_configured" };
-  const signature = header(input.headers, SITE_GATEWAY_SIGNATURE_HEADER, 128);
-  const timestampText = header(input.headers, SITE_GATEWAY_TIMESTAMP_HEADER, 16);
-  const host = header(input.headers, SITE_GATEWAY_HOST_HEADER, 253);
-  if (!signature || !timestampText || !host) return { ok: false, reason: "missing_headers" };
-  if (!/^\d{1,12}$/u.test(timestampText)) return { ok: false, reason: "bad_timestamp" };
-  const timestamp = Number(timestampText);
-  const now = Math.floor((input.nowMs ?? Date.now()) / 1000);
-  if (Math.abs(now - timestamp) > SITE_GATEWAY_MAX_SKEW_SECONDS)
-    return { ok: false, reason: "skew" };
-  return { ok: true, secrets, signature, timestamp, host };
-}
-
-/**
- * The signed body hash the gateway sent ahead of the body, or `null` when it
- * sent none. A malformed value is not a hash and fails the signature.
- */
-export function signedBodySha256(headers: Headers): string | null {
-  const value = header(headers, SITE_GATEWAY_BODY_SHA256_HEADER, 64);
-  if (value === null) return headers.has(SITE_GATEWAY_BODY_SHA256_HEADER) ? "" : null;
-  return /^[0-9a-f]{64}$/u.test(value) ? value : "";
-}
-
-/**
- * Verify a signed request. Pass the body when it has been read, or, before
- * reading it, the hash the gateway signed (`signedBodySha256`); the caller
- * then checks the body it reads with `sameBodySha256`.
+ * Verify a signed request from its headers alone; the body is not needed.
+ * On success the caller reads the body (capped) and checks it against
+ * `bodySha256` with `sameSha256Hex`, refusing a mismatch as `body_mismatch`.
  */
 export function verifySiteGatewayRequest(input: {
   method: string;
   pathWithQuery: string;
   headers: Headers;
-  body: Uint8Array | { sha256: string };
   secrets: readonly (string | undefined)[];
   nowMs?: number;
 }): SiteGatewayVerification {
-  const pre = precheckSiteGatewayRequest(input);
-  if (!pre.ok) return pre;
-  const { secrets, signature, timestamp, host } = pre;
-  const bodySha256 = input.body instanceof Uint8Array ? sha256Hex(input.body) : input.body.sha256;
-  // A malformed signed hash never verifies.
-  if (!/^[0-9a-f]{64}$/u.test(bodySha256)) return { ok: false, reason: "bad_signature" };
+  const secrets = input.secrets.filter((secret): secret is string => Boolean(secret));
+  if (secrets.length === 0) return { ok: false, reason: "not_configured" };
+  const signature = header(input.headers, SITE_GATEWAY_SIGNATURE_HEADER, 128);
+  const timestampText = header(input.headers, SITE_GATEWAY_TIMESTAMP_HEADER, 16);
+  const host = header(input.headers, SITE_GATEWAY_HOST_HEADER, 253);
+  const bodySha256 = input.headers.get(SITE_GATEWAY_BODY_SHA256_HEADER);
+  if (!signature || !timestampText || !host || bodySha256 === null)
+    return { ok: false, reason: "missing_headers" };
+  if (!/^\d{1,12}$/u.test(timestampText)) return { ok: false, reason: "bad_timestamp" };
+  const timestamp = Number(timestampText);
+  const now = Math.floor((input.nowMs ?? Date.now()) / 1000);
+  if (Math.abs(now - timestamp) > SITE_GATEWAY_MAX_SKEW_SECONDS)
+    return { ok: false, reason: "skew" };
+  // The hash must be lowercase hex, exactly as the gateway signs it.
+  if (!SHA256_HEX.test(bodySha256)) return { ok: false, reason: "bad_body_hash" };
   const session = header(input.headers, SITE_GATEWAY_SESSION_HEADER) ?? "";
   const visitor = header(input.headers, SITE_GATEWAY_VISITOR_HEADER) ?? "";
   const clientIp = header(input.headers, SITE_GATEWAY_CLIENT_IP_HEADER, 64) ?? "";
@@ -155,7 +135,7 @@ export function verifySiteGatewayRequest(input: {
   // Check every configured secret, so timing does not reveal which one matched.
   let matched = false;
   for (const secret of secrets)
-    matched = sameSignature(siteGatewaySignature(secret, canonical), signature) || matched;
+    matched = sameText(siteGatewaySignature(secret, canonical), signature) || matched;
   if (!matched) return { ok: false, reason: "bad_signature" };
   // Signed requests never carry app credentials; a request that does is refused.
   if (SITE_RUNTIME_REFUSED_HEADERS.some((name) => input.headers.has(name)))
@@ -163,12 +143,13 @@ export function verifySiteGatewayRequest(input: {
   return {
     ok: true,
     fields: { host: host.toLowerCase(), session, visitor, clientIp, human: human === "1" },
+    bodySha256,
   };
 }
 
-/** Whether `body` hashes to the signed hex digest, compared in constant time. */
-export function sameBodySha256(body: Uint8Array, signedSha256: string): boolean {
-  return sameSignature(sha256Hex(body), signedSha256);
+/** Whether two hex digests are equal, compared in constant time. */
+export function sameSha256Hex(actual: string, signed: string): boolean {
+  return sameText(actual, signed);
 }
 
 /** Sign a request as the gateway does (tests and local tools). */
@@ -183,8 +164,6 @@ export function signSiteGatewayRequest(input: {
   clientIp?: string;
   human?: boolean;
   nowMs?: number;
-  /** Also send the signed body hash header (the gateway does). */
-  bodyHashHeader?: boolean;
 }): Record<string, string> {
   const body =
     typeof input.body === "string"
@@ -197,16 +176,17 @@ export function signSiteGatewayRequest(input: {
     clientIp: input.clientIp ?? "",
     human: input.human ? "1" : "",
   };
+  const bodySha256 = sha256Hex(body);
   const canonical = siteGatewayCanonicalString({
     method: input.method,
     host: input.host,
     pathWithQuery: input.pathWithQuery,
     timestamp,
-    bodySha256: sha256Hex(body),
+    bodySha256,
     ...fields,
   });
   return {
-    ...(input.bodyHashHeader ? { [SITE_GATEWAY_BODY_SHA256_HEADER]: sha256Hex(body) } : {}),
+    [SITE_GATEWAY_BODY_SHA256_HEADER]: bodySha256,
     [SITE_GATEWAY_TIMESTAMP_HEADER]: String(timestamp),
     [SITE_GATEWAY_SIGNATURE_HEADER]: siteGatewaySignature(input.secret, canonical),
     [SITE_GATEWAY_HOST_HEADER]: input.host,

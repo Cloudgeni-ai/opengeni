@@ -191,21 +191,29 @@ request:
 - Requests that carry `Authorization`, `Proxy-Authorization`, `Cookie`,
   `X-Api-Key` or an external-actor header are refused.
 
-The signature headers and the timestamp are checked before the body is
-read. The gateway also sends `x-opengeni-gateway-body-sha256`, the
-lowercase hex SHA-256 it signs as `bodySha256`. With it, the API verifies
-the signature before reading the body, then refuses a body that does not
-match the hash. Without it (older gateways), the API reads the capped body
-first and verifies afterwards; once every gateway sends the header, that
-fallback can go.
+Every signed request also carries `x-opengeni-site-body-sha256`
+(`SITE_GATEWAY_BODY_SHA256_HEADER` in `@opengeni/contracts`): the lowercase
+hex SHA-256 the gateway signs as `bodySha256`, which is the hash of the empty
+string for `GET` and `HEAD`. The header is required, and there is no
+fallback. The API checks that it is 64 lowercase hex characters and verifies
+the signature from the headers alone, before reading the body. It then reads
+the body under the cap, hashing it as it arrives, and refuses a body that
+does not match the signed hash.
 
 Bodies are capped before they are read: 4 MiB for JSON and 25 MiB for
 `POST /published-artifacts/current/files` (the gateway's caps). A larger
 body returns 413 `site_request_too_large`.
 
 A failure returns `401 site_gateway_signature_invalid`, with
-`details.reason` set to `missing_headers`, `bad_timestamp`, `skew`,
-`bad_signature`, `body_mismatch` or `credentials`.
+`details.reason` set to one of:
+
+- `missing_headers`: the signature, timestamp, host or body hash header is
+  absent.
+- `bad_timestamp` or `skew`: the timestamp is malformed or outside the window.
+- `bad_body_hash`: the body hash header is not 64 lowercase hex characters.
+- `bad_signature`: no configured secret produces the signature.
+- `body_mismatch`: the body read does not hash to the signed value.
+- `credentials`: the request also carries app credentials.
 
 The gateway must sign the normalized path. A path with dot segments is
 normalized by the URL parser before verification, so it fails the
