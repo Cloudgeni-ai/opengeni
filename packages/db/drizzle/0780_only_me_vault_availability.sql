@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- An Only-me vault can be limited to some of its owner's workspaces, the same
 -- way an organization vault is. `allowed_workspace_ids` NULL keeps the vault
 -- available everywhere its owner works (every existing vault stays that way);
