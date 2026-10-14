@@ -244,7 +244,10 @@ with these refinements:
   the gateway's `SITE_DB` binding is used only by the internal route.
 - The API reaches the gateway at its own setting,
   `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN`, behind
-  `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`. The internal route answers on
+  `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED`. The flag only offers and runs
+  Site SQL; with the origin and secret configured, export, inspect and
+  dropping a database keep working after the flag is turned off, so data
+  can always leave. The internal route answers on
   any host the Worker serves; deployments should use a reserved label such as
   `internal.<sites domain>`. It accepts `GATEWAY_SECRET_PREVIOUS` for
   rotation, and the Durable Object refuses replayed request ids.
@@ -256,7 +259,17 @@ with these refinements:
   profiles use the free Site SQL numbers.
 - Schema changes go only through migrations: `site_sql_execute` refuses
   them, and a SQL import's schema statements are recorded as an
-  `import_<time>` migration so a rebuild reproduces them.
+  `import_<time>` migration so a rebuild reproduces them (triggers as a
+  second migration after the data). A Site's migrations hold at most 6 MiB
+  of SQL, and migrations travel to the Durable Object in bounded calls
+  (only the missing ones on migrate), so a rebuild always fits the
+  gateway's request limit.
+- Usage counters live in their own `site_sql_usage` row, and only Site page
+  calls count toward the monthly caps; management is metered as events
+  only. Exports come in cursor pieces of at most 16 MiB.
+- Postgres definitions cascade with the workspace; the Durable Objects are
+  dropped best effort after workspace deletion (a retry sweep is a
+  follow-up).
 
 ## Alternatives rejected
 

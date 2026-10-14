@@ -369,28 +369,47 @@ database can always be rebuilt; the Durable Object holds only the rows.
 The deployment enables it with `OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED=true`
 plus `OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN` (the gateway origin the API
 calls: `https://...`, or `http://` on loopback for local development) and
-`OPENGENI_SITES_GATEWAY_SECRET`. Missing any of them, every Site SQL call
-returns `unavailable` (503) and nothing else changes. Export keeps working
-while a Site's database is turned off, so data can always leave Cloudflare.
-Turning a Site's database off keeps its data.
+`OPENGENI_SITES_GATEWAY_SECRET`. Without the origin and secret, every Site
+SQL call returns `unavailable` (503), the agent tools are not offered, and
+nothing else changes. The flag only controls offering and running Site SQL
+(turning it on, migrations, keep-resets, imports, named queries and ad hoc
+statements): with the flag off but the origin and secret still set, export,
+inspect and `reset` with `schema: "drop"` keep working, so existing data can
+always leave Cloudflare or be deleted. Export also works while a Site's
+database is turned off; turning a Site's database off keeps its data.
 
 ### Definitions in Postgres
 
-Migration `0779_site_sql.sql` (placeholder ordinal) adds four
-workspace-owned FORCE-RLS tables, keyed and cascading like Site Data:
+Migration `0779_site_sql.sql` adds five workspace-owned FORCE-RLS tables,
+keyed and cascading like Site Data:
 
 - `site_sql_databases`: one row per Site that ever turned Site SQL on:
-  `enabled`, the month's rows read and written, the last reported database
-  size, and when it was last rebuilt.
+  `enabled`, the migration counter and when it was last rebuilt.
+- `site_sql_usage`: the Site's usage counters, in their own row so Site page
+  calls never wait on a migration holding the database row: the month's
+  rows read and written by Site pages, the last reported database size and
+  its high-water mark (storage growth is metered past the mark, so calls
+  finishing out of order never count the same bytes twice).
 - `site_sql_migrations`: the ordered, append-only schema migrations (name,
   SQL, checksum). The Durable Object records which ones it applied, so
   `migrate` and `reset` can replay the missing ones on an empty database.
+  A Site's migrations hold at most 6 MiB of SQL together (2M characters
+  each); past that `migrate` returns `quota_exceeded`
+  (`migration_bytes_per_site`). Load data with imports, not migrations.
 - `site_sql_queries`: named queries (name, one statement, parameter names,
   `read` or `write`, audience, row cap, description).
 - `site_sql_rate_windows`: per-minute call windows per viewer and per Site.
 
 The store is `packages/db/src/site-sql.ts`; `withSiteSqlDatabaseLock`
-serializes migrations and resets per Site.
+serializes migrations and resets per Site. A migration first asks the
+Durable Object which migrations it has and sends only the missing ones, in
+calls of at most 4 MiB; a keep-reset sends every migration in calls of at
+most 4 MiB, emptying the database only on the first.
+
+The Postgres rows cascade with their workspace. The Durable Objects do not:
+deleting a workspace notes its Site SQL databases first and then drops each
+one through the gateway (`reset`), best effort. A failure is logged with the
+Site id and the data stays in its Durable Object (see Follow-ups).
 
 ### Statements
 
@@ -424,8 +443,10 @@ query's audience:
 | Audience    | Who may run it from a Site page                                  |
 | ----------- | ---------------------------------------------------------------- |
 | `everyone`  | every viewer, including anonymous guests of public Sites         |
-| `signed_in` | (default) viewers who are signed in; guests get `forbidden`       |
+| `signed_in` | (default) viewers signed in as a person; guests, and service keys, agents or schedules acting on their own, get `forbidden` (`sign_in_required`) |
 | `managers`  | no Site page; only managers through tools and the API            |
+
+The Site's managers (outside a Site frame) may run every query.
 
 `:viewer` (the viewer's stable principal, such as `user:<id>` or
 `guest:<visitor>`), `:viewer_kind` and `:viewer_signed_in` (1 or 0) are bound
@@ -468,8 +489,8 @@ reports rows read, rows written and the database size, which the API meters.
 Managers (the Site's owner, workspace admins and agents acting for them) use
 `/v1/workspaces/:ws/published-artifacts/:artifactId/sql` (GET describe,
 PUT `/settings`, POST|PUT|DELETE `/queries/:name`, POST `/migrations`, `/query`,
-`/execute`, `/import`, `/reset`, GET `/inspect`, `/export?format=&table=`) and
-the matching agent tools:
+`/execute`, `/import`, `/reset`, GET `/inspect`,
+`/export?format=&table=&cursor=&maxBytes=`) and the matching agent tools:
 
 | Tool                    | Does                                                                  |
 | ----------------------- | --------------------------------------------------------------------- |
@@ -479,14 +500,36 @@ the matching agent tools:
 | `site_sql_define_query` | create, replace or delete a named query                                |
 | `site_sql_query`        | one read-only statement (also read-only PRAGMA and EXPLAIN)            |
 | `site_sql_execute`      | one write statement (schema changes go through migrations)             |
-| `site_sql_export`       | the database as SQL (schema plus INSERTs), one table as CSV, or JSON   |
-| `site_sql_import`       | SQL (schema statements become an `import_<time>` migration), CSV or JSON rows into a table |
+| `site_sql_export`       | the database as SQL (schema, multi-row INSERTs, then triggers), one table as CSV, or JSON, in pieces |
+| `site_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
 | `site_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
 
-Read tools need `artifacts:read`; the rest need `artifacts:publish`.
-Exports are capped at 16 MB per call (page by table for larger databases).
-CSV and JSON imports insert in chunks; a failure part way reports how many
-rows landed in `details.imported`.
+Every route and tool needs the manager role on the Site; read tools also
+need `artifacts:read` and the rest `artifacts:publish`. The tools are only
+registered when the gateway origin and secret are configured.
+
+Exports come in pieces: one response holds at most `maxBytes` (16 MiB at
+most; the agent tool defaults to 512 KB and allows 2 MB). When there is more,
+the HTTP route sets `X-OpenGeni-Export-Next-Cursor` (and
+`X-OpenGeni-Export-Truncated: true`), JSON exports also carry `nextCursor`,
+and the tool returns `nextCursor`: pass it back as `cursor` and append the
+pieces in order. Only the first piece holds the header (the SQL schema, the
+CSV header row, the JSON schema) and only the last SQL piece holds the
+triggers, so the pieces of a SQL export re-import one after another
+(`site_sql_import` takes at most 2 MB per call). SQL and JSON exports keep
+every value (JSON writes blobs as `{ "$base64": "..." }`, which JSON imports
+cannot load back yet, so SQL is the lossless round trip); CSV turns every
+value into text (an empty cell imports as NULL) and blobs into base64. SQL
+dumps write up to 500 rows per INSERT and
+keep each statement under the Durable Object's 100 KB statement limit; a
+single row larger than that needs a JSON export and import.
+
+SQL imports record their schema statements as a migration before the data
+(so a rebuild keeps them), run the data statements in batches, and record
+triggers as a second migration after the data, so triggers do not fire on
+imported rows. CSV and JSON imports insert in chunks. Batches that ran stay
+when a later one fails; the error reports `details.imported` and the
+migrations recorded (`details.migrations`).
 
 ### Limits and metering
 
@@ -508,10 +551,18 @@ rows landed in `details.imported`.
 `unlimited` lifts the monthly caps (5 GB storage, 600 calls per viewer and
 6,000 per Site per minute still apply), and `custom` profiles use the free
 Site SQL numbers. Managers share one window of 600 calls per minute per Site.
-Monthly caps are checked before each call, so the last call of a month can
-overshoot by its own rows. Every call records `site_sql.rows_read`,
-`site_sql.rows_written` and `site_sql.storage_growth_bytes` usage events
-(source resource `site`) in `usage_only` mode like Site Data.
+On published hosts, guests' write queries also count against the Site's
+guest write limit shared with Site Data
+(`OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE`).
+Monthly caps count only Site page calls (named queries) and are checked
+before each call, so the last call of a month can overshoot by its own rows.
+Management (export, inspect, migrations, resets, imports and ad hoc
+statements) is metered but neither counts toward nor stops at the monthly
+caps; the managers' call window and the storage cap bound it. Every call
+records `site_sql.rows_read`, `site_sql.rows_written` and
+`site_sql.storage_growth_bytes` usage events (source resource `site`) in
+`usage_only` mode like Site Data. Metering runs after the Durable Object
+answered; a metering failure is logged and does not fail the call.
 
 ## Tests
 
@@ -577,4 +628,5 @@ overshoot by its own rows. Every call records `site_sql.rows_read`,
   queries); custom limit profiles have no Site SQL fields; a Postgres commit
   failure after a migration applied leaves the database one migration ahead
   until the next reset; blobs cannot be imported from JSON; a console view
-  of the database.
+  of the database; retry or sweep Durable Objects whose drop after
+  workspace deletion failed (today they are only logged).

@@ -114,10 +114,13 @@ its own SQLite database (one Durable Object per Site) next to Site Data.
 Agents define the schema as migrations and the queries the Site may run;
 Site code calls them by name with `site.sql.run(name, params)` and never
 sends SQL. Each named query has an audience: `everyone` (guests too),
-`signed_in` (the default) or `managers` (never from a Site page).
+`signed_in` (the default; viewers signed in as a person) or `managers`
+(never from a Site page).
 Opengeni binds `:viewer` from the signed-in viewer or guest, so a Site
 cannot act as someone else. Data can always be exported as SQL, CSV or
-JSON, even while the database is turned off. Details and limits are in
+JSON (in pieces with a cursor for large databases), even while the database
+is turned off or after the deployment stops offering Site SQL, as long as
+the gateway origin and secret stay configured. Details and limits are in
 [Site Data: Site SQL](site-data.md#site-sql-optional-cloudflare-storage).
 
 ## Embedded agents

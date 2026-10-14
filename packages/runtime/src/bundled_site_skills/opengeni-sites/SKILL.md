@@ -410,7 +410,8 @@ Site HTML never sends SQL:
 3. `site_sql_define_query` for every query the page runs: exactly one
    SELECT, INSERT, UPDATE, DELETE or REPLACE (WITH allowed, not recursive),
    `:name` parameters only, and an `audience`: `everyone` (guests of public
-   Sites too), `signed_in` (default) or `managers` (never from the page).
+   Sites too), `signed_in` (default; viewers signed in as a person) or
+   `managers` (never from the page).
 
 `:viewer` (the viewer's stable id, such as `user:<id>` or `guest:<visitor>`),
 `:viewer_kind` and `:viewer_signed_in` are bound by Opengeni from the signed-in
@@ -448,10 +449,17 @@ keyset.
 Owner tools: `site_sql_inspect` (tables, migrations, pending migrations,
 queries, usage, limits), `site_sql_query` (one read-only statement),
 `site_sql_execute` (one write), `site_sql_export` (`sql`, `csv` for one table,
-or `json`; works while the database is off), `site_sql_import` (`sql`, `csv`
-or `json` rows into an existing table), and `site_sql_reset` (`confirm: true`;
+or `json`; works while the database is off; returns at most `maxBytes`,
+512 KB by default: while `nextCursor` is set, call again with it as `cursor`
+and keep the pieces in order), `site_sql_import` (`sql`, `csv` or `json` rows
+into an existing table, at most 2 MB per call; import the pieces of a large
+SQL export in order; triggers are added after the rows), and `site_sql_reset`
+(`confirm: true`;
 `schema: "keep"` empties and rebuilds from the migrations, `"drop"` forgets
-everything). Export before a reset when the data matters. Statements may not
+everything). Export before a reset when the data matters; SQL is the lossless
+format (CSV turns values into text). Keep migrations to schema: a Site's
+migrations hold at most 6 MB of SQL, so load data with `site_sql_import`.
+Statements may not
 use ATTACH, VACUUM, load_extension, transactions or PRAGMA writes, or name
 tables starting with `_cf_` or `_og_`.
 

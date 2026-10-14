@@ -18,7 +18,7 @@ Ask Opengeni, or use the tools directly:
 | Audience    | Who can run it from the Site                            |
 | ----------- | ------------------------------------------------------- |
 | `everyone`  | every viewer, including guests of public Sites          |
-| `signed_in` | signed-in viewers (the default)                         |
+| `signed_in` | viewers signed in as a person (the default)             |
 | `managers`  | nobody on the Site page; only managers and their agents |
 
 ```sql
@@ -42,12 +42,14 @@ Sites never send SQL; they can only run the named queries an owner defined. Erro
 
 ## Managing data
 
-`site_sql_inspect` shows tables, row counts, migrations, queries, usage and limits. `site_sql_query` and `site_sql_execute` run one statement for the owner. `site_sql_export` downloads the database as SQL, a table as CSV, or everything as JSON, even while the database is turned off; `site_sql_import` loads SQL, CSV or JSON. `site_sql_reset` empties the database and rebuilds the tables, or deletes everything.
+`site_sql_inspect` shows tables, row counts, migrations, queries, usage and limits. `site_sql_query` and `site_sql_execute` run one statement for the owner. `site_sql_export` downloads the database as SQL, a table as CSV, or everything as JSON, even while the database is turned off. Large exports come in pieces: pass the returned `nextCursor` back as `cursor` and keep the pieces in order. SQL keeps every value exactly; CSV turns values into text. `site_sql_import` loads SQL, CSV or JSON (up to 2 MB per call; import the pieces of a large SQL export in order). A SQL import adds its tables first, then the rows, then any triggers, so triggers do not fire on imported rows. `site_sql_reset` empties the database and rebuilds the tables, or deletes everything.
+
+Deleting a workspace also deletes its Sites' databases.
 
 Statements are checked: no `ATTACH`, no extensions, no `VACUUM`, no PRAGMA writes, and one statement per named query.
 
 ## Limits and usage
 
-On the free profile a Site's database holds up to 50 MB and reads 5 million and writes 100,000 rows a month. Each viewer can make 60 calls a minute and the Site 600, and one call returns at most 1,000 rows and 1 MB. The credits profile raises these. Self-hosted deployments change them with the `OPENGENI_SITES_SQL_*` settings. Rows read, rows written and storage are recorded for the workspace like Site Data; they are not charged yet.
+On the free profile a Site's database holds up to 50 MB, and the Site's pages read 5 million and write 100,000 rows a month. Each viewer can make 60 calls a minute and the Site 600, and one call returns at most 1,000 rows and 1 MB. Guests' writes also share the Site's guest write limit with Site Data. The credits profile raises these. The owner's own work (exports, imports, migrations and statements run with the tools) does not use up the monthly rows. A Site's migrations hold at most 6 MB of SQL; load data with imports instead. Self-hosted deployments change the limits with the `OPENGENI_SITES_SQL_*` settings. Rows read, rows written and storage are recorded for the workspace like Site Data; they are not charged yet.
 
 See [Site SQL internals](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/site-data.md#site-sql-optional-cloudflare-storage).
