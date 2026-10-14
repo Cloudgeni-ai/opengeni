@@ -161,6 +161,8 @@ export type BrowserExternalAuthDispatchResult = {
 
 export type BrowserCdpConnection = {
   onDisconnect?: (listener: () => void) => () => void;
+  /** Throws a definite error for a page this transport can never control. */
+  assertNavigable?: (url: string) => void;
   send<T = Record<string, unknown>>(
     method: string,
     params?: Readonly<Record<string, unknown>>,
@@ -473,6 +475,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let target: TargetInfo;
     if (this.targetLifecycle === "cdp") {
       connection = await this.ensureConnection();
+      if (deferNavigation) connection.assertNavigable?.(url);
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
         { url: "about:blank", background: true, ...this.contextScope() },
@@ -484,7 +487,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Attached Chrome's tab inventory may lag the creation receipt. Never
       // substitute another tab (even another blank tab) for the exact target
       // we created: the initial navigation would overwrite the user's page.
-      target = await this.waitForCreatedTargetInfo(connection, created.targetId);
+      try {
+        target = await this.waitForCreatedTargetInfo(connection, created.targetId);
+        this.selectedTargetId = target.targetId;
+        if (deferNavigation) await this.navigate(await this.ensureTargetState(target), url);
+        return await this.observe(target.targetId);
+      } catch (error) {
+        // The session never started, so nothing can use or close this tab.
+        await this.discardCreatedTarget(connection, created.targetId);
+        throw error;
+      }
     } else {
       connection = await this.ensureConnection();
       if (this.headlessSessionCookies) {
@@ -583,20 +595,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // Establish the blank document and target policies before remote navigation.
     // A slow response must use the navigation budget, not the target-creation deadline.
     const deferNavigation = url !== "about:blank";
+    if (deferNavigation) connection.assertNavigable?.(url);
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
       ...this.contextScope(),
       url: deferNavigation ? "about:blank" : url,
       background: true,
     });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
+    const previousSelection = this.selectedTargetId;
     const createdTarget = await this.waitForCreatedTargetInfo(connection, result.targetId);
     const createdState = await this.ensureTargetState(createdTarget);
     await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
     if (deferNavigation) {
-      await this.navigate(createdState, url);
+      try {
+        await this.navigate(createdState, url);
+      } catch (error) {
+        // A slow page may still finish loading in a tab the caller can list
+        // and select. Any other failure leaves a tab nobody asked for: the
+        // blank bootstrap document, or a page the browser will not let us
+        // control. The caller was told the open failed, so close it.
+        if (!isNavigationTimeout(error)) {
+          await this.discardCreatedTarget(connection, result.targetId);
+          if (this.selectedTargetId === result.targetId) this.selectedTargetId = previousSelection;
+        }
+        throw error;
+      }
     }
     return createdState;
+  }
+
+  private async discardCreatedTarget(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<void> {
+    this.removeState(targetId);
+    if (this.selectedTargetId === targetId) this.selectedTargetId = null;
+    try {
+      await connection.send("Target.closeTarget", { targetId });
+    } catch {
+      // Best effort: the tab may already be gone, and the original failure
+      // is what the caller needs to see.
+    }
   }
 
   async selectTarget(targetId: string): Promise<BrowserObservationValue> {
@@ -4303,6 +4343,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async navigate(state: TargetState, url: string): Promise<void> {
+    this.connection?.assertNavigable?.(url);
     const result = await this.sendActionTarget<{ errorText?: unknown }>(state, "Page.navigate", {
       url,
     });
@@ -5858,4 +5899,11 @@ async function ownedCdpProcessId(connection: BrowserCdpConnection): Promise<numb
     throw new Error("CDP endpoint does not identify the exact owned browser process");
   }
   return pid;
+}
+
+function isNavigationTimeout(error: unknown): boolean {
+  return (
+    error instanceof CdpCommandTimeoutError ||
+    (error instanceof InteractionDefiniteDriverError && error.code === "timeout")
+  );
 }
