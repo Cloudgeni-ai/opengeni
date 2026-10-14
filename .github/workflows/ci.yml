@@ -176,6 +176,7 @@ jobs:
             bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
             bun scripts/release/lockstep-version.ts
             bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
+            bun scripts/public-api/refresh-sdk-major.ts
             git add -A
             git diff --cached --check
           )
@@ -502,6 +503,7 @@ jobs:
               bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
               bun scripts/release/lockstep-version.ts
               bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
+              bun scripts/public-api/refresh-sdk-major.ts
               git add -A
               git diff --cached --check
             )
