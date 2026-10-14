@@ -12,6 +12,7 @@ import {
   SiteDataGetRequest,
   SiteDataQueryRequest,
   SiteDataWriteRequest,
+  SiteSqlRunRequest,
   SITE_GATEWAY_CALLBACK_PATH,
   SITE_RUNTIME_API_PREFIX,
   SITE_TOOL_METHODS,
@@ -87,7 +88,9 @@ import {
   signedInSiteViewerKind,
   type SiteRuntimeViewer,
 } from "../site-publishing/viewer";
+import { runSiteSqlQuery } from "../site-sql/service";
 import { siteDataHttpError } from "./site-data";
+import { runSiteSqlRoute } from "./site-sql";
 
 /**
  * `/v1/site-runtime/*`: the API a Site gateway calls for one published Site
@@ -508,10 +511,57 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       case "data.patch":
       case "data.delete":
         return await siteData(request, host, viewer, limits.guestWritesPerMinute);
+      case "sql.run":
+        return await siteSql(request, host, viewer);
       default:
         if (id.startsWith("sessions.")) return await sessions(request, id, host, viewer, limits);
         throw unsupported();
     }
+  };
+
+  /** This Site's viewer (`user:<subject>` or `guest:<visitor>`) as Site Data and Site SQL see it. */
+  const publishedViewer = (
+    host: SiteRuntimeHost & { versionId: string },
+    viewer: SiteRuntimeViewer,
+  ): PublishedSiteDataViewer => ({
+    kind: "published_viewer",
+    accountId: host.scope.accountId,
+    workspaceId: host.scope.workspaceId,
+    site: {
+      id: host.site.id,
+      title: host.site.title,
+      status: host.site.status,
+      visibility: host.site.visibility,
+      ownerSubjectId: host.site.ownerSubjectId,
+      createdBySubjectId: host.site.createdBySubjectId,
+    },
+    principal: viewer.principal,
+    guest: viewer.kind === "guest",
+  });
+
+  /**
+   * Site SQL: run one named query of this Site as the viewer. The query's
+   * audience decides who may run it (guests only `everyone`), and `:viewer`
+   * is bound from this viewer; the Site never sends SQL.
+   */
+  const siteSql = async (
+    request: RuntimeRequest,
+    host: SiteRuntimeHost & { versionId: string },
+    viewer: SiteRuntimeViewer,
+  ): Promise<Response> => {
+    const name = /^\/published-artifacts\/current\/sql\/queries\/([^/]+)$/u.exec(
+      request.suffix,
+    )?.[1];
+    if (request.method !== "POST" || !name) throw unsupported();
+    const input = parseJson(request.body, SiteSqlRunRequest);
+    const siteId = host.site.id;
+    return request.context.json(
+      await runSiteSqlRoute(() =>
+        runSiteSqlQuery(deps, publishedViewer(host, viewer), siteId, name, input.params ?? {}, {
+          frameSiteId: siteId,
+        }),
+      ),
+    );
   };
 
   /** Site Data and files of this Site, as the viewer (`user:<subject>` or `guest:<visitor>`). */
@@ -523,21 +573,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   ): Promise<Response> => {
     const { context, method, url } = request;
     const path = request.suffix.slice("/published-artifacts/current".length);
-    const authority: PublishedSiteDataViewer = {
-      kind: "published_viewer",
-      accountId: host.scope.accountId,
-      workspaceId: host.scope.workspaceId,
-      site: {
-        id: host.site.id,
-        title: host.site.title,
-        status: host.site.status,
-        visibility: host.site.visibility,
-        ownerSubjectId: host.site.ownerSubjectId,
-        createdBySubjectId: host.site.createdBySubjectId,
-      },
-      principal: viewer.principal,
-      guest: viewer.kind === "guest",
-    };
+    const authority = publishedViewer(host, viewer);
     const siteId = host.site.id;
     const surface = { frameSiteId: siteId };
     const guestWrite = async () => {

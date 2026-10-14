@@ -5,13 +5,13 @@
  * (Miniflare) through the signed internal route.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { AccessGrant } from "@opengeni/contracts";
+import { SITE_GATEWAY_CALLBACK_PATH, type AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import {
   createDb,
@@ -30,11 +30,13 @@ import {
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import { signSiteDbRequest } from "../src/site-sql/gateway";
 import { siteSqlLimits, siteSqlTransport } from "../src/site-sql/service";
 
 const SECRET = "site-sql-gateway-secret-0123456789abcdef";
 const ORIGIN = "https://internal.sites.test";
+const DOMAIN = "sites.example.test";
 const GATEWAY_DIR = resolve(import.meta.dir, "../../site-gateway");
 
 let shared: SharedTestDatabase;
@@ -101,7 +103,7 @@ const SQL_SETTINGS: Partial<Settings> = {
   sitesCloudflareStorageEnabled: true,
   sitesGatewayInternalOrigin: ORIGIN,
   sitesGatewaySecret: SECRET,
-} as Partial<Settings>;
+};
 
 type Who = { subjectId: string; grant: AccessGrant; headers: Record<string, string> };
 
@@ -216,6 +218,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
   };
   const owner = await person(memberPermissions);
   const member = await person(memberPermissions);
+  const admin = await person([...memberPermissions, "workspace:admin"]);
   await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
     values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'site-sql-test')`;
   await shared.admin`insert into organization_private_session_settings (account_id, enabled, version, updated_by_membership_id)
@@ -269,7 +272,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
         request(who, "POST", `/queries/${name}`, { params }, framed ? frame : {}),
     };
   };
-  return { app, deps, settings, accountId, workspace, owner, member, publish, sql };
+  return { app, deps, settings, accountId, workspace, owner, member, admin, base, publish, sql };
 }
 
 const code = (result: { json: any }) => result.json?.error?.details?.code;
@@ -550,6 +553,157 @@ test("free, credits and unlimited profiles shape the limits", () => {
   });
   expect(siteSqlLimits(settings, "custom")).toEqual(free);
 });
+
+test("published hosts run named queries as the verified viewer; guests only everyone", async () => {
+  const f = await fixture({ ...SQL_SETTINGS, sitesDomain: DOMAIN });
+  const siteId = await f.publish("Lunch poll");
+  const s = f.sql(siteId);
+  expect((await s.enable(f.owner)).status).toBe(200);
+  expect(
+    (
+      await s.migrate(
+        f.owner,
+        "create_votes",
+        "CREATE TABLE votes (poll TEXT NOT NULL, voter TEXT NOT NULL, choice TEXT NOT NULL, PRIMARY KEY (poll, voter));",
+      )
+    ).status,
+  ).toBe(201);
+  for (const [name, definition] of [
+    [
+      "cast_vote",
+      {
+        sql: "INSERT INTO votes (poll, voter, choice) VALUES (:poll, :viewer, :choice) ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice",
+      },
+    ],
+    [
+      "results",
+      {
+        sql: "SELECT choice, count(*) AS votes FROM votes WHERE poll = :poll GROUP BY choice ORDER BY choice",
+        audience: "everyone",
+      },
+    ],
+    ["my_vote", { sql: "SELECT choice, :viewer_kind AS kind FROM votes WHERE voter = :viewer" }],
+    ["everything", { sql: "SELECT * FROM votes", audience: "managers" }],
+  ] as const) {
+    const defined = await s.define(f.owner, name, definition);
+    expect({ name, status: defined.status }).toEqual({ name, status: 201 });
+  }
+
+  const published = await f.app.request(`${f.base}/${siteId}/publication`, {
+    method: "PUT",
+    headers: f.owner.headers,
+    body: JSON.stringify({ access: "public" }),
+  });
+  expect(published.status, await published.clone().text()).toBe(201);
+  const host = String(((await published.json()) as { hostname: string }).hostname);
+
+  /** A request signed as the gateway signs it. */
+  const gateway = async (
+    method: string,
+    path: string,
+    options: { body?: unknown; visitor?: string; session?: string } = {},
+  ) => {
+    const pathWithQuery = `/v1/site-runtime${path}`;
+    const body = options.body === undefined ? "" : JSON.stringify(options.body);
+    const signed = signSiteGatewayRequest({
+      secret: SECRET,
+      method,
+      pathWithQuery,
+      host,
+      body,
+      ...(options.visitor ? { visitor: options.visitor } : {}),
+      ...(options.session ? { session: options.session } : {}),
+      clientIp: "198.51.100.7",
+    });
+    const response = await f.app.request(pathWithQuery, {
+      method,
+      headers: { ...signed, ...(body ? { "content-type": "application/json" } : {}) },
+      ...(body ? { body } : {}),
+    });
+    return { status: response.status, json: (await response.json().catch(() => null)) as any };
+  };
+  const run = (name: string, params: Record<string, unknown>, who: Record<string, string>) =>
+    gateway("POST", `/published-artifacts/current/sql/queries/${name}`, {
+      body: { params },
+      ...who,
+    });
+
+  // A signed-in viewer: sign in on the host, then vote as themselves.
+  const verifier = randomBytes(32).toString("base64url");
+  const authorized = await f.app.request("/v1/site-auth/authorize", {
+    method: "POST",
+    headers: f.member.headers,
+    body: JSON.stringify({
+      host,
+      state: randomBytes(16).toString("base64url"),
+      codeChallenge: createHash("sha256").update(verifier).digest("base64url"),
+      codeChallengeMethod: "S256",
+      redirectUri: `https://${host}${SITE_GATEWAY_CALLBACK_PATH}`,
+    }),
+  });
+  expect(authorized.status, await authorized.clone().text()).toBe(200);
+  const authCode = new URL(
+    ((await authorized.json()) as { redirectTo: string }).redirectTo,
+  ).searchParams.get("code");
+  const exchanged = await gateway("POST", "/auth/exchange", {
+    body: {
+      code: authCode,
+      codeVerifier: verifier,
+      redirectUri: `https://${host}${SITE_GATEWAY_CALLBACK_PATH}`,
+    },
+  });
+  expect(exchanged.status, JSON.stringify(exchanged.json)).toBe(200);
+  const signedIn = { session: String(exchanged.json.sessionToken) };
+  const guest = { visitor: randomBytes(18).toString("base64url") };
+
+  const voted = await run("cast_vote", { poll: "lunch", choice: "tacos" }, signedIn);
+  expect(voted.status, JSON.stringify(voted.json)).toBe(200);
+  // SQLite counts the row and its primary-key index entry.
+  expect(voted.json.rowsWritten).toBeGreaterThanOrEqual(1);
+  const mine = await run("my_vote", {}, signedIn);
+  expect(mine.json.rows).toEqual([{ choice: "tacos", kind: "user" }]);
+
+  // Guests run only `everyone` queries and never supply the viewer.
+  const results = await run("results", { poll: "lunch" }, guest);
+  expect(results.status, JSON.stringify(results.json)).toBe(200);
+  expect(results.json.rows).toEqual([{ choice: "tacos", votes: 1 }]);
+  const guestVote = await run("cast_vote", { poll: "lunch", choice: "soup" }, guest);
+  expect(guestVote.status).toBe(403);
+  expect(guestVote.json.error.details).toMatchObject({
+    code: "forbidden",
+    reason: "sign_in_required",
+  });
+  const guestMine = await run("my_vote", {}, guest);
+  expect(guestMine.status).toBe(403);
+  const spoofed = await run("results", { poll: "lunch", viewer: "user:someone-else" }, guest);
+  expect(spoofed.status).toBe(422);
+  expect(spoofed.json.error.details).toMatchObject({ code: "validation", param: "viewer" });
+  // Managers-only queries never run from a Site page, signed in or not.
+  expect((await run("everything", {}, signedIn)).status).toBe(403);
+  expect((await run("missing", {}, signedIn)).status).toBe(404);
+  // Only the allowlisted operation reaches Site SQL from a Site.
+  const listQueries = await gateway("GET", "/published-artifacts/current/sql", signedIn);
+  expect(listQueries.status).toBe(404);
+
+  // The stored voter is the verified principal, not anything the page sent.
+  const stored = await s.request(f.owner, "POST", "/query", { sql: "SELECT voter FROM votes" });
+  expect(stored.json.rows).toEqual([{ voter: `user:${f.member.subjectId}` }]);
+
+  // The publication's limit profile decides the Site SQL limits.
+  expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
+    rowsReadPerSitePerMonth: 5_000_000,
+  });
+  const unlimited = await f.app.request(`${f.base}/${siteId}/publication`, {
+    method: "PUT",
+    headers: f.admin.headers,
+    body: JSON.stringify({ limitProfile: { kind: "unlimited" } }),
+  });
+  expect(unlimited.status, await unlimited.clone().text()).toBe(200);
+  expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
+    rowsReadPerSitePerMonth: null,
+    rowsWrittenPerSitePerMonth: null,
+  });
+}, 120_000);
 
 test("the gateway refuses internal calls the API did not sign", async () => {
   const body = JSON.stringify({ requestId: crypto.randomUUID() });

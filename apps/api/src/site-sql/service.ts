@@ -25,6 +25,7 @@ import {
   type SiteSqlResetResponse,
   type SiteSqlRunResponse,
   type SiteSqlValue,
+  type SiteLimitProfileKind,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -34,6 +35,8 @@ import {
   deleteSiteSqlQuery,
   getSiteSqlDatabase,
   getSiteSqlQuery,
+  getSitePublication,
+  getWorkspaceSiteLimitProfile,
   listSiteSqlMigrations,
   listSiteSqlQueries,
   markSiteSqlRebuilt,
@@ -51,6 +54,7 @@ import {
   type SiteSqlStoredQuery,
 } from "@opengeni/db";
 import { parseSiteDataCsv } from "../site-data/operations";
+import { sourceSiteLimitProfile } from "../site-publishing/limits";
 import {
   resolveSiteDataAccess,
   type SiteDataAccess,
@@ -174,10 +178,11 @@ export type SiteSqlLimitSettings = Pick<
   | "sitesSqlFreeCallsPerMinutePerSite"
   | "sitesSqlMaxRowsPerCall"
   | "sitesSqlMaxResponseBytes"
-> & { sitesCreditsLimitMultiplier?: number };
+  | "sitesCreditsLimitMultiplier"
+>;
 
 /** The limit profile kinds of published Sites (docs/published-sites.md). */
-export type SiteSqlProfileKind = "free" | "credits" | "unlimited" | "custom";
+export type SiteSqlProfileKind = SiteLimitProfileKind;
 
 /** Flood brakes that hold under every profile, including unlimited. */
 export const SITE_SQL_FLOOD_BRAKES = Object.freeze({
@@ -222,7 +227,7 @@ export function siteSqlLimits(
     ...common,
   };
   if (kind === "credits") {
-    const factor = settings.sitesCreditsLimitMultiplier ?? 10;
+    const factor = settings.sitesCreditsLimitMultiplier;
     return {
       ...free,
       storageBytesPerSite: brake(
@@ -254,14 +259,20 @@ export function siteSqlLimits(
 }
 
 /**
- * The limit profile in force for a Site. Published Sites keep profiles in
- * Postgres; until a Site has one, it gets the free profile.
+ * The limit profile in force for a Site, the same one published Sites use:
+ * the Site's own profile, else the workspace default, else free. Sites that
+ * were never published have no profile of their own.
  */
-export const siteSqlProfileSource: {
-  kind: (deps: SiteSqlDeps, scope: SiteSqlScope) => Promise<SiteSqlProfileKind>;
-} = {
-  kind: async () => "free",
-};
+export async function siteSqlProfileKind(
+  deps: Pick<SiteSqlDeps, "db">,
+  scope: SiteSqlScope,
+): Promise<SiteSqlProfileKind> {
+  const publishing = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+  const publication = await getSitePublication(deps.db, publishing, scope.siteId);
+  const site = publication?.limitProfile ?? null;
+  const workspace = site ? null : await getWorkspaceSiteLimitProfile(deps.db, publishing);
+  return sourceSiteLimitProfile(site, workspace).kind;
+}
 
 // ---------------------------------------------------------------------------
 // Access
@@ -320,7 +331,7 @@ async function requireDatabase(
 }
 
 async function limitsFor(deps: SiteSqlDeps, scope: SiteSqlScope): Promise<SiteSqlLimits> {
-  return siteSqlLimits(deps.settings, await siteSqlProfileSource.kind(deps, scope));
+  return siteSqlLimits(deps.settings, await siteSqlProfileKind(deps, scope));
 }
 
 /** Count a call against the caller's windows before any work. */
