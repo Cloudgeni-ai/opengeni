@@ -31,9 +31,9 @@ Each organization subscription account has its own page.
 - Models it can serve: "All models, including new ones" also covers models the
   provider adds later. "Only the models I choose" keeps new models off until
   someone adds them.
-- Use for new work: when off, the account is not picked for new chats or
-  schedules. Work already running continues. Use this to retire an account
-  gently.
+- Enable account: when off, the account shows as Disabled and is not picked for
+  new chats or schedules. Turning it off won't interrupt running work. Use this
+  to retire an account gently. It doesn't pause or cancel the provider plan.
 - Use extra credits: allows paid extra credits after the plan's included usage
   runs out. Spread work uses other accounts' included usage first. Usage updates
   can lag, so a request may still use credits shortly after this is turned off.
