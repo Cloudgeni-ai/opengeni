@@ -166,7 +166,9 @@ export function VaultPage({
         Rename
       </DropdownMenuItem>,
     );
-  if (vault.ownerKind === "organization" && canManageAvailability)
+  // The route decides who may choose (organization admins, and an Only-me
+  // vault's owner); the page only shows the entry when it is allowed.
+  if (canManageAvailability)
     menuItems.push(
       <DropdownMenuItem key="availability" onSelect={actions.editAvailability}>
         <UsersIcon aria-hidden="true" />
