@@ -4,6 +4,9 @@ import {
   isPlainJsonObject,
   parseSiteDataPath,
   readSiteDataPath,
+  siteDataGuestMayCreate,
+  siteDataGuestModifyReach,
+  siteDataGuestReadReach,
   siteDataMayCreate,
   siteDataModifyReach,
   siteDataReadReach,
@@ -11,6 +14,7 @@ import {
   writeSiteDataPath,
   SITE_DATA_ACCESS_MODES,
   SITE_DATA_COLLECTION_NAME,
+  SITE_DATA_GUEST_ACCESS,
   SITE_DATA_DEFAULT_PAGE,
   SITE_DATA_MAX_BATCH,
   SITE_DATA_MAX_FILTERS,
@@ -25,6 +29,8 @@ import {
   SITE_DATA_MAX_UNIQUE_SETS,
   SITE_DATA_RECORD_OVERHEAD_BYTES,
   type SiteDataAccessMode,
+  type SiteDataGuestAccess,
+  type SiteDataReach,
   type SiteDataRole,
 } from "./site-data-policy";
 
@@ -65,6 +71,12 @@ export type SiteDataCaller = SiteDataScope & {
   principal: string;
   actor: string;
   framed: boolean;
+  /**
+   * An anonymous guest of a published Site (`guest:<visitor>`): a framed
+   * viewer that reaches only what each collection's guest rule allows, and
+   * no files.
+   */
+  guest?: boolean;
 };
 
 /** Each started 5 ms of schema validation counts one more write operation. */
@@ -124,6 +136,8 @@ export type SiteDataCollectionDefinition = {
   name: string;
   accessMode: SiteDataAccessMode;
   privateRecords?: boolean;
+  /** Omitted keeps the current rule (none for a new collection). */
+  guestAccess?: SiteDataGuestAccess;
   jsonSchema?: Record<string, unknown> | null;
   indexedFields?: string[];
   uniqueFields?: string[][];
@@ -134,6 +148,7 @@ export type SiteDataCollection = {
   name: string;
   accessMode: SiteDataAccessMode;
   privateRecords: boolean;
+  guestAccess: SiteDataGuestAccess;
   jsonSchema: Record<string, unknown> | null;
   indexedFields: string[];
   uniqueFields: string[][];
@@ -339,6 +354,7 @@ type CollectionRow = {
   name: string;
   access_mode: SiteDataAccessMode;
   private_records: boolean;
+  guest_access?: SiteDataGuestAccess | null;
   json_schema: Record<string, unknown> | null;
   indexed_fields: string[];
   unique_fields: string[][];
@@ -400,6 +416,7 @@ function toCollection(row: CollectionRow): SiteDataCollection {
     name: row.name,
     accessMode: row.access_mode,
     privateRecords: row.private_records,
+    guestAccess: row.guest_access ?? "none",
     jsonSchema: row.json_schema ?? null,
     indexedFields: Array.isArray(row.indexed_fields) ? row.indexed_fields : [],
     uniqueFields: Array.isArray(row.unique_fields) ? row.unique_fields : [],
@@ -476,7 +493,9 @@ function validationError(message: string, details: Record<string, unknown> = {})
 /** Validate and normalize a collection definition. */
 export function normalizeSiteDataCollectionDefinition(
   definition: SiteDataCollectionDefinition,
-): Required<SiteDataCollectionDefinition> {
+): Required<Omit<SiteDataCollectionDefinition, "guestAccess">> & {
+  guestAccess?: SiteDataGuestAccess;
+} {
   if (!SITE_DATA_COLLECTION_NAME.test(definition.name ?? ""))
     throw validationError(
       "Collection names start with a letter and use letters, digits, - or _ (up to 64)",
@@ -486,6 +505,11 @@ export function normalizeSiteDataCollectionDefinition(
   const privateRecords = definition.privateRecords === true;
   if (privateRecords && definition.accessMode !== "per_viewer")
     throw validationError("Only per_viewer collections can keep records private");
+  if (
+    definition.guestAccess !== undefined &&
+    !SITE_DATA_GUEST_ACCESS.includes(definition.guestAccess)
+  )
+    throw validationError(`Guest access must be one of ${SITE_DATA_GUEST_ACCESS.join(", ")}`);
   const jsonSchema = definition.jsonSchema ?? null;
   if (jsonSchema !== null) {
     if (!isPlainJsonObject(jsonSchema)) throw validationError("jsonSchema must be an object");
@@ -512,6 +536,7 @@ export function normalizeSiteDataCollectionDefinition(
     name: definition.name,
     accessMode: definition.accessMode,
     privateRecords,
+    ...(definition.guestAccess === undefined ? {} : { guestAccess: definition.guestAccess }),
     jsonSchema,
     indexedFields,
     uniqueFields,
@@ -825,12 +850,45 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     return rows[0] ? toCollection(rows[0]) : null;
   };
 
-  const requireCollection = async (tx: Database, scope: SiteDataScope, name: string) => {
+  const requireCollection = async (
+    tx: Database,
+    scope: SiteDataScope & { guest?: boolean },
+    name: string,
+  ) => {
     if (typeof name !== "string" || !SITE_DATA_COLLECTION_NAME.test(name))
       throw new SiteDataError("not_found", `Collection ${String(name)} does not exist`);
     const collection = await loadCollection(tx, scope, name);
     if (!collection) throw new SiteDataError("not_found", `Collection ${name} does not exist`);
+    // Guests see only collections the owner opened to them.
+    if (scope.guest === true && collection.guestAccess === "none")
+      throw new SiteDataError("forbidden", `Guests cannot use ${name}; sign in to continue`, {
+        reason: "guest_access",
+      });
     return collection;
+  };
+
+  /** Read reach for this caller: guests by the collection's guest rule. */
+  const readReach = (caller: SiteDataCaller, collection: SiteDataCollection): SiteDataReach =>
+    caller.guest === true
+      ? siteDataGuestReadReach(collection, collection.guestAccess)
+      : siteDataReadReach(collection, caller.role);
+
+  const mayCreate = (caller: SiteDataCaller, collection: SiteDataCollection): boolean =>
+    caller.guest === true
+      ? siteDataGuestMayCreate(collection, collection.guestAccess)
+      : siteDataMayCreate(collection, caller.role);
+
+  const modifyReach = (caller: SiteDataCaller, collection: SiteDataCollection): SiteDataReach =>
+    caller.guest === true
+      ? siteDataGuestModifyReach(collection, collection.guestAccess)
+      : siteDataModifyReach(collection, caller.role);
+
+  /** Guests never reach Site Data files. */
+  const refuseGuestFiles = (caller: SiteDataCaller) => {
+    if (caller.guest === true)
+      throw new SiteDataError("forbidden", "Sign in to use this Site's files", {
+        reason: "guest_access",
+      });
   };
 
   /**
@@ -1182,9 +1240,10 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     return rows[0] ?? null;
   };
 
-  const readable = (caller: SiteDataCaller, collection: SiteDataCollection, row: RecordRow) =>
-    siteDataReadReach(collection, caller.role) === "all" ||
-    row.owner_principal === caller.principal;
+  const readable = (caller: SiteDataCaller, collection: SiteDataCollection, row: RecordRow) => {
+    const reach = readReach(caller, collection);
+    return reach === "all" || (reach === "own" && row.owner_principal === caller.principal);
+  };
 
   /** Turn a malformed cursor's value errors into validation, never a 500. */
   const withCursorErrors = async <T>(hasCursor: boolean, run: () => Promise<T>): Promise<T> => {
@@ -1321,10 +1380,11 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           const [row] = await rawRows<CollectionRow>(
             tx,
             sql`insert into site_data_collections
-                (account_id, workspace_id, site_id, name, access_mode, private_records, json_schema,
-                 indexed_fields, unique_fields, created_by, updated_by)
+                (account_id, workspace_id, site_id, name, access_mode, private_records, guest_access,
+                 json_schema, indexed_fields, unique_fields, created_by, updated_by)
               values (${caller.accountId}, ${caller.workspaceId}, ${caller.siteId}, ${definition.name},
                 ${definition.accessMode}, ${definition.privateRecords},
+                ${definition.guestAccess ?? "none"},
                 ${definition.jsonSchema === null ? null : JSON.stringify(definition.jsonSchema)}::jsonb,
                 ${JSON.stringify(definition.indexedFields)}::jsonb,
                 ${JSON.stringify(definition.uniqueFields)}::jsonb, ${caller.actor}, ${caller.actor})
@@ -1348,6 +1408,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           sql`update site_data_collections set
               access_mode = ${definition.accessMode},
               private_records = ${definition.privateRecords},
+              guest_access = ${definition.guestAccess ?? existing.guestAccess},
               json_schema = ${definition.jsonSchema === null ? null : JSON.stringify(definition.jsonSchema)}::jsonb,
               indexed_fields = ${JSON.stringify(definition.indexedFields)}::jsonb,
               unique_fields = ${JSON.stringify(definition.uniqueFields)}::jsonb,
@@ -1420,7 +1481,11 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     async query(caller, query) {
       return scoped(caller, async (tx) => {
         const collection = await requireCollection(tx, caller, query.collection);
-        const reach = siteDataReadReach(collection, caller.role);
+        const reach = readReach(caller, collection);
+        if (reach === "none")
+          throw new SiteDataError("forbidden", `You cannot read ${collection.name}`, {
+            reason: "guest_access",
+          });
         const scope =
           query.scope ??
           (caller.framed && siteDataScopedPerViewer(collection.accessMode) ? "own" : "all");
@@ -1619,7 +1684,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
           data: Record<string, unknown>,
           index: number,
         ) => {
-          if (!siteDataMayCreate(collection, caller.role))
+          if (!mayCreate(caller, collection))
             throw new SiteDataError(
               "forbidden",
               `Only the Site's managers can add to ${collection.name}`,
@@ -1657,7 +1722,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
         ) => {
           const row = await findRecord(tx, caller, collection, ref, true);
           if (!row || !readable(caller, collection, row)) return null;
-          const modify = siteDataModifyReach(collection, caller.role);
+          const modify = modifyReach(caller, collection);
           if (modify === "none" || (modify === "own" && row.owner_principal !== caller.principal))
             throw new SiteDataError(
               "forbidden",
@@ -1868,6 +1933,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async listFiles(caller, options = {}) {
+      refuseGuestFiles(caller);
       return scoped(caller, async (tx) => {
         const limit = Math.min(
           Math.max(1, Math.trunc(options.limit ?? 100) || 100),
@@ -1900,6 +1966,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async getFile(caller, fileId) {
+      refuseGuestFiles(caller);
       if (!UUID.test(fileId)) return null;
       return scoped(caller, async (tx) => {
         const [row] = await rawRows<FileRow>(
@@ -1919,6 +1986,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async checkFileQuota(caller, sizeBytes, limits) {
+      refuseGuestFiles(caller);
       await scoped(caller, async (tx) => {
         const [row] = await rawRows<UsageRow>(
           tx,
@@ -1930,6 +1998,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async insertFile(caller, file, options) {
+      refuseGuestFiles(caller);
       return scoped(caller, async (tx) => {
         const usage = await lockUsage(tx, caller);
         await assertWritableSite(tx, caller);
@@ -1956,6 +2025,7 @@ export function createPostgresSiteDataStore(db: Database): SiteDataStore {
     },
 
     async deleteFile(caller, fileId) {
+      refuseGuestFiles(caller);
       if (!UUID.test(fileId)) throw new SiteDataError("not_found", "File not found");
       return scoped(caller, async (tx) => {
         await lockUsage(tx, caller);
