@@ -9,10 +9,21 @@ import { siteDataCsvCell } from "../site-data/operations";
  * Site SQL export and import formats, so a Site's data can always leave
  * Cloudflare: a SQL dump (schema, then INSERT statements), CSV for one table,
  * and JSON rows per table. Blobs travel as `{ "$base64": "..." }` in JSON,
- * X'..' literals in SQL and base64 text in CSV.
+ * X'..' literals in SQL and base64 text in CSV. SQL and JSON keep every value
+ * as stored; CSV turns every value into text (an empty cell is NULL on
+ * import) and blobs into base64.
  */
 
 export type SiteSqlExportTable = { name: string; columns: string[]; rows: unknown[][] };
+
+/** Rows per INSERT statement of a SQL dump. */
+export const SITE_SQL_INSERT_ROWS = 500;
+/**
+ * Most bytes per INSERT statement of a SQL dump: Durable Object SQLite
+ * refuses statements over 100 KB. A single row past this still gets its own
+ * statement (and needs a JSON import to load back).
+ */
+export const SITE_SQL_INSERT_BYTES = 90_000;
 
 function isBlob(value: unknown): value is { $base64: string } {
   return (
@@ -33,6 +44,14 @@ export function siteSqlLiteral(value: unknown): string {
   return `'${text.replaceAll("'", "''")}'`;
 }
 
+/** Schema entries that belong to one table (its own entry, its indexes and triggers), or all. */
+export function siteSqlSchemaEntries(
+  schema: readonly SiteDbSchemaEntry[],
+  table?: string,
+): SiteDbSchemaEntry[] {
+  return table === undefined ? [...schema] : schema.filter((entry) => entry.table === table);
+}
+
 /** The schema statements of a dump, tables first, each ending with a semicolon. */
 export function siteSqlSchemaStatements(schema: readonly SiteDbSchemaEntry[]): string[] {
   const order = { table: 0, view: 1, index: 2, trigger: 3 } as const;
@@ -42,16 +61,35 @@ export function siteSqlSchemaStatements(schema: readonly SiteDbSchemaEntry[]): s
     .map((entry) => `${entry.sql!.trim().replace(/;+$/u, "")};`);
 }
 
-/** INSERT statements for one exported page of a table. */
+/**
+ * INSERT statements for one exported page of a table: up to
+ * SITE_SQL_INSERT_ROWS rows and SITE_SQL_INSERT_BYTES bytes each, one
+ * statement per line.
+ */
 export function siteSqlInsertStatements(table: SiteSqlExportTable): string[] {
   if (table.rows.length === 0) return [];
   const columns = table.columns.map(quoteSiteSqlIdentifier).join(", ");
-  return table.rows.map(
-    (row) =>
-      `INSERT INTO ${quoteSiteSqlIdentifier(table.name)} (${columns}) VALUES (${row
-        .map(siteSqlLiteral)
-        .join(", ")});`,
-  );
+  const head = `INSERT INTO ${quoteSiteSqlIdentifier(table.name)} (${columns}) VALUES `;
+  const headBytes = Buffer.byteLength(head, "utf8") + 1;
+  const statements: string[] = [];
+  let tuples: string[] = [];
+  let bytes = headBytes;
+  for (const row of table.rows) {
+    const tuple = `(${row.map(siteSqlLiteral).join(", ")})`;
+    const size = Buffer.byteLength(tuple, "utf8") + 2;
+    if (
+      tuples.length > 0 &&
+      (tuples.length >= SITE_SQL_INSERT_ROWS || bytes + size > SITE_SQL_INSERT_BYTES)
+    ) {
+      statements.push(`${head}${tuples.join(", ")};`);
+      tuples = [];
+      bytes = headBytes;
+    }
+    tuples.push(tuple);
+    bytes += size;
+  }
+  if (tuples.length > 0) statements.push(`${head}${tuples.join(", ")};`);
+  return statements;
 }
 
 /** A CSV cell for an exported value (formula-safe, like Site Data exports). */

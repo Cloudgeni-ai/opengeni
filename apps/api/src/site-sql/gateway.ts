@@ -35,17 +35,31 @@ export type SiteSqlGatewaySettings = Pick<
   | "sitesSqlTimeoutMs"
 >;
 
-/** The gateway to call, or null when Site SQL is not configured on this deployment. */
+/**
+ * The gateway to call, or null when no gateway origin and secret are
+ * configured. This alone lets the API reach Durable Objects that already
+ * exist (export, inspect, dropping data); offering Site SQL also needs the
+ * flag (siteSqlOffered).
+ */
 export function siteSqlGatewayConfig(
   settings: SiteSqlGatewaySettings,
 ): SiteSqlGatewayConfig | null {
-  if (!settings.sitesCloudflareStorageEnabled) return null;
   if (!settings.sitesGatewayInternalOrigin || !settings.sitesGatewaySecret) return null;
   return {
     origin: new URL(settings.sitesGatewayInternalOrigin).origin,
     secret: settings.sitesGatewaySecret,
     timeoutMs: settings.sitesSqlTimeoutMs,
   };
+}
+
+/**
+ * Whether this deployment offers Site SQL: the flag is on and the gateway is
+ * configured. Turning it on, migrating, rebuilding, importing and running
+ * SQL need this; export, inspect and dropping a database only need the
+ * gateway.
+ */
+export function siteSqlOffered(settings: SiteSqlGatewaySettings): boolean {
+  return settings.sitesCloudflareStorageEnabled && siteSqlGatewayConfig(settings) !== null;
 }
 
 /** A refusal or failure from the gateway or the Durable Object. */

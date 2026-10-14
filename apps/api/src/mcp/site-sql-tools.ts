@@ -32,6 +32,9 @@ const NameInput = z4
   .string()
   .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
   .describe("A letter, then letters, digits, - or _ (up to 64).");
+/** Export pieces through the tool stay small, so they fit in an agent's context. */
+const SITE_SQL_TOOL_EXPORT_DEFAULT_BYTES = 512 * 1024;
+const SITE_SQL_TOOL_EXPORT_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
  * First-party Site SQL tools: optional per-Site Cloudflare storage (one SQLite
@@ -75,8 +78,18 @@ export function registerSiteSqlTools(
     },
     call(async ({ siteId }: { siteId: string }) => {
       const described = await describeSiteSql(deps, grant, siteId);
-      if (!described.available || !described.enabled) return { ...described, database: null };
-      return { ...described, database: await inspectSiteSql(deps, grant, siteId) };
+      // The database is inspectable whenever it exists and the gateway is
+      // configured, also while Site SQL is off or no longer offered.
+      try {
+        return { ...described, database: await inspectSiteSql(deps, grant, siteId) };
+      } catch (error) {
+        if (
+          error instanceof SiteSqlError &&
+          (error.code === "unavailable" || error.code === "disabled")
+        )
+          return { ...described, database: null };
+        throw error;
+      }
     }),
   );
 
@@ -220,7 +233,7 @@ export function registerSiteSqlTools(
     "site_sql_export",
     {
       description:
-        "Export a Site's database so its data can always leave Cloudflare: sql (schema and INSERT statements, ready for site_sql_import or any SQLite), csv (one table) or json (schema and rows per table). Bounded at 16 MB; check truncated.",
+        "Export a Site's database so its data can always leave Cloudflare: sql (schema, multi-row INSERT statements, then triggers; ready for site_sql_import or any SQLite), csv (one table; values become text) or json (schema and rows per table). SQL and JSON keep every value. One call returns at most maxBytes (default 512 KB); when nextCursor is set, call again with it as cursor and append the pieces in order (only the first piece has the schema or CSV header, only the last SQL piece has the triggers). Works while Site SQL is off.",
       inputSchema: {
         siteId: SiteIdInput,
         format: SiteSqlExportFormat.optional().describe("sql (default), csv or json."),
@@ -229,6 +242,19 @@ export function registerSiteSqlTools(
           .regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u)
           .optional()
           .describe("Only this table (required for csv)."),
+        cursor: z4
+          .string()
+          .min(1)
+          .max(4096)
+          .optional()
+          .describe("nextCursor from the previous piece, to continue the export."),
+        maxBytes: z4
+          .number()
+          .int()
+          .min(1024)
+          .max(SITE_SQL_TOOL_EXPORT_MAX_BYTES)
+          .optional()
+          .describe("Most bytes of this piece (default 512 KB, at most 2 MB)."),
       },
     },
     call(
@@ -236,15 +262,23 @@ export function registerSiteSqlTools(
         siteId: string;
         format?: "sql" | "csv" | "json" | undefined;
         table?: string | undefined;
+        cursor?: string | undefined;
+        maxBytes?: number | undefined;
       }) => {
         const exported = await exportSiteSql(deps, grant, args.siteId, {
           format: args.format ?? "sql",
           ...(args.table ? { table: args.table } : {}),
+          ...(args.cursor ? { cursor: args.cursor } : {}),
+          maxBytes: Math.min(
+            args.maxBytes ?? SITE_SQL_TOOL_EXPORT_DEFAULT_BYTES,
+            SITE_SQL_TOOL_EXPORT_MAX_BYTES,
+          ),
         });
         return {
           format: args.format ?? "sql",
           filename: exported.filename,
           truncated: exported.truncated,
+          nextCursor: exported.nextCursor,
           content: exported.content,
         };
       },
@@ -255,7 +289,7 @@ export function registerSiteSqlTools(
     "site_sql_import",
     {
       description:
-        "Import data into a Site's database. sql: statements run together; any schema statements in it (CREATE TABLE ...) are recorded as a migration first. csv: a header row of column names, then rows, into an existing table (an empty cell is NULL). json: rows as objects keyed by column, into an existing table. onConflict (csv, json): fail (default), replace or ignore.",
+        "Import data into a Site's database (at most 2 MB per call). sql: schema statements (CREATE TABLE, INDEX, VIEW) are recorded as a migration first, the data statements run in batches, and triggers are recorded as a second migration after the data so they do not fire on imported rows; import the pieces of a large site_sql_export in order. csv: a header row of column names, then rows, into an existing table (an empty cell is NULL). json: rows as objects keyed by column, into an existing table. onConflict (csv, json): fail (default), replace or ignore. When a batch fails, earlier batches stay; the error says how much landed and which migration was recorded.",
       inputSchema: contractToolInput(
         z4.object({ siteId: SiteIdInput, ...SiteSqlImportRequest.shape }),
       ),

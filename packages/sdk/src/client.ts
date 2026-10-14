@@ -8585,23 +8585,44 @@ export class OpenGeniClient {
     );
   }
 
-  /** Export a Site's SQL database as SQL, CSV (one table) or JSON (bounded; check `truncated`). */
+  /**
+   * Export a Site's SQL database as SQL, CSV (one table) or JSON. One call
+   * returns at most `maxBytes` (16 MiB at most); when `nextCursor` is set,
+   * call again with it as `cursor` and append the pieces in order.
+   */
   async exportSiteSql(
     workspaceId: string,
     siteId: string,
-    options: { format?: SiteSqlExportFormat; table?: string; signal?: AbortSignal } = {},
-  ): Promise<{ content: string; contentType: string; truncated: boolean }> {
+    options: {
+      format?: SiteSqlExportFormat;
+      table?: string;
+      cursor?: string;
+      maxBytes?: number;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<{
+    content: string;
+    contentType: string;
+    truncated: boolean;
+    nextCursor: string | null;
+  }> {
     const format = options.format ?? "sql";
     const response = await this.requestResponse(
       "GET",
       `${siteDataPath(workspaceId, siteId)}/sql/export`,
-      { format, ...(options.table ? { table: options.table } : {}) },
+      {
+        format,
+        ...(options.table ? { table: options.table } : {}),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(options.maxBytes !== undefined ? { maxBytes: String(options.maxBytes) } : {}),
+      },
       { ...options, accept: format === "json" ? "application/json" : "*/*" },
     );
     return {
       content: await response.text(),
       contentType: response.headers.get("content-type") ?? "",
       truncated: response.headers.get("x-opengeni-export-truncated") === "true",
+      nextCursor: response.headers.get("x-opengeni-export-next-cursor") || null,
     };
   }
 

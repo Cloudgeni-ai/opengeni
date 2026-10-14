@@ -801,6 +801,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Event-Mode",
       "X-OpenGeni-Event-Result",
       "X-OpenGeni-Event-Result-Mode",
+      "X-OpenGeni-Export-Next-Cursor",
+      "X-OpenGeni-Export-Truncated",
       "X-OpenGeni-Forensic-Exact",
       "X-OpenGeni-Has-More",
       "X-OpenGeni-Next-After",

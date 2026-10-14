@@ -6,6 +6,7 @@ import {
   signDelegatedAccessToken,
   siteHostname,
   type Permission,
+  type SiteLimitProfileKind,
   type SiteLimits,
 } from "@opengeni/contracts";
 import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
@@ -29,7 +30,7 @@ import {
   type SiteRuntimeRateBucket,
 } from "@opengeni/db";
 import type { SiteGatewayFields } from "./gateway-signature";
-import { effectiveSiteLimits } from "./limits";
+import { effectiveSiteLimits, sourceSiteLimitProfile } from "./limits";
 import { siteLimitInputs, sitePublishingError, siteServable } from "./service";
 import {
   effectiveSiteAccess,
@@ -159,8 +160,19 @@ export async function siteRuntimeLimits(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
 ): Promise<SiteLimits> {
+  return (await siteRuntimeLimitProfile(deps, host)).limits;
+}
+
+/** The Site's effective limits and the kind of limit profile they come from. */
+export async function siteRuntimeLimitProfile(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+): Promise<{ limits: SiteLimits; kind: SiteLimitProfileKind }> {
   const profiles = await siteLimitInputs(deps, host.scope, host.publication);
-  return effectiveSiteLimits(deps.settings, profiles.site, profiles.workspace);
+  return {
+    limits: effectiveSiteLimits(deps.settings, profiles.site, profiles.workspace),
+    kind: sourceSiteLimitProfile(profiles.site, profiles.workspace).kind,
+  };
 }
 
 /** Count one operation in a per-minute bucket; 429 with Retry-After past `limit` (null: no limit). */

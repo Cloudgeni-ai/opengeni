@@ -32,7 +32,13 @@ import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import { signSiteDbRequest } from "../src/site-sql/gateway";
-import { siteSqlLimits, siteSqlTransport } from "../src/site-sql/service";
+import {
+  dropSiteSqlDatabases,
+  siteSqlAudienceRefusal,
+  siteSqlLimits,
+  siteSqlSitesOfWorkspace,
+  siteSqlTransport,
+} from "../src/site-sql/service";
 
 const SECRET = "site-sql-gateway-secret-0123456789abcdef";
 const ORIGIN = "https://internal.sites.test";
@@ -391,6 +397,8 @@ test("owners define a schema and named queries; Site pages run them as viewers",
   expect(code(await s.request(f.owner, "POST", "/execute", { sql: "DROP TABLE votes" }))).toBe(
     "validation",
   );
+  const pageWrites = (await s.request(f.owner, "GET", "")).json.usage.rowsWrittenThisMonth;
+  expect(pageWrites).toBeGreaterThanOrEqual(3);
   const updated = await s.request(f.owner, "POST", "/execute", {
     sql: "UPDATE votes SET at = 1",
   });
@@ -407,7 +415,9 @@ test("owners define a schema and named queries; Site pages run them as viewers",
     "site_sql.storage_growth_bytes",
   ]);
   const described = await s.request(f.owner, "GET", "");
-  expect(described.json.usage.rowsWrittenThisMonth).toBeGreaterThanOrEqual(5);
+  // Only Site page calls count toward the monthly caps; the owner's ad hoc
+  // UPDATE (like the migration) is metered as events only.
+  expect(described.json.usage.rowsWrittenThisMonth).toBe(pageWrites);
   expect(described.json.usage.storageBytes).toBeGreaterThan(0);
   expect(described.json.queries.map((query: any) => [query.name, query.mode])).toEqual([
     ["cast", "write"],
@@ -440,7 +450,8 @@ test("owners define a schema and named queries; Site pages run them as viewers",
     .filter((line) => line.startsWith("INSERT"))
     .join("\n");
   const restored = await s.request(f.owner, "POST", "/import", { format: "sql", sql: dataOnly });
-  expect(restored.json).toMatchObject({ imported: 2, migration: null });
+  // One multi-row INSERT holds both rows.
+  expect(restored.json).toMatchObject({ imported: 1, migration: null, migrations: [] });
   expect((await s.run(f.member, "tally")).json.rows).toEqual([{ choice: "coffee", n: 2 }]);
   const fromCsv = await s.request(f.owner, "POST", "/import", {
     format: "csv",
@@ -469,6 +480,7 @@ test("owners define a schema and named queries; Site pages run them as viewers",
   const full = await s.request(f.owner, "POST", "/import", { format: "sql", sql: dump.text });
   expect(full.status, full.text).toBe(200);
   expect(full.json.migration).toMatch(/^import_/u);
+  expect(full.json.migrations).toEqual([full.json.migration]);
   const inspected = await s.request(f.owner, "GET", "/inspect");
   expect(inspected.json.tables.map((table: any) => [table.name, table.rowCount])).toEqual([
     ["votes", 2],
@@ -485,23 +497,28 @@ test("limits refuse past the monthly write cap and the storage cap", async () =>
   await s.enable(f.owner);
   await s.migrate(f.owner, "init", "CREATE TABLE notes (body TEXT);");
   await s.define(f.owner, "add", { sql: "INSERT INTO notes (body) VALUES (:body)" });
-  // Every row counts, the migration's own included; calls stop once the cap is reached.
+  // Every row a Site page writes counts (the migration does not); calls stop once the cap is reached.
   let accepted = 0;
   let capped = await s.run(f.member, "add", { body: "first" });
   while (capped.status === 200 && accepted < 20) {
     accepted += 1;
     capped = await s.run(f.member, "add", { body: `row ${accepted}` });
   }
-  expect(accepted).toBeGreaterThan(0);
-  expect(accepted).toBeLessThanOrEqual(12);
+  expect(accepted).toBe(12);
   expect((await s.request(f.owner, "GET", "")).json.usage.rowsWrittenThisMonth).toBe(12);
   expect({ status: capped.status, code: code(capped) }).toEqual({
     status: 413,
     code: "quota_exceeded",
   });
   expect(capped.json.error.details.quota).toBe("rows_written_per_month");
-  // Exports still work past the cap.
+  // Exports and the owner's own management still work past the cap, without counting toward it.
   expect((await s.request(f.owner, "GET", "/export?format=json")).status).toBe(200);
+  const managed = await s.request(f.owner, "POST", "/execute", {
+    sql: "UPDATE notes SET body = upper(body)",
+  });
+  expect(managed.status, managed.text).toBe(200);
+  expect(managed.json.rowsWritten).toBeGreaterThan(0);
+  expect((await s.request(f.owner, "GET", "")).json.usage.rowsWrittenThisMonth).toBe(12);
 
   const g = await fixture({
     ...SQL_SETTINGS,
@@ -555,7 +572,11 @@ test("free, credits and unlimited profiles shape the limits", () => {
 });
 
 test("published hosts run named queries as the verified viewer; guests only everyone", async () => {
-  const f = await fixture({ ...SQL_SETTINGS, sitesDomain: DOMAIN });
+  const f = await fixture({
+    ...SQL_SETTINGS,
+    sitesDomain: DOMAIN,
+    sitesFreeGuestWritesPerMinute: 2,
+  } as Partial<Settings>);
   const siteId = await f.publish("Lunch poll");
   const s = f.sql(siteId);
   expect((await s.enable(f.owner)).status).toBe(200);
@@ -584,6 +605,13 @@ test("published hosts run named queries as the verified viewer; guests only ever
     ],
     ["my_vote", { sql: "SELECT choice, :viewer_kind AS kind FROM votes WHERE voter = :viewer" }],
     ["everything", { sql: "SELECT * FROM votes", audience: "managers" }],
+    [
+      "sign_guestbook",
+      {
+        sql: "INSERT INTO votes (poll, voter, choice) VALUES ('guestbook', :viewer, :note) ON CONFLICT (poll, voter) DO UPDATE SET choice = excluded.choice",
+        audience: "everyone",
+      },
+    ],
   ] as const) {
     const defined = await s.define(f.owner, name, definition);
     expect({ name, status: defined.status }).toEqual({ name, status: 201 });
@@ -688,6 +716,16 @@ test("published hosts run named queries as the verified viewer; guests only ever
   // The stored voter is the verified principal, not anything the page sent.
   const stored = await s.request(f.owner, "POST", "/query", { sql: "SELECT voter FROM votes" });
   expect(stored.json.rows).toEqual([{ voter: `user:${f.member.subjectId}` }]);
+
+  // Guests' write queries share the Site's guest write limit with Site Data.
+  expect((await run("sign_guestbook", { note: "hi" }, guest)).status).toBe(200);
+  expect((await run("sign_guestbook", { note: "hello" }, guest)).status).toBe(200);
+  const flooded = await run("sign_guestbook", { note: "again" }, guest);
+  expect(flooded.status, JSON.stringify(flooded.json)).toBe(429);
+  expect(flooded.json.error.details).toMatchObject({ bucket: "guest_writes" });
+  // Reads and signed-in writes are not guest writes.
+  expect((await run("results", { poll: "lunch" }, guest)).status).toBe(200);
+  expect((await run("sign_guestbook", { note: "member" }, signedIn)).status).toBe(200);
 
   // The publication's limit profile decides the Site SQL limits.
   expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
@@ -849,6 +887,14 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
     expect(inspected.queries[0]).toMatchObject({ name: "recent", params: ["limit"] });
     const exported = await ok("site_sql_export", { format: "csv", table: "metrics" });
     expect(exported.content).toBe("day,visits\n2026-10-13,10\n2026-10-14,13\n");
+    expect(exported.nextCursor).toBeNull();
+    // Small pieces through the tool, continued with the cursor.
+    const firstPiece = await ok("site_sql_export", {
+      format: "csv",
+      table: "metrics",
+      maxBytes: 1024,
+    });
+    expect(firstPiece.content.startsWith("day,visits\n")).toBe(true);
     const refused = await callTool("site_sql_execute", { siteId, sql: "DROP TABLE metrics" });
     expect(refused.isError).toBe(true);
     expect(refused.value.error.code).toBe("validation");
@@ -859,4 +905,239 @@ test("an agent acting for the owner manages Site SQL with the tools", async () =
   } finally {
     await mcp.close();
   }
+  // Without a configured gateway the tools are not offered at all.
+  const bare = buildOpenGeniMcpServer(
+    {
+      ...(f.deps as unknown as ApiRouteDeps),
+      settings: { ...f.settings, sitesGatewayInternalOrigin: undefined },
+    } as unknown as ApiRouteDeps,
+    grant,
+  );
+  expect(
+    Object.keys(
+      (bare as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
+    ).filter((name) => name.startsWith("site_sql_")),
+  ).toEqual([]);
+}, 120_000);
+
+/** Calls the API makes to the gateway while `fn` runs: the operation and its JSON body. */
+async function gatewayCalls(fn: () => Promise<unknown>) {
+  const original = siteSqlTransport.fetch;
+  const calls: Array<{ operation: string; body: any }> = [];
+  siteSqlTransport.fetch = async (input, init) => {
+    calls.push({
+      operation: new URL(String(input)).pathname.split("/").at(-1) ?? "",
+      body: JSON.parse(String(init.body)),
+    });
+    return original(input, init);
+  };
+  try {
+    await fn();
+  } finally {
+    siteSqlTransport.fetch = original;
+  }
+  return calls;
+}
+
+test("with the flag off, export, inspect and dropping data still work", async () => {
+  const f = await fixture();
+  const s = f.sql(await f.publish("Flag off"));
+  await s.enable(f.owner);
+  await s.migrate(f.owner, "init", "CREATE TABLE notes (body TEXT);");
+  await s.define(f.owner, "add", {
+    sql: "INSERT INTO notes (body) VALUES (:body)",
+    audience: "everyone",
+  });
+  expect((await s.run(f.member, "add", { body: "kept" })).status).toBe(200);
+
+  (f.settings as { sitesCloudflareStorageEnabled: boolean }).sitesCloudflareStorageEnabled = false;
+  try {
+    expect((await s.request(f.owner, "GET", "")).json).toMatchObject({
+      available: false,
+      enabled: true,
+    });
+    expect(code(await s.run(f.member, "add", { body: "refused" }))).toBe("unavailable");
+    expect(code(await s.migrate(f.owner, "more", "CREATE TABLE more (x);"))).toBe("unavailable");
+    expect(code(await s.enable(f.owner))).toBe("unavailable");
+    expect(code(await s.request(f.owner, "POST", "/reset", { confirm: true }))).toBe("unavailable");
+    const exported = await s.request(f.owner, "GET", "/export?format=json");
+    expect(exported.status, exported.text).toBe(200);
+    expect(exported.json.tables.notes.rows).toEqual([{ body: "kept" }]);
+    const inspected = await s.request(f.owner, "GET", "/inspect");
+    expect(inspected.status, inspected.text).toBe(200);
+    expect(inspected.json.tables.map((table: any) => [table.name, table.rowCount])).toEqual([
+      ["notes", 1],
+    ]);
+    const dropped = await s.request(f.owner, "POST", "/reset", { confirm: true, schema: "drop" });
+    expect(dropped.status, dropped.text).toBe(200);
+    expect((await s.request(f.owner, "GET", "/inspect")).json.tables).toEqual([]);
+  } finally {
+    (f.settings as { sitesCloudflareStorageEnabled: boolean }).sitesCloudflareStorageEnabled = true;
+  }
+}, 120_000);
+
+test("large exports come in pieces that re-import as one dump, triggers last", async () => {
+  const f = await fixture();
+  const s = f.sql(await f.publish("Pieces"));
+  await s.enable(f.owner);
+  const migrated = await s.migrate(
+    f.owner,
+    "init",
+    `CREATE TABLE items (id INTEGER PRIMARY KEY, body TEXT);
+     CREATE TABLE audit (item INTEGER);
+     CREATE TRIGGER items_audit AFTER INSERT ON items BEGIN INSERT INTO audit (item) VALUES (NEW.id); END;`,
+  );
+  expect(migrated.status, migrated.text).toBe(201);
+  const rows = Array.from({ length: 3_000 }, (_, index) => ({
+    id: index + 1,
+    body: `item ${index + 1} ${"x".repeat(150)}`,
+  }));
+  const loaded = await s.request(f.owner, "POST", "/import", {
+    format: "json",
+    table: "items",
+    rows,
+  });
+  expect(loaded.json).toMatchObject({ imported: 3_000 });
+
+  // A later migration sends only what the database is missing.
+  const calls = await gatewayCalls(async () => {
+    const second = await s.migrate(f.owner, "second", "CREATE INDEX items_body ON items (body);");
+    expect(second.status, second.text).toBe(201);
+  });
+  const migrateCalls = calls.filter((call) => call.operation === "migrate");
+  expect(migrateCalls).toHaveLength(1);
+  expect(
+    migrateCalls[0]!.body.migrations.map((entry: any) => [entry.name, entry.position]),
+  ).toEqual([["second", 2]]);
+
+  const pieces: string[] = [];
+  let cursor: string | null = null;
+  do {
+    const query: string = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+    const piece = await s.request(f.owner, "GET", `/export?format=sql&maxBytes=100000${query}`);
+    expect(piece.status, piece.text).toBe(200);
+    pieces.push(piece.text);
+    cursor = piece.headers.get("X-OpenGeni-Export-Next-Cursor");
+    expect(piece.headers.get("X-OpenGeni-Export-Truncated")).toBe(cursor ? "true" : "false");
+  } while (cursor && pieces.length < 100);
+  expect(pieces.length).toBeGreaterThan(2);
+  expect(pieces.filter((piece) => piece.includes("-- Schema"))).toHaveLength(1);
+  expect(pieces[0]).toContain("CREATE TABLE items");
+  expect(pieces.filter((piece) => piece.includes("CREATE TRIGGER"))).toHaveLength(1);
+  expect(pieces.at(-1)).toContain("CREATE TRIGGER items_audit");
+
+  // CSV pieces carry the header once.
+  const csvFirst = await s.request(f.owner, "GET", "/export?format=csv&table=items&maxBytes=4096");
+  const csvCursor = csvFirst.headers.get("X-OpenGeni-Export-Next-Cursor");
+  expect(csvFirst.text.startsWith("id,body\n")).toBe(true);
+  expect(csvCursor).toBeTruthy();
+  const csvNext = await s.request(
+    f.owner,
+    "GET",
+    `/export?format=csv&table=items&maxBytes=4096&cursor=${encodeURIComponent(csvCursor!)}`,
+  );
+  expect(csvNext.text.startsWith("id,body")).toBe(false);
+  expect(csvNext.text.length).toBeGreaterThan(0);
+
+  // The pieces, imported in order into a dropped database, restore it; the
+  // trigger is applied after the data, so it did not fire on imported rows.
+  await s.request(f.owner, "POST", "/reset", { confirm: true, schema: "drop" });
+  const recorded: string[] = [];
+  for (const piece of pieces) {
+    const imported = await s.request(f.owner, "POST", "/import", { format: "sql", sql: piece });
+    expect(imported.status, imported.text.slice(0, 500)).toBe(200);
+    recorded.push(...imported.json.migrations);
+  }
+  expect(recorded).toHaveLength(2);
+  expect(recorded[0]).toMatch(/^import_[0-9]+_[0-9a-f]{4}$/u);
+  expect(recorded[1]).toMatch(/^import_[0-9]+_[0-9a-f]{4}_triggers$/u);
+  const count = async (table: string) =>
+    (await s.request(f.owner, "POST", "/query", { sql: `SELECT count(*) AS n FROM ${table}` })).json
+      .rows[0].n;
+  expect(await count("items")).toBe(3_000);
+  expect(await count("audit")).toBe(3_000);
+  await s.request(f.owner, "POST", "/execute", {
+    sql: "INSERT INTO items (id, body) VALUES (5000, 'new')",
+  });
+  expect(await count("audit")).toBe(3_001);
+}, 180_000);
+
+test("rebuilds send migrations in bounded calls and a Site's migration SQL is capped", async () => {
+  const f = await fixture();
+  const s = f.sql(await f.publish("Big migrations"));
+  await s.enable(f.owner);
+  // About 1.9 MB of SQL each, in statements under the Durable Object's 100 KB limit.
+  const big = Array.from({ length: 20 }, () => `SELECT '${"x".repeat(95_000)}';`).join("\n");
+  for (const name of ["big_1", "big_2", "big_3"]) {
+    const migrated = await s.migrate(f.owner, name, big);
+    expect(migrated.status, migrated.text.slice(0, 500)).toBe(201);
+  }
+  const capped = await s.migrate(f.owner, "big_4", big);
+  expect({ status: capped.status, code: code(capped) }).toEqual({
+    status: 413,
+    code: "quota_exceeded",
+  });
+  expect(capped.json.error.details.quota).toBe("migration_bytes_per_site");
+
+  let reset: any = null;
+  const calls = await gatewayCalls(async () => {
+    reset = await s.request(f.owner, "POST", "/reset", { confirm: true });
+  });
+  expect(reset.status, reset.text?.slice(0, 500)).toBe(200);
+  expect(reset.json.applied).toEqual(["big_1", "big_2", "big_3"]);
+  const migrateCalls = calls.filter((call) => call.operation === "migrate");
+  expect(migrateCalls.length).toBeGreaterThan(1);
+  expect(migrateCalls.map((call) => call.body.rebuild === true)).toEqual([
+    true,
+    ...migrateCalls.slice(1).map(() => false),
+  ]);
+  for (const call of migrateCalls)
+    expect(JSON.stringify(call.body).length).toBeLessThan(8 * 1024 * 1024);
+}, 180_000);
+
+test("signed_in needs a person; managers run everything; guests only everyone", () => {
+  const refuse = (
+    audience: "everyone" | "signed_in" | "managers",
+    caller: { manager: boolean; guest: boolean; person: boolean },
+  ) =>
+    siteSqlAudienceRefusal(audience, caller)?.details.reason ??
+    siteSqlAudienceRefusal(audience, caller)?.code ??
+    null;
+  const manager = { manager: true, guest: false, person: false };
+  const person = { manager: false, guest: false, person: true };
+  const service = { manager: false, guest: false, person: false };
+  const guest = { manager: false, guest: true, person: false };
+  expect(
+    [manager, person, service, guest].map((caller) => [
+      refuse("everyone", caller),
+      refuse("signed_in", caller),
+      refuse("managers", caller),
+    ]),
+  ).toEqual([
+    [null, null, null],
+    [null, null, "forbidden"],
+    [null, "sign_in_required", "forbidden"],
+    [null, "sign_in_required", "forbidden"],
+  ]);
+});
+
+test("a deleted workspace's Site databases are dropped from their Durable Objects", async () => {
+  const f = await fixture();
+  const siteId = await f.publish("Doomed");
+  const s = f.sql(siteId);
+  await s.enable(f.owner);
+  await s.migrate(f.owner, "init", "CREATE TABLE notes (body TEXT);");
+  await s.request(f.owner, "POST", "/execute", { sql: "INSERT INTO notes (body) VALUES ('x')" });
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const sites = await siteSqlSitesOfWorkspace(f.deps as unknown as ApiRouteDeps, scope);
+  expect(sites).toEqual([siteId]);
+  // Nothing to list or drop without a configured gateway.
+  expect(
+    await siteSqlSitesOfWorkspace(
+      { db: db.db, settings: { ...f.settings, sitesGatewaySecret: undefined } },
+      scope,
+    ),
+  ).toEqual([]);
+  await dropSiteSqlDatabases({ settings: f.settings }, [...sites, crypto.randomUUID()]);
+  expect((await s.request(f.owner, "GET", "/inspect")).json.tables).toEqual([]);
 }, 120_000);

@@ -177,6 +177,7 @@ import { assertDescribedToolInput, contractToolInput } from "./contract-input";
 import { registerSiteDataTools } from "./site-data-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
+import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
@@ -1150,15 +1151,18 @@ export function buildOpenGeniMcpServer(
       },
       json,
     );
-    registerSiteSqlTools(
-      server,
-      deps,
-      grant,
-      async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    );
+    // Site SQL tools need a configured gateway (they also reach databases
+    // that already exist after the deployment stops offering Site SQL).
+    if (siteSqlGatewayConfig(deps.settings) !== null)
+      registerSiteSqlTools(
+        server,
+        deps,
+        grant,
+        async () => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+        },
+        json,
+      );
     registerSitePublicationTools(
       server,
       deps,

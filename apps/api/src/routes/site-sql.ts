@@ -1,6 +1,7 @@
 import { SITE_FRAME_HEADER } from "@opengeni/contracts/site-session-http";
 import {
   SITE_SQL_ERROR_STATUS,
+  SITE_SQL_EXPORT_NEXT_CURSOR_HEADER,
   SiteSqlExportFormat,
   SiteSqlImportRequest,
   SiteSqlMigrationRequest,
@@ -210,10 +211,23 @@ export function registerSiteSqlRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!format.success)
       throw siteSqlHttpError(new SiteSqlError("validation", "format is sql, csv or json"));
     const table = context.req.query("table");
+    const cursor = context.req.query("cursor");
+    if (cursor !== undefined && (cursor.length === 0 || cursor.length > 4096))
+      throw siteSqlHttpError(
+        new SiteSqlError("validation", "cursor is a nextCursor from an export"),
+      );
+    const maxBytesText = context.req.query("maxBytes");
+    const maxBytes = maxBytesText === undefined ? undefined : Number(maxBytesText);
+    if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 1024))
+      throw siteSqlHttpError(
+        new SiteSqlError("validation", "maxBytes is a whole number of bytes, at least 1024"),
+      );
     const exported = await runSiteSqlRoute(() =>
       exportSiteSql(deps, grant, siteId(context), {
         format: format.data,
         ...(table ? { table } : {}),
+        ...(cursor ? { cursor } : {}),
+        ...(maxBytes !== undefined ? { maxBytes } : {}),
       }),
     );
     return new Response(exported.content, {
@@ -222,6 +236,9 @@ export function registerSiteSqlRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Content-Disposition": `attachment; filename="${exported.filename}"`,
         ...USER_CONTENT_SECURITY_HEADERS,
         "X-OpenGeni-Export-Truncated": exported.truncated ? "true" : "false",
+        ...(exported.nextCursor
+          ? { [SITE_SQL_EXPORT_NEXT_CURSOR_HEADER]: exported.nextCursor }
+          : {}),
       },
     });
   });
