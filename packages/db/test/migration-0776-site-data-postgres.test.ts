@@ -1,4 +1,4 @@
-// Migration 0776: Site Data. The six site_data_* tables are workspace-owned,
+// Migration 0776: Site Data. The eight site_data_* tables are workspace-owned,
 // FORCE RLS and reachable by the application role only inside a workspace
 // context; data follows its Site and is removed with the workspace.
 import { afterAll, beforeAll, expect, test } from "bun:test";

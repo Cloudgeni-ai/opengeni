@@ -2172,55 +2172,57 @@ async function mergeFixture(overrides: Partial<Settings> = {}) {
 }
 
 test("patches and increments reserve for the stored records they merge into", async () => {
-  const { resolveSiteDataAccess } = await import("../src/site-data/service");
-  const { f, created, sizes } = await mergeFixture();
-  expect(sizes.huge).toBeGreaterThan(255_000);
-  expect(sizes.medium).toBeGreaterThan(100_000);
-  const access = await resolveSiteDataAccess(f.deps as never, f.owner.grant, created.id);
-  // What the routes send for a one-op patch or increment: 25 ms for the
-  // bytes sent, plus 1 µs per stored byte, capped at 250 ms.
-  const admit = (touched: { collection: string; key?: string; id?: string }[]) =>
-    access.store
-      .consumeRate(access.caller, "write", 1, access.limits, {
-        collections: touched.map((ref) => ref.collection),
-        reserveMs: 25,
-        touched,
-        reserveMsPerStoredByte: 0.001,
-        maxReserveMs: 250,
-      })
-      .then(async (reservation) => {
-        await access.store.settleValidation(
-          access.caller,
-          { ...reservation, spentMs: 0 },
-          access.limits,
-        );
-        return reservation.reservedMs;
-      });
-  // A tiny patch into a 256 KB record reserves the whole budget.
-  expect(await admit([{ collection: "big", key: "huge" }])).toBe(250);
-  // An increment into a 100 KB record reserves for its size.
-  expect(await admit([{ collection: "big", key: "medium" }])).toBeCloseTo(
-    25 + sizes.medium / 1000,
-    3,
-  );
-  // Small and missing records add little or nothing.
-  expect(await admit([{ collection: "small", key: "k1" }])).toBeLessThan(25.1);
-  expect(await admit([{ collection: "big", key: "missing" }])).toBe(25);
-  expect(await admit([{ collection: "big", id: crypto.randomUUID() }])).toBe(25);
-  // Several merges add up, still within the cap.
-  expect(
-    await admit([
-      { collection: "big", key: "medium" },
-      { collection: "big", key: "medium" },
-    ]),
-  ).toBeCloseTo(25 + (2 * sizes.medium) / 1000, 3);
-  expect(
-    await admit([
-      { collection: "big", key: "medium" },
-      { collection: "big", key: "huge" },
-    ]),
-  ).toBe(250);
-  expect(await validationMicros(f, created.id)).toBe(0);
+  await withinOneMinute(async () => {
+    const { resolveSiteDataAccess } = await import("../src/site-data/service");
+    const { f, created, sizes } = await mergeFixture();
+    expect(sizes.huge).toBeGreaterThan(255_000);
+    expect(sizes.medium).toBeGreaterThan(100_000);
+    const access = await resolveSiteDataAccess(f.deps as never, f.owner.grant, created.id);
+    // What the routes send for a one-op patch or increment: 25 ms for the
+    // bytes sent, plus 1 µs per stored byte, capped at 250 ms.
+    const admit = (touched: { collection: string; key?: string; id?: string }[]) =>
+      access.store
+        .consumeRate(access.caller, "write", 1, access.limits, {
+          collections: touched.map((ref) => ref.collection),
+          reserveMs: 25,
+          touched,
+          reserveMsPerStoredByte: 0.001,
+          maxReserveMs: 250,
+        })
+        .then(async (reservation) => {
+          await access.store.settleValidation(
+            access.caller,
+            { ...reservation, spentMs: 0 },
+            access.limits,
+          );
+          return reservation.reservedMs;
+        });
+    // A tiny patch into a 256 KB record reserves the whole budget.
+    expect(await admit([{ collection: "big", key: "huge" }])).toBe(250);
+    // An increment into a 100 KB record reserves for its size.
+    expect(await admit([{ collection: "big", key: "medium" }])).toBeCloseTo(
+      25 + sizes.medium / 1000,
+      3,
+    );
+    // Small and missing records add little or nothing.
+    expect(await admit([{ collection: "small", key: "k1" }])).toBeLessThan(25.1);
+    expect(await admit([{ collection: "big", key: "missing" }])).toBe(25);
+    expect(await admit([{ collection: "big", id: crypto.randomUUID() }])).toBe(25);
+    // Several merges add up, still within the cap.
+    expect(
+      await admit([
+        { collection: "big", key: "medium" },
+        { collection: "big", key: "medium" },
+      ]),
+    ).toBeCloseTo(25 + (2 * sizes.medium) / 1000, 3);
+    expect(
+      await admit([
+        { collection: "big", key: "medium" },
+        { collection: "big", key: "huge" },
+      ]),
+    ).toBe(250);
+    expect(await validationMicros(f, created.id)).toBe(0);
+  });
 });
 
 test("the routes reserve for merged records, refusing what the window cannot take", async () => {
@@ -2294,6 +2296,122 @@ test("concurrent tiny patches into large records stop at the window", async () =
     expect(results.filter((reserved) => reserved === 250)).toHaveLength(20);
     expect(results.filter((reserved) => reserved === "site_validation_time")).toHaveLength(10);
     expect(await validationMicros(f, created.id)).toBe(5_000_000);
+  });
+});
+
+test("patches admitted before a large write lands are sent again, not checked past their reservation", async () => {
+  const { prevalidateSiteDataWrite, resolveSiteDataAccess } =
+    await import("../src/site-data/service");
+  await withinOneMinute(async () => {
+    const { f, s, created } = await mergeFixture();
+    const access = await resolveSiteDataAccess(f.deps as never, f.member.grant, created.id);
+    const patch = { op: "patch", collection: "small", key: "k0", data: { n: 1 } };
+    let checks = 0;
+    await withValidationClock(
+      () => {
+        checks += 1;
+        return 0.5;
+      },
+      async () => {
+        // Twenty one-op patches admitted and checked while k0 is small: each
+        // reserves about 25 ms.
+        const admitted = [];
+        for (let i = 0; i < 20; i += 1) {
+          const reservation = await access.store.consumeRate(
+            access.caller,
+            "write",
+            1,
+            access.limits,
+            {
+              collections: ["small"],
+              reserveMs: 25,
+              touched: [{ collection: "small", key: "k0" }],
+              reserveMsPerStoredByte: 0.001,
+              maxReserveMs: 250,
+            },
+          );
+          expect(reservation.reservedMs).toBeLessThan(25.1);
+          const meter = { ms: 0 };
+          const options = await prevalidateSiteDataWrite(access, [patch], {
+            meter,
+            reservedMs: reservation.reservedMs,
+          });
+          admitted.push({ reservation, meter, options });
+        }
+        // Then a 256 KB write to the same record lands first.
+        const large = { n: 0, pad: "x".repeat(255_000) };
+        expect(
+          (await s.write(f.owner, [{ op: "put", collection: "small", key: "k0", data: large }]))
+            .status,
+        ).toBe(200);
+        // Under the lock each patch would check the whole 256 KB record:
+        // every one is refused before anything is checked.
+        const before = checks;
+        const results = await Promise.all(
+          admitted.map(({ options }) =>
+            access.store.write(access.caller, [patch] as never, options).then(
+              () => null,
+              (error: any) => error,
+            ),
+          ),
+        );
+        expect(checks).toBe(before);
+        for (const error of results) {
+          expect(error?.code).toBe("conflict");
+          expect(error?.details).toEqual({ reason: "record_grew", retryable: true });
+        }
+        const { siteDataHttpError } = await import("../src/routes/site-data");
+        expect(siteDataHttpError(results[0]).status).toBe(409);
+        for (const { reservation, meter } of admitted)
+          await access.store.settleValidation(
+            access.caller,
+            { ...reservation, spentMs: meter.ms },
+            access.limits,
+          );
+        // Nothing was written, and the windows hold only what was spent.
+        const stored = await s.get(f.owner, { collection: "small", key: "k0" });
+        expect(stored.json.record.data.pad).toHaveLength(255_000);
+        expect(stored.json.record.data.n).toBe(0);
+        const spent = admitted.reduce((sum, { meter }) => sum + meter.ms, 0);
+        expect(await validationMicros(f, created.id)).toBeLessThanOrEqual(
+          Math.ceil((spent + 0.5 * 4) * 1000),
+        );
+        // A retry reserves for the record's real size and goes through.
+        const retry = await s.write(f.member, [patch]);
+        expect(retry.status).toBe(200);
+        expect((await s.get(f.owner, { collection: "small", key: "k0" })).json.record.data.n).toBe(
+          1,
+        );
+      },
+    );
+  });
+});
+
+test("a large write racing many tiny patches keeps the windows within their bound", async () => {
+  await withinOneMinute(async () => {
+    const { f, s, created } = await mergeFixture();
+    const large = { n: 0, pad: "x".repeat(255_000) };
+    const results = await withValidationClock(
+      () => 1,
+      () =>
+        Promise.all([
+          s.write(f.owner, [{ op: "put", collection: "small", key: "k1", data: large }]),
+          ...Array.from({ length: 30 }, (_, n) =>
+            s.write(f.member, [
+              { op: "patch", collection: "small", key: "k1", data: { n: n + 1 } },
+            ]),
+          ),
+        ]),
+    );
+    expect(results[0]!.status).toBe(200);
+    for (const result of results.slice(1)) {
+      expect([200, 409, 429]).toContain(result.status);
+      if (result.status === 409)
+        expect(result.json.error.details).toMatchObject({ reason: "record_grew" });
+    }
+    // At most the Site window, plus 25 ms of slack per request.
+    expect(await validationMicros(f, created.id)).toBeLessThanOrEqual(5_000_000 + 31 * 25_000);
+    expect(await validationMicros(f)).toBeLessThanOrEqual(20_000_000);
   });
 });
 
@@ -2601,6 +2719,99 @@ test("patch and increment results are checked before the lock, on the same budge
   );
   expect(spent.code).toBe("validation");
   expect(spent.details).toMatchObject({ reason: "validation_budget", index: 1 });
+});
+
+test("a record that grew past the request's reservation is refused before it is checked", async () => {
+  const { prevalidateSiteDataWrite } = await import("../src/site-data/service");
+  const schema = { type: "object", properties: { pad: { type: "string" } } };
+  // Stored records are about 20 KB unless a test says otherwise.
+  let stored: Record<string, unknown> = { pad: "x".repeat(20_000) };
+  const store = {
+    getCollection: async () => ({ jsonSchema: schema }),
+    get: async () => ({ data: { ...stored } }),
+  };
+  const access = {
+    store,
+    caller: {},
+    limits: { maxRecordBytes: 256 * 1024 },
+    writeOptions: { limits: {} },
+  } as never;
+  const pad = (bytes: number) => ({ pad: "y".repeat(bytes) });
+  const refusal = (run: () => unknown) => {
+    try {
+      run();
+      return null;
+    } catch (error) {
+      return error as any;
+    }
+  };
+  let checks = 0;
+  await withValidationClock(
+    () => {
+      checks += 1;
+      return 0;
+    },
+    async () => {
+      // A patch that reserved 25 ms: a 100 KB record under the lock needs
+      // about 100 ms, more than 25 ms past its reservation.
+      const small = await prevalidateSiteDataWrite(
+        access,
+        [{ op: "patch", collection: "rows", key: "a", data: { n: 1 } }],
+        { reservedMs: 25 },
+      );
+      const before = checks;
+      const grew = refusal(() => small.validate!(schema, pad(100_000)));
+      expect(checks).toBe(before);
+      expect(grew.code).toBe("conflict");
+      expect(grew.details).toEqual({ reason: "record_grew", retryable: true });
+      const { siteDataHttpError } = await import("../src/routes/site-data");
+      const httpError = siteDataHttpError(grew);
+      expect(httpError.status).toBe(409);
+      expect(httpError.retryable).toBe(true);
+      // Records add up: the prevalidated 20 KB merge counted, then two more
+      // 20 KB records reach 60 ms, past 25 + 25 ms.
+      const many = await prevalidateSiteDataWrite(
+        access,
+        [{ op: "patch", collection: "rows", key: "a", data: { n: 1 } }],
+        { reservedMs: 25 },
+      );
+      expect(many.validate!(schema, pad(20_001))).toBeNull();
+      expect(refusal(() => many.validate!(schema, pad(20_002))).details.reason).toBe("record_grew");
+      // A reservation at the budget cannot grow on a retry: the time budget applies.
+      const full = await prevalidateSiteDataWrite(
+        access,
+        [{ op: "patch", collection: "rows", key: "a", data: { n: 1 } }],
+        { reservedMs: 250 },
+      );
+      expect(full.validate!(schema, pad(200_000))).toBeNull();
+      // Without a reservation (no admission), nothing is refused.
+      const none = await prevalidateSiteDataWrite(access, [
+        { op: "patch", collection: "rows", key: "a", data: { n: 1 } },
+      ]);
+      expect(none.validate!(schema, pad(200_000))).toBeNull();
+      // Records checked before the lock count too: a 100 KB insert that
+      // reserved 125 ms leaves no room for a 60 KB merge under the lock.
+      const inserted = await prevalidateSiteDataWrite(
+        access,
+        [
+          { op: "insert", collection: "rows", data: pad(100_000) },
+          { op: "patch", collection: "rows", key: "a", data: { n: 1 } },
+        ],
+        { reservedMs: 125 },
+      );
+      expect(refusal(() => inserted.validate!(schema, pad(60_000))).details.reason).toBe(
+        "record_grew",
+      );
+      // A record that grew before the request checked it is refused there.
+      stored = pad(200_000);
+      const early = await prevalidateSiteDataWrite(
+        access,
+        [{ op: "patch", collection: "rows", key: "a", data: { n: 1 } }],
+        { reservedMs: 25 },
+      ).catch((error: any) => error);
+      expect(early.details).toEqual({ reason: "record_grew", retryable: true });
+    },
+  );
 });
 
 test("managers share a per-Site write window counted before any work", async () => {

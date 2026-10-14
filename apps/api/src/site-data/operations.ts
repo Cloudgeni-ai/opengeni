@@ -314,7 +314,10 @@ export async function writeSiteData(
     touched: mergedRecords(operations),
   });
   return meteredWrite(access, reserved, async (meter) => {
-    const options = await prevalidateSiteDataWrite(access, operations, { meter });
+    const options = await prevalidateSiteDataWrite(access, operations, {
+      meter,
+      reservedMs: reserved.reservedMs,
+    });
     return access.store.write(access.caller, operations as SiteDataWriteOp[], options);
   });
 }
@@ -495,7 +498,10 @@ export async function importSiteData(
       return { op: "put", collection, key: String(key), data };
     });
     // Every record is checked against the schema before anything is written.
-    const options = await prevalidateSiteDataWrite(access, operations, { meter }).catch(failed);
+    const options = await prevalidateSiteDataWrite(access, operations, {
+      meter,
+      reservedMs: reserved.reservedMs,
+    }).catch(failed);
     // Each batch is atomic; a failure reports how many records were imported.
     for (let start = 0; start < operations.length; start += SITE_DATA_MAX_BATCH) {
       await access.store
