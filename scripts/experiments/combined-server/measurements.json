@@ -1,0 +1,624 @@
+{
+  "measuredAt": "2026-10-13",
+  "sourceBase": "1ee99c1c1b25ae86b9af9b491d43f3cdbd1ebc39",
+  "runtime": "Bun 1.4.0, Linux x64",
+  "units": "MiB (summed process RSS; shared pages may be counted more than once)",
+  "baseline": "stock production role bundles, not the shared experimental split bundle",
+  "readiness": "fresh application processes; ready external infrastructure; warm OS file cache",
+  "evidence": {
+    "final": [
+      {
+        "layout": "stock",
+        "repeat": 0,
+        "readyMs": 3376.755734,
+        "loadMs": 16870.870799000004,
+        "idleMedianMiB": 1828.7265625,
+        "idleInfrastructureMedianMiB": 1937.2578125,
+        "idleWholeStackMedianMiB": 3765.984375,
+        "loadPeakMiB": 2881.09765625,
+        "loadMedianMiB": 2314.37890625,
+        "loadHealthMs": {
+          "median": 1.9237109999994573,
+          "p95": 5.230562999997346,
+          "max": 16.589568000003055,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 6,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "stock",
+          "repeat": 0,
+          "shutdownMs": 217.26766599999974,
+          "exits": [0, 0, 0, 0, 0, 143]
+        }
+      },
+      {
+        "layout": "combined",
+        "repeat": 0,
+        "readyMs": 5186.229828000003,
+        "loadMs": 26405.440768,
+        "idleMedianMiB": 604.39453125,
+        "idleInfrastructureMedianMiB": 1970.19921875,
+        "idleWholeStackMedianMiB": 2574.59375,
+        "loadPeakMiB": 1721.3046875,
+        "loadMedianMiB": 1154.54296875,
+        "loadHealthMs": {
+          "median": 3.798534000001382,
+          "p95": 27.98796100000618,
+          "max": 1389.5426469999948,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 3,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "combined",
+          "repeat": 0,
+          "shutdownMs": 225.38739499999792,
+          "exits": [0]
+        }
+      },
+      {
+        "layout": "workers",
+        "repeat": 0,
+        "readyMs": 4203.191082000005,
+        "loadMs": 17456.133318000007,
+        "idleMedianMiB": 1508.71875,
+        "idleInfrastructureMedianMiB": 1966.4765625,
+        "idleWholeStackMedianMiB": 3473.87890625,
+        "loadPeakMiB": 2671.23046875,
+        "loadMedianMiB": 1997.34375,
+        "loadHealthMs": {
+          "median": 1.7689430000027642,
+          "p95": 7.364075999998022,
+          "max": 9.176879999999073,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 1,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "workers",
+          "repeat": 0,
+          "shutdownMs": 368.4485090000089,
+          "exits": [0, 0, 0, 0, 143]
+        }
+      },
+      {
+        "layout": "workers",
+        "repeat": 1,
+        "readyMs": 3431.418455999985,
+        "loadMs": 19667.066334000003,
+        "idleMedianMiB": 1509.84765625,
+        "idleInfrastructureMedianMiB": 2101.94140625,
+        "idleWholeStackMedianMiB": 3611.0390625,
+        "loadPeakMiB": 2462.45703125,
+        "loadMedianMiB": 2027.36328125,
+        "loadHealthMs": {
+          "median": 1.9698039999930188,
+          "p95": 18.134175000013784,
+          "max": 65.55423799998243,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 6,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "workers",
+          "repeat": 1,
+          "shutdownMs": 236.87678300001426,
+          "exits": [0, 0, 0, 0, 143]
+        }
+      },
+      {
+        "layout": "combined",
+        "repeat": 1,
+        "readyMs": 6441.606738000002,
+        "loadMs": 18309.080245999998,
+        "idleMedianMiB": 605.33203125,
+        "idleInfrastructureMedianMiB": 2098.5390625,
+        "idleWholeStackMedianMiB": 2703.87109375,
+        "loadPeakMiB": 1670.359375,
+        "loadMedianMiB": 1220.27734375,
+        "loadHealthMs": {
+          "median": 2.4651170000142884,
+          "p95": 44.36596999998437,
+          "max": 1286.0882059999858,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 3,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "combined",
+          "repeat": 1,
+          "shutdownMs": 324.92674900000566,
+          "exits": [0]
+        }
+      },
+      {
+        "layout": "stock",
+        "repeat": 1,
+        "readyMs": 2778.870870999992,
+        "loadMs": 15186.35238300002,
+        "idleMedianMiB": 1817.4609375,
+        "idleInfrastructureMedianMiB": 2027.1796875,
+        "idleWholeStackMedianMiB": 3845.484375,
+        "loadPeakMiB": 2853.0703125,
+        "loadMedianMiB": 2284.41015625,
+        "loadHealthMs": {
+          "median": 1.50214599998435,
+          "p95": 8.94694699998945,
+          "max": 14.567493000009563,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 2,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "stock",
+          "repeat": 1,
+          "shutdownMs": 229.75712700001895,
+          "exits": [0, 0, 0, 0, 0, 143]
+        }
+      },
+      {
+        "layout": "stock",
+        "repeat": 2,
+        "readyMs": 2677.1653139999835,
+        "loadMs": 14694.89129499998,
+        "idleMedianMiB": 1820.22265625,
+        "idleInfrastructureMedianMiB": 2042.5546875,
+        "idleWholeStackMedianMiB": 3862.77734375,
+        "loadPeakMiB": 2752.85546875,
+        "loadMedianMiB": 2332.46875,
+        "loadHealthMs": {
+          "median": 1.402412999945227,
+          "p95": 6.124800999998115,
+          "max": 8.12868600001093,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 1,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "stock",
+          "repeat": 2,
+          "shutdownMs": 354.36515100003453,
+          "exits": [0, 0, 0, 0, 0, 143]
+        }
+      },
+      {
+        "layout": "combined",
+        "repeat": 2,
+        "readyMs": 4566.324236000015,
+        "loadMs": 15807.126760000014,
+        "idleMedianMiB": 591.71484375,
+        "idleInfrastructureMedianMiB": 2014.73046875,
+        "idleWholeStackMedianMiB": 2606.4453125,
+        "loadPeakMiB": 1792.33203125,
+        "loadMedianMiB": 1175.08984375,
+        "loadHealthMs": {
+          "median": 1.718934000004083,
+          "p95": 20.174630999972578,
+          "max": 1174.5680270000012,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 0,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "combined",
+          "repeat": 2,
+          "shutdownMs": 215.52488600002835,
+          "exits": [0]
+        }
+      },
+      {
+        "layout": "workers",
+        "repeat": 2,
+        "readyMs": 4406.001489999995,
+        "loadMs": 15604.784763999982,
+        "idleMedianMiB": 1519.40625,
+        "idleInfrastructureMedianMiB": 2111.3515625,
+        "idleWholeStackMedianMiB": 3630.7578125,
+        "loadPeakMiB": 2585.234375,
+        "loadMedianMiB": 2090.484375,
+        "loadHealthMs": {
+          "median": 1.7228450000402518,
+          "p95": 6.159441999974661,
+          "max": 13.340522999991663,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 0,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "workers",
+          "repeat": 2,
+          "shutdownMs": 380.0393880000338,
+          "exits": [0, 0, 0, 0, 143]
+        }
+      }
+    ],
+    "rejection": [
+      {
+        "layout": "split",
+        "repeat": 0,
+        "readyMs": 4134.367115999999,
+        "loadMs": 30294.950082,
+        "idleMedianMiB": 2054.78125,
+        "idleWholeStackMedianMiB": null,
+        "loadPeakMiB": 3058.1484375,
+        "loadMedianMiB": 2574.734375,
+        "loadHealthMs": {
+          "median": 2.40561400000297,
+          "p95": 12.06355000000076,
+          "max": 19.72486299999946,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 3,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "fault": {
+          "fault": "rejection",
+          "apiSurvived": true,
+          "processExited": false,
+          "exitCode": null
+        }
+      },
+      {
+        "layout": "combined",
+        "repeat": 0,
+        "readyMs": 5305.789506999994,
+        "loadMs": 169874.065756,
+        "idleMedianMiB": 607.91015625,
+        "idleWholeStackMedianMiB": null,
+        "loadPeakMiB": 1608.40625,
+        "loadMedianMiB": 717.76953125,
+        "loadHealthMs": {
+          "median": 2.0952389999874867,
+          "p95": 19.65026900000521,
+          "max": 1410.5499899999995,
+          "failedSamples": 22
+        },
+        "idempotentRetries": 0,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "fault": {
+          "fault": "rejection",
+          "apiSurvived": false,
+          "processExited": true,
+          "exitCode": 1
+        }
+      }
+    ],
+    "shutdown": [
+      {
+        "layout": "combined",
+        "repeat": 0,
+        "readyMs": 10681.245879,
+        "loadMs": 172388.176239,
+        "idleMedianMiB": 650.75390625,
+        "idleInfrastructureMedianMiB": 2181.625,
+        "idleWholeStackMedianMiB": 2839.39453125,
+        "loadPeakMiB": 1694.78125,
+        "loadMedianMiB": 746.87109375,
+        "loadHealthMs": {
+          "median": 2.941995000001043,
+          "p95": 16.86052600000403,
+          "max": 1960.0329639999982,
+          "failedSamples": 24
+        },
+        "idempotentRetries": 0,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "fault": {
+          "fault": "shutdown",
+          "apiSurvived": false,
+          "processExited": true,
+          "exitCode": 0
+        },
+        "shutdown": {
+          "layout": "combined",
+          "repeat": 0,
+          "shutdownMs": 479.56581100000767,
+          "exits": [0]
+        }
+      }
+    ],
+    "blocking": [
+      {
+        "layout": "split",
+        "repeat": 0,
+        "readyMs": 5606.5035419999995,
+        "loadMs": 43620.406766,
+        "idleMedianMiB": 2038.0078125,
+        "idleInfrastructureMedianMiB": 2165.17578125,
+        "idleWholeStackMedianMiB": 4203.18359375,
+        "loadPeakMiB": 2941.30078125,
+        "loadMedianMiB": 2465.109375,
+        "loadHealthMs": {
+          "median": 5.34090400000423,
+          "p95": 38.154859000002034,
+          "max": 110.4512160000013,
+          "failedSamples": 0
+        },
+        "idempotentRetries": 4,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "split",
+          "repeat": 0,
+          "shutdownMs": 650.5152430000016,
+          "exits": [0, 0, 0, 0, 0, 0]
+        }
+      },
+      {
+        "layout": "combined",
+        "repeat": 0,
+        "readyMs": 12971.682082,
+        "loadMs": 35165.94781900001,
+        "idleMedianMiB": 598.40234375,
+        "idleInfrastructureMedianMiB": 2013.421875,
+        "idleWholeStackMedianMiB": 2611.82421875,
+        "loadPeakMiB": 1597.71484375,
+        "loadMedianMiB": 1072.75390625,
+        "loadHealthMs": {
+          "median": 4.864027999996324,
+          "p95": 346.72516400000313,
+          "max": 513.4584079999913,
+          "failedSamples": 1
+        },
+        "idempotentRetries": 3,
+        "publishedHints": 4,
+        "exports": [
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          },
+          {
+            "bytes": 6072,
+            "state": "succeeded"
+          }
+        ],
+        "shutdown": {
+          "layout": "combined",
+          "repeat": 0,
+          "shutdownMs": 320.30699599999934,
+          "exits": [0]
+        }
+      }
+    ]
+  }
+}

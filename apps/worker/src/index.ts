@@ -1021,6 +1021,8 @@ export async function createOpenGeniWorkerService(
 export type RunOpenGeniWorkerOptions = OpenGeniWorkerServiceOptions & {
   /** Defaults to SIGTERM and SIGINT. Pass false when the host owns process signals. */
   shutdownSignals?: false | ReadonlyArray<"SIGTERM" | "SIGINT">;
+  /** Experimental composition host retains the ordinary service lifecycle. */
+  onService?: (service: OpenGeniWorkerService) => void;
 };
 
 /** Start, drain, and close one embedded worker process. */
@@ -1050,6 +1052,7 @@ export async function runOpenGeniWorker(options: RunOpenGeniWorkerOptions): Prom
     return { signal, handler };
   });
   try {
+    options.onService?.(service);
     await service.run();
   } finally {
     for (const { signal, handler } of handlers) {
@@ -1059,12 +1062,20 @@ export async function runOpenGeniWorker(options: RunOpenGeniWorkerOptions): Prom
   }
 }
 
-export async function startWorker() {
-  const role = process.env.OPENGENI_WORKER_ROLE;
+export async function startWorker(
+  options: {
+    role?: OpenGeniWorkerRole;
+    settings?: Settings;
+    runtime?: ActivityDependencies["runtime"];
+    shutdownSignals?: RunOpenGeniWorkerOptions["shutdownSignals"];
+    onService?: RunOpenGeniWorkerOptions["onService"];
+  } = {},
+) {
+  const role = options.role ?? process.env.OPENGENI_WORKER_ROLE;
   if (role !== "control" && role !== "turn") {
     throw new Error("OPENGENI_WORKER_ROLE must be explicitly set to 'control' or 'turn'");
   }
-  const settings = getSettings();
+  const settings = options.settings ?? getSettings();
   const observability = createObservability(settings, { component: `worker-${role}` });
   // Before any NativeConnection: SDK and core logs become structured lines.
   installTemporalRuntimeLogging(observability);
@@ -1118,11 +1129,16 @@ export async function startWorker() {
     );
     await runOpenGeniWorker({
       role,
+      ...(options.shutdownSignals === undefined
+        ? {}
+        : { shutdownSignals: options.shutdownSignals }),
+      ...(options.onService ? { onService: options.onService } : {}),
       terminateWorker: () => process.exit(1),
       settings,
       databasePosture,
       http: { readinessDb: readinessDbClient.db },
       activityDependencies: {
+        ...(options.runtime ? { runtime: options.runtime } : {}),
         observability,
         db: dbClient.db,
         bus,
