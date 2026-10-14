@@ -1,4 +1,5 @@
 import {
+  SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CLIENT_IP_HEADER,
   SITE_GATEWAY_HOST_HEADER,
   SITE_GATEWAY_HUMAN_HEADER,
@@ -17,11 +18,10 @@ import type { GatewayConfig } from "./env";
 /**
  * Hex SHA-256 of the forwarded body (of the empty string when there is
  * none): exactly the `bodySha256` field of the signed canonical string. The
- * API can rebuild the canonical string and verify the signature from headers
- * alone, before reading the body, then check the body against this hash.
- * Gateway-local until the contracts name it.
+ * API verifies the signature from headers alone, before reading the body,
+ * then checks the body against this hash. The API requires it.
  */
-export const SITE_GATEWAY_BODY_SHA256_HEADER = "x-opengeni-site-body-sha256";
+export { SITE_GATEWAY_BODY_SHA256_HEADER };
 
 /** `v1=<base64url HMAC-SHA256>` over the shared canonical string. */
 export async function signGatewayFields(
