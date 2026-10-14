@@ -162,6 +162,35 @@ export const client = {
     fixtureActivity.exports.push(name);
     return { content: "[]", contentType: "application/json", truncated: false };
   },
+  async getSiteSql() {
+    return siteSql;
+  },
+  async updateSiteSqlSettings(
+    _workspaceId: string,
+    _siteId: string,
+    request: { enabled: boolean },
+  ) {
+    siteSql = { ...siteSql, enabled: request.enabled };
+    return siteSql;
+  },
+};
+
+let siteSql = {
+  siteId,
+  available: true,
+  enabled: true,
+  migrations: [],
+  queries: [{ name: "top_votes" }, { name: "cast_vote" }],
+  usage: { storageBytes: 1_310_720, rowsReadThisMonth: 48_210, rowsWrittenThisMonth: 1_204 },
+  limits: {
+    storageBytesPerSite: 50 * 1024 * 1024,
+    rowsReadPerSitePerMonth: 5_000_000,
+    rowsWrittenPerSitePerMonth: 100_000,
+    callsPerMinutePerViewer: 60,
+    callsPerMinutePerSite: 600,
+    maxRowsPerCall: 1000,
+    maxResponseBytes: 1024 * 1024,
+  },
 };
 
 export function useAppContext() {
