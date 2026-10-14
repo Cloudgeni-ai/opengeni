@@ -2101,7 +2101,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("a shared workspace's admin connects every provider for the workspace, Codex too", async () => {
+  test("SUB-OWN-09: a shared workspace's admin connects every provider for the workspace, Codex too", async () => {
     context.clientConfig.claudeSubscriptionEnabled = true;
     const view = await render();
     try {
