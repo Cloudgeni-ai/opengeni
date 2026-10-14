@@ -228,11 +228,14 @@ await og.setSessionUsageLimit(workspaceId, session.id, {
 The SDK verifies the server's echo and never lets an older server start
 unlimited work. A create that carries a limit also sends
 `startMode: "standard"`, which a server that predates usage limits rejects
-before creating anything, so the SDK throws
-`OpenGeniSessionUsageLimitUnsupportedError` with no session started.
+before creating anything (its create route answers 422
+`INVALID_SESSION_CREATE_REQUEST` naming `startMode`), so the SDK throws
+`OpenGeniSessionUsageLimitUnsupportedError` with no session started. Any other
+validation error stays an ordinary `OpenGeniApiError`.
 If a server accepts the create but does not echo the limit, `createSession`
 throws the same error carrying the created `sessionId`, and
-`setSessionUsageLimit` throws instead of reporting success. A refusal surfaces as
+`setSessionUsageLimit` (client method or free function) throws it too instead
+of reporting success. A refusal surfaces as
 `OpenGeniSessionUsageLimitReachedError` (never the allowance error), and
 `@opengeni/sdk/session-usage-limits` plus `@opengeni/react` provide the parser,
 neutral message and notice. Older clients that do not understand the new
