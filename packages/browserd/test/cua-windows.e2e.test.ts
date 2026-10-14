@@ -28,8 +28,12 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
         return null;
       }
     };
-    const until = async (check: (state: State) => boolean, label: string): Promise<State> => {
-      for (let attempt = 0; attempt < 100; attempt++) {
+    const until = async (
+      check: (state: State) => boolean,
+      label: string,
+      attempts = 100,
+    ): Promise<State> => {
+      for (let attempt = 0; attempt < attempts; attempt++) {
         const state = await read();
         if (state && check(state)) return state;
         await Bun.sleep(100);
@@ -52,7 +56,8 @@ test.skipIf(process.platform !== "win32" || process.env.OPENGENI_CUA_E2E !== "1"
     let supervisor: ComputerSupervisor | undefined;
     const reference = { computerSessionId: randomUUID(), controllerGeneration: randomUUID() };
     try {
-      const ready = await until((state) => state.ready, "window shown");
+      // A cold PowerShell start that loads WinForms can take several seconds.
+      const ready = await until((state) => state.ready, "window shown", 600);
       supervisor = await ComputerSupervisor.open({
         rootDirectory: join(root, "controller"),
         displaceExistingSessions: true,

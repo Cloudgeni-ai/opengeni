@@ -10,7 +10,9 @@ $statePath = Join-Path $Root "fixture-state.json"
 
 function Save-State {
   $temporary = "$statePath.tmp"
-  ($state | ConvertTo-Json -Compress) | Set-Content -Encoding UTF8 -Path $temporary
+  # WriteAllText writes UTF-8 without a byte-order mark, which JSON parsers
+  # reject; Windows PowerShell's Set-Content -Encoding UTF8 would add one.
+  [System.IO.File]::WriteAllText($temporary, ($state | ConvertTo-Json -Compress))
   Move-Item -Force -Path $temporary -Destination $statePath
 }
 
