@@ -342,7 +342,7 @@ export class ExistingComputerEnvironmentAllocator implements ComputerEnvironment
     const environment = nativeComputerEnvironment(context.baseEnvironment);
     const platform = process.platform;
     if (platform === "win32" && this.options.allowWindows) {
-      const seat = await readWindowsSeat(environment);
+      const seat = await readWindowsSeat();
       return { ...seat, rfbPort: null, environment, async close() {} };
     }
     if (platform !== "darwin" && platform !== "linux") {

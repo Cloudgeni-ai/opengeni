@@ -26,6 +26,10 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./app-links": {
+      "types": "./src/app-links.ts",
+      "default": "./src/app-links.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

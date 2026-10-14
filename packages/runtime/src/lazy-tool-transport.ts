@@ -870,7 +870,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
  * without that tool's schema, so its scalar, array and object values can
  * arrive as strings. Restore the declared types before Runner dispatches it.
  */
-function restoreDirectDeferredCallArgumentTypes(
+export function restoreDirectDeferredCallArgumentTypes(
   candidate: Record<string, unknown>,
   runtime: LazyToolRuntime,
 ): Record<string, unknown> {

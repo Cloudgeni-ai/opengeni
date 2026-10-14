@@ -1464,7 +1464,7 @@ export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
 
 export type TurnInitiatorContext = Record<string, unknown>;
 
-/** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
+/** Bounded host provenance; Opengeni-owned lineage keys are reserved. */
 export type ServiceTurnInitiatorContext = TurnInitiatorContext;
 
 export type IntegrationClientMetadata = {
@@ -5017,6 +5017,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Whether people can connect their own computers; absent on older servers. */
+  connectedMachines?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -6297,7 +6299,7 @@ export type MemberNotificationsSetting = {
 
 // --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
 
-export type NativeAppPlatform = "ios" | "android";
+export type NativeAppPlatform = "ios" | "android" | "macos" | "windows" | "linux";
 
 export type NativeAppAuthorizeInput = {
   /** Exactly `<registered scheme>://auth/callback`. */
@@ -9074,7 +9076,7 @@ export type GitHubInstallationBinding = {
   lifecycle: GitHubInstallationLifecycle;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
-  /** OpenGeni-owned entry point for changing the installation's repository allowlist. */
+  /** Opengeni-owned entry point for changing the installation's repository allowlist. */
   configureUrl: string | null;
   createdAt: string;
   updatedAt: string;

@@ -299,6 +299,11 @@ can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it
 can explain the outage, choose another available tool or compute target, or help
 recover the machine. The transport failure must not replace the agent loop.
+The same holds for sessions with repository resources, whose repository Skill
+index is built through the sandbox before the first model call: a typed
+offline/timeout control error during that discovery degrades to a short
+"repository skills unavailable" instruction for that run instead of failing the
+turn, and the next run discovers again.
 
 ## Create a session on a machine
 
@@ -898,6 +903,20 @@ explicit `workingDir` to `createSession`). Historical attachments are not restag
 automatically; retrieve them explicitly through Files or attach them to a new
 message when needed.
 
+While a session keeps `/`, staging an attachment, spilled tool result or generated
+image into it usually still fails. When the turn's effective backend is a
+Connected Machine and its working directory is `/`, any failed staging command
+gets a reason that says the filesystem root is often not writable (read-only on
+macOS), that this may be why it failed, and how to fix it, followed by the
+underlying error. The model and timeline therefore no longer see only a raw
+`mkdir: .opengeni: Read-only file system`. This condition is structural (backend
+plus root), never a match on the possibly localized command output, so the
+wording stays conditional. The original command output and exit code are kept,
+and managed sandboxes keep their raw reason. Opengeni never redirects those
+files to another host folder, so the cwd-relative `.opengeni/...` paths keep
+their meaning (`packages/runtime/src/index.ts`,
+`explainConnectedMachineRootDownloadFailure`).
+
 `opengeni-agent run` is the explicit foreground alternative.
 
 Self-update requires settled accepted work across every connection. Relay pumps,
@@ -1012,7 +1031,7 @@ The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
   chat** (the same attach path as the list). Closing the dialog stops the watch;
 - once a machine with a screen is reachable (the chat's own machine first),
   offers the
-  [OpenGeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
+  [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
   for that machine and shows **Connected** when a Chrome profile on that same
   enrollment links up. It checks once, polls only after **Add to Chrome**, and
   stops after ten minutes or when the inventory is not readable.
@@ -1071,13 +1090,13 @@ per-attempt admission `run_on` uses. When computer input is refused because
 screen control is off, the error names that tool.
 
 macOS also needs Screen Recording, Accessibility and Input Monitoring for
-OpenGeni. Mac agents report all three without prompting, on Hello and on each
+Opengeni. Mac agents report all three without prompting, on Hello and on each
 desktop heartbeat, as `runtime.macPermissions` in the machine list; older agents
 report only a missing Screen Recording grant, as `desktopUnavailableReason`.
 `POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings` with
 `pane: screen_recording | accessibility | input_monitoring` opens that System
 Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
-nothing; the person switches OpenGeni on there. The chat card walks the missing
+nothing; the person switches Opengeni on there. The chat card walks the missing
 permissions in that order, from what the Mac reports.
 
 ### Change who can use a machine

@@ -308,7 +308,7 @@ export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
 );
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
-// OpenGeni-owned identity carried beside the provider's opaque SDK envelope.
+// Opengeni-owned identity carried beside the provider's opaque SDK envelope.
 // Provider serializers intentionally use different keys (`sandboxId`,
 // `devboxId`, `sandboxName`, ...); durable lease logic must not need to learn a
 // new provider's private state shape. Existing envelopes remain readable via
@@ -3398,7 +3398,7 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
   "viaTruncated",
 ]);
 
-/** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
+/** Bounded host provenance that cannot forge Opengeni-owned lineage fields. */
 export const ServiceTurnInitiatorContext = /* @__PURE__ */ defineSchema(() =>
   TurnInitiatorContext.superRefine((value, ctx) => {
     for (const key of reservedServiceTurnInitiatorContextKeys) {
@@ -3817,7 +3817,7 @@ export async function verifyEnrollmentBearer(
 // (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
 // secret value is NEVER logged.
 /**
- * The OpenGeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
+ * The Opengeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
  * an installed Connected Machine agent through native messaging, so the machine
  * must be connected before the extension can link up.
  */
@@ -5142,7 +5142,7 @@ export type CredentialAuthNeededReason =
   | "refresh_failed";
 
 /**
- * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * Host-owned run credentials are materialized below one Opengeni-owned sandbox
  * directory. Paths are relative POSIX names; the runtime validates traversal,
  * collisions, bounds, and modes before any content reaches a sandbox.
  */
@@ -21474,6 +21474,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
+    // Whether people can connect their own computers to this deployment. Absent
+    // on older servers: clients then treat it as unknown.
+    connectedMachines: z.boolean().optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.

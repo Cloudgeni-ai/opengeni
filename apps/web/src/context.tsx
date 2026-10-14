@@ -62,6 +62,7 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
@@ -2914,42 +2915,44 @@ export function RootRouteComponent() {
   ) : managedAuthRequired && authSession === undefined ? (
     <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
-    <Suspense fallback={<LoadingPanel />}>
-      <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
-        {browserAccountsEnabled ? (
-          <BrowserAccountsSignedOutPanel
-            presentation="embedded"
-            search={window.location.search}
-            invitation={organizationInvitationContinuation}
-            emptySetRegistrationPanel={
-              clientConfig?.managedAuthSessionSetMode === "broker" ||
-              clientConfig?.managedAuthSessionSetMode === "dual" ? (
-                <ManagedAuthPanel
-                  initialMode="signup"
-                  allowedModes={["signup"]}
-                  presentation="embedded"
-                  onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
-                  emailVerificationRequired={managedEmailVerificationRequired}
-                  newSignupsEnabled={managedNewSignupsEnabled}
-                />
-              ) : undefined
-            }
-          />
-        ) : (
-          <ManagedAuthPanel
-            presentation="embedded"
-            search={window.location.search}
-            invitation={organizationInvitationContinuation}
-            onDismissInvitation={clearOrganizationInvitationContinuation}
-            onSubmit={handleManagedAuth}
-            emailVerificationRequired={managedEmailVerificationRequired}
-            newSignupsEnabled={managedNewSignupsEnabled}
-            socialProviders={managedSocialProviders}
-            onSocialSubmit={handleManagedSocialAuth}
-          />
-        )}
-      </SignedOutPage>
-    </Suspense>
+    <DesktopSignedOutRecovery>
+      <Suspense fallback={<LoadingPanel />}>
+        <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
+          {browserAccountsEnabled ? (
+            <BrowserAccountsSignedOutPanel
+              presentation="embedded"
+              search={window.location.search}
+              invitation={organizationInvitationContinuation}
+              emptySetRegistrationPanel={
+                clientConfig?.managedAuthSessionSetMode === "broker" ||
+                clientConfig?.managedAuthSessionSetMode === "dual" ? (
+                  <ManagedAuthPanel
+                    initialMode="signup"
+                    allowedModes={["signup"]}
+                    presentation="embedded"
+                    onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
+                    emailVerificationRequired={managedEmailVerificationRequired}
+                    newSignupsEnabled={managedNewSignupsEnabled}
+                  />
+                ) : undefined
+              }
+            />
+          ) : (
+            <ManagedAuthPanel
+              presentation="embedded"
+              search={window.location.search}
+              invitation={organizationInvitationContinuation}
+              onDismissInvitation={clearOrganizationInvitationContinuation}
+              onSubmit={handleManagedAuth}
+              emailVerificationRequired={managedEmailVerificationRequired}
+              newSignupsEnabled={managedNewSignupsEnabled}
+              socialProviders={managedSocialProviders}
+              onSocialSubmit={handleManagedSocialAuth}
+            />
+          )}
+        </SignedOutPage>
+      </Suspense>
+    </DesktopSignedOutRecovery>
   ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&

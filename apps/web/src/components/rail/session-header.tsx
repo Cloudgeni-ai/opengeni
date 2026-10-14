@@ -223,7 +223,10 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap">
+    <header
+      data-window-drag
+      className="flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
+    >
       {leading}
       {/* The title takes every pixel the actions leave; it truncates last. */}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">

@@ -6301,7 +6301,7 @@ export async function applyCreditDebitUpToBalance(
 }
 
 /**
- * Settle an already-consumed, OpenGeni-funded resource for its full cost.
+ * Settle an already-consumed, Opengeni-funded resource for its full cost.
  * Admission happens before use; an in-flight operation can take the account
  * below zero. Future grants and purchased top-ups net against that balance.
  * Never use this helper to admit a new operation or for externally paid use.
@@ -24082,7 +24082,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       payload: { waiterId: waiter.waiterId, generation: waiter.generation, reason },
     }),
     cancelledBy: "codex_capacity_reconcile",
-    recheckBeforeReset: false,
+    recheckBeforeReset: true,
   },
   xai: {
     label: "SuperGrok",
@@ -24151,7 +24151,7 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
     cancelledBy: "claude_capacity_reconcile",
     // Claude's adapter reads no usage that can end an exhaustion before its
     // stored reset (its quota comes from response headers), so its waiter
-    // sleeps until the reset like Codex's.
+    // sleeps until the reset.
     recheckBeforeReset: false,
   },
 };
@@ -40255,7 +40255,13 @@ export async function recordSkippedContextCompaction(
       | "replacement_not_smaller"
       | "replacement_exceeds_model_budget"
       | "replacement_unchanged"
-      | "summarization_failed";
+      | "summarization_failed"
+      /**
+       * The attempt was cancelled (worker shutdown or another activity
+       * cancellation) while the checkpoint request was in flight. Not a
+       * provider or summarizer failure; the recovered attempt re-evaluates.
+       */
+      | "interrupted";
     /**
      * When false, record the visible skip even if no operator `/compact` is
      * pending (auto/overflow paths that already emitted `compaction.started`).

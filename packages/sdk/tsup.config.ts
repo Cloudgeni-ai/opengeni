@@ -14,6 +14,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/allowance-refusal.ts",
+    "src/app-links.ts",
     "src/chat/index.ts",
     "src/tenant-workspaces.ts",
     "src/session-proxy.ts",

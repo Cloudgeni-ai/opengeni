@@ -7,6 +7,7 @@ import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { AppearanceSubmenu } from "@/components/appearance-menu";
+import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
 import {
   accountMenuAriaLabel,
@@ -149,8 +150,14 @@ export function RailFooter() {
                   supportEmail={context.clientConfig.supportEmail}
                   onSendFeedback={onSendFeedback}
                 />
-                <DropdownMenuSeparator />
-                {managed ? (
+                {hasDesktopAccounts() ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DesktopAccountMenuItems />
+                  </>
+                ) : null}
+                {hasDesktopAccounts() ? null : <DropdownMenuSeparator />}
+                {hasDesktopAccounts() ? null : managed ? (
                   <DropdownMenuItem
                     variant="destructive"
                     onSelect={() => {

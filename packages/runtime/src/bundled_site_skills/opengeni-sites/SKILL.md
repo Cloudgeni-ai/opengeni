@@ -11,7 +11,7 @@ not a requirement: a plain HTML-only Site is valid. Build and test in the
 sandbox, then upload the self-contained HTML and optional source.
 
 Do not invent a Site framework, deployment service, App Host, custom domain
-setup, provider-specific API wrapper, or OpenGeni-only build CLI. Putting a
+setup, provider-specific API wrapper, or Opengeni-only build CLI. Putting a
 Site on the web is built in (see "Publish to the web").
 
 ## Sites have no server; AI comes from the host
@@ -181,7 +181,7 @@ An HTML-only Site can be a small widget; it does not require a full-page layout.
 
 ## Prefer Opengeni's UI and typed client
 
-- Prefer `@opengeni/react` components and compiled CSS for OpenGeni-native
+- Prefer `@opengeni/react` components and compiled CSS for Opengeni-native
   session, timeline, composer, queue, approval, and human-input experiences.
 - Use custom React only where the Site has a genuinely different product need.
 - Inside the published opaque-origin iframe, create the workspace-bound client

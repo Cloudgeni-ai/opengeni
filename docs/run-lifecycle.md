@@ -398,7 +398,7 @@ Send: the primary click starts or ends the call, while the disclosure holds the
 supported realtime-model choice, connection status, recovery actions, and dev
 diagnostics. Realtime-model choice is intentionally independent from the
 ordinary session model and remembers the user's last workspace choice. The
-catalog groups OpenGeni-managed Gateway, Connected Codex, and workspace-owned
+catalog groups Opengeni-managed Gateway, Connected Codex, and workspace-owned
 Gateway models; unconfigured credentials remain visible but disabled.
 The owner operation and browser proof are
 scoped to session storage and never rendered or logged. Reload replays that
@@ -585,7 +585,7 @@ turn.
 That same exact calling-turn boundary supplies an agent-spawned child's omitted
 model and reasoning effort. Explicit child values may override them. A
 Codex-subscription manager therefore keeps its external billing path for workers
-by default instead of falling back to the deployment's OpenGeni-credit model.
+by default instead of falling back to the deployment's Opengeni-credit model.
 Omitted latency mode instead defaults to `standard` for every fresh session;
 `fast` and `priority` require an explicit, model-supported selection. The initial
 policy records this default as `deployment`, not `continuation`. Keyed replay
@@ -1044,7 +1044,7 @@ and failures prevent downstream preparation without bypassing execution fences.
 
 An explicitly empty effective first-party permission ceiling is zero delegated
 authority. Before eager/deferred preparation, runtime omits only remote
-OpenGeni-delegated MCP matches; it neither signs an empty token nor pads the
+Opengeni-delegated MCP matches; it neither signs an empty token nor pads the
 grant. Empty broad tool selection is silent; requested first-party tools and
 dedicated `files`/`docs` stay unavailable with the existing `insufficient_scope`
 advisory. External-host, local-registration, connection-backed and
@@ -1602,7 +1602,9 @@ effective admission gate. An active goal adds an optional id/version fence; it
 does not own the waiter or the turn.
 
 The workflow waits for the earliest authoritative provider reset or a bounded
-value-free metadata refresh. Capacity-affecting writes increment a
+recheck. A provider whose usage read can end an exhaustion early (Codex,
+SuperGrok) rechecks on a 1 to 15 minute backoff and re-reads usage for the
+exhausted connections the turn may use before re-evaluating. Capacity-affecting writes increment a
 same-transaction wake revision before a best-effort Temporal signal.
 Duplicate/lost signals are harmless: row-locked re-evaluation is the sole
 resume writer, and unobserved revisions repair commit-to-signal loss after
@@ -1673,6 +1675,18 @@ Steer cooperatively settles the ordinary turn as `superseded` before another
 model request. A claimed standalone compaction instead completes its maintenance
 turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
 interruption fences.
+A compaction cut short by its own attempt's cancellation (graceful worker
+shutdown during a deploy, or any other Temporal activity cancellation) is not a
+summarization failure. The worker classifies it structurally, from the attempt's
+aborted cancellation signal or a typed turn cancellation error and never from
+message text, and settles the started landmark as
+`session.context.compaction.skipped(reason="interrupted")` without consuming an
+explicit `/compact` request, then lets the cancellation propagate unchanged. The
+landmark write is best effort: if a control already closed the attempt, or the
+write fails, nothing is recorded and the cancellation still wins. Same-turn
+recovery is unchanged; the recovered attempt re-evaluates the threshold or the
+still-pending request and compacts again if needed
+(`apps/worker/src/activities/agent-turn/compaction-interruption.ts`).
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -1950,6 +1964,11 @@ symlink Skill entrypoints are excluded because portable filesystem APIs cannot
 prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
 the configured-catalog history lifecycle above. It is fixed for the bound capability; reads
 observe live edits or report missing files, and rebinding refreshes discovery.
+When discovery meets a typed unreachable workspace (a Connected Machine
+`agentOffline` or control-timeout `SelfhostedControlError`), the bound
+capability memoizes an explicitly unavailable, empty index and contributes a
+short notice instead of failing instruction preparation; the next run rebinds
+and discovers again. Every other discovery failure still fails the turn.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves

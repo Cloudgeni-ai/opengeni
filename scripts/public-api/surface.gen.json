@@ -11983,6 +11983,7 @@
         "$.codeSearch": "object!",
         "$.codeSearch.available": "boolean!",
         "$.codeSearch.workspaceDefault": "enum!=[\"\\\"off\\\"\",\"\\\"on\\\"\",\"\\\"split\\\"\"]",
+        "$.connectedMachines": "boolean?",
         "$.defaultModel": "string!",
         "$.defaultReasoningEffort": "ref(ReasoningEffort)!",
         "$.defaultSandboxBackend": "enum!=[\"\\\"blaxel\\\"\",\"\\\"cloudflare\\\"\",\"\\\"daytona\\\"\",\"\\\"docker\\\"\",\"\\\"e2b\\\"\",\"\\\"local\\\"\",\"\\\"modal\\\"\",\"\\\"none\\\"\",\"\\\"opensandbox\\\"\",\"\\\"runloop\\\"\",\"\\\"selfhosted\\\"\",\"\\\"vercel\\\"\"]",
@@ -31012,6 +31013,15 @@
     "@opengeni/sdk/allowance-refusal": {
       "allowanceExhaustedMessage": "value",
       "parseAllowanceExhaustedRefusal": "value"
+    },
+    "@opengeni/sdk/app-links": {
+      "accountForAppLink": "value",
+      "appHandoffUrl": "value",
+      "AppLink": "type",
+      "AppLinkAccount": "type",
+      "normalizeServerUrl": "value",
+      "parseAppLink": "value",
+      "serverLabel": "value"
     },
     "@opengeni/sdk/artifacts": {
       "CreateEditableArtifactMaterializationRequest": "type",

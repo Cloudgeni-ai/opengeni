@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in</title>
+    <link rel="stylesheet" href="welcome.css" />
+  </head>
+  <body>
+    <div class="drag" aria-hidden="true"></div>
+    <main>
+      <img class="mark" src="logo.svg" alt="" width="44" />
+      <section id="start">
+        <h1 id="title">Sign in</h1>
+        <p class="lead">You'll finish signing in in your browser.</p>
+        <form id="form" novalidate>
+          <button id="continue" type="submit" class="primary">Continue in browser</button>
+          <details id="server-details">
+            <summary>Use another server</summary>
+            <label for="server">Server address</label>
+            <input
+              id="server"
+              name="server"
+              type="text"
+              inputmode="url"
+              autocomplete="url"
+              autocapitalize="off"
+              spellcheck="false"
+              placeholder="app.opengeni.ai"
+            />
+          </details>
+        </form>
+      </section>
+      <section id="waiting" hidden>
+        <h1>Finish in your browser</h1>
+        <p class="lead">
+          Sign in to <strong id="pending-server"></strong> and allow this computer. This window
+          updates by itself.
+        </p>
+        <div class="row">
+          <button id="again" type="button" class="secondary">Open the browser again</button>
+          <button id="restart" type="button" class="link">Start over</button>
+        </div>
+      </section>
+      <p id="error" class="error" role="alert" hidden></p>
+      <button id="cancel" type="button" class="link back" hidden>Back</button>
+    </main>
+    <script src="welcome.js"></script>
+  </body>
+</html>

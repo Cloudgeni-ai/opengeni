@@ -1,7 +1,7 @@
 # Advanced In-Process Embedding
 
 > Most customer products do **not** need this integration shape. When Opengeni
-> remains a standalone service and the product presents an OpenGeni-backed agent
+> remains a standalone service and the product presents an Opengeni-backed agent
 > in its own UI, mount `OpenGeniChat` or `SessionConversation` from
 > `@opengeni/react` behind the packaged `createSessionProxyHandler` from
 > `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
@@ -65,7 +65,7 @@ behavior is not appropriate. The proxy does not need billing, sandbox environmen
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
-**OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+**Opengeni-rendered product UI.** A host that mounts the styled React surfaces
 should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
 under `OpenGeniProvider`. A standalone product backs both with
@@ -395,7 +395,7 @@ with exact agent turn/attempt claims, and is consumed only by commands that
 create work; it cannot impersonate a human or change access. V2 core callers
 can provide the same typed fields on their trusted `AccessGrant`. The optional
 display label belongs on `serviceInitiator`, not in its context. Identity fields
-and context are bounded; OpenGeni-owned lineage/backfill keys and the
+and context are bounded; Opengeni-owned lineage/backfill keys and the
 `unattributed-legacy` migration sentinel are reserved.
 
 Ordinary delegated and first-party/Codemode credentials remain `ogd_`. The

@@ -176,6 +176,7 @@ jobs:
             bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
             bun scripts/release/lockstep-version.ts
             bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
+            bun scripts/public-api/refresh-sdk-major.ts
             git add -A
             git diff --cached --check
           )
@@ -502,6 +503,7 @@ jobs:
               bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
               bun scripts/release/lockstep-version.ts
               bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
+              bun scripts/public-api/refresh-sdk-major.ts
               git add -A
               git diff --cached --check
             )
@@ -1938,6 +1940,9 @@ jobs:
 
   api-image:
     name: Build API workload image
+    # Only exact-main push builds sign an agent. PR, scheduled, and automation
+    # builds use a credential-free environment and never wait for release approval.
+    environment: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'public-release' || 'ci-build' }}
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest

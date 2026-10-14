@@ -123,7 +123,7 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
     for (const toolName of ["secret_save", "secret_move", "secret_delete", "secret_get"]) {
       expect(secretArgumentMode(entry("opengeni", toolName))).toBe("preserve");
     }
-    // Only OpenGeni's own secret tools are exempt, not a connector's tool that happens to share the prefix.
+    // Only Opengeni's own secret tools are exempt, not a connector's tool that happens to share the prefix.
     expect(secretArgumentMode(entry("mcp", "secret_save"))).toBe("literal");
   });
 
@@ -143,7 +143,7 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
     expect(calls[0]?.use.surface).toBe("codemode");
   });
 
-  test("OpenGeni tools get the value; an escape passes the reference on for later work", async () => {
+  test("Opengeni tools get the value; an escape passes the reference on for later work", async () => {
     const brace = "{";
     const ref = (path: string) => `${brace}${brace}secret:${path}}}`;
     const { resolver, calls } = fakeResolver({ "GitHub/token": VALUE });
@@ -168,7 +168,7 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
     expect(calls).toHaveLength(1);
   });
 
-  test("interaction tools and OpenGeni's secret tools receive the reference verbatim", async () => {
+  test("interaction tools and Opengeni's secret tools receive the reference verbatim", async () => {
     const brace = "{";
     const ref = `${brace}${brace}secret:GitHub/token}}`;
     for (const [source, toolName] of [

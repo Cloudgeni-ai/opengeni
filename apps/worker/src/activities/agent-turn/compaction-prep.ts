@@ -26,6 +26,10 @@ import {
 import { type ModelProviderApi, type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
+import {
+  isContextCompactionInterruption,
+  settleContextCompactionInterruption,
+} from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type {
   TurnActivityServices as ActivityServices,
@@ -509,6 +513,24 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         // `compaction.started` may already be live — settle skipped before
         // failing the turn so the timeline cannot stick on Compacting…
         const landmark = await settleFailedContextCompactionLandmark(
@@ -692,6 +714,24 @@ export async function runPostAgentCompaction(
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         const landmark = await settleFailedContextCompactionLandmark(
           db,
           {
@@ -863,6 +903,21 @@ export async function runPostAgentCompaction(
     } catch (compactError) {
       if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
       if (compactError instanceof TurnAttemptFencedError) throw compactError;
+      if (isContextCompactionInterruption(compactError, cancellationSignal)) {
+        await settleContextCompactionInterruption(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: attempt.turnId!,
+            executionGeneration: attempt.executionGeneration,
+            attemptId: input.attemptId,
+          },
+          { publishLiveEvents: publishCompactionLiveEvents, observability },
+        );
+        throw compactError;
+      }
       const landmark = await settleFailedContextCompactionLandmark(
         db,
         {

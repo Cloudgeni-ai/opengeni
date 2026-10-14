@@ -226,7 +226,7 @@ describe("personal owner signed-state claim", () => {
         personalOwnerVerified: false,
       }),
     ).toBe(false);
-    // Claim present but the subject is an OpenGeni-minted machine.
+    // Claim present but the subject is an Opengeni-minted machine.
     expect(
       personalOwnerStateAccepted({
         ownership: "personal",
