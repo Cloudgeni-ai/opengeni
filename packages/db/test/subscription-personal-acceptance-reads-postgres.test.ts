@@ -620,6 +620,21 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ),
       "session usage limit capability has unsafe owner or direct runtime privileges",
     );
+    // 0776 (Site Data): its tables are in the runtime and protected contracts.
+    const siteDataTables = [
+      "site_data_collections",
+      "site_data_files",
+      "site_data_rate_windows",
+      "site_data_record_values",
+      "site_data_records",
+      "site_data_usage",
+      "site_data_validation_windows",
+      "site_data_workspace_validation_windows",
+    ].join(", ");
+    heldBack.push(
+      `runtime privilege tables are missing: ${siteDataTables}`,
+      `protected tables are missing: ${siteDataTables}`,
+    );
     const expected = [
       ...heldBack,
       ...PENDING_RETIREMENT,
