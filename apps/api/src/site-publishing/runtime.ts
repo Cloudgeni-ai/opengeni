@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { parseSiteHostname, siteHostname, type SiteLimits } from "@opengeni/contracts";
 import { sessionUsageLimitsProducerEnabled, type ApiRouteDeps } from "@opengeni/core";
 import {
@@ -9,12 +10,15 @@ import {
   getSession,
   getSitePublication,
   isSiteWorkspaceMember,
-  listReservedSiteRuntimeConversations,
+  claimSiteRuntimeReservationSweep,
   readSessionUsageLimit,
   recordUsageEvent,
   releaseSiteRuntimeConversationStart,
+  setSessionUsageLimitInTransaction,
   settleSiteRuntimeConversationSpend,
+  SITE_RUNTIME_ABANDONED_START_MINUTES,
   withRlsContext,
+  withWorkspaceSessionActivityRls,
   type PublishedSiteRecord,
   type SitePublicationRecord,
   type SitePublishingScope,
@@ -194,9 +198,54 @@ export async function enforceSiteRuntimeViewerRate(
     );
 }
 
-/** The rate principal of the signed client address (`ip:unknown` when the gateway sent none). */
+/**
+ * The rate principal of the signed client address (`ip:unknown` when the
+ * gateway sent none). IPv6 addresses count per /64 (one subscriber usually
+ * holds a whole /64, so per-address keys would be free to rotate);
+ * IPv4-mapped IPv6 counts as its IPv4 address.
+ */
 export function siteClientAddressPrincipal(fields: Pick<SiteGatewayFields, "clientIp">): string {
-  return `ip:${fields.clientIp.trim().slice(0, 64) || "unknown"}`;
+  return `ip:${siteClientAddressKey(fields.clientIp)}`;
+}
+
+/** A client address as a rate key: IPv4 as is, IPv6 as its /64 prefix. */
+export function siteClientAddressKey(raw: string): string {
+  const value = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^\[(.*)\]$/u, "$1")
+    .replace(/%.*$/u, "");
+  if (!value) return "unknown";
+  const family = isIP(value);
+  if (family !== 6) return value.slice(0, 64);
+  const halves = value.split("::");
+  const groups = (part: string | undefined) => (part ? part.split(":") : []);
+  const head = groups(halves[0]);
+  const tail = halves.length === 2 ? groups(halves[1]) : [];
+  // An embedded IPv4 tail is two hextets.
+  const last = halves.length === 2 ? tail : head;
+  const dotted = last.at(-1);
+  if (dotted?.includes(".")) {
+    const octets = dotted.split(".").map(Number);
+    last.splice(
+      -1,
+      1,
+      ((octets[0]! << 8) | octets[1]!).toString(16),
+      ((octets[2]! << 8) | octets[3]!).toString(16),
+    );
+  }
+  const zeros = halves.length === 2 ? Math.max(0, 8 - head.length - tail.length) : 0;
+  const hextets = [...head, ...Array<string>(zeros).fill("0"), ...tail].map((group) =>
+    Number.parseInt(group, 16),
+  );
+  if (hextets.length !== 8 || hextets.some((hextet) => !Number.isInteger(hextet)))
+    return value.slice(0, 64);
+  if (hextets.slice(0, 5).every((hextet) => hextet === 0) && hextets[5] === 0xffff)
+    return [hextets[6]! >> 8, hextets[6]! & 255, hextets[7]! >> 8, hextets[7]! & 255].join(".");
+  return `${hextets
+    .slice(0, 4)
+    .map((hextet) => hextet.toString(16))
+    .join(":")}::/64`;
 }
 
 /** Count one operation in a per-minute bucket; 429 with Retry-After past `limit` (null: no limit). */
@@ -312,21 +361,29 @@ export function siteWideBudget(result: SiteRuntimeReservation): boolean {
 
 const IDLE_SESSION_STATUSES = new Set(["idle", "failed", "cancelled"]);
 /** A start whose session has not appeared after this long failed before its create committed. */
-const ABANDONED_START_MS = 10 * 60_000;
+const ABANDONED_START_MS = SITE_RUNTIME_ABANDONED_START_MINUTES * 60_000;
+
+/** A conversation's session usage as read while settling. */
+export type SiteConversationUsage = {
+  usedMicros: number;
+  limitMicros: number | null;
+  version: number;
+};
 
 /**
  * Bring a conversation's counted spend up to its session usage so far and
  * release what it no longer needs reserved (all of it once the session is
- * idle). A start whose session never appeared is released entirely. A read
- * failure leaves the counters as they are; the session's own usage limit
- * still caps the conversation.
+ * idle, or when `release` says so). A start whose session never appeared is
+ * released entirely. A read failure leaves the counters as they are; the
+ * session's own usage limit still caps the conversation.
  */
 export async function settleSiteRuntimeSpend(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
-  conversation: Pick<SiteRuntimeConversationRecord, "sessionId" | "turns" | "reservedMicros"> &
+  conversation: Pick<SiteRuntimeConversationRecord, "sessionId" | "admissions"> &
     Partial<Pick<SiteRuntimeConversationRecord, "createdAt">>,
-): Promise<number | null> {
+  options: { release?: boolean } = {},
+): Promise<SiteConversationUsage | null> {
   const { sessionId } = conversation;
   try {
     const session = await getSession(deps.db, host.scope.workspaceId, sessionId);
@@ -343,15 +400,19 @@ export async function settleSiteRuntimeSpend(
       sessionId,
       runtime: true,
     });
-    const used = read.outcome === "ok" ? read.state.usedMicros : null;
-    if (used === null) return null;
+    if (read.outcome !== "ok" || read.state.usedMicros === null) return null;
+    const usage = {
+      usedMicros: read.state.usedMicros,
+      limitMicros: read.state.limitMicros,
+      version: read.state.version,
+    };
     await settleSiteRuntimeConversationSpend(deps.db, host.scope, {
       sessionId,
-      usedMicros: used,
-      idle: session !== null && IDLE_SESSION_STATUSES.has(session.status),
-      expected: { turns: conversation.turns, reservedMicros: conversation.reservedMicros },
+      usedMicros: usage.usedMicros,
+      idle: options.release === true || IDLE_SESSION_STATUSES.has(session.status),
+      expected: { admissions: conversation.admissions },
     });
-    return used;
+    return usage;
   } catch (error) {
     console.warn("[site-runtime] could not settle conversation spend", {
       siteId: host.site.id,
@@ -361,23 +422,100 @@ export async function settleSiteRuntimeSpend(
   }
 }
 
-/** Reservations swept per refusal before one retry. */
+/**
+ * Lower a conversation's session usage limit to `limitMicros` (a
+ * per-conversation limit lowered after it started), before more work runs in
+ * it. The Site's host identity writes it, compare-and-set on the version
+ * read while settling. Refuses the work (503) when the limit cannot be
+ * lowered, so a conversation never runs above its Site's current cap.
+ */
+export async function capSiteConversationUsageLimit(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+  sessionId: string,
+  limitMicros: number,
+  usage: SiteConversationUsage | null,
+): Promise<void> {
+  let current = usage;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (current === null) {
+      const read = await readSessionUsageLimit(deps.db, {
+        ...host.scope,
+        sessionId,
+        runtime: true,
+      }).catch(() => null);
+      current =
+        read?.outcome === "ok"
+          ? {
+              usedMicros: read.state.usedMicros ?? 0,
+              limitMicros: read.state.limitMicros,
+              version: read.state.version,
+            }
+          : null;
+      if (current === null) break;
+    }
+    if (current.limitMicros !== null && current.limitMicros <= limitMicros) return;
+    const { version } = current;
+    const result = await withWorkspaceSessionActivityRls(
+      deps.db,
+      host.scope.workspaceId,
+      async (tx) =>
+        await setSessionUsageLimitInTransaction(tx, {
+          ...host.scope,
+          sessionId,
+          limitMicros,
+          expectedVersion: version,
+          operationId: `site-runtime-cap:${sessionId}:${version}:${limitMicros}`,
+          actor: { type: "host", subjectId: `site:${host.site.id}` },
+          producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
+        }),
+    ).catch(() => null);
+    if (result?.outcome === "ok" || result?.outcome === "replayed") return;
+    current = null;
+  }
+  throw sitePublishingError(
+    503,
+    "upstream_unavailable",
+    "site_conversation_unavailable",
+    "The conversation cannot continue right now",
+  );
+}
+
+/** Reservations claimed per sweep. */
 const STALE_RESERVATION_SWEEP = 20;
+/** After a sweep that found nothing, the Site is not swept again for this long (per process). */
+const EMPTY_SWEEP_COOLDOWN_MS = 5_000;
+const emptySweeps = new Map<string, number>();
 
 /**
- * Settle the Site's oldest reserved conversations (idle ones release their
- * whole reservation), so a Site-wide budget held by finished conversations
- * frees up. Bounded per call.
+ * Release reservations that conversations no longer need, so a Site-wide
+ * budget held by finished, abandoned or long-inactive conversations frees
+ * up. Claims a bounded batch of likely candidates (idle sessions, starts
+ * whose session never appeared, reservations inactive for six hours),
+ * least recently visited first and each at most every 30 seconds, and
+ * settles each. A sweep that finds nothing pauses sweeping the Site for a
+ * few seconds, so refused starts in a burst cost one cheap check at most.
+ * Returns whether any reservation was visited.
  */
 export async function sweepSiteRuntimeReservations(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
-): Promise<void> {
-  for (const conversation of await listReservedSiteRuntimeConversations(deps.db, host.scope, {
+): Promise<boolean> {
+  const now = Date.now();
+  if ((emptySweeps.get(host.site.id) ?? 0) > now - EMPTY_SWEEP_COOLDOWN_MS) return false;
+  const candidates = await claimSiteRuntimeReservationSweep(deps.db, host.scope, {
     siteId: host.site.id,
     limit: STALE_RESERVATION_SWEEP,
-  }))
-    await settleSiteRuntimeSpend(deps, host, conversation);
+  });
+  if (candidates.length === 0) {
+    if (emptySweeps.size > 10_000) emptySweeps.clear();
+    emptySweeps.set(host.site.id, now);
+    return false;
+  }
+  emptySweeps.delete(host.site.id);
+  for (const candidate of candidates)
+    await settleSiteRuntimeSpend(deps, host, candidate, { release: candidate.aged });
+  return true;
 }
 
 /** Usage-only metering for Site runtime events (agent spend is metered by the session itself). */

@@ -1267,7 +1267,10 @@ export type SiteRuntimeConversationRecord = {
   /** The conversation's own spend cap, fixed at start (its session usage limit). */
   limitMicros: number | null;
   reservedMicros: number;
+  /** Work admitted so far (start, messages, steering, resumes). */
+  admissions: number;
   createdAt: Date;
+  /** Last admitted work or counted spend. */
   updatedAt: Date;
 };
 
@@ -1282,13 +1285,14 @@ type ConversationRow = {
   reserved_micros: string | number;
   reserved_day: unknown;
   reserved_month: unknown;
+  admissions: string | number;
   created_at: unknown;
   updated_at: unknown;
 };
 
 const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, version_id, turns,
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
-  reserved_month::text as reserved_month, created_at, updated_at`;
+  reserved_month::text as reserved_month, admissions, created_at, updated_at`;
 
 function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
   return {
@@ -1300,6 +1304,7 @@ function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
     meteredMicros: Number(row.metered_micros),
     limitMicros: row.limit_micros === null ? null : Number(row.limit_micros),
     reservedMicros: Number(row.reserved_micros),
+    admissions: Number(row.admissions),
     createdAt: date(row.created_at),
     updatedAt: date(row.updated_at),
   };
@@ -1341,25 +1346,69 @@ export async function listOwnedSiteRuntimeConversations(
   );
 }
 
-/** The Site's conversations that still hold a spend reservation, oldest activity first. */
-export async function listReservedSiteRuntimeConversations(
+/** Statuses of a session with no turn running or queued. */
+const IDLE_SESSION_STATUSES = ["idle", "failed", "cancelled"];
+/** A reservation with no admitted work or counted spend for this long is released. */
+export const SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS = 6;
+/** A sweep revisits a conversation at most this often. */
+const SWEEP_REVISIT_SECONDS = 30;
+/** A start whose session has not appeared after this long failed before its create committed. */
+export const SITE_RUNTIME_ABANDONED_START_MINUTES = 10;
+
+export type SiteRuntimeSweepCandidate = SiteRuntimeConversationRecord & {
+  /** No admitted work or counted spend for `SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS`. */
+  aged: boolean;
+};
+
+/**
+ * Claim up to `limit` of the Site's conversations whose reservation can
+ * likely be released, and mark them visited: those whose session is idle,
+ * failed or cancelled, starts whose session never appeared, and
+ * reservations inactive for `SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS`.
+ * Least recently visited first, each at most every 30 seconds, so repeated
+ * sweeps move through the Site instead of revisiting the same rows.
+ * Running conversations are not candidates: settling them would only move
+ * reserved spend into counted spend, freeing nothing.
+ */
+export async function claimSiteRuntimeReservationSweep(
   db: Database,
   scope: SitePublishingScope,
-  input: { siteId: string; limit: number },
-): Promise<SiteRuntimeConversationRecord[]> {
+  input: { siteId: string; limit: number; now?: Date },
+): Promise<SiteRuntimeSweepCandidate[]> {
+  if (!UUID.test(input.siteId)) return [];
+  const now = (input.now ?? new Date()).toISOString();
   return await withRlsContext(db, scope, async (tx) =>
     (
-      await rawRows<ConversationRow>(
+      await rawRows<ConversationRow & { aged: boolean }>(
         tx,
-        sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
-          where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
-            and reserved_micros > 0
-          order by updated_at asc limit ${Math.max(1, Math.min(input.limit, 100))}`,
+        sql`with picked as (
+            select c.session_id as picked_id from site_runtime_conversations c
+            left join sessions s on s.workspace_id = c.workspace_id and s.id = c.session_id
+            where c.workspace_id = ${scope.workspaceId} and c.site_id = ${input.siteId}
+              and c.reserved_micros > 0
+              and (c.swept_at is null
+                or c.swept_at < ${now}::timestamptz - make_interval(secs => ${SWEEP_REVISIT_SECONDS}))
+              and (s.status in (${sql.join(
+                IDLE_SESSION_STATUSES.map((status) => sql`${status}`),
+                sql`, `,
+              )})
+                or (s.id is null and c.created_at < ${now}::timestamptz
+                  - make_interval(mins => ${SITE_RUNTIME_ABANDONED_START_MINUTES}))
+                or c.updated_at < ${now}::timestamptz
+                  - make_interval(hours => ${SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS}))
+            order by c.swept_at asc nulls first, c.updated_at asc
+            limit ${Math.max(1, Math.min(input.limit, 100))}
+            for update of c skip locked
+          )
+          update site_runtime_conversations c set swept_at = ${now}::timestamptz
+          from picked
+          where c.workspace_id = ${scope.workspaceId} and c.session_id = picked.picked_id
+          returning ${CONVERSATION_COLUMNS}, c.updated_at < ${now}::timestamptz
+            - make_interval(hours => ${SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS}) as aged`,
       )
-    ).map(toConversation),
+    ).map((row) => ({ ...toConversation(row), aged: row.aged === true })),
   );
 }
-
 /** Statuses of a session that may still run or queue agent work. */
 const ACTIVE_SESSION_STATUSES = [
   "queued",
@@ -1631,10 +1680,10 @@ export async function reserveSiteRuntimeConversationStart(
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
           viewer_principal, version_id, turns, limit_micros, reserved_micros, reserved_day,
-          reserved_month)
+          reserved_month, admissions)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
           ${input.viewerPrincipal}, ${input.versionId}, 1, ${limitMicros}, ${reserve},
-          ${periods.day}::date, ${periods.month}::date)`,
+          ${periods.day}::date, ${periods.month}::date, 1)`,
     );
     for (const window of [visitorDay, siteDay, siteMonth])
       await adjustUsageWindow(tx, scope, input.siteId, window, {
@@ -1694,6 +1743,9 @@ export async function releaseSiteRuntimeConversationStart(
  * `newTurn`, else steering, resuming or running a queued message): under the
  * turn cap and its own spend cap, and top its reservation back up to what
  * the conversation may still spend, refusing when a budget cannot hold it.
+ * A per-conversation limit lowered since the start lowers the conversation's
+ * cap (returned as `limitMicros`; the caller lowers the session usage limit
+ * to it before the work runs).
  */
 export async function reserveSiteRuntimeConversationWork(
   db: Database,
@@ -1782,7 +1834,8 @@ export async function reserveSiteRuntimeConversationWork(
     await tx.execute(
       sql`update site_runtime_conversations set reserved_micros = ${target},
           reserved_day = ${periods.day}::date, reserved_month = ${periods.month}::date,
-          turns = turns + ${input.newTurn ? 1 : 0}, updated_at = now()
+          limit_micros = ${cap}, turns = turns + ${input.newTurn ? 1 : 0},
+          admissions = admissions + 1, updated_at = now()
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
     );
     return { ok: true, limitMicros: cap, reservedMicros: target } as const;
@@ -1794,8 +1847,10 @@ export async function reserveSiteRuntimeConversationWork(
  * so far): add the difference to the viewer's day and the Site's day and
  * month, and release that much of its reservation. When the session is
  * `idle` (no turn running or queued) the whole reservation is released, but
- * only if no work was admitted since `expected` was read. Never counts the
- * same micro twice; spend never goes down. Returns the spend added.
+ * only if no work was admitted since `expected` was read (its `admissions`
+ * counter moves with every admission, even one that leaves the reservation
+ * as it was). Never counts the same micro twice; spend never goes down.
+ * Returns the spend added.
  */
 export async function settleSiteRuntimeConversationSpend(
   db: Database,
@@ -1805,7 +1860,7 @@ export async function settleSiteRuntimeConversationSpend(
     usedMicros: number;
     idle?: boolean;
     /** The conversation as read before the session status (guards the idle release). */
-    expected?: Pick<SiteRuntimeConversationRecord, "turns" | "reservedMicros">;
+    expected?: Pick<SiteRuntimeConversationRecord, "admissions">;
     now?: Date;
   },
 ): Promise<number> {
@@ -1823,9 +1878,7 @@ export async function settleSiteRuntimeConversationSpend(
     const conversation = toConversation(row);
     const delta = Math.max(0, used - conversation.meteredMicros);
     const unchanged =
-      input.expected === undefined ||
-      (input.expected.turns === conversation.turns &&
-        input.expected.reservedMicros === conversation.reservedMicros);
+      input.expected === undefined || input.expected.admissions === conversation.admissions;
     const release =
       input.idle && unchanged
         ? conversation.reservedMicros
@@ -1893,7 +1946,7 @@ export async function consumeSiteRuntimeRate(
   const window = new Date(Math.floor(now.getTime() / 60_000) * 60_000);
   const cap = Math.max(0, Math.floor(input.limit));
   return await withRlsContext(db, scope, async (tx) => {
-    const [row] = await rawRows<{ operations: number }>(
+    const [row] = await rawRows<{ operations: number; inserted: boolean }>(
       tx,
       sql`insert into site_runtime_rate_windows (account_id, workspace_id, site_id, principal_key,
           bucket, window_started_at, operations)
@@ -1908,16 +1961,19 @@ export async function consumeSiteRuntimeRate(
             else 1 end,
           window_started_at = greatest(site_runtime_rate_windows.window_started_at,
             excluded.window_started_at)
-        returning operations`,
+        returning operations, (xmax = 0) as inserted`,
     );
-    // Bounded cleanup on the write path, now and then: this Site's stale windows.
-    if (input.sweep ?? Math.random() < 0.01)
+    // Bounded cleanup on the write path, keeping pace with new principals:
+    // every new row deletes up to a few of this Site's stale windows, and
+    // about 1% of calls delete a larger batch.
+    const sweep = input.sweep ?? Math.random() < 0.01;
+    if (sweep || row?.inserted === true)
       await tx.execute(
         sql`delete from site_runtime_rate_windows where ctid = any(array(
             select ctid from site_runtime_rate_windows
             where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
               and window_started_at < now() - interval '10 minutes'
-            limit 100))`,
+            limit ${sweep ? 100 : 4}))`,
       );
     const allowed = Number(row!.operations) <= cap;
     return {

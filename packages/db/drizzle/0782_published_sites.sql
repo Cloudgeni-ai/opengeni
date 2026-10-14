@@ -213,7 +213,14 @@ CREATE TABLE site_runtime_conversations (
   reserved_micros bigint NOT NULL DEFAULT 0 CHECK (reserved_micros >= 0),
   reserved_day date,
   reserved_month date,
+  -- Work admitted so far (the start, messages, steering, resumes). Releasing
+  -- an idle conversation's reservation applies only if it has not moved since
+  -- the session's status was read.
+  admissions bigint NOT NULL DEFAULT 0 CHECK (admissions >= 0),
+  -- When a reservation sweep last visited the conversation (null: never).
+  swept_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
+  -- Last admitted work or counted spend.
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT site_runtime_conversations_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
@@ -228,7 +235,7 @@ CREATE INDEX site_runtime_conversations_viewer_idx
 CREATE INDEX site_runtime_conversations_site_recent_idx
   ON site_runtime_conversations (workspace_id, site_id, updated_at DESC);
 CREATE INDEX site_runtime_conversations_reserved_idx
-  ON site_runtime_conversations (workspace_id, site_id, updated_at)
+  ON site_runtime_conversations (workspace_id, site_id, swept_at NULLS FIRST, updated_at)
   WHERE reserved_micros > 0;
 
 -- Current-period spend and conversation counters per Site and viewer

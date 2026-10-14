@@ -64,6 +64,7 @@ import {
   type SiteGatewayFields,
 } from "../site-publishing/gateway-signature";
 import {
+  capSiteConversationUsageLimit,
   enforceSiteRuntimeRate,
   enforceSiteRuntimeViewerRate,
   findSiteRuntimeHost,
@@ -896,13 +897,15 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         "Conversation not found",
       );
     const budgets = siteRuntimeBudgetLimits(limits);
-    /** Reserve, and when a Site-wide budget refuses, settle stale reservations and retry once. */
+    /**
+     * Reserve, and when a Site-wide budget refuses, release reservations
+     * finished conversations no longer need and retry once (unless the Site
+     * was swept moments ago).
+     */
     const reserve = async (run: () => Promise<SiteRuntimeReservation>) => {
       let reservation = await run();
-      if (siteWideBudget(reservation)) {
-        await sweepSiteRuntimeReservations(deps, host);
+      if (siteWideBudget(reservation) && (await sweepSiteRuntimeReservations(deps, host)))
         reservation = await run();
-      }
       if (!reservation.ok) throw siteBudgetExhausted(reservation.budget);
       return reservation;
     };
@@ -1084,14 +1087,24 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The agent and budget checks every message-bearing operation passes.
     const admitAgentWork = async (newTurn: boolean) => {
       requireSiteAgent(deps, host, viewer, limits);
-      await settleSiteRuntimeSpend(deps, host, conversation);
-      await reserve(() =>
+      const usage = await settleSiteRuntimeSpend(deps, host, conversation);
+      const admitted = await reserve(() =>
         reserveSiteRuntimeConversationWork(deps.db, host.scope, {
           sessionId: conversation.sessionId,
           limits: budgets,
           newTurn,
         }),
       );
+      // A per-conversation limit lowered since the start lowers the session's
+      // own usage limit too, before the work runs.
+      if (admitted.limitMicros !== null)
+        await capSiteConversationUsageLimit(
+          deps,
+          host,
+          conversation.sessionId,
+          admitted.limitMicros,
+          usage,
+        );
     };
     /**
      * A Site's composer drafts are text only: no workspace resources,
@@ -1245,12 +1258,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         const control = parseJson(request.body, SessionControlRequest);
         // Pausing or cancelling is always allowed; resuming starts work again.
         if (control.action === "resume") await admitAgentWork(false);
-        else await settleSiteRuntimeSpend(deps, host, conversation);
-        return await forward("POST", `${target}/control`, {
+        const controlled = await send("POST", `${target}/control`, {
           action: control.action,
           clientEventId: control.clientEventId,
           ...(control.reason ? { reason: control.reason } : {}),
         });
+        // Settled after the control applied: a cancelled conversation releases
+        // its reservation at once.
+        if (control.action !== "resume" && controlled.ok)
+          await settleSiteRuntimeSpend(deps, host, conversation);
+        return siteRuntimeForwardedResponse(controlled);
       }
       default:
         throw unsupported();

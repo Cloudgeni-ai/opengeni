@@ -26,7 +26,7 @@ import {
   findSiteViewerSession,
   getOwnedSiteRuntimeConversation,
   liftSiteHostnameHold,
-  listReservedSiteRuntimeConversations,
+  claimSiteRuntimeReservationSweep,
   listSiteModerationQueue,
   readSiteRuntimeUsage,
   recordSitePublicationScan,
@@ -772,9 +772,63 @@ test("conversation starts reserve their cap against every budget in one transact
       newTurn: true,
     }),
   ).toEqual({ ok: false, budget: "turns_per_conversation" });
+  // Work admitted after the conversation was read keeps its reservation even
+  // when the reservation itself did not change (steering an unchanged cap).
+  const read = await getOwnedSiteRuntimeConversation(client.db, a, {
+    sessionId: first.sessionId,
+    siteId,
+    viewerPrincipal: "guest:v1",
+  });
+  expect(read).toMatchObject({ admissions: 2, reservedMicros: 3_300, limitMicros: 4_000 });
   expect(
-    (await listReservedSiteRuntimeConversations(client.db, a, { siteId, limit: 10 })).length,
-  ).toBe(2);
+    await reserveSiteRuntimeConversationWork(client.db, a, {
+      sessionId: first.sessionId,
+      limits,
+      newTurn: false,
+    }),
+  ).toMatchObject({ ok: true, reservedMicros: 3_300 });
+  const idleSettle = (admissions: number) =>
+    settleSiteRuntimeConversationSpend(client.db, a, {
+      sessionId: first.sessionId,
+      usedMicros: 700,
+      idle: true,
+      expected: { admissions },
+    });
+  await idleSettle(read!.admissions);
+  const reserved = async () =>
+    (
+      await getOwnedSiteRuntimeConversation(client.db, a, {
+        sessionId: first.sessionId,
+        siteId,
+        viewerPrincipal: "guest:v1",
+      })
+    )?.reservedMicros;
+  expect(await reserved()).toBe(3_300);
+  // A lowered per-conversation limit lowers the conversation's cap.
+  expect(
+    await reserveSiteRuntimeConversationWork(client.db, a, {
+      sessionId: first.sessionId,
+      limits: { ...limits, agentMicrosPerConversation: 2_000 },
+      newTurn: false,
+    }),
+  ).toMatchObject({ ok: true, limitMicros: 2_000, reservedMicros: 1_300 });
+  // The sweep claims only conversations whose reservation can be released:
+  // these sessions never appeared, but their starts are recent.
+  expect(await claimSiteRuntimeReservationSweep(client.db, a, { siteId, limit: 10 })).toEqual([]);
+  // After six hours without work every reservation ages out, and a claimed
+  // conversation is not revisited for a while.
+  const later = new Date(Date.now() + 7 * 3_600_000);
+  const claimed = await claimSiteRuntimeReservationSweep(client.db, a, {
+    siteId,
+    limit: 10,
+    now: later,
+  });
+  expect(claimed.map((conversation) => conversation.aged)).toEqual([true, true]);
+  expect(
+    await claimSiteRuntimeReservationSweep(client.db, a, { siteId, limit: 10, now: later }),
+  ).toEqual([]);
+  await idleSettle(4);
+  expect(await reserved()).toBe(0);
   // Daily starts, per visitor and per Site.
   expect(await start("guest:v1", { ...limits, conversationsPerVisitorPerDay: 1 })).toEqual(
     expect.objectContaining({ ok: false, budget: "conversations_per_visitor_per_day" }),
@@ -814,6 +868,36 @@ test("rate windows count per principal and bucket and reset each minute", async 
   expect(refused.retryAfterSeconds).toBeGreaterThan(0);
   expect((await take("guest:b")).allowed).toBe(true);
   expect((await take("guest:a", new Date(now.getTime() + 60_000))).allowed).toBe(true);
+  // Cleanup keeps pace with new principals: each new row deletes up to four
+  // stale windows, whatever the 1% batch does.
+  for (let index = 0; index < 6; index += 1)
+    await shared.admin`insert into site_runtime_rate_windows (account_id, workspace_id, site_id,
+        principal_key, bucket, window_started_at, operations)
+      values (${a.accountId}, ${a.workspaceId}, ${siteId}, ${`ip:stale-${index}`}, 'requests',
+        now() - interval '20 minutes', 1)`;
+  const stale = async () =>
+    Number(
+      (
+        await shared.admin`select count(*)::int as n from site_runtime_rate_windows
+          where site_id = ${siteId} and window_started_at < now() - interval '10 minutes'`
+      )[0]!.n,
+    );
+  expect(await stale()).toBe(6);
+  const fresh = (principal: string) =>
+    consumeSiteRuntimeRate(client.db, a, {
+      siteId,
+      principal,
+      bucket: "requests",
+      limit: 2,
+      sweep: false,
+    });
+  await fresh("guest:new-1");
+  expect(await stale()).toBe(2);
+  // An existing principal's window is updated in place and deletes nothing.
+  await fresh("guest:new-1");
+  expect(await stale()).toBe(2);
+  await fresh("guest:new-2");
+  expect(await stale()).toBe(0);
 });
 
 test("Site Data guest rules: none hides, read reads, append adds, own changes only own", async () => {

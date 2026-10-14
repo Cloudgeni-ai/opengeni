@@ -16,6 +16,7 @@ import {
 } from "../src/site-publishing/gateway-signature";
 import { siteAgentToolRefs } from "../src/routes/site-runtime";
 import { effectiveSiteLimits, freeSiteLimits } from "../src/site-publishing/limits";
+import { siteClientAddressKey } from "../src/site-publishing/runtime";
 import { siteAccessNarrowed } from "../src/site-publishing/service";
 import {
   siteSessionEventProjection,
@@ -508,5 +509,20 @@ describe("Site-safe session events", () => {
     ]);
     expect(frames[0]!.event.payload).toEqual({ text: "Grüße 👋" });
     expect(frames[2]!.event.payload).toEqual({ id: "call_1", name: "crm" });
+  });
+});
+
+describe("client address rate keys", () => {
+  test("IPv6 counts per /64, IPv4 and mapped IPv4 per address", () => {
+    expect(siteClientAddressKey("203.0.113.7")).toBe("203.0.113.7");
+    expect(siteClientAddressKey(" 2001:DB8:1:2:aaaa:bbbb:cccc:dddd ")).toBe("2001:db8:1:2::/64");
+    expect(siteClientAddressKey("2001:db8:1:2::1")).toBe("2001:db8:1:2::/64");
+    expect(siteClientAddressKey("[2001:db8:1:2:ffff::9]")).toBe("2001:db8:1:2::/64");
+    expect(siteClientAddressKey("2001:db8::")).toBe("2001:db8:0:0::/64");
+    expect(siteClientAddressKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(siteClientAddressKey("::ffff:198.51.100.4")).toBe("198.51.100.4");
+    expect(siteClientAddressKey("64:ff9b::198.51.100.4")).toBe("64:ff9b:0:0::/64");
+    expect(siteClientAddressKey("")).toBe("unknown");
+    expect(siteClientAddressKey("not an address")).toBe("not an address");
   });
 });

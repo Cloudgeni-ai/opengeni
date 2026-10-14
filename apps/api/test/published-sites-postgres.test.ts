@@ -1596,6 +1596,64 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(removed.json.agent.tools).toBeNull();
 }, 90_000);
 
+test("finished conversations free the Site budget; a lowered cap lowers running conversations", async () => {
+  const f = await fixture();
+  const site = await f.live("Sweep", { access: "public", agent: { enabled: true } });
+  const setLimits = async (overrides: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, site.id, "PUT", {
+      limitProfile: { kind: "custom", overrides },
+    });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  };
+  let address = 0;
+  const visit = () => ({ visitor: visitorId(), clientIp: `198.51.100.${(address += 1)}` });
+  const start = async (who: { visitor: string; clientIp: string }) =>
+    await f.gateway(site.host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const reserved = async (sessionId: string) => {
+    const [row] = await shared.admin`select reserved_micros, limit_micros
+      from site_runtime_conversations where session_id = ${sessionId}`;
+    return { reserved: Number(row!.reserved_micros), limit: Number(row!.limit_micros) };
+  };
+  // Room for two conversations of 20_000 in the Site's month.
+  await setLimits({ agentMicrosPerSitePerMonth: 40_000 });
+  const [alice, bob, carol] = [visit(), visit(), visit()];
+  const first = await start(alice);
+  expect(first.status, JSON.stringify(first.json)).toBe(202);
+  const second = await start(bob);
+  expect(second.status, JSON.stringify(second.json)).toBe(202);
+
+  // A lowered per-conversation limit lowers the session's own limit before
+  // the next message runs.
+  await setLimits({ agentMicrosPerSitePerMonth: 40_000, agentMicrosPerConversation: 5_000 });
+  const sent = await f.gateway(site.host, "POST", `/sessions/${second.json.id}/events`, {
+    ...bob,
+    body: { type: "user.message", payload: { text: "More" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+  expect(await reserved(second.json.id)).toEqual({ reserved: 5_000, limit: 5_000 });
+  const usage = await f.api(
+    f.owner,
+    "GET",
+    `/v1/workspaces/${f.workspace.id}/sessions/${second.json.id}`,
+  );
+  expect(usage.json.usageLimit).toMatchObject({ limitMicros: 5_000 });
+  await setLimits({ agentMicrosPerSitePerMonth: 25_000 });
+
+  // The first conversation finished (its session went idle) without anyone
+  // settling it: a refused start sweeps it and then succeeds.
+  await shared.admin`update sessions set status = 'idle' where id = ${first.json.id}`;
+  const third = await start(carol);
+  expect(third.status, JSON.stringify(third.json)).toBe(202);
+  expect((await reserved(first.json.id)).reserved).toBe(0);
+  // Cancelling releases a conversation's reservation at once.
+  const cancelled = await f.gateway(site.host, "POST", `/sessions/${second.json.id}/control`, {
+    ...bob,
+    body: { action: "cancel", clientEventId: `cancel-${randomBytes(4).toString("hex")}` },
+  });
+  expect(cancelled.status, JSON.stringify(cancelled.json)).toBeLessThan(300);
+  expect((await reserved(second.json.id)).reserved).toBe(0);
+}, 60_000);
+
 test("abuse reports and flagged scans reach the platform, at most once an hour per Site", async () => {
   const sent: Array<{ kind: string; to: string; subject: string }> = [];
   const transport = {

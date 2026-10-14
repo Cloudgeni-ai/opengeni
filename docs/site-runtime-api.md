@@ -210,7 +210,8 @@ signature.
 - **Rates.** Every call counts against the visitor's requests per minute.
   Guests are also counted per signed client address, at four times the
   visitor limit, so minting new visitor ids does not reset their limits;
-  both must pass. Going over returns 429 `site_rate_limited` with
+  both must pass. IPv6 addresses count per /64 prefix (IPv4-mapped
+  addresses as their IPv4 address). Going over returns 429 `site_rate_limited` with
   `{ bucket, retryAfterSeconds }`.
 
 ### Routes
@@ -315,11 +316,18 @@ Operations:
     against the visitor's day, the Site's day and the Site's month, and
     counts the conversation against the visitor's and the Site's starts per
     day, in one transaction that refuses when any is over. A Site-wide
-    refusal first settles stale reservations and retries once. Sending,
-    steering and resuming re-check the turn count and top the reservation
-    up to the conversation's cap. Settling (on reads and later starts)
-    brings counted spend up to the session's actual usage and releases what
-    an idle conversation no longer needs. Over budget returns 429
+    refusal first sweeps reservations conversations no longer need and
+    retries once: a bounded batch of conversations whose session is idle,
+    failed or cancelled, starts whose session never appeared, and
+    reservations with no work for six hours, least recently visited first
+    (each at most every 30 seconds; an empty sweep pauses sweeping that Site
+    for a few seconds). Sending, steering and resuming re-check the turn
+    count and top the reservation up to the conversation's cap; a
+    per-conversation limit lowered since the start lowers the cap and the
+    session's own usage limit before the work runs. Settling (on reads,
+    later starts and pause or cancel) brings counted spend up to the
+    session's actual usage and releases what an idle conversation no longer
+    needs. Over budget returns 429
     `site_budget_exhausted` with `{ budget }`: `conversations_per_visitor_per_day`,
     `conversations_per_site_per_day`, `turns_per_conversation`,
     `agent_micros_per_conversation`, `agent_micros_per_visitor_per_day` or
@@ -349,9 +357,26 @@ defaults from settings.
 
 Counters are single-row upserts in `site_runtime_rate_windows` (per minute)
 and `site_runtime_usage` (per day and month). Rate windows can overshoot by
-a request or two under concurrency; agent budgets cannot, because starts
-and top-ups are conditional reservations. Old rate windows, usage rows and
-expired viewer sessions are deleted in small batches on the write path.
+a request or two under concurrency. Agent budgets are conditional
+reservations, so concurrent starts and top-ups cannot overshoot them, but
+counted spend can still end slightly above a budget in these bounded cases:
+
+- A model call that is already running finishes even when it crosses the
+  session's usage limit (see `docs/session-usage-limits.md`), so a
+  conversation can end a little above its cap.
+- A reservation released after six hours without admitted work or counted
+  spend frees the budget even if that session is somehow still running; it
+  is still capped by its own usage limit, so the overshoot is at most that
+  conversation's remaining cap.
+- A reservation counted in a day or month that has since ended is not
+  carried into the new period; the conversation's spend is still counted
+  when it lands.
+
+Every profile has a per-conversation cap (the flood brake applies to
+`unlimited` too), so every conversation reserves.
+
+Old rate windows, usage rows and expired viewer sessions are deleted in
+small batches on the write path.
 
 Agent spend is billed to the organization through the normal session usage
 ledger. Sign-ins, reports and Site Data use are recorded as usage-only
