@@ -23,6 +23,7 @@ import {
 } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
+  listVaultsForSubject,
   recordVaultSecretUse,
   resolveSecretReferenceCandidates,
   type SecretReferenceCandidate,
@@ -37,6 +38,7 @@ import {
   type VaultProviderErrorCode,
   type VaultProviderRegistry,
 } from "@opengeni/vaults";
+import { LINKED_VAULT_MISS_MAX_AGE_MS, refreshStaleLinkedVaults } from "./provider-sync";
 import type { VaultServiceDeps } from "./types";
 
 export type SecretResolverOptions = {
@@ -286,20 +288,43 @@ export function createSecretResolver(
       );
     }
 
-    const { meta, candidates } = await resolveSecretReferenceCandidates(deps.db, context, {
-      refs: references.map((reference, index) => lookupFor(reference, index)),
-    });
-    const failures: SecretReferenceFailure[] = [];
-    const chosen: Chosen[] = [];
-    references.forEach((reference, index) => {
-      const outcome = chooseSecretCandidate(
-        reference,
-        candidates.filter((candidate) => candidate.refIndex === index),
-        meta,
-      );
-      if ("failure" in outcome) failures.push(outcome.failure);
-      else chosen.push({ reference, candidate: outcome.candidate });
-    });
+    const choose = async () => {
+      const { meta, candidates } = await resolveSecretReferenceCandidates(deps.db, context, {
+        refs: references.map((reference, index) => lookupFor(reference, index)),
+      });
+      const failures: SecretReferenceFailure[] = [];
+      const chosen: Chosen[] = [];
+      references.forEach((reference, index) => {
+        const outcome = chooseSecretCandidate(
+          reference,
+          candidates.filter((candidate) => candidate.refIndex === index),
+          meta,
+        );
+        if ("failure" in outcome) failures.push(outcome.failure);
+        else chosen.push({ reference, candidate: outcome.candidate });
+      });
+      return { meta, failures, chosen };
+    };
+    let { meta, failures, chosen } = await choose();
+    // A reference to an item added straight in a connected provider (1Password)
+    // finds nothing until the vault's mirror catches up: refresh stale linked
+    // vaults once and look again before reporting it missing.
+    if (failures.some((failure) => failure.code === "not_found")) {
+      const registry = deps.providers ?? opts.providersForSubject?.(meta.subjectId);
+      if (registry) {
+        const reachable = await listVaultsForSubject(deps.db, context, {
+          workspaceId: principal.workspaceId,
+        });
+        const changed = await refreshStaleLinkedVaults({
+          db: deps.db,
+          context,
+          vaults: reachable,
+          providers: registry,
+          maxAgeMs: LINKED_VAULT_MISS_MAX_AGE_MS,
+        });
+        if (changed.length > 0) ({ meta, failures, chosen } = await choose());
+      }
+    }
     const hasActingHuman = meta.humanExpected && meta.humanValid;
     if (failures.length > 0) {
       throw new SecretReferenceError(

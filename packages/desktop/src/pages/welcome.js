@@ -8,6 +8,8 @@
     /** @type {HTMLElement} */ (document.getElementById(id));
   const start = byId("start");
   const waiting = byId("waiting");
+  const unreachable = byId("unreachable");
+  const retry = /** @type {HTMLButtonElement} */ (byId("retry"));
   const title = byId("title");
   const error = byId("error");
   const server = /** @type {HTMLInputElement} */ (byId("server"));
@@ -21,12 +23,24 @@
     title.textContent = state.canCancel ? "Add an account" : `Sign in to ${state.productName}`;
     document.title = title.textContent;
     server.placeholder = state.defaultServerUrl.replace(/^https?:\/\//u, "");
-    start.hidden = Boolean(state.pendingServer);
-    waiting.hidden = !state.pendingServer;
+    const out = state.unreachable;
+    unreachable.hidden = !out;
+    start.hidden = Boolean(out || state.pendingServer);
+    waiting.hidden = Boolean(out || !state.pendingServer);
     byId("pending-server").textContent = state.pendingServer ?? "";
+    if (out) {
+      document.title = "Can't connect";
+      byId("unreachable-server").textContent = out.server;
+      for (const name of document.querySelectorAll(".product-name")) {
+        name.textContent = state.productName;
+      }
+      // Not disabled, so the button keeps keyboard focus between tries.
+      retry.setAttribute("aria-disabled", String(out.retrying));
+      retry.textContent = out.retrying ? "Trying…" : "Try again";
+    }
     error.hidden = !state.error;
     error.textContent = state.error ?? "";
-    cancel.hidden = !state.canCancel;
+    cancel.hidden = Boolean(out) || !state.canCancel;
   }
 
   function serverAddress() {
@@ -43,6 +57,7 @@
     waiting.hidden = true;
   });
   cancel.addEventListener("click", () => void bridge.cancel());
+  retry.addEventListener("click", () => void bridge.retry());
   details.addEventListener("toggle", () => {
     if (details.open) server.focus();
   });

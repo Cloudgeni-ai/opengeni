@@ -573,6 +573,7 @@ export const VAULT_RUNTIME_ROUTINES = [
   "link_provider_vault(jsonb, jsonb)",
   "provider_vault_sync_target(uuid, jsonb)",
   "provider_vault_item_ref(uuid, uuid, text, jsonb)",
+  "provider_connection_home_workspace(uuid)",
 ] as const;
 /** Vault tables (0739): FORCE row security, no application-role privileges. */
 export const VAULT_TABLES = [

@@ -37,7 +37,7 @@ export function claudePlan(account: ClaudeSubscriptionAccount) {
 /** The usage cell of a Claude account row, from the usage its listing carries. */
 export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.ReactNode {
   if (account.status !== "active") return null;
-  if (!account.allocatorEnabled) return <StatusBadge status="paused" variant="dot" />;
+  if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
   return (
     <ClaudeUsageReadout
       state={{

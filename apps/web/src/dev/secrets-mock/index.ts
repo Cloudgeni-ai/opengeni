@@ -214,7 +214,7 @@ function routes(state: MockState): Route[] {
           ownerKind: body.ownerKind,
           ownerLabel: body.ownerKind === "user" ? "Only me" : "Platform engineering",
           availability:
-            body.ownerKind === "organization"
+            body.ownerKind === "organization" || body.ownerKind === "user"
               ? (body.availability ?? { allowedWorkspaceIds: null, allowPersonalWorkspaces: true })
               : null,
           isDefault: false,

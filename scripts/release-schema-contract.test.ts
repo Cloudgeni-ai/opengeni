@@ -2326,6 +2326,9 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0778_published_sites.sql",
+      "0781_session_usage_limit_statement_seed.sql",
+      "0780_only_me_vault_availability.sql",
+      "0779_provider_connection_home_workspace.sql",
       "0777_workspace_admin_subscription_connections.sql",
       "0776_site_data.sql",
       "0772_sandbox_ended_epoch_setup_uncertainties.sql",

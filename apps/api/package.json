@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/api-router",
-  "version": "1.4.4",
+  "version": "2.0.0",
   "description": "Opengeni HTTP surface: the Hono adapter/router (createApp), routes, MCP HTTP transport, and HTTP access adapters over @opengeni/core. An engine-distribution surface — its runtime closure includes engine-internal packages.",
   "license": "Apache-2.0",
   "repository": {
@@ -38,6 +38,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@1password/sdk": "0.5.0",
     "@aws-sdk/client-s3": "^3.1044.0",
     "@aws-sdk/s3-request-presigner": "^3.1044.0",
     "@hono/zod-validator": "^0.7.6",

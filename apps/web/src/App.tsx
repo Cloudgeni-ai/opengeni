@@ -100,7 +100,7 @@ import {
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
 } from "@/lib/workspace-navigation-preference";
-import { installDesktopShell } from "@/lib/desktop";
+import { installDesktopShell, warmDesktopPages } from "@/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -865,6 +865,14 @@ const router = createRouter({
   ...routerErrorOptions(() => appRoutePattern()),
 });
 installDesktopShell((path) => router.history.push(path));
+warmDesktopPages([
+  LazySessionRoute,
+  LazySessionsIndexRoute,
+  LazyInboxRoute,
+  LazyCapabilitiesRoute,
+  LazySchedulesRoute,
+  LazyArtifactsRoute,
+]);
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {

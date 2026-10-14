@@ -170,7 +170,7 @@ export const VaultSummary = /* @__PURE__ */ defineSchema(() =>
     lastSyncedAt: z.string().nullable(),
     rateLimitedUntil: z.string().nullable(),
     providerConnectionId: z.string().uuid().nullable(),
-    /** Organization vaults only. */
+    /** Organization and Only-me vaults; null for workspace and task vaults. */
     availability: VaultAvailability.nullable(),
     isDefault: z.boolean(),
     itemCount: z.number().int(),

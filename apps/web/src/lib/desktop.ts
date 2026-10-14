@@ -13,6 +13,13 @@ import {
 export const desktopBridge: DesktopBridge | null =
   typeof window === "undefined" ? null : getDesktopBridge();
 
+/**
+ * In the macOS app the window's traffic lights sit in the top-left corner of
+ * the page, where the rails put the brand; the Dock and menu bar already name
+ * the app, so rails keep that row for the window controls.
+ */
+export const windowControlsInPage = desktopBridge?.platform === "macos";
+
 export function desktopCapability(capability: DesktopCapability): DesktopBridge | null {
   return hasDesktopCapability(desktopBridge, capability) ? desktopBridge : null;
 }
@@ -35,6 +42,29 @@ export function installDesktopShell(navigate: (path: string) => void): void {
   window.__opengeniDesktopNavigate = (path: string) => {
     if (typeof path === "string" && path.startsWith("/") && !path.startsWith("//")) navigate(path);
   };
+}
+
+/**
+ * The desktop app is one long-lived window: once it is idle after opening,
+ * fetch the code for the pages people move between, so the first visit to
+ * each one renders at once instead of showing a loading state.
+ */
+export function warmDesktopPages(pages: readonly { preload?: () => unknown }[]): void {
+  if (!desktopBridge) return;
+  const warm = () => {
+    for (const page of pages) {
+      try {
+        void Promise.resolve(page.preload?.()).catch(() => undefined);
+      } catch {
+        // A page that fails to load now loads (and reports) on its first visit.
+      }
+    }
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(warm, { timeout: 3_000 });
+  } else {
+    window.setTimeout(warm, 1_500);
+  }
 }
 
 const RESTORE_KEY = "opengeni.desktop.webSessionRestoredAt";

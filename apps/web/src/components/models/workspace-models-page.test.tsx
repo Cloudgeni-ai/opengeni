@@ -1196,7 +1196,7 @@ describe("Codex pool controls", () => {
 });
 
 describe("Codex account page", () => {
-  test("opens from the row, maps Use for new work to the allocator, and goes back", async () => {
+  test("opens from the row, maps Enable account to the allocator, and goes back", async () => {
     const view = await render();
     try {
       const row = view.container.querySelector<HTMLElement>("[data-row-action]")!;
@@ -1204,7 +1204,7 @@ describe("Codex account page", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Team plan");
       const toggle = view.container.querySelector<HTMLButtonElement>(
-        'button[role="switch"][aria-label="Use Team plan for new work"]',
+        'button[role="switch"][aria-label="Enable Team plan"]',
       )!;
       expect(toggle.getAttribute("aria-checked")).toBe("true");
       await act(async () => toggle.click());
@@ -1289,7 +1289,7 @@ describe("Codex account page", () => {
       // No green "Connected", no "Organization" chip, no aside repeating the header.
       expect(text).not.toContain("Connected");
       expect(text).not.toContain("Belongs to");
-      expect(text).not.toContain("Use for new work");
+      expect(text).not.toContain("Enable account");
       expect(view.container.querySelector('button[role="switch"]')).toBeNull();
       expect(button(view.container, /Disconnect/)).toBeUndefined();
       expect(button(view.container, /Rename/)).toBeUndefined();

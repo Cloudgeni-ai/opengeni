@@ -16,6 +16,7 @@ import {
 
 import type { DesktopAppConfig } from "./config";
 import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
+import { MainFrameLoad } from "./reachability";
 
 const MIN_SIZE = { width: 720, height: 520 };
 const DEFAULT_SIZE = { width: 1280, height: 860 };
@@ -32,6 +33,10 @@ export interface WindowEvents {
   navigated(accountId: string, url: string): void;
   /** The view's renderer went away; the shell decides whether to reload. */
   crashed(accountId: string): void;
+  /** The account's server couldn't be reached, or answered with a server error. */
+  loadFailed(accountId: string, url: string): void;
+  /** The account's web app loaded. */
+  loaded(accountId: string): void;
   /** The window was closed by the person. */
   closed(): void;
   focused(): void;
@@ -96,7 +101,9 @@ export class MainWindow {
       ...(mac
         ? {
             titleBarStyle: "hiddenInset" as const,
-            trafficLightPosition: { x: 18, y: 18 },
+            // Centred on the 56px title row: the rail's top row and every
+            // page's header share that centre line.
+            trafficLightPosition: { x: 18, y: 21 },
             vibrancy: "sidebar" as const,
             visualEffectState: "followWindow" as const,
           }
@@ -153,9 +160,7 @@ export class MainWindow {
     if (!entry) {
       entry = { view: this.createAccountView(target), baseUrl: target.baseUrl };
       this.views.set(target.id, entry);
-      void entry.view.webContents.loadURL(
-        new URL(path ?? target.initialPath, target.baseUrl).toString(),
-      );
+      this.load(entry.view.webContents, new URL(path ?? target.initialPath, target.baseUrl));
     } else if (path) {
       this.navigate(target.id, path);
     }
@@ -177,16 +182,28 @@ export class MainWindow {
         true,
       )
       .then((handled: unknown) => {
-        if (handled !== true) void contents.loadURL(url);
+        if (handled !== true) this.load(contents, url);
       })
-      .catch(() => void contents.loadURL(url));
+      .catch(() => this.load(contents, url));
   }
 
   reload(accountId: string, path?: string): void {
     const entry = this.views.get(accountId);
     if (!entry) return;
-    if (path) void entry.view.webContents.loadURL(new URL(path, entry.baseUrl).toString());
+    if (path) this.load(entry.view.webContents, new URL(path, entry.baseUrl));
     else entry.view.webContents.reload();
+  }
+
+  /** Load an account's page again after it failed, in the background. */
+  retry(accountId: string, url: string): void {
+    const entry = this.views.get(accountId);
+    if (!entry) return;
+    this.load(entry.view.webContents, sameOrigin(url, entry.baseUrl) ? url : entry.baseUrl);
+  }
+
+  /** Failures arrive as load events; the promise only repeats them. */
+  private load(contents: WebContents, url: URL | string): void {
+    contents.loadURL(url.toString()).catch(() => undefined);
   }
 
   removeAccount(accountId: string): void {
@@ -267,7 +284,20 @@ export class MainWindow {
     if (process.platform === "darwin") view.setBackgroundColor("#00000000");
     const contents = view.webContents;
     this.guardNavigation(contents, target.baseUrl);
-    contents.on("did-navigate", (_event, url) => this.events.navigated(target.id, url));
+    const load = new MainFrameLoad();
+    contents.on("did-navigate", (_event, url, httpResponseCode) => {
+      load.navigated(url, httpResponseCode);
+      this.events.navigated(target.id, url);
+    });
+    contents.on("did-fail-load", (_event, errorCode, _description, url, isMainFrame) => {
+      const outcome = load.failedToLoad(errorCode, url, isMainFrame);
+      if (outcome?.kind === "failed") this.events.loadFailed(target.id, outcome.url);
+    });
+    contents.on("did-finish-load", () => {
+      const outcome = load.finished();
+      if (outcome?.kind === "failed") this.events.loadFailed(target.id, outcome.url);
+      else if (outcome?.kind === "loaded") this.events.loaded(target.id);
+    });
     contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
       if (isMainFrame) this.events.navigated(target.id, url);
     });

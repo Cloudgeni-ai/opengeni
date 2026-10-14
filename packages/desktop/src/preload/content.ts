@@ -10,6 +10,7 @@ import {
   DESKTOP_IPC,
   type DesktopAccountsSnapshot,
   type DesktopBridge,
+  type DesktopCommand,
   type DesktopPlatform,
   type ThisComputerStatus,
 } from "../contract";
@@ -36,10 +37,25 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 const origin = argument("opengeni-origin");
 
 if (origin && window.location.origin === origin) {
+  // Menu commands go to the page's newest listener. A page without one (an
+  // older server) still gets the navigation commands as a page load.
+  let commandListener: ((command: DesktopCommand) => void) | null = null;
+  ipcRenderer.on(DESKTOP_IPC.command, (_event, command: DesktopCommand) => {
+    if (commandListener) {
+      commandListener(command);
+      return;
+    }
+    const workspaceId = /^\/workspaces\/([0-9a-f-]{36})(?:\/|$)/iu.exec(
+      window.location.pathname,
+    )?.[1];
+    if (!workspaceId) return;
+    if (command === "newSession") window.location.assign(`/workspaces/${workspaceId}/sessions`);
+    if (command === "openInbox") window.location.assign(`/workspaces/${workspaceId}/inbox`);
+  });
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
-    capabilities: ["accounts", "thisComputer", "openExternal"],
+    capabilities: ["accounts", "thisComputer", "openExternal", "commands"],
     productName: argument("opengeni-product") ?? "Opengeni",
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
@@ -64,6 +80,14 @@ if (origin && window.location.origin === origin) {
       onChange: (listener) => subscribe(DESKTOP_IPC.computerChanged, () => listener()),
     },
     openExternal: (url) => ipcRenderer.invoke(DESKTOP_IPC.openExternal, url),
+    commands: {
+      onCommand: (listener) => {
+        commandListener = listener;
+        return () => {
+          if (commandListener === listener) commandListener = null;
+        };
+      },
+    },
     setAppearance: (appearance) => ipcRenderer.send(DESKTOP_IPC.appearanceSet, appearance),
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);

@@ -140,8 +140,8 @@ page footer, or a menu.
 top-left and a peach wash from the bottom-right over `bg`. The signed-out pages use
 `.og-page-glow`, the same two washes down the left edge of the canvas.
 
-Grey (`fg-subtle`) is Paused, Not connected, Revoked, Off. Always a dot plus a sentence-case
-label; never color alone.
+Grey (`fg-subtle`) is Paused, Disabled, Not connected, Revoked, Off. Always a dot plus a
+sentence-case label; never color alone.
 
 **Only states that need attention are shown.** A healthy object carries no status: no green
 "Connected" or "Active" badge on a row or a page header. Show Needs reconnect, Paused, Out of

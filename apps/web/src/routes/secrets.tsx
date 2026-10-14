@@ -12,6 +12,7 @@ import {
   useVaults,
   type OnePasswordConnectionSummary,
   type ProviderVaultMeta,
+  type VaultAvailability,
   type VaultSummary,
   type VaultsApi,
 } from "@opengeni/react";
@@ -67,7 +68,28 @@ export function parseCreatableType(value: unknown): CreatableType | undefined {
   return CREATABLE_TYPES.includes(value as CreatableType) ? (value as CreatableType) : undefined;
 }
 
-/** True when the workspace's default agent has the Secrets capability off. */
+/**
+ * Who chooses where a vault is available: organization admins for an
+ * organization vault, the owner for their Only-me vaults except the default
+ * one (it is where Only-me saves go, so it stays everywhere).
+ */
+function canEditAvailability(vault: VaultSummary): boolean {
+  if (!vault.canManage) return false;
+  if (vault.ownerKind === "organization") return true;
+  return vault.ownerKind === "user" && !vault.isDefault;
+}
+
+/** Whether a vault still reaches this workspace after its availability changes. */
+function vaultStaysHere(
+  vault: VaultSummary,
+  availability: VaultAvailability,
+  workspaceId: string,
+): boolean {
+  const allowed = availability.allowedWorkspaceIds;
+  if (allowed === null || allowed.includes(workspaceId)) return true;
+  // An Only-me vault always reaches its home (Personal) workspace.
+  return vault.ownerKind === "user" && vault.workspaceId === workspaceId;
+}
 
 /** Wraps a mutation so its error carries the vault copy (UI-9). */
 async function attempt<T>(operation: () => Promise<T>): Promise<T> {
@@ -355,6 +377,7 @@ export function SecretsRoute({
           canCreateOrganization={canManageOrganization}
           organizationName={organizationName}
           workspaces={organizationWorkspaces}
+          currentWorkspaceId={workspace?.kind === "shared" ? workspaceId : null}
           onClose={() => openList()}
           onCreate={async (request) => {
             const created = await attempt(() => api.createVault(request));
@@ -429,7 +452,7 @@ export function SecretsRoute({
         onChanged={refreshVaults}
       />
     );
-  } else if (view === "availability" && vault.canManage && vault.ownerKind === "organization") {
+  } else if (view === "availability" && canEditAvailability(vault)) {
     page = (
       <AvailabilityPage
         vault={vault}
@@ -441,6 +464,11 @@ export function SecretsRoute({
             api.updateVault(vault.id, { expectedGeneration: vault.generation, availability }),
           );
           await vaults.refresh();
+          if (!vaultStaysHere(vault, availability, workspaceId)) {
+            toast.success(`Saved. ${vault.name} is no longer available in this workspace.`);
+            openList();
+            return;
+          }
           toast.success("Saved");
           openVault(vault.id);
         }}
@@ -468,7 +496,7 @@ export function SecretsRoute({
         key={vault.id}
         vault={vault}
         organizationName={organizationName}
-        canManageAvailability={vault.canManage && vault.ownerKind === "organization"}
+        canManageAvailability={canEditAvailability(vault)}
         providerAccount={(() => {
           const source = vault.providerConnectionId
             ? connections?.find((each) => each.id === vault.providerConnectionId)
