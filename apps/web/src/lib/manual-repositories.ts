@@ -97,8 +97,9 @@ export async function attachManualRepository(input: {
   remove: (id: number) => void;
 }): Promise<ManualRepositoryAttachResult> {
   // Attaching re-classifies the row from its URL. A GitHub identity retained
-  // from a restored draft never survives an edited URL.
-  const { github: _retainedIdentity, ...repository } = input.repository;
+  // from a restored draft never survives an edited URL, and the attached row
+  // is no longer mid-edit.
+  const { github: _retainedIdentity, editing: _editing, ...repository } = input.repository;
   const target = classifyManualRepository({ ...input, repository });
   if (target.kind === "workspace_github") {
     await input.selectWorkspaceRepository(target.repository, target.ref);
