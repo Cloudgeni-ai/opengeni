@@ -1140,6 +1140,184 @@ test("agents started from a Site leave the organization profile, machines, envir
   }
 });
 
+test("agents started from a Site write only on the allowlist; other workspace writes are refused", async () => {
+  const f = await fixture();
+  const own = await f.publish("Own Site");
+  const fromSite = await f.startSession(own.frame("frame-own"));
+  const plain = await f.startSession();
+  const clampedAgent = await f.liveAgentGrant(fromSite);
+  const plainAgent = await f.liveAgentGrant(plain);
+  const bearer = async (grant: AccessGrant) => {
+    const metadata = grant.metadata as {
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+    };
+    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: [
+        ...permissions,
+        "documents:manage",
+        "members:manage",
+        "workspace:admin",
+        "documents:search",
+        "files:upload",
+        "files:read",
+      ],
+      principalKind: "agent_attempt",
+      sessionId: metadata.sessionId,
+      turnId: metadata.turnId,
+      attemptId: metadata.attemptId,
+      executionGeneration: metadata.executionGeneration,
+      exp: Math.floor(Date.now() / 1000) + 600,
+    })}`;
+  };
+  const as = async (
+    grant: AccessGrant,
+    method: string,
+    path: string,
+    body?: unknown,
+    headers: Record<string, string> = {},
+  ) => {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+      method,
+      headers: {
+        authorization: await bearer(grant),
+        "content-type": "application/json",
+        ...headers,
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: response.status, text: await response.text() };
+  };
+  const clampRefusal = /An agent started from a Site page cannot/u;
+  const uuid = () => crypto.randomUUID();
+  // Families the earlier block list did not name, a session's own settings,
+  // tool approvals and inference: every write is refused, naming what it
+  // would change. (The only `mcp` writes are the agent's own MCP endpoints,
+  // which stay open; a path no route serves is a 404 before any guard.)
+  const refused: Array<[string, string, unknown, string]> = [
+    ["POST", "/variable-sets", {}, "secrets"],
+    ["POST", "/model-providers/openai/custom-models", {}, "workspace settings"],
+    ["PATCH", "/claude/settings", {}, "workspace settings"],
+    ["POST", "/github/repositories/sync", {}, "workspace members, connections or settings"],
+    ["POST", "/environments", {}, "sandbox environments"],
+    ["POST", "/identity-links", {}, "workspace members, connections or settings"],
+    ["POST", "/channels", {}, "workspace members, connections or settings"],
+    ["PUT", "/slack-task-policy", {}, "workspace settings"],
+    ["POST", "/preferences/proposals", {}, "workspace instructions"],
+    [
+      "POST",
+      `/user-resource-authorities/${uuid()}/grants`,
+      {},
+      "workspace members, connections or settings",
+    ],
+    ["PUT", "/memory-slack-publications/configuration", {}, "workspace settings"],
+    ["POST", "/company-brain/knowledge/record", {}, "Knowledge"],
+    ["POST", "/codex/apps", {}, "workspace settings"],
+    ["POST", "/gateway-custom-models", {}, "workspace settings"],
+    ["POST", "/scheduled-tasks", {}, "schedules"],
+    ["PUT", `/sessions/${fromSite}/tool-policy`, {}, "workspace settings"],
+    ["PUT", `/sessions/${fromSite}/vault-policy`, {}, "workspace settings"],
+    ["PUT", `/sessions/${fromSite}/usage-limit`, {}, "workspace settings"],
+    ["POST", "/tools/approvals", {}, "workspace settings"],
+    ["POST", "/chat/completions", {}, "workspace settings"],
+  ];
+  for (const [method, path, body, what] of refused) {
+    const route = `${method} ${path}`;
+    const clamped = await as(clampedAgent, method, path, body);
+    expect({
+      route,
+      status: clamped.status,
+      refused: clamped.text.includes(`cannot create or change ${what}`),
+    }).toEqual({ route, status: 403, refused: true });
+    // Another agent is not limited here.
+    const other = await as(plainAgent, method, path, body);
+    expect({ route, refused: clampRefusal.test(other.text) }).toEqual({ route, refused: false });
+  }
+  // A publication keeps its own refusal code.
+  const publication = await as(
+    clampedAgent,
+    "PUT",
+    `/published-artifacts/${own.siteId}/publication`,
+    { access: "members" },
+  );
+  expect({
+    status: publication.status,
+    code: (JSON.parse(publication.text) as { error?: { details?: { code?: string } } }).error
+      ?.details?.code,
+  }).toEqual({ status: 403, code: "site_agent_forbidden" });
+
+  // The allowlist still serves the agent's work: its tools, its
+  // conversations, files, content and reads sent as POST.
+  const mcp = await as(
+    clampedAgent,
+    "POST",
+    "/mcp",
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "site-agent", version: "1" },
+      },
+    },
+    { accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-06-18" },
+  );
+  expect({ status: mcp.status, initialized: mcp.text.includes('"serverInfo"') }).toEqual({
+    status: 200,
+    initialized: true,
+  });
+  const renamed = await as(clampedAgent, "PATCH", `/sessions/${fromSite}`, {
+    title: "Renamed by its agent",
+  });
+  expect(renamed.status, renamed.text).toBe(200);
+  // A conversation it starts is its child, so it stays clamped to the Site.
+  const child = await as(clampedAgent, "POST", "/sessions", { initialMessage: "Child work" });
+  expect(child.status, child.text).toBe(202);
+  const childId = (JSON.parse(child.text) as { id: string }).id;
+  expect(await siteAgentClamp(db.db, await f.agentGrant(childId))).toEqual({
+    clamped: true,
+    originSiteIds: [own.siteId],
+  });
+  const created = await as(clampedAgent, "POST", "/published-artifacts", {
+    title: "Made by a Site agent",
+    html: "<!doctype html><h1>New</h1>",
+    idempotencyKey: uuid(),
+  });
+  expect(created.status, created.text).toBe(201);
+  const open: Array<[string, string, unknown]> = [
+    ["POST", `/sessions/${fromSite}/events`, { type: "user.message", payload: { text: "Hi" } }],
+    ["POST", `/sessions/${fromSite}/control`, { action: "interrupt" }],
+    ["POST", `/sessions/${fromSite}/fs/list`, { path: "." }],
+    ["PUT", `/sessions/${fromSite}/archive`, { archived: true }],
+    ["POST", "/codemode/calls", {}],
+    ["POST", "/tools/calls", {}],
+    ["POST", "/files/uploads", {}],
+    ["POST", "/editable-artifacts", {}],
+    ["POST", `/published-artifacts/${own.siteId}/versions`, {}],
+    ["POST", `/published-artifacts/${own.siteId}/data/query`, {}],
+    ["POST", "/knowledge/entries/search", {}],
+    ["POST", `/document-bases/${uuid()}/search`, {}],
+    ["POST", "/company-brain/knowledge/search", {}],
+    ["POST", "/browser-sessions", {}],
+    ["POST", "/feedback", {}],
+  ];
+  for (const [method, path, body] of open) {
+    const route = `${method} ${path}`;
+    const result = await as(clampedAgent, method, path, body);
+    expect({ route, refused: clampRefusal.test(result.text) }).toEqual({ route, refused: false });
+  }
+  // Reads stay open everywhere.
+  const read = await as(clampedAgent, "GET", "/variable-sets");
+  expect(clampRefusal.test(read.text)).toBe(false);
+});
+
 test("Site pages send message text only: no approvals, answers, resources or credentials", async () => {
   const f = await fixture();
   const site = await f.publish("Site A");

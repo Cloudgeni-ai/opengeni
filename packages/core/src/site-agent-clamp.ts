@@ -131,7 +131,8 @@ export type SiteClampedResource =
   | "workspace members, connections or settings"
   | "the organization profile"
   | "Connected Machines"
-  | "sandbox environments";
+  | "sandbox environments"
+  | "workspace settings";
 
 /** The refusal message for a Site-clamped agent. */
 export function siteClampedAgentMessage(what: SiteClampedResource): string {
@@ -143,7 +144,7 @@ export function siteClampedAgentMessage(what: SiteClampedResource): string {
  * that page's reach and cannot create or change schedules, automations, Site
  * publications, workspace instructions, Skills, Knowledge, secrets,
  * workspace members, connections and settings, the organization profile,
- * Connected Machines or sandbox environments.
+ * Connected Machines, sandbox environments or other workspace settings.
  */
 export async function assertNotSiteClampedAgent(
   db: Database,

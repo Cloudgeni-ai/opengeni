@@ -97,11 +97,35 @@ The first-party tools refuse those writes with `site_agent_clamped`:
 - `artifacts_publish`, `artifacts_rollback`, `artifacts_archive` and
   `artifacts_restore` for another published Site.
 
-The API refuses the same agent's writes to those workspace route families
-with 403 (`apps/api/src/site-agent-guard.ts`), matching the percent-decoded
-path the router uses. Reading stays open. A session started from a Site page
-cannot get session admin access (409), and an agent acting for a Site page
-cannot run `admin_action_call`.
+Over HTTP the clamp is an allowlist (`SITE_AGENT_WRITES` in
+`apps/api/src/site-agent-guard.ts`). Under `/v1/workspaces/:workspaceId` such
+an agent may send writes only to:
+
+- its tools: the first-party MCP endpoint (and its docs and files servers),
+  Codemode calls and SDK proxy, and the tool gateway's calls;
+- conversations: starting one (a child of its own session, so it stays
+  clamped), renaming, archiving or deleting one it reaches, and working in
+  one (events, steer, control, queue, composer draft, retry, context, goal,
+  artifacts, files, git, terminal, background commands);
+- the browser and computer sessions it drives;
+- files and content: uploads and download links, editable artifacts, new
+  Sites and uploads, Site Data and a Site's files (only for the Site it was
+  started from), and a Site's versions, rollback, status and audience (under
+  the rule above);
+- reads sent as POST: Knowledge and document searches, download links, the
+  Knowledge save dry run and a Connected Machine audience preview;
+- feedback.
+
+Every other write, including `PATCH` or `DELETE` on the workspace itself, a
+session's agent, tools, servers, credentials, variable sets, vaults, Skills,
+usage limit and admin access, tool approvals, and any route family added
+later, is refused with 403 before the route runs. The refusal names what it
+would change ("workspace settings" when no narrower name fits). Paths are
+matched percent-decoded, as the router sees them, and reading stays open.
+`apps/api/test/site-agent-guard.test.ts` pins the open routes against the
+registered route table. A session started from a Site page cannot get
+session admin access (409), and an agent acting for a Site page cannot run
+`admin_action_call`.
 Published Sites start their agents as `site:<siteId>` with the publication's
 own tools and limits instead (see `docs/site-runtime-api.md`).
 

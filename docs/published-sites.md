@@ -116,7 +116,9 @@ per-conversation spend cap that is in place before the first model call. A
 visitor can list, read and continue only their own conversations on that
 Site, and sees a Site-safe view of them (no workspace ids, instructions,
 tools or metadata). Agents started from a Site can't create or change
-schedules, automations or Site publications, and can't read other sessions.
+schedules, automations, Site publications or workspace settings, and can't
+read other sessions; their API writes are held to an allowlist (see
+`docs/site-conversations.md`).
 Public Sites can let guests chat too; the limit profile and the deployment
 decide. Guest agents can optionally require a human check
 (`OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` with the gateway's Turnstile

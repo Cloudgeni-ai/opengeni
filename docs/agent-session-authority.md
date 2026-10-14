@@ -178,7 +178,8 @@ Authority never widens down a tree or through a side door:
   else is a 404. Sessions, turns and schedules started from a Site record
   which Site (`_opengeniSiteOrigin`), and an agent started from a Site cannot
   create or change schedules, automations or Site publications, nor read,
-  message, steer or control sessions outside its Site.
+  message, steer or control sessions outside its Site. Its workspace API
+  writes are held to an allowlist (`apps/api/src/site-agent-guard.ts`).
 - A session-scoped grant without a signed `firstPartyMcpTools` claim registers
   no first-party tools.
 

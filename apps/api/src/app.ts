@@ -1701,9 +1701,9 @@ export function createAppComposition(deps: AppDependencies): {
   // Requests a host forwarded from a Site frame: SITE_OPERATIONS only, only
   // the frame's own sessions, and the validated Site origin as provenance.
   app.use("/v1/workspaces/:workspaceId/*", siteFrameGuard(routeDeps));
-  // Agents started from a Site page do not learn or widen access: no writes
-  // to instructions, Skills, Knowledge, credentials, members, connections
-  // or settings.
+  // Agents started from a Site page do not learn or widen access: their
+  // workspace writes are held to an allowlist (their tools, conversations,
+  // files and content); everything else is refused.
   app.use("/v1/workspaces/:workspaceId/*", siteClampedAgentGuard(routeDeps));
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
