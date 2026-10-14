@@ -92,7 +92,11 @@ import {
   type VaultCallerAuthority,
 } from "./mapping";
 import { vaultErrorCodeForProvider } from "./provider-registry";
-import { LINKED_VAULT_SEARCH_MAX_AGE_MS, refreshStaleLinkedVaults } from "./provider-sync";
+import {
+  LINKED_VAULT_OPEN_WAIT_MS,
+  LINKED_VAULT_SEARCH_MAX_AGE_MS,
+  refreshStaleLinkedVaults,
+} from "./provider-sync";
 import {
   archiveProviderVaultItem,
   writeProviderVaultItem,
@@ -767,7 +771,22 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async listItems(actor, workspaceId, vaultId, q) {
-      const result = await listVaultItems(deps.db, subjectContext(actor, workspaceId), {
+      const context = subjectContext(actor, workspaceId);
+      // Opening a linked vault shows items added straight in the provider
+      // (1Password) without anyone pressing Sync: the first page refreshes a
+      // stale mirror, on the same budget as agent search.
+      if (deps.providers && q.cursor === undefined) {
+        const vault = await getVault(deps.db, context, { vaultId });
+        await refreshStaleLinkedVaults({
+          db: deps.db,
+          context,
+          vaults: [vault],
+          providers: deps.providers,
+          maxAgeMs: LINKED_VAULT_SEARCH_MAX_AGE_MS,
+          waitMs: LINKED_VAULT_OPEN_WAIT_MS,
+        });
+      }
+      const result = await listVaultItems(deps.db, context, {
         vaultId,
         ...(q.q !== undefined ? { q: q.q } : {}),
         ...(q.type !== undefined ? { type: q.type } : {}),
