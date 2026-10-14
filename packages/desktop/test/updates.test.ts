@@ -32,7 +32,7 @@ mock.module("electron", () => ({
 }));
 mock.module("electron-updater", () => ({ autoUpdater }));
 
-const { AppUpdates } = await import("../src/main/updates");
+const { AppUpdates, updateNeedsPassword } = await import("../src/main/updates");
 
 describe("app updates", () => {
   test("restarting into an update lets the shell quit first", async () => {
@@ -51,5 +51,24 @@ describe("app updates", () => {
 
     updates.menuAction();
     expect(calls).toEqual(["beforeRestart", "quitAndInstall"]);
+  });
+});
+
+describe("update installs", () => {
+  test("deb and rpm installs need a password; AppImage and other platforms don't", () => {
+    expect(updateNeedsPassword("linux", () => "deb\n")).toBe(true);
+    expect(updateNeedsPassword("linux", () => "rpm")).toBe(true);
+    expect(updateNeedsPassword("darwin", () => "deb")).toBe(false);
+    expect(
+      updateNeedsPassword("linux", () => {
+        throw new Error("no package-type file");
+      }),
+    ).toBe(false);
+    process.env.APPIMAGE = "/home/person/Opengeni.AppImage";
+    try {
+      expect(updateNeedsPassword("linux", () => "deb")).toBe(false);
+    } finally {
+      delete process.env.APPIMAGE;
+    }
   });
 });

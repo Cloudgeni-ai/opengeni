@@ -10,16 +10,13 @@ import {
   shell,
   WebContentsView,
   type ContextMenuParams,
-  type Rectangle,
   type WebContents,
 } from "electron";
 
 import type { DesktopAppConfig } from "./config";
 import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
 import { MainFrameLoad } from "./reachability";
-
-const MIN_SIZE = { width: 720, height: 520 };
-const DEFAULT_SIZE = { width: 1280, height: 860 };
+import { MIN_SIZE, placeWindow, type Placement, type SavedWindow } from "./window-placement";
 
 export interface AccountTarget {
   id: string;
@@ -79,17 +76,19 @@ export class MainWindow {
   private shown: WebContentsView | null = null;
   private shownAccountId: string | null = null;
   private saveTimer: NodeJS.Timeout | null = null;
+  private maximizeOnReveal = false;
 
   constructor(
     private readonly config: DesktopAppConfig,
     private readonly stateDirectory: string,
     private readonly events: WindowEvents,
   ) {
-    const bounds = this.restoreBounds();
+    const placement = this.placement();
+    this.maximizeOnReveal = placement.maximize;
     const mac = process.platform === "darwin";
     const dark = nativeTheme.shouldUseDarkColors;
     this.window = new BaseWindow({
-      ...bounds,
+      ...placement.bounds,
       minWidth: MIN_SIZE.width,
       minHeight: MIN_SIZE.height,
       title: config.productName,
@@ -107,12 +106,21 @@ export class MainWindow {
             vibrancy: "sidebar" as const,
             visualEffectState: "followWindow" as const,
           }
-        : { autoHideMenuBar: true }),
+        : {
+            autoHideMenuBar: true,
+            ...(process.platform === "linux" ? { icon: config.appIconPath } : {}),
+          }),
     });
     this.window.on("resize", () => {
-      this.layout();
       this.scheduleSave();
     });
+    // Follow the content area itself: on Wayland a maximize (including GNOME's
+    // automatic one as a large window maps) settles after the window's state
+    // events, with no resize event.
+    this.window.contentView.on("bounds-changed", () => this.layout());
+    for (const event of ["maximize", "unmaximize"] as const) {
+      this.window.on(event as "maximize", () => this.scheduleSave());
+    }
     this.window.on("move", () => this.scheduleSave());
     this.window.on("focus", () => this.events.focused());
     this.window.on("closed", () => this.events.closed());
@@ -122,7 +130,15 @@ export class MainWindow {
   reveal(): void {
     if (this.window.isDestroyed()) return;
     if (this.window.isMinimized()) this.window.restore();
-    if (!this.window.isVisible()) this.window.show();
+    if (!this.window.isVisible()) {
+      // Maximize once the window is mapped: on X11 a maximize requested while
+      // hidden, or in the same task as show(), is dropped.
+      if (this.maximizeOnReveal) {
+        this.window.once("show", () => setImmediate(() => this.window.maximize()));
+      }
+      this.window.show();
+      this.maximizeOnReveal = false;
+    }
     this.window.focus();
   }
 
@@ -260,7 +276,7 @@ export class MainWindow {
 
   private layout(): void {
     if (!this.shown || this.window.isDestroyed()) return;
-    const { width, height } = this.window.getContentBounds();
+    const { width, height } = this.window.contentView.getBounds();
     this.shown.setBounds({ x: 0, y: 0, width, height });
   }
 
@@ -391,27 +407,19 @@ export class MainWindow {
     return join(this.stateDirectory, "window.json");
   }
 
-  private restoreBounds(): Partial<Rectangle> & { width: number; height: number } {
+  private placement(): Placement {
+    let saved: SavedWindow | null = null;
     try {
-      const saved = JSON.parse(readFileSync(this.boundsFile(), "utf8")) as Rectangle;
-      const visible = screen
-        .getAllDisplays()
-        .some(
-          (display) =>
-            saved.x < display.workArea.x + display.workArea.width - 80 &&
-            saved.x + saved.width > display.workArea.x + 80 &&
-            saved.y >= display.workArea.y - 10 &&
-            saved.y < display.workArea.y + display.workArea.height - 80,
-        );
-      if (visible && saved.width >= MIN_SIZE.width && saved.height >= MIN_SIZE.height) return saved;
+      saved = JSON.parse(readFileSync(this.boundsFile(), "utf8")) as SavedWindow;
     } catch {
       // First launch, or the file is unreadable.
     }
-    const area = screen.getPrimaryDisplay().workAreaSize;
-    return {
-      width: Math.min(DEFAULT_SIZE.width, area.width - 80),
-      height: Math.min(DEFAULT_SIZE.height, area.height - 80),
-    };
+    return placeWindow({
+      saved,
+      workAreas: screen.getAllDisplays().map((display) => display.workArea),
+      primary: screen.getPrimaryDisplay().workArea,
+      platform: process.platform,
+    });
   }
 
   private scheduleSave(): void {
@@ -420,7 +428,11 @@ export class MainWindow {
       if (this.window.isDestroyed() || this.window.isMinimized() || this.window.isFullScreen())
         return;
       try {
-        writeFileSync(this.boundsFile(), JSON.stringify(this.window.getNormalBounds()));
+        const saved: SavedWindow = {
+          ...this.window.getNormalBounds(),
+          maximized: this.window.isMaximized(),
+        };
+        writeFileSync(this.boundsFile(), JSON.stringify(saved));
       } catch {
         // Remembering the size is best effort.
       }
