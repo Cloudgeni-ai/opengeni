@@ -1023,7 +1023,7 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
   const [row] = await shared.admin`select created_by_kind, created_by_subject_id, metadata
     from sessions where id = ${sessionId}`;
   expect(row!.created_by_subject_id).toBe(`site:${site.id}`);
-  // OPE-801 provenance: the Site, its title and the served version, on the
+  // Site provenance: the Site, its title and the served version, on the
   // session and on every turn the viewer starts.
   const siteOrigin = { siteId: site.id, title: "Helpdesk", versionId: site.versionId };
   expect(row!.metadata._opengeniSiteOrigin).toEqual(siteOrigin);

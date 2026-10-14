@@ -943,7 +943,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   ): Promise<Response> => {
     const { context, url } = request;
     const base = `/v1/workspaces/${host.scope.workspaceId}/sessions`;
-    // Every forwarded call runs inside the Site's origin (OPE-801), and also
+    // Every forwarded call runs inside the Site's origin, and also
     // carries the Site and version headers the API's Site frame guard
     // validates; sessions and turns it starts record this Site and version.
     const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };

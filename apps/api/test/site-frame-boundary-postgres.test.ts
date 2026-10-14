@@ -42,7 +42,7 @@ import { registerSecretTools } from "../src/mcp/secret-tools";
 import { registerSitePublicationTools } from "../src/mcp/site-publication-tools";
 import { resolveSiteManagement } from "../src/site-publishing/service";
 
-// OPE-801: Site pages reach only the SITE_OPERATIONS allowlist and only their
+// Site pages reach only the SITE_OPERATIONS allowlist and only their
 // own Site's sessions, everything they start records which Site, and agents
 // started from a Site cannot reach outside it (schedules, automations, other
 // sessions). These run the real routes against PostgreSQL as the restricted

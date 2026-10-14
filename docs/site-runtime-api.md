@@ -277,7 +277,7 @@ Operations:
       instructions and MCP servers, no first-party tools, and memory off.
     - The viewer is the end-user label. The Site, its title and the served
       version are recorded as the session's origin and on every turn
-      (OPE-801 `SiteSessionOrigin`). The call runs inside
+      (`SiteSessionOrigin`). The call runs inside
       `withSiteSessionOrigin` and carries the Site and version headers, which
       the Site frame guard validates again.
     - Its workspace tools are the publication's `agent.tools` for workspace
