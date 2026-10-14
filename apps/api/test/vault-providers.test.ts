@@ -696,6 +696,51 @@ describe("provider vault link, sync and managed vaults", () => {
     expect(noHost.status).toBe(503);
     expect(noHost.body.error).toBe("provider_unavailable");
   });
+
+  test("opening a stale linked vault lists items added in the provider", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const host = createFakeVaultProvider({
+      vaults: [
+        {
+          externalVaultId: "host-vault",
+          name: "Host secrets",
+          items: [{ name: "Deploy key", type: "api_key", fields: [{ name: "value", value: "v" }] }],
+        },
+      ],
+    });
+    const deps = { connectionCredentials: { vaultProvider: host } };
+    const linked = await call(workspace, "POST", "/vaults/link", {
+      deps,
+      body: {
+        provider: "host",
+        externalVaultId: "host-vault",
+        ownerKind: "workspace",
+        mode: "read_only",
+      },
+    });
+    expect(linked.status).toBe(201);
+    // Somebody adds an item straight in the provider, and the mirror goes stale.
+    await host.writeItem(
+      { connectionId: null, budget: createProviderCallBudget(5) },
+      "host-vault",
+      {
+        name: "Company card",
+        type: "note",
+        websites: [],
+        fields: [{ name: "number", kind: "concealed", value: "4242" }],
+      },
+    );
+    await shared!.admin`
+      update vaults set last_synced_at = now() - interval '1 hour'
+      where id = ${linked.body.id}`;
+
+    const opened = await call(workspace, "GET", `/vaults/${linked.body.id}/items`, { deps });
+    expect(opened.status).toBe(200);
+    expect(opened.body.items.map((item: { name: string }) => item.name)).toEqual(
+      expect.arrayContaining(["Deploy key", "Company card"]),
+    );
+  });
 });
 
 /** A structurally valid token for another 1Password account; no real key material. */
