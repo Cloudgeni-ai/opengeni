@@ -6,18 +6,25 @@ import type { Settings } from "@opengeni/config";
  * of truth; the KV host map and the edge cache are rebuildable copies. With
  * no Cloudflare settings every call is a no-op.
  *
- * Writes go through the Cloudflare REST API with plain fetch (no SDK) and
- * never block the database write: callers schedule them after commit, each is
- * retried a few times and then logged. A writer never replaces a newer
- * generation (read, compare, write; KV has no compare-and-set, so two writers
- * racing within one round trip can still land out of order).
+ * Writes go through the Cloudflare REST API with plain fetch (no SDK, each
+ * call bounded by a 10 s timeout) and never block the database write: callers
+ * schedule them after commit, each is retried a few times and then logged. A
+ * writer never replaces a newer generation (read, compare, write; KV has no
+ * compare-and-set, so two writers racing within one round trip can still land
+ * out of order). Generations come from one database sequence shared by every
+ * hostname, so a later change to a label (a move, an unpublish tombstone, a
+ * takedown) always carries a higher generation than anything written before.
  *
- * Staleness bound: every KV entry expires after `sitesHostMapTtlSeconds`
- * (default 300 s), and the gateway falls back to the signed API host lookup
- * on a miss and caches lookups for 60 s. A missed or failed sync is therefore
- * corrected within TTL + 60 s; the API re-checks publication status and
- * access on every site-runtime call regardless. A takedown also purges the
- * host's edge cache when a zone id is configured.
+ * Staleness bound: the API itself refuses a suspended or unpublished Site on
+ * the very next site-runtime call (it re-checks publication status and access
+ * every time). The edge copies lag behind: Cloudflare KV propagates a write
+ * to other locations within about 60 s, every KV entry expires after
+ * `sitesHostMapTtlSeconds` (default 300 s), and the gateway caches host
+ * lookups for up to 60 s and access checks for 30 s. A takedown also purges
+ * the host's edge cache when a zone id is configured. The after-commit sync
+ * runs in process, so a restart can lose a pending write; the next signed
+ * host lookup for that label re-syncs a stale record, and the TTL bounds the
+ * rest. A missed sync is therefore corrected within TTL + 60 s at worst.
  */
 
 export type SiteEdgeSyncSettings = Pick<
@@ -45,6 +52,7 @@ export type SiteEdgeSyncOptions = {
 };
 
 const API = "https://api.cloudflare.com/client/v4";
+const FETCH_TIMEOUT_MS = 10_000;
 
 async function withRetries<T>(attempts: number, backoffMs: number, run: () => Promise<T>) {
   let last: unknown;
@@ -87,7 +95,11 @@ export function createSiteEdgeSync(
       const parsed = SiteHostMapRecord.parse(record);
       const key = siteHostMapKey(parsed.hostname);
       return await withRetries(attempts, backoffMs, async () => {
-        const current = await fetchImpl(valueUrl(key), { method: "GET", headers });
+        const current = await fetchImpl(valueUrl(key), {
+          method: "GET",
+          headers,
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
         if (current.ok) {
           const existing = SiteHostMapRecord.safeParse(await current.json().catch(() => null));
           if (existing.success && existing.data.generation > parsed.generation)
@@ -102,6 +114,7 @@ export function createSiteEdgeSync(
           method: "PUT",
           headers: { ...headers, "content-type": "application/json" },
           body: JSON.stringify(parsed),
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
         if (!written.ok) throw new Error(`Cloudflare KV write failed with ${written.status}`);
         await written.body?.cancel().catch(() => undefined);
@@ -117,6 +130,7 @@ export function createSiteEdgeSync(
             method: "POST",
             headers: { ...headers, "content-type": "application/json" },
             body: JSON.stringify({ hosts: [hostname.toLowerCase()] }),
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
           },
         );
         if (!response.ok) throw new Error(`Cloudflare cache purge failed with ${response.status}`);

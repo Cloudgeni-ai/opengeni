@@ -20,6 +20,7 @@ export type SiteLimitSettings = Pick<
   | "sitesFreeRequestsPerMinutePerVisitor"
   | "sitesFreeGuestWritesPerMinute"
   | "sitesFreeConversationsPerVisitorPerDay"
+  | "sitesFreeConversationsPerSitePerDay"
   | "sitesFreeTurnsPerConversation"
   | "sitesFreeAgentMicrosPerConversation"
   | "sitesFreeAgentMicrosPerVisitorPerDay"
@@ -35,6 +36,7 @@ export function freeSiteLimits(settings: SiteLimitSettings): SiteLimitsValue {
     agentsEnabled: true,
     guestAgentsEnabled: true,
     conversationsPerVisitorPerDay: settings.sitesFreeConversationsPerVisitorPerDay,
+    conversationsPerSitePerDay: settings.sitesFreeConversationsPerSitePerDay,
     turnsPerConversation: settings.sitesFreeTurnsPerConversation,
     agentMicrosPerConversation: settings.sitesFreeAgentMicrosPerConversation,
     agentMicrosPerVisitorPerDay: settings.sitesFreeAgentMicrosPerVisitorPerDay,
@@ -80,6 +82,7 @@ export function siteLimitsForProfile(
       limits = {
         ...free,
         conversationsPerVisitorPerDay: times(free.conversationsPerVisitorPerDay, factor),
+        conversationsPerSitePerDay: times(free.conversationsPerSitePerDay, factor),
         agentMicrosPerConversation: times(free.agentMicrosPerConversation, factor),
         agentMicrosPerVisitorPerDay: times(free.agentMicrosPerVisitorPerDay, factor),
         agentMicrosPerSitePerMonth: times(free.agentMicrosPerSitePerMonth, factor),
@@ -90,6 +93,7 @@ export function siteLimitsForProfile(
       limits = {
         ...free,
         conversationsPerVisitorPerDay: null,
+        conversationsPerSitePerDay: UNLIMITED_SITE_FLOOD_BRAKES.conversationsPerSitePerDay,
         turnsPerConversation: null,
         agentMicrosPerVisitorPerDay: null,
         agentMicrosPerSitePerMonth: null,
@@ -107,6 +111,10 @@ export function siteLimitsForProfile(
     requestsPerMinutePerVisitor: braked(
       limits.requestsPerMinutePerVisitor,
       UNLIMITED_SITE_FLOOD_BRAKES.requestsPerMinutePerVisitor,
+    ),
+    conversationsPerSitePerDay: braked(
+      limits.conversationsPerSitePerDay,
+      UNLIMITED_SITE_FLOOD_BRAKES.conversationsPerSitePerDay,
     ),
     agentMicrosPerConversation: braked(
       limits.agentMicrosPerConversation,

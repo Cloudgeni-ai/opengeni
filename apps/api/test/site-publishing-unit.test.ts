@@ -14,7 +14,9 @@ import {
   signSiteGatewayRequest,
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
+import { siteAgentToolRefs } from "../src/routes/site-runtime";
 import { effectiveSiteLimits, freeSiteLimits } from "../src/site-publishing/limits";
+import { siteAccessNarrowed } from "../src/site-publishing/service";
 import {
   effectiveSiteAccess,
   signedInSiteViewerKind,
@@ -300,5 +302,39 @@ describe("content scanner", () => {
       status: "flagged",
       findings: [{ url: "https://evil.example/", threatTypes: ["SOCIAL_ENGINEERING"] }],
     });
+  });
+});
+
+describe("Site agents", () => {
+  test("workspace tools reach signed-in viewers, and guests only when an admin opted in", () => {
+    const tools = { tools: ["crm", "bad id!"], guestTools: false };
+    const crm = [{ kind: "mcp", id: "crm", optional: true }];
+    expect(siteAgentToolRefs(tools, { kind: "member" })).toEqual(crm);
+    expect(siteAgentToolRefs(tools, { kind: "user" })).toEqual(crm);
+    expect(siteAgentToolRefs(tools, { kind: "guest" })).toEqual([]);
+    expect(siteAgentToolRefs({ ...tools, guestTools: true }, { kind: "guest" })).toEqual(crm);
+    expect(siteAgentToolRefs({ tools: null, guestTools: true }, { kind: "member" })).toEqual([]);
+  });
+
+  test("viewers stop when a Site is unpublished, its access narrows or its agent turns off", () => {
+    const base = {
+      status: "active" as const,
+      access: "invited" as const,
+      invitedEmails: ["a@example.com", "b@example.com"],
+      agent: { enabled: true, model: null, instructions: null, tools: null, guestTools: false },
+    };
+    expect(siteAccessNarrowed(base, base)).toBeNull();
+    expect(siteAccessNarrowed(base, { ...base, status: "unpublished" })).toBe("unpublished");
+    expect(siteAccessNarrowed(base, { ...base, access: "members" })).toBe("access_narrowed");
+    expect(siteAccessNarrowed(base, { ...base, invitedEmails: ["a@example.com"] })).toBe(
+      "access_narrowed",
+    );
+    expect(
+      siteAccessNarrowed(base, { ...base, invitedEmails: [...base.invitedEmails, "c@x.io"] }),
+    ).toBeNull();
+    expect(siteAccessNarrowed(base, { ...base, access: "public" })).toBeNull();
+    expect(siteAccessNarrowed(base, { ...base, agent: { ...base.agent, enabled: false } })).toBe(
+      "agent_disabled",
+    );
   });
 });
