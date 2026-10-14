@@ -12,6 +12,7 @@ import {
   getLiveEnrollmentConnection,
   getSandbox,
 } from "@opengeni/db";
+import { attachedBrowserViewer } from "./attached-browser-viewer";
 import { ApiHttpError } from "./http/api-error";
 import { compareAgentVersions } from "./sandbox/machines";
 
@@ -59,8 +60,7 @@ export async function placementAgentVersion(
   }
   if (placement?.kind === "attached_device") {
     const device = await getAttachedBrowserDevice(db, {
-      accountId: grant.accountId,
-      workspaceId,
+      ...(await attachedBrowserViewer({ db }, grant, workspaceId)),
       deviceId: placement.deviceId,
     });
     const enrollment = await getLiveEnrollmentConnection(db, workspaceId, device.enrollmentId);
