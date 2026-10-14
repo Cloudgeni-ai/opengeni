@@ -7,6 +7,8 @@ export default defineConfig({
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
     "src/usage-allowances.ts",
+    "src/session-usage-limits.ts",
+    "src/session-usage-limit-refusal.ts",
     "src/mcp-endpoint.ts",
     "src/index.ts",
     "src/connect.ts",

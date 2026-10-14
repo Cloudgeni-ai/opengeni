@@ -5,6 +5,9 @@ import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import { BudgetExhaustedError } from "../src/activities/agent-turn/admission";
 import { runTurnStreamAttempt } from "../src/activities/agent-turn/stream-attempt";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 test("stream component retains the completed compaction checkpoint before refusing every paid dispatch", async () => {
   const checkpoint = [{ type: "message", role: "user", content: "Completed summary" }];

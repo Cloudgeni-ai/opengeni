@@ -10,6 +10,7 @@ import {
   claimWorkspaceWebhookDeliveries,
   claimOrganizationWebhookDeliveries,
   decryptEnvironmentValue,
+  maintainSessionUsageLimits,
   maintainWorkspaceAllowances,
   pruneOrganizationWebhookDeliveries,
   pruneWorkspaceWebhookDeliveries,
@@ -20,6 +21,7 @@ import {
 } from "@opengeni/db";
 import { pinnedFetch } from "@opengeni/network";
 import type { Observability } from "@opengeni/observability";
+import { recordSessionUsageLimitEvent } from "@opengeni/core";
 
 export const WORKSPACE_WEBHOOK_DISPATCH_BATCH_SIZE = 32;
 const CLAIM_SECONDS = 60;
@@ -30,7 +32,8 @@ const PRUNE_EVERY_TICKS = 300;
 export type WorkspaceWebhookDispatchDeps = {
   db: Database;
   settings: Settings;
-  observability?: Pick<Observability, "info" | "warn" | "error">;
+  observability?: Pick<Observability, "info" | "warn" | "error"> &
+    Partial<Pick<Observability, "incrementCounter">>;
   fetch?: typeof pinnedFetch;
 };
 
@@ -94,10 +97,42 @@ async function deliverOne(
   return error === null ? "delivered" : "failed";
 }
 
+/**
+ * One bounded, resumable page of the per-task usage limit legacy import.
+ * Roots created before the feature stay `preparing` (never shown or
+ * admitted as $0 for a write) until this converges them. A failure is retried
+ * on a later tick (per-root exponential backoff with its SQLSTATE kept) and
+ * never blocks webhook delivery. The same pass discloses lost single-call
+ * custody markers as unpriced so a crashed process cannot block a task forever.
+ */
+async function importLegacySessionUsage(deps: WorkspaceWebhookDispatchDeps): Promise<void> {
+  const sink = deps.observability?.incrementCounter ? deps.observability : null;
+  const metrics = sink as Pick<Observability, "incrementCounter"> | null;
+  try {
+    const result = await maintainSessionUsageLimits(deps.db);
+    recordSessionUsageLimitEvent(metrics, "import", "imported", result.processed);
+    recordSessionUsageLimitEvent(metrics, "import", "import_failed", result.failed);
+    recordSessionUsageLimitEvent(metrics, "single_call", "lost_resolved", result.resolvedLost);
+    if (result.failed > 0) {
+      deps.observability?.warn("Session usage limit import pages failed", {
+        failed: result.failed,
+        sqlstates: JSON.stringify(result.errors),
+      });
+    }
+  } catch (error) {
+    recordSessionUsageLimitEvent(metrics, "import", "import_failed");
+    deps.observability?.warn("Session usage limit import failed", { error: errorText(error) });
+  }
+}
+
 /** Claim and deliver one globally bounded batch. At-least-once: receivers dedupe on event id. */
 export async function drainWorkspaceWebhookDeliveries(
   deps: WorkspaceWebhookDispatchDeps,
 ): Promise<WorkspaceWebhookBatchResult> {
+  // Usage-limit maintenance contains its own failures, so it runs first: a
+  // failing allowance pass cannot keep lost custody markers (and the tasks
+  // they park) unresolved.
+  await importLegacySessionUsage(deps);
   // Allowance rollover/expiry does not depend on webhook secrets, usage
   // readers, inference or having any pending delivery.
   await maintainWorkspaceAllowances(deps.db);

@@ -170,3 +170,5 @@ export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
 export { retainKnowledgeMessage } from "./domain/knowledge-messages";
 
 export * from "./domain/connector-tool-permissions";
+export * from "./session-usage-limits";
+export * from "./session-usage-limit-metrics";

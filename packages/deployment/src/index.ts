@@ -198,6 +198,14 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
 ];
 
+/** Per-task usage limit producer flag (API + both workers). Default
+ * off in @opengeni/config; a valueEnv passthrough emitted only when set.
+ * Persisted limits are enforced regardless; enable only after every consumer
+ * (API, workers, web, SDK/React, embedded hosts) understands the new stop. */
+export const SESSION_USAGE_LIMITS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_SESSION_USAGE_LIMITS_ENABLED",
+];
+
 /** Agent configuration rollout switches (sessions.agent_config, migration
  * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
  * only when set. Enable admission only after every worker runs a 0559-aware
@@ -3022,6 +3030,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of SESSION_USAGE_LIMITS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {

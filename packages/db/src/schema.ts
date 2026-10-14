@@ -2,6 +2,7 @@ import { createSubscriptionPoolTables } from "./subscription-pool-schema";
 import { subscriptionConnections } from "./subscription-core-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
 import {
+  commentaryExclusiveMeaningfulSessionEventSql,
   commentaryInclusiveMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
 } from "./session-meaningful-events";
@@ -9645,7 +9646,13 @@ export const sessionEvents = pgTable(
     meaningfulAttention: index("session_events_meaningful_attention_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(commentaryInclusiveMeaningfulSessionEventSql("session_events")),
+    // Pre-0774 attention probes (task usage-limit stops not yet meaningful)
+    // during a rolling deploy. Drop it in a later rolling migration once no
+    // pre-0774 API can run.
     meaningfulAttentionWithoutCommentary: index("session_events_meaningful_attention_v2_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(commentaryExclusiveMeaningfulSessionEventSql("session_events")),
+    meaningfulAttentionWithUsageLimitStops: index("session_events_meaningful_attention_v3_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(meaningfulSessionEventSql("session_events")),
     workspaceTurnType: index("session_events_workspace_turn_type_idx")

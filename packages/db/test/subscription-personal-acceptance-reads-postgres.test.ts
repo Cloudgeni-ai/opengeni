@@ -34,6 +34,9 @@ import {
   recoverSubscriptionCoreCodexConnectionHealth,
   retiredSubscriptionObjectDescriptions,
   retiredSubscriptionObjectViolation,
+  RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
+  SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
+  SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -603,6 +606,19 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ...MAINTENANCE_WORK_PROBE_ROUTINES.map(
         ([routine]) => `maintenance work check ${routine} is missing or has unsafe posture`,
       ),
+    );
+    // 0773 (per-task usage limits).
+    heldBack.push(
+      ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
+      ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
+        (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
+      ),
+      ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
+        (table) => `session usage limit private table ${table} is missing or unsafe`,
+      ),
+      "session usage limit capability has unsafe owner or direct runtime privileges",
     );
     const expected = [
       ...heldBack,

@@ -810,6 +810,14 @@ overshoot, not reservations; shares may oversubscribe. Default-off
 `OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
 
+### 3.13 Task usage limits stop admission, not running work
+
+One optional USD-micro limit per root session counts the pre-margin
+API-equivalent model cost of the whole tree, settled synchronously into a
+per-root counter. Admission refuses new model requests; no reservations, so
+admitted calls may overshoot. Default-off `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`
+gates producers only. Canonical: [`session-usage-limits.md`](session-usage-limits.md).
+
 ---
 
 ## 4. System architecture
@@ -2352,6 +2360,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
 | Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts`, `packages/react/src/usage.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |
+| Per-task (root session) usage limits | `packages/contracts/src/session-usage-limits.ts`, `packages/db/src/session-usage-limits.ts`, `packages/core/src/session-usage-limits.ts`, `apps/worker/src/activities/agent-turn/admission.ts` | §3.13 and [`session-usage-limits.md`](session-usage-limits.md) |
 | Organization/workspace callbacks | `packages/db/src/workspace-integrations.ts`, `apps/api/src/routes/workspace-integrations.ts`, `apps/api/src/routes/organization-integrations.ts`, `apps/api/src/workspace-webhook-dispatch.ts`, `apps/worker/src/activities/workspace-credential-provider.ts` | [`workspace-integrations.md`](workspace-integrations.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 

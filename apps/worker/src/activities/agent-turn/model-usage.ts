@@ -1,5 +1,6 @@
 import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
+  isStoredVerbatimAsLosslessJsonString,
   recordModelCallFact,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
@@ -37,7 +38,12 @@ import {
 } from "@opengeni/contracts";
 import { safeErrorDiagnostic } from "./errors";
 import {
+  holdSessionUsageReceipt,
+  releaseHeldSessionUsageReceiptMeteredByEvent,
+} from "./session-usage-custody";
+import {
   sanitizedModelUsageInput,
+  sessionUsageMeterAmountMicros,
   settleModelUsage,
   type ModelUsageBillingRecord,
 } from "@opengeni/core";
@@ -628,6 +634,7 @@ export async function emitModelCallUsage(input: {
       (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
   if (!authoritative) return false;
+  releaseReceiptMeteredByCommittedEvent(input, telemetry);
   try {
     input.observability.info("model call usage", {
       provider: input.provider,
@@ -662,6 +669,63 @@ export async function emitModelCallUsage(input: {
     // Durable event + billing already committed; metrics are best-effort only.
   }
   return true;
+}
+
+const METERED_PRICING_SOURCES = new Set(["configured_list_price", "gateway_reported"]);
+const MAX_METERED_SOURCE_KEY_BYTES = 1024;
+
+/**
+ * The committed `agent.model.usage` event metered this call's task usage in
+ * its own transaction (the database trigger applies `<turnId>:<sourceKey>`
+ * with the payload's amount; a failure would have rolled the event back).
+ * Drop a held receipt for that identity when the event carried exactly its
+ * amount, mirroring the trigger's acceptance rules conservatively: anything
+ * the trigger might value differently keeps the hold for the direct write.
+ * A source key the lossless codec stores encoded (NUL, a lone surrogate, the
+ * codec prefix) reaches the trigger as a different string and identity, so it
+ * never counts as metered here: the hold stays and fails closed.
+ */
+function releaseReceiptMeteredByCommittedEvent(
+  input: {
+    sessionId: string;
+    turnId: string;
+    sourceKey: string;
+    billingSnapshot?: Pick<
+      ModelUsageBillingRecord,
+      "estimatedProviderCostMicros" | "pricingSource"
+    >;
+  },
+  telemetry: { inputTokens?: number | null; outputTokens?: number | null },
+): void {
+  if (!isStoredVerbatimAsLosslessJsonString(input.sourceKey)) return;
+  const keyBytes = new TextEncoder().encode(input.sourceKey).byteLength;
+  if (keyBytes < 1 || keyBytes > MAX_METERED_SOURCE_KEY_BYTES) return;
+  const estimated = input.billingSnapshot?.estimatedProviderCostMicros ?? null;
+  const pricingSource = input.billingSnapshot?.pricingSource ?? null;
+  const tokens = (value: number | null | undefined) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value < 1e15
+      ? value
+      : null;
+  const eventAmount =
+    estimated !== null &&
+    Number.isSafeInteger(estimated) &&
+    estimated >= 0 &&
+    estimated < 1e16 &&
+    pricingSource !== null &&
+    METERED_PRICING_SOURCES.has(pricingSource)
+      ? sessionUsageMeterAmountMicros({
+          estimatedProviderCostMicros: estimated,
+          gatewayReported: pricingSource === "gateway_reported",
+          inputTokens: tokens(telemetry.inputTokens),
+          outputTokens: tokens(telemetry.outputTokens),
+        })
+      : null;
+  releaseHeldSessionUsageReceiptMeteredByEvent({
+    sessionId: input.sessionId,
+    sourceId: `${input.turnId}:${input.sourceKey}`,
+    amountMicros: eventAmount,
+    pricingSource: eventAmount === null ? null : pricingSource,
+  });
 }
 
 /**
@@ -725,6 +789,14 @@ export async function recordModelUsageAndDebitCredits(
     sessionId: input.sessionId,
     turnId: input.turnId,
     turnAttemptId: input.turnAttemptId,
+    usageLimitMetrics: input.observability ?? null,
+    // A failed task-usage receipt write never loses or replays the response:
+    // custody writes it before the next model request or turn completion.
+    receiptCustody: (receipt) =>
+      holdSessionUsageReceipt(
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        receipt,
+      ),
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
     debitMetadata: {
       sessionId: input.sessionId,

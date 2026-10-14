@@ -7,9 +7,11 @@ import {
 } from "@opengeni/contracts";
 import {
   isDatabaseConnectionLoss,
+  SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
   WorkspaceControlBusyError,
 } from "@opengeni/db";
+import { SessionUsageLimitHttpError, sessionUsageLimitRefusalFromError } from "@opengeni/core";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
@@ -69,6 +71,66 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
     outcomeUnknown: false,
     details,
   });
+}
+
+const SESSION_USAGE_LIMIT_ERROR_CODES: Record<SessionUsageLimitHttpError["code"], ErrorCode> = {
+  session_usage_limit_conflict: "conflict",
+  session_usage_limit_not_root: "conflict",
+  session_usage_limit_preparing: "conflict",
+  session_usage_limit_disabled: "validation_failed",
+  session_usage_limit_forbidden: "forbidden",
+  session_usage_limit_unavailable: "upstream_unavailable",
+  session_not_found: "not_found",
+};
+
+/**
+ * Per-task usage limits. A reached root limit is a non-retryable 402
+ * `session_usage_limit_reached` whose details carry only the public refusal
+ * fields; it is never `allowance_exhausted`, `payment_required` or a purchase
+ * prompt. Limit writes map to stable `details.code` values. Unreadable usage
+ * state is a retryable 503 that was not applied (never unlimited).
+ */
+export function sessionUsageLimitHttpError(error: unknown): ApiHttpError | null {
+  const refusal = sessionUsageLimitRefusalFromError(error);
+  if (refusal) {
+    return new ApiHttpError(402, {
+      code: "session_usage_limit_reached",
+      message: refusal.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        basis: refusal.basis,
+        rootSessionId: refusal.rootSessionId,
+        limitMicros: refusal.limitMicros,
+        usedMicros: refusal.usedMicros,
+      },
+    });
+  }
+  if (error instanceof SessionUsageLimitHttpError) {
+    return new ApiHttpError(error.status, {
+      code: SESSION_USAGE_LIMIT_ERROR_CODES[error.code],
+      message: error.message,
+      retryable: error.code === "session_usage_limit_unavailable",
+      outcomeUnknown: false,
+      details: { ...error.details, code: error.code },
+    });
+  }
+  const unavailable =
+    error instanceof SessionUsageLimitUnavailableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof SessionUsageLimitUnavailableError
+        ? error.cause
+        : null;
+  if (unavailable) {
+    return new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "Usage for this task is temporarily unavailable. Try again shortly.",
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: "session_usage_limit_unavailable" },
+    });
+  }
+  return null;
 }
 
 /**

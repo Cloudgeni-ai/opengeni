@@ -156,6 +156,7 @@ import {
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
 } from "./model-usage";
+import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
 import {
   sessionTitleGenerationOptions,
   sessionTitleRoute,
@@ -679,6 +680,7 @@ export async function runTurnStreamAttempt(
       chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
       countsTowardTokenCap: billingState.countsTowardTokenCap,
       initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+      sessionId: input.sessionId,
     });
   };
   const runStreamAttempt = async (options: {
@@ -1943,6 +1945,9 @@ export async function runTurnStreamAttempt(
       // History plus the exact approval suffix now own the complete response.
       await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
       await finishParallelSessionTitle();
+      // Held task-usage receipts are durable before the attempt waits on a
+      // person (the resume may run in another worker process).
+      await flushHeldSessionUsageReceipts(db, input.sessionId);
       if (
         !(await eventing.settle!({
           events: [
@@ -2081,6 +2086,9 @@ export async function runTurnStreamAttempt(
     await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
     await finalizeTurnOpStreamOps();
     await finishParallelSessionTitle();
+    // Every task-usage receipt held after a failed write is durable before
+    // the turn completes (a persistent failure enters DB-only recovery).
+    await flushHeldSessionUsageReceipts(db, input.sessionId);
     if (
       !(await eventing.settle!({
         events: [
@@ -2386,6 +2394,7 @@ export async function runTurnStreamAttempt(
         const deferredSteer = await settleDeferredSteerAfterCompaction();
         if (deferredSteer) return deferredSteer;
         if (turn.source === "compaction") {
+          await flushHeldSessionUsageReceipts(db, input.sessionId);
           const settled = await eventing.settle!({
             events: [
               {

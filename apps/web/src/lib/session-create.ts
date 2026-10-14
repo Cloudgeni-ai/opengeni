@@ -280,6 +280,12 @@ export type BuildCreateSessionRequestInput = {
   channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
   agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
+  /**
+   * Per-task usage limit in USD micros. Only sent when the server advertises
+   * `sessionUsageLimits.enabled` and a limit was chosen; null or omitted sends
+   * nothing (no limit), so older servers never see the field.
+   */
+  usageLimitMicros?: number | null;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
   /** Prevent a partially hydrated capability catalog from becoming a pin. */
@@ -401,6 +407,9 @@ export function buildCreateSessionRequest(
     ...(input.channelId ? { channelId: input.channelId } : {}),
     ...(input.agentLearning && Object.keys(input.agentLearning).length
       ? { agentLearning: input.agentLearning }
+      : {}),
+    ...(typeof input.usageLimitMicros === "number"
+      ? { usageLimitMicros: input.usageLimitMicros }
       : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {

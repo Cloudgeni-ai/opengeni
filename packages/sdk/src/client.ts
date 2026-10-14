@@ -78,7 +78,12 @@ import {
   OpenGeniApiError,
   OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
+  OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
+  rejectsStartModeField,
+  sessionUsageLimitNotConfirmed,
+  sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
@@ -282,6 +287,8 @@ import type {
   WorkspaceModelAccountSettings,
   ModelAccountPreferences,
   SessionModelAccountChoiceResponse,
+  SessionUsageLimit,
+  SetSessionUsageLimitRequest,
   SetSessionModelAccountChoiceRequest,
   SetSessionModelAccountChoiceResponse,
   UpdateModelAccountPreferencesRequest,
@@ -1326,11 +1333,77 @@ export class OpenGeniClient {
     workspaceId: string,
     request: CreateSessionRequest,
   ): Promise<CreateSessionResponse> {
-    return await this.requestJson<CreateSessionResponse>(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+    const limited = request.usageLimitMicros !== undefined && request.usageLimitMicros !== null;
+    // A limited create spells out the default start mode. Servers that
+    // predate usage limits accept only `realtime` there, so they reject the
+    // whole request before creating or starting anything, rather than
+    // dropping the unknown limit and starting uncapped work.
+    const body: CreateSessionRequest =
+      limited && request.startMode === undefined ? { ...request, startMode: "standard" } : request;
+    let created: CreateSessionResponse;
+    try {
+      created = await this.requestJson<CreateSessionResponse>(
+        "POST",
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
+        body,
+      );
+    } catch (error) {
+      if (
+        limited &&
+        body.startMode === "standard" &&
+        error instanceof OpenGeniApiError &&
+        rejectsStartModeField(error)
+      ) {
+        throw new OpenGeniSessionUsageLimitUnsupportedError(
+          "This server does not support task usage limits, so the session was not created. Create it without a usage limit, or upgrade the server.",
+          { sessionId: null, cause: error },
+        );
+      }
+      throw error;
+    }
+    assertSessionUsageLimitEcho(request.usageLimitMicros, created);
+    return created;
+  }
+
+  /**
+   * The task's usage limit and recorded API-equivalent model usage. A child
+   * session returns its root's state with `inherited: true`. Servers that
+   * predate usage limits return 404.
+   */
+  async getSessionUsageLimit(
+    workspaceId: string,
+    sessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SessionUsageLimit> {
+    return await this.requestJson<SessionUsageLimit>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /**
+   * Set (`limitMicros`), lower, raise or clear (`limitMicros: null`) a root
+   * task's usage limit with compare-and-set on `expectedVersion`. Person or
+   * trusted host only; agents are refused. Changing the limit never resumes
+   * paused work. Returns the committed state; 409 on a stale version.
+   */
+  async setSessionUsageLimit(
+    workspaceId: string,
+    sessionId: string,
+    request: SetSessionUsageLimitRequest,
+  ): Promise<SessionUsageLimit> {
+    const committed = await this.requestJson<SessionUsageLimit>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
       request,
     );
+    if (committed.limitMicros !== request.limitMicros) {
+      throw sessionUsageLimitNotConfirmed(sessionId);
+    }
+    return committed;
   }
 
   async getNewSessionDraft(
@@ -10528,6 +10601,22 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | unde
   });
 }
 
+/**
+ * Servers without usage limits strip the unknown create field. A requested
+ * limit that is not echoed back would silently run unlimited, so fail loudly.
+ */
+function assertSessionUsageLimitEcho(
+  requested: number | null | undefined,
+  created: CreateSessionResponse,
+): void {
+  if (requested === undefined || requested === null) return;
+  if (created.usageLimit?.limitMicros === requested) return;
+  throw new OpenGeniSessionUsageLimitUnsupportedError(
+    `The session ${created.id} was created, but the server did not confirm its usage limit; it may not support usage limits. Set the limit with setSessionUsageLimit before sending work, or treat the task as unlimited.`,
+    { sessionId: created.id },
+  );
+}
+
 type ApiErrorRequestContext = {
   method: string;
   correlationId?: string | undefined;
@@ -10540,7 +10629,9 @@ async function apiErrorFromResponse(
   const body = await readBoundedJsonErrorBody(response);
   const ErrorType = allowanceExhaustedFields(body)
     ? OpenGeniAllowanceExhaustedError
-    : OpenGeniApiError;
+    : sessionUsageLimitReachedFields(body)
+      ? OpenGeniSessionUsageLimitReachedError
+      : OpenGeniApiError;
   const error = new ErrorType(response.status, body, {
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     mutation: isMutationMethod(context.method),

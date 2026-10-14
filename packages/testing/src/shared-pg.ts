@@ -961,6 +961,66 @@ export async function acquireOwnerMigratedTestDatabase(
   }
 }
 
+export type RestrictedRuntimeTestDatabase = {
+  /** Dedicated data schema the migration owner migrated into. */
+  schema: string;
+  /** opengeni_app URL; pass `{ searchPath: schema }` to createDb. */
+  appUrl: string;
+  /** Superuser pool on the same database with `search_path` set to the schema. */
+  admin: postgres.Sql;
+  /** Name of the NOSUPERUSER NOBYPASSRLS migration owner. */
+  ownerRole: string;
+  release: () => Promise<void>;
+};
+
+/**
+ * The production database posture in one call: a NOSUPERUSER NOBYPASSRLS
+ * migration owner, a dedicated (non-public) data schema migrated by that
+ * owner, and the restricted application role provisioned with FORCE RLS.
+ * SECURITY DEFINER routines then run as a role that FORCE RLS binds, exactly
+ * as deployed, unlike the superuser-owned shared template. Returns null when
+ * no test PostgreSQL is available.
+ */
+export async function acquireRestrictedRuntimeTestDatabase(
+  label = "restricted-runtime",
+  schema = "og_data",
+): Promise<RestrictedRuntimeTestDatabase | null> {
+  if (!/^[a-z_][a-z0-9_]{0,40}$/.test(schema)) throw new Error("Invalid test schema name");
+  const owner = await acquireOwnerMigratedTestDatabase(label);
+  if (!owner) return null;
+  let admin: postgres.Sql | null = null;
+  try {
+    await owner.admin.unsafe(`CREATE SCHEMA ${schema} AUTHORIZATION "${owner.ownerRole}"`);
+    await owner.admin.unsafe(`ALTER EXTENSION vector SET SCHEMA ${schema}`);
+    await migrate(owner.ownerUrl, schema, { applicationDatabaseRoles: ["opengeni_app"] });
+    await provisionRoles(owner.adminUrl, {
+      targetSchema: schema,
+      appRole: "opengeni_app",
+      appPassword: owner.appPassword,
+      rlsStrategy: "force",
+    });
+    const appUrl = new URL(owner.adminUrl);
+    appUrl.username = "opengeni_app";
+    appUrl.password = owner.appPassword;
+    admin = postgres(owner.adminUrl, { max: 4, connection: { search_path: schema } });
+    const pool = admin;
+    return {
+      schema,
+      appUrl: appUrl.toString(),
+      admin: pool,
+      ownerRole: owner.ownerRole,
+      release: async () => {
+        await pool.end().catch(() => undefined);
+        await owner.release();
+      },
+    };
+  } catch (error) {
+    await admin?.end().catch(() => undefined);
+    await owner.release();
+    throw error;
+  }
+}
+
 // Re-export so callers don't need to import the constant from elsewhere.
 export const SHARED_TEST_PG_IMAGE = IMAGE;
 

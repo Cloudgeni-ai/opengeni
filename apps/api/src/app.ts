@@ -140,6 +140,7 @@ import {
   databaseUnavailableHttpError,
   modelUnavailableHttpError,
   scheduledTaskTargetAccessHttpError,
+  sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
@@ -158,6 +159,7 @@ import {
   registeredHandlerRoutePath,
 } from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
+import { sessionUsageLimitsProducerEnabled } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -617,6 +619,7 @@ export function createAppComposition(deps: AppDependencies): {
           entitlements: deps.entitlements ?? null,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
           log: (message, attributes) => observability.error(message, attributes),
+          usageLimitMetrics: observability,
         })
       : deps.modelCalls;
   registerProductUsageMetricBaselines(observability);
@@ -1503,6 +1506,11 @@ export function createAppComposition(deps: AppDependencies): {
             }
           : {}),
         agentConfig: clientAgentConfig(deps.settings),
+        // Producer capability for per-task usage limits. Clients only offer a
+        // new limit when enabled; existing limits stay visible and removable.
+        sessionUsageLimits: {
+          enabled: sessionUsageLimitsProducerEnabled(deps.settings),
+        },
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -2272,7 +2280,8 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (allowanceExhaustedHttpError(rawError) ??
+        : (sessionUsageLimitHttpError(rawError) ??
+          allowanceExhaustedHttpError(rawError) ??
           subscriptionSettingsLockedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
           scheduledTaskTargetAccessHttpError(rawError) ??

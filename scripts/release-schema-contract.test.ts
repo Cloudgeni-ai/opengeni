@@ -2789,6 +2789,9 @@ describe("release schema contract", () => {
       "0687_human_wait_command_containment.sql",
       "0736_notification_webhook_content.sql",
       "0739_vaults.sql",
+      "0773_session_usage_limits.sql",
+      "0774_session_usage_limit_attention_index.sql",
+      "0775_session_usage_limit_attention_cursor.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -327,6 +327,14 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("session usage limits producer flag defaults off and parses", () => {
+    expect(withEnv({}, () => getSettings()).sessionUsageLimitsEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_SESSION_USAGE_LIMITS_ENABLED: "true" }, () => getSettings())
+        .sessionUsageLimitsEnabled,
+    ).toBe(true);
+  });
+
   test("configured host MCP refs are rejected", () => {
     const mcpServers = JSON.stringify([
       {

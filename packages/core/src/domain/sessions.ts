@@ -212,6 +212,14 @@ import { prepareExternalLinkTurnAdmission } from "../application/external-link-w
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
 
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
+import {
+  applyInitialSessionUsageLimit,
+  requireSessionUsageLimitAllows,
+  SessionUsageLimitHttpError,
+  sessionUsageLimitsProducerEnabled,
+  sessionUsageLimitWriteActorForAccess,
+} from "../session-usage-limits";
+import { recordSessionUsageLimitEvent } from "../session-usage-limit-metrics";
 import type {
   AcceptSessionUserMessageDependencies,
   ApiRouteDeps,
@@ -2379,6 +2387,12 @@ export async function retryFailedSession(
   );
   if (replay) return replay;
   const session = await requireSession(deps.db, workspaceId, sessionId);
+  // A retry is a new model request: a reached task usage limit refuses it.
+  await requireSessionUsageLimitAllows(
+    deps.db,
+    { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
+    { sink: deps.observability, boundary: "send" },
+  );
   const failure = await getSessionEvent(deps.db, workspaceId, request.failureEventId);
   if (!failure || failure.sessionId !== sessionId)
     throw new SessionRetryConflictError("RETRY_STALE_FAILURE", "The failure event is unavailable");
@@ -2482,7 +2496,7 @@ async function withSessionCreateUsageRecording(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   workspaceId: string;
-  startMode: "realtime" | undefined;
+  startMode: "realtime" | "standard" | undefined;
   origin: "system" | "user";
   createOutcome: CreateSessionOutcome;
 }): Promise<CreateSessionRequestOutcome> {
@@ -2580,6 +2594,46 @@ async function createSessionForRequestInFileScope(
       }
       throw error;
     }
+  }
+  // a create-time usage limit belongs to a new ROOT task and only a
+  // person or the trusted host may set it. Agents (including children, which
+  // always share their root's limit) are rejected even when the value is null.
+  let initialUsageLimitActor: ReturnType<typeof sessionUsageLimitWriteActorForAccess> | null = null;
+  if (payload.usageLimitMicros !== undefined) {
+    try {
+      if (parentSessionId || !authorization) {
+        throw new SessionUsageLimitHttpError(
+          403,
+          "session_usage_limit_forbidden",
+          "Only a person or the application's server can set a task usage limit.",
+        );
+      }
+      initialUsageLimitActor = sessionUsageLimitWriteActorForAccess(authorization);
+    } catch (error) {
+      recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "forbidden");
+      throw error;
+    }
+  }
+  if (
+    payload.usageLimitMicros !== undefined &&
+    payload.usageLimitMicros !== null &&
+    !sessionUsageLimitsProducerEnabled(unresolvedDeps.settings)
+  ) {
+    recordSessionUsageLimitEvent(unresolvedDeps.observability, "create", "disabled");
+    throw new SessionUsageLimitHttpError(
+      422,
+      "session_usage_limit_disabled",
+      "Usage limits are not enabled on this server.",
+    );
+  }
+  // A task whose usage limit is reached cannot start more inference by
+  // spawning another agent.
+  if (parentSessionId) {
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId: parentSessionId },
+      { sink: unresolvedDeps.observability, boundary: "child_create" },
+    );
   }
   const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
   if (parentSessionId && !parentSession) {
@@ -3772,10 +3826,26 @@ async function createSessionForRequestInFileScope(
       ? ("personal" as const)
       : ("workspace" as const);
   const initialLearningActor = initialLearningContext?.actor;
+  const initialUsageLimit =
+    initialUsageLimitActor && payload.usageLimitMicros != null
+      ? { actor: initialUsageLimitActor, limitMicros: payload.usageLimitMicros }
+      : null;
+  const applyInitialUsageLimit = initialUsageLimit
+    ? async (tx: Database, sessionId: string) =>
+        await applyInitialSessionUsageLimit(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          limitMicros: initialUsageLimit.limitMicros,
+          actor: initialUsageLimit.actor,
+          producerEnabled: sessionUsageLimitsProducerEnabled(unresolvedDeps.settings),
+        })
+    : null;
   const beforeCreateCommit =
     initialLearning && initialLearningContext && initialLearningActor?.kind === "human"
       ? async (tx: Database, sessionId: string) => {
           await externalBeforeCreateCommit?.(tx);
+          await applyInitialUsageLimit?.(tx, sessionId);
           await saveAgentLearningSettings(
             tx,
             {
@@ -3791,7 +3861,12 @@ async function createSessionForRequestInFileScope(
             },
           );
         }
-      : externalBeforeCreateCommit;
+      : applyInitialUsageLimit
+        ? async (tx: Database, sessionId: string) => {
+            await externalBeforeCreateCommit?.(tx);
+            await applyInitialUsageLimit(tx, sessionId);
+          }
+        : externalBeforeCreateCommit;
   let createOutcome: CreateSessionOutcome;
   try {
     createOutcome = await createAndStartSessionWithOutcome({
@@ -4220,6 +4295,13 @@ async function acceptSessionUserMessageInFileScope(
     // pure read with no side effects.
     const existingSession = await requireSession(db, workspaceId, sessionId);
     assertSessionIsNotImported(existingSession);
+    // a reached task usage limit refuses a fresh Send/Steer here,
+    // after exact replays returned above and before any queue/interrupt write.
+    await requireSessionUsageLimitAllows(
+      db,
+      { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
+      { sink: deps.observability, boundary: delivery === "steer" ? "steer" : "send" },
+    );
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
       grant,

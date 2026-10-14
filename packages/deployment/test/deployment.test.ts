@@ -22,6 +22,7 @@ import {
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
+  SESSION_USAGE_LIMITS_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
   API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
@@ -1793,6 +1794,24 @@ describe("deployment contract", () => {
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
+  });
+
+  test("renders the session usage limits producer flag only when configured", () => {
+    expect(SESSION_USAGE_LIMITS_PASSTHROUGH_ENV).toEqual(["OPENGENI_SESSION_USAGE_LIMITS_ENABLED"]);
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_SESSION_USAGE_LIMITS_ENABLED: "true",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true");
+    expect(configured.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {

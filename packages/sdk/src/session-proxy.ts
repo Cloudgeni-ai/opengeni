@@ -698,7 +698,13 @@ export function createSessionProxyHandler(
             }
           }
           // Upstream proxy capabilities never authorize this host's routes.
-          const { artifacts: _upstreamArtifacts, ...conversationConfig } = config;
+          // Task usage limits are set by this host's server, never through the
+          // browser boundary, so the producer capability is not forwarded.
+          const {
+            artifacts: _upstreamArtifacts,
+            sessionUsageLimits: _upstreamUsageLimits,
+            ...conversationConfig
+          } = config;
           const upstreamVoice = config.voiceInput;
           if (upstreamVoice && typeof upstreamVoice === "object") {
             // Only one-shot recordings are forwarded, never resumable chunk uploads.
