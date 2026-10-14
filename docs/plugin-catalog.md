@@ -25,7 +25,7 @@ and replaces the snapshot only after both sources succeed. No repository scans
 happen during search. No executable upstream files are copied or executed.
 
 The marketplace adapter installs indexed skills and references supported remote MCP connections. A catalogue entry must
-not be sent directly to OpenGeni's plugin-manifest installer: these are different
+not be sent directly to Opengeni's plugin-manifest installer: these are different
 manifest formats. MCP connections and skills can be mapped to our existing
 primitives; hosted apps, commands, hooks and agent definitions require explicit
 runtime support. Retain upstream licensing and source attribution when importing

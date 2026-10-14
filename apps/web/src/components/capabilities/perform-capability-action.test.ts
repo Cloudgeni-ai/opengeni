@@ -172,4 +172,101 @@ describe("shared capability connection lifecycle", () => {
     );
     expect(h.enableCapability).toHaveBeenCalledTimes(1);
   });
+
+  describe("per-account connector management", () => {
+    const gmail = CapabilityCatalogItem.parse({
+      id: "mail",
+      kind: "mcp",
+      source: "manual",
+      name: "Mail",
+      providerDomain: "mail.example.com",
+      mcpUrl: "https://mail.example.com/mcp",
+      authKind: "oauth2",
+      enabled: true,
+      connectionRef: {
+        providerDomain: "mail.example.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+      runtime: { available: true },
+    });
+
+    test("Remove disconnects exactly that account in its own workspace", async () => {
+      const deleteConnection = mock(async () => ({}));
+      const disableCapability = mock(async () => {});
+      const h = harness({ deleteConnection, disableCapability });
+      await performCapabilityAction(
+        { ...h.options, item: gmail },
+        {
+          type: "remove_connection",
+          item: gmail,
+          connection: { id: "account-2", workspaceId: "personal-workspace" },
+        },
+      );
+      expect(deleteConnection).toHaveBeenCalledTimes(1);
+      expect(deleteConnection).toHaveBeenCalledWith("personal-workspace", "account-2");
+      // The connector itself stays on.
+      expect(disableCapability).not.toHaveBeenCalled();
+      expect(h.options.refresh).toHaveBeenCalledTimes(1);
+    });
+
+    test("a failed Remove is reported, never announced as done", async () => {
+      const deleteConnection = mock(async () => {
+        throw new Error("connection not found");
+      });
+      const h = harness({ deleteConnection });
+      await expect(
+        performCapabilityAction(
+          { ...h.options, item: gmail },
+          {
+            type: "remove_connection",
+            item: gmail,
+            connection: { id: "someone-elses", workspaceId: "workspace" },
+          },
+        ),
+      ).rejects.toThrow("connection not found");
+      expect(h.options.onComplete).not.toHaveBeenCalled();
+    });
+
+    test("Add account signs in a further account instead of refreshing the existing one", async () => {
+      const startConnectionOAuth = mock(async (_workspaceId: string, _request: object) => ({
+        state: "s",
+        authorizationUrl: "https://accounts.example/consent",
+      }));
+      const h = harness({ startConnectionOAuth });
+      await performCapabilityAction(
+        { ...h.options, item: gmail },
+        { type: "add_oauth_account", item: gmail, ownership: "personal" },
+      );
+      expect(startConnectionOAuth.mock.calls[0]?.[0]).toBe("workspace");
+      expect(startConnectionOAuth.mock.calls[0]?.[1]).toMatchObject({
+        mcpUrl: "https://mail.example.com/mcp",
+        newAccount: true,
+        ownership: "personal",
+      });
+      expect(startConnectionOAuth.mock.calls[0]?.[1]).not.toHaveProperty("connectionId");
+      expect(h.options.redirect).toHaveBeenCalledWith("https://accounts.example/consent");
+    });
+
+    test("per-account Reconnect re-signs exactly that row, in the workspace that owns it", async () => {
+      const startConnectionOAuth = mock(async (_workspaceId: string, _request: object) => ({
+        state: "s",
+        authorizationUrl: "https://accounts.example/consent",
+      }));
+      const h = harness({ startConnectionOAuth });
+      await performCapabilityAction(
+        { ...h.options, item: gmail },
+        {
+          type: "reconnect_oauth",
+          item: gmail,
+          connectionId: "account-2",
+          ownership: "personal",
+          connectionWorkspaceId: "personal-workspace",
+        },
+      );
+      expect(startConnectionOAuth.mock.calls[0]?.[0]).toBe("personal-workspace");
+      expect(startConnectionOAuth.mock.calls[0]?.[1]).toMatchObject({ connectionId: "account-2" });
+      expect(startConnectionOAuth.mock.calls[0]?.[1]).not.toHaveProperty("newAccount");
+    });
+  });
 });

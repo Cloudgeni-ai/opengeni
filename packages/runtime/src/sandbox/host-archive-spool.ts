@@ -3,20 +3,28 @@ import { constants, type BigIntStats } from "node:fs";
 import {
   lstat,
   mkdir,
-  mkdtemp,
   open,
   readdir,
   realpath,
-  rm,
   rmdir,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { WorkspaceTreeFingerprint } from "@opengeni/contracts";
 import type { WorkspaceArchiveSpool } from "./archive-spool";
-import { WorkspaceArchiveIntegrityError } from "./workspace-archive";
+import {
+  WorkspaceArchiveIntegrityError,
+  workspaceContentManifest,
+  type WorkspaceContentEntry,
+  type WorkspaceContentManifest,
+} from "./workspace-archive";
+import {
+  createHostArchiveTemporaryDirectory,
+  hostArchiveTemporaryBases,
+  removeHostArchiveTemporaryDirectory,
+  sweepOrphanedHostArchiveTemporaryDirectoriesOnce,
+} from "./host-archive-temporary";
 
 const CHUNK_BYTES = 64 * 1024;
 // Filesystem representability, not an archive resource quota. Check component
@@ -107,7 +115,29 @@ function fdPath(handle: FileHandle, name?: string) {
 /** Node has no openat API. Linux's descriptor namespace supplies the same pinned
  * parent resolution; O_NOFOLLOW applies to the child, never an untrusted ancestor.
  * Do not replace this with lstat(path) followed by open(path): that races. */
-async function openRoot(root: string, create = false): Promise<FileHandle> {
+export type HostWorkspaceRootIdentity = Readonly<{
+  dev: string;
+  ino: string;
+  uid: string;
+  gid: string;
+  mode: string;
+}>;
+
+function rootIdentity(stats: BigIntStats): HostWorkspaceRootIdentity {
+  return Object.freeze({
+    dev: String(stats.dev),
+    ino: String(stats.ino),
+    uid: String(stats.uid),
+    gid: String(stats.gid),
+    mode: String(stats.mode),
+  });
+}
+
+async function openRoot(
+  root: string,
+  create = false,
+  expected?: HostWorkspaceRootIdentity,
+): Promise<FileHandle> {
   if (process.platform !== "linux")
     invalid("host archive codec requires Linux descriptor-relative filesystem access");
   if (!isAbsolute(root)) invalid("host workspace root must be absolute");
@@ -127,10 +157,57 @@ async function openRoot(root: string, create = false): Promise<FileHandle> {
       await current.close();
       current = next;
     }
+    if (expected) {
+      const actual = rootIdentity(await current.stat({ bigint: true }));
+      if (
+        Object.keys(actual).some(
+          (key) =>
+            actual[key as keyof HostWorkspaceRootIdentity] !==
+            expected[key as keyof HostWorkspaceRootIdentity],
+        )
+      )
+        invalid("owned workspace root identity changed");
+    }
     return current;
   } catch (error) {
     await current.close();
     throw error;
+  }
+}
+
+/** Metadata only. Content readers repeat this identity comparison on their
+ * opened directory descriptor before inventory or file reads. */
+export async function readHostWorkspaceRootIdentity(
+  root: string,
+  expected?: HostWorkspaceRootIdentity,
+): Promise<HostWorkspaceRootIdentity> {
+  if (process.platform !== "linux") {
+    if (!isAbsolute(root) || resolve(root) !== root || (await realpath(root)) !== root)
+      invalid("owned workspace root is not canonical");
+    const handle = await open(root, READ_DIRECTORY);
+    try {
+      const stats = await handle.stat({ bigint: true });
+      if (!stats.isDirectory()) invalid("owned workspace root is not a directory");
+      const actual = rootIdentity(stats);
+      if (
+        expected &&
+        Object.keys(actual).some(
+          (key) =>
+            actual[key as keyof HostWorkspaceRootIdentity] !==
+            expected[key as keyof HostWorkspaceRootIdentity],
+        )
+      )
+        invalid("owned workspace root identity changed");
+      return actual;
+    } finally {
+      await handle.close();
+    }
+  }
+  const handle = await openRoot(root, false, expected);
+  try {
+    return rootIdentity(await handle.stat({ bigint: true }));
+  } finally {
+    await handle.close();
   }
 }
 
@@ -141,13 +218,18 @@ type TreeIndex = {
 
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-async function inventory(root: FileHandle, excludedPaths: readonly string[]): Promise<TreeIndex> {
+async function inventory(
+  root: FileHandle,
+  excludedPaths: readonly string[],
+  signal?: AbortSignal,
+): Promise<TreeIndex> {
   const tree: TreeIndex = { directories: new Map(), files: new Map() };
   const walk = async (handle: FileHandle, logical: string) => {
     const before = await handle.stat({ bigint: true });
     tree.directories.set(logical, before);
     const names = await readdir(fdPath(handle));
     for (const name of names) {
+      signal?.throwIfAborted();
       const path = logical ? `${logical}/${name}` : name;
       if (
         excludedPaths.some(
@@ -216,6 +298,7 @@ async function readTreeFile(
   tree: TreeIndex,
   path: string,
   consume: (bytes: Buffer) => void | Promise<void>,
+  signal?: AbortSignal,
 ) {
   const [parent, name] = parentAndName(path);
   const directory = await openDirectory(root, parent, tree);
@@ -229,6 +312,7 @@ async function readTreeFile(
       const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
       let offset = 0;
       while (offset < size) {
+        signal?.throwIfAborted();
         const { bytesRead } = await handle.read(
           buffer,
           0,
@@ -308,7 +392,7 @@ async function verifyInventory(rootPath: string, root: FileHandle, tree: TreeInd
   }
 }
 
-async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex) {
+async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex, signal?: AbortSignal) {
   const directories = [...tree.directories.keys()].filter(Boolean);
   const hash = projection(directories);
   let total = 0;
@@ -316,9 +400,16 @@ async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex) {
     const size = Number(tree.files.get(path)!.size);
     frame(hash, "file", path);
     frame(hash, "bytes", String(size));
-    await readTreeFile(root, tree, path, (bytes) => {
-      hash.update(bytes);
-    });
+    signal?.throwIfAborted();
+    await readTreeFile(
+      root,
+      tree,
+      path,
+      (bytes) => {
+        hash.update(bytes);
+      },
+      signal,
+    );
     total += size;
   }
   await verifyInventory(rootPath, root, tree);
@@ -328,8 +419,9 @@ async function hashTree(rootPath: string, root: FileHandle, tree: TreeIndex) {
 export async function fingerprintHostWorkspace(
   root: string,
   excludedPaths: readonly string[],
+  expectedRoot?: HostWorkspaceRootIdentity,
 ): Promise<WorkspaceTreeFingerprint> {
-  const handle = await openRoot(root);
+  const handle = await openRoot(root, false, expectedRoot);
   try {
     return await hashTree(root, handle, await inventory(handle, excludedPaths));
   } catch (error) {
@@ -344,14 +436,18 @@ function within(root: string, candidate: string) {
   return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`));
 }
 
-async function privateTemporaryDirectory(root: string) {
+async function privateTemporaryDirectory(root: string | null) {
   // Resolve the actual location before creating anything: TMPDIR can itself be a
   // symlink or live inside the source workspace. Never add spool files to it.
-  const actualRoot = await realpath(root).catch(() => resolve(root));
-  for (const candidate of [tmpdir(), "/var/tmp", "/tmp"]) {
+  const actualRoot = root === null ? null : await realpath(root).catch(() => resolve(root));
+  // Reclaim spools whose owner process stopped mid-capture/upload/restore
+  // before adding another multi-gigabyte one. Never removes a live owner's.
+  await sweepOrphanedHostArchiveTemporaryDirectoriesOnce();
+  for (const candidate of hostArchiveTemporaryBases()) {
     const base = await realpath(candidate).catch(() => null);
-    if (!base || within(actualRoot, base) || within("/dev/shm", base)) continue;
-    return await mkdtemp(join(base, "opengeni-host-archive-"));
+    if (!base || (actualRoot !== null && within(actualRoot, base)) || within("/dev/shm", base))
+      continue;
+    return await createHostArchiveTemporaryDirectory(base);
   }
   invalid("no private disk temporary directory exists outside the workspace");
 }
@@ -439,20 +535,33 @@ function ownedSpool(
       }
     },
     dispose() {
-      return (disposal ??= rm(directory, { recursive: true, force: true }));
+      return (disposal ??= removeHostArchiveTemporaryDirectory(directory));
     },
   };
 }
 
+/**
+ * An aborted `signal` stops the capture at the next file chunk, removes its
+ * temporary spool and rejects with the signal's reason. Every read is local
+ * and owned here, so the rejection is the physical end of the capture: callers
+ * may treat it as settled.
+ */
 export async function captureHostWorkspaceArchive(
   root: string,
   excludedPaths: readonly string[],
-): Promise<{ spool: WorkspaceArchiveSpool; workspace: WorkspaceTreeFingerprint }> {
-  const handle = await openRoot(root);
+  expectedRoot?: HostWorkspaceRootIdentity,
+  signal?: AbortSignal,
+): Promise<{
+  spool: WorkspaceArchiveSpool;
+  workspace: WorkspaceTreeFingerprint;
+}> {
+  signal?.throwIfAborted();
+  const handle = await openRoot(root, false, expectedRoot);
   let temporary: string | undefined;
+  let handleClosed = false;
   try {
-    const tree = await inventory(handle, excludedPaths);
-    const before = await hashTree(root, handle, tree);
+    const tree = await inventory(handle, excludedPaths, signal);
+    const before = await hashTree(root, handle, tree, signal);
     temporary = await privateTemporaryDirectory(root);
     const path = join(temporary, "archive.json");
     const file = await open(path, CREATE, 0o600);
@@ -474,10 +583,16 @@ export async function captureHostWorkspaceArchive(
         await writer.write(`${first ? "" : ","}{"path":${JSON.stringify(logical)},"data":"`);
         first = false;
         const encoder = new Base64Encoder(writer);
-        await readTreeFile(handle, tree, logical, async (bytes) => {
-          hash.update(bytes);
-          await encoder.write(bytes);
-        });
+        await readTreeFile(
+          handle,
+          tree,
+          logical,
+          async (bytes) => {
+            hash.update(bytes);
+            await encoder.write(bytes);
+          },
+          signal,
+        );
         await encoder.finish();
         await writer.write('"}');
         total += size;
@@ -499,7 +614,10 @@ export async function captureHostWorkspaceArchive(
         0o600,
       );
       try {
-        decoded = await fingerprintArchiveIndex(await indexArchive(encoded, payload, {}), payload);
+        signal?.throwIfAborted();
+        const index = await indexArchive(encoded, payload, {});
+        signal?.throwIfAborted();
+        decoded = await fingerprintArchiveIndex(index, payload, signal);
       } finally {
         await payload.close();
       }
@@ -507,14 +625,24 @@ export async function captureHostWorkspaceArchive(
       await encoded.close();
     }
     await unlink(payloadPath);
+    signal?.throwIfAborted();
     await verifyInventory(root, handle, tree);
-    const after = await hashTree(root, handle, await inventory(handle, excludedPaths));
+    const after = await hashTree(
+      root,
+      handle,
+      await inventory(handle, excludedPaths, signal),
+      signal,
+    );
     if (
       before.sha256 !== archived.sha256 ||
       after.sha256 !== archived.sha256 ||
       decoded.sha256 !== archived.sha256
     )
       changed();
+    // Close before handing over ownership: a close failure after the transfer
+    // would reject without giving the caller the spool it must dispose.
+    handleClosed = true;
+    await handle.close();
     const spool = ownedSpool(temporary, path, writer.byteSize, writer.hash.digest("hex"));
     temporary = undefined;
     return { spool, workspace: archived };
@@ -522,9 +650,9 @@ export async function captureHostWorkspaceArchive(
     return captureError(error);
   } finally {
     try {
-      await handle.close();
+      if (!handleClosed) await handle.close();
     } finally {
-      if (temporary) await rm(temporary, { recursive: true, force: true });
+      if (temporary) await removeHostArchiveTemporaryDirectory(temporary);
     }
   }
 }
@@ -785,11 +913,16 @@ class Base64Decoder {
 type FileSpan = { path: string; offset: number; byteSize: number };
 type ArchiveIndex = { directories: string[]; files: FileSpan[] };
 
-async function fingerprintArchiveIndex(index: ArchiveIndex, payload: FileHandle) {
+async function fingerprintArchiveIndex(
+  index: ArchiveIndex,
+  payload: FileHandle,
+  signal?: AbortSignal,
+) {
   const hash = projection(index.directories);
   let total = 0;
   const buffer = Buffer.allocUnsafe(CHUNK_BYTES);
   for (const file of [...index.files].sort((a, b) => compare(a.path, b.path))) {
+    signal?.throwIfAborted();
     frame(hash, "file", file.path);
     frame(hash, "bytes", String(file.byteSize));
     let copied = 0;
@@ -940,11 +1073,15 @@ async function copySpan(payload: FileHandle, output: FileHandle, span: FileSpan)
   }
 }
 
-export async function restoreHostWorkspaceArchive(
-  root: string,
+/** Copies the untrusted spool once into a private temporary directory outside
+ * `avoidRoot`, verifies its exact size and SHA-256, indexes it, and hands the
+ * validated index and decoded payload to `use`. */
+async function withValidatedHostArchive<T>(
+  avoidRoot: string | null,
   spool: WorkspaceArchiveSpool,
-  options: HostWorkspaceArchiveOptions = {},
-): Promise<void> {
+  options: HostWorkspaceArchiveOptions,
+  use: (archive: ArchiveIndex, payload: FileHandle) => Promise<T>,
+): Promise<T> {
   // A provider callback can mutate the caller's spool/options objects. The
   // selected expectation must remain the one supplied before any asynchronous
   // work, not a replacement advertised while bytes are being produced.
@@ -955,7 +1092,7 @@ export async function restoreHostWorkspaceArchive(
   checkLimit(expectedByteSize, limits?.maxInputBytes, "input size");
   if (expectedByteSize < 0 || !/^[0-9a-f]{64}$/.test(expectedSha256))
     invalid("invalid workspace archive spool metadata");
-  const temporary = await privateTemporaryDirectory(root);
+  const temporary = await privateTemporaryDirectory(avoidRoot);
   const handles: FileHandle[] = [];
   try {
     const input = await open(
@@ -986,55 +1123,237 @@ export async function restoreHostWorkspaceArchive(
       chunkBytes: processingChunkBytes,
       archiveLimits: limits,
     });
-    // Nothing above creates, clears or truncates anything under root.
-    const destination = await openRoot(root, true);
-    handles.push(destination);
-    const destinationIdentity = await destination.stat({ bigint: true });
-    await clearDirectory(destination);
-    for (const path of archive.directories) {
-      const directory = await openDirectory(destination, path, undefined, true);
-      await directory.close();
-    }
-    for (const span of archive.files) {
-      const [parent, name] = parentAndName(span.path);
-      const directory = await openDirectory(destination, parent, undefined, true);
-      try {
-        const output = await open(fdPath(directory, name), CREATE, 0o666);
-        try {
-          const identity = await output.stat({ bigint: true });
-          await copySpan(payload, output, span);
-          const freshParent = await openDirectory(destination, parent);
-          try {
-            if (
-              !sameEntry(
-                await directory.stat({ bigint: true }),
-                await freshParent.stat({ bigint: true }),
-              ) ||
-              !sameEntry(identity, await lstat(fdPath(freshParent, name), { bigint: true }))
-            )
-              invalid("restore destination file changed");
-          } finally {
-            await freshParent.close();
-          }
-        } finally {
-          await output.close();
-        }
-      } finally {
-        await directory.close();
-      }
-    }
-    const fresh = await openRoot(root);
-    try {
-      if (!sameEntry(destinationIdentity, await fresh.stat({ bigint: true })))
-        invalid("restore destination root changed");
-    } finally {
-      await fresh.close();
-    }
+    return await use(archive, payload);
   } finally {
     try {
       await Promise.all(handles.map((handle) => handle.close()));
     } finally {
-      await rm(temporary, { recursive: true, force: true });
+      await removeHostArchiveTemporaryDirectory(temporary);
     }
   }
+}
+
+export async function restoreHostWorkspaceArchive(
+  root: string,
+  spool: WorkspaceArchiveSpool,
+  options: HostWorkspaceArchiveOptions = {},
+): Promise<void> {
+  await withValidatedHostArchive(root, spool, options, async (archive, payload) => {
+    const handles: FileHandle[] = [];
+    try {
+      await restoreValidatedArchive(root, archive, payload, handles);
+    } finally {
+      await Promise.all(handles.map((handle) => handle.close()));
+    }
+  });
+}
+
+async function restoreValidatedArchive(
+  root: string,
+  archive: ArchiveIndex,
+  payload: FileHandle,
+  handles: FileHandle[],
+): Promise<void> {
+  // Nothing before this creates, clears or truncates anything under root.
+  const destination = await openRoot(root, true);
+  handles.push(destination);
+  const destinationIdentity = await destination.stat({ bigint: true });
+  await clearDirectory(destination);
+  for (const path of archive.directories) {
+    const directory = await openDirectory(destination, path, undefined, true);
+    await directory.close();
+  }
+  for (const span of archive.files) {
+    const [parent, name] = parentAndName(span.path);
+    const directory = await openDirectory(destination, parent, undefined, true);
+    try {
+      const output = await open(fdPath(directory, name), CREATE, 0o666);
+      try {
+        const identity = await output.stat({ bigint: true });
+        await copySpan(payload, output, span);
+        const freshParent = await openDirectory(destination, parent);
+        try {
+          if (
+            !sameEntry(
+              await directory.stat({ bigint: true }),
+              await freshParent.stat({ bigint: true }),
+            ) ||
+            !sameEntry(identity, await lstat(fdPath(freshParent, name), { bigint: true }))
+          )
+            invalid("restore destination file changed");
+        } finally {
+          await freshParent.close();
+        }
+      } finally {
+        await output.close();
+      }
+    } finally {
+      await directory.close();
+    }
+  }
+  const fresh = await openRoot(root);
+  try {
+    if (!sameEntry(destinationIdentity, await fresh.stat({ bigint: true })))
+      invalid("restore destination root changed");
+  } finally {
+    await fresh.close();
+  }
+}
+
+const TAR_BLOCK = 512;
+// Largest size a ustar header's 11 octal digits can carry. Portable sandbox
+// tar validators refuse a PAX size override, so a larger member is unportable.
+const TAR_MAX_MEMBER_BYTES = 0o77777777777;
+const TAR_DIRECTORY_MODE = 0o755;
+const TAR_FILE_MODE = 0o644;
+
+function tarOctal(header: Buffer, offset: number, width: number, value: number) {
+  header.write(`${value.toString(8).padStart(width - 1, "0")}\0`, offset, width, "ascii");
+}
+
+function tarHeader(name: string, type: "0" | "5" | "x", size: number, mode: number, mtime: number) {
+  const header = Buffer.alloc(TAR_BLOCK);
+  header.write(name, 0, 100, "utf8");
+  tarOctal(header, 100, 8, mode);
+  tarOctal(header, 108, 8, 0);
+  tarOctal(header, 116, 8, 0);
+  tarOctal(header, 124, 12, size);
+  tarOctal(header, 136, 12, mtime);
+  header.fill(0x20, 148, 156);
+  header.write(type, 156, 1, "ascii");
+  header.write("ustar\0", 257, 6, "ascii");
+  header.write("00", 263, 2, "ascii");
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+  return header;
+}
+
+function paxRecord(key: string, value: string): Buffer {
+  const body = ` ${key}=${value}\n`;
+  const bodyBytes = Buffer.byteLength(body);
+  // The decimal length prefix counts its own digits.
+  let length = bodyBytes + String(bodyBytes).length;
+  while (bodyBytes + String(length).length !== length) length = bodyBytes + String(length).length;
+  return Buffer.from(`${length}${body}`);
+}
+
+function padded(bytes: number) {
+  return Math.ceil(bytes / TAR_BLOCK) * TAR_BLOCK;
+}
+
+/** Header blocks for one member; a name that does not fit ustar's 100 bytes
+ * travels in a PAX `path` record, which sandbox tar validators accept. */
+function tarMemberHeader(name: string, type: "0" | "5", size: number, mtime: number): Buffer {
+  const mode = type === "5" ? TAR_DIRECTORY_MODE : TAR_FILE_MODE;
+  if (Buffer.byteLength(name) <= 100) return tarHeader(name, type, size, mode, mtime);
+  const record = paxRecord("path", name);
+  const pax = Buffer.alloc(TAR_BLOCK + padded(record.length));
+  tarHeader("././@PaxHeader", "x", record.length, 0o644, mtime).copy(pax, 0);
+  record.copy(pax, TAR_BLOCK);
+  return Buffer.concat([pax, tarHeader("././@LongName", type, size, mode, mtime)]);
+}
+
+function excludedBy(path: string, excluded: readonly string[]) {
+  return excluded.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
+export type PortableWorkspaceTar = {
+  /** A plain ustar/PAX archive of the workspace: directories and regular files. */
+  bytes: Uint8Array;
+  /** The archive's own `sdk_local_archive_v1` fingerprint over every member,
+   * comparable with the descriptor captured alongside it. */
+  fingerprint: WorkspaceTreeFingerprint;
+  /** Exactly what extracting `bytes` materializes, for verifying the result. */
+  contents: WorkspaceContentManifest;
+};
+
+/**
+ * Converts a host-backed workspace archive (the portable JSON projection that
+ * Local/Docker sandboxes capture) into a tar any remote sandbox can hydrate.
+ * The spool is validated exactly like a host restore. `excludedPaths` are the
+ * destination's ephemeral paths: they are not persisted there, so they are left
+ * out of the tar and of `contents`.
+ */
+export async function convertHostWorkspaceArchiveToTar(
+  spool: WorkspaceArchiveSpool,
+  options: HostWorkspaceArchiveOptions & {
+    excludedPaths?: readonly string[];
+    mtimeSeconds?: number;
+  } = {},
+): Promise<PortableWorkspaceTar> {
+  const excluded = (options.excludedPaths ?? [])
+    .map((path) => path.replace(/^(\.\/)+/, "").replace(/\/+$/, ""))
+    .filter((path) => path.length > 0);
+  const mtime =
+    options.mtimeSeconds !== undefined && Number.isFinite(options.mtimeSeconds)
+      ? Math.max(0, Math.floor(options.mtimeSeconds))
+      : 0;
+  return await withValidatedHostArchive(null, spool, options, async (archive, payload) => {
+    const archiveFingerprint = await fingerprintArchiveIndex(archive, payload);
+    // Every ancestor is a directory of the restored tree, listed or not.
+    const listed = new Set(archive.directories);
+    const directories = new Set<string>();
+    for (const path of [...archive.directories, ...archive.files.map((file) => file.path)]) {
+      let parent = listed.has(path) ? path : parentAndName(path)[0];
+      while (parent) {
+        if (!excludedBy(parent, excluded)) directories.add(parent);
+        parent = parentAndName(parent)[0];
+      }
+    }
+    const files = archive.files.filter((file) => !excludedBy(file.path, excluded));
+    const orderedDirectories = [...directories].sort((left, right) =>
+      Buffer.compare(Buffer.from(left), Buffer.from(right)),
+    );
+    const headers = new Map<string, Buffer>();
+    let total = 2 * TAR_BLOCK;
+    for (const directory of orderedDirectories) {
+      const header = tarMemberHeader(`${directory}/`, "5", 0, mtime);
+      headers.set(`d:${directory}`, header);
+      total += header.length;
+    }
+    for (const file of files) {
+      if (file.byteSize > TAR_MAX_MEMBER_BYTES)
+        invalid("workspace archive file is too large for a portable tar");
+      const header = tarMemberHeader(file.path, "0", file.byteSize, mtime);
+      headers.set(`f:${file.path}`, header);
+      total += header.length + padded(file.byteSize);
+    }
+    checkLimit(total, Number.MAX_SAFE_INTEGER, "portable tar size");
+    const tar = Buffer.alloc(total);
+    const entries: WorkspaceContentEntry[] = [];
+    let offset = 0;
+    for (const directory of orderedDirectories) {
+      offset += headers.get(`d:${directory}`)!.copy(tar, offset);
+      entries.push({ kind: "directory", path: directory });
+    }
+    for (const file of files) {
+      offset += headers.get(`f:${file.path}`)!.copy(tar, offset);
+      const hash = createHash("sha256");
+      let copied = 0;
+      while (copied < file.byteSize) {
+        const { bytesRead } = await payload.read(
+          tar,
+          offset + copied,
+          Math.min(CHUNK_BYTES, file.byteSize - copied),
+          file.offset + copied,
+        );
+        if (!bytesRead) invalid("validated workspace payload was truncated");
+        hash.update(tar.subarray(offset + copied, offset + copied + bytesRead));
+        copied += bytesRead;
+      }
+      offset += padded(file.byteSize);
+      entries.push({
+        kind: "file",
+        path: file.path,
+        sha256: hash.digest("hex"),
+        byteSize: file.byteSize,
+      });
+    }
+    return {
+      bytes: new Uint8Array(tar.buffer, tar.byteOffset, tar.byteLength),
+      fingerprint: archiveFingerprint,
+      contents: workspaceContentManifest(entries),
+    };
+  });
 }

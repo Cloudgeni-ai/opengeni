@@ -12,7 +12,7 @@ import {
   agentRunFailurePayload,
   classifyCodexCredentialFailure,
 } from "../src/activities/agent-turn/errors";
-import { selectCodexCredentialLeaseForTurn } from "../src/activities/codex-rotation";
+import { selectCodexCredentialLeaseForTurn } from "./fixtures/legacy-codex/rotation";
 
 const model = "codex/gpt-6-sol";
 const now = new Date("2026-09-27T12:00:00.000Z");

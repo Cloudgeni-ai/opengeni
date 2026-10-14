@@ -20,9 +20,11 @@ import {
   SANDBOX_REAPER_MAINTENANCE_WORKFLOW_ID,
   SANDBOX_REAPER_SCAN_ACTIVITY_TIMEOUT_MS,
   sandboxDrainWorkflowId,
+  sandboxIdleCheckpointWorkflowId,
   sandboxLifecycleTaskQueue,
   type SandboxDrainActivityInput,
   type SandboxDrainWorkflowInput,
+  type SandboxIdleCheckpointWorkflowInput,
   type SandboxLeaseSweepMaintenanceInput,
 } from "../sandbox-reaper-contract";
 
@@ -54,6 +56,40 @@ function maintenanceActivity() {
     // pathological pass keep the fixed-id V2 workflow open forever and thereby
     // suppress all later drain inventories. The next Schedule tick retries it.
     retry: { maximumAttempts: 1 },
+  });
+}
+
+function idleCheckpointInventoryActivity() {
+  return proxyActivities<Pick<typeof activities, "listIdleSandboxCheckpoints">>({
+    taskQueue: lifecycleTaskQueue(),
+    startToCloseTimeout: SANDBOX_REAPER_SCAN_ACTIVITY_TIMEOUT_MS,
+    heartbeatTimeout: SANDBOX_REAPER_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
+    // Bounded so the fixed-id sweep closes and the next tick starts a fresh
+    // one, including during a rolling deploy whose old pollers lack it.
+    retry: {
+      initialInterval: "1 second",
+      backoffCoefficient: 2,
+      maximumInterval: "30 seconds",
+      maximumAttempts: 3,
+    },
+  });
+}
+
+function idleCheckpointActivity(startToCloseTimeout: number) {
+  return proxyActivities<Pick<typeof activities, "checkpointIdleSandboxLease">>({
+    taskQueue: lifecycleTaskQueue(),
+    startToCloseTimeout,
+    heartbeatTimeout: SANDBOX_REAPER_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
+    // A protective checkpoint, not a lifecycle transition: the exact capture
+    // claim fences a late or repeated attempt, and the next sweep lists the
+    // box again once its snapshot interval is due. A few retries cover a
+    // crashed worker or a rolling deploy whose old pollers lack the activity.
+    retry: {
+      initialInterval: "1 second",
+      backoffCoefficient: 2,
+      maximumInterval: "30 seconds",
+      maximumAttempts: 3,
+    },
   });
 }
 
@@ -95,6 +131,58 @@ export async function sandboxDrainWorkflow(input: SandboxDrainWorkflowInput): Pr
       activityInput,
     );
   }
+}
+
+/** Checkpoint one warm box between turns (see checkpointIdleSandboxLease).
+ * Failure is not fatal: the next sweep lists the box again when it is due. */
+export async function sandboxIdleCheckpointWorkflow(
+  input: SandboxIdleCheckpointWorkflowInput,
+): Promise<void> {
+  try {
+    await idleCheckpointActivity(
+      input.timeoutClass === "fast"
+        ? SANDBOX_DRAIN_FAST_ACTIVITY_TIMEOUT_MS
+        : SANDBOX_DRAIN_EXTENDED_ACTIVITY_TIMEOUT_MS,
+    ).checkpointIdleSandboxLease(input);
+  } catch (error) {
+    log.warn("sandbox idle checkpoint deferred to a later sweep", {
+      workspaceId: input.target.workspaceId,
+      sandboxGroupId: input.target.sandboxGroupId,
+      leaseEpoch: input.target.leaseEpoch,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/** Idle checkpoint sweep, started from the same tick as the drain inventory
+ * but as its own workflow type, so the V2 drain workflow's command history is
+ * unchanged across a rolling deploy. Inventory is DB only; each exact box gets
+ * one durable child per lease epoch, and a still-running child for that epoch
+ * is the coalesced capture. */
+export async function sandboxIdleCheckpointSweepWorkflow(): Promise<void> {
+  const { targets, timeoutClass } =
+    await idleCheckpointInventoryActivity().listIdleSandboxCheckpoints();
+  await Promise.all(
+    targets.map(async (target) => {
+      try {
+        await startChild(sandboxIdleCheckpointWorkflow, {
+          workflowId: sandboxIdleCheckpointWorkflowId(target),
+          taskQueue: lifecycleTaskQueue(),
+          workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE,
+          parentClosePolicy: ParentClosePolicy.ABANDON,
+          args: [{ target, timeoutClass }],
+        });
+      } catch (error) {
+        if (alreadyRunningChild(error)) return;
+        log.warn("sandbox idle checkpoint child start deferred to a later sweep", {
+          workspaceId: target.workspaceId,
+          sandboxGroupId: target.sandboxGroupId,
+          leaseEpoch: target.leaseEpoch,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }),
+  );
 }
 
 /** Ancillary billing/reconciliation/GC is durable but never allowed to hold the

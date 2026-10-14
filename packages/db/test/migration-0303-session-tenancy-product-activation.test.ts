@@ -198,8 +198,10 @@ describe("migration 0303 session tenancy product activation", () => {
             ${`${organization!.id}:user:greenfield-boundary-race`}
           )`;
           await transaction`select lock_session_tenancy_activation_boundary()`;
+          // The value-free interlock witness is retired (0611 answers false);
+          // the greenfield helpers read the committed receipt rows directly.
           const [boundary] = await transaction<{ activated: boolean }[]>`
-          select session_tenancy_any_product_activation() as activated`;
+          select exists (select 1 from session_tenancy_activations) as activated`;
           return boundary!.activated;
         })
         .then((activated) => {
@@ -435,32 +437,19 @@ describe("migration 0303 session tenancy product activation", () => {
     const accountId = await account();
     await activate(accountId);
     const runtime = createDb(shared.appUrl, { max: 1 });
+    // Migration 0611 made activation universal and retired the deployment
+    // switch: a durable receipt no longer gates API/worker startup posture.
     await expect(
       assertRuntimeDatabasePosture(runtime.db, {
         rlsStrategy: "force",
         expectedRole: "opengeni_app",
         targetSchema: "public",
-      }),
-    ).rejects.toThrow(/session-tenancy product activation is durable/);
-    await expect(
-      assertRuntimeDatabasePosture(runtime.db, {
-        rlsStrategy: "force",
-        expectedRole: "opengeni_app",
-        targetSchema: "public",
-        organizationTenancyCanonicalActivationEnabled: true,
       }),
     ).resolves.toBeDefined();
     await expect(
       assertRuntimeDatabasePosture(runtime.db, {
         rlsStrategy: "scoped",
         targetSchema: "public",
-      }),
-    ).rejects.toThrow(/session-tenancy product activation is durable/);
-    await expect(
-      assertRuntimeDatabasePosture(runtime.db, {
-        rlsStrategy: "scoped",
-        targetSchema: "public",
-        organizationTenancyCanonicalActivationEnabled: true,
       }),
     ).resolves.toBeDefined();
     await runtime.close();
@@ -470,7 +459,8 @@ describe("migration 0303 session tenancy product activation", () => {
         select session_tenancy_any_product_activation() as activated`;
       const [exact] = await app<{ activated: boolean }[]>`
         select session_tenancy_product_activated(${accountId}::uuid, 1) as activated`;
-      expect(any?.activated).toBe(true);
+      // The retired interlock witness always answers false (0611).
+      expect(any?.activated).toBe(false);
       expect(exact?.activated).toBe(false);
       const [scopedExact] = await app.begin(async (transaction) => {
         await transaction`select set_config('opengeni.account_id', ${accountId}, true)`;

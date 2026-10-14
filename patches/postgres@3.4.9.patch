@@ -1,7 +1,40 @@
 diff --git a/src/connection.js b/src/connection.js
 --- a/src/connection.js
 +++ b/src/connection.js
-@@ -287,6 +287,11 @@
+@@ -157,6 +157,13 @@
+     if (terminated)
+       return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    // A transaction callback can outlive the physical connection. Reject its
++    // late query before build/write (and the catch path's Sync write).
++    if (!socket) {
++      queryError(q, Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
++
+     if (stream)
+       return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
+ 
+@@ -252,10 +259,16 @@
+   }
+ 
+   function nextWrite(fn) {
+-    const x = socket.write(chunk, fn)
++    const buffer = chunk
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+-    return x
++    if (!socket) {
++      const err = Errors.connection('CONNECTION_CLOSED', options)
++      error(err)
++      fn && fn(err)
++      return false
++    }
++    return buffer ? socket.write(buffer, fn) : true
+   }
+ 
+   function connectTimedOut() {
+@@ -287,6 +300,11 @@
  
      socket.removeAllListeners()
      socket = tls.connect(options)
@@ -13,10 +46,78 @@ diff --git a/src/connection.js b/src/connection.js
      socket.on('secureConnect', connected)
      socket.on('error', error)
      socket.on('close', closed)
+@@ -438,6 +456,7 @@
+     remaining = 0
+     incomings = null
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     socket.removeListener('data', data)
+     socket.removeListener('connect', connected)
+     idleTimer.cancel()
+@@ -450,7 +469,14 @@
+-    if (initial)
++    // Only reconnect transparently before any startup query was dispatched.
++    if (initial && !query)
+       return reconnect()
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // The rejected query cannot receive ReadyForQuery from a dead backend.
++    // Release its drain obligation without replaying any bytes.
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
++    ended && (ended(), ending = ended = null)
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -562,4 +588,9 @@
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup discovery has no application promise to observe rejection.
++        // Never apply its late failure to a replacement physical connection.
++        const startupSocket = socket
++        return fetchArrayTypes().catch(err => {
++          if (socket === startupSocket) error(err)
++        })
+       }
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
-@@ -287,6 +287,11 @@
+@@ -157,6 +157,13 @@
+     if (terminated)
+       return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
+ 
++    // A transaction callback can outlive the physical connection. Reject its
++    // late query before build/write (and the catch path's Sync write).
++    if (!socket) {
++      queryError(q, Errors.connection('CONNECTION_CLOSED', options))
++      return true
++    }
++
+     if (stream)
+       return queryError(q, Errors.generic('COPY_IN_PROGRESS', 'You cannot execute queries during copy'))
+ 
+@@ -252,10 +259,16 @@
+   }
+ 
+   function nextWrite(fn) {
+-    const x = socket.write(chunk, fn)
++    const buffer = chunk
+     nextWriteTimer !== null && clearImmediate(nextWriteTimer)
+     chunk = nextWriteTimer = null
+-    return x
++    if (!socket) {
++      const err = Errors.connection('CONNECTION_CLOSED', options)
++      error(err)
++      fn && fn(err)
++      return false
++    }
++    return buffer ? socket.write(buffer, fn) : true
+   }
+ 
+   function connectTimedOut() {
+@@ -287,6 +300,11 @@
  
      socket.removeAllListeners()
      socket = tls.connect(options)
@@ -28,3 +129,154 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.on('secureConnect', connected)
      socket.on('error', error)
      socket.on('close', closed)
+@@ -438,6 +456,7 @@
+     remaining = 0
+     incomings = null
+     clearImmediate(nextWriteTimer)
++    chunk = nextWriteTimer = null
+     socket.removeListener('data', data)
+     socket.removeListener('connect', connected)
+     idleTimer.cancel()
+@@ -450,7 +469,14 @@
+-    if (initial)
++    // Only reconnect transparently before any startup query was dispatched.
++    if (initial && !query)
+       return reconnect()
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    // The rejected query cannot receive ReadyForQuery from a dead backend.
++    // Release its drain obligation without replaying any bytes.
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
++    ended && (ended(), ending = ended = null)
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -562,4 +588,9 @@
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup discovery has no application promise to observe rejection.
++        // Never apply its late failure to a replacement physical connection.
++        const startupSocket = socket
++        return fetchArrayTypes().catch(err => {
++          if (socket === startupSocket) error(err)
++        })
+       }
+diff --git a/src/index.js b/src/index.js
+--- a/src/index.js
++++ b/src/index.js
+@@ -210,6 +210,8 @@
+         closed.length && connect(closed.shift(), query)
+       })
+ 
++    let closedError = null
++    c.onclose = err => closedError = err
+     move(c, reserved)
+     c.reserved = () => queue.length
+       ? c.execute(queue.shift())
+@@ -218,6 +220,8 @@
+ 
+     const sql = Sql(handler)
+     sql.release = () => {
++      if (closedError) return
++      c.onclose = null
+       c.reserved = null
+       onopen(c)
+     }
+@@ -225,6 +229,7 @@
+     return sql
+ 
+     function handler(q) {
++      if (closedError) return q.reject(closedError)
+       c.queue === full
+         ? queue.push(q)
+         : c.execute(q) || move(c, full)
+@@ -236,13 +241,17 @@
+     const queries = Queue()
+     let savepoints = 0
+       , connection
++      , connectionError = null
+       , prepare = null
+ 
+     try {
+       await sql.unsafe('begin ' + options.replace(/[^a-z ]/ig, ''), [], { onexecute }).execute()
+       return await Promise.race([
+         scope(connection, fn),
+-        new Promise((_, reject) => connection.onclose = reject)
++        new Promise((_, reject) => connection.onclose = err => {
++          connectionError = err
++          reject(err)
++        })
+       ])
+     } catch (error) {
+       throw error
+@@ -289,6 +298,9 @@
+       }
+ 
+       function handler(q) {
++        // A failed transaction callback may finish after this physical
++        // connection has been reused. Never send its rollback/commit there.
++        if (connectionError) return q.reject(connectionError)
+         q.catch(e => uncaughtError || (uncaughtError = e))
+         c.queue === full
+           ? queries.push(q)
+diff --git a/cjs/src/index.js b/cjs/src/index.js
+--- a/cjs/src/index.js
++++ b/cjs/src/index.js
+@@ -210,6 +210,8 @@
+         closed.length && connect(closed.shift(), query)
+       })
+ 
++    let closedError = null
++    c.onclose = err => closedError = err
+     move(c, reserved)
+     c.reserved = () => queue.length
+       ? c.execute(queue.shift())
+@@ -218,6 +220,8 @@
+ 
+     const sql = Sql(handler)
+     sql.release = () => {
++      if (closedError) return
++      c.onclose = null
+       c.reserved = null
+       onopen(c)
+     }
+@@ -225,6 +229,7 @@
+     return sql
+ 
+     function handler(q) {
++      if (closedError) return q.reject(closedError)
+       c.queue === full
+         ? queue.push(q)
+         : c.execute(q) || move(c, full)
+@@ -236,13 +241,17 @@
+     const queries = Queue()
+     let savepoints = 0
+       , connection
++      , connectionError = null
+       , prepare = null
+ 
+     try {
+       await sql.unsafe('begin ' + options.replace(/[^a-z ]/ig, ''), [], { onexecute }).execute()
+       return await Promise.race([
+         scope(connection, fn),
+-        new Promise((_, reject) => connection.onclose = reject)
++        new Promise((_, reject) => connection.onclose = err => {
++          connectionError = err
++          reject(err)
++        })
+       ])
+     } catch (error) {
+       throw error
+@@ -289,6 +298,9 @@
+       }
+ 
+       function handler(q) {
++        // A failed transaction callback may finish after this physical
++        // connection has been reused. Never send its rollback/commit there.
++        if (connectionError) return q.reject(connectionError)
+         q.catch(e => uncaughtError || (uncaughtError = e))
+         c.queue === full
+           ? queries.push(q)

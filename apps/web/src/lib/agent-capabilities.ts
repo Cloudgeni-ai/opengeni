@@ -45,7 +45,13 @@ export const AGENT_CAPABILITY_GROUPS: readonly AgentCapabilityGroup[] = [
   {
     id: "workspace",
     label: "Workspace",
-    capabilities: ["knowledge", "workspaceFiles", "workspaceConnectors", "workspaceAdmin"],
+    capabilities: [
+      "knowledge",
+      "secrets",
+      "workspaceFiles",
+      "workspaceConnectors",
+      "workspaceAdmin",
+    ],
   },
 ];
 
@@ -79,7 +85,7 @@ export const AGENT_STARTING_POINTS: readonly {
 export const SKILLS_OPTIONS: readonly { value: "off" | "read" | "manage"; label: string }[] = [
   { value: "off", label: "Off" },
   { value: "read", label: "Read" },
-  { value: "manage", label: "Read and manage" },
+  { value: "manage", label: "Read and write" },
 ];
 
 export function skillsOptionValue(value: AgentSkillsCapability): "off" | "read" | "manage" {
@@ -237,7 +243,7 @@ export function capabilitySummary(
   return `${on} of ${offered.length} capabilities`;
 }
 
-/** The workspace's saved defaults, or null when it follows OpenGeni's defaults. */
+/** The workspace's saved defaults, or null when it follows Opengeni's defaults. */
 export function workspaceAgentDefaultsDraft(input: {
   capabilities: AgentCapabilities | undefined;
   legacyHumanInputOff: boolean;

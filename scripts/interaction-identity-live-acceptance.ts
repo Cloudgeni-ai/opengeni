@@ -533,7 +533,7 @@ async function createFixture(runId: string): Promise<{ url: string; dispose(): P
 function identityFixtureHtml(): string {
   return `<!doctype html>
 <meta charset="utf-8">
-<title>OpenGeni identity acceptance</title>
+<title>Opengeni identity acceptance</title>
 <h1>Browser identity acceptance</h1>
 <div id="state">loading</div>
 <script>

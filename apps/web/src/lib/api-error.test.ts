@@ -23,7 +23,7 @@ function apiError(status: number, message: string, code?: string) {
 describe("api errors in product words", () => {
   test("splits the raw message into status, server message and reference", () => {
     const error = apiError(403, "missing permission: workspace:admin");
-    expect(error.message).toContain("OpenGeni API 403");
+    expect(error.message).toContain("Opengeni API 403");
     expect(apiErrorFacts(error)).toEqual({
       status: 403,
       code: undefined,
@@ -40,7 +40,7 @@ describe("api errors in product words", () => {
   });
 
   test("reads the reference from a plain message too", () => {
-    const facts = apiErrorFacts(new Error(`OpenGeni API 404: not found Reference: ${REFERENCE}.`));
+    const facts = apiErrorFacts(new Error(`Opengeni API 404: not found Reference: ${REFERENCE}.`));
     expect(facts.reference).toBe(REFERENCE);
     expect(facts.serverMessage).toBe("not found");
   });
@@ -48,7 +48,7 @@ describe("api errors in product words", () => {
   test("a 403 or a missing permission is a permission refusal, not a failure", () => {
     expect(isPermissionDenied(apiError(403, "Forbidden"))).toBe(true);
     expect(
-      isPermissionDenied(new Error("OpenGeni API 400: missing permission: secrets:read")),
+      isPermissionDenied(new Error("Opengeni API 400: missing permission: secrets:read")),
     ).toBe(true);
     expect(isPermissionDenied(apiError(500, "boom"))).toBe(false);
     expect(isPermissionDenied(new Error("missing permission is a phrase in my own copy"))).toBe(
@@ -59,7 +59,7 @@ describe("api errors in product words", () => {
   test("advice never repeats the raw API string", () => {
     for (const status of [400, 401, 403, 404, 409, 422, 429, 500, 503]) {
       const advice = apiErrorAdvice(apiError(status, "OPENGENI_SECRET_KEY is required"));
-      expect(advice).not.toContain("OpenGeni API");
+      expect(advice).not.toContain("Opengeni API");
       expect(advice).not.toContain(REFERENCE);
       expect(advice).not.toContain("OPENGENI_SECRET_KEY");
     }
@@ -85,7 +85,7 @@ describe("api errors in product words", () => {
       apiErrorAdvice(
         apiError(422, "model is not available: organization-claude-subscription/claude-opus-5-5"),
       ),
-    ).toBe("Claude Opus 5.5 isn't available here. Choose another model.");
+    ).toBe("Opus 5.5 isn't available here. Choose another model.");
   });
 
   test("keeps the app's own messages and maps network failures", () => {
@@ -139,7 +139,7 @@ describe("api errors in product words", () => {
       `Variable set name is already in use: Prod. Reference: ${REFERENCE}.`,
     );
     expect(userErrorTextWithoutReference(error)).toBe("Variable set name is already in use: Prod.");
-    expect(userErrorText(new Error(`OpenGeni API 404: not found Reference: ${REFERENCE}.`))).toBe(
+    expect(userErrorText(new Error(`Opengeni API 404: not found Reference: ${REFERENCE}.`))).toBe(
       `Try again. If it keeps happening, reload the page. Reference: ${REFERENCE}.`,
     );
     // No reference, nothing appended; an app error keeps its own message.

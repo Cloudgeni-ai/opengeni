@@ -19,8 +19,6 @@ const legacyBrowserUnusedMethods = [
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
   "browseAtlassianSources",
-  // Only the removed Agents page cancelled sessions from the web client.
-  "cancelSession",
   "captureComputerTarget",
   "codexAccountUsage",
   "codexDisconnect",
@@ -36,9 +34,11 @@ const legacyBrowserUnusedMethods = [
   "getCompanyProfileRevision",
   "getDocumentBase",
   "getDocumentOriginalFile",
-  "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
+  // Shared Insights methods are adopted by the separately owned Insights UI.
+  "getWorkspaceInsightsUsage",
+  "getOrganizationInsightsUsage",
   // Keep the existing summary/workspace reads available to SDK callers after
   // Insights moved to getOrganizationModelUsage.
   "getOrganizationUsageSummary",
@@ -85,11 +85,80 @@ const legacyBrowserUnusedMethods = [
 // The agent's browser still capture uses the same authenticated, bounded SDK
 // response transport as the existing computer capture method. It is intentionally
 // available to runtime callers even though the web UI does not call it.
-const agentInteractionMethods = ["captureBrowserTarget", "getBrowserTargetState", "readBrowserDom"];
+const agentInteractionMethods = [
+  "callNativeComputerTool",
+  "getNativeComputerToolReceipt",
+  "captureBrowserTarget",
+  "getBrowserTargetState",
+  "readBrowserDom",
+  "openBrowserTargetWithInventory",
+];
+
+// Server-side integrations replace the Skills a session carries, and hosts that
+// attach their own session MCP servers manage those tools' Allow/Ask/Block
+// choices; the web console calls none of these methods.
+const integrationMethods = [
+  "getSessionMcpToolPermissions",
+  "updateSessionMcpToolPermissions",
+  "updateSessionSkills",
+  // Site Data management for hosts and scripts; the web Data tab reads,
+  // deletes and exports, and agents manage collections with tools.
+  "defineSiteDataCollection",
+  "deleteSiteDataCollection",
+  "deleteSiteDataFile",
+  "getSiteDataFileUrl",
+  "importSiteData",
+  "listSiteDataFiles",
+  "resetSiteDataCollection",
+];
+
+// The native app exchanges its sign-in code, signs out and manages its push
+// device through the public client. The web app only starts the authorization.
+const nativeAppMethods = [
+  "exchangeNativeAppCode",
+  "getNativePushDevice",
+  "registerNativePushDevice",
+  "signOutNativeApp",
+  "unregisterNativePushDevice",
+];
+
+// #3470 retired the preference editor and learning/onboarding hooks, not their
+// public SDK contracts. Preserve these existing browser methods for old bundles
+// and SDK consumers; their browser transport is exercised in the corresponding
+// preference-registry, workspace-learning and instruction-policy tests.
+const retiredSettingsMethods = [
+  "activatePreferenceRegistryRevision",
+  "correctPreferenceRegistry",
+  "createPreferenceRegistryProposal",
+  "deactivatePreferenceRegistry",
+  "getWorkspaceLearningHistory",
+  "listPreferenceRegistry",
+  "listWorkspaceInstructionPolicyOnboardingProposals",
+  "rejectPreferenceRegistryProposal",
+  "supersedePreferenceRegistry",
+];
+
+// These browser-facing account APIs landed before their separately reviewed
+// settings (#4123) and picker (#4169) UI. Keep the pending surface explicit;
+// remove each entry when its browser consumer lands (the equality below enforces it).
+const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
+}
+
+function browserUnusedMethods(clientSource: string, browserSource: string): string[] {
+  const methodNames = [
+    ...clientSource.matchAll(/^  (?:async )?([A-Za-z_$][A-Za-z0-9_$]*)\(/gm),
+  ].map((match) => match[1]!);
+  return [...new Set(methodNames)]
+    .filter(
+      (methodName) =>
+        countIdentifier(browserSource, methodName) === 0 &&
+        countIdentifier(clientSource, methodName) === 1,
+    )
+    .sort();
 }
 
 async function readBrowserProductionSources(): Promise<string> {
@@ -130,21 +199,32 @@ describe("browser client runtime surface", () => {
       Bun.file(clientPath).text(),
       readBrowserProductionSources(),
     ]);
-    const methodNames = [
-      ...clientSource.matchAll(/^  (?:async )?([A-Za-z_$][A-Za-z0-9_$]*)\(/gm),
-    ].map((match) => match[1]!);
-    const browserUnusedMethods = [...new Set(methodNames)]
-      .filter(
-        (methodName) =>
-          countIdentifier(browserSource, methodName) === 0 &&
-          countIdentifier(clientSource, methodName) === 1,
-      )
-      .sort();
-
     expect(browserSource).toContain("@opengeni/sdk/browser");
     expect(browserSource).not.toContain("@opengeni/sdk/core");
-    expect(browserUnusedMethods).toEqual(
-      [...legacyBrowserUnusedMethods, ...agentInteractionMethods].sort(),
+    expect(browserUnusedMethods(clientSource, browserSource)).toEqual(
+      [
+        ...legacyBrowserUnusedMethods,
+        ...agentInteractionMethods,
+        ...integrationMethods,
+        ...nativeAppMethods,
+        ...retiredSettingsMethods,
+        ...pendingModelAccountMethods,
+      ].sort(),
     );
+  });
+
+  test("still detects an unclassified addition while allowing an actual browser consumer", async () => {
+    const [clientSource, browserSource] = await Promise.all([
+      Bun.file(clientPath).text(),
+      readBrowserProductionSources(),
+    ]);
+    const baseline = browserUnusedMethods(clientSource, browserSource);
+    const extendedClient = `${clientSource}\n  async unclassifiedSdkMethod() {}\n`;
+    expect(browserUnusedMethods(extendedClient, browserSource)).toEqual(
+      [...baseline, "unclassifiedSdkMethod"].sort(),
+    );
+    expect(
+      browserUnusedMethods(extendedClient, `${browserSource}\nclient.unclassifiedSdkMethod();`),
+    ).toEqual(baseline);
   });
 });

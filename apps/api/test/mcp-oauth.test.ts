@@ -46,6 +46,13 @@ describe("MCP OAuth protocol", () => {
       token_endpoint_auth_methods_supported: ["none"],
       authorization_response_iss_parameter_supported: true,
     });
+    // RFC 8414 path-aware discovery (tried first by Claude) returns the same JSON.
+    const pathAware = await app.request("/.well-known/oauth-authorization-server/v1/mcp");
+    expect(pathAware.status).toBe(200);
+    expect(await pathAware.json()).toMatchObject({
+      issuer: "https://api.example.test",
+      registration_endpoint: "https://api.example.test/oauth/register",
+    });
 
     const protectedResource = await app.request(
       `/.well-known/oauth-protected-resource/v1/workspaces/${workspaceId}/mcp/docs`,

@@ -611,6 +611,12 @@ function classifyStartError(error: unknown): TranscriptionErrorCode {
 
 export function normalizeTranscriptionErrorCode(code: unknown): TranscriptionErrorCode {
   switch (code) {
+    case "insufficient_credits":
+    case "allowance_exhausted":
+    case "monthly_model_cost_limit":
+    case "unavailable":
+    case "too_large":
+    case "invalid_audio":
     case "permission_denied":
     case "not_supported":
     case "network":

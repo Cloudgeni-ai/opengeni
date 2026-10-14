@@ -1,0 +1,191 @@
+/* ---------------------------------------------------------------------------
+   Playground: Acme, a sample product with the Opengeni chat inside.
+
+   Acme is styled only through --og-* tokens, exactly as an integration would
+   style its own page, so the color and theme controls change Acme and the
+   embedded <OpenGeniChat /> together. The playground's own chrome (top bar,
+   controls, snippet) uses the app's Tailwind tokens instead.
+   --------------------------------------------------------------------------- */
+
+/* Dark inside a light app. The tokens' dark palette lives on :root only, so a
+   product that wants dark in a light page sets it on its own subtree. These
+   are the base values from @opengeni/react/styles/tokens.css (:root); derived
+   tokens recompute from them. */
+.og-playground-product[data-og-theme="dark"] {
+  --og-color-bg: #303030;
+  --og-color-canvas: #202020;
+  --og-color-surface-1: #333333;
+  --og-color-surface-2: #383838;
+  --og-color-surface-3: #404040;
+  --og-color-selection: #484848;
+  --og-color-hover: rgb(230 230 230 / 0.08);
+  --og-color-border: #454545;
+  --og-color-border-strong: #555555;
+  --og-color-fg: #e6e6e6;
+  --og-color-fg-label: #d4d4d4;
+  --og-color-fg-muted: #b8b8b8;
+  --og-color-fg-subtle: #a3a3a3;
+  --og-color-switch-track: #454545;
+  --og-color-switch-thumb: #a3a3a3;
+  --og-color-status-queued: #a3a3a3;
+  --og-color-status-running: #d5bd72;
+  --og-color-status-idle: #83cbb0;
+  --og-color-status-waiting: #e9ab77;
+  --og-color-status-failed: oklch(0.77 0.12 22);
+  --og-color-status-cancelled: #a3a3a3;
+  --og-color-danger: oklch(0.76 0.13 22);
+  --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.28);
+  --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.32), 0 1px 2px oklch(0 0 0 / 0.24);
+  --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.42), 0 2px 8px oklch(0 0 0 / 0.28);
+  --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
+  --og-session-chrome-surface-open: var(--og-color-surface-2);
+  --og-session-chrome-border: var(--og-color-border);
+  --og-session-chrome-border-open: var(--og-color-border);
+  --og-session-chrome-highlight: var(--og-color-surface-3);
+  --og-session-chrome-highlight-ring: var(--og-color-fg);
+  --og-session-chrome-shadow: 0 6px 22px -14px oklch(0 0 0 / 0.42);
+  --og-session-chrome-shadow-open: 0 10px 28px -16px oklch(0 0 0 / 0.5);
+  --og-session-chrome-row-hover: var(--og-color-surface-3);
+  color-scheme: dark;
+}
+
+.og-playground-product {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--og-color-bg);
+  color: var(--og-color-fg);
+  font-family: var(--og-font-sans);
+  transition:
+    background-color 160ms ease-out,
+    color 160ms ease-out;
+}
+
+.acme-nav {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 24px;
+  border-bottom: 1px solid var(--og-color-border);
+  background: var(--og-color-surface-1);
+  padding: 10px 18px;
+}
+.acme-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.acme-logo b {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: var(--og-radius-sm);
+  background: var(--og-color-accent);
+  color: #fff;
+  font-size: 13px;
+  transition: background-color 160ms ease-out;
+}
+.acme-links {
+  display: inline-flex;
+  gap: 18px;
+  color: var(--og-color-fg-muted);
+  font-size: 13px;
+}
+.acme-links [aria-current="page"] {
+  color: var(--og-color-fg);
+  font-weight: 600;
+}
+.acme-avatar {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--og-color-surface-3);
+  font-size: 11px;
+  font-weight: 700;
+}
+/* The embedded chat fills the rest of Acme's page. */
+.acme-agent {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+}
+.acme-agent > .og-chat {
+  flex: 1;
+}
+
+/* Acme follows its own width, so the Phone preview gets the phone layout. */
+.og-playground-product {
+  container-type: inline-size;
+}
+@container (max-width: 640px) {
+  .acme-nav {
+    gap: 14px;
+    padding: 8px 12px;
+  }
+  .acme-links {
+    display: none;
+  }
+}
+
+/* The demo's Connect: the stock card's button shows the pretend sign-in. */
+.acme-agent a[data-demo-connect] {
+  position: relative;
+  color: transparent;
+  pointer-events: none;
+}
+.acme-agent a[data-demo-connect] > * {
+  visibility: hidden;
+}
+.acme-agent a[data-demo-connect]::after {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--og-color-primary-fg);
+  content: "Connecting…";
+}
+.acme-agent a[data-demo-connect="connected"]::after {
+  content: "✓ Connected";
+}
+
+/* The snippet marks the lines a change just wrote. */
+.og-code-line {
+  transition: background-color 600ms ease-out;
+}
+.og-code-line[data-changed] {
+  background: color-mix(in oklch, var(--color-status-idle) 18%, transparent);
+  transition: none;
+}
+/* The first thing to press pulses gently while the first tip points at it. */
+.og-pulse[data-pulse] {
+  animation: og-pulse 1.6s ease-out infinite;
+  border-color: var(--color-fg);
+}
+@keyframes og-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-fg) 35%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 8px color-mix(in oklch, var(--color-fg) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .og-pulse[data-pulse] {
+    animation: none;
+  }
+  .og-playground-product,
+  .og-code-line {
+    transition: none;
+  }
+}

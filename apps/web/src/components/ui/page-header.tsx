@@ -101,6 +101,9 @@ export function PageHeader({
     <header
       data-slot="page-header"
       data-variant={variant}
+      // In the desktop app a page's title area moves the window, like a
+      // native title bar; its controls stay clickable.
+      data-window-drag
       className={cn("@container/page-header min-w-0", className)}
       {...props}
     >

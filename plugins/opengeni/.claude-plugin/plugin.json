@@ -1,16 +1,17 @@
 {
   "name": "opengeni",
-  "displayName": "OpenGeni",
-  "version": "0.2.0",
-  "description": "Offload long-running or parallel work from your coding agent to an OpenGeni workspace, and build products on OpenGeni agents.",
+  "displayName": "Opengeni",
+  "version": "0.3.1",
+  "description": "Offload long-running or parallel work from your coding agent to an Opengeni workspace, and build products on Opengeni agents.",
   "author": {
-    "name": "OpenGeni",
+    "name": "Opengeni",
     "url": "https://opengeni.ai"
   },
   "homepage": "https://docs.opengeni.ai/guides/coding-agents",
   "repository": "https://github.com/Cloudgeni-ai/opengeni",
   "license": "Apache-2.0",
   "keywords": ["opengeni", "mcp", "agents", "background-agents", "cloud-agents", "sdk"],
+  "icon": "./assets/logo.png",
   "mcpServers": {
     "opengeni": { "type": "http", "url": "https://app.opengeni.ai/v1/mcp" }
   }

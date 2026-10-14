@@ -4,7 +4,7 @@ type Observer = {
   capture: (name: AnalyticsEventName, properties?: AnalyticsProperties) => boolean;
   request: (pathname: string, method: string) => (status: number | null) => void;
   connection: (
-    provider: "codex" | "supergrok" | "ai-gateway" | "openrouter",
+    provider: "codex" | "supergrok" | "ai-gateway" | "openrouter" | "opper",
     workspaceId: string,
   ) => (outcome: "connected" | "expired" | "denied" | "outcome_unknown") => void;
   sessionEvents: (sessionId: string, events: readonly { type: string }[]) => void;

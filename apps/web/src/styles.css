@@ -75,6 +75,10 @@
   --color-status-cancelled: var(--og-color-status-cancelled);
   --color-danger: var(--og-color-danger);
 
+  /* Chat updates are not lifecycle states. Keep unread and following-up
+     markers teal without recoloring neutral navigation or other statuses. */
+  --color-session-update: light-dark(#0f766e, #5ad4c5);
+
   /* Data visualization (Insights). Token classes, then series in fixed order.
      Validated with the dataviz palette checks against both canvases. */
   --color-chart-input: var(--og-chart-input);
@@ -412,8 +416,10 @@ body {
   overflow-x: auto;
 }
 
+/* Shrink to fit, then wrap cells within the (possibly widened) table wrapper
+   instead of forcing one-line rows and horizontal scrolling. */
 .markdown-stream table {
-  width: max-content;
+  width: auto;
   min-width: min(100%, 32rem);
 }
 
@@ -447,8 +453,8 @@ body {
 }
 @container og-composer (max-width: 39.999rem) {
   /* A split desktop pane needs the same overflow menu as a phone. These
-     hooks also cover the compact variable-set picker, without duplicating
-     controls or changing their keyboard/menu behavior. */
+     hooks keep the compact controls without duplicating them or changing
+     their keyboard/menu behavior. */
   .console-composer-wide-control { display: none; }
   .console-composer-compact-control { display: inline-flex; }
   .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
@@ -495,4 +501,64 @@ body {
 .capability-search-section > .og-plugin-discovery,
 .capability-search-section > section {
   margin-top: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Desktop app (html[data-desktop="macos" | "windows" | "linux"])
+   The desktop shell shows this app in a native window: title areas drag the
+   window, and on macOS the rail lets the window's sidebar material through.
+   --------------------------------------------------------------------------- */
+html[data-desktop] [data-window-drag] {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+html[data-desktop] [data-window-drag] :is(a, button, input, select, textarea, label, summary, [role="button"], [role="menuitem"], [role="tab"], [contenteditable], [tabindex]) {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* On macOS the page runs under the title bar: a strip along the top of every
+   page drags the window, including pages without a header of their own.
+   Windows and Linux keep the system title bar. */
+html[data-desktop="macos"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 2147483000;
+  height: 10px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+html[data-desktop="macos"],
+html[data-desktop="macos"] body {
+  background-color: transparent;
+}
+
+@layer components {
+  html[data-desktop="macos"] .og-rail-glow {
+    background:
+      radial-gradient(ellipse 130% 45% at 0 0, var(--og-glow-teal-quiet), transparent 85%),
+      radial-gradient(ellipse 140% 45% at 100% 100%, var(--og-glow-peach-quiet), transparent 85%),
+      color-mix(in srgb, var(--og-color-bg) 62%, transparent);
+  }
+}
+
+/* macOS draws the traffic lights over the rail's top-left corner (they end
+   about 72px in, centred on the 56px title row). A collapsed rail is narrower
+   than they are: its toggle moves below them, and the page's title bar starts
+   after them. */
+html[data-desktop="macos"] nav[data-collapsed="true"] [data-rail-header] {
+  padding-top: 44px;
+}
+
+html[data-desktop="macos"]:has(nav[data-collapsed="true"]) [data-titlebar] {
+  padding-left: 32px;
+}
+
+/* A full-window workspace panel (maximized, or the overlay in a narrow
+   window) puts its tab row under the traffic lights. */
+html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {
+  padding-left: 84px;
 }

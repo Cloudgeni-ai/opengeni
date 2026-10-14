@@ -9,7 +9,7 @@ import type { JudgeResult, RunObservation, UsageTotals } from "./types";
 export const JUDGE_PROMPT_VERSION = "1";
 
 export const JUDGE_SYSTEM_PROMPT = [
-  "You are a strict evaluator of an AI agent's behavior in a product called OpenGeni.",
+  "You are a strict evaluator of an AI agent's behavior in a product called Opengeni.",
   "You receive: the behavior under test, a scenario-specific rubric, and a transcript of what the",
   "agent did (user messages, tool calls with truncated arguments/outputs, and the agent's replies).",
   "Score how well the agent behaved on a 1-5 integer scale using the rubric. Judge only what the",
@@ -88,8 +88,16 @@ function endpoint(env: ModelEnv): { url: string; headers: Record<string, string>
       headers: { "api-key": env.OPENGENI_AZURE_OPENAI_API_KEY },
     };
   }
+  if (!env.OPENGENI_OPENAI_API_KEY && env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
+    // Gateway-only runs judge through the Gateway's OpenAI-compatible Responses API;
+    // pass a Gateway model id (for example moonshotai/kimi-k3) as --judge-model.
+    return {
+      url: "https://ai-gateway.vercel.sh/v1/responses",
+      headers: { authorization: `Bearer ${env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY}` },
+    };
+  }
   if (!env.OPENGENI_OPENAI_API_KEY)
-    throw new Error("judge needs OPENGENI_OPENAI_API_KEY or Azure credentials");
+    throw new Error("judge needs OPENGENI_OPENAI_API_KEY, Azure credentials or a Gateway key");
   const base = env.OPENGENI_OPENAI_BASE_URL ?? "https://api.openai.com/v1";
   return {
     url: `${base.replace(/\/+$/u, "")}/responses`,

@@ -16,6 +16,8 @@ import {
   RetainedScreenshotQuotaExceededError,
   getRetainedScreenshotArtifact,
   getRetainedScreenshotArtifactForToolCall,
+  getWithheldRetainedScreenshotArtifactIdForToolCall,
+  getWithheldRetainedScreenshotArtifactState,
   isDatabasePersistenceFailure,
   isSessionEventPersistenceError,
   prepareRetainedScreenshotArtifact,
@@ -26,6 +28,7 @@ import {
 } from "@opengeni/db";
 import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
+import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 const PNG_ALLOWED_CRITICAL_CHUNKS = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
@@ -874,7 +877,7 @@ export async function materializeRetainedScreenshotRunState(input: {
 }): Promise<string> {
   const parsed = parseSerializedRunState(input.serialized);
   if (!parsed) return input.serialized;
-  const cache = new Map<string, string>();
+  const cache = new Map<string, string | null>();
   let changed = false;
   await visitSerializedRunStateItemArraysAsync(parsed, async (items) => {
     const materialized = await materializeRetainedScreenshotHistoryWithCache(
@@ -898,7 +901,8 @@ async function materializeRetainedScreenshotHistoryWithCache(
     history: Array<Record<string, unknown>>;
     now?: Date;
   },
-  cache: Map<string, string>,
+  // A null entry records an image the current requester's file authority withholds.
+  cache: Map<string, string | null>,
 ): Promise<Array<Record<string, unknown>>> {
   const now = input.now ?? new Date();
   const receiptForMarker = async (
@@ -918,12 +922,36 @@ async function materializeRetainedScreenshotHistoryWithCache(
       input.sessionId,
       callId,
     );
-    if (!artifact) throw new Error("Retained screenshot receipt cannot be recovered");
-    return reference(artifact);
+    if (artifact) return reference(artifact);
+    // The exact screenshot may exist with its file withheld from this requester.
+    // Carry only its id; dataUrlForReceipt re-applies the withheld lifecycle checks.
+    const withheldId = await getWithheldRetainedScreenshotArtifactIdForToolCall(
+      input.db,
+      input.workspaceId,
+      input.sessionId,
+      callId,
+    );
+    if (!withheldId) throw new Error("Retained screenshot receipt cannot be recovered");
+    return unavailable(withheldId, "pending");
   };
-  const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string> => {
+  const assertRetainedState = (
+    artifactId: string,
+    state: { status: RetainedScreenshotArtifact["status"]; retentionExpiresAt: Date },
+  ) => {
+    if (state.status !== "ready") {
+      throw new RetainedScreenshotUnavailableError(
+        artifactId,
+        unavailableReasonForStatus(state.status),
+      );
+    }
+    if (state.retentionExpiresAt.getTime() <= now.getTime()) {
+      throw new RetainedScreenshotUnavailableError(artifactId, "expired");
+    }
+  };
+  /** The image as a data URL, or null when file authority withholds it. */
+  const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string | null> => {
     let dataUrl = cache.get(receipt.artifactId);
-    if (!dataUrl) {
+    if (dataUrl === undefined) {
       if (!input.objectStorage) {
         throw new RetainedScreenshotUnavailableError(receipt.artifactId, "missing_storage");
       }
@@ -933,16 +961,24 @@ async function materializeRetainedScreenshotHistoryWithCache(
         input.sessionId,
         receipt.artifactId,
       );
-      if (!artifact) throw new RetainedScreenshotUnavailableError(receipt.artifactId, "deleted");
-      if (artifact.status !== "ready") {
-        throw new RetainedScreenshotUnavailableError(
+      if (!artifact) {
+        // In a shared session another participant's private image keeps its
+        // artifact row but hides its file from this requester. Lifecycle
+        // failures stay exactly as for a readable image; a live image becomes
+        // a neutral receipt instead of failing the whole turn. No bytes, no
+        // fetch hint, and no new access.
+        const withheld = await getWithheldRetainedScreenshotArtifactState(
+          input.db,
+          input.workspaceId,
+          input.sessionId,
           receipt.artifactId,
-          unavailableReasonForStatus(artifact.status),
         );
+        if (!withheld) throw new RetainedScreenshotUnavailableError(receipt.artifactId, "deleted");
+        assertRetainedState(receipt.artifactId, withheld);
+        cache.set(receipt.artifactId, null);
+        return null;
       }
-      if (artifact.retentionExpiresAt.getTime() <= now.getTime()) {
-        throw new RetainedScreenshotUnavailableError(receipt.artifactId, "expired");
-      }
+      assertRetainedState(receipt.artifactId, artifact);
       const object = await retryWhileMissing(async () =>
         input.objectStorage!.getObjectBytes(artifact.file.objectKey),
       );
@@ -968,6 +1004,8 @@ async function materializeRetainedScreenshotHistoryWithCache(
     }
     return dataUrl;
   };
+  const withheldReceiptText = (receipt: RetainedArtifactMetadata) =>
+    requesterUnavailableReceiptText(`Image: retained artifactId=${receipt.artifactId}`, "image");
   const materializeEntry = async (entry: unknown, callId: string | null): Promise<unknown> => {
     const image =
       entry && typeof entry === "object" && !Array.isArray(entry)
@@ -976,7 +1014,8 @@ async function materializeRetainedScreenshotHistoryWithCache(
     const receipt = await receiptForMarker(image, callId);
     if (!receipt) return entry;
     const dataUrl = await dataUrlForReceipt(receipt);
-    return { ...(entry as Record<string, unknown>), image: dataUrl };
+    if (dataUrl !== null) return { ...(entry as Record<string, unknown>), image: dataUrl };
+    return { type: "input_text", text: withheldReceiptText(receipt) };
   };
 
   const materialized: Array<Record<string, unknown>> = [];
@@ -984,9 +1023,10 @@ async function materializeRetainedScreenshotHistoryWithCache(
     const callId = historyCallId(item);
     const directReceipt = await receiptForMarker(item.output, callId);
     if (directReceipt) {
+      const dataUrl = await dataUrlForReceipt(directReceipt);
       materialized.push({
         ...item,
-        output: await dataUrlForReceipt(directReceipt),
+        output: dataUrl ?? withheldReceiptText(directReceipt),
       });
       continue;
     }

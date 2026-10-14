@@ -1,7 +1,7 @@
 import { createQuickstartChatHandler, openGeniFromEnvironment } from "./quickstart";
 
-// Run `bun run onboard <user>` once first: chat requests never grant the
-// workspace membership a product user needs, and the API refuses them without it.
+// No onboarding step: the tenant workspace is created on first use, and Opengeni
+// adds each product user to it on their first request.
 const { og, tenant } = openGeniFromEnvironment();
 const chat = createQuickstartChatHandler(og, tenant);
 

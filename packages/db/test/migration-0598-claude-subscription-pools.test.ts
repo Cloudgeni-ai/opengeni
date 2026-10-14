@@ -14,9 +14,98 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
+const subscriptionCoreMigrations = [
+  "0642_shared_subscription_core.sql",
+  "0643_model_call_facts_subscription_connection_index.sql",
+  "0644_subscription_inference_source_settings.sql",
+  "0645_subscription_core_runtime.sql",
+  "0646_subscription_core_people_assignment_read.sql",
+  "0667_subscription_authority_refresh_contract.sql",
+  "0668_subscription_core_codex_chat_authority.sql",
+  "0669_subscription_core_codex_waits.sql",
+  "0670_subscription_core_codex_apps.sql",
+  "0671_subscription_core_codex_operations.sql",
+  // Extends the shared connection table created by withheld 0642.
+  "0679_codex_extra_credit_consent.sql",
+  "0688_subscription_core_codex_writers.sql",
+  "0689_subscription_core_codex_cutover.sql",
+  "0691_subscription_core_codex_disconnect.sql",
+  "0695_subscription_model_catalog_observations.sql",
+  // Patches the request guard created by withheld 0691.
+  "0697_codex_retry_after_unknown_outcome.sql",
+  // Patches ownerless access and lease guards created by withheld 0667 and 0671.
+  "0698_codex_ownerless_person_turns.sql",
+  // Patches the request guard after 0697.
+  "0699_codex_recovery_after_interrupted_attempt.sql",
+  "0700_codex_ownerless_person_refresh.sql",
+  // Replaces the scope guard on the shared connection table from withheld 0642.
+  "0702_subscription_codex_access_editor.sql",
+  // Adds provider-neutral routines over the shared core tables from withheld 0642.
+  "0707_subscription_core_neutral_routines.sql",
+  // Rewrites the operation-lease constraints and guard that withheld 0691 defines; replay after it.
+  "0711_subscription_codex_completion_operations.sql",
+  // Records provider cutover receipts over withheld 0689 and restricts its tables.
+  "0712_subscription_core_generic_precursor.sql",
+  // Keys and redefines the auto-assignment objects the withheld 0689 creates.
+  "0713_subscription_core_provider_keyed_reach.sql",
+  // Redefines the reach setters withheld 0713 creates.
+  "0714_subscription_workspace_managed_organization_accounts.sql",
+  // Rewrites routines 0707, 0713 and 0714 create from their live definitions;
+  // replay after them.
+  "0715_subscription_core_api_key_connections.sql",
+  // Builds on withheld 0712's receipts and patches the helpers it patched.
+  "0716_subscription_authority_compat.sql",
+  // Requires 0716's routines; it follows 0716.
+  "0717_subscription_authority_fences.sql",
+  // Adds a trigger on the session bindings table from withheld 0642.
+  "0723_subscription_binding_cache_clock.sql",
+  // Adds checks and triggers on the settings table from withheld 0642.
+  "0724_subscription_settings_locks.sql",
+  // Patches the acceptance writers withheld 0669, 0688 and 0707 define.
+  "0726_subscription_personal_acceptance_reads.sql",
+  // Patches the operation-lease guard withheld 0671 and 0711 define.
+  "0727_subscription_core_ownerless_video_operations.sql",
+  // Built from the connect writer withheld 0715 rewrites; it follows 0715.
+  "0728_subscription_core_personal_connect_format.sql",
+  // Adds owner policies on the person preferences table from withheld 0642.
+  "0729_subscription_person_preferences_owner.sql",
+  // Built from the owner reader withheld 0715 rewrites; it follows 0715.
+  "0730_subscription_core_personal_connection_versions.sql",
+  // Rekeys the session bindings table from withheld 0642.
+  "0733_subscription_session_bindings_per_provider.sql",
+  // Reads and narrows the personal authority routines withheld with 0642/0667.
+  "0749_subscription_shared_personal_choice.sql",
+  // Previews the system-update claim rewritten by withheld core migrations.
+  "0732_sandbox_maintenance_work_probes.sql",
+  // Owner-only routines over the shared connection table from withheld 0642.
+  "0735_subscription_core_owned_connection_usage.sql",
+  "0747_subscription_core_xai_cutover.sql",
+  // Extends the capacity waiter table from withheld shared-core migrations.
+  "0750_subscription_waiter_candidates.sql",
+  // Uses the shared connection row type and post-0715 owner routines.
+  "0752_subscription_personal_sharing.sql",
+  // Reads shared-core tables and the own-membership helper from withheld 0729.
+  "0757_subscription_people_picker_reads.sql",
+  // Reads the session_system_updates subscription authority column from withheld 0688.
+  "0759_tenancy_quiescence_carries_owner_pending_updates.sql",
+  "0760_terminal_turn_run_state_cleanup.sql",
+  "0761_exhausted_scheduled_tasks.sql",
+  "0768_private_visibility_ignores_leftovers.sql",
+  "0769_private_visibility_never_blocks.sql",
+  // Policies and the disconnect routine over the shared connection table and
+  // owner-capability helper from withheld 0642/0645/0707.
+  "0777_workspace_admin_subscription_connections.sql",
+] as const;
+// The drained Claude cutover moves the very pools this test characterizes, so
+// it stays recorded as applied and never runs here.
+const claudeCutover = "0748_subscription_core_claude_cutover.sql";
+// The drained retirement drops those pools' routines and requires the Claude
+// receipt: it stays recorded as applied and never runs here either.
+const retirement = "0751_subscription_core_legacy_retirement.sql";
 const key = Buffer.alloc(32, 67);
 const ids = {
   account: randomUUID(),
@@ -70,8 +159,10 @@ beforeAll(async () => {
   owner = postgres(owned.ownerUrl, { max: 1 });
   await owner`CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
   await owner`INSERT INTO schema_migrations(name) VALUES(${migration})`;
+  await owner`INSERT INTO schema_migrations(name) SELECT unnest(${subscriptionCoreMigrations}::text[])`;
+  await owner`INSERT INTO schema_migrations(name) VALUES (${claudeCutover}), (${retirement}), ('0746_subscription_failover_readiness_and_request_fence.sql')`;
   await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
-  await owner`DELETE FROM schema_migrations WHERE name = ${migration}`;
+  await owner`DELETE FROM schema_migrations WHERE name = ${migration} OR name = ANY(${subscriptionCoreMigrations}::text[])`;
   await owned.admin`INSERT INTO managed_accounts(id, name) VALUES(${ids.account}, 'Subscription migration fixture')`;
   await owned.admin`INSERT INTO workspaces(id, account_id, name) VALUES(${ids.workspace}, ${ids.account}, 'Migration fixture')`;
   await owned.admin`INSERT INTO workspace_inference_controls(workspace_id, account_id) VALUES(${ids.workspace}, ${ids.account})`;
@@ -320,6 +411,8 @@ test("cloned capacity waiters retain the enabled xAI tenancy fence and reject un
   expect(posture.every((row) => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
 
   await provisionRoles(owned.adminUrl, { appRole: "opengeni_app", appPassword: owned.appPassword });
+  // The pools run before the retirement, under that release's grants.
+  await restorePreRetirementGrants(owned.adminUrl);
   const url = new URL(owned.adminUrl);
   url.username = "opengeni_app";
   url.password = owned.appPassword;

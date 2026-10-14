@@ -54,8 +54,8 @@ resource "google_service_networking_connection" "private_vpc" {
 
 resource "google_service_account" "runtime" {
   account_id   = local.runtime_sa_id
-  display_name = "OpenGeni runtime"
-  description  = "Runtime identity for OpenGeni workloads."
+  display_name = "Opengeni runtime"
+  description  = "Runtime identity for Opengeni workloads."
 }
 
 resource "google_container_cluster" "this" {
@@ -123,7 +123,7 @@ resource "google_container_node_pool" "system" {
 resource "google_artifact_registry_repository" "images" {
   location      = var.region
   repository_id = local.artifact_repo_id
-  description   = "OpenGeni workload images"
+  description   = "Opengeni workload images"
   format        = "DOCKER"
   labels        = local.labels
 }

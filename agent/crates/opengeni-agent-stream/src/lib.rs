@@ -1,4 +1,4 @@
-//! Relay-edge stream transport for the OpenGeni self-hosted agent.
+//! Relay-edge stream transport for the Opengeni self-hosted agent.
 //!
 //! The agent dials OUT to a stateless relay edge and pumps interactive PTY bytes
 //! and desktop framebuffer frames over it, fate-isolated from the NATS control

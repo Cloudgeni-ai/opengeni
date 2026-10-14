@@ -73,13 +73,19 @@ pub async fn serve_op_start_scoped<P: Platform>(
     request_id: String,
     start: v1::OpStart,
 ) -> ControlResponse {
-    serve_op_start_scoped_with_policy(engine, platform, scope, publish, request_id, start, None)
-        .await
+    serve_op_start_scoped_with_policy(
+        engine, platform, scope, publish, request_id, start, None, None,
+    )
+    .await
 }
 
 /// Policy-aware multi-connection form. The policy snapshot is part of the
 /// idempotent OpStart request; the first accepted start owns it and later
 /// duplicates attach to that same operation without re-spawning.
+/// `frame_subject` is where `publish` sends frames; when given, an in-place
+/// agent update may hand the job to its successor instead of waiting for it.
+#[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
+#[allow(clippy::too_many_lines)] // one admission-to-start sequence
 pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
@@ -88,6 +94,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     request_id: String,
     start: v1::OpStart,
     resource_policy: Option<v1::OperationResourcePolicy>,
+    frame_subject: Option<String>,
 ) -> ControlResponse {
     let mut exec = match extract_exec(&request_id, start.op) {
         Ok(exec) => exec,
@@ -148,6 +155,23 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
                 .handles
                 .window_bytes
                 .store(window, Ordering::Relaxed);
+            if let Some(subject) = frame_subject {
+                // The job's own reservation must not hold an update back:
+                // the update hands the job over instead of waiting for it.
+                if let Some(reservation) = opengeni_agent_platform::current_work_reservation() {
+                    reservation.mark_handover();
+                }
+                engine.mark_handover_capable(
+                    &op_id,
+                    &started.handles,
+                    crate::engine::OpHandoverTag {
+                        scope: scope.to_string(),
+                        request_id: request_id.clone(),
+                        subject,
+                        window_bytes: window,
+                    },
+                );
+            }
             // The server subscribed before sending OpStart (protocol
             // invariant), so it is attached from the first frame.
             let _ = started
@@ -355,7 +379,10 @@ pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) 
 /// Builds the frame-publishing emit hook: engine [`Frame`]s become encoded
 /// `OpFrame`s on the sink. The retained Exit payload IS the encoded `OpExit`,
 /// decoded back for the typed oneof (uniform for live emission and replay).
-fn frame_publisher(publish: FrameSink, op_id: String) -> impl Fn(Frame) + Send + 'static {
+pub(crate) fn frame_publisher(
+    publish: FrameSink,
+    op_id: String,
+) -> impl Fn(Frame) + Send + 'static {
     move |frame| {
         let body = match frame.body {
             FrameBody::Data { channel, bytes } => v1::op_frame::Body::Data(v1::OpData {

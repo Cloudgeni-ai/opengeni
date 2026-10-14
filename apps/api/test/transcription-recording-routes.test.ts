@@ -8,6 +8,7 @@ import {
   type TranscriptionRecordingResponse,
 } from "@opengeni/contracts";
 import {
+  TranscriptionBillingRefusedError,
   TranscriptionServiceError,
   type TranscriptionSegmenter,
   type TranscriptionService,
@@ -1222,4 +1223,149 @@ test("keeps a previously attempted recording pinned after later auth rejection",
       fallbackProviderId: null,
     }),
   );
+});
+
+describe("resumable transcription billing", () => {
+  function billedSegmentFixture(providerId = "azure-mai") {
+    const segmentBytes = new Uint8Array([4, 5, 6]);
+    const segmentSha256 = createHash("sha256").update(segmentBytes).digest("hex");
+    const claimed = response("transcribing", { segmentCount: 1 });
+    spyOn(dbModule, "claimNextTranscriptionRecordingSegment").mockImplementation(
+      async (_db, input) => ({
+        recording: claimed,
+        claimed: true,
+        attemptId: input.attemptId,
+        segment: {
+          segmentNumber: 0,
+          durationMilliseconds: 50_000,
+          byteLength: segmentBytes.byteLength,
+          sha256: segmentSha256,
+          objectKey: "segment-0",
+          providerId,
+        } as never,
+      }),
+    );
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    return {
+      segmenter: { available: () => true, segment: async function* () {} },
+      objectStorage: storage({
+        getObjectBytes: async () => ({ bytes: segmentBytes, contentType: "audio/wav" }),
+      }),
+    };
+  }
+
+  test("persists the exact credit refusal on the recording and answers 402 without sending audio", async () => {
+    const fixture = billedSegmentFixture();
+    const failSegment = spyOn(dbModule, "failTranscriptionRecordingSegment").mockResolvedValue(
+      response("failed", { errorCode: "insufficient_credits", retryable: true }),
+    );
+    const startProviderCall = spyOn(
+      dbModule,
+      "startTranscriptionRecordingSegmentProviderCall",
+    ).mockResolvedValue(undefined as never);
+    let providerCalls = 0;
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "azure-mai",
+      admit: async () => {
+        throw new TranscriptionBillingRefusedError({
+          code: "insufficient_credits",
+          message: "Voice input needs Opengeni credits.",
+        });
+      },
+      transcribe: async () => {
+        providerCalls += 1;
+        return {
+          text: "never",
+          languages: [],
+          providerId: "azure-mai",
+          audioSeconds: 0,
+          latencyMs: 0,
+        };
+      },
+    };
+    const res = await app({ transcription, ...fixture }).request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: { authorization: await bearer(), "x-opengeni-correlation-id": CORRELATION_ID },
+      },
+    );
+    expect(res.status).toBe(402);
+    expect(await res.json()).toMatchObject({ code: "insufficient_credits" });
+    expect(providerCalls).toBe(0);
+    expect(startProviderCall).not.toHaveBeenCalled();
+    expect(failSegment).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ errorCode: "insufficient_credits", retryable: true }),
+    );
+  });
+
+  test("commits the transcript before settling, and a settlement failure keeps the 200 transcript", async () => {
+    const fixture = billedSegmentFixture();
+    const order: string[] = [];
+    const complete = response("complete", {
+      segmentCount: 1,
+      completedSegmentCount: 1,
+      transcriptText: "waited for this",
+    });
+    spyOn(dbModule, "startTranscriptionRecordingSegmentProviderCall").mockResolvedValue(
+      undefined as never,
+    );
+    spyOn(dbModule, "completeTranscriptionRecordingSegment").mockImplementation(async () => {
+      order.push("complete");
+      return complete;
+    });
+    const failSegment = spyOn(dbModule, "failTranscriptionRecordingSegment");
+    let billing: unknown;
+    const transcription: TranscriptionService = {
+      limits: () => ({
+        maxDurationSeconds: 50,
+        maxSizeBytes: 25 * 1024 * 1024,
+        acceptedMimeTypes: ["audio/webm"],
+      }),
+      available: () => true,
+      selectProvider: () => "azure-mai",
+      admit: async () => undefined,
+      transcribe: async (input) => {
+        billing = input.billing;
+        expect(input.deferBillingSettlement).toBe(true);
+        return {
+          text: "waited for this",
+          languages: ["en"],
+          providerId: "azure-mai",
+          audioSeconds: 0,
+          latencyMs: 0,
+          settleBilling: async () => {
+            order.push("settle");
+            throw new Error("debit transaction failed");
+          },
+        };
+      },
+    };
+    const res = await app({ transcription, ...fixture }).request(
+      `/v1/workspaces/${WORKSPACE_ID}/transcription-recordings/${RECORDING_ID}/process-next`,
+      {
+        method: "POST",
+        headers: { authorization: await bearer(), "x-opengeni-correlation-id": CORRELATION_ID },
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as TranscriptionRecordingResponse).recording.transcriptText).toBe(
+      "waited for this",
+    );
+    expect(order).toEqual(["complete", "settle"]);
+    expect(failSegment).not.toHaveBeenCalled();
+    // The unit id binds the server creation time and the server-produced bytes;
+    // the server-measured WAV duration is absent only because these bytes are not WAV.
+    expect(billing).toMatchObject({
+      sourceId: expect.stringMatching(new RegExp(`^${RECORDING_ID}:\\d+:0:[0-9a-f]{64}$`)),
+      attribution: { kind: "human", initiatingHumanSubjectId: SUBJECT_ID },
+    });
+  });
 });

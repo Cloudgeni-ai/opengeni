@@ -68,6 +68,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     needs: guard
+    environment: agent-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -79,7 +80,7 @@ jobs:
             asset: opengeni-agent-x86_64-unknown-linux-musl
             kind: linux
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             asset: opengeni-agent-aarch64-unknown-linux-musl
             kind: linux
           - target: universal-apple-darwin
@@ -155,6 +156,12 @@ jobs:
             aarch64-*) bun_target=bun-linux-arm64; browser_arch=arm64 ;;
             *) echo "unsupported Linux interaction target" >&2; exit 1 ;;
           esac
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang pkg-config libdbus-1-dev libpipewire-0.3-dev libspa-0.2-dev libei-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev libxi-dev libxtst-dev libxext-dev \
+            libxdo-dev libssl-dev
+          bun packages/browserd/scripts/stage-cua-runtime.ts "$browser_arch"
           bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}"
@@ -186,6 +193,7 @@ jobs:
             OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/opengeni-agent-browser-${{ matrix.target }}" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/opengeni-computer-native-${{ matrix.target }}" \
+            OPENGENI_EMBEDDED_CUA_RUNTIME="$GITHUB_WORKSPACE/packages/browserd/dist/cua/$browser_arch/embedded.rs" \
               cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
           )
           cp "agent/target/${{ matrix.target }}/release/opengeni-agent" "${{ matrix.asset }}"
@@ -305,6 +313,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Windows computer use runs CUA's published native runtime in process.
+          bun packages/browserd/scripts/stage-cua-runtime.ts x64
           bun build --compile --target=bun-windows-x64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile "opengeni-browserd-${{ matrix.target }}.exe"
@@ -320,6 +330,7 @@ jobs:
             OPENGENI_EMBEDDED_BROWSERD="$workspace_windows\\opengeni-browserd-${{ matrix.target }}.exe" \
             OPENGENI_EMBEDDED_AGENT_BROWSER="$workspace_windows\\opengeni-agent-browser-${{ matrix.target }}.exe" \
             OPENGENI_EMBEDDED_COMPUTER_NATIVE="$workspace_windows\\opengeni-computer-native-${{ matrix.target }}.exe" \
+            OPENGENI_EMBEDDED_CUA_RUNTIME="$workspace_windows\\packages\\browserd\\dist\\cua\\x64\\embedded.rs" \
               cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
           )
           cp "agent/target/${{ matrix.target }}/release/opengeni-agent.exe" "${{ matrix.asset }}"
@@ -425,8 +436,8 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleName</key><string>OpenGeni Agent</string>
-              <key>CFBundleDisplayName</key><string>OpenGeni Agent</string>
+              <key>CFBundleName</key><string>Opengeni Agent</string>
+              <key>CFBundleDisplayName</key><string>Opengeni Agent</string>
               <key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>
               <key>CFBundleExecutable</key><string>opengeni-agent</string>
               <key>CFBundleIconFile</key><string>OpenGeni-Agent.icns</string>
@@ -584,6 +595,7 @@ jobs:
   # combined SHA256SUMS, signs the channel manifest, and creates the GH Release with
   # the binaries + the install scripts attached.
   publish:
+    environment: agent-release
     name: Publish release
     needs: [guard, build]
     runs-on: ubuntu-latest

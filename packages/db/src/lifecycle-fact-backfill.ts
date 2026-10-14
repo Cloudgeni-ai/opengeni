@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { databaseBootConnectOptions } from "./boot-connect";
 
 /**
  * One-time, operator-invoked backfill of product lifecycle facts captured
@@ -75,7 +76,9 @@ export async function backfillProductLifecycleFacts(
   return results;
 }
 
-if (import.meta.main) {
+/** Command-line entry. Bundled release images call this explicitly; see
+ * scripts/assemble-server-runtime.ts. */
+export async function runLifecycleFactBackfillCli(): Promise<void> {
   const databaseUrl =
     process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_URL;
   if (!databaseUrl) {
@@ -96,7 +99,11 @@ if (import.meta.main) {
   // Bounds every call, including the one-pass read that materializes a
   // source; a timeout rolls that call back and a rerun starts it again.
   const statementTimeout = timeoutArgument?.split("=")[1] ?? "15min";
-  const sql = postgres(databaseUrl, { max: 1, onnotice: () => undefined });
+  const sql = postgres(databaseUrl, {
+    max: 1,
+    onnotice: () => undefined,
+    ...databaseBootConnectOptions(databaseUrl),
+  });
   try {
     // One pooled connection, so these session settings bound every call.
     await sql`select set_config('statement_timeout', ${statementTimeout}, false),
@@ -114,3 +121,5 @@ if (import.meta.main) {
     await sql.end();
   }
 }
+
+if (import.meta.main) await runLifecycleFactBackfillCli();

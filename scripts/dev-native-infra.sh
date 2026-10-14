@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Container-free PostgreSQL/NATS/Temporal/object storage for one OpenGeni worktree.
+# Container-free PostgreSQL/NATS/Temporal/object storage for one Opengeni worktree.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -104,7 +104,7 @@ EOF
 }
 
 die() {
-  echo "Native OpenGeni infrastructure: $*" >&2
+  echo "Native Opengeni infrastructure: $*" >&2
   exit 1
 }
 
@@ -366,12 +366,12 @@ print_status() {
   local quiet="${1:-}"
   if all_running; then
     if [ "$quiet" != "--quiet" ]; then
-      echo "Native OpenGeni infrastructure is running for ${COMPOSE_PROJECT_NAME}."
+      echo "Native Opengeni infrastructure is running for ${COMPOSE_PROJECT_NAME}."
     fi
     return 0
   fi
   if [ "$quiet" != "--quiet" ]; then
-    echo "Native OpenGeni infrastructure is not fully running for ${COMPOSE_PROJECT_NAME}." >&2
+    echo "Native Opengeni infrastructure is not fully running for ${COMPOSE_PROJECT_NAME}." >&2
   fi
   return 1
 }

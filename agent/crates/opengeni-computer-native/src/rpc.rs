@@ -248,6 +248,9 @@ where
     while let Some(result) = tasks.join_next().await {
         result??;
     }
+    adapter.shutdown().await.map_err(|error| {
+        NativeRpcServerError::Protocol(format!("native producer cleanup failed: {error:?}"))
+    })?;
     Ok(())
 }
 
@@ -514,10 +517,24 @@ mod tests {
         NativeObservation, NativeTarget,
     };
 
-    struct MockAdapter;
+    #[derive(Default)]
+    struct MockAdapter {
+        cleanup: Option<(Arc<tokio::sync::Notify>, Arc<Semaphore>)>,
+        fail_cleanup: bool,
+    }
 
     #[async_trait]
     impl ComputerAdapter for MockAdapter {
+        async fn shutdown(&self) -> NativeAdapterResult<()> {
+            if let Some((entered, gate)) = &self.cleanup {
+                entered.notify_one();
+                let _permit = gate.acquire().await.unwrap();
+            }
+            if self.fail_cleanup {
+                return Err(NativeAdapterError::unsupported("fixture cleanup failed"));
+            }
+            Ok(())
+        }
         fn capabilities(&self) -> NativeCapabilities {
             NativeCapabilities {
                 semantic_observation: true,
@@ -527,6 +544,7 @@ mod tests {
                 screen_capture: false,
                 semantic_actions: true,
                 pointer_input: false,
+                pointer_click_continuation: false,
                 keyboard_input: false,
                 clipboard: true,
                 background_actions: true,
@@ -595,11 +613,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn eof_joins_persistent_producers_and_reports_cleanup_failure() {
+        for fail_cleanup in [false, true] {
+            let (mut client, server) = duplex(128);
+            let (server_read, server_write) = split(server);
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let gate = Arc::new(Semaphore::new(0));
+            let adapter = Arc::new(MockAdapter {
+                cleanup: Some((entered.clone(), gate.clone())),
+                fail_cleanup,
+            });
+            let task = tokio::spawn(serve(adapter, server_read, server_write));
+            client.shutdown().await.unwrap();
+            entered.notified().await;
+            assert!(!task.is_finished(), "EOF is not producer completion");
+            gate.add_permits(1);
+            let result = task.await.unwrap();
+            assert_eq!(result.is_err(), fail_cleanup);
+        }
+    }
+
+    #[tokio::test]
     async fn serves_correlated_length_prefixed_handshake() {
         let (client, server) = duplex(16 * 1024);
         let (mut client_read, mut client_write) = split(client);
         let (server_read, server_write) = split(server);
-        let task = tokio::spawn(serve(Arc::new(MockAdapter), server_read, server_write));
+        let task = tokio::spawn(serve(
+            Arc::new(MockAdapter::default()),
+            server_read,
+            server_write,
+        ));
         let request = serde_json::to_vec(&json!({
             "protocolVersion": NATIVE_RPC_PROTOCOL_VERSION,
             "requestId": "r_test",
@@ -626,7 +669,11 @@ mod tests {
         let (client, server) = duplex(16 * 1024);
         let (mut client_read, mut client_write) = split(client);
         let (server_read, server_write) = split(server);
-        let task = tokio::spawn(serve(Arc::new(MockAdapter), server_read, server_write));
+        let task = tokio::spawn(serve(
+            Arc::new(MockAdapter::default()),
+            server_read,
+            server_write,
+        ));
         let request = serde_json::to_vec(&json!({
             "protocolVersion": NATIVE_RPC_PROTOCOL_VERSION,
             "requestId": "r_clipboard",
@@ -654,7 +701,11 @@ mod tests {
         let (client, server) = duplex(16 * 1024);
         let (mut client_read, mut client_write) = split(client);
         let (server_read, server_write) = split(server);
-        let task = tokio::spawn(serve(Arc::new(MockAdapter), server_read, server_write));
+        let task = tokio::spawn(serve(
+            Arc::new(MockAdapter::default()),
+            server_read,
+            server_write,
+        ));
         let request = serde_json::to_vec(&json!({
             "protocolVersion": NATIVE_RPC_PROTOCOL_VERSION,
             "requestId": "r_dispatch",
@@ -721,7 +772,11 @@ mod tests {
         let (client, server) = duplex(16 * 1024);
         let (mut client_read, mut client_write) = split(client);
         let (server_read, server_write) = split(server);
-        let task = tokio::spawn(serve(Arc::new(MockAdapter), server_read, server_write));
+        let task = tokio::spawn(serve(
+            Arc::new(MockAdapter::default()),
+            server_read,
+            server_write,
+        ));
         let request = serde_json::to_vec(&json!({
             "protocolVersion": NATIVE_RPC_PROTOCOL_VERSION,
             "requestId": "r_capture",

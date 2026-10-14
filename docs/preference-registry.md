@@ -264,7 +264,6 @@ Canonical implementation:
 - `apps/api/src/routes/preference-registry.ts`;
 - `apps/api/src/mcp/server.ts`;
 - `packages/sdk/src/preference-registry.ts`;
-- `apps/web/src/routes/preference-registry-admin.tsx`;
 - `apps/web/src/routes/workspace-state-loader.ts`;
 - `packages/runtime/src/workspace-governance.ts`;
 - `apps/worker/src/activities/agent-turn/governance-model.ts`.

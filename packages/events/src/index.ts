@@ -510,7 +510,7 @@ export { connect, nkeys, type NatsConnection } from "nats";
  * exactly this). Kept minimal so the events package does not leak the `nats` `Msg`
  * type into the agent-loop-free runtime leaf.
  */
-export type RequestReply = { data: Uint8Array };
+export type RequestReply = { data: Uint8Array; headers?: { get(name: string): string } };
 
 /**
  * The minimal request/reply connection the selfhosted control plane consumes
@@ -521,6 +521,7 @@ export type RequestReply = { data: Uint8Array };
  * connection.
  */
 export interface RequestConnection {
+  supportsHeaders?: boolean;
   request(subject: string, payload: Uint8Array, opts: { timeout: number }): Promise<RequestReply>;
 }
 
@@ -730,6 +731,7 @@ export async function createNatsEventBus(
     }
   });
   const requestConnection: RequestConnection = {
+    supportsHeaders: true,
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeout),
   };
   const opStreamConnection: OpStreamConnection = {
@@ -1156,7 +1158,7 @@ async function requestReply(
   timeout: number,
 ): Promise<RequestReply> {
   const msg: Msg = await nc.request(subject, payload, { timeout });
-  return { data: msg.data };
+  return { data: msg.data, ...(msg.headers ? { headers: msg.headers } : {}) };
 }
 
 /**

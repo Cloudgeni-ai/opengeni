@@ -141,7 +141,7 @@ function SlackReactionChannelsDialogBody({
   }
 
   return (
-    <DialogContent className="max-w-lg">
+    <DialogContent>
       <DialogHeader>
         <DialogTitle>Where the reaction shortcut works</DialogTitle>
         <DialogDescription>

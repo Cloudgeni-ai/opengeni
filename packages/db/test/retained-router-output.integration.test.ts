@@ -132,8 +132,8 @@ test("past the recording limit only the marker and the final page are recorded",
     commandId: scope.processId,
   });
   expect(output.chunks.map((chunk) => chunk.chunk).join("")).toBe(
-    "head\ncross\n[OpenGeni stopped recording stdout after 16 MiB; the final part will still be recorded.]\n" +
-      "[OpenGeni did not record part of this stdout after 16 MiB; its final 20 bytes follow.]\nFATAL: step 42\n",
+    "head\ncross\n[Opengeni stopped recording stdout after 16 MiB; the final part will still be recorded.]\n" +
+      "[Opengeni did not record part of this stdout after 16 MiB; its final 20 bytes follow.]\nFATAL: step 42\n",
   );
   const stored = (await getRetainedProviderCommand(client.db, scope)) as ModalRouterProviderCommand;
   expect(stored.streams.stdout.byteOffset).toBe(LIMIT + 120);

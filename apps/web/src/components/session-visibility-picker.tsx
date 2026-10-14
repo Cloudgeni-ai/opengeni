@@ -35,7 +35,7 @@ export function SessionVisibilityPicker(props: {
 
   // When Workspace is the only valid value there is no decision to make.
   // Personal work belongs in the member's owner-only Personal workspace;
-  // activated organizations get the real Workspace / Only me choice below.
+  // organizations that allow Only me get the real Workspace / Only me choice below.
   if (props.capabilities?.canCreatePrivate !== true) {
     return null;
   }

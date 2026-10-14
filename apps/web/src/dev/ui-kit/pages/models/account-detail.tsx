@@ -414,7 +414,7 @@ function SettingsSection({ account }: { account: CodexAccount }) {
       <SettingRowGroup className="-my-3">
         <SettingRow
           variant={picks.settingRow}
-          label={legacy ? "Use for new automatic turns" : "Available for new chats"}
+          label={legacy ? "Use for new automatic turns" : "Use for new work"}
           description={
             legacy
               ? "Enabled accounts can be picked for new automatic turns."
@@ -449,7 +449,7 @@ function SettingsSection({ account }: { account: CodexAccount }) {
               account.isPrimary
                 ? legacy
                   ? "Used when a session isn't pinned and Auto-rotate is off."
-                  : "New work starts here. With Primary only, it's the only account used."
+                  : "New work starts here. With Primary first, other accounts are used only when this one can't serve it."
                 : legacy
                   ? "Make this the account unpinned sessions use."
                   : "Make this the account new work starts with."
@@ -737,7 +737,7 @@ function CodexFooter({
 }
 
 /* ----------------------------------------------------------------------------
-   API-key providers (OpenRouter, Vercel AI Gateway).
+   API-key providers (OpenRouter, Opper, Vercel AI Gateway).
    -------------------------------------------------------------------------- */
 
 export function GatewayDetail({

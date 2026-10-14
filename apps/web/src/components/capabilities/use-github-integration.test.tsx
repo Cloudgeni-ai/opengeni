@@ -137,7 +137,7 @@ function appContext(permissions: string[], update: ReturnType<typeof mock>) {
           {
             kind: "workspace_app" as const,
             installationId: 71,
-            label: "OpenGeni bot on Cloudgeni-ai",
+            label: "Opengeni bot on Cloudgeni-ai",
             groups: { routine: "ask" as const, review: "ask" as const, merge: "ask" as const },
           },
         ],
@@ -163,7 +163,7 @@ describe("GitHub action approval controls", () => {
     const update = mock(async () => ({
       kind: "workspace_app" as const,
       installationId: 71,
-      label: "OpenGeni bot on Cloudgeni-ai",
+      label: "Opengeni bot on Cloudgeni-ai",
       groups: { routine: "allow" as const, review: "ask" as const, merge: "ask" as const },
     }));
     const rendered = await renderAdapter(appContext(["github:manage"], update));

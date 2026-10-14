@@ -95,6 +95,12 @@ JSON output normalizes revisions to decimal strings. Cells return zero-based
 coordinates, formula text, and a tagged value (`empty`, `boolean`, `number`,
 `date`, `text`, or `error`).
 
+When `modeledFeatures.dimensions` is true, sheet metadata includes
+`defaultRowHeight` (24 px), `defaultColumnWidth` (96 px), and sorted sparse
+`rowHeights`/`columnWidths` pairs `[zeroBasedIndex, pixels]`. A viewport returns
+only dimension entries within its requested bounds. Use metadata for whole-sheet
+geometry; absent entries use the defaults.
+
 ## Commands
 
 For an existing sheet, construct its exact precondition from metadata:
@@ -116,6 +122,22 @@ One apply accepts an ordered atomic array of:
 - `cells.set`: sheet precondition, zero-based `anchor`, `rows`, `columns`, and
   row-major `cells`
 - `range.clear`: sheet precondition and inclusive zero-based `start`/`end`
+- `row.height.set`: sheet precondition, zero-based `row`, and `height`
+- `column.width.set`: sheet precondition, zero-based `column`, and `width`
+
+Dimensions are integer CSS pixels from 1 through 4096. `null` resets an entry to
+the default without expanding sparse state. These commands change neither cell
+contents nor the used cell bounds:
+
+```js
+await workbook.apply([
+  { kind: "column.width.set", sheet: existingSheet, column: 0, width: 180 },
+  { kind: "row.height.set", sheet: existingSheet, row: 0, height: 36 },
+]);
+await workbook.apply([
+  { kind: "column.width.set", sheet: existingSheet, column: 0, width: null },
+]);
+```
 
 A sheet created earlier in the same batch uses:
 
@@ -143,6 +165,12 @@ console.log(status.file.fileId, status.file.sourceHeadSequence, status.file.sour
 ```
 
 Do not export and re-import to continue editing.
+
+XLSX geometry is verified against the canonical dimensions, including entries
+outside the used cell rectangle. Fractional imported pixel heights and column
+widths below 6 px cannot round-trip through this boundary and are rejected
+explicitly rather than silently resized. Interactive resize controls use
+integer sizes from 8 through 4096 px.
 
 ## Explicit standalone XLSX/CSV work
 

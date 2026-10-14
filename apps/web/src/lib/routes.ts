@@ -50,7 +50,16 @@ export function parseCheckoutOutcome(search: Record<string, unknown>): CheckoutO
 }
 
 /** Full-page artifact return context belongs to route assembly, not the session graph. */
-export function artifactReturnSearch(search: Record<string, unknown>): { fromSession?: string } {
+export type ArtifactReturnSearch = {
+  fromSession?: string;
+  kind?: "site" | "image" | "document" | "spreadsheet" | "presentation" | "file";
+  q?: string;
+  sort?: "newest" | "title";
+  status?: "archived";
+  browse?: boolean;
+};
+
+export function artifactReturnSearch(search: Record<string, unknown>): ArtifactReturnSearch {
   // Router match search merges validation over raw input. An omitted key would
   // leave an invalid raw fromSession available to useSearch() consumers.
   return {
@@ -59,5 +68,18 @@ export function artifactReturnSearch(search: Record<string, unknown>): { fromSes
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(search.fromSession)
         ? search.fromSession
         : undefined,
+    kind:
+      search.kind === "site" ||
+      search.kind === "image" ||
+      search.kind === "document" ||
+      search.kind === "spreadsheet" ||
+      search.kind === "presentation" ||
+      search.kind === "file"
+        ? search.kind
+        : undefined,
+    q: typeof search.q === "string" ? search.q.slice(0, 500) || undefined : undefined,
+    sort: search.sort === "newest" || search.sort === "title" ? search.sort : undefined,
+    status: search.status === "archived" ? "archived" : undefined,
+    browse: search.browse === true ? true : undefined,
   };
 }

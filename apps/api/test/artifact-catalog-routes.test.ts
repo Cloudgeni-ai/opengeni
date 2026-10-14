@@ -51,16 +51,25 @@ function fixture(
     agentAttempt?: Partial<Parameters<typeof signDelegatedAccessToken>[1]>;
     file?: Record<string, unknown>;
     image?: Record<string, unknown>;
+    pinUnavailable?: boolean;
+    /** The pinned Site is someone else's Only me Site, so the viewer cannot see it. */
+    hiddenSite?: boolean;
   } = {},
 ) {
   const reads: Array<Parameters<EditableArtifactApplicationPort["readArtifact"]>[0]> = [];
   const queries: Array<{ sql: string; params: unknown[] }> = [];
   const selectedTables: string[] = [];
+  const siteVisibilityChecks: Array<{ sql: string; params: unknown[] }> = [];
   const db = {
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
     execute: async (query: SQL) => {
       const compiled = new PgDialect().sqlToQuery(query);
       queries.push(compiled);
+      if (compiled.sql.includes("opengeni_private.update_artifact_pin(")) {
+        if (options.pinUnavailable)
+          throw Object.assign(new Error("target unavailable"), { code: "42501" });
+        return [];
+      }
       if (compiled.sql.includes("WITH candidates AS")) return pages.shift() ?? [];
       if (
         compiled.sql.includes("current_setting('opengeni.account_id'") ||
@@ -93,7 +102,11 @@ function fixture(
           selectedTables.push(tableName);
           return builder;
         },
-        where: () => builder,
+        where: (condition?: SQL) => {
+          if (tableName === "workspace_artifacts" && condition)
+            siteVisibilityChecks.push(new PgDialect().sqlToQuery(condition));
+          return builder;
+        },
         innerJoin: () => builder,
         leftJoin: () => builder,
         then: (resolve: (value: unknown[]) => unknown, reject?: (error: unknown) => unknown) =>
@@ -103,6 +116,8 @@ function fixture(
           ),
         limit: async () => {
           if (tableName === "workspaces") return [{ accountId }];
+          if (tableName === "workspace_artifacts")
+            return options.hiddenSite ? [] : [{ id: "40000000-0000-4000-8000-000000000004" }];
           if (tableName === "generated_image_artifacts")
             return options.image && options.file
               ? [{ artifact: options.image, file: options.file, uploadStatus: "uploaded" }]
@@ -158,11 +173,169 @@ function fixture(
         authorization: `Bearer ${await signDelegatedAccessToken(SECRET, { accountId, workspaceId, subjectId, principalKind: "human_session", permissions, exp: Math.floor(Date.now() / 1000) + 3600, ...options.agentAttempt })}`,
       },
     });
-  return { app, request, reads, queries, selectedTables };
+  const pin = async (
+    kind: string,
+    id: string,
+    body: unknown = { pinned: true },
+    permissions: Permission[] = ["artifacts:publish", "artifacts:read"],
+  ) =>
+    app.request(`/v1/workspaces/${workspaceId}/artifact-catalog/${kind}/${id}/pin`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await signDelegatedAccessToken(SECRET, { accountId, workspaceId, subjectId: "user:catalog", principalKind: "human_session", permissions, exp: Math.floor(Date.now() / 1000) + 3600 })}`,
+      },
+      body: JSON.stringify(body),
+    });
+  return { app, request, pin, reads, queries, selectedTables, siteVisibilityChecks };
 }
 
+test("pin mutations require publish plus target-domain read authority and validate closed input", async () => {
+  const target = "40000000-0000-4000-8000-000000000004";
+  const { pin, queries } = fixture([]);
+  expect((await pin("site", target, { pinned: true }, ["artifacts:read"])).status).toBe(403);
+  expect((await pin("site", target, { pinned: true }, ["artifacts:publish"])).status).toBe(403);
+  expect(
+    (await pin("file", target, { pinned: true }, ["artifacts:publish", "artifacts:read"])).status,
+  ).toBe(403);
+  for (const [kind, id, body] of [
+    ["attachment", target, { pinned: true }],
+    ["site", "bad", { pinned: true }],
+    ["document", target, { pinned: true }],
+    ["site", target, {}],
+    ["site", target, { pinned: "true" }],
+    ["site", target, { pinned: true, extra: true }],
+  ] as const)
+    expect((await pin(kind, id, body)).status).toBe(422);
+  expect(queries.some(({ sql }) => sql.includes("update_artifact_pin("))).toBe(false);
+});
+
+test("pin/unpin returns compact state and maps scoped missing/foreign/hidden targets to 404", async () => {
+  const target = "40000000-0000-4000-8000-000000000004";
+  const visible = fixture([]);
+  for (const pinned of [true, true, false, false]) {
+    const response = await visible.pin("site", target, { pinned });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({ kind: "site", artifactId: target, pinned });
+  }
+  // The Site is looked up as this person: shared Sites or their own Only me ones.
+  const check = visible.siteVisibilityChecks[0]!;
+  expect(check.sql).toContain('"visibility"');
+  expect(check.sql).toContain('"owner_subject_id"');
+  expect(check.params).toContain("user:catalog");
+  const hidden = fixture([], { hiddenSite: true });
+  const hiddenResponse = await hidden.pin("site", target);
+  expect(hiddenResponse.status).toBe(404);
+  expect(await hiddenResponse.json()).toEqual({ message: "Artifact not found" });
+  expect(hidden.queries.some(({ sql }) => sql.includes("update_artifact_pin("))).toBe(false);
+  const absent = fixture([], { pinUnavailable: true });
+  expect((await absent.pin("site", target)).status).toBe(404);
+  const file = fixture([]);
+  expect(
+    (await file.pin("file", target, { pinned: false }, ["artifacts:publish", "files:read"])).status,
+  ).toBe(404);
+  expect(file.queries.some(({ sql }) => sql.includes("update_artifact_pin("))).toBe(false);
+});
+
+test("editable pins use the non-mutating application read and never bypass denied or mismatched metadata", async () => {
+  const target = "1".repeat(32);
+  for (const code of ["not_found", "forbidden"] as const) {
+    const denied = fixture([], {
+      read: async () => {
+        throw new EditableArtifactApplicationError(code);
+      },
+    });
+    expect((await denied.pin("document", target)).status).toBe(404);
+    expect(denied.reads).toHaveLength(1);
+    expect(denied.queries.some(({ sql }) => sql.includes("update_artifact_pin("))).toBe(false);
+  }
+  const metadata = {
+    id: target,
+    modality: "document",
+    scope: { accountId, workspaceId },
+    title: "Report",
+    lifecycle: "active",
+    createdAt,
+    updatedAt: createdAt,
+  };
+  const visible = fixture([], { read: async () => metadata as never });
+  expect((await visible.pin("document", target)).status).toBe(200);
+  expect(visible.reads[0]!.artifactId).toBe(target);
+  const wrongKind = fixture([], {
+    read: async () => ({ ...metadata, modality: "spreadsheet" }) as never,
+  });
+  expect((await wrongKind.pin("document", target)).status).toBe(404);
+  const foreign = fixture([], {
+    read: async () => ({ ...metadata, scope: { accountId, workspaceId: "foreign" } }) as never,
+  });
+  expect((await foreign.pin("document", target)).status).toBe(404);
+});
+
+test("file and image pin responses stay metadata-only and need files read, not artifacts read", async () => {
+  const target = "40000000-0000-4000-8000-000000000004";
+  for (const kind of ["file", "image"] as const) {
+    const visible = fixture([], {
+      file: {
+        id: target,
+        accountId,
+        workspaceId,
+        status: "ready",
+        createdAt: new Date(createdAt),
+        updatedAt: new Date(createdAt),
+      },
+    });
+    const response = await visible.pin(kind, target.toUpperCase(), { pinned: true }, [
+      "artifacts:publish",
+      "files:read",
+    ]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await response.json()).toEqual({ kind, artifactId: target, pinned: true });
+    expect(visible.selectedTables).toEqual(["files"]);
+  }
+});
+
+test("catalog projection and encrypted frontiers retain pins across the global pin boundary", async () => {
+  const first = candidate("pinned-one", "site", { pinned: true, title: "Z", sort_key: "z" });
+  const second = candidate("pinned-two", "site", { pinned: true, title: "ZZ", sort_key: "zz" });
+  const third = candidate("unpinned-one", "site", { pinned: false, title: "A", sort_key: "a" });
+  const fourth = candidate("unpinned-two", "site", { pinned: false, title: "B", sort_key: "b" });
+  const { request, queries } = fixture([
+    [first, second, third],
+    [second, third],
+    [third, fourth],
+    [fourth],
+  ]);
+  let cursor: string | null = null;
+  const items: Array<{ id: string; pinned: boolean }> = [];
+  do {
+    const response = await request(
+      `sort=title&limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    const page = await response.json();
+    items.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  expect(items.map(({ id, pinned }) => ({ id, pinned }))).toEqual([
+    { id: first.id, pinned: true },
+    { id: second.id, pinned: true },
+    { id: third.id, pinned: false },
+    { id: fourth.id, pinned: false },
+  ]);
+  const statements = queries.filter(({ sql }) => sql.includes("WITH candidates AS"));
+  expect(statements[1]!.params).toContain(true);
+  expect(statements[2]!.params).toContain(true);
+  expect(statements[3]!.params).toContain(false);
+});
+
 test("catalog is read-only and redacts unauthorized provenance before projection", async () => {
-  const { request, queries } = fixture([[candidate("site-one")]]);
+  const { request, queries } = fixture([
+    [
+      candidate("site-one", "site", { site_visibility: "workspace_shared" }),
+      candidate("site-two", "site", { site_visibility: "user_private" }),
+    ],
+  ]);
   const response = await request();
   expect(response.status, await response.clone().text()).toBe(200);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -175,12 +348,25 @@ test("catalog is read-only and redacts unauthorized provenance before projection
         status: "active",
         createdAt,
         updatedAt: createdAt,
+        visibility: "workspace",
+      },
+      {
+        id: "site-two",
+        kind: "site",
+        title: "Report",
+        status: "active",
+        createdAt,
+        updatedAt: createdAt,
+        visibility: "private",
       },
     ],
     nextCursor: null,
   });
   const query = queries.find((entry) => entry.sql.includes("WITH candidates AS"))!;
   expect(query.sql).toContain("workspace_artifacts");
+  // Sites are limited to the workspace's and the viewer's own Only me ones.
+  expect(query.sql).toContain("a.owner_subject_id");
+  expect(query.params).toContain("user:catalog");
   expect(query.sql).not.toContain("generated_image_artifacts");
   expect(query.sql).not.toContain("sandbox_file_publications");
   expect(query.sql).not.toContain("editable_artifacts");

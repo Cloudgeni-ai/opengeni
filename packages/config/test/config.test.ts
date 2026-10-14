@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_MODAL_IMAGE_REF,
+  FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   collectGitIdentityEnvironment,
@@ -326,6 +327,14 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("session usage limits producer flag defaults off and parses", () => {
+    expect(withEnv({}, () => getSettings()).sessionUsageLimitsEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_SESSION_USAGE_LIMITS_ENABLED: "true" }, () => getSettings())
+        .sessionUsageLimitsEnabled,
+    ).toBe(true);
+  });
+
   test("configured host MCP refs are rejected", () => {
     const mcpServers = JSON.stringify([
       {
@@ -412,7 +421,7 @@ describe("browser analytics configuration", () => {
 });
 
 describe("console documentation link configuration", () => {
-  test("defaults to the public OpenGeni docs", () => {
+  test("defaults to the public Opengeni docs", () => {
     expect(withEnv({}, () => getSettings()).documentationUrl).toBe("https://docs.opengeni.ai");
   });
 
@@ -577,14 +586,6 @@ describe("Google Drive integration settings", () => {
     expect(settings.webBaseUrl).toBe("http://127.0.0.1:3000");
     expect(settings.googleDriveClientId).toBe("client.apps.googleusercontent.com");
     expect(settings.googleDriveClientSecret).toBe("client-secret");
-  });
-
-  test("keeps short MCP OAuth state issuance off until the callback reader is deployed", () => {
-    expect(withEnv({}, () => getSettings()).integrationsOauthShortStateEnabled).toBe(false);
-    expect(
-      withEnv({ OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED: "true" }, () => getSettings())
-        .integrationsOauthShortStateEnabled,
-    ).toBe(true);
   });
 
   test("requires the Google OAuth client id and secret together", () => {
@@ -955,14 +956,14 @@ describe("personal GitHub OAuth settings", () => {
   });
 });
 
-describe("OpenGeni Slack interaction settings", () => {
+describe("Opengeni Slack interaction settings", () => {
   const slackEnv = {
     OPENGENI_ENVIRONMENT: "local",
     OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
     OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
     OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
     OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
-    OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Staging",
+    OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Staging",
     OPENGENI_SLACK_COMMAND: "/opengeni-staging",
   };
 
@@ -971,7 +972,7 @@ describe("OpenGeni Slack interaction settings", () => {
     expect(settings.slackClientId).toBe("slack-client-id");
     expect(settings.slackClientSecret).toBe("slack-client-secret");
     expect(settings.slackSigningSecret).toBeUndefined();
-    expect(settings.slackBotDisplayName).toBe("OpenGeni Staging");
+    expect(settings.slackBotDisplayName).toBe("Opengeni Staging");
     expect(settings.slackCommand).toBe("/opengeni-staging");
   });
 
@@ -984,12 +985,12 @@ describe("OpenGeni Slack interaction settings", () => {
   });
 
   test("defaults and validates the signed Slack slash command", () => {
-    expect(withEnv({}, () => getSettings()).slackBotDisplayName).toBe("OpenGeni");
+    expect(withEnv({}, () => getSettings()).slackBotDisplayName).toBe("Opengeni");
     expect(withEnv({}, () => getSettings()).slackCommand).toBe("/opengeni");
     expect(() =>
-      withEnv({ OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Preview" }, () => getSettings()),
+      withEnv({ OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Preview" }, () => getSettings()),
     ).toThrow();
-    expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings())).toThrow();
+    expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/Opengeni" }, () => getSettings())).toThrow();
   });
 });
 
@@ -1008,7 +1009,7 @@ describe("Docker workspace materialization", () => {
 
 describe("agent stable release selection", () => {
   test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.46");
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.54");
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");
@@ -1037,49 +1038,22 @@ describe("rig verification lease ownership rollout", () => {
   });
 });
 
-describe("canonical organization-tenancy activation opt-out", () => {
-  test("defaults to the reversible pre-activation posture", () => {
-    expect(withEnv({}, () => getSettings()).organizationTenancyCanonicalActivationEnabled).toBe(
-      false,
-    );
-  });
-
-  test("parses an explicit decline and an explicit acceptance without truthy-string coercion", () => {
-    // The whole point of the switch is that an operator can write it out to say
-    // "no". A z.coerce.boolean() field would read "false" as TRUE and activate
-    // the one-way boundary for exactly the operator who tried to decline it.
-    for (const declined of ["false", "0", "no", "off", "FALSE"]) {
-      expect(
-        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: declined }, () =>
-          getSettings(),
-        ).organizationTenancyCanonicalActivationEnabled,
-      ).toBe(false);
-    }
-    for (const accepted of ["true", "1", "yes", "on", "TRUE"]) {
-      expect(
-        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: accepted }, () =>
-          getSettings(),
-        ).organizationTenancyCanonicalActivationEnabled,
-      ).toBe(true);
-    }
-  });
-
-  test("is independent of every other tenancy-adjacent posture", () => {
-    // Activation must never be inferred from managed product access or the
-    // delegation posture: it is one explicit operator statement.
-    const settings = withEnv(
-      {
-        OPENGENI_ENVIRONMENT: "test",
-        OPENGENI_PRODUCT_ACCESS_MODE: "managed",
-        OPENGENI_PUBLIC_BASE_URL: "https://opengeni.example.com",
-        OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret-value",
-        OPENGENI_DELEGATION_SECRET: "delegation-secret-value",
-      },
-      () => getSettings(),
-    );
-    expect(settings.productAccessMode).toBe("managed");
-    expect(settings.organizationTenancyCanonicalActivationEnabled).toBe(false);
-  });
+describe("retired deployment switches", () => {
+  test.each([
+    [
+      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
+      "organizationTenancyCanonicalActivationEnabled",
+    ],
+    ["OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED", "integrationsOauthShortStateEnabled"],
+  ])(
+    "%s is accepted and ignored for any value so existing deployments keep booting",
+    (name, key) => {
+      for (const value of [undefined, "false", "true", "0", "1", "not-a-boolean"]) {
+        const settings = withEnv(value === undefined ? {} : { [name]: value }, () => getSettings());
+        expect(settings).not.toHaveProperty(key);
+      }
+    },
+  );
 });
 
 describe("Temporal connection security", () => {
@@ -1324,7 +1298,7 @@ describe("sandbox preparation profiles", () => {
   test("defaults managed transactional email to the verified mail subdomain sender", () => {
     const settings = withEnv({}, () => getSettings());
 
-    expect(settings.emailFrom).toBe("OpenGeni <auth@mail.opengeni.ai>");
+    expect(settings.emailFrom).toBe("Opengeni <auth@mail.opengeni.ai>");
   });
 
   test("parses startup dependency retry settings", () => {
@@ -1573,15 +1547,15 @@ describe("sandbox preparation profiles", () => {
   test("collects git identity settings for sandbox pass-through", () => {
     const settings = withEnv(
       {
-        OPENGENI_GIT_AUTHOR_NAME: "OpenGeni Agent",
+        OPENGENI_GIT_AUTHOR_NAME: "Opengeni Agent",
         OPENGENI_GIT_AUTHOR_EMAIL: "infra@example.com",
       },
       () => getSettings(),
     );
     expect(collectGitIdentityEnvironment(settings)).toEqual({
-      GIT_AUTHOR_NAME: "OpenGeni Agent",
+      GIT_AUTHOR_NAME: "Opengeni Agent",
       GIT_AUTHOR_EMAIL: "infra@example.com",
-      GIT_COMMITTER_NAME: "OpenGeni Agent",
+      GIT_COMMITTER_NAME: "Opengeni Agent",
       GIT_COMMITTER_EMAIL: "infra@example.com",
     });
   });
@@ -1675,7 +1649,7 @@ describe("sandbox preparation profiles", () => {
   test("registers built-in MCP profiles by default", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.mcpServers.find((server) => server.id === "opengeni")).toMatchObject({
-      name: "OpenGeni",
+      name: "Opengeni",
       url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`,
       // The opengeni server's tools/list is permission-scoped (varies by the
       // caller's delegated grant). The Agents SDK caches tools/list in a
@@ -1697,6 +1671,15 @@ describe("sandbox preparation profiles", () => {
       allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"],
       cacheToolsList: false,
     });
+    // The built-in servers are this deployment's own API, which is briefly
+    // slow while it restarts or is busy. Their setup must outlast the
+    // client's 5-second default instead of failing the turn.
+    for (const id of ["opengeni", "files", "docs"]) {
+      expect(settings.mcpServers.find((server) => server.id === id)).toMatchObject({
+        setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
+      });
+    }
+    expect(FIRST_PARTY_MCP_SETUP_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
   });
 
   test("derives built-in document MCP URL from OPENGENI_MCP_URL", () => {
@@ -1739,7 +1722,7 @@ describe("sandbox preparation profiles", () => {
   test("adds Codemode pointers whenever exact-attempt signing authority is available", () => {
     const local = withEnv({}, () => getSettings());
     expect(local.ogtoolPackageSpec).toBeUndefined();
-    expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
+    expect(stableSandboxEnvironmentForRun(local, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
       OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
     });
@@ -1753,7 +1736,7 @@ describe("sandbox preparation profiles", () => {
       () => getSettings(),
     );
     expect(configured.ogtoolPackageSpec).toBe("@opengeni/ogtool@0.1.0");
-    expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
+    expect(stableSandboxEnvironmentForRun(configured, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
       OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
       OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
@@ -1763,7 +1746,7 @@ describe("sandbox preparation profiles", () => {
       getSettings(),
     );
     expect(
-      stableSandboxEnvironmentForRun(unavailable, {}, { workspaceId: "ws-1" })
+      stableSandboxEnvironmentForRun(unavailable, { workspaceId: "ws-1" })
         .OPENGENI_CODEMODE_TOKEN_FILE,
     ).toBeUndefined();
   });
@@ -1788,7 +1771,7 @@ describe("sandbox preparation profiles", () => {
 
   test("adds stable git credential pointers and provider CLI wrapper PATH for provisioned sandboxes", () => {
     const settings = withEnv({}, () => getSettings());
-    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+    const env = stableSandboxEnvironmentForRun(settings, { workspaceId: "ws-1" });
 
     expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBe("/workspace/.opengeni/git-credentials");
     expect(env.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
@@ -1799,7 +1782,7 @@ describe("sandbox preparation profiles", () => {
 
   test("does not add git credential pointers or wrapper PATH for selfhosted sandboxes", () => {
     const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "selfhosted" }, () => getSettings());
-    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+    const env = stableSandboxEnvironmentForRun(settings, { workspaceId: "ws-1" });
 
     expect(env).toEqual({});
     expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
@@ -1816,7 +1799,7 @@ describe("sandbox preparation profiles", () => {
       },
       () => getSettings(),
     );
-    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+    const env = stableSandboxEnvironmentForRun(settings, { workspaceId: "ws-1" });
 
     expect(env).toEqual({});
   });
@@ -1856,6 +1839,37 @@ describe("sandbox preparation profiles", () => {
     });
   });
 
+  test("offers editable-artifact export only when the materializer is deployed", async () => {
+    const { resolveFirstPartyMcpToolPolicy, allowedFirstPartyMcpToolsForSession } =
+      await import("../src/index");
+    const exportTools = ["editable_artifact_export", "editable_artifact_export_status"];
+    const absent = withEnv({}, () => getSettings());
+    expect(absent.artifactMaterializerDeployed).toBe(false);
+    const absentPolicy = resolveFirstPartyMcpToolPolicy(absent);
+    for (const tool of exportTools) {
+      expect(absentPolicy.allowed).not.toContain(tool);
+      expect(absentPolicy.default).not.toContain(tool);
+    }
+    // Collaborative editing stays available.
+    expect(absentPolicy.default).toContain("editable_artifact_apply");
+    // A stored selection naming export loses it at execution.
+    expect(
+      allowedFirstPartyMcpToolsForSession(absent, [
+        "editable_artifact_get",
+        "editable_artifact_export",
+      ]),
+    ).toEqual(["editable_artifact_get"]);
+
+    const deployed = withEnv({ OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED: "true" }, () =>
+      getSettings(),
+    );
+    const deployedPolicy = resolveFirstPartyMcpToolPolicy(deployed);
+    for (const tool of exportTools) {
+      expect(deployedPolicy.allowed).toContain(tool);
+      expect(deployedPolicy.default).toContain(tool);
+    }
+  });
+
   test("rejects defaults outside the deployment first-party tool ceiling", () => {
     expect(() =>
       withEnv(
@@ -1887,7 +1901,7 @@ describe("sandbox preparation profiles", () => {
     );
   });
 
-  test("ignores pre-OpenGeni environment variable names", () => {
+  test("ignores pre-Opengeni environment variable names", () => {
     withEnv(
       {
         INFRA_AGENT_SERVICE_NAME: "legacy-service",
@@ -2188,6 +2202,47 @@ describe("workspace environments encryption key", () => {
         () => getSettings(),
       ).environmentsEncryptionKey,
     ).toBeUndefined();
+  });
+});
+
+describe("managed email delivery", () => {
+  const managedEnv = {
+    OPENGENI_ENVIRONMENT: "production",
+    OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+    OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+    OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+    OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+  };
+
+  test("defaults to Resend and requires its key outside local/test", () => {
+    expect(() => withEnv(managedEnv, () => getSettings())).toThrow(
+      "OPENGENI_RESEND_API_KEY is required for managed mode outside local/test",
+    );
+    const settings = withEnv({ ...managedEnv, OPENGENI_RESEND_API_KEY: "re_test" }, () =>
+      getSettings(),
+    );
+    expect(settings.managedEmailDelivery).toBe("resend");
+  });
+
+  test("disabled delivery boots without a provider key and refuses one", () => {
+    const settings = withEnv({ ...managedEnv, OPENGENI_MANAGED_EMAIL_DELIVERY: "disabled" }, () =>
+      getSettings(),
+    );
+    expect(settings.managedEmailDelivery).toBe("disabled");
+    expect(settings.resendApiKey).toBeUndefined();
+    expect(() =>
+      withEnv(
+        {
+          ...managedEnv,
+          OPENGENI_MANAGED_EMAIL_DELIVERY: "disabled",
+          OPENGENI_RESEND_API_KEY: "re_test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_RESEND_API_KEY must be unset when OPENGENI_MANAGED_EMAIL_DELIVERY=disabled",
+    );
   });
 });
 
@@ -2994,4 +3049,22 @@ test("existing pause-enabled sessions gain resume without changing unrelated sel
     "goal_pause",
     "goal_resume",
   ]);
+});
+
+describe("managed auth email verification switch", () => {
+  test("keeps the environment default unless explicitly overridden", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthRequireEmailVerification).toBeUndefined();
+    for (const [value, expected] of [
+      ["true", true],
+      ["false", false],
+    ] as const) {
+      expect(
+        withEnv({ OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION: value }, () => getSettings())
+          .managedAuthRequireEmailVerification,
+      ).toBe(expected);
+    }
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION: "invalid" }, () => getSettings()),
+    ).toThrow();
+  });
 });

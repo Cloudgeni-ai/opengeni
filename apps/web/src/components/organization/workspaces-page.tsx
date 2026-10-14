@@ -39,6 +39,7 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { Toolbar, ToolbarSearch, ToolbarSummary } from "@/components/ui/toolbar";
 import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import type {
   OrganizationMember,
@@ -53,6 +54,7 @@ import {
 } from "./organization-directory";
 import { useOrganizationNavigation, type OrganizationNavigation } from "./organization-nav";
 import {
+  filterWorkspacesByName,
   initialsOf,
   joinNames,
   memberName,
@@ -60,6 +62,7 @@ import {
   workspaceMemberName,
   workspaceRoleLabel,
   workspaceRoleOptions,
+  WORKSPACE_SEARCH_THRESHOLD,
 } from "./organization-people-model";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import type { ReturnTo } from "@/lib/return-to";
@@ -231,6 +234,7 @@ function WorkspacesList({
   nav: OrganizationNavigation;
 }) {
   const [joining, setJoining] = useState<OrganizationWorkspaceAccess | null>(null);
+  const [query, setQuery] = useState("");
   const overview = directory.overview;
   if (overview.error && !overview.value) {
     return (
@@ -268,29 +272,59 @@ function WorkspacesList({
       />
     );
   }
+  const searchable = workspaces.length > WORKSPACE_SEARCH_THRESHOLD;
+  const shown = searchable ? filterWorkspacesByName(workspaces, query) : workspaces;
+  const filtered = searchable && query.trim().length > 0;
   return (
     <>
-      <RowList
-        columns={COLUMNS}
-        label={`Workspaces in ${overview.value.organization.name}`}
-        nameLabel="Workspace"
-        flush
-      >
-        {workspaces.map((workspace) => (
-          <ListRow
-            key={workspace.id}
-            leading={<LogoTile name={workspace.name} />}
-            title={workspace.name}
-            cells={{
-              people: <PeopleStack members={workspace.members} />,
-              access: <YourAccess workspace={workspace} onJoin={() => setJoining(workspace)} />,
-              created: <RelativeTime date={workspace.createdAt} format="date" />,
-            }}
-            indicator="open"
-            onOpen={() => nav.openWorkspace(workspace.id)}
-          />
-        ))}
-      </RowList>
+      {searchable ? (
+        <div className="flex min-w-0 flex-col gap-4 pb-4">
+          <Toolbar>
+            <ToolbarSearch
+              value={query}
+              onValueChange={setQuery}
+              placeholder="Search workspaces"
+              aria-label="Search workspaces"
+            />
+          </Toolbar>
+          {filtered ? (
+            <ToolbarSummary>
+              {shown.length} of {workspaces.length} workspaces
+            </ToolbarSummary>
+          ) : null}
+        </div>
+      ) : null}
+      {filtered && shown.length === 0 ? (
+        <EmptyState
+          variant="page"
+          icon={<SquareStackIcon />}
+          title="No workspaces match"
+          description="Try another name."
+          className="pt-8 pb-6"
+        />
+      ) : (
+        <RowList
+          columns={COLUMNS}
+          label={`Workspaces in ${overview.value.organization.name}`}
+          nameLabel="Workspace"
+          flush
+        >
+          {shown.map((workspace) => (
+            <ListRow
+              key={workspace.id}
+              leading={<LogoTile name={workspace.name} />}
+              title={workspace.name}
+              cells={{
+                people: <PeopleStack members={workspace.members} />,
+                access: <YourAccess workspace={workspace} onJoin={() => setJoining(workspace)} />,
+                created: <RelativeTime date={workspace.createdAt} format="date" />,
+              }}
+              indicator="open"
+              onOpen={() => nav.openWorkspace(workspace.id)}
+            />
+          ))}
+        </RowList>
+      )}
       {joining ? (
         <JoinDialog
           workspace={joining}
@@ -325,6 +359,8 @@ function accessMembers(
       initials: initialsOf(workspaceMemberName(member, you)),
       kind: service ? "service" : "person",
       isYou: member.subjectId === directory.identity.subjectId,
+      // Organization owners and admins set their own access here too.
+      managesOwnAccess: !directory.singleUser,
       tag: directory.singleUser ? "Owner" : undefined,
       // Single-user mode: the local administrator has every permission.
       role: directory.singleUser ? "admin" : member.role,
@@ -422,7 +458,10 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
-  const back = { label: "Workspaces", onClick: () => nav.openSection("workspaces") };
+  const back = {
+    label: "Workspaces",
+    onClick: () => nav.openSection("workspaces"),
+  };
   const overview = directory.overview.value;
   const workspace = overview?.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
 
@@ -491,7 +530,10 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
     const organizationMembershipId = current.organizationMembershipId;
     const before = current.role;
     try {
-      await directory.removeWorkspaceAccess({ workspaceId: workspace.id, member: current });
+      await directory.removeWorkspaceAccess({
+        workspaceId: workspace.id,
+        member: current,
+      });
     } catch (error) {
       toast.error(`Couldn't remove ${member.name}`, {
         description: userErrorText(error),

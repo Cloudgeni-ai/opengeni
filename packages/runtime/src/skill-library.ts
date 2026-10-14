@@ -256,7 +256,7 @@ const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
     sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
     sourceUrl:
       "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/azure-verified-modules",
-    provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+    provenance: "Vendored from hashicorp/agent-skills; reviewed Opengeni curated entry.",
     license: "MPL-2.0",
     documentationUrl: "https://azure.github.io/Azure-Verified-Modules/",
     compatibility: Object.freeze({

@@ -225,8 +225,8 @@ export function useSessionEvents(
   // new stream identity cannot expose the previous session's event log.
   const [stateStreamKey, setStateStreamKey] = useState(streamKey);
 
-  // Reopening SSE after a prepend must not cancel the next history page.
-  // Navigation belongs to the session/client lifetime, not the transport.
+  // Navigation belongs to the session/client lifetime, not the transport: an
+  // SSE reconnect must never cancel an in-flight history page.
   useEffect(() => {
     navigationGenerationRef.current += 1;
     setNewerError(null);
@@ -621,9 +621,6 @@ export function useSessionEvents(
           }
           const current = eventWindowRef.current;
           assertPrependOrder(current.events, window.events);
-          // Freeze the live iterator before replacing its in-memory window. Rows
-          // pending in the aborted iterator were never cursor-committed and will
-          // be replayed from the retained high-water mark below.
           const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
             direction: "oldest",
           });
@@ -633,7 +630,6 @@ export function useSessionEvents(
             markTailPreserved();
             return false;
           }
-          streamAbortRef.current?.abort();
           const status = observeSessionStatus(window.events, sessionStatusRef);
           const retained = {
             ...next,
@@ -645,21 +641,28 @@ export function useSessionEvents(
           }
           const retainedNewest = maxResumeSequenceOrNull(retained.events);
           const previousNewest = maxResumeSequenceOrNull(current.events);
+          const evictedLiveTail =
+            previousNewest !== null && retainedNewest !== null && retainedNewest < previousNewest;
+          if (evictedLiveTail && viewModeRef.current === "live") {
+            // The prepend leaves the live tip. Freeze the iterator before the
+            // window is replaced so a late flush cannot append live rows onto
+            // (and newest-bound away) the history the reader just requested.
+            streamAbortRef.current?.abort();
+          }
           eventWindowRef.current = retained;
           markCommitted();
           oldestSequenceRef.current = retainedOldest;
           newestSequenceRef.current = retainedNewest;
-          streamResumeSequenceRef.current = maxResumeSequence(retained.events);
+          if (evictedLiveTail) {
+            streamResumeSequenceRef.current = maxResumeSequence(retained.events);
+          }
           // Oldest-directed eviction can discard newer in-memory rows. That fact
           // keeps windowTruncated true, but it does not imply older durable rows
           // exist; only the backward DB page can answer hasOlder truthfully.
           const olderStillAvailable = window.hasOlder;
           hasOlderRef.current = olderStillAvailable;
-          const evictedLiveTail =
-            previousNewest !== null && retainedNewest !== null && retainedNewest < previousNewest;
           let newer: boolean | null = null;
           let enterHistory = false;
-          let reconnectLive = false;
           if (viewModeRef.current === "history" || evictedLiveTail) {
             const highWater = lastSequenceRef.current;
             newer = retainedNewest !== null && (retainedNewest < highWater || retained.truncated);
@@ -672,11 +675,13 @@ export function useSessionEvents(
               viewModeRef.current = "history";
               enterHistory = true;
             }
-          } else {
-            // The retained merge is still one contiguous live suffix. Restart
-            // SSE from its cursor so events queued during the fetch are replayed.
-            reconnectLive = true;
           }
+          // Otherwise the merge is still one contiguous live suffix and the open
+          // SSE iterator keeps appending to it: every flush reads
+          // eventWindowRef, so rows delivered during or after this fetch land
+          // once, in order, on the prepended window. Reopening the stream here
+          // would flash a connecting state and re-run session reconciliation on
+          // every scroll-up for no data benefit.
           loadingOlderRef.current = false;
           startTransition(() => {
             if (status !== undefined) {
@@ -689,8 +694,6 @@ export function useSessionEvents(
             }
             if (enterHistory) {
               setViewMode("history");
-            } else if (reconnectLive) {
-              setStreamEpoch((epoch) => epoch + 1);
             }
             setLoadingOlder(false);
           });

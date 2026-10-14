@@ -1,11 +1,12 @@
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,
-  BoxIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   EyeIcon,
+  GaugeIcon,
   GitBranchIcon,
+  LockKeyholeIcon,
   PaperclipIcon,
   PlugIcon,
   ServerIcon,
@@ -32,9 +33,6 @@ import {
 } from "@/components/ui/composer-menu";
 import { MENU_BACK_BUTTON_CLASS, MENU_CHEVRON_CLASS } from "@/components/ui/menu-styles";
 const loadAgentLearning = () => import("@/components/knowledge/agent-learning-settings");
-const AgentLearningSettingsEditor = lazyComposerPanel(() =>
-  loadAgentLearning().then((module) => module.AgentLearningSettingsEditor),
-);
 const AgentLearningDraftEditor = lazyComposerPanel(() =>
   loadAgentLearning().then((module) => module.AgentLearningDraftEditor),
 );
@@ -62,10 +60,11 @@ export type Panel =
   | "tools"
   | "repos"
   | "voice"
-  | "variables"
+  | "secrets"
   | "settings"
   | "runs-on"
-  | "visibility";
+  | "visibility"
+  | "usage-limit";
 
 /** A per-session setting shown as a "+" row with its current value, opening a drill-in. */
 export type ComposerSettingPanel = {
@@ -98,11 +97,16 @@ export type ComposerPlusProps = {
     value: import("@opengeni/sdk").AgentLearningOverrides;
     onChange: (value: import("@opengeni/sdk").AgentLearningOverrides) => void;
   };
+  /**
+   * An existing chat: "Chat settings" opens the chat's Agent tab, the one
+   * place for its identity, capabilities and Agent learning.
+   */
   chatSettings?: {
     workspaceId: string;
     sessionId: string;
     scope: "workspace" | "personal";
     canEdit: boolean;
+    onOpen: () => void;
   };
   /**
    * Agent settings are on for this server: "+" shows Capabilities (with the
@@ -126,14 +130,14 @@ export type ComposerPlusProps = {
     /** Panel element; receives `leading` (back control) via clone. */
     panel: ReactElement<{ leading?: ReactNode }>;
   };
-  variableSets?: {
-    selectedCount: number;
-    panel: ReactElement<{ leading?: ReactNode; onClose?: () => void }>;
-  };
+  /** Which vaults agents in this chat may use, and the task's own items. */
+  secrets?: ComposerSettingPanel;
   /** Where the chat runs: managed sandbox and environment, or a connected machine. */
   runsOn?: ComposerSettingPanel;
   /** Who can see the chat, when the organization offers a choice. */
   visibility?: ComposerSettingPanel;
+  /** A new chat's usage limit, when the server offers limits. */
+  usageLimit?: ComposerSettingPanel;
   /** When set, Voice model appears under + (bar keeps a start-only control). */
   voiceModel?: {
     selectedLabel: string;
@@ -166,8 +170,9 @@ export function ComposerMobilePlusPanel(
     });
     return () => cancelAnimationFrame(frame);
   }, [panel]);
-  // Chat settings opens without a load: fetch its editor while the menu is open.
-  // A composer rendered outside the app (a preview harness) has no client.
+  // Chat settings opens without a load: fetch the editor (and, for an existing
+  // chat, its settings for the Agent tab) while the menu is open. A composer
+  // rendered outside the app (a preview harness) has no client.
   const client = useOptionalAppContext()?.client ?? null;
   const chatSettings = props.chatSettings;
   const draftChatSettings = Boolean(props.draftChatSettings);
@@ -298,23 +303,17 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
-          {props.variableSets ? (
-            <DropdownMenuItem
-              data-composer-panel="variables"
-              className="cursor-pointer"
+          {props.secrets ? (
+            <SettingRowItem
+              panel="secrets"
+              icon={<LockKeyholeIcon className="size-4" />}
+              label="Secrets"
+              setting={props.secrets}
               disabled={props.disabled}
-              onSelect={(event) => {
-                event.preventDefault();
-                setPanel("variables");
-              }}
-            >
-              <BoxIcon className="size-4" />
-              Variable sets
-              <DropdownMenuMeta>{props.variableSets.selectedCount || ""}</DropdownMenuMeta>
-              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
-            </DropdownMenuItem>
+              onOpen={() => setPanel("secrets")}
+            />
           ) : null}
-          {props.runsOn || props.visibility ? <DropdownMenuSeparator /> : null}
+          {props.runsOn || props.visibility || props.usageLimit ? <DropdownMenuSeparator /> : null}
           {props.runsOn ? (
             <SettingRowItem
               icon={<ServerIcon className="size-4" />}
@@ -331,6 +330,16 @@ export function ComposerMobilePlusPanel(
               setting={props.visibility}
               disabled={props.disabled}
               onOpen={() => setPanel("visibility")}
+            />
+          ) : null}
+          {props.usageLimit ? (
+            <SettingRowItem
+              panel="usage-limit"
+              icon={<GaugeIcon className="size-4" />}
+              label="Usage limit"
+              setting={props.usageLimit}
+              disabled={props.disabled}
+              onOpen={() => setPanel("usage-limit")}
             />
           ) : null}
           {voiceModel ? (
@@ -351,7 +360,21 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
-          {props.chatSettings || props.draftChatSettings ? (
+          {props.chatSettings ? (
+            // One place per chat: its Agent tab, not a second copy here.
+            <DropdownMenuItem
+              data-composer-panel="settings"
+              className="cursor-pointer"
+              onSelect={() => {
+                setOpen(false);
+                props.chatSettings?.onOpen();
+              }}
+            >
+              <SettingsIcon className="size-4" />
+              Chat settings
+              <DropdownMenuMeta>Agent tab</DropdownMenuMeta>
+            </DropdownMenuItem>
+          ) : props.draftChatSettings ? (
             <DropdownMenuItem
               data-composer-panel="settings"
               className="cursor-pointer"
@@ -389,13 +412,10 @@ export function ComposerMobilePlusPanel(
         />
       ) : panel === "repos" && repositories ? (
         withLeading(repositories.panel, backButton)
-      ) : panel === "variables" && props.variableSets ? (
-        cloneElement(props.variableSets.panel, {
+      ) : panel === "secrets" && props.secrets ? (
+        cloneElement(props.secrets.panel, {
           leading: backButton,
-          onClose: () => {
-            setOpen(false);
-            setPanel("root");
-          },
+          presentation: dialogOpen ? "dialog" : "menu",
         })
       ) : panel === "runs-on" && props.runsOn ? (
         cloneElement(props.runsOn.panel, {
@@ -407,34 +427,29 @@ export function ComposerMobilePlusPanel(
           leading: backButton,
           presentation: dialogOpen ? "dialog" : "menu",
         })
+      ) : panel === "usage-limit" && props.usageLimit ? (
+        cloneElement(props.usageLimit.panel, {
+          leading: backButton,
+          presentation: dialogOpen ? "dialog" : "menu",
+        })
       ) : panel === "voice" && voiceModel ? (
         withLeading(voiceModel.panel, backButton)
-      ) : panel === "settings" ? (
+      ) : panel === "settings" && props.draftChatSettings ? (
         <>
           <ComposerMenuHeader title="Chat settings" leading={backButton} />
           <div className="min-h-0 overflow-y-auto overscroll-contain px-2.5 pb-1.5">
             <p className="mb-3 text-xs text-fg-muted">
-              Choose what agents can add or update in this chat.
+              Agent learning for this chat: whether agents' changes to knowledge, instructions and
+              skills apply right away or wait for your OK.
             </p>
             <Suspense
               fallback={<ComposerMenuRowsSkeleton rows={3} size="tile" label="Loading settings" />}
             >
-              {props.chatSettings ? (
-                <AgentLearningSettingsEditor
-                  compact
-                  key={props.chatSettings.sessionId}
-                  workspaceId={props.chatSettings.workspaceId}
-                  scope={props.chatSettings.scope}
-                  source={{ kind: "chat", id: props.chatSettings.sessionId }}
-                  canEdit={props.chatSettings.canEdit}
-                />
-              ) : props.draftChatSettings ? (
-                <AgentLearningDraftEditor
-                  compact
-                  {...props.draftChatSettings}
-                  disabled={props.disabled}
-                />
-              ) : null}
+              <AgentLearningDraftEditor
+                compact
+                {...props.draftChatSettings}
+                disabled={props.disabled}
+              />
             </Suspense>
           </div>
         </>
@@ -450,10 +465,11 @@ export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
   tools: "Connectors",
   repos: "Repositories",
   voice: "Voice model",
-  variables: "Variable sets",
+  secrets: "Secrets",
   settings: "Chat settings",
   "runs-on": "Runs on",
   visibility: "Who can see this chat",
+  "usage-limit": "Usage limit",
 };
 
 function ComposerPanelContent(props: {
@@ -506,6 +522,8 @@ function ComposerPanelContent(props: {
 }
 
 function SettingRowItem(props: {
+  /** Focus returns to this row when its drill-in goes back. */
+  panel?: Panel;
   icon: ReactNode;
   label: string;
   setting: ComposerSettingPanel;
@@ -514,6 +532,7 @@ function SettingRowItem(props: {
 }) {
   return (
     <DropdownMenuItem
+      data-composer-panel={props.panel}
       className="cursor-pointer"
       disabled={props.disabled || props.setting.disabled}
       onSelect={(event) => {

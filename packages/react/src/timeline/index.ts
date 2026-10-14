@@ -42,8 +42,10 @@ export type {
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
+  MessageSender,
   KnowledgeItem,
   NoticeItem,
+  SessionUsageLimitStop,
   ReasoningItem,
   SandboxItem,
   StartupPhase,
@@ -61,9 +63,20 @@ export type {
 
 // renderer registry
 export { createToolRegistry, rawTypeOf } from "./registry";
+export {
+  createSessionRetainedScreenshotLoader,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
+} from "./retained-loaders";
+export type {
+  RetainedArtifactLoaderClient,
+  RetainedScreenshotLoaderClient,
+  RetainedVideoLoaderClient,
+} from "./retained-loaders";
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
   RetainedScreenshotLoader,
   VideoArtifactPlaybackLoader,
   ToolRegistry,
@@ -93,8 +106,17 @@ export {
 export type { ActivityDisclosureProps, DisclosureChip } from "./shared";
 
 // screenshot lightbox
-export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot-lightbox";
-export type { LightboxControlLabels } from "./screenshot-lightbox";
+export {
+  LightboxProvider,
+  useLightbox,
+  useLightboxGalleryItem,
+  useLightboxOptional,
+} from "./screenshot-lightbox";
+export type {
+  LightboxControlLabels,
+  LightboxGalleryEntry,
+  LightboxGalleryImage,
+} from "./screenshot-lightbox";
 
 // disclosure defaults (opt-in initial-open seed; for screenshot/test instrumentation)
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";

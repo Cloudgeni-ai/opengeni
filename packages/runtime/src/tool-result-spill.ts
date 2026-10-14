@@ -56,8 +56,9 @@ export function modelToolResultFits(result: AttemptToolResultValue): boolean {
  * exact result. The model receives its model-visible projection (compact
  * Knowledge discovery output for the exact tool identity) when that fits in
  * 1 MiB; otherwise the exact result is spilled to a file, as for any tool.
- * MCP-backed tools are already bounded on their exact result by the MCP
- * transport cap before this seam runs.
+ * MCP-backed exact results are bounded only by the 8 MiB MCP transport cap
+ * before this seam runs, so a large MCP read spills here like any other tool
+ * instead of failing after the provider already returned it.
  */
 export async function projectAttemptToolResultForCaller(
   result: AttemptToolResultValue,

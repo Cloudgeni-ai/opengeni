@@ -1,22 +1,21 @@
-import { createHash } from "node:crypto";
 import {
   BrowserActionCommand,
   BrowserActionReceipt,
+  INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserProtectedAuthFillReceipt,
-  BrowserProtectedAuthObservation,
   BrowserTarget,
+  ComputerNativeCommand,
+  ComputerNativeReceipt,
+  ComputerOperationCommand,
+  ComputerOperationReceipt,
+  ComputerOperationObservation,
+  type ComputerNativeResult,
   ComputerActionCommand,
-  ComputerActionReceipt,
   ComputerObservation,
   ComputerTarget,
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserActionReceipt as BrowserActionReceiptValue,
   type BrowserObservation as BrowserObservationValue,
-  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
-  type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
-  type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
   type ComputerActionCommand as ComputerActionCommandValue,
   type ComputerActionReceipt as ComputerActionReceiptValue,
@@ -29,7 +28,9 @@ import {
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   recoverInteractionReceipt,
+  secretFreeCommandDigest,
   type InteractionControllerErrorCode,
+  type InteractionDispatchTrace,
   type InteractionOperationJournalRecord,
 } from "./controller-core";
 
@@ -37,14 +38,20 @@ export {
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
+  secretFreeCommandDigest,
   type InteractionControllerErrorCode,
+  type InteractionDispatchTrace,
 };
 
 export type BrowserInteractionDriver = {
   target(targetId: string): Promise<BrowserTargetValue | null>;
   observe(targetId: string): Promise<BrowserObservationValue>;
   validate?(command: BrowserActionCommandValue, target: BrowserTargetValue): Promise<void> | void;
-  dispatch(command: BrowserActionCommandValue): Promise<BrowserObservationValue | null>;
+  /** Drivers that resolve locators record each resolved element on `trace`. */
+  dispatch(
+    command: BrowserActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<BrowserObservationValue | null>;
 };
 
 export type BrowserInteractionAuthority = {
@@ -88,6 +95,7 @@ export class BrowserInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "browser",
         parseCommand: (value) => BrowserActionCommand.parse(value),
@@ -162,6 +170,10 @@ export class BrowserInteractionController {
             error: input.error,
           });
         },
+        maxDispatchTraceItems: INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
+        attachDispatchTrace(receipt, items) {
+          return BrowserActionReceipt.parse({ ...receipt, targets: items });
+        },
         recoverReceipt(receipt, settledAt) {
           if (
             receipt.browserSessionId !== browserSessionId ||
@@ -195,6 +207,10 @@ export class BrowserInteractionController {
     return this.core.journalSnapshot();
   }
 
+  isIdle(): boolean {
+    return this.core.isIdle();
+  }
+
   waitForIdle(): Promise<void> {
     return this.core.waitForIdle();
   }
@@ -213,194 +229,8 @@ export function recoverBrowserOperationJournalRecord(
   };
 }
 
-export type BrowserProtectedAuthDriver = {
-  target(targetId: string): Promise<BrowserTargetValue | null>;
-  observe(targetId: string): Promise<BrowserProtectedAuthObservationValue>;
-  validate?(
-    command: BrowserProtectedAuthFillCommandValue,
-    target: BrowserTargetValue,
-  ): Promise<void> | void;
-  dispatch(
-    command: BrowserProtectedAuthFillCommandValue,
-  ): Promise<BrowserProtectedAuthObservationValue>;
-};
-
-export type BrowserProtectedAuthAuthority = {
-  authorizeDispatch(command: BrowserProtectedAuthFillCommandValue): Promise<void> | void;
-};
-
-export type BrowserProtectedAuthOperationJournalRecord =
-  InteractionOperationJournalRecord<BrowserProtectedAuthFillReceiptValue>;
-
-export type BrowserProtectedAuthControllerOptions = {
-  browserSessionId: string;
-  controllerGeneration: string;
-  driver: BrowserProtectedAuthDriver;
-  authority?: BrowserProtectedAuthAuthority;
-  maxJournalEntries?: number;
-  now?: () => Date;
-  initialJournal?: Iterable<BrowserProtectedAuthOperationJournalRecord>;
-  onJournalRecord?: (record: BrowserProtectedAuthOperationJournalRecord) => Promise<void> | void;
-  /** Reads the same durable authority as onJournalRecord and initialJournal. */
-  loadJournalRecord?: (operationId: string) => BrowserProtectedAuthOperationJournalRecord | null;
-};
-
-/** Secret-bearing commands are admitted only through this controller-private
- * authority. Its durable digest binds all semantics plus credential version,
- * but deliberately excludes ephemeral password/TOTP value bytes. */
-export class BrowserProtectedAuthController {
-  private readonly core: InteractionControllerCore<
-    BrowserProtectedAuthFillCommandValue,
-    BrowserTargetValue,
-    BrowserProtectedAuthObservationValue,
-    BrowserProtectedAuthFillReceiptValue
-  >;
-
-  constructor(options: BrowserProtectedAuthControllerOptions) {
-    const { browserSessionId, controllerGeneration } = options;
-    this.core = new InteractionControllerCore({
-      driver: options.driver,
-      ...(options.authority ? { authority: options.authority } : {}),
-      ...(options.maxJournalEntries !== undefined
-        ? { maxJournalEntries: options.maxJournalEntries }
-        : {}),
-      ...(options.now ? { now: options.now } : {}),
-      ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
-      ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
-      ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
-      commandDigest: protectedAuthCommandDigest,
-      adapter: {
-        resourceLabel: "browser protected fill",
-        parseCommand: (value) => BrowserProtectedAuthFillCommand.parse(value),
-        parseTarget: (value) => BrowserTarget.parse(value),
-        parseObservation: (value) => BrowserProtectedAuthObservation.parse(value),
-        parseReceipt: (value) => BrowserProtectedAuthFillReceipt.parse(value),
-        assertCommandAuthority(command) {
-          if (command.browserSessionId !== browserSessionId) {
-            throw new InteractionControllerError(
-              "resource_not_found",
-              "protected fill targets another browser session",
-            );
-          }
-          if (command.controllerGeneration !== controllerGeneration) {
-            throw new InteractionControllerError(
-              "controller_stale",
-              "protected fill targets a stale browser controller",
-            );
-          }
-        },
-        assertTargetAuthority(target) {
-          if (
-            target.browserSessionId !== browserSessionId ||
-            target.controllerGeneration !== controllerGeneration
-          ) {
-            throw new InteractionControllerError(
-              "controller_stale",
-              "protected-fill target belongs to a stale browser controller",
-            );
-          }
-        },
-        assertExpectedGenerations(command, target) {
-          if (command.expectedTargetGeneration !== target.targetGeneration) {
-            throw new InteractionControllerError(
-              "target_stale",
-              "browser target changed before protected fill",
-              true,
-            );
-          }
-          if (command.expectedDocumentGeneration !== target.documentGeneration) {
-            throw new InteractionControllerError(
-              "document_stale",
-              "browser document changed before protected fill",
-              true,
-            );
-          }
-        },
-        assertObservationAuthority(observation, targetId) {
-          if (
-            observation.target.id !== targetId ||
-            observation.target.browserSessionId !== browserSessionId ||
-            observation.target.controllerGeneration !== controllerGeneration
-          ) {
-            throw new InteractionControllerError(
-              "driver_failed",
-              "protected-fill driver returned a result outside controller authority",
-            );
-          }
-        },
-        makeReceipt(input) {
-          return BrowserProtectedAuthFillReceipt.parse({
-            protocolVersion: 1,
-            operationId: input.command.operationId,
-            browserSessionId,
-            controllerGeneration,
-            targetId: input.command.targetId,
-            state: input.state,
-            dispatchedAt: input.dispatchedAt,
-            settledAt: input.settledAt,
-            observation: input.observation,
-            error: input.error,
-          });
-        },
-        recoverReceipt(receipt, settledAt) {
-          if (
-            receipt.browserSessionId !== browserSessionId ||
-            receipt.controllerGeneration !== controllerGeneration
-          ) {
-            throw new Error(
-              `restored protected-fill operation ${receipt.operationId} is outside controller authority`,
-            );
-          }
-          return recoverInteractionReceipt(receipt, settledAt, "browser protected fill", (value) =>
-            BrowserProtectedAuthFillReceipt.parse(value),
-          );
-        },
-      },
-    });
-  }
-
-  run(
-    command: BrowserProtectedAuthFillCommandValue,
-  ): Promise<BrowserProtectedAuthFillReceiptValue> {
-    return this.core.run(command);
-  }
-
-  receipt(operationId: string): BrowserProtectedAuthFillReceiptValue | null {
-    return this.core.receipt(operationId);
-  }
-
-  journalSnapshot(): BrowserProtectedAuthOperationJournalRecord[] {
-    return this.core.journalSnapshot();
-  }
-
-  waitForIdle(): Promise<void> {
-    return this.core.waitForIdle();
-  }
-}
-
-export function recoverBrowserProtectedAuthOperationJournalRecord(
-  record: BrowserProtectedAuthOperationJournalRecord,
-  settledAt: string,
-): BrowserProtectedAuthOperationJournalRecord {
-  const receipt = BrowserProtectedAuthFillReceipt.parse(record.receipt);
-  return {
-    ...record,
-    receipt: recoverInteractionReceipt(receipt, settledAt, "browser protected fill", (value) =>
-      BrowserProtectedAuthFillReceipt.parse(value),
-    ),
-  };
-}
-
-function protectedAuthCommandDigest(command: BrowserProtectedAuthFillCommandValue): string {
-  const { fields, ...metadata } = command;
-  const secretFree = {
-    ...metadata,
-    fields: fields.map(({ value: _value, ...field }) => field),
-  };
-  return createHash("sha256").update(canonicalJson(secretFree), "utf8").digest("hex");
-}
-
-function canonicalJson(value: unknown): string {
+/** Deterministic JSON with sorted object keys and undefined entries dropped. */
+export function canonicalJson(value: unknown): string {
   return JSON.stringify(canonicalJsonValue(value));
 }
 
@@ -422,14 +252,16 @@ export type ComputerInteractionDriver = {
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
   dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue | null>;
+  validateNative?(command: ComputerNativeCommand): Promise<void>;
+  dispatchNative?(command: ComputerNativeCommand): Promise<ComputerNativeResult>;
 };
 
 export type ComputerInteractionAuthority = {
-  authorizeDispatch(command: ComputerActionCommandValue): Promise<void> | void;
+  authorizeDispatch(command: ComputerOperationCommand): Promise<void> | void;
 };
 
 export type ComputerOperationJournalRecord =
-  InteractionOperationJournalRecord<ComputerActionReceiptValue>;
+  InteractionOperationJournalRecord<ComputerOperationReceipt>;
 
 export type ComputerInteractionControllerOptions = {
   computerSessionId: string;
@@ -447,18 +279,78 @@ export type ComputerInteractionControllerOptions = {
 /** Placement-resident ComputerSession mutation authority. Linux AT-SPI/X11,
  * macOS AX/ScreenCaptureKit, and later UIA adapters share this exact core. */
 export class ComputerInteractionController {
+  // Ephemeral causal metadata, never reconstructed from a terminal receipt.
+  // Native input additionally verifies and consumes its exact delivery proof.
+  private readonly firstClicks = new Map<string, ComputerActionCommandValue>();
   private readonly core: InteractionControllerCore<
-    ComputerActionCommandValue,
+    ComputerOperationCommand,
     ComputerTargetValue,
-    ComputerObservationValue,
-    ComputerActionReceiptValue
+    ComputerOperationObservation,
+    ComputerOperationReceipt
   >;
 
   constructor(options: ComputerInteractionControllerOptions) {
     const { computerSessionId, controllerGeneration } = options;
     this.core = new InteractionControllerCore({
-      driver: options.driver,
-      ...(options.authority ? { authority: options.authority } : {}),
+      driver: {
+        target: (id) => options.driver.target(id),
+        observe: (id) => options.driver.observe(id),
+        validate: (command, target) => {
+          if (command.targetId !== null) return options.driver.validate?.(command, target);
+        },
+        validateSession: async (command) => {
+          if (
+            command.targetId !== null ||
+            !options.driver.validateNative ||
+            !options.driver.dispatchNative
+          )
+            throw new InteractionControllerError(
+              "unsupported",
+              "Native CUA calls require a CUA ComputerSession",
+            );
+          await options.driver.validateNative(command);
+        },
+        dispatch: (command) =>
+          command.targetId === null
+            ? options.driver.dispatchNative!(command)
+            : options.driver.dispatch(command),
+      },
+      authority: {
+        authorizeDispatch: async (command) => {
+          await options.authority?.authorizeDispatch(command);
+          if (command.targetId === null) return;
+          if (
+            command.action.type === "pointer" &&
+            command.action.action === "click" &&
+            (command.action.clickCount ?? 1) === 1
+          ) {
+            // Only a journal-admitted command reaches dispatch authority.
+            // Conflicting retries cannot replace an earlier operation's kind.
+            this.firstClicks.set(command.operationId, ComputerActionCommand.parse(command));
+            while (this.firstClicks.size > 512) {
+              this.firstClicks.delete(this.firstClicks.keys().next().value!);
+            }
+          }
+          if (command.action.type !== "pointer" || command.action.clickCount !== 2) return;
+          const firstId = command.action.continuationOfOperationId;
+          const first = firstId ? this.firstClicks.get(firstId) : null;
+          const receipt = firstId ? this.core.receipt(firstId) : null;
+          if (
+            !first ||
+            receipt?.state !== "completed" ||
+            first.computerSessionId !== command.computerSessionId ||
+            first.controllerGeneration !== command.controllerGeneration ||
+            first.targetId !== command.targetId ||
+            first.expectedTargetGeneration !== command.expectedTargetGeneration ||
+            JSON.stringify(first.actor) !== JSON.stringify(command.actor)
+          ) {
+            throw new InteractionControllerError(
+              "invalid_action",
+              "click continuation requires its exact completed first click",
+            );
+          }
+        },
+      },
       ...(options.maxJournalEntries !== undefined
         ? { maxJournalEntries: options.maxJournalEntries }
         : {}),
@@ -466,12 +358,13 @@ export class ComputerInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "computer",
-        parseCommand: (value) => ComputerActionCommand.parse(value),
+        parseCommand: (value) => ComputerOperationCommand.parse(value),
         parseTarget: (value) => ComputerTarget.parse(value),
-        parseObservation: (value) => ComputerObservation.parse(value),
-        parseReceipt: (value) => ComputerActionReceipt.parse(value),
+        parseObservation: (value) => ComputerOperationObservation.parse(value),
+        parseReceipt: (value) => ComputerOperationReceipt.parse(value),
         assertCommandAuthority(command) {
           if (command.computerSessionId !== computerSessionId) {
             throw new InteractionControllerError(
@@ -498,6 +391,7 @@ export class ComputerInteractionController {
           }
         },
         assertExpectedGenerations(command, target) {
+          if (command.targetId === null) return;
           if (command.expectedTargetGeneration !== target.targetGeneration) {
             throw new InteractionControllerError(
               "target_stale",
@@ -507,6 +401,18 @@ export class ComputerInteractionController {
           }
         },
         assertObservationAuthority(observation, targetId) {
+          if (observation.target === null) {
+            if (
+              targetId !== null ||
+              observation.computerSessionId !== computerSessionId ||
+              observation.controllerGeneration !== controllerGeneration
+            )
+              throw new InteractionControllerError(
+                "driver_failed",
+                "native result belongs to another computer controller",
+              );
+            return;
+          }
           if (
             observation.computerSessionId !== computerSessionId ||
             observation.target.id !== targetId ||
@@ -519,8 +425,13 @@ export class ComputerInteractionController {
             );
           }
         },
+        outcome(observation) {
+          return observation.target === null
+            ? { state: observation.outcome, error: observation.error }
+            : { state: "completed", error: null };
+        },
         makeReceipt(input) {
-          return ComputerActionReceipt.parse({
+          return ComputerOperationReceipt.parse({
             protocolVersion: 1,
             operationId: input.command.operationId,
             computerSessionId,
@@ -543,27 +454,36 @@ export class ComputerInteractionController {
             );
           }
           return recoverInteractionReceipt(receipt, settledAt, "computer", (value) =>
-            ComputerActionReceipt.parse(value),
+            ComputerOperationReceipt.parse(value),
           );
         },
       },
     });
   }
 
-  observe(targetId: string): Promise<ComputerObservationValue> {
-    return this.core.observe(targetId);
+  async observe(targetId: string): Promise<ComputerObservationValue> {
+    return ComputerObservation.parse(await this.core.observe(targetId));
   }
 
   run(command: ComputerActionCommandValue): Promise<ComputerActionReceiptValue> {
-    return this.core.run(command);
+    // The command discriminant fixes the receipt variant; retain replay Promise identity.
+    return this.core.run(command) as Promise<ComputerActionReceiptValue>;
   }
 
-  receipt(operationId: string): ComputerActionReceiptValue | null {
+  runNative(command: ComputerNativeCommand): Promise<ComputerNativeReceipt> {
+    return this.core.run(command) as Promise<ComputerNativeReceipt>;
+  }
+
+  receipt(operationId: string): ComputerOperationReceipt | null {
     return this.core.receipt(operationId);
   }
 
   journalSnapshot(): ComputerOperationJournalRecord[] {
     return this.core.journalSnapshot();
+  }
+
+  isIdle(): boolean {
+    return this.core.isIdle();
   }
 
   waitForIdle(): Promise<void> {
@@ -575,11 +495,12 @@ export function recoverComputerOperationJournalRecord(
   record: ComputerOperationJournalRecord,
   settledAt: string,
 ): ComputerOperationJournalRecord {
-  const receipt = ComputerActionReceipt.parse(record.receipt);
+  const receipt = ComputerOperationReceipt.parse(record.receipt);
   return {
     ...record,
     receipt: recoverInteractionReceipt(receipt, settledAt, "computer", (value) =>
-      ComputerActionReceipt.parse(value),
+      ComputerOperationReceipt.parse(value),
     ),
   };
 }
+export { boundComputerNativeReceipt } from "./native-result";

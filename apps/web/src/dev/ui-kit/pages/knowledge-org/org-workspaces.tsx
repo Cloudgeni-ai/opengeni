@@ -502,7 +502,7 @@ function WorkspaceDetailPage({
               roles={WORKSPACE_ROLE_OPTIONS}
               members={members}
               readOnlyReason={
-                store.local ? "Single-user mode: only you use this OpenGeni." : undefined
+                store.local ? "Single-user mode: only you use this Opengeni." : undefined
               }
               onRoleChange={(member, role) => store.setGrant(member.id, workspace.id, role)}
               onResetToRole={(member) =>

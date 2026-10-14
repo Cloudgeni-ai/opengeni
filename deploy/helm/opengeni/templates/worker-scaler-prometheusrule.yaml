@@ -1,0 +1,333 @@
+{{- include "opengeni.workerScaler.validate" . -}}
+{{- if .Values.worker.turns.autoscaling.queueDemand.enabled }}
+{{- $name := include "opengeni.fullname" . -}}
+{{- $identityLabels := include "opengeni.workerScaler.identity" . | fromJson | toYaml -}}
+{{- $environment := .Values.config.OPENGENI_ENVIRONMENT | default "production" -}}
+{{- $temporalNamespace := .Values.config.OPENGENI_TEMPORAL_NAMESPACE | default "default" -}}
+{{- $taskQueue := printf "%s-turns" (.Values.config.OPENGENI_TEMPORAL_TASK_QUEUE | default "opengeni-runs-ts") -}}
+{{- $scope := printf "namespace=%s,release=%s,environment=%s,component=\"worker-turn\",temporal_namespace=%s,task_queue=%s" (toJson .Release.Namespace) (toJson .Release.Name) (toJson $environment) (toJson $temporalNamespace) (toJson $taskQueue) -}}
+{{- $up := printf "up{namespace=%s,release=%s,opengeni_workload_component=\"worker-turns\",pod!=\"\",pod_uid!=\"\"}" (toJson .Release.Namespace) (toJson .Release.Name) -}}
+{{- $healthy := printf "(%s == 1)" (include "opengeni.workerScaler.fresh" (dict "series" $up)) -}}
+{{- $ksmUp := printf "(%s == 1)" (include "opengeni.workerScaler.fresh" (dict "series" "up")) -}}
+{{- $podScope := printf "namespace=%s,pod=~\"%s-worker-turns-.*\",uid!=\"\"" (toJson .Release.Namespace) $name -}}
+{{- $recordIdentity := printf "namespace=%s,release=%s,environment=%s,temporal_namespace=%s,task_queue=%s" (toJson .Release.Namespace) (toJson .Release.Name) (toJson $environment) (toJson $temporalNamespace) (toJson $taskQueue) -}}
+{{- $recordScope := printf "%s,scaler_stage_complete=\"\"" $recordIdentity -}}
+{{- $deletionSeries := printf "kube_pod_deletion_timestamp{%s}" $podScope -}}
+{{- $validDeletion := printf "(%s > 0 and %s < +Inf and time() - %s >= -5 and on (job, instance) %s)" (include "opengeni.workerScaler.fresh" (dict "series" $deletionSeries)) $deletionSeries $deletionSeries $ksmUp -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $name }}-worker-scaler
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    {{- with .Values.observability.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.prometheusRule.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    # Sequential stages share one group. Each dependency is independently
+    # timestamp-fenced so a failed stage cannot recycle Prometheus lookback.
+    - name: {{ $name }}.worker-scaler.v1
+      interval: 15s
+      rules:
+        - record: opengeni:worker_scaler:targets
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            max by (namespace, pod, uid) (
+              label_replace(
+                {{ include "opengeni.workerScaler.fresh" (dict "series" $up) | nindent 16 }},
+                "uid", "$1", "pod_uid", "(.+)"
+              )
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        # KSM lists are independent of worker scrape discovery. Never infer
+        # complete coverage by comparing counts of unmatched physical pods.
+        {{- range $entry := list
+          (dict "record" "pods" "metric" "kube_pod_info" "extra" "")
+          (dict "record" "labels" "metric" "kube_pod_labels" "extra" (printf ",label_app_kubernetes_io_instance=%s,label_app_kubernetes_io_component=\"worker-turns\"" (toJson $.Release.Name)))
+          (dict "record" "phase" "metric" "kube_pod_status_phase" "extra" "")
+          (dict "record" "deleting" "metric" "kube_pod_deletion_timestamp" "extra" "")
+        }}
+        {{- $series := printf "%s{%s%s}" $entry.metric $podScope $entry.extra }}
+        - record: opengeni:worker_scaler:{{ $entry.record }}
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            max by (namespace, pod, uid{{ if eq $entry.record "phase" }}, phase{{ end }}) (
+              {{- if eq $entry.record "deleting" }}
+              {{ $validDeletion | nindent 14 }}
+              {{- else }}
+              {{ include "opengeni.workerScaler.fresh" (dict "series" $series) | nindent 14 }}
+              and on (job, instance)
+              {{ $ksmUp | nindent 14 }}
+              {{- end }}
+            )
+            {{ include "opengeni.workerScaler.stageComplete" $ }}
+        {{- end }}
+        # An absent deletion timestamp is normal. A PRESENT invalid sample is
+        # not absence: preserve its UID as incomplete, even if stale/NaN/failed
+        # scrape. A deletion event may be old during drain; only its sample age
+        # is bounded, while the event must be finite, positive and not future.
+        - record: opengeni:worker_scaler:deletion_invalid
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            group by (namespace, pod, uid) (
+              {{ $deletionSeries }} unless {{ $validDeletion | nindent 14 }}
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        - record: opengeni:worker_scaler:replicas
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            {{- $replicas := printf "kube_deployment_status_replicas{namespace=%s,deployment=%s}" (toJson .Release.Namespace) (toJson (printf "%s-worker-turns" $name)) }}
+            max by (namespace) (
+              {{ include "opengeni.workerScaler.fresh" (dict "series" $replicas) | nindent 14 }} >= 0
+              and {{ $replicas }} < +Inf
+              and on (job, instance) {{ $ksmUp | nindent 14 }}
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        - record: opengeni:worker_scaler:inventory_valid_until
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            min by (namespace) (
+              {{- range $index, $entry := list
+                (dict "metric" "kube_pod_info" "extra" "")
+                (dict "metric" "kube_pod_labels" "extra" (printf ",label_app_kubernetes_io_instance=%s,label_app_kubernetes_io_component=\"worker-turns\"" (toJson $.Release.Name)))
+                (dict "metric" "kube_pod_status_phase" "extra" "")
+                (dict "metric" "kube_pod_deletion_timestamp" "extra" "")
+              }}
+              {{- $series := printf "%s{%s%s}" $entry.metric $podScope $entry.extra }}
+              {{ if $index }}or{{ end }} label_replace(
+                (timestamp({{ $series }}) + 60
+                 and {{ include "opengeni.workerScaler.fresh" (dict "series" $series) | nindent 16 }}
+                 and on (job, instance) {{ $ksmUp | nindent 16 }}),
+                "deadline_source", "ksm{{ $index }}", "__name__", ".*"
+              )
+              {{- end }}
+              or label_replace((timestamp({{ $replicas }}) + 60
+                and {{ include "opengeni.workerScaler.fresh" (dict "series" $replicas) | nindent 16 }}
+                and on (job, instance) {{ $ksmUp | nindent 16 }}), "deadline_source", "replicas", "__name__", ".*")
+              or label_replace(
+                (0 * kube_pod_info{ {{ $podScope }} } + on (job, instance) group_left () (max by (job, instance) (timestamp(up)) + 60))
+                and {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "kube_pod_info{%s}" $podScope)) | nindent 16 }}
+                and on (job, instance) {{ $ksmUp | nindent 16 }},
+                "deadline_source", "ksm_scrape", "__name__", ".*"
+              )
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        {{- $pods := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:pods{%s}" $recordScope) "age" 30) }}
+        {{- $labels := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:labels{%s}" $recordScope) "age" 30) }}
+        {{- $phase := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:phase{%s}" $recordScope) "age" 30) }}
+        {{- $deleting := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:deleting{%s}" $recordScope) "age" 30) }}
+        {{- $targets := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:targets{%s}" $recordScope) "age" 30) }}
+        {{- $invalidDeletion := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:deletion_invalid{%s}" $recordScope) "age" 30) }}
+        - record: opengeni:worker_scaler:inventory_incomplete
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            ({{ $pods | nindent 12 }} unless on (namespace, pod, uid) ({{ $labels | nindent 12 }} == 1))
+            or ({{ $labels | nindent 12 }} unless on (namespace, pod, uid) ({{ $pods | nindent 12 }} == 1))
+            or ({{ $pods | nindent 12 }} unless on (namespace, pod, uid) ({{ $phase | nindent 12 }} == 1))
+            or ({{ $targets | nindent 12 }} unless on (namespace, pod, uid) ({{ $pods | nindent 12 }} == 1))
+            or {{ $invalidDeletion | nindent 12 }}
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        - record: opengeni:worker_scaler:relevant
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            ({{ $pods | nindent 12 }} == 1)
+            and on (namespace, pod, uid) ({{ $labels | nindent 12 }} == 1)
+            and on (namespace, pod, uid) (
+              ({{ $phase | nindent 14 }} == 1 and on (namespace, pod, uid, phase) opengeni:worker_scaler:phase{ {{ $recordScope }},phase=~"Running|Unknown"})
+              or ({{ $deleting | nindent 14 }} > 0 and {{ $deleting | nindent 14 }} < +Inf)
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        # Supplemental cardinality is not the identity proof above. A fresh
+        # controller total also detects a pod omitted by BOTH scrape/KSM lists.
+        # ReplicaSet active counts exclude deleting pods; uncertain controller
+        # lag/version differences deliberately make R/B unavailable.
+        - record: opengeni:worker_scaler:inventory_size
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            sum by (namespace) (
+              (({{ $pods | nindent 14 }} == 1) unless on (namespace, pod, uid) ({{ $deleting | nindent 14 }} > 0))
+              or ((0 * ({{ $pods | nindent 14 }} == 1)) and on (namespace, pod, uid) ({{ $deleting | nindent 14 }} > 0))
+            )
+            {{ include "opengeni.workerScaler.stageComplete" . }}
+        # Positive evidence for EVERY classification/completeness stage. The
+        # marker is emitted atomically by that stage, including legitimately
+        # empty deletion/mismatch vectors. A separate unconditional heartbeat
+        # would not prove the stage succeeded. All identities are exact here.
+        - record: opengeni:worker_scaler:inventory_stages_complete
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            min without (scaler_stage_complete) (
+              {{- range $index, $stage := list "targets" "pods" "labels" "phase" "deleting" "deletion_invalid" "replicas" "inventory_valid_until" "inventory_incomplete" "relevant" "inventory_size" }}
+              {{ if $index }}and on (namespace, release, environment, temporal_namespace, task_queue){{ end }}
+              ({{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:%s{%s,scaler_stage_complete=\"true\"}" $stage $recordIdentity) "age" 30) | nindent 14 }} == 1)
+              {{- end }}
+            )
+        - record: opengeni:worker_scaler:queue_readers
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            (
+              {{- $queue := printf "opengeni_turn_eligible_backlog{%s}" $scope }}
+              {{- $valid := printf "opengeni_turn_capacity_monitor_fresh{%s}" $scope }}
+              {{- $observed := printf "opengeni_turn_capacity_monitor_last_success_timestamp_seconds{%s}" $scope }}
+              {{ include "opengeni.workerScaler.fresh" (dict "series" $queue) | nindent 14 }} >= 0
+              and {{ $queue }} < +Inf
+              and ignoring (__name__) ({{ include "opengeni.workerScaler.fresh" (dict "series" $valid) | nindent 14 }} == 1)
+              and ignoring (__name__) (
+                {{ include "opengeni.workerScaler.fresh" (dict "series" $observed) | nindent 16 }} > 0
+                and time() - {{ $observed }} < 45
+                and time() - {{ $observed }} >= -5
+              )
+              and on (namespace, pod, pod_uid, job, instance)
+              {{ $healthy | nindent 14 }}
+            )
+        - record: opengeni_turn_worker_queued_valid_until_timestamp_seconds
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            min by (namespace) (
+              {{ include "opengeni.workerScaler.deadline" (dict "value" $queue "valid" $valid "observed" $observed "up" $up "producerAge" 45) | nindent 14 }}
+              and ignoring (__name__)
+              {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:queue_readers{%s}" $recordScope) "age" 30) | nindent 14 }}
+            )
+        {{- $queueDeadline := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni_turn_worker_queued_valid_until_timestamp_seconds{%s}" $recordScope) "age" 30) }}
+        - record: opengeni_turn_worker_queued
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            max by (namespace) (
+              {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:queue_readers{%s}" $recordScope) "age" 30) | nindent 14 }}
+            )
+            and on (namespace) ({{ $queueDeadline | nindent 12 }} > time())
+        - record: opengeni:worker_scaler:activity_readers
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            (
+                  {{- $activities := printf "opengeni_turn_worker_activities_inflight{%s,worker_pod_uid!=\"\"}" $scope }}
+                  {{- $valid := printf "opengeni_turn_worker_activities_last_read_success{%s,worker_pod_uid!=\"\"}" $scope }}
+                  {{- $observed := printf "opengeni_turn_worker_activities_last_observed_timestamp_seconds{%s,worker_pod_uid!=\"\"}" $scope }}
+                  {{ include "opengeni.workerScaler.fresh" (dict "series" $activities) | nindent 18 }} >= 0
+                  and {{ $activities }} < +Inf
+                  and ignoring (__name__) ({{ include "opengeni.workerScaler.fresh" (dict "series" $valid) | nindent 18 }} == 1)
+                  and ignoring (__name__) (
+                    {{ include "opengeni.workerScaler.fresh" (dict "series" $observed) | nindent 20 }} > 0
+                    and time() - {{ $observed }} < 60
+                    and time() - {{ $observed }} >= -5
+                  )
+                  and on (namespace, pod, pod_uid, job, instance)
+                  {{ $healthy | nindent 18 }}
+            )
+        - record: opengeni:worker_scaler:activity_valid_until
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            min by (namespace, pod, uid) (
+              label_replace(
+                ({{ include "opengeni.workerScaler.deadline" (dict "value" $activities "valid" $valid "observed" $observed "up" $up) | nindent 16 }}
+                  and ignoring (__name__)
+                  {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:activity_readers{%s}" $recordScope) "age" 30) | nindent 16 }}
+                ), "uid", "$1", "worker_pod_uid", "(.+)"
+              )
+            )
+        - record: opengeni:worker_scaler:activities
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            max by (namespace, pod, uid) (
+              label_replace(
+                {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:activity_readers{%s}" $recordScope) "age" 30) | nindent 16 }},
+                "uid", "$1", "worker_pod_uid", "(.+)"
+              )
+            )
+            and on (namespace, pod, uid) ({{ $targets | nindent 12 }} == 1)
+            and on (namespace, pod, uid)
+            ({{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:activity_valid_until{%s}" $recordScope) "age" 30) | nindent 12 }} > time())
+        {{- $activities := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:activities{%s}" $recordScope) "age" 30) }}
+        {{- $relevant := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:relevant{%s}" $recordScope) "age" 30) }}
+        {{- $incomplete := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_incomplete{%s}" $recordScope) "age" 30) }}
+        {{- $size := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_size{%s}" $recordScope) "age" 30) }}
+        {{- $replicas := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:replicas{%s}" $recordScope) "age" 30) }}
+        {{- $stagesComplete := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_stages_complete{%s}" $recordScope) "age" 30) }}
+        - record: opengeni:worker_scaler:fleet_valid_until
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            min by (namespace) (
+              label_replace(
+                ({{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:activity_valid_until{%s}" $recordScope) "age" 30) | nindent 16 }}
+                 and on (namespace, pod, uid) {{ $relevant | nindent 16 }}),
+                "deadline_source", "activity", "__name__", ".*"
+              )
+              or label_replace(
+                {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_valid_until{%s}" $recordScope) "age" 30) | nindent 16 }},
+                "deadline_source", "inventory", "__name__", ".*"
+              )
+              or label_replace((timestamp({{ $up }}) + 60 and {{ $healthy | nindent 16 }}), "deadline_source", "targets", "__name__", ".*")
+            )
+            and on (namespace)
+            {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:inventory_valid_until{%s}" $recordScope) "age" 30) | nindent 12 }}
+            # The aggregate above retains namespace only until rule labels are
+            # applied; BOTH dependency selectors already bind all five labels.
+            and on (namespace)
+            ({{ $stagesComplete | nindent 12 }} == 1)
+        {{- $fleetDeadline := include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:fleet_valid_until{%s}" $recordScope) "age" 30) }}
+        - record: opengeni:worker_scaler:executing
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            sum by (namespace) ({{ $activities | nindent 12 }} and on (namespace, pod, uid) {{ $relevant | nindent 12 }})
+            unless on (namespace) ({{ $relevant | nindent 12 }} unless on (namespace, pod, uid) {{ $activities | nindent 12 }})
+            unless on (namespace) {{ $incomplete | nindent 12 }}
+            and on (namespace) ({{ $size | nindent 12 }} == on (namespace) {{ $replicas | nindent 12 }})
+            and on (namespace) ({{ $fleetDeadline | nindent 12 }} > time())
+        - record: opengeni_turn_worker_busy
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            sum by (namespace) (({{ $activities | nindent 12 }} and on (namespace, pod, uid) {{ $relevant | nindent 12 }}) > bool 0)
+            unless on (namespace) ({{ $relevant | nindent 12 }} unless on (namespace, pod, uid) {{ $activities | nindent 12 }})
+            unless on (namespace) {{ $incomplete | nindent 12 }}
+            and on (namespace) ({{ $size | nindent 12 }} == on (namespace) {{ $replicas | nindent 12 }})
+            and on (namespace) ({{ $fleetDeadline | nindent 12 }} > time())
+        - record: opengeni_turn_worker_busy_valid_until_timestamp_seconds
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            {{ $fleetDeadline | nindent 12 }}
+            and on (namespace)
+            {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni_turn_worker_busy{%s}" $recordScope) "age" 30) | nindent 12 }}
+        - record: opengeni_turn_worker_demand_valid_until_timestamp_seconds
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            min by (namespace) (
+              label_replace({{ $queueDeadline | nindent 14 }}, "deadline_source", "queue", "__name__", ".*")
+              or label_replace({{ $fleetDeadline | nindent 14 }}, "deadline_source", "fleet", "__name__", ".*")
+            )
+            and on (namespace) {{ $queueDeadline | nindent 12 }}
+            and on (namespace) {{ $fleetDeadline | nindent 12 }}
+        - record: opengeni_turn_worker_demand
+          labels:
+            {{- $identityLabels | nindent 12 }}
+          expr: |
+            {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni_turn_worker_queued{%s}" $recordScope) "age" 30) | nindent 12 }}
+            + on (namespace, release, environment, temporal_namespace, task_queue)
+            {{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni:worker_scaler:executing{%s}" $recordScope) "age" 30) | nindent 12 }}
+            and on (namespace)
+            ({{ include "opengeni.workerScaler.fresh" (dict "series" (printf "opengeni_turn_worker_demand_valid_until_timestamp_seconds{%s}" $recordScope) "age" 30) | nindent 12 }} > time())
+{{- end }}

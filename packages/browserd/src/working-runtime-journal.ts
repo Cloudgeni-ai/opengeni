@@ -22,13 +22,15 @@ export type BrowserWorkingRuntimeReceipt = {
   operationId: string;
   launchAttemptId: string;
   state: InteractionOperationState;
-  intent: "launch" | "retire";
+  intent: "launch" | "suspend" | "retire";
   authority: BrowserWorkingRuntimeAuthority;
   launchDigest: string;
   restoreAuthorityDigest: string | null;
   profile: ProfileDirectoryIdentity;
   process: OwnedManagedBrowserProcess | null;
   directoryLaunchAllowed: boolean;
+  /** Bounded error code recorded only when a launch is settled failed. */
+  failureCode?: string;
 };
 
 type Options = {
@@ -88,6 +90,7 @@ export class SqliteBrowserWorkingRuntimeJournal {
     >,
     previousOperationId?: string,
   ) {
+    const { failureCode: _failureCode, ...launch } = input;
     const recoveryDigest = previousOperationId
       ? createHash("sha256").update(`working-runtime-recovery:${previousOperationId}`).digest("hex")
       : null;
@@ -95,7 +98,7 @@ export class SqliteBrowserWorkingRuntimeJournal {
       ? `${recoveryDigest.slice(0, 8)}-${recoveryDigest.slice(8, 12)}-4${recoveryDigest.slice(13, 16)}-8${recoveryDigest.slice(17, 20)}-${recoveryDigest.slice(20, 32)}`
       : randomUUID();
     const receipt: BrowserWorkingRuntimeReceipt = {
-      ...input,
+      ...launch,
       version: 1,
       operationId,
       launchAttemptId: randomUUID(),
@@ -112,9 +115,37 @@ export class SqliteBrowserWorkingRuntimeJournal {
     return completed;
   }
 
+  /** Settle a launch whose cleanup proved it never completed: its driver was
+   * closed, no owned process was recorded and any restored profile was removed.
+   * A failed receipt is never re-adopted and never authorizes a directory launch. */
+  fail(receipt: BrowserWorkingRuntimeReceipt, failureCode: string) {
+    if (receipt.intent !== "launch") throw unavailable();
+    const failed: BrowserWorkingRuntimeReceipt = {
+      ...receipt,
+      state: "failed",
+      process: null,
+      directoryLaunchAllowed: false,
+      failureCode: boundedFailureCode(failureCode),
+    };
+    this.write(failed);
+    return failed;
+  }
+
   retire(receipt: BrowserWorkingRuntimeReceipt) {
     const retiring = this.begin({ ...receipt, intent: "retire", process: null });
     return { ...retiring, state: "dispatched" as const };
+  }
+
+  suspend(receipt: BrowserWorkingRuntimeReceipt) {
+    if (
+      receipt.intent !== "launch" ||
+      receipt.state !== "completed" ||
+      !receipt.process ||
+      !receipt.directoryLaunchAllowed
+    )
+      throw unavailable();
+    const suspending = this.begin({ ...receipt, intent: "suspend" });
+    return { ...suspending, state: "dispatched" as const };
   }
 
   close() {
@@ -147,6 +178,32 @@ export async function assertDirectory(path: string): Promise<ProfileDirectoryIde
   return { device: metadata.dev, inode: metadata.ino };
 }
 
+/** True only when a launch receipt proves no browser can be adopted from it:
+ * it was settled failed, or (for receipts written before failed settlement
+ * existed) it is a dispatched restore launch with no recorded process whose
+ * exact restored profile directory no longer exists. Cleanup removes that
+ * directory only after the launch's driver closed. */
+export async function isAbandonedLaunchReceipt(
+  receipt: BrowserWorkingRuntimeReceipt | null,
+  profileDirectory: string,
+): Promise<boolean> {
+  if (!receipt || receipt.intent !== "launch" || receipt.process !== null) return false;
+  if (receipt.state === "failed") return true;
+  if (receipt.state !== "dispatched" || receipt.restoreAuthorityDigest === null) return false;
+  try {
+    await lstat(profileDirectory);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+export function boundedFailureCode(value: unknown): string {
+  return typeof value === "string" && FAILURE_CODE.test(value) ? value : "internal";
+}
+
+const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
+
 export function assertWorkingRuntimeReceipt(
   receipt: BrowserWorkingRuntimeReceipt | null,
   authority: BrowserWorkingRuntimeAuthority,
@@ -155,7 +212,8 @@ export function assertWorkingRuntimeReceipt(
 ): asserts receipt is BrowserWorkingRuntimeReceipt & { process: OwnedManagedBrowserProcess } {
   if (
     !receipt ||
-    receipt.intent !== "launch" ||
+    (receipt.intent !== "launch" &&
+      !(receipt.intent === "suspend" && receipt.directoryLaunchAllowed)) ||
     receipt.state !== "completed" ||
     receipt.process === null ||
     receipt.launchDigest !== launchDigest ||
@@ -192,7 +250,7 @@ function parseReceipt(value: unknown): BrowserWorkingRuntimeReceipt {
     !["prepared", "dispatched", "completed", "failed", "outcome_unknown"].includes(
       String(value.state),
     ) ||
-    !["launch", "retire"].includes(String(value.intent)) ||
+    !["launch", "suspend", "retire"].includes(String(value.intent)) ||
     !record(value.authority) ||
     !Number.isSafeInteger(value.authority.tokenGeneration) ||
     Number(value.authority.tokenGeneration) < 1 ||
@@ -204,7 +262,11 @@ function parseReceipt(value: unknown): BrowserWorkingRuntimeReceipt {
     !record(value.profile) ||
     !Number.isSafeInteger(value.profile.device) ||
     !Number.isSafeInteger(value.profile.inode) ||
-    typeof value.directoryLaunchAllowed !== "boolean"
+    typeof value.directoryLaunchAllowed !== "boolean" ||
+    (value.failureCode !== undefined &&
+      (value.state !== "failed" ||
+        typeof value.failureCode !== "string" ||
+        !FAILURE_CODE.test(value.failureCode)))
   )
     throw unavailable();
   if (value.process !== null) {

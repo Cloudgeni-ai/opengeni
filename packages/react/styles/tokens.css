@@ -165,7 +165,7 @@
      draws a crisp edge via `focus-within:border-og-accent/50`; the old
      `0 0 0 1px` ring sat flush against that border and read as a doubled
      hairline, so the glow is purely a faint diffuse grey halo. */
-  --og-shadow-glow: 0 0 24px var(--og-color-accent);
+  --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 10%, transparent);
 
   /* Session chrome — override on `.og-session-chrome` (or an ancestor) to rebrand.
      Defaults stay quiet: soft surface, short motion, no gold shout. */

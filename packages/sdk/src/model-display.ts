@@ -3,6 +3,7 @@ export {
   humanizeModelSlug,
   isRawModelLabel,
   modelDisplayName,
+  modelLogoUrl,
   modelSlug,
   modelVendor,
   type ModelDisplayInput,

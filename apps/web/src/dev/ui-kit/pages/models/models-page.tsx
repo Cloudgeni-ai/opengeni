@@ -25,7 +25,7 @@ import { Switch } from "@/components/ui/switch";
 import { UsageReadout } from "@/components/ui/usage-meter";
 import { cn } from "@/lib/utils";
 
-import { currentWorkspace, organization } from "../../fixtures";
+import { KIT_NOW, currentWorkspace, organization } from "../../fixtures";
 import {
   CodexAccountDetail,
   GatewayDetail,
@@ -74,10 +74,10 @@ const COLUMNS: RowListColumn[] = [
   { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end" },
 ];
 
-const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "vercel"];
+const GATEWAY_ORDER: readonly GatewayId[] = ["openrouter", "opper", "vercel"];
 
 const PICK_HELP =
-  "Spread work sends each new chat to the account with the most usage left. Primary only uses the primary account and waits when it runs out.";
+  "Spread work shares new chats evenly across accounts that can serve them. Primary first starts new chats on the primary account and uses another account when it can't serve them.";
 
 const LEGACY_SOURCE_OPTIONS: SelectOption<LegacySource>[] = [
   {
@@ -733,7 +733,7 @@ function RotationRow({
           onValueChange={onChange}
           options={[
             { value: "spread", label: "Spread work" },
-            { value: "primary", label: "Primary only" },
+            { value: "primary", label: "Primary first" },
           ]}
         />
       }
@@ -868,7 +868,16 @@ function CodexRow({ account, pageScope }: { account: CodexAccount; pageScope: Sc
           <UsageReadout
             percent={weekly.percentLeft}
             window="this week"
-            resetsLabel={weekly.resetsLabel}
+            resets={account.usage.flatMap((window) =>
+              window.resetsAt
+                ? [
+                    window === weekly
+                      ? { at: window.resetsAt }
+                      : { label: window.label, at: window.resetsAt },
+                  ]
+                : [],
+            )}
+            now={KIT_NOW.getTime()}
           />
         ) : null,
       }}

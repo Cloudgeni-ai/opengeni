@@ -2,12 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  BrowserActionCommand,
-  BrowserObservation,
-  BrowserProtectedAuthFillCommand,
-  BrowserTarget,
-} from "@opengeni/contracts";
+import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
 import { InteractionControllerError } from "@opengeni/interaction";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
@@ -16,6 +11,8 @@ import {
   BrowserControlServer,
   CdpCommandTimeoutError,
   CdpTransportError,
+  CdpSessionDetachedError,
+  CdpProtocolError,
   BrowserSupervisor,
   ComputerSupervisor,
   LatestBrowserFrameSubscription,
@@ -37,27 +34,32 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
-  test("keeps update idle proof private and includes open browser lifetimes", async () => {
+  test("fences new controller work atomically and releases only the owning update", async () => {
     await withServer(async ({ server, reference }) => {
-      for (const token of [undefined, viewToken, controlToken]) {
-        expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
-      }
-      expect(
-        (await request(server, "/v1/runtime", { token: adminToken, method: "POST" })).status,
-      ).toBe(405);
-      const idle = async () =>
-        await json(await request(server, "/v1/runtime", { token: adminToken }));
-      expect((await idle()).data).toEqual({ idle: true });
-      expect(
-        (
-          await request(server, "/v1/browser-sessions", {
-            method: "POST",
-            token: adminToken,
-            body: createBody(reference),
-          })
-        ).status,
-      ).toBe(201);
-      expect((await idle()).data).toEqual({ idle: false });
+      const operationId = randomUUID();
+      const update = async (method: string, id = operationId, token = adminToken) =>
+        await request(server, "/v1/runtime/update", { method, token, body: { operationId: id } });
+      for (const token of [controlToken, viewToken])
+        expect((await update("POST", operationId, token)).status).toBe(401);
+      const proof = await json(await update("POST"));
+      expect(proof.data).toEqual({ idle: true, operationId });
+      const create = async () =>
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+      expect((await create()).status).toBe(503);
+      expect((await json(await update("POST", randomUUID()))).data.idle).toBe(false);
+      expect((await update("DELETE", randomUUID())).status).toBe(409);
+      expect((await create()).status).toBe(503);
+      expect((await json(await update("DELETE"))).data).toMatchObject({
+        operationId,
+        released: true,
+      });
+      expect((await create()).status).toBe(201);
+      expect((await json(await update("POST"))).data.idle).toBe(false);
+      // A failed idle proof must not prevent accepted work from closing normally.
       expect(
         (
           await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
@@ -67,11 +69,113 @@ describe("BrowserControlServer", () => {
           })
         ).status,
       ).toBe(200);
-      expect((await idle()).data).toEqual({ idle: true });
+      expect((await json(await update("POST"))).data.idle).toBe(true);
+      await update("DELETE");
+    });
+  });
+
+  test("a create still reading JSON blocks controller update admission", async () => {
+    await withServer(async ({ server, reference }) => {
+      let finishBody: (() => void) | undefined;
+      let beginBody: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        beginBody = resolve;
+      });
+      const body = JSON.stringify(createBody(reference));
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body.slice(0, 10)));
+          finishBody = () => {
+            controller.enqueue(new TextEncoder().encode(body.slice(10)));
+            controller.close();
+          };
+          beginBody!();
+        },
+      });
+      const create = fetch(`${server.url}/v1/browser-sessions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
+        body: stream,
+      });
+      try {
+        await started;
+        let queued = false;
+        for (let attempt = 0; attempt < 20 && !queued; attempt += 1) {
+          queued = !(await json(await request(server, "/v1/runtime", { token: adminToken }))).data
+            .idle;
+        }
+        expect(queued).toBe(true);
+        // The query shares the same real HTTP server: native in-flight requests
+        // include bodies queued before the supervisor starts constructing a runtime.
+        const operationId = randomUUID();
+        const proof = await json(
+          await request(server, "/v1/runtime/update", {
+            method: "POST",
+            token: adminToken,
+            body: { operationId },
+          }),
+        );
+        expect(proof.data.idle).toBe(false);
+      } finally {
+        finishBody!();
+      }
+      expect((await create).status).toBe(201);
+    });
+  });
+
+  test("keeps update idle proof private and includes open browser lifetimes", async () => {
+    // `empty` additionally requires that no session exists at all; only then
+    // may the parent agent stop this controller to reclaim its memory.
+    await withServer(async ({ server, reference }) => {
+      for (const token of [undefined, viewToken, controlToken]) {
+        expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
+      }
+      expect(
+        (await request(server, "/v1/runtime", { token: adminToken, method: "POST" })).status,
+      ).toBe(405);
+      const idle = async () =>
+        await json(await request(server, "/v1/runtime", { token: adminToken }));
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      expect((await idle()).data).toEqual({ idle: false, empty: false });
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
+            method: "POST",
+            token: adminToken,
+            body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await idle()).data).toEqual({ idle: true, empty: true });
     });
   });
 
   test.each([
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpProtocolError("Page.getFrameTree", -32_000, "synthetic debugger rejection"),
+    },
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
     {
       operation: "listTargets" as const,
       label: "target inventory",
@@ -141,6 +245,135 @@ describe("BrowserControlServer", () => {
       );
     },
   );
+
+  test("metadata-only opening keeps exact control authority and the default observation response", async () => {
+    const calls: string[] = [];
+    await withServer(
+      async ({ server, reference }) => {
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        calls.length = 0;
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`;
+        for (const token of [undefined, viewToken]) {
+          expect(
+            (await request(server, path, { method: "POST", ...(token ? { token } : {}), body: {} }))
+              .status,
+          ).toBe(401);
+        }
+        expect(calls).toEqual([]);
+        const response = await request(server, path, {
+          method: "POST",
+          token: controlToken,
+          body: { url: "https://new.example.test/" },
+        });
+        expect(response.status).toBe(201);
+        const inventory = (await json(response)).data;
+        expect(inventory).toMatchObject({
+          ...reference,
+          targets: [{ url: "https://new.example.test/", selected: true }],
+        });
+        expect(inventory).not.toHaveProperty("observation");
+        expect(calls).toEqual(["openTargetWithInventory"]);
+        const defaultResponse = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: {} },
+        );
+        expect(defaultResponse.status).toBe(201);
+        expect((await json(defaultResponse)).data).toHaveProperty("semantic");
+      },
+      {
+        beforeDriverOperation: (name) => {
+          calls.push(name);
+        },
+      },
+    );
+  });
+
+  test("passkey sync is control-only, bound to the session path and validated", async () => {
+    await withServer(async ({ server, reference }) => {
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      const path = `/v1/browser-sessions/${reference.browserSessionId}/passkeys/sync`;
+      const body = {
+        protocolVersion: 1,
+        ...reference,
+        credentials: null,
+        acknowledgeEventIds: [],
+      };
+      for (const token of [undefined, viewToken]) {
+        expect(
+          (await request(server, path, { method: "POST", ...(token ? { token } : {}), body }))
+            .status,
+        ).toBe(401);
+      }
+      expect((await request(server, path, { token: controlToken })).status).toBe(405);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, credentials: "all" },
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, browserSessionId: randomUUID() },
+          })
+        ).status,
+      ).toBe(409);
+      const synced = await request(server, path, { method: "POST", token: controlToken, body });
+      expect(synced.status).toBe(200);
+      // The fake driver hosts no page authenticators; the manager still answers.
+      expect((await json(synced)).data).toEqual({ ...reference, authenticators: 0, events: [] });
+    });
+  });
+
+  test("metadata-only opening never replays a mutation whose completion is unknown", async () => {
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const failed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`,
+          { method: "POST", token: controlToken, body: { url: "https://new.example.test/" } },
+        );
+        expect(failed.status).toBe(500);
+        expect(((await failed.json()) as { error: unknown }).error).toMatchObject({
+          code: "driver_failed",
+          retryable: false,
+        });
+        expect(attempts).toBe(1);
+      },
+      {
+        beforeDriverOperation: (name) => {
+          if (name === "openTargetWithInventory") {
+            attempts++;
+            throw new CdpCommandTimeoutError("Target.getTargets");
+          }
+        },
+      },
+    );
+  });
 
   test("does not classify a CDP mutation timeout as retryable or redispatch it", async () => {
     let attempts = 0;
@@ -491,33 +724,38 @@ describe("BrowserControlServer", () => {
         { method: "POST", token: controlToken, body: command(observation) },
       );
       expect(acted.status).toBe(200);
-      expect((await json(acted)).data.state).toBe("completed");
+      const actedBody = await json(acted);
+      expect(actedBody.data.state).toBe("completed");
+      // Callers that did not ask for resolved targets may parse strictly.
+      expect(actedBody.data).not.toHaveProperty("targets");
+      const traced = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect(traced.data.state).toBe("completed");
+      expect(traced.data.targets).toEqual([
+        {
+          actionIndex: 0,
+          ref: "e1",
+          role: "button",
+          name: "Close",
+          container: { role: "dialog", name: "Edit item" },
+        },
+      ]);
 
-      const protectedCommand = protectedAuthCommand(observation);
-      const protectedPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`;
+      // Protected fill is gone; logins use ordinary fill actions.
       expect(
         (
-          await request(server, protectedPath, {
-            method: "POST",
-            token: viewToken,
-            body: protectedCommand,
-          })
+          await request(
+            server,
+            `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`,
+            { method: "POST", token: controlToken, body: {} },
+          )
         ).status,
-      ).toBe(401);
-      const protectedFill = await request(server, protectedPath, {
-        method: "POST",
-        token: controlToken,
-        body: protectedCommand,
-      });
-      expect(protectedFill.status).toBe(200);
-      const protectedBody = await protectedFill.text();
-      expect(protectedBody).not.toContain("server-test-password");
-      expect(JSON.parse(protectedBody).data.state).toBe("completed");
-      const protectedReceiptPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-operations/${protectedCommand.operationId}`;
-      expect((await request(server, protectedReceiptPath, { token: viewToken })).status).toBe(401);
-      expect((await request(server, protectedReceiptPath, { token: controlToken })).status).toBe(
-        200,
-      );
+      ).toBe(404);
 
       const externalAuthPath = `/v1/browser-sessions/${reference.browserSessionId}/external-auth`;
       const externalAuthCommand = {
@@ -1170,7 +1408,7 @@ async function withServer(
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1239,7 +1477,7 @@ function fakeDriver(
     failStart?: boolean;
     screenshotError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "dispatch",
+      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
   },
 ): BrowserSupervisorDriver {
@@ -1295,6 +1533,11 @@ function fakeDriver(
       target.url = url ?? "about:blank";
       return observation();
     },
+    async openTargetWithInventory(url) {
+      options.beforeDriverOperation?.("openTargetWithInventory");
+      target.url = url ?? "about:blank";
+      return [{ ...target }];
+    },
     async selectTarget() {
       return observation();
     },
@@ -1328,12 +1571,16 @@ function fakeDriver(
         truncated: false,
       };
     },
-    async dispatch() {
+    async dispatch(_command, trace) {
       options.beforeDriverOperation?.("dispatch");
+      trace?.record({
+        actionIndex: 0,
+        ref: "e1",
+        role: "button",
+        name: "Close",
+        container: { role: "dialog", name: "Edit item" },
+      });
       return observation();
-    },
-    async protectedFill() {
-      return { target: { ...target }, status: "submitted" };
     },
     async externalAuth() {
       return {
@@ -1533,32 +1780,6 @@ function command(observation: BrowserObservation): BrowserActionCommand {
     expectedFrameId: observation.frameId!,
     actor: { kind: "system", subjectId: "server-test" },
     action: { type: "click", locator: { kind: "ref", ref: "e1" } },
-  };
-}
-
-function protectedAuthCommand(observation: BrowserObservation): BrowserProtectedAuthFillCommand {
-  return {
-    protocolVersion: 1,
-    operationId: randomUUID(),
-    browserSessionId: observation.browserSessionId,
-    controllerGeneration: observation.target.controllerGeneration,
-    targetId: observation.target.id,
-    expectedTargetGeneration: observation.target.targetGeneration,
-    expectedDocumentGeneration: observation.target.documentGeneration!,
-    expectedFrameId: observation.frameId!,
-    actor: { kind: "system", subjectId: "credential-broker-test" },
-    authorityId: "password-authority",
-    credentialVersion: 1,
-    allowedOrigins: ["https://example.test"],
-    fields: [
-      {
-        fieldId: "password",
-        locator: { kind: "ref", ref: "e-password" },
-        purpose: "password",
-        value: "server-test-password",
-      },
-    ],
-    submit: { type: "press", key: "Enter" },
   };
 }
 

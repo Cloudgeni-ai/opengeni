@@ -1,5 +1,189 @@
 # @opengeni/browserd
 
+## 0.2.16
+
+### Patch Changes
+
+- ab03f44: A requested agent update on a busy machine now waits for the machine to become idle instead of failing with `update_busy_work`. The agent accepts the update, reports it as waiting for idle (with the reason), keeps admitting new work, and re-attempts its short idle proof every few seconds until it can apply. Open browser and computer sessions no longer count as busy when a restart would lose nothing: a quiescent managed browser whose owned process survives graceful shutdown and is reattached on its next request, a session whose browser already ended, and a computer session on the machine's own physical seat. Admitted commands, attached browser sessions, browsers without a durable working runtime and isolated virtual desktops still keep the update waiting.
+- 2952b97: Make clicks and hovers in attached Chrome fast again. Agent tabs open in the background so the user's foreground tab is left alone, and Chrome held every mouse event sent to such a hidden tab for about five seconds before acknowledging it, so each click cost over five seconds regardless of how many agents ran. Attached sessions now use the same target-local focus emulation as managed browsers, which keeps a background tab rendering and taking input without activating it; Chrome clears it when the debugger detaches. The extension admits exactly `Emulation.setFocusEmulationEnabled` and no other Emulation method. Browserd keeps working with older extensions that reject it, at the old speed, until the extension updates.
+- 2634253: Keep attached Chrome sessions alive across agent restarts, agent updates and native-host reconnects. Every native reconnect used to give the profile a new connection generation, which ended all of its live browser sessions with `controller_transition_expired`, so an agent update or a brief native-host exit lost every agent's attached browser. The extension now also reports a state generation that lasts for its worker's lifetime, the span in which Chrome keeps its tab ids and debugger attachments, and the agent binds the profile's placement to it while still fencing each native port with the per-port generation. Because a quiescent attached session now survives a restart, it no longer holds back an agent update; the agent still waits while an older extension without a state generation backs a live attached controller.
+- 055015d: Browser action receipts now say which element each locator resolved to: its role, name, reference, and the nearest dialog, landmark, menu or toolbar around it. A "Close" that hit the page header instead of a dialog is now visible in the receipt. Controllers add the field only when the caller asks for it, and never store it in their operation journal, so older and newer API and controller versions keep working together.
+- 2a25879: When a browser action becomes `outcome_unknown` because a later step failed, the receipt now keeps that step's reason (for example "browser element is covered or not pointer-actionable"), not only its error code, so agents can correct the target without replaying.
+- 57b5a95: Browser fill now works on native date, time, month, week and datetime-local inputs. Fill sets the input's value in its own format (for example HH:MM for time) and notifies the page as user input, whether the locator points at the input or at one of its hour, minute or date parts. Previously it cleared the focused part and then reported an unknown outcome. A value that does not match the input's format is refused before anything changes, with the expected format in the error. Snapshots offer fill on the input itself, not on its part spin buttons.
+- 2263020: On Linux machines with a systemd user manager, each managed browser now runs in its own transient scope (`opengeni-browser-<id>.scope`) under `opengeni-browsers.slice` instead of inside the agent's service. Stopping, restarting or updating the agent service therefore no longer kills any of a browser's processes (previously its renderer, GPU and utility processes died with the service, crashing every tab), and each browser's memory and CPU are visible per browser. The slice sets no resource limits. The launch keeps Chrome's process ID unchanged, and Chromium's own move of its main process into an app scope is undone after launch so the whole browser stays one unit. Machines without a reachable user manager launch browsers exactly as before.
+- 4b2d2c5: Browser press accepts the function keys F1-F24 and the navigation keys Home, End, PageUp, PageDown, Insert and ContextMenu, plus the common short spellings (Esc, Return, Del, PgUp, PgDn, Up, Down, Left, Right). Before, any of these was refused as an unsupported key even though the tool schema accepts any key string, so an agent could not, for example, press F2 to edit a grid cell. Genuinely unknown keys are still refused before focus moves or any input is sent. The browser action tool description now lists the accepted key names.
+- 1ee99c1: Report a crashed browser tab as a definite, non-retryable `tab_crashed` diagnosis with open-a-new-tab guidance through browserd and the API. Previously the API turned it into a generic "temporarily unavailable, retry" outage, so agents kept retrying a dead tab.
+- 1756cfe: Preserve a typed tab_not_responding diagnosis and recovery guidance when page-scoped CDP commands time out. Reads and pre-input failures are definite; actions whose input was already sent retain uncertain effects and must not be replayed automatically. Healthy tabs remain usable.
+- 4f82ee7: A browser tab whose page process crashed no longer hangs every command until it times out with a retryable "upstream unavailable" error. The browser service now notices the crash, both when it happens and when it later attaches to an already-crashed tab. It fails page commands on that tab at once with a clear, non-retryable error that says to open a new tab. The rest of the browser keeps working.
+- c0bba27: A browser refusal to focus the locator of press, fill or type (for example the page document node) is now a definite invalid_action with nothing sent, instead of an unknown outcome.
+- 262e6b5: A managed browser whose restored launch failed before it finished can be resumed again. Previously, if Chrome started from a restored private profile but the launch then threw, cleanup removed the profile but left the launch record "in progress". Every later cleanup or resume of that browser was then refused as "Current browser is unavailable", and the stuck resume eventually marked the browser lost.
+
+  Now the browser service records such a launch as failed, with a short error code, and logs the original error. Cleanup of that exact controller generation succeeds, so the next resume restores again from the saved private checkpoint. Launch records left "in progress" by earlier versions are treated the same way when no process was recorded and the restored profile is gone. A launch that might still be running stays protected as before.
+
+  A browser that was lost because its resume timed out (`controller_transition_expired` after a resume) can now be resumed through the normal resume request. The API first ends the old controller generation, then returns the browser to suspended and restores it from the same checkpoint under a new generation. Browsers lost during create, suspend or end are unchanged.
+
+- a619cad: A browser click or hover on a control that only accepts the pointer while its row or card is hovered (a common pattern for row actions such as "add" or "more" buttons) now moves the pointer onto it first, as a person would, and then clicks. Before, the hit test fell through the hidden control to its row and the action was refused. A control that stays unreachable after the pointer arrives is still refused, reported as an unknown outcome because the pointer moved.
+- c3e192d: A click or hover on a target that is already in view, but covered or without a box, is now a definite refusal instead of an unknown outcome. Refusals after an actual scroll stay unknown, because scrolling can run page handlers.
+- 900f37c: Restoring a checkpointed tab set now keeps the live tab that startup selected for the primary page instead of re-selecting a reopened tab with the same URL whose renderer crashed, so resume no longer fails with "This browser tab crashed".
+- d91c6d5: A browser click on a target hidden under a sticky table column, a sticky header or a small fixed toolbar now scrolls the target out from under it, trying other scroll alignments, and then clicks. Before, the click was refused as covered. A layer over the whole viewport, such as a modal backdrop, is still a definite refusal, and nothing is scrolled.
+- 07fb2a3: A browser scroll aimed at an element now scrolls the nearest box around it that can actually move in that direction, as a mouse wheel over the element would, instead of calling scroll on the element itself, which did nothing for tables, rows and plain wrappers inside a scrolling panel. When nothing can move (already at the edge, or no scrollable box), both located and page scrolls now fail with a definite error instead of reporting success.
+- 51e3048: Browser actions no longer report a menu, listbox or dialog that the action just closed as still open. Before the post-action snapshot, the driver briefly waits for finite running animations to finish, so exit animations complete and the element leaves the page first. Infinite animations such as spinners are ignored, and the wait is capped at 750 ms.
+- 8a5446d: Starting a managed browser no longer fails when a tab reopened from a restored profile has a crashed renderer. Startup selects the first live tab, or opens a new one when none is live, and keeps the crashed tab in the tab list for the user to close.
+- ce3587b: Startup reaping of stale browser sessions now reads the Linux process inventory once per pass and fully identity-checks only processes that name the exact profile, so a machine with many retained session directories no longer exceeds the browser sidecar readiness timeout.
+- 13754f1: Rename a shadowing test helper parameter so the repository lint passes with warnings denied.
+- ca2204a: Validate a press key before focusing its locator, so an unsupported key is a definite invalid_action with no input sent instead of outcome_unknown.
+- 4fa68d5: Agent updates and controller restarts no longer close managed browsers. Graceful browserd shutdown now detaches from a browser with a durable working runtime instead of closing it, so its tabs and unsaved page state (open editors, half-filled forms) stay live, and the next controller adopts the same process on its next request. Previously, shutdown closed Chrome and recovery relaunched it in the same profile: cookies and storage survived, but live page state was lost. Live reattachment now also works for headed browsers, for a launcher from an earlier agent release, and for a browser whose launcher was killed with a stopped service. A stale launcher record whose PID now names an unrelated process is still refused.
+- Updated dependencies [fc57bd2]
+- Updated dependencies [04ebc42]
+- Updated dependencies [ab03f44]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [c2f4153]
+- Updated dependencies [de2d721]
+- Updated dependencies [055015d]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [1756cfe]
+- Updated dependencies [40e2542]
+- Updated dependencies [6861501]
+- Updated dependencies [bfed4f1]
+- Updated dependencies [4532435]
+- Updated dependencies [f96605f]
+- Updated dependencies [496ce55]
+- Updated dependencies [3822e5f]
+- Updated dependencies [3962da3]
+- Updated dependencies [c4dd318]
+- Updated dependencies [ce7b403]
+- Updated dependencies [445baf4]
+- Updated dependencies [5b4a738]
+- Updated dependencies [334c470]
+- Updated dependencies [96d7167]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [6313dd8]
+- Updated dependencies [945490f]
+- Updated dependencies [8e878ac]
+- Updated dependencies [9701372]
+- Updated dependencies [bc40348]
+- Updated dependencies [5eb1c32]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [4cb80a9]
+- Updated dependencies [eb68b58]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [6960770]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [63bf721]
+- Updated dependencies [3a4a435]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [322f26c]
+- Updated dependencies [945c247]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [5cb6d71]
+- Updated dependencies [732a788]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [7ce535f]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [a91718c]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/interaction@2.0.0
+
+## 0.2.15
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/interaction@1.4.4
+
+## 0.2.14
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.3
+- @opengeni/interaction@1.4.3
+
+## 0.2.13
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.2
+- @opengeni/interaction@1.4.2
+
+## 0.2.12
+
+### Patch Changes
+
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/interaction@1.4.1
+
+## 0.2.11
+
+### Patch Changes
+
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/interaction@1.4.0
+
+## 0.2.10
+
+### Patch Changes
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/interaction@1.3.0
+
+## 0.2.9
+
+### Patch Changes
+
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/interaction@1.2.0
+
+## 0.2.8
+
+### Patch Changes
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/interaction@1.1.0
+
+## 0.2.7
+
+### Patch Changes
+
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/interaction@1.0.1
+
 ## 0.2.6
 
 ### Patch Changes

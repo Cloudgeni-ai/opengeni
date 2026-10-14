@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { McpPersonalConnectionDelegations, ReasoningEffort } from "@opengeni/contracts";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -186,6 +189,8 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     sessionId: string;
     realtimeId: string;
     ownerSubjectId: string;
+    /** The owner's own label (their email) when a request carries it. */
+    ownerSubjectLabel?: string | null | undefined;
     now?: Date;
   },
 ): Promise<SessionRealtimeContextProjection | null> {
@@ -258,6 +263,10 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     text: row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion),
     payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
   }));
+  // Voice-assistant chatter alone ("Still checking.") is not a new request. Steering it into
+  // the session would supersede a running turn or wake an idle one for nothing, so only a
+  // tail with at least one finalized user transcript is handed off.
+  if (!decodedRows.some((entry) => entry.role === "user")) return null;
   const rendered = renderSessionRealtimeTail(decodedRows);
   if (!rendered.context) return null;
   const renderedRows = decodedRows.slice(decodedRows.length - rendered.includedEntryCount);
@@ -292,7 +301,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    subjectLabel: "Realtime",
+    subjectLabel: input.ownerSubjectLabel?.trim() || "Realtime",
     actor: {
       type: "human",
       subjectId: input.ownerSubjectId,
@@ -322,6 +331,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
       mode.personalConnectionDelegations,
     ),
     mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
+    connectionAccountIntent: parseConnectionAccountIntent(mode.connectionAccountIntent),
   });
   const now = input.now ?? new Date();
   const [projection] = await db

@@ -193,37 +193,21 @@ describe("migration 0323 organization private-session enablement", () => {
     expect(source).not.toContain("nested_agent_depth_exceeded");
   });
 
-  test("keeps the receipt-only Personal workspace rule and gates shared workspaces on the setting", async () => {
+  test("keeps the Personal workspace rule and gates shared workspaces on the setting", async () => {
     if (!shared || !client) return;
     const organization = await provisionOrganization("receipt-vs-setting");
 
-    // Without the receipt nothing is private-ready anywhere.
-    await expect(
-      getPrivateSessionCreatePolicy(client.db, {
-        workspaceId: organization.personalWorkspaceId,
-        actorSubjectId: organization.subjectId,
-      }),
-    ).resolves.toEqual({
-      personalWorkspace: true,
-      platformAvailable: false,
-      organizationEnabled: false,
+    // No readiness receipt exists: every organization is activated since 0611,
+    // so the managed human's own Personal workspace keeps the 0311 rule. An
+    // owner/admin explicitly disables shared-workspace Only me (the default
+    // since 0611 is enabled) to prove the setting never gates Personal.
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: organization.accountId,
+      actorSubjectId: organization.subjectId,
+      enabled: false,
+      expectedVersion: 0,
+      operationId: crypto.randomUUID(),
     });
-    const personalWithoutReceipt = await captureError(() =>
-      createSessionWithIdempotencyKeyResult(
-        client!.db,
-        privateCreateInput(
-          organization,
-          organization.personalWorkspaceId,
-          `personal-no-receipt-${crypto.randomUUID()}`,
-          "private without readiness receipt",
-        ),
-      ),
-    );
-    expect(nestedPostgresSqlState(personalWithoutReceipt)).toBe("42501");
-
-    await insertReadinessReceipt(organization.accountId, "0323-receipt-test");
-
-    // Receipt alone: the managed human's own Personal workspace keeps the 0311 rule.
     await expect(
       getPrivateSessionCreatePolicy(client.db, {
         workspaceId: organization.personalWorkspaceId,
@@ -257,9 +241,9 @@ describe("migration 0323 organization private-session enablement", () => {
       tenancy: { visibility: "private", authorityEpoch: 1, ownedByCurrentUser: true },
     });
 
-    // Receipt alone is NOT enough in a shared workspace: the owner/admin setting
-    // is still disabled, so the create fails closed with the typed error and
-    // nothing is inserted.
+    // Activation alone is NOT enough in a shared workspace: the owner/admin
+    // setting is explicitly disabled, so the create fails closed with the typed
+    // error and nothing is inserted.
     await expect(
       getPrivateSessionCreatePolicy(client.db, {
         workspaceId: organization.sharedWorkspaceId,
@@ -333,19 +317,9 @@ describe("migration 0323 organization private-session enablement", () => {
         organizationId: organization.accountId,
         actorSubjectId: organization.subjectId,
       }),
-    ).resolves.toMatchObject({ enabled: false, available: false, version: 0 });
-    const readinessDenied = await captureError(() =>
-      updateOrganizationPrivateSessionSettings(client!.db, {
-        organizationId: organization.accountId,
-        actorSubjectId: organization.subjectId,
-        enabled: true,
-        expectedVersion: 0,
-        operationId: crypto.randomUUID(),
-      }),
-    );
-    expect(nestedPostgresSqlState(readinessDenied)).toBe("55000");
-
-    await insertReadinessReceipt(organization.accountId, "0323-test");
+    ).resolves.toMatchObject({ enabled: true, available: true, version: 0 });
+    // Only me defaults to enabled without any row or readiness receipt (0611):
+    // an explicit enable records the decision without changing the outcome.
     const enableOperationId = crypto.randomUUID();
     const enabled = await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: organization.accountId,
@@ -354,7 +328,7 @@ describe("migration 0323 organization private-session enablement", () => {
       expectedVersion: 0,
       operationId: enableOperationId,
     });
-    expect(enabled).toMatchObject({ enabled: true, available: true, version: 1, changed: true });
+    expect(enabled).toMatchObject({ enabled: true, available: true, version: 1, changed: false });
 
     const privateCreate = privateCreateInput(
       organization,

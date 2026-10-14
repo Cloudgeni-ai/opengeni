@@ -72,6 +72,7 @@ function connectDriver(
   customSocket = true,
 ) {
   const sockets: net.Socket[] = [];
+  let closedConnections = 0;
   const base = {
     host: "127.0.0.1",
     port: fixture.port,
@@ -84,6 +85,9 @@ function connectDriver(
     backoff: () => 0,
     max_lifetime: 0,
     idle_timeout: 0,
+    onclose: () => {
+      closedConnections += 1;
+    },
     ssl,
     sslnegotiation: fixture.transport === "direct" ? "direct" : undefined,
   };
@@ -109,7 +113,13 @@ function connectDriver(
       }
     : base;
   const client = driver(options);
-  return { client, sockets };
+  return {
+    client,
+    sockets,
+    get closedConnections() {
+      return closedConnections;
+    },
+  };
 }
 
 async function query(client: postgres.Sql) {
@@ -239,6 +249,94 @@ describe("postgres-js real-driver TLS socket retention", () => {
           expect(sockets[1]!.readableLength).toBeLessThanOrEqual(rawQueueLimit);
           expect(fixture.connectionCount).toBe(2);
           expect(fixture.queryCount).toBe(3);
+        } finally {
+          await cleanup(fixture, client, sockets);
+        }
+      }, 10_000);
+    }
+
+    for (const transport of ["sslrequest", "direct", "plain"] as const) {
+      test(`${entrypoint} ${transport} drains an interrupted query without waiting for a closed backend`, async () => {
+        const fixture = await startPostgresFixture(credentials, transport, 2);
+        const { client, sockets } = connectDriver(
+          driver,
+          fixture,
+          transport === "plain" ? false : undefined,
+        );
+        try {
+          assertResult(await query(client));
+          const failure = await query(client).then(
+            () => null,
+            (error: unknown) => error,
+          );
+          expect(failure).toMatchObject({ code: "CONNECTION_CLOSED" });
+          // No timeout-driven destroy or reconnect may hide a rejected query
+          // retained as active after physical close.
+          await bounded(client.end(), "drain closed query");
+          expect(fixture.queryCount).toBe(2);
+          expect(fixture.connectionCount).toBe(1);
+          expect(sockets.every((socket) => socket.destroyed)).toBe(true);
+        } finally {
+          await client.end({ timeout: 1 });
+          for (const socket of sockets) socket.destroy();
+          await fixture.close();
+        }
+      }, 10_000);
+
+      test(`${entrypoint} ${transport} rejects late reserved writes after physical close and reconnects`, async () => {
+        const fixture = await startPostgresFixture(credentials, transport);
+        const connection = connectDriver(
+          driver,
+          fixture,
+          transport === "plain" ? false : undefined,
+        );
+        const { client, sockets } = connection;
+        try {
+          // Warm the connection before reserving it: fetch_types=false skips
+          // the startup discovery query on which reserve admission normally waits.
+          assertResult(await query(client));
+          const reserved = await bounded(client.reserve(), "reserve connected client");
+          fixture.disconnect();
+          await bounded(
+            (async () => {
+              while (connection.closedConnections === 0) await tick();
+            })(),
+            "physical close",
+          );
+          const count = fixture.queryCount;
+          // Both the immediate (>1KiB) write and deferred small-write paths
+          // previously escaped/hung on a null socket. Never replay their bytes.
+          for (const length of [2048, 16]) {
+            const rejection = await bounded(
+              Promise.resolve(
+                reserved.unsafe(`select fixture_payload /*${"x".repeat(length)}*/`).simple(),
+              ).then(
+                () => null,
+                (error: unknown) => error,
+              ),
+              "late reserved query rejection",
+            );
+            expect(rejection).toBeInstanceOf(Error);
+            expect((rejection as NodeJS.ErrnoException).code).toBe("CONNECTION_CLOSED");
+          }
+          expect(fixture.queryCount).toBe(count);
+          assertResult(await query(client));
+          expect(fixture.queryCount).toBe(count + 1);
+          const lateAfterReuse = await bounded(
+            Promise.resolve(reserved.unsafe("select fixture_payload").simple()).then(
+              () => null,
+              (failure: unknown) => failure,
+            ),
+            "late query after connection reuse",
+          );
+          expect((lateAfterReuse as NodeJS.ErrnoException).code).toBe("CONNECTION_CLOSED");
+          // An obsolete release cannot move the replacement's connection into
+          // the open queue, nor can an old transaction write on that socket.
+          reserved.release();
+          assertResult(await query(client));
+          expect(fixture.queryCount).toBe(count + 2);
+          expect(fixture.connectionCount).toBe(2);
+          expect(sockets[0]!.destroyed).toBe(true);
         } finally {
           await cleanup(fixture, client, sockets);
         }

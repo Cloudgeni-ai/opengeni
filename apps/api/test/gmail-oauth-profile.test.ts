@@ -52,7 +52,9 @@ describe("Gmail REST OAuth profile", () => {
   });
 
   test("verified discovery is bounded by actual reported scopes and the existing reviewed tools", () => {
-    const tools = profile.localToolVerification!.toolsForScopes;
+    const watchTopic = { gmailWatchTopicName: "projects/example/topics/gmail" };
+    const tools = (scopes: readonly string[]) =>
+      profile.localToolVerification!.toolsForScopes(scopes, watchTopic);
     expect(tools([])).toEqual([]);
     expect(tools(["https://www.googleapis.com/auth/drive.readonly"])).toEqual([]);
     expect(tools(OFFICIAL_GMAIL_MCP_SCOPES).map(({ name }) => name)).toEqual(
@@ -95,6 +97,17 @@ describe("Gmail REST OAuth profile", () => {
     ]);
     expect(tools([OFFICIAL_GMAIL_MCP_SCOPES[2]]).map(({ name }) => name)).toEqual(
       GMAIL_REST_MCP_TOOLS.map(({ name }) => name),
+    );
+  });
+
+  test("watch_mailbox is not offered without a deployment Pub/Sub topic", () => {
+    const names = profile
+      .localToolVerification!.toolsForScopes(OFFICIAL_GMAIL_MCP_SCOPES, {})
+      .map(({ name }) => name);
+    expect(names).not.toContain("watch_mailbox");
+    expect(names).toContain("stop_watch");
+    expect(names).toEqual(
+      GMAIL_REST_MCP_TOOLS.map(({ name }) => name).filter((name) => name !== "watch_mailbox"),
     );
   });
 

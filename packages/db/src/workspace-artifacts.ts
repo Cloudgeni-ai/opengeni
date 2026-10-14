@@ -12,14 +12,36 @@ import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
+import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
+
+/**
+ * Who is reading Sites: the person, or the person an agent acts for. They see
+ * every workspace Site plus their own Only me Sites. Null (keys, services and
+ * runs without a person) sees workspace Sites only. Every read and mutation
+ * takes one, so no path can skip the audience.
+ */
+export type WorkspaceArtifactViewer = { subjectId: string | null };
+
+/** Internal replay reads of an operation the caller already proved it owns. */
+const OPERATION_REPLAY = Symbol("operation-replay");
+
+function visibleTo(viewer: WorkspaceArtifactViewer) {
+  return viewer.subjectId === null
+    ? eq(schema.workspaceArtifacts.visibility, "workspace_shared")
+    : or(
+        eq(schema.workspaceArtifacts.visibility, "workspace_shared"),
+        eq(schema.workspaceArtifacts.ownerSubjectId, viewer.subjectId),
+      )!;
+}
 
 /** Any exact publication from this session establishes the Site association. */
 export async function hasWorkspaceArtifactSessionLink(
   db: Database,
   workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
   sessionId: string,
   artifactId: string,
 ): Promise<boolean> {
@@ -31,6 +53,7 @@ export async function hasWorkspaceArtifactSessionLink(
         and(
           eq(schema.workspaceArtifacts.workspaceId, workspaceId),
           eq(schema.workspaceArtifacts.id, artifactId),
+          visibleTo(viewer),
           sql`exists (select 1 from ${schema.workspaceArtifactVersions} as published_version
             where published_version.artifact_id = ${schema.workspaceArtifacts.id}
               and published_version.workspace_id = ${schema.workspaceArtifacts.workspaceId}
@@ -46,6 +69,7 @@ export async function hasWorkspaceArtifactSessionLink(
 export async function getWorkspaceSiteSessionOrigin(
   db: Database,
   workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
   siteId: string,
   versionId: string,
 ): Promise<{ siteId: string; title: string }> {
@@ -65,6 +89,7 @@ export async function getWorkspaceSiteSessionOrigin(
         and(
           eq(schema.workspaceArtifacts.workspaceId, workspaceId),
           eq(schema.workspaceArtifacts.id, siteId),
+          visibleTo(viewer),
         ),
       )
       .limit(1);
@@ -173,6 +198,11 @@ export class WorkspaceArtifactOperationError extends Error {
   readonly name = "WorkspaceArtifactOperationError";
 }
 
+/** The Site is visible to the caller, but only its owner may do this. */
+export class WorkspaceArtifactOwnerRequiredError extends Error {
+  readonly name = "WorkspaceArtifactOwnerRequiredError";
+}
+
 function iso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
@@ -227,6 +257,8 @@ function artifactFromRow(row: ArtifactRow, version: VersionRow | null): Workspac
     title: row.title,
     description: row.description,
     status: row.status,
+    visibility: row.visibility === "user_private" ? "private" : "workspace",
+    ownerSubjectId: row.ownerSubjectId,
     currentVersion: version ? versionFromRow(version) : null,
     createdBySubjectId: row.createdBySubjectId,
     createdAt: iso(row.createdAt),
@@ -249,7 +281,13 @@ async function currentVersion(scopedDb: any, artifact: ArtifactRow): Promise<Ver
   return row ?? null;
 }
 
-async function artifactRow(scopedDb: any, workspaceId: string, artifactId: string, lock = false) {
+async function artifactRow(
+  scopedDb: any,
+  workspaceId: string,
+  artifactId: string,
+  viewer: WorkspaceArtifactViewer | typeof OPERATION_REPLAY,
+  lock = false,
+) {
   let query = scopedDb
     .select()
     .from(schema.workspaceArtifacts)
@@ -257,6 +295,7 @@ async function artifactRow(scopedDb: any, workspaceId: string, artifactId: strin
       and(
         eq(schema.workspaceArtifacts.workspaceId, workspaceId),
         eq(schema.workspaceArtifacts.id, artifactId),
+        ...(viewer === OPERATION_REPLAY ? [] : [visibleTo(viewer)]),
       ),
     )
     .limit(1);
@@ -265,9 +304,33 @@ async function artifactRow(scopedDb: any, workspaceId: string, artifactId: strin
   return (row as ArtifactRow | undefined) ?? null;
 }
 
+/** Whether this viewer can see the Site at all, without loading its history. */
+export async function isWorkspaceArtifactVisible(
+  db: Database,
+  workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
+  artifactId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.workspaceArtifacts.id })
+      .from(schema.workspaceArtifacts)
+      .where(
+        and(
+          eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+          eq(schema.workspaceArtifacts.id, artifactId),
+          visibleTo(viewer),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  });
+}
+
 export async function listWorkspaceArtifacts(
   db: Database,
   workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
   options: {
     limit?: number;
     cursor?: string;
@@ -284,6 +347,7 @@ export async function listWorkspaceArtifacts(
     const cursor = options.cursor ? decodeListCursor(options.cursor) : null;
     const visibility = and(
       eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+      visibleTo(viewer),
       ...(options.sourceSessionId
         ? [
             sql`exists (select 1 from ${schema.workspaceArtifactVersions} as published_version
@@ -355,10 +419,11 @@ function decodeListCursor(value: string): { updatedAt: Date; id: string } {
 export async function getWorkspaceArtifact(
   db: Database,
   workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
   artifactId: string,
 ): Promise<WorkspaceArtifactDetailResponse> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const artifact = await artifactRow(scopedDb, workspaceId, artifactId);
+    const artifact = await artifactRow(scopedDb, workspaceId, artifactId, viewer);
     if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
     const [versionRows, eventRows, current] = await Promise.all([
       scopedDb
@@ -398,6 +463,7 @@ export async function getWorkspaceArtifact(
 export async function getWorkspaceArtifactContentRef(
   db: Database,
   workspaceId: string,
+  viewer: WorkspaceArtifactViewer,
   artifactId: string,
   versionId?: string,
 ): Promise<{
@@ -408,7 +474,7 @@ export async function getWorkspaceArtifactContentRef(
   sourceKey: string | null;
 }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const artifact = await artifactRow(scopedDb, workspaceId, artifactId);
+    const artifact = await artifactRow(scopedDb, workspaceId, artifactId, viewer);
     if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
     const targetId = versionId ?? artifact.currentVersionId;
     if (!targetId) throw new WorkspaceArtifactNotFoundError("Artifact has no published version");
@@ -639,7 +705,10 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     throw new WorkspaceArtifactOperationError("Artifact attempt provenance is incomplete");
   }
   const [row] = await scopedDb
-    .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
+    .select({
+      catalog: schema.sessionAttemptToolCatalogs.catalog,
+      contentRefs: schema.sessionAttemptToolCatalogs.contentRefs,
+    })
     .from(schema.sessionAttemptToolCatalogs)
     .where(
       and(
@@ -654,7 +723,9 @@ async function assertArtifactRequestedToolsInAttemptCatalog(
     .limit(1);
   let allowed: Set<string>;
   try {
-    const catalog = parseVerifiedAttemptToolCatalog(row?.catalog);
+    const catalog = parseVerifiedAttemptToolCatalog(
+      row ? await hydrateStoredAttemptToolCatalog(scopedDb, row) : undefined,
+    );
     allowed = new Set(catalog.entries.map((entry) => toolIdentityKey(entry.identity)));
   } catch {
     throw new WorkspaceArtifactOperationError(
@@ -684,7 +755,7 @@ async function replayForOperation(scopedDb: any, workspaceId: string, operationK
     )
     .limit(1);
   if (!event) return null;
-  const artifact = await artifactRow(scopedDb, workspaceId, event.artifactId);
+  const artifact = await artifactRow(scopedDb, workspaceId, event.artifactId, OPERATION_REPLAY);
   if (!artifact) return null;
   const [version] = await scopedDb
     .select()
@@ -837,6 +908,15 @@ function assertStatusReplay(
   }
 }
 
+/** A Site the caller cannot see is indistinguishable from one that does not exist. */
+async function requireVisibleArtifact(
+  scopedDb: any,
+  input: { workspaceId: string; artifactId: string; viewer: WorkspaceArtifactViewer },
+): Promise<void> {
+  if (!(await artifactRow(scopedDb, input.workspaceId, input.artifactId, input.viewer)))
+    throw new WorkspaceArtifactNotFoundError("Artifact not found");
+}
+
 function mutationResult(
   artifact: ArtifactRow,
   version: VersionRow,
@@ -860,6 +940,10 @@ export async function createWorkspaceArtifact(
     title: string;
     description: string | null;
     requestedSlug?: string | null;
+    /** Who can see it; `user_private` needs an owner. */
+    visibility: "workspace_shared" | "user_private";
+    /** The person it is published for: the human caller or the human an agent acts for. */
+    ownerSubjectId: string | null;
   },
 ): Promise<WorkspaceArtifactMutationResponse> {
   let contentPersisted = false;
@@ -896,6 +980,8 @@ export async function createWorkspaceArtifact(
               title: input.title,
               description: input.description,
               createdBySubjectId: input.actorSubjectId,
+              visibility: input.visibility,
+              ownerSubjectId: input.ownerSubjectId,
             })
             .returning();
           const [version] = await tx
@@ -969,6 +1055,7 @@ export async function publishWorkspaceArtifactVersion(
     expectedCurrentVersionId: string;
     title?: string;
     description?: string | null;
+    viewer: WorkspaceArtifactViewer;
   },
 ): Promise<WorkspaceArtifactMutationResponse> {
   let contentPersisted = false;
@@ -979,6 +1066,7 @@ export async function publishWorkspaceArtifactVersion(
       async (scopedDb) => {
         return await scopedDb.transaction(async (tx) => {
           await lockOperation(tx, input.workspaceId, input.operationKey);
+          await requireVisibleArtifact(tx, input);
           const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
           if (replay) {
             assertPublishReplayMatchesInput(replay, input);
@@ -992,7 +1080,13 @@ export async function publishWorkspaceArtifactVersion(
           }
           await assertAttemptAuthority(tx, input);
           await retainArtifactUpload(tx, input);
-          const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+          const artifact = await artifactRow(
+            tx,
+            input.workspaceId,
+            input.artifactId,
+            input.viewer,
+            true,
+          );
           if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
           if (artifact.status !== "active") {
             throw new WorkspaceArtifactOperationError("Archived artifacts cannot be published");
@@ -1108,6 +1202,7 @@ export async function rollbackWorkspaceArtifact(
     versionId: string;
     expectedCurrentVersionId: string;
     reason: string;
+    viewer: WorkspaceArtifactViewer;
   },
 ): Promise<WorkspaceArtifactMutationResponse> {
   return await withRlsContext(
@@ -1116,6 +1211,7 @@ export async function rollbackWorkspaceArtifact(
     async (scopedDb) => {
       return await scopedDb.transaction(async (tx) => {
         await lockOperation(tx, input.workspaceId, input.operationKey);
+        await requireVisibleArtifact(tx, input);
         const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
         if (replay) {
           assertRollbackReplay(
@@ -1134,7 +1230,13 @@ export async function rollbackWorkspaceArtifact(
           );
         }
         await assertAttemptAuthority(tx, input);
-        const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+        const artifact = await artifactRow(
+          tx,
+          input.workspaceId,
+          input.artifactId,
+          input.viewer,
+          true,
+        );
         if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
         if (artifact.status !== "active") {
           throw new WorkspaceArtifactOperationError("Archived artifacts cannot be rolled back");
@@ -1204,6 +1306,7 @@ export async function setWorkspaceArtifactStatus(
     status: "active" | "archived";
     expectedCurrentVersionId: string;
     reason: string;
+    viewer: WorkspaceArtifactViewer;
   },
 ): Promise<WorkspaceArtifactMutationResponse> {
   return await withRlsContext(
@@ -1212,6 +1315,7 @@ export async function setWorkspaceArtifactStatus(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockOperation(tx, input.workspaceId, input.operationKey);
+        await requireVisibleArtifact(tx, input);
         const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
         if (replay) {
           assertStatusReplay(
@@ -1230,7 +1334,13 @@ export async function setWorkspaceArtifactStatus(
           );
         }
         await assertAttemptAuthority(tx, input);
-        const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+        const artifact = await artifactRow(
+          tx,
+          input.workspaceId,
+          input.artifactId,
+          input.viewer,
+          true,
+        );
         if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
         if (artifact.currentVersionId !== input.expectedCurrentVersionId) {
           throw new WorkspaceArtifactConflictError(
@@ -1276,4 +1386,49 @@ export async function setWorkspaceArtifactStatus(
         return mutationResult(updated!, current, event!, false);
       }),
   );
+}
+
+/**
+ * Change who can see a Site. Only its owner can, and only while they can see
+ * it; anyone else gets the same answer as for a Site that does not exist, or,
+ * when the Site is shared with them, an owner-required refusal. Whether the
+ * owner may make anything Only me is decided by the caller first.
+ */
+export async function updateWorkspaceArtifactVisibility(
+  db: Database,
+  input: {
+    workspaceId: string;
+    artifactId: string;
+    viewer: WorkspaceArtifactViewer;
+    visibility: "workspace_shared" | "user_private";
+  },
+): Promise<WorkspaceArtifact> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const artifact = await artifactRow(
+      scopedDb,
+      input.workspaceId,
+      input.artifactId,
+      input.viewer,
+      true,
+    );
+    if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
+    if (input.viewer.subjectId === null || artifact.ownerSubjectId !== input.viewer.subjectId)
+      throw new WorkspaceArtifactOwnerRequiredError(
+        "Only the person who owns this Site can change who can see it",
+      );
+    const [updated] =
+      artifact.visibility === input.visibility
+        ? [artifact]
+        : await scopedDb
+            .update(schema.workspaceArtifacts)
+            .set({ visibility: input.visibility })
+            .where(
+              and(
+                eq(schema.workspaceArtifacts.workspaceId, input.workspaceId),
+                eq(schema.workspaceArtifacts.id, artifact.id),
+              ),
+            )
+            .returning();
+    return artifactFromRow(updated!, await currentVersion(scopedDb, updated!));
+  });
 }

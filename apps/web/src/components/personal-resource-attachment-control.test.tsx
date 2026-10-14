@@ -17,7 +17,6 @@ function controller(
     truncated: false,
     catalog: null,
     selected: {
-      variableSets: [],
       rigs: [],
       connectedMachines: [{ enrollmentId: "machine-1", name: "My machine" }],
       resourceCount: 1,

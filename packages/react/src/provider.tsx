@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "./client";
 import { usePageLiveActivity } from "./hooks/internal";
+import { retainSharedQueries } from "./hooks/shared-query";
 import { OpenGeniContext } from "./session-context";
 import { ErrorMessageContext, type ErrorMessageFormatter } from "./lib/error-message";
 
@@ -23,20 +24,31 @@ export type OpenGeniProviderProps = {
   onWorkspaceControlEvent?: ((event: WorkspaceControlEvent) => void) | undefined;
   onWorkspaceInteractionEvent?: ((event: WorkspaceInteractionRevisionEvent) => void) | undefined;
   /**
-   * Stale-tab protection for the stock OpenGeni web app: when the server's API
+   * Stale-tab protection for the stock Opengeni web app: when the server's API
    * contract revision differs from this bundle's, cover the page and reload it
    * once. Off by default, because an embedded product's page must never be
-   * blocked or reloaded when OpenGeni deploys; there a mismatch is ignored and
+   * blocked or reloaded when Opengeni deploys; there a mismatch is ignored and
    * the SDK's tolerant-reader compatibility applies.
    */
   reloadOnApiContractChange?: boolean | undefined;
+  /**
+   * Keep subscription account lists and usage readings (`useCodexAccounts`,
+   * `useSuperGrokAccounts`) for `client` after the components that read them
+   * unmount, so returning to them renders the last rows at once and re-reads
+   * in the background. Off by default: then readers mounted together share one
+   * request, but nothing is served to a later mount. Opt in only when every
+   * signed-in person gets their own `client` object (the stock Opengeni console
+   * creates a new client on every identity change). Retained rows are dropped
+   * when `client` changes or this provider unmounts.
+   */
+  retainReadsAcrossMounts?: boolean | undefined;
   /** Host-owned error copy. Receives the original diagnostic error and neutral default copy. */
   formatError?: ErrorMessageFormatter | undefined;
   children?: ReactNode;
 };
 
 /**
- * Supplies the OpenGeni client + workspace to all hooks below it. Hooks also
+ * Supplies the Opengeni client + workspace to all hooks below it. Hooks also
  * accept `{ client, workspaceId }` overrides per call for multi-workspace UIs.
  */
 export function OpenGeniProvider({
@@ -45,6 +57,7 @@ export function OpenGeniProvider({
   onWorkspaceControlEvent,
   onWorkspaceInteractionEvent,
   reloadOnApiContractChange = false,
+  retainReadsAcrossMounts = false,
   formatError,
   children,
 }: OpenGeniProviderProps) {
@@ -73,6 +86,11 @@ export function OpenGeniProvider({
     "streamWorkspaceLiveEvents" in client && typeof client.streamWorkspaceLiveEvents === "function";
   callbackRef.current = onWorkspaceControlEvent;
   interactionCallbackRef.current = onWorkspaceInteractionEvent;
+
+  useEffect(() => {
+    if (!retainReadsAcrossMounts) return;
+    return retainSharedQueries(client);
+  }, [client, retainReadsAcrossMounts]);
 
   const strictContract = reloadOnApiContractChange;
   const verifyApiContract = useCallback(async (): Promise<void> => {

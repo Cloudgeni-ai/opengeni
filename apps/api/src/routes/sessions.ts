@@ -1,19 +1,46 @@
+import {
+  legacyVariableSetFields,
+  rejectLegacyVariableSetFields,
+  variableSetsRemovedResponse,
+  withoutEmptyLegacyVariableSetFields,
+} from "../http/variable-sets-removed";
+import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { scheduledSessionIds } from "@opengeni/db";
+import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
 import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
+import {
+  createRealtimeVoiceBilling,
+  RealtimeVoiceUnavailableError,
+  TranscriptionBillingRefusedError,
+} from "@opengeni/core";
+import type { CreditDebitAttribution, SessionForkPointRefusal } from "@opengeni/db";
+import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
 import { SandboxRecoveryConflictError } from "@opengeni/db";
 import { codexAccountJson } from "./codex";
-import { getSessionCodexAccounts } from "@opengeni/db";
+import {
+  deliverSubscriptionCoreCodexWake,
+  getSubscriptionCoreSessionCodexAccounts,
+  pinSubscriptionCoreSessionCodexAccount,
+} from "@opengeni/db";
+import { codexRouteDisposition } from "./codex-core";
+import {
+  loadCodexSessionPointerProjection,
+  type CodexSessionPointerProjection,
+} from "../codex-session-pointers";
+import { getToolActionReview, getToolReviewDetailsPage } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -77,14 +104,17 @@ import {
   UpdateSessionChannelRequest,
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
+  UpdateSessionRetentionRequest,
+  SetSessionUsageLimitRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
-  UpdateSessionVariableSetsRequest,
   UpdateSessionVisibilityRequest,
+  SessionVisibility,
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
+  UpdateSessionSkillsRequest,
   AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -113,7 +143,8 @@ import {
   type TerminalPtyExitedPayload,
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
-  type VariableSet,
+  type VaultApiError,
+  VAULT_ERROR_HTTP_STATUS,
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
@@ -146,6 +177,7 @@ import {
   listSessionGoalRevisions,
   rejectSessionGoalRevisionWithEvent,
   listSessionIdsInGroup,
+  countAllSessionsInGroup,
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
   listSessionsForSubject,
@@ -156,9 +188,7 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  switchSessionCodexAccount,
   setSessionChannel,
-  updateSessionVariableSets,
   ChannelNotFoundError,
   setSessionAttention,
   setSessionArchive,
@@ -176,6 +206,7 @@ import {
   upsertSessionGoalWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
+  PersonalSessionInitiatorRequiredError,
   beginSessionRealtimeInTransaction,
   activateSessionRealtimeConnectionInTransaction,
   claimSessionRealtimeConnectionInTransaction,
@@ -195,12 +226,14 @@ import {
   SessionTenancyConflictError,
   SessionTenancyInvalidRequestError,
   SessionTenancyNotActivatedError,
+  SessionVisibilityWorkConflictError,
   HumanInputResponseValidationError,
   SkillHumanResponseError,
   latestWorkspaceCapture,
   sessionLatestWorkspaceCapture,
   renewSessionRealtimeInTransaction,
   syncSessionRealtimeLedgerInTransaction,
+  setSessionKeepLive,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   workspaceCaptureAtRevision,
@@ -311,17 +344,29 @@ import {
   submitComposerDraftForRequest,
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
+  previewManagedHumanSessionVisibilityChange,
   updateSessionToolPolicy,
   updateSessionAgent,
+  updateSessionSkills,
   updateSessionTitle,
+  setSessionRetention,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyContext,
   relayConfigFromSettings,
-  validateVariableSetAttachment,
+  getSessionUsageLimitForAccess,
+  SessionUsageLimitHttpError,
+  sessionUsageLimitForRead,
+  setSessionUsageLimitForAccess,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
+import { isAgentActingAsPerson } from "../http/acting-person";
+import {
+  humanSecretWriteContext,
+  prepareSecretAnswers,
+  splitSecretAnswers,
+} from "../secret-answers";
 import { browserSseDeliveryOptions, sseSessionStream } from "../http/sse";
 import {
   serveWorkspaceCapture,
@@ -374,10 +419,62 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     observability: deps.observability,
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
-  const withSiteCommandOrigin = <T>(c: Context, workspaceId: string, run: () => Promise<T>) =>
+  const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });
+  /** Credit refusal / unavailable deployment voice as an HTTP response, else null. */
+  const realtimeVoiceRefusalResponse = (c: Context, error: unknown): Response | null => {
+    if (error instanceof TranscriptionBillingRefusedError) {
+      return transcriptionBillingRefusal(c, error);
+    }
+    if (error instanceof RealtimeVoiceUnavailableError) {
+      return c.json(
+        {
+          error: {
+            status: 409,
+            code: "realtime_voice_unavailable",
+            message: error.message,
+            retryable: false,
+            details: { reason: error.code },
+          },
+        },
+        409,
+      );
+    }
+    return null;
+  };
+  /**
+   * Bill every started minute observed so far for a deployment-funded call.
+   * Owner attribution only when the caller is the voice owner. A settlement
+   * failure is logged and retried idempotently on the next heartbeat.
+   */
+  const settleRealtimeVoice = async (input: {
+    grant: { subjectId: string };
+    attribution: CreditDebitAttribution;
+    workspaceId: string;
+    sessionId: string;
+    realtimeId: string;
+  }) => {
+    try {
+      return await realtimeVoiceBilling.settle({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: input.realtimeId,
+        callerSubjectId: input.grant.subjectId,
+        attribution: input.attribution,
+      });
+    } catch (error) {
+      console.error("realtime voice settlement failed", {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: input.realtimeId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  };
+  const withSiteCommandOrigin = <T>(c: Context, grant: AccessGrant, run: () => Promise<T>) =>
     withOptionalSiteCommandOrigin(
       db,
-      workspaceId,
+      grant,
       c.req.header("x-opengeni-site-id"),
       c.req.header("x-opengeni-site-version"),
       run,
@@ -509,7 +606,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // Every deployment has one fail-closed authorization seam for every HTTP
-  // session surface. The core boundary always enforces durable OpenGeni-owned
+  // session surface. The core boundary always enforces durable Opengeni-owned
   // private-session rules; an embedding host port can add narrower policy.
   // Register it before the routes so a newly added path cannot accidentally
   // inherit workspace access without an explicit operation classification. The
@@ -609,11 +706,26 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
+      const legacyFields = legacyVariableSetFields(payload);
+      if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
+      payload = withoutEmptyLegacyVariableSetFields(payload);
       CreateSessionRequest.parse(payload);
+      // only a person present in the app or the host's server sets a
+      // task usage limit; an agent acting for a person cannot, even null.
+      if (
+        (payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined &&
+        isAgentActingAsPerson(c)
+      ) {
+        throw new SessionUsageLimitHttpError(
+          403,
+          "session_usage_limit_forbidden",
+          "Only a person or the application's server can set a task usage limit.",
+        );
+      }
       const origin = await measureSessionCreatePhase(deps.observability, "site_origin", () =>
         resolveSiteSessionOrigin(
           db,
-          workspaceId,
+          grant,
           c.req.header("x-opengeni-site-id"),
           c.req.header("x-opengeni-site-version"),
         ),
@@ -625,6 +737,24 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
+    }
+    // A creator may exempt its new session from the idle-session archive (a
+    // persistent agent, for example). Creation committed; this only marks it.
+    if ((payload as { keepLive?: unknown }).keepLive === true) {
+      const kept = await setSessionKeepLive(db, {
+        workspaceId,
+        sessionId: session.id,
+        keepLive: true,
+      });
+      if (kept.status === "updated") session = { ...session, retention: kept.retention };
+    }
+    // Echo a requested usage limit so clients can tell this server applied it
+    // (older servers strip the unknown field and would run unlimited).
+    if ((payload as { usageLimitMicros?: unknown }).usageLimitMicros !== undefined) {
+      const usageLimit = await sessionUsageLimitForRead(db, session, {
+        subjectId: grant.subjectId,
+      });
+      if (usageLimit) session = { ...session, usageLimit };
     }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
@@ -813,6 +943,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.pinsOnly ? { pinsOnly: true } : {}),
           ...(query.includeTotals ? { includeTotals: true } : {}),
           ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
+          ...(query.contentArchivedOnly ? { contentArchivedOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -896,12 +1027,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         hasSchedules: scheduleTargets.has(session.id),
         ...(activity ? { backgroundCommandActivity: activity } : {}),
       };
-      return sessionWithEffectiveToolPolicy(
-        decorated,
-        policy.workspaceServerIds,
-        policy.workspaceDefaultServerIds,
-        policy.effectiveToolsContext,
-      );
+      return sessionResponse(decorated, policy);
     };
     if (pageView) {
       return c.json({
@@ -1070,6 +1196,48 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/tool-reviews/:approvalId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const input = {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      approvalId: c.req.param("approvalId"),
+    };
+    const review = await getToolActionReview(db, input);
+    if (!review) throw new HTTPException(404, { message: "Review not found" });
+    c.header("Cache-Control", "private, no-store");
+    return c.json(review);
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-reviews/:approvalId/details",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const query = z
+        .object({
+          actionDigest: z.string().regex(/^[0-9a-f]{64}$/),
+          path: z.string().max(2048).default(""),
+          offset: z.coerce.number().int().min(0).max(4_194_304).default(0),
+        })
+        .safeParse(c.req.query());
+      if (!query.success) throw new HTTPException(400, { message: "Invalid review page" });
+      const input = {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: c.req.param("sessionId"),
+        approvalId: c.req.param("approvalId"),
+        ...query.data,
+      };
+      const page = await getToolReviewDetailsPage(db, input);
+      if (!page) throw new HTTPException(404, { message: "Review details unavailable" });
+      c.header("Cache-Control", "private, no-store");
+      return c.json(page);
+    },
+  );
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -1087,22 +1255,38 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const activity = await backgroundCommandActivityForSessions(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionIds: [sessionId],
-    });
-    const scheduleTargets =
+    // Independent reads of the already-authorized session: the effective
+    // policy context depends only on the session row, not on the activity or
+    // schedule annotations, so all three are read concurrently.
+    const [activity, scheduleTargets, policy] = await Promise.all([
+      backgroundCommandActivityForSessions(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionIds: [sessionId],
+      }),
       hasPermission(grant.permissions, "scheduled_tasks:run") &&
       hasPermission(grant.permissions, "sessions:control")
-        ? await scheduledSessionIds(db, workspaceId, [sessionId])
-        : new Set<string>();
+        ? scheduledSessionIds(db, workspaceId, [sessionId])
+        : Promise.resolve(new Set<string>()),
+      loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
+    ]);
+    // the task's usage projection. A failed read is `unavailable`,
+    // never $0 or unlimited; it does not fail the session read.
+    const usageLimit = await sessionUsageLimitForRead(db, session, {
+      subjectId: grant.subjectId,
+    });
     return c.json(
-      await withEffectivePolicy(deps, workspaceId, grant.subjectId, {
-        ...session,
-        hasSchedules: scheduleTargets.has(sessionId),
-        ...(activity.get(sessionId) ? { backgroundCommandActivity: activity.get(sessionId) } : {}),
-      }),
+      sessionResponse(
+        {
+          ...session,
+          ...(usageLimit ? { usageLimit } : {}),
+          hasSchedules: scheduleTargets.has(sessionId),
+          ...(activity.get(sessionId)
+            ? { backgroundCommandActivity: activity.get(sessionId) }
+            : {}),
+        },
+        policy,
+      ),
     );
   });
 
@@ -1198,11 +1382,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/visibility/preview", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const target = SessionVisibility.safeParse(c.req.query("visibility"));
+    if (!target.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid session visibility preview request.",
+        retryable: false,
+        details: { fields: zodErrorFields(target.error) },
+      });
+    }
+    try {
+      return c.json(
+        await previewManagedHumanSessionVisibilityChange(
+          deps,
+          authorization,
+          workspaceId,
+          sessionId,
+          target.data,
+          "http",
+        ),
+      );
+    } catch (error) {
+      throw sessionTenancyHttpError(error);
+    }
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/forks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const parsed = ForkSessionRequest.safeParse(await c.req.json().catch(() => null));
+    const forkLegacy = rejectLegacyVariableSetFields(c, await c.req.json().catch(() => null));
+    if ("response" in forkLegacy) return forkLegacy.response;
+    const parsed = ForkSessionRequest.safeParse(forkLegacy.payload);
     if (!parsed.success) {
       throw new ApiHttpError(422, {
         code: "validation_failed",
@@ -1264,6 +1479,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     try {
+      await realtimeVoiceBilling.admit({
+        accountId: grant.accountId,
+        workspaceId,
+        model: parsed.data.model,
+        attribution: creditDebitAttributionForGrant(grant),
+      });
+    } catch (error) {
+      const refused = realtimeVoiceRefusalResponse(c, error);
+      if (refused) return refused;
+      throw error;
+    }
+    try {
       const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
         const accounts = await freezeSessionRealtimeConnectionAccounts({
           db: scopedDb as unknown as Database,
@@ -1311,6 +1538,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       }
       try {
+        // Settle observed minutes before renewing; out of credits keeps the
+        // current lease so the call drains and ends instead of running free.
+        const settlement = await settleRealtimeVoice({
+          grant,
+          attribution: creditDebitAttributionForGrant(grant),
+          workspaceId,
+          sessionId,
+          realtimeId,
+        });
+        const stop = settlement?.stop ?? null;
         const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
           renewSessionRealtimeInTransaction(scopedDb, {
             workspaceId,
@@ -1318,11 +1555,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             realtimeId,
             ownerSubjectId: grant.subjectId,
             ...parsed.data,
+            extendLease: stop === null,
           }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
-        return c.json({ mode: result.mode, replay: result.replay });
+        return c.json({
+          mode: result.mode,
+          replay: result.replay,
+          ...(stop && result.mode.state === "active"
+            ? { stop: { code: stop.code, message: stop.message } }
+            : {}),
+        });
       } catch (error) {
         throw sessionRealtimeHttpError(error);
       }
@@ -1355,10 +1599,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           realtimeId,
           ownerSubjectId: grant.subjectId,
+          ownerSubjectLabel: grant.subjectLabel ?? null,
           ...parsed.data,
         }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+      await settleRealtimeVoice({
+        grant,
+        attribution: creditDebitAttributionForGrant(grant),
+        workspaceId,
+        sessionId,
+        realtimeId,
+      });
       c.header("cache-control", "private, no-store");
       return c.json({ mode: result.mode, replay: result.replay });
     } catch (error) {
@@ -1394,21 +1646,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...providerRequest
       } = parsed.data;
       const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            operationId,
-            ownerSubjectId: grant.subjectId,
-            browserInstanceId,
-            ownerKey,
-            expectedVersion,
-            expectedConnectionEpoch,
-            rotate,
-            promotionMode: browserActivation === "required" ? "staged" : "legacy",
-          }),
-        ),
+        scopedDb.transaction(async (tx) => {
+          const claimed = await claimSessionRealtimeConnectionInTransaction(
+            tx as unknown as Database,
+            {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              operationId,
+              ownerSubjectId: grant.subjectId,
+              browserInstanceId,
+              ownerKey,
+              expectedVersion,
+              expectedConnectionEpoch,
+              rotate,
+              promotionMode: browserActivation === "required" ? "staged" : "legacy",
+            },
+          );
+          if (
+            claimed.mode.model !== "gpt-live-1-boulder-alpha" &&
+            claimed.mode.model !== AZURE_LIVE_MODEL_ID
+          ) {
+            throw new CodexRealtimeBrokerError(
+              "invalid_request",
+              "This voice model does not use WebRTC negotiation",
+            );
+          }
+          return claimed;
+        }),
       );
       if (claim.replay) {
         if (
@@ -1443,7 +1708,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         return c.json({
           sdp: claim.connection.sdpAnswer,
           version: "v3" as const,
-          model: "gpt-live-1-boulder-alpha" as const,
+          model: claim.mode.model,
           connectionId: claim.connection.id,
           connectionEpoch: claim.connection.connectionEpoch,
           startupFenceSequence: claim.connection.startupFenceSequence,
@@ -1451,13 +1716,40 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           replay: true,
         });
       }
-      const broker = buildSessionCodexRealtimeBroker(
-        db,
-        settings,
-        workspaceId,
-        sessionId,
-        deps.codexFetch,
-      );
+      try {
+        await realtimeVoiceBilling.admit({
+          accountId: grant.accountId,
+          workspaceId,
+          model: claim.mode.model,
+          attribution: creditDebitAttributionForGrant(grant),
+        });
+      } catch (error) {
+        const refused = realtimeVoiceRefusalResponse(c, error);
+        if (!refused) throw error;
+        await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId: claim.connection.id,
+              operationId,
+              connectionEpoch: claim.connection.connectionEpoch,
+              failureCode: "billing_refused",
+            }),
+          ),
+        ).catch(() => undefined);
+        return refused;
+      }
+      const broker =
+        claim.mode.model === AZURE_LIVE_MODEL_ID
+          ? buildSessionAzureLiveBroker(db, settings, workspaceId, sessionId, deps.codexFetch)
+          : buildSessionCodexRealtimeBroker(
+              db,
+              settings,
+              { accountId: grant.accountId, workspaceId, sessionId },
+              deps.codexFetch,
+            );
       try {
         const answer = await broker({
           request: providerRequest,
@@ -1496,6 +1788,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 ),
               )
             : null;
+        await settleRealtimeVoice({
+          grant,
+          attribution: creditDebitAttributionForGrant(grant),
+          workspaceId,
+          sessionId,
+          realtimeId,
+        });
         return c.json({
           ...answer,
           connectionId: completed.connection.id,
@@ -1596,6 +1895,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           "Realtime Gateway tokens are single-use; reconnect with a new operation",
         );
       }
+      await realtimeVoiceBilling.admit({
+        accountId: grant.accountId,
+        workspaceId,
+        model: claim.mode.model,
+        attribution: creditDebitAttributionForGrant(grant),
+      });
       const secret = await createGatewayRealtimeConnectionSecret({
         db,
         settings,
@@ -1619,6 +1924,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ),
       );
       connectionCompleted = true;
+      await settleRealtimeVoice({
+        grant,
+        attribution: creditDebitAttributionForGrant(grant),
+        workspaceId,
+        sessionId,
+        realtimeId,
+      });
       return c.json({
         ...secret,
         connectionId: completed.connection.id,
@@ -1640,11 +1952,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               operationId,
               connectionEpoch: claimed.connection.connectionEpoch,
               failureCode:
-                error instanceof GatewayRealtimeBrokerError ? error.code : "gateway_error",
+                error instanceof GatewayRealtimeBrokerError
+                  ? error.code
+                  : error instanceof TranscriptionBillingRefusedError ||
+                      error instanceof RealtimeVoiceUnavailableError
+                    ? "billing_refused"
+                    : "gateway_error",
             }),
           ),
         ).catch(() => undefined);
       }
+      const refused = realtimeVoiceRefusalResponse(c, error);
+      if (refused) return refused;
       if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
       if (!(error instanceof GatewayRealtimeBrokerError)) throw error;
       const status = error.code === "credential_unavailable" ? 409 : 502;
@@ -1853,29 +2172,38 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       }
       try {
-        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
-          // Acquire origin authority before inference/session locks. A deferred
-          // realtime session has no initial worker turn; capture its exact
-          // linked actor when the ledger actually admits ordinary agent work.
-          await beforeCommit?.(scopedDb as unknown as Database);
-          return syncSessionRealtimeLedgerInTransaction(
-            scopedDb,
-            {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              ownerSubjectId: grant.subjectId,
-              ...parsed.data,
-              controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
-            },
-            captureLinked
-              ? {
-                  afterDelegationAdmission: async ({ turnId }) =>
-                    captureLinked(scopedDb as unknown as Database, sessionId, turnId),
-                }
-              : {},
-          );
-        });
+        const result = await withWorkspaceSessionActivityRls(
+          db,
+          workspaceId,
+          async (scopedDb) => {
+            // Acquire origin authority before inference/session locks. A deferred
+            // realtime session has no initial worker turn; capture its exact
+            // linked actor when the ledger actually admits ordinary agent work.
+            await beforeCommit?.(scopedDb as unknown as Database);
+            return syncSessionRealtimeLedgerInTransaction(
+              scopedDb,
+              {
+                workspaceId,
+                sessionId,
+                realtimeId,
+                ownerSubjectId: grant.subjectId,
+                ownerSubjectLabel: grant.subjectLabel ?? null,
+                ...parsed.data,
+                controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+              },
+              captureLinked
+                ? {
+                    afterDelegationAdmission: async ({ turnId }) =>
+                      captureLinked(scopedDb as unknown as Database, sessionId, turnId),
+                  }
+                : {},
+            );
+          },
+          undefined,
+          // External reauthorization takes the organization-membership lock,
+          // which precedes the tenancy fence and the canonical session prefix.
+          Boolean(beforeCommit),
+        );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
         return c.json({ accepted: result.accepted, outbound: result.outbound });
@@ -1999,6 +2327,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Personal chat organization: archived roots leave the ordinary rail only
   // for this member and remain recoverable through the archived list view.
+  // Archiving a chat you started that still has work also pauses it (see
+  // pauseOwnArchivedWork); archiving anyone else's chat only hides it for you.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -2014,14 +2344,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid session archive request" });
     }
     try {
-      const session = await setSessionArchive(db, {
+      const archived = await setSessionArchive(db, {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
         personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         ...parsed.data,
       });
-      if (!session) throw new HTTPException(404, { message: "session not found" });
+      if (!archived) throw new HTTPException(404, { message: "session not found" });
+      let session = archived;
+      if (parsed.data.archived) {
+        try {
+          session = await pauseOwnArchivedWork(deps, grant, workspaceId, archived);
+        } catch (error) {
+          return commandConflictResponse(c, error);
+        }
+      }
       return c.json(
         await withEffectivePolicy(
           deps,
@@ -2082,12 +2420,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
       ancestors: lineage.ancestors.map((session) =>
-        sessionWithEffectiveToolPolicy(
-          { ...session, hasSchedules: targets.has(session.id) },
-          policy.workspaceServerIds,
-          policy.workspaceDefaultServerIds,
-          policy.effectiveToolsContext,
-        ),
+        sessionResponse({ ...session, hasSchedules: targets.has(session.id) }, policy),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
     });
@@ -2096,9 +2429,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     // authorizeSessionHttp has already enforced private-session and agent scope.
-    const projection = await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
+    await codexRouteDisposition(deps, grant.accountId);
+    const projection = await getSubscriptionCoreSessionCodexAccounts(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      // A turn on the viewer's own personal connection shows it to them.
+      viewerSubjectId: grant.subjectId,
+    });
     if (!projection) throw new HTTPException(404, { message: "session not found" });
     const activeAccountId = projection.rotation?.activeCredentialId ?? null;
     return c.json({
@@ -2119,7 +2459,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
-  // "auto" clears the pin (the session follows the workspace active pointer); a
+  // "auto" clears only the Codex pin (shared-core automatic selection); a
   // uuid pins the session to that specific account. Overrides a capacity-blocked
   // turn; a running attempt keeps its account. 404 when the session or the target
   // account id isn't in the workspace.
@@ -2138,7 +2478,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       try {
         await requireSessionAuthorization(deps, grant, {
           sessionId,
-          operation: "session.codex_account.write",
+          operation: "session.model_account.write",
           surface: "http",
         });
       } catch (error) {
@@ -2146,42 +2486,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    const mutation = await switchSessionCodexAccount(db, {
+    await codexRouteDisposition(deps, grant.accountId);
+
+    const core = await pinSubscriptionCoreSessionCodexAccount(db, {
+      accountId: grant.accountId,
       workspaceId,
       sessionId,
-      credentialId: pinned,
+      connectionId: pinned,
       subjectId: grant.subjectId,
     });
-    const ok = mutation.result.changed;
-    if (!ok) {
-      throw new HTTPException(404, {
-        message: "session or codex account not found",
-      });
+    if (!core.result.changed) {
+      throw new HTTPException(404, { message: "session or codex account not found" });
     }
-    await Promise.allSettled(
-      mutation.wakeTargets.map((wake) =>
-        workflowClient.signalCodexCapacity
-          ? workflowClient.signalCodexCapacity({
-              accountId: wake.accountId,
-              workspaceId: wake.workspaceId,
-              sessionId: wake.sessionId,
-              workflowId: wake.workflowId,
-              wakeRevision: wake.wakeRevision,
-              workflowWakeRevision: wake.workflowWakeRevision,
-            })
-          : workflowClient.wakeSessionWorkflow({
-              accountId: wake.accountId,
-              workspaceId: wake.workspaceId,
-              sessionId: wake.sessionId,
-              workflowId: wake.workflowId,
-              wakeRevision: wake.workflowWakeRevision,
-            }),
-      ),
-    );
-    await publishDurableSessionEvents(bus, workspaceId, sessionId, mutation.result.events);
+    await deliverSubscriptionCoreCodexWake(db, core.wake);
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, core.result.events);
     return c.json({
       pinned: target === "auto" ? "auto" : target,
-      appliedTo: mutation.result.appliedTo,
+      appliedTo: core.result.appliedTo,
     });
   });
 
@@ -2227,89 +2548,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
-  // Replace the complete ordered Variable Set selection. The DB mutation
-  // serializes with turn claim, rejects live/shared sandbox use, and requests a
-  // cold rotation before the new environment can be materialized.
+  // Variable Sets were replaced by vaults. The route answers 410 so old
+  // clients learn where secrets moved instead of silently doing nothing.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    try {
-      await requireSessionAuthorization(deps, grant, {
-        sessionId,
-        operation: "session.variable_sets.write",
-        surface: "http",
-      });
-    } catch (error) {
-      throw sessionAuthorizationHttpError(error);
-    }
-    // Detach still requires attach authority: it changes which protected
-    // resources the session may materialize. Non-empty selections additionally
-    // require use authority through validateVariableSetAttachment.
-    requirePermission(grant, "variable-sets:attach");
-    const parsed = UpdateSessionVariableSetsRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new ApiHttpError(422, {
-        code: "validation_failed",
-        message: "Invalid session Variable Set request.",
-        retryable: false,
-        details: { fields: zodErrorFields(parsed.error) },
-      });
-    }
-    const variableSets: VariableSet[] = [];
-    for (const variableSetId of parsed.data.variableSetIds) {
-      variableSets.push(
-        await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
-      );
-    }
-    const result = await updateSessionVariableSets(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-      subjectId: grant.subjectId,
-      variableSets: variableSets.map((variableSet) => ({
-        id: variableSet.id,
-        name: variableSet.name,
-        scope: variableSet.scope,
-      })),
-    });
-    if (result.status === "not_found") {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    if (result.status === "invalid_variable_sets") {
-      throw new ApiHttpError(422, {
-        code: "validation_failed",
-        message: "One or more selected Variable Sets are no longer available.",
-        retryable: false,
-        outcomeUnknown: false,
-        details: { variableSetIds: result.variableSetIds },
-      });
-    }
-    if (result.status === "blocked") {
-      const messages = {
-        turn_in_flight:
-          "Variable Sets can be changed only when the session has no accepted, queued, claimed, or pending work.",
-        shared_sandbox_group:
-          "Variable Sets cannot be changed while this session shares a sandbox; fork it into a separate session first.",
-        live_sandbox_holders:
-          "Close active terminal, desktop, and sandbox operations before changing Variable Sets.",
-      } as const;
-      throw new HTTPException(409, { message: messages[result.reason] });
-    }
-    if (result.status === "updated") {
-      await publishDurableSessionEvents(bus, workspaceId, sessionId, [result.event]);
-    }
-    const session = await getSessionForSubject(
-      db,
-      workspaceId,
-      sessionId,
-      grant.subjectId,
-      relatedSessionAccessFor(c),
-    );
-    if (!session) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    return variableSetsRemovedResponse(c, 410);
   });
 
   // Manual rename. A user-set title is permanent: the db write is
@@ -2338,6 +2582,89 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
+  // Workspace-wide keep-live exemption from the idle-session archive. Distinct
+  // from the personal rail archive above; archived sessions are read-only.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/retention", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = await parseRequestJson(c, UpdateSessionRetentionRequest);
+    const { result, relatedSessionAccess } = await setSessionRetention(
+      deps,
+      grant,
+      sessionId,
+      payload.keepLive,
+    );
+    if (result.status === "not_found") {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (result.status === "archived") {
+      return c.json(
+        {
+          code: "SESSION_ARCHIVED_READ_ONLY",
+          message:
+            "This session is already archived, so its keep-live setting can no longer change.",
+        },
+        409,
+      );
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccess,
+    );
+    if (!session) throw new HTTPException(404, { message: "session not found" });
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  // Per-task usage limit. Reads follow session read access; a child
+  // returns its root's shared state. Writes are compare-and-set on the ROOT
+  // by a person in the app or the host's server key only, never an agent
+  // (including one acting for a person), and never wake or resume work.
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    return c.json(await getSessionUsageLimitForAccess(deps, authorization, sessionId));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    // Checked first: an agent acting for a person (connected agent, admin
+    // access, personal API key) is refused whatever access it holds.
+    if (isAgentActingAsPerson(c)) {
+      throw new SessionUsageLimitHttpError(
+        403,
+        "session_usage_limit_forbidden",
+        "Only a person or the application's server can change a task usage limit.",
+      );
+    }
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:control",
+    );
+    const payload = await parseRequestJson(c, SetSessionUsageLimitRequest);
+    return c.json(
+      await setSessionUsageLimitForAccess(deps, authorization, sessionId, payload, c.req.raw),
+    );
+  });
+
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -2353,30 +2680,55 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       case "not_found":
         throw new HTTPException(404, { message: "session not found" });
       case "not_root":
-        throw new HTTPException(409, {
-          message: "delete the root session to remove the complete workstream",
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "Delete the chat this one belongs to; sub-chats are removed with it.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_not_root" },
         });
       case "active_sessions":
-        throw new HTTPException(409, {
-          message: "cancel the workstream and wait for active turns to finish before deleting it",
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message:
+            "This chat is still running. Stop it, then delete it once its current turn has finished.",
+          retryable: true,
+          outcomeUnknown: false,
+          details: { code: "session_delete_active_sessions" },
         });
       case "active_video_generations":
-        throw new HTTPException(409, {
-          message: "wait for active video generations to finish before deleting this workstream",
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "Wait for this chat's video generations to finish before deleting it.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_active_video_generations" },
         });
       case "active_background_commands":
-        throw new HTTPException(409, {
-          message: "pause or cancel this workstream's background commands before deleting it",
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "Stop this chat's background commands before deleting it.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_active_background_commands" },
         });
       case "live_sandboxes":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message:
-            "wait for the workstream's sandbox activity to finish draining before deleting it",
+            "This chat's computer is still shutting down. Try deleting it again in a moment.",
+          retryable: true,
+          outcomeUnknown: false,
+          details: { code: "session_delete_live_sandboxes" },
         });
       case "externally_referenced":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message:
-            "this workstream has durable workspace outputs or independent forks; archive it instead",
+            "This chat has saved workspace outputs or forks that depend on it. Archive it instead.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_externally_referenced" },
         });
     }
   });
@@ -2464,6 +2816,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  // Replace the Skills the session carries itself. Shares the tool-policy
+  // version CAS and applies from the next attempt.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/skills", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      UpdateSessionSkillsRequest,
+      await c.req.json().catch(() => null),
+    );
+    try {
+      const session = await updateSessionSkills(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -2471,6 +2851,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
     if (!goal) {
+      // `?absent=null` opts in to a successful `null` for a goal-less session,
+      // so a browser polling a fresh chat logs no failed request. Without it
+      // the original 404 contract is unchanged for existing clients.
+      if (c.req.query("absent") === "null") {
+        return c.json(null);
+      }
       throw new HTTPException(404, { message: "session goal not found" });
     }
     return c.json(goal);
@@ -2748,6 +3134,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       sessionId,
       {
         status: "active",
+        beforeResume: (tx, session, causalTurn) =>
+          assertGoalResumeAllowed({ ...deps, db: tx }, session, causalTurn).catch(
+            (error: unknown) => {
+              if (error instanceof GoalResumeBlockedError) {
+                throw new HTTPException(422, { message: error.message, cause: error });
+              }
+              throw error;
+            },
+          ),
         event: { type: "goal.resumed", actor: "api" },
       },
     );
@@ -3411,6 +3806,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 workspaceId,
                 session,
                 subjectId: authorization.grant.subjectId,
+                grant: authorization.grant,
               },
               async () => undefined,
             );
@@ -3515,7 +3911,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
     try {
-      result = await withSiteCommandOrigin(c, workspaceId, () =>
+      result = await withSiteCommandOrigin(c, grant, () =>
         acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
           text: payload.text,
           annotations: payload.annotations,
@@ -3563,7 +3959,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await withSiteCommandOrigin(c, workspaceId, () =>
+      result = await withSiteCommandOrigin(c, grant, () =>
         submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
           authorization,
         }),
@@ -3606,7 +4002,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (event.type === "user.message") {
       let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
       try {
-        result = await withSiteCommandOrigin(c, workspaceId, () =>
+        result = await withSiteCommandOrigin(c, grant, () =>
           acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
             text: event.payload.text,
             annotations: event.payload.annotations,
@@ -3692,14 +4088,32 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
 
     if (event.type === "user.humanInputResponse") {
+      // Secret values are write-only: split them off before anything else sees
+      // the response, generate/encrypt them, and let the accept transaction
+      // write them to vaults. The stored response and event get references.
+      const { response, secretAnswers: rawSecretAnswers } = splitSecretAnswers(
+        event.payload.response,
+        event.payload.secretAnswers,
+      );
       let accepted;
       try {
+        const secretAnswers = prepareSecretAnswers(settings, rawSecretAnswers, "human");
         accepted = await acceptSessionHumanInputResponse(db, {
           accountId: grant.accountId,
           workspaceId,
           sessionId,
           requestId: event.payload.requestId,
-          response: event.payload.response,
+          response,
+          ...(secretAnswers.length
+            ? {
+                secretAnswers,
+                secretWriteContext: humanSecretWriteContext({
+                  accountId: grant.accountId,
+                  workspaceId,
+                  subjectId: grant.subjectId,
+                }),
+              }
+            : {}),
           respondedBy: grant.subjectId,
           canonicalHumanSession:
             authorization.canonicalManagedHumanSession ||
@@ -3732,6 +4146,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               message: error.message,
             },
           );
+        }
+        const vaultError = isVaultError(error) ? error : vaultErrorFromDatabase(error);
+        if (vaultError) {
+          const body: VaultApiError = {
+            error: vaultError.code,
+            message: vaultError.message,
+            ...(vaultError.details ? { details: vaultError.details } : {}),
+          };
+          return c.json(body, VAULT_ERROR_HTTP_STATUS[vaultError.code] as ContentfulStatusCode);
         }
         throw error;
       }
@@ -3823,13 +4246,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // Resolve the shared-exposure disclosure for a session's group: `shared` when
   // the group has >1 session (addendum E.1), and the OTHER sessions' ids ONLY
   // (never their conversation/metadata; the query selects only id — stress g).
+  // `shared` counts every member, including Only-me sessions the caller cannot
+  // read, because sharing is a property of the box; the ids stay actor-scoped.
   async function resolveSharedExposure(
     workspaceId: string,
     session: { id: string; sandboxGroupId: string },
   ): Promise<{ shared: boolean; sharedSessionIds: string[] }> {
-    const ids = await listSessionIdsInGroup(db, workspaceId, session.sandboxGroupId);
+    const [ids, memberCount] = await Promise.all([
+      listSessionIdsInGroup(db, workspaceId, session.sandboxGroupId),
+      countAllSessionsInGroup(db, workspaceId, session.sandboxGroupId),
+    ]);
     const others = ids.filter((id) => id !== session.id);
-    return { shared: others.length > 0, sharedSessionIds: others };
+    return { shared: memberCount > 1 || others.length > 0, sharedSessionIds: others };
   }
 
   // GET .../stream-capabilities — the capability-negotiation read. Returns the
@@ -4196,6 +4624,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         session,
         viewerSubjectId: grant.subjectId,
+        grant,
         waitSignal: c.req.raw.signal,
         ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
       });
@@ -4967,11 +5396,19 @@ function codexRealtimeHttpFailure(error: CodexRealtimeBrokerError): {
   }
 }
 
-function sessionRealtimeHttpError(error: unknown): HTTPException {
+/** Conflicts a person can hit by starting voice; the browser shows these verbatim. */
+const SESSION_REALTIME_USER_MESSAGES: Partial<Record<string, string>> = {
+  REALTIME_ACTIVE:
+    "Voice is already on for this session in another tab or window. End it there, or try again in a minute.",
+  CONTROL_NOT_ACTIVE: "Resume this session to start voice.",
+  SESSION_CANCELLED: "This session was cancelled, so voice can't start.",
+};
+
+export function sessionRealtimeHttpError(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
   if (error instanceof SessionRealtimeConflictError) {
     return new HTTPException(error.code === "REALTIME_NOT_FOUND" ? 404 : 409, {
-      message: error.message,
+      message: SESSION_REALTIME_USER_MESSAGES[error.code] ?? error.message,
       cause: error,
     });
   }
@@ -5003,12 +5440,28 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
+  if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
+  // Task usage limit: read with the session; change as a control write
+  // (the route additionally admits only a person or the host server key).
+  if (suffix === "/usage-limit") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT") return "session.control";
+    return null;
+  }
   if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";
+  // Owner-only preview of the same change: identical authority to making it.
+  if (suffix === "/visibility/preview" && verb === "GET") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/admin-access") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT" || verb === "DELETE") return "session.tool_policy.write";
+    return null;
+  }
   if (suffix === "/mcp-credentials/rotate" && verb === "POST")
     return "session.mcp.credentials.rotate";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
@@ -5017,12 +5470,21 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
   if (suffix === "/model-context" && verb === "GET") return "session.read";
+  if (/^\/tool-reviews\/[^/]+(?:\/details)?$/.test(suffix) && verb === "GET") return "session.read";
   if (suffix === "/codex-accounts" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";
   }
   if (suffix === "/codex-account" && verb === "POST") {
-    return "session.codex_account.write";
+    return "session.model_account.write";
+  }
+  // The provider-neutral account choice (any provider) and the older
+  // per-provider pin share one internal operation. Core adapts its name at the
+  // host boundary according to the authorization port's explicit capability.
+  if (suffix === "/model-account") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT") return "session.model_account.write";
+    return null;
   }
   if (suffix === "/realtime/webrtc" && verb === "POST") {
     return "session.realtime.start";
@@ -5141,6 +5603,17 @@ function sessionAuthorizationHttpError(error: unknown): HTTPException {
   throw error;
 }
 
+const SESSION_FORK_POINT_REFUSAL_MESSAGES: Record<SessionForkPointRefusal, string> = {
+  message_unavailable:
+    "Only your messages and the agent's replies can be fork points. Choose one of those, or fork the whole session.",
+  boundary_not_retained:
+    "This message is from before the conversation was compacted, so it can't be a fork point. Choose a more recent message, or fork the whole session.",
+  history_compacted:
+    "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
+  unfinished_tool_exchange:
+    "The agent was still waiting for a tool result at this message. Choose a later message, or fork the whole session.",
+};
+
 export function sessionTenancyHttpError(error: unknown): Error {
   if (error instanceof SessionTenancyManagedHumanRequiredError) {
     return new ApiHttpError(403, {
@@ -5152,7 +5625,7 @@ export function sessionTenancyHttpError(error: unknown): Error {
   if (error instanceof SessionTenancyNotActivatedError) {
     return new ApiHttpError(409, {
       code: "conflict",
-      message: "Session tenancy is not activated for this organization.",
+      message: "Only-me chats are not enabled for this organization.",
       retryable: false,
       details: { reason: "not_activated" },
     });
@@ -5173,6 +5646,25 @@ export function sessionTenancyHttpError(error: unknown): Error {
       },
     });
   }
+  if (error instanceof SessionVisibilityWorkConflictError) {
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message:
+        error.reason === "active_work"
+          ? "The chat has work in progress. Send stopActiveWork to stop it and make the change."
+          : "The chat's work is still stopping. Retry with the same idempotency key.",
+      retryable: error.reason === "stopping_active_work",
+      details: {
+        reason: error.reason,
+        runningTurnCount: error.work.runningTurnCount,
+        queuedTurnCount: error.work.queuedTurnCount,
+        activeGoal: error.work.activeGoal,
+        liveVoice: error.work.liveVoice,
+        otherPeoplePendingUpdateCount: error.work.otherPeoplePendingUpdateCount,
+        otherPeopleAccountChoiceCount: error.work.otherPeopleAccountChoiceCount,
+      },
+    });
+  }
   if (
     error instanceof SessionTenancyAccessError ||
     error instanceof SessionAuthorizationDeniedError
@@ -5184,6 +5676,14 @@ export function sessionTenancyHttpError(error: unknown): Error {
     });
   }
   if (error instanceof SessionTenancyInvalidRequestError) {
+    if (error.forkPointRefusal) {
+      return new ApiHttpError(422, {
+        code: "validation_failed",
+        message: SESSION_FORK_POINT_REFUSAL_MESSAGES[error.forkPointRefusal],
+        retryable: false,
+        details: { reason: `fork_point_${error.forkPointRefusal}` },
+      });
+    }
     return new ApiHttpError(422, {
       code: "validation_failed",
       message: "Invalid session tenancy request.",
@@ -5270,6 +5770,7 @@ export function sessionListQuery(
   includePinned: boolean;
   includeTotals: boolean;
   needsYouOnly: boolean;
+  contentArchivedOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5319,12 +5820,13 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
-  for (const key of ["includeTotals", "needsYouOnly"]) {
+  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly"]) {
     if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
       throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
   }
   const includeTotals = query.includeTotals === "true";
   const needsYouOnly = query.needsYouOnly === "true";
+  const contentArchivedOnly = query.contentArchivedOnly === "true";
   if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
     throw new HTTPException(400, { message: "includeTotals requires a root page" });
   if (needsYouOnly && !allowCursor)
@@ -5416,13 +5918,14 @@ export function sessionListQuery(
     const parsedEndUser = SessionScopeSubjectId.safeParse(query.scopeSubjectId);
     if (!parsedEndUser.success) {
       throw new HTTPException(400, {
-        message: "scopeSubjectId must be a canonical OpenGeni user subject",
+        message: "scopeSubjectId must be a canonical Opengeni user subject",
       });
     }
     scopeSubjectId = parsedEndUser.data;
   }
   const hasPageFilters =
     needsYouOnly ||
+    contentArchivedOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -5457,6 +5960,7 @@ export function sessionListQuery(
     includePinned,
     includeTotals,
     needsYouOnly,
+    contentArchivedOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
@@ -5816,6 +6320,18 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionUsageLimitHttpError) {
+    // a create-time usage limit the caller may not set (agents and
+    // children) or that this server does not accept yet (producer flag off).
+    return c.json(
+      {
+        code: error.status === 403 ? "SESSION_CREATE_FORBIDDEN" : "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { code: error.code },
+      },
+      error.status as 403 | 404 | 409 | 422 | 503,
+    );
+  }
   if (error instanceof UnsupportedLatencyModeError) {
     return c.json(
       {
@@ -5965,6 +6481,52 @@ function zodErrorFields(error: ZodError): string {
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
+/** Statuses in which a chat still has work that would keep running after it is archived. */
+const ARCHIVE_LIVE_WORK_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+]);
+
+/**
+ * Archiving a chat you started means you are done with it, so work it still
+ * has (a running or queued turn, a pending wait, an active goal) must not keep
+ * running out of sight. It is paused exactly like the Pause control: reversible
+ * with Resume, and a paused chat dispatches no goal continuations either. A
+ * chat someone else started is never paused: archiving only hides it for you.
+ * Settled chats are left alone so a later message to them still just runs.
+ */
+async function pauseOwnArchivedWork(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  if (session.createdBy.kind !== "subject" || session.createdBy.subjectId !== grant.subjectId)
+    return session;
+  if (!hasPermission(grant.permissions, "sessions:control")) return session;
+  if (session.effectiveControl.directState === "paused") return session;
+  const liveWork =
+    ARCHIVE_LIVE_WORK_STATUSES.has(session.status) ||
+    session.activeTurnId !== null ||
+    Boolean(session.inputWait) ||
+    (await getSessionGoal(deps.db, workspaceId, session.id))?.status === "active";
+  if (!liveWork) return session;
+  const paused = await controlHumanSessionWorkstream(
+    deps,
+    { accountId: grant.accountId, workspaceId, sessionId: session.id, subjectId: grant.subjectId },
+    {
+      action: "pause",
+      reason: "Archived",
+      // One pause per archive: a retried archive replays it instead of pausing twice.
+      clientEventId: `archive-pause:${session.id}:${session.archiveVersion}`,
+    },
+  );
+  return { ...session, effectiveControl: paused.effectiveControl };
+}
+
 function commandConflictResponse(c: Context, error: unknown): Response {
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
@@ -5975,6 +6537,9 @@ function commandConflictResponse(c: Context, error: unknown): Response {
   if (error instanceof SessionCommandIdempotencyError) {
     return c.json({ code: error.code, message: error.message }, 409);
   }
+  if (error instanceof PersonalSessionInitiatorRequiredError) {
+    return c.json({ code: error.code, message: error.message }, 403);
+  }
   throw error;
 }
 
@@ -5982,19 +6547,46 @@ type EffectivePolicyContext = {
   workspaceServerIds: string[];
   workspaceDefaultServerIds: string[];
   effectiveToolsContext: Awaited<ReturnType<typeof workspaceSessionEffectiveToolsContext>>;
+  /** The Codex session pointers by cutover disposition (see codex-session-pointers). */
+  codexPointers: CodexSessionPointerProjection;
 };
 
+/**
+ * Everything a Session response projection needs, loaded once for all the
+ * sessions it returns. Every route that returns a Session projects it through
+ * `sessionResponse` with this context.
+ */
 async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
   subjectId: string,
   sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  const [policy, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyContext(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
+  // Both projections read the same workspace row; hydrate it once.
+  const workspaceRead = requireWorkspace(deps.db, workspaceId);
+  void workspaceRead.catch(() => undefined);
+  const [policy, effectiveToolsContext, codexPointers] = await Promise.all([
+    workspaceSessionToolPolicyContext(
+      deps.db,
+      workspaceId,
+      deps.settings,
+      subjectId,
+      workspaceRead,
+    ),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions, workspaceRead),
+    loadCodexSessionPointerProjection(deps.db, workspaceId, sessions),
   ]);
-  return { ...policy, effectiveToolsContext };
+  return { ...policy, effectiveToolsContext, codexPointers };
+}
+
+/** The response projection of one Session: Codex pointers and effective tool policy. */
+function sessionResponse(session: Session, policy: EffectivePolicyContext): Session {
+  return sessionWithEffectiveToolPolicy(
+    policy.codexPointers(session),
+    policy.workspaceServerIds,
+    policy.workspaceDefaultServerIds,
+    policy.effectiveToolsContext,
+  );
 }
 
 async function withEffectivePolicy(
@@ -6004,23 +6596,13 @@ async function withEffectivePolicy(
   session: Session,
 ): Promise<Session> {
   const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId, [session]);
-  return sessionWithEffectiveToolPolicy(
-    session,
-    policy.workspaceServerIds,
-    policy.workspaceDefaultServerIds,
-    policy.effectiveToolsContext,
-  );
+  return sessionResponse(session, policy);
 }
 
 function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): LineageNode[] {
   return nodes.map((node) => ({
     ...node,
-    session: sessionWithEffectiveToolPolicy(
-      node.session as Session,
-      policy.workspaceServerIds,
-      policy.workspaceDefaultServerIds,
-      policy.effectiveToolsContext,
-    ),
+    session: sessionResponse(node.session as Session, policy),
     children: mapLineageNodes(node.children, policy),
   }));
 }

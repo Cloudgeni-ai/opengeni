@@ -1,17 +1,17 @@
 ---
 name: offload-to-opengeni
 description: >-
-  Run work in the cloud on an OpenGeni workspace instead of locally. Use when
+  Run work in the cloud on an Opengeni workspace instead of locally. Use when
   the user asks to run something in the cloud, in the background, in parallel,
-  "on OpenGeni", or to hand off a long-running task; or asks about the status,
-  result, or a follow-up for an OpenGeni session. Creates a session with a
+  "on Opengeni", or to hand off a long-running task; or asks about the status,
+  result, or a follow-up for an Opengeni session. Creates a session with a
   self-contained brief, reports its link, checks status, fetches results, and
-  sends follow-ups through the OpenGeni MCP server.
+  sends follow-ups through the Opengeni MCP server.
 ---
 
-# Offload work to OpenGeni
+# Offload work to Opengeni
 
-OpenGeni runs durable agent sessions in the user's workspace, each with its own
+Opengeni runs durable agent sessions in the user's workspace, each with its own
 cloud sandbox, repository checkout, and connected tools. You talk to it through
 the `opengeni` MCP server this plugin connects
 (`https://app.opengeni.ai/v1/mcp`). The remote agent does not see this
@@ -19,7 +19,7 @@ conversation, your files, or your local machine.
 
 ## Tools
 
-The server has three tools that reach every OpenGeni API action. Clients add
+The server has three tools that reach every Opengeni API action. Clients add
 their own prefix (in Claude Code:
 `mcp__plugin_opengeni_opengeni__opengeni_actions_search`); match on the suffix.
 
@@ -50,7 +50,7 @@ questions, and work that depends on local-only state (uncommitted changes,
 local services, files outside the repository) here, unless the user insists;
 then explain what the remote agent will not be able to see.
 
-Each session consumes the workspace's OpenGeni credits or connected model
+Each session consumes the workspace's Opengeni credits or connected model
 subscription. Ask before starting more than one session for a single request.
 
 ## 2. Make the code reachable
@@ -88,7 +88,7 @@ The remote agent clones from the Git host, not from this machine.
 Never put secrets in a session: no API keys, tokens, passwords, private keys,
 `.env` contents, or connection strings in `initialMessage`, `instructions`,
 `metadata`, or follow-up messages. If the task needs a credential, tell the
-user to add it in OpenGeni (Variables or Connections) themselves, and refer to
+user to add it in Opengeni (Variables or Connections) themselves, and refer to
 it by name.
 
 ## 4. Create the session

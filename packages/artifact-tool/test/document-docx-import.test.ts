@@ -35,7 +35,7 @@ describe("bounded DOCX importer", () => {
             },
           },
           headers: { default: new Header({ children: [new Paragraph("Confidential")] }) },
-          footers: { default: new Footer({ children: [new Paragraph("OpenGeni")] }) },
+          footers: { default: new Footer({ children: [new Paragraph("Opengeni")] }) },
           children: [
             new Paragraph({
               heading: HeadingLevel.HEADING_1,
@@ -105,7 +105,7 @@ describe("bounded DOCX importer", () => {
     });
     expect(imported.footers[0]?.blocks[0]).toMatchObject({
       kind: "paragraph",
-      inlines: [{ text: "OpenGeni" }],
+      inlines: [{ text: "Opengeni" }],
     });
     expect(imported.comments).toMatchObject([
       { id: "0", resolved: true },

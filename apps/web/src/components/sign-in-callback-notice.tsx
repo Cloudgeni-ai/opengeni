@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import {
   clearSignInChangeFeedback,
+  isStaleSignInRequestCallbackError,
   isVerificationLinkCallbackError,
   readSignInCallbackError,
   readSignInChangeFeedback,
@@ -35,10 +36,25 @@ export function SignInCallbackNotice({
       window.location.pathname === "/" &&
       new URLSearchParams(window.location.search).get("signInMethod") === "connected",
   );
+  const [staleRequest] = useState(() => isStaleSignInRequestCallbackError(window.location.search));
   const linkError = isVerificationLinkCallbackError(message);
   useEffect(() => {
     if (linkError && verificationLinkError === "auth-panel") setMessage(null);
   }, [linkError, verificationLinkError]);
+  // A stale-request code next to a valid session describes an old request (a
+  // duplicate or late callback): the sign-in that matters succeeded. Drop the
+  // notice and the leftover `error` so a reload cannot resurface it.
+  useEffect(() => {
+    if (!staleRequest || userId === null) return;
+    setMessage(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("error");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }, [staleRequest, userId]);
   const shownMessage = linkError && verificationLinkError !== "notice" ? null : message;
   const [receipt, setReceipt] = useState(readSignInChangeFeedback);
   useEffect(() => {

@@ -1,21 +1,21 @@
 # Northstar support agent example
 
-A small fictional customer-support SaaS showing the complete OpenGeni
+A small fictional customer-support SaaS showing the complete Opengeni
 integration as a clear before/after:
 
-1. Open the product with OpenGeni off and use it as a small support SaaS:
+1. Open the product with Opengeni off and use it as a small support SaaS:
    search and filter the queue, switch between four tickets, inspect customer
    signals, change fields, add internal notes, and reply.
-2. Turn on the frontend-only **OpenGeni** switch to embed the agent workspace in
+2. Turn on the frontend-only **Opengeni** switch to embed the agent workspace in
    the same product.
 3. The product backend onboards the demo operator as an external workspace
-   member, creates each OpenGeni session as that user with an explicit tool
+   member, creates each Opengeni session as that user with an explicit tool
    selection and a stable idempotency key, and mounts the SDK's packaged
    `createSessionProxyHandler` at `/api/opengeni/*`. The organization API key
    stays server-side, and the browser can reach only the conversation routes.
-4. OpenGeni calls the product's authenticated Streamable HTTP MCP server.
+4. Opengeni calls the product's authenticated Streamable HTTP MCP server.
 5. MCP tools read and mutate the same ticket data used by the human workflow.
-6. Product SSE updates the ticket immediately while OpenGeni SSE updates the
+6. Product SSE updates the ticket immediately while Opengeni SSE updates the
    agent timeline independently.
 7. The panel is the default embed: `<OpenGeniProvider>` plus
    `<SessionConversation>`, with Northstar tool renderers and Markdown. Runs use
@@ -33,7 +33,7 @@ The example depends on `@opengeni/sdk` and `@opengeni/react` through
 `workspace:*`, so a repository checkout always runs against the current SDK and
 component source rather than a stale published copy.
 
-## Run against managed OpenGeni
+## Run against managed Opengeni
 
 Requirements: Bun, an organization API key authorized for the configured
 organization workspace, and a public HTTPS tunnel for the MCP endpoint.
@@ -81,7 +81,7 @@ Open <http://127.0.0.1:3101>. If not using ngrok, set
 This is a local integration example, not a production auth template: its proxy
 `resolve` hook returns one fixed operator. A real SaaS should authenticate its
 users in `resolve`, pass its CSRF check as `authorizeMutation`, authorize each product resource and
-OpenGeni workspace mapping, deploy MCP on its backend, store secrets in a secret
+Opengeni workspace mapping, deploy MCP on its backend, store secrets in a secret
 manager, and rate-limit both its session and tool endpoints. See
 [`docs/product-integration.md`](../../docs/product-integration.md),
 [`docs/session-mcp-servers.md`](../../docs/session-mcp-servers.md), and

@@ -42,7 +42,7 @@ const runtimes: EditableArtifactRuntimes = {
   presentation: runtime,
   workerUrl: "https://assets.example/worker.js",
 };
-const capability: NonNullable<ClientConfig["artifacts"]> = {
+const capability: Exclude<NonNullable<ClientConfig["artifacts"]>, false> = {
   editableLiveUrl: "wss://api.example/v1/editable-artifacts/live",
   cachePartition: {
     accountId: "account",

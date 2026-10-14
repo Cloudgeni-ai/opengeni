@@ -189,10 +189,10 @@ describe("session admission notice", () => {
   });
 
   for (const [reason, copy] of [
-    ["database_claim_rejected", "access or safety check"],
+    ["database_claim_rejected", "Nothing is needed from you"],
     ["initiator_membership_required", "person who started this work"],
     ["personal_resource_grant_required", "personal resource"],
-    ["future_reason", "access or safety check"],
+    ["future_reason", "Nothing is needed from you"],
   ] as const) {
     test(`safe explanation for ${reason}`, async () => {
       const recheck = await render({ session: session(reason) });
@@ -256,7 +256,7 @@ describe("session admission notice", () => {
     expect(button.textContent).toBe("Rechecking…");
     await act(async () => finish());
     expect(button.disabled).toBe(false);
-    expect(container.textContent).toContain("Work needs attention");
+    expect(container.textContent).toContain("Stuck");
   });
 
   test("failure is announced without exposing server errors", async () => {

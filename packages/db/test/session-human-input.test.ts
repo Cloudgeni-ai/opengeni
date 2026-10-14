@@ -112,6 +112,9 @@ async function freezeRequest(
   } = {},
 ) {
   const { grant, session } = await createFixture();
+  // Real Agent messages carry their exact sender attempt; the same human's
+  // informational messages join this human request's execution context.
+  const senderLineage = options.initialUpdate ? await sameHumanSenderLineage(grant) : null;
   await send(grant, session.id, "continue with my decision");
   const initialUpdate = options.initialUpdate
     ? await addSessionSystemUpdate(client.db, {
@@ -128,6 +131,7 @@ async function freezeRequest(
           text: "INITIAL-ACK",
           operationId: crypto.randomUUID(),
         },
+        lineage: senderLineage!,
       })
     : null;
   const queuedPrompt = options.queueEditPrompt
@@ -232,6 +236,47 @@ async function freezeRequest(
     parallelRequestId,
     questions,
     initialUpdate,
+    senderLineage,
+  };
+}
+
+/** Claim a turn of the same human in a sibling session to send Agent messages. */
+async function sameHumanSenderLineage(grant: {
+  accountId: string;
+  workspaceId: string | null;
+  subjectId: string;
+}) {
+  const sender = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    initialMessage: "Report back to the other session",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+  });
+  await send(
+    { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId },
+    sender.id,
+    "report back",
+  );
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+    sessionId: sender.id,
+    workflowId: `session-${sender.id}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error(`could not claim sender: ${claim.reason}`);
+  return {
+    callerSessionId: sender.id,
+    callerTurnId: claim.turn.id,
+    callerAttemptId: attemptId,
+    callerExecutionGeneration: claim.turn.executionGeneration,
   };
 }
 
@@ -402,6 +447,8 @@ describe("durable structured human input", () => {
         text: "FOLLOWUP-ACK",
         operationId: crypto.randomUUID(),
       },
+
+      lineage: frozen.senderLineage!,
     });
     if (!followUp.added) throw new Error(`follow-up was not added: ${followUp.reason}`);
     const accepted = await acceptSessionHumanInputResponse(client.db, {
@@ -457,6 +504,8 @@ describe("durable structured human input", () => {
         text: "NEXT-TURN-ONLY",
         operationId: crypto.randomUUID(),
       },
+
+      lineage: frozen.senderLineage!,
     });
     if (!laterFollowUp.added) {
       throw new Error(`later follow-up was not added: ${laterFollowUp.reason}`);

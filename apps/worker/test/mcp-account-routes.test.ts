@@ -3,6 +3,10 @@ import { testSettings } from "@opengeni/testing";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import { selectedSessionRemoteMcpTargets } from "@opengeni/runtime";
 import {
+  connectorActionPoliciesForAccountRoutes,
+  resolveConnectorActionPolicy,
+} from "@opengeni/db";
+import {
   accountRouteAuthNeededPayload,
   expandMcpAccountRoutes,
 } from "../src/activities/mcp-account-routes";
@@ -56,6 +60,43 @@ const settings = () =>
     ],
   });
 
+test("account routes resolve canonical preferences only for the exact frozen connection", () => {
+  const preference = {
+    id: crypto.randomUUID(),
+    connectionId: personal.connectionId,
+    serverId: "mail",
+    toolName: "send",
+    actionName: "*",
+    policy: "allow" as const,
+    version: 1,
+  };
+  const snapshot = connectorActionPoliciesForAccountRoutes([preference], [personal, workspace]);
+  for (const binding of [personal, workspace]) {
+    const resolved = resolveConnectorActionPolicy(snapshot, {
+      connectionId: binding.connectionId,
+      serverId: binding.serverId,
+      toolName: "send",
+      actionName: "send",
+      defaultDecision: "ask",
+    });
+    expect(resolved).toMatchObject(
+      binding === personal
+        ? { managed: true, source: "explicit", entry: { policy: "allow", id: preference.id } }
+        : { managed: true, source: "default", decision: "ask" },
+    );
+  }
+  expect(
+    resolveConnectorActionPolicy(snapshot, {
+      connectionId: personal.connectionId,
+      serverId: workspace.serverId,
+      toolName: "send",
+      actionName: "send",
+      defaultDecision: "ask",
+    }),
+  ).toMatchObject({ source: "default", decision: "ask" });
+  expect(connectorActionPoliciesForAccountRoutes([preference], null)).toEqual([preference]);
+});
+
 test("auth recovery keeps exact execution alias and adds only frozen canonical identity", () => {
   const payload = {
     serverId: personal.serverId,
@@ -101,9 +142,59 @@ test("simultaneous routes retain canonical restrictions and distinct exact accou
     expect(server.allowedTools).toEqual(["read", "send"]);
     expect(server.headers).toBeUndefined();
   }
-  expect(result.accountLabels.get(personal.serverId)).toBe("mail — Personal: alice@example.test");
-  expect(result.accountLabels.get(workspace.serverId)).toBe("mail — Workspace: Team inbox");
+  expect(result.accountLabels.get(personal.serverId)).toEqual({
+    model: "mail — Personal: alice@example.test",
+    connector: "mail",
+    providerDomain: "example.test",
+    account: "alice@example.test",
+  });
+  expect(result.accountLabels.get(workspace.serverId)).toEqual({
+    model: "mail — Workspace: Team inbox",
+    connector: "mail",
+    providerDomain: "example.test",
+    account: "Team inbox",
+  });
   expect(original.mcpServers[0]?.id).toBe("mail");
+});
+
+test("people see a connector's account only when there are several to tell apart", () => {
+  const single = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [{ ...personal, accountLabel: "alice@example.test · Only me" }],
+  });
+  // The model is still told exactly which account it is using.
+  expect(single.accountLabels.get(personal.serverId)).toEqual({
+    model: "mail — Personal: alice@example.test · Only me",
+    connector: "mail",
+    providerDomain: "example.test",
+  });
+
+  const sameIdentity = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [
+      { ...personal, accountLabel: "alice@example.test · Only me" },
+      { ...workspace, accountLabel: "alice@example.test · This workspace" },
+    ],
+  });
+  expect(sameIdentity.accountLabels.get(personal.serverId)?.account).toBe(
+    "alice@example.test · Only me",
+  );
+  expect(sameIdentity.accountLabels.get(workspace.serverId)?.account).toBe(
+    "alice@example.test · This workspace",
+  );
+
+  const distinct = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [
+      { ...personal, accountLabel: "alice@example.test · Only me" },
+      { ...workspace, accountLabel: "team@example.test · This workspace" },
+    ],
+  });
+  expect(distinct.accountLabels.get(personal.serverId)?.account).toBe("alice@example.test");
+  expect(distinct.accountLabels.get(workspace.serverId)?.account).toBe("team@example.test");
 });
 
 test("empty accepted bindings remove authenticated defaults while null keeps historical behavior", () => {
@@ -161,20 +252,66 @@ test("duplicate aliases, canonical collisions and fabricated workspace owners fa
   }
 });
 
-test("provider changes never rebind an accepted route", () => {
-  expect(() =>
+test("provider changes never rebind an accepted route; the stale route is dropped", () => {
+  const moved = {
+    ...personal,
+    providerDomain: "other.test",
+    connectionRef: { ...personal.connectionRef, providerDomain: "other.test" },
+  };
+  const onlyStale = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [moved],
+  });
+  expect(onlyStale.tools).toEqual([]);
+  expect(onlyStale.settings.mcpServers).toEqual([]);
+
+  const mixed = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [moved, workspace],
+  });
+  expect(mixed.tools.map((tool) => tool.id)).toEqual([workspace.serverId]);
+  expect(mixed.settings.mcpServers.map((server) => server.connectionRef)).toEqual([
+    workspace.connectionRef,
+  ]);
+
+  const kindChanged = expandMcpAccountRoutes({
+    settings: settings(),
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [
+      {
+        ...personal,
+        kind: "api_key",
+        connectionRef: { ...personal.connectionRef, kind: "api_key" },
+      },
+    ],
+  });
+  expect(kindChanged.tools).toEqual([]);
+});
+
+test("a connector removed or made public after acceptance drops its account routes", () => {
+  const removed = settings();
+  removed.mcpServers = [];
+  expect(
     expandMcpAccountRoutes({
-      settings: settings(),
+      settings: removed,
       tools: [{ kind: "mcp", id: "mail" }],
-      bindings: [
-        {
-          ...personal,
-          providerDomain: "other.test",
-          connectionRef: { ...personal.connectionRef, providerDomain: "other.test" },
-        },
-      ],
-    }),
-  ).toThrow("does not match canonical provider");
+      bindings: [personal],
+    }).settings.mcpServers,
+  ).toEqual([]);
+
+  const madePublic = settings();
+  delete madePublic.mcpServers[0]!.connectionRef;
+  const result = expandMcpAccountRoutes({
+    settings: madePublic,
+    tools: [{ kind: "mcp", id: "mail" }],
+    bindings: [personal],
+  });
+  expect(result.tools.map((tool) => tool.id)).toEqual(["mail"]);
+  expect(result.settings.mcpServers.every((server) => server.connectionRef === undefined)).toBe(
+    true,
+  );
 });
 
 test("account refs retain frozen resource restrictions without copying another account config", () => {

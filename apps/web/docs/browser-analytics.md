@@ -35,6 +35,9 @@ once that lookup has finished.
 | `signup_completed` | A sign-up or social authorization completed. `method` is `email`, `google`, or `github`; `is_new_user` is `true` when the flow created the account. Email sign-ups report it when the verification link returns (`is_new_user: true`); a Google/GitHub authorization of an existing account reports `is_new_user: false`. Reopening a still-valid verification link repeats the event, so count unique persons with `is_new_user = true`, or use the server `sign_up` counter, rather than raw events. Social sign-ups through the isolated session-set Add window (`dual`/`broker` modes) do not report it; see below. |
 | `email_verified` | The browser returned from a successful email verification link (`method: "email"`). Reopening an already-used link can repeat it; the server counter is authoritative. |
 | `organization_setup_completed` | The self-service post-sign-in organization setup request was accepted. |
+| `api_key_created` | An organization or workspace API key create request was accepted (onboarding's developer setup key, Settings, or Organization). `scope` is `organization` (with `account_id`) or `workspace` (with `workspace_id`). The key preset, name, and token are never read. Keys a coding agent mints through the API are not browser events; use the server `opengeni_http_requests_total` API-key route series for the total. |
+| `voice_call_attempted` / `voice_call_finished` | Entering live voice for a session (`POST .../sessions/:id/realtime`) and its HTTP result, joined by `interaction_id`; `credits_required` means the call was refused for credits. Provider negotiation and heartbeats are not new calls. |
+| `dictation_attempted` / `dictation_finished` | One dictation: `mode` is `direct` (a short transcription) or `recording` (the start of a long recording; its chunks and finalize are not counted). |
 | `checkout_started` | A credit checkout session was created; the browser is about to leave for Stripe. |
 | `checkout_completed` | The organization page confirmed a Stripe success return. The outcome is one-shot: the page drops `checkout` from the URL immediately, so a reload, back navigation, or bookmark does not repeat it. Credits post asynchronously by webhook; returns to other pages are not observed. |
 | `first_turn_completed` | The first agent turn of a session this page created completed while its view was open. Carries the session, workspace, and account IDs only. |
@@ -42,6 +45,7 @@ once that lookup has finished.
 | `integration_connect_started` / `integration_connect_finished` | One connect journey for an integration, capability, or model provider. See "Integration connect journey" below. |
 | `turn_failure_viewed` / `turn_failure_action` | The failed-turn banner was shown, and the person's first next step. See "Failed-turn recovery" below. |
 | `onboarding_step_viewed` / `onboarding_step_completed` / `onboarding_abandoned` | Post-sign-in onboarding steps. See "Onboarding steps" below. |
+| `playground_step_completed` | A playground action, once per visit: `step` is `ask` (a question answered), `style` (a color or theme changed) or `ship` ("Add it to your product"). |
 
 ## Pages and control labels
 
@@ -50,7 +54,8 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
 `rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
-`organization`, and `files`; a session page also carries `session_id`.
+`organization`, `files`, `playground`, `read-only-chats`, and `inbox`; a session page also carries
+`session_id`.
 `environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),
@@ -81,7 +86,7 @@ as `action` only when it is one of the closed values in `analytics-actions.ts`:
 | `invite_member` | Send invitation in organization People |
 | `buy_credits` | Buy or add credits buttons and links |
 | `connect_model` | Connect a model links |
-| `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter` | Provider connect controls in settings and onboarding |
+| `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter`, `connect_opper` | Provider connect controls in settings and onboarding |
 
 Clicks are the only signal: pressing Enter to send or Cmd/Ctrl+Enter to steer
 is not a click. Use `session_command_attempted` for message volume.
@@ -116,7 +121,7 @@ vocabulary and UUIDs.
   `bitbucket`, `google`, `microsoft`, `linear`, `atlassian`, `notion`,
   `supabase`, `datadog`, `posthog`, `openai`, `x`, `other`, and the model classes
   `codex`, `supergrok`, `vercel_gateway`, `openrouter`, `anthropic`,
-  `claude_subscription`. Domains and MCP hosts map like the server function
+  `claude_subscription`, `opper`. Domains and MCP hosts map like the server function
   (`mcp.linear.app` is `linear`); custom MCP servers, custom APIs, Fiken and
   Reddit are `other`.
 - `method`: `oauth`, `api_key`, `device_code`, `app_install`, `custom`.
@@ -131,7 +136,7 @@ catalog OAuth, API-key, X/Reddit and Fiken actions (`performCapabilityAction`,
 used by the Plugins page and the in-chat capability card), the Plugins page MCP
 OAuth dialog, custom MCP servers and custom APIs, in-chat reconnect redirects,
 personal GitHub sign-in, Codex and SuperGrok (workspace and organization),
-Vercel AI Gateway, OpenRouter, Anthropic and Claude-subscription keys, Claude
+Vercel AI Gateway, OpenRouter, Opper, Anthropic and Claude-subscription keys, Claude
 subscription sign-in, organization model providers, and the onboarding model
 step. The inline OAuth card in a session (`SessionMcpCapabilityCard`) is not
 covered because it lives in `@opengeni/react`.
@@ -278,22 +283,47 @@ Route render failures, uncaught window errors, unhandled promise rejections and
 stale lazy-chunk loads are reported to `POST /v1/client-errors`
 (`src/lib/client-error-reporting.ts`), which increments
 `opengeni_client_errors_total{kind="route_error|unhandled_rejection|window_error|chunk_load"}`.
-This is operational telemetry, separate from the consent-controlled providers
-above: the body is only the closed `kind`, the matched route pattern (for example
-`/workspaces/$workspaceId/sessions/$sessionId`, or `unknown`), and the bundle
-revision. It never carries an error message, stack, concrete URL, identifier,
-cookie or user content; the request uses `credentials: "omit"`, and the API
-rejects any other field. The route is public so failures before sign-in are
-counted too.
+This is error diagnostics, separate from the consent-controlled analytics
+providers above: collecting product analytics needs consent, while finding out
+why the app crashed for someone does not. The body is the closed `kind`, the
+matched route pattern (for example `/workspaces/$workspaceId/sessions/$sessionId`,
+or `unknown`, never the page URL), the bundle revision, and an optional `error`
+object with what went wrong:
 
-The browser suppresses a repeated kind and route for one minute and sends at
-most ten reports per ten minutes; the API additionally bounds admission per kind
-and per process. ResizeObserver loop notices, opaque cross-origin
+- `name` and `message` of the thrown value (`NonError` and a short rendering of
+  the value when something other than an `Error` was thrown or rejected;
+  `ErrorEvent` and the event message for an uncaught error without an error
+  object);
+- `stack`, the browser's stack trace (or the event's `file:line:column`);
+- `componentStack`, React's component stack, for a failure caught by a route
+  error boundary.
+
+Error text is not user content by design, but a message can quote a value the
+app was handling (a file name, a field value), so occasionally a fragment of
+user content is included. Before the report leaves the browser, the shared
+projection in `@opengeni/contracts/client-error-report` scrubs each field:
+query strings and fragments are removed from URLs (React's error-decoder links
+keep theirs, which hold only the error's arguments); authorization values, JWTs,
+well-known API token formats, the values of `token=`/`password:`-style
+assignments and long opaque letter-and-digit strings become `[redacted]`; and
+control characters are removed. Each field is then cut to a fixed size (name
+128 bytes, message 1 KiB, stack and component stack 4 KiB each), keeping the
+start. The API applies the same projection again to whatever it receives and
+rejects any other field, and the request uses `credentials: "omit"`, so no
+cookie is sent. The route is public so failures before sign-in are counted
+too.
+
+The browser suppresses a repeat of the same kind, route and error (its name and
+first message line) for one minute and sends at most ten reports per ten
+minutes; the API additionally bounds admission per kind and per process.
+ResizeObserver loop notices, opaque cross-origin
 `Script error.` events and `AbortError` rejections are not reported. Treat the
 counter as a lower bound: blocked requests, closed tabs and both rate limits
-drop reports. It is not exception capture; use the route pattern and revision in
-the API's `Web client error reported` log line to locate a failing page and
-release.
+drop reports. The API's `Web client error reported` log line carries the route
+pattern and revision (which page and which release) and the scrubbed error as
+`clientErrorName`, `clientErrorMessage`, `clientErrorStack` and
+`clientComponentStack`. Stack frames point into the minified bundle of that
+revision.
 
 The same beacon carries closed failure and health signals
 (`src/lib/client-signals.ts`, metrics in `docs/application-observability.md`):
@@ -350,4 +380,4 @@ so a failing page keeps the workspace rail and offers Reload and Go home. Once a
 document has observed a chunk-load failure, any route failure it shows is
 presented as an update with Reload first, including the brief follow-on failure
 while the recovery reload is in flight. The raw error text is shown only in
-development builds.
+development builds; every build reports it, scrubbed, through the beacon above.

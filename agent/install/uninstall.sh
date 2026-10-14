@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# OpenGeni self-hosted agent uninstaller — Linux + macOS, STRICT POSIX sh.
+# Opengeni self-hosted agent uninstaller — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
 #   curl -fsSL https://get.opengeni.ai/uninstall.sh | sh

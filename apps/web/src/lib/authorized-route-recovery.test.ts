@@ -115,7 +115,8 @@ describe("authorized workspace route recovery", () => {
         requestedWorkspaceId,
         location: location(`/workspaces/${requestedWorkspaceId}/variable-sets`),
         workspaces: [workspace(fallbackWorkspaceId)],
-        accessContext: context({ [fallbackWorkspaceId]: ["variable-sets:list"] }),
+        // Writing without listing never makes Secrets a destination.
+        accessContext: context({ [fallbackWorkspaceId]: ["secrets:write"] }),
       }),
     ).toBeNull();
   });

@@ -7,14 +7,15 @@
 //! reusable [`BrowserIdentity`](https://docs.opengeni.ai/) state snapshot.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     io::Write as _,
     net::Shutdown,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
-    time::Duration,
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant, SystemTime},
 };
 
+use crate::uploads::update_drain::{UpdateDrain, WorkReservation};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use opengeni_agent_proto::v1;
 use rand::{rngs::OsRng, RngCore as _};
@@ -25,7 +26,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 const AUTHORITY_FILE: &str = "browser-bridge-authority.json";
@@ -43,6 +44,13 @@ const MAX_ATTACHED_PROFILES: usize = 1_000;
 const MAX_TABS_PER_PROFILE: usize = 100_000;
 const MAX_PENDING_COMMANDS: usize = 4_096;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// Ended extension connections a bridge remembers and reports.
+const MAX_RECORDED_CONNECTION_ENDS: usize = 32;
+const MAX_CONNECTION_END_DETAIL_BYTES: usize = 512;
+/// Chrome-supplied page metadata is bounded rather than trusted to fit.
+const MAX_TAB_TITLE_BYTES: usize = 8_192;
+const MAX_TAB_URL_BYTES: usize = 65_536;
+const TAB_URL_TOO_LONG: &str = "This tab's address is too long for Opengeni to control";
 
 /// Failures at the trusted local browser-bridge boundary.
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +76,9 @@ pub enum BrowserBridgeError {
     /// The extension did not settle a bounded command in time.
     #[error("attached browser command timed out")]
     Timeout,
+    /// The process has fenced new work for a verified self-update.
+    #[error("attached browser work is draining for update")]
+    Draining,
 }
 
 /// Chrome passes the allowed extension origin as argv[1]. Native Messaging
@@ -116,40 +127,104 @@ pub fn run_native_host() -> Result<(), BrowserBridgeError> {
         "token": authority.token,
     }))?;
     write_native_frame_sync_bounded(&mut socket, &authentication, MAX_AUTH_MESSAGE_BYTES)?;
+    relay_native_host(socket, std::io::stdin(), std::io::stdout().lock())
+}
 
+/// Copy frames between Chrome (`browser_input`/`browser_output`) and the
+/// authenticated agent socket until either side ends.
+fn relay_native_host<I, O>(
+    mut socket: std::net::TcpStream,
+    mut browser_input: I,
+    mut browser_output: O,
+) -> Result<(), BrowserBridgeError>
+where
+    I: std::io::Read + Send + 'static,
+    O: std::io::Write,
+{
     // Keep the agent -> Chrome direction on the main thread. If the agent
     // rejects a hello or shuts down, EOF now terminates this disposable native
     // host immediately instead of leaving it blocked forever on Chrome stdin.
     // Conversely, Chrome EOF shuts down the socket write half, which makes the
     // agent close its read half and releases the main loop below.
-    let mut browser_writer = socket.try_clone()?;
+    // Before closing, the host tells the agent why in one final frame, so the
+    // agent can tell a browser-side close from a host that simply vanished.
+    let agent_writer = Arc::new(Mutex::new(socket.try_clone()?));
+    let browser_writer = Arc::clone(&agent_writer);
     let _browser_input = std::thread::spawn(move || {
-        let result = (|| -> Result<(), BrowserBridgeError> {
-            let stdin = std::io::stdin();
-            let mut stdin = stdin.lock();
-            while let Some(message) =
-                read_native_frame_sync_bounded(&mut stdin, MAX_RESPONSE_MESSAGE_BYTES)?
+        let closing = loop {
+            let message = match read_native_frame_sync_bounded(
+                &mut browser_input,
+                MAX_RESPONSE_MESSAGE_BYTES,
+            ) {
+                Ok(Some(message)) => message,
+                Ok(None) => break Some((NativeHostClosingReason::ClosedPort, None)),
+                Err(error) => {
+                    break Some((
+                        NativeHostClosingReason::MessageInvalid,
+                        Some(error.to_string()),
+                    ))
+                }
+            };
+            let mut writer = browser_writer.lock().expect("native host agent writer");
+            if write_native_frame_sync_bounded(&mut *writer, &message, MAX_RESPONSE_MESSAGE_BYTES)
+                .is_err()
             {
-                write_native_frame_sync_bounded(
-                    &mut browser_writer,
-                    &message,
-                    MAX_RESPONSE_MESSAGE_BYTES,
-                )?;
+                // The agent side is gone; nobody is left to tell.
+                break None;
             }
-            Ok(())
-        })();
-        let _ = browser_writer.shutdown(Shutdown::Write);
-        result
+        };
+        let mut writer = browser_writer.lock().expect("native host agent writer");
+        if let Some((reason, detail)) = closing {
+            send_native_host_closing(&mut writer, reason, detail.as_deref());
+        }
+        let _ = writer.shutdown(Shutdown::Write);
     });
 
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
     while let Some(message) =
         read_native_frame_sync_bounded(&mut socket, MAX_COMMAND_MESSAGE_BYTES)?
     {
-        write_native_frame_sync_bounded(&mut stdout, &message, MAX_COMMAND_MESSAGE_BYTES)?;
+        if let Err(error) = write_native_frame_sync_bounded(
+            &mut browser_output,
+            &message,
+            MAX_COMMAND_MESSAGE_BYTES,
+        ) {
+            let mut writer = agent_writer.lock().expect("native host agent writer");
+            send_native_host_closing(
+                &mut writer,
+                NativeHostClosingReason::OutputFailed,
+                Some(&error.to_string()),
+            );
+            let _ = writer.shutdown(Shutdown::Write);
+            return Err(error);
+        }
     }
     Ok(())
+}
+
+fn send_native_host_closing(
+    writer: &mut std::net::TcpStream,
+    reason: NativeHostClosingReason,
+    detail: Option<&str>,
+) {
+    let detail = detail.map(|detail| truncate_utf8(detail, MAX_CONNECTION_END_DETAIL_BYTES));
+    if let Ok(frame) = serde_json::to_vec(&NativeHostClosing {
+        kind: "native_host_closing",
+        reason,
+        detail,
+    }) {
+        let _ = write_native_frame_sync_bounded(writer, &frame, MAX_RESPONSE_MESSAGE_BYTES);
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 /// Install the user-scoped Native Messaging manifest for Google Chrome and for
@@ -164,7 +239,7 @@ pub fn install_native_host_manifests(
     })?;
     let body = serde_json::to_vec_pretty(&NativeHostManifest {
         name: NATIVE_HOST_NAME,
-        description: "OpenGeni attached-browser bridge",
+        description: "Opengeni attached-browser bridge",
         path: binary,
         kind: "stdio",
         allowed_origins: extension_origins(),
@@ -269,8 +344,11 @@ enum BridgeRole {
     Controller,
 }
 
+// Extension messages ignore fields this agent does not know. The extension
+// updates from its store independently of the agent; a newer extension adding
+// a field must never be locked out by an older agent.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)] // Mirrors the public capability bitmap exactly.
 struct ExtensionCapabilities {
     tab_inventory: bool,
@@ -300,7 +378,7 @@ enum ExtensionArchitecture {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct ExtensionDevice {
     id: String,
     name: String,
@@ -311,12 +389,35 @@ struct ExtensionDevice {
     platform: ExtensionPlatform,
     architecture: ExtensionArchitecture,
     connection_generation: String,
+    /// The extension's live-state generation: one value for the lifetime of
+    /// its background worker, reused by every native reconnect. Chrome keeps
+    /// tab ids and debugger attachments across those reconnects, so the
+    /// control plane's placement stays the same while the per-port
+    /// `connection_generation` keeps fencing this transport. Older extensions
+    /// omit it; their placement then changes with every connection.
+    #[serde(default)]
+    state_generation: Option<String>,
     inventory_revision: u64,
     capabilities: ExtensionCapabilities,
 }
 
+impl ExtensionDevice {
+    /// The generation the control plane binds sessions to.
+    fn placement_generation(&self) -> &str {
+        self.state_generation
+            .as_deref()
+            .unwrap_or(&self.connection_generation)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtensionProfileMetadata {
+    profile_label: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)] // Chrome's tab observation is a boolean field set.
 pub(crate) struct AttachedTab {
     pub(crate) id: String,
@@ -349,6 +450,8 @@ enum ExtensionMessage {
         connection_generation: String,
         #[serde(rename = "inventoryRevision")]
         inventory_revision: u64,
+        #[serde(default)]
+        profile: Option<ExtensionProfileMetadata>,
         tabs: Vec<AttachedTab>,
     },
     CommandResult {
@@ -362,10 +465,37 @@ enum ExtensionMessage {
         payload: Option<serde_json::Value>,
         error: Option<BridgeWireError>,
     },
+    /// The native host's last frame before it closes the connection. A frame
+    /// relayed from Chrome could claim this type too; it only labels why the
+    /// connection is about to end and grants nothing.
+    NativeHostClosing {
+        reason: NativeHostClosingReason,
+        #[serde(default)]
+        detail: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+enum NativeHostClosingReason {
+    #[serde(rename = "browser_closed_port")]
+    ClosedPort,
+    #[serde(rename = "browser_message_invalid")]
+    MessageInvalid,
+    #[serde(rename = "browser_output_failed")]
+    OutputFailed,
+}
+
+#[derive(Serialize)]
+struct NativeHostClosing<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    reason: NativeHostClosingReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct BridgeWireError {
     code: String,
     message: String,
@@ -435,7 +565,24 @@ struct ControllerResponse<'a> {
 struct PendingCommand {
     device_id: String,
     connection_generation: String,
-    settle: oneshot::Sender<Result<ExtensionCommandResult, BrowserBridgeRequestFailure>>,
+    settle: Option<oneshot::Sender<Result<ExtensionCommandResult, BrowserBridgeRequestFailure>>>,
+    _reservation: Option<WorkReservation>,
+}
+
+struct ControllerReply {
+    bytes: Vec<u8>,
+    reservation: Option<WorkReservation>,
+    settled: bool,
+}
+
+impl Drop for ControllerReply {
+    fn drop(&mut self) {
+        if !self.settled {
+            if let Some(reservation) = &self.reservation {
+                reservation.mark_unsettled();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -449,6 +596,7 @@ struct ConnectedProfile {
     device: ExtensionDevice,
     tabs: Vec<AttachedTab>,
     outbound: mpsc::Sender<Vec<u8>>,
+    connected_at: Instant,
 }
 
 struct InventoryState {
@@ -456,6 +604,62 @@ struct InventoryState {
     revision: u64,
     profiles: BTreeMap<String, ConnectedProfile>,
     pending: HashMap<String, PendingCommand>,
+    connection_ends: VecDeque<v1::AttachedBrowserConnectionEnd>,
+}
+
+impl InventoryState {
+    fn new(bridge_generation: String) -> Self {
+        Self {
+            bridge_generation,
+            revision: 0,
+            profiles: BTreeMap::new(),
+            pending: HashMap::new(),
+            connection_ends: VecDeque::new(),
+        }
+    }
+}
+
+/// Why this bridge saw one extension connection end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectionEnd {
+    reason: v1::AttachedBrowserConnectionEndReason,
+    detail: Option<String>,
+}
+
+impl ConnectionEnd {
+    /// Classify the end of one native-host connection from the host's own
+    /// closing report (if it sent one) and how the agent's read loop ended.
+    fn observe(
+        result: &Result<(), BrowserBridgeError>,
+        closing: Option<(NativeHostClosingReason, Option<String>)>,
+    ) -> Self {
+        use v1::AttachedBrowserConnectionEndReason as Reason;
+        if let Err(error @ (BrowserBridgeError::Protocol(_) | BrowserBridgeError::Authority(_))) =
+            result
+        {
+            return Self {
+                reason: Reason::AgentRejected,
+                detail: Some(error.to_string()),
+            };
+        }
+        if let Some((reason, detail)) = closing {
+            return Self {
+                reason: match reason {
+                    NativeHostClosingReason::ClosedPort => Reason::BrowserClosedPort,
+                    NativeHostClosingReason::MessageInvalid => Reason::BrowserMessageInvalid,
+                    NativeHostClosingReason::OutputFailed => Reason::BrowserOutputFailed,
+                },
+                detail,
+            };
+        }
+        Self {
+            reason: Reason::NativeHostLost,
+            detail: match result {
+                Ok(()) => None,
+                Err(error) => Some(error.to_string()),
+            },
+        }
+    }
 }
 
 /// Cheap clone held by the connection supervisor. Snapshotting never awaits the
@@ -463,6 +667,7 @@ struct InventoryState {
 #[derive(Clone)]
 pub struct BrowserBridgeInventory {
     state: Arc<RwLock<InventoryState>>,
+    update_drain: Arc<UpdateDrain>,
 }
 
 impl BrowserBridgeInventory {
@@ -474,7 +679,30 @@ impl BrowserBridgeInventory {
             bridge_generation: state.bridge_generation.clone(),
             revision: state.revision,
             devices: state.profiles.values().map(announcement).collect(),
+            connection_ends: state.connection_ends.iter().cloned().collect(),
         }
+    }
+}
+
+impl std::fmt::Debug for BrowserBridgeInventory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserBridgeInventory")
+            .finish_non_exhaustive()
+    }
+}
+
+impl BrowserBridgeInventory {
+    /// Whether `placement` belongs to a connected profile whose extension
+    /// reports no live-state generation: its next native connection, such as
+    /// after this process restarts, gets a new placement and ends its sessions.
+    #[must_use]
+    pub fn placement_ends_on_reconnect(&self, placement: &str) -> bool {
+        let state = self.state.read().expect("browser bridge inventory lock");
+        state.profiles.values().any(|profile| {
+            profile.device.state_generation.is_none()
+                && profile.device.connection_generation == placement
+        })
     }
 
     async fn request(
@@ -502,7 +730,7 @@ impl BrowserBridgeInventory {
             ));
         }
 
-        let (outbound, bytes, receiver) = {
+        let (outbound, bytes, receiver, transport_generation) = {
             let mut state = self.state.write().expect("browser bridge inventory lock");
             if state.pending.len() >= MAX_PENDING_COMMANDS {
                 return Err(BrowserBridgeError::Unavailable);
@@ -516,16 +744,19 @@ impl BrowserBridgeInventory {
                 .profiles
                 .get(device_id)
                 .ok_or(BrowserBridgeError::Unavailable)?;
-            if profile.device.connection_generation != expected_connection_generation {
+            if profile.device.placement_generation() != expected_connection_generation {
                 return Err(BrowserBridgeError::Fenced);
             }
             let outbound = profile.outbound.clone();
+            // The placement generation may outlive one native port; the
+            // extension and every result fence use the exact live port.
+            let transport_generation = profile.device.connection_generation.clone();
             let bytes = serde_json::to_vec(&ExtensionCommand {
                 kind: "command",
                 protocol_version: BRIDGE_PROTOCOL_VERSION,
                 request_id,
                 device_id,
-                connection_generation: expected_connection_generation,
+                connection_generation: &transport_generation,
                 payload: &payload,
             })?;
             if bytes.len() > MAX_COMMAND_MESSAGE_BYTES {
@@ -538,18 +769,19 @@ impl BrowserBridgeInventory {
                 request_id.to_string(),
                 PendingCommand {
                     device_id: device_id.to_string(),
-                    connection_generation: expected_connection_generation.to_string(),
-                    settle,
+                    connection_generation: transport_generation.clone(),
+                    settle: Some(settle),
+                    _reservation: opengeni_agent_platform::current_work_reservation(),
                 },
             );
-            (outbound, bytes, receiver)
+            (outbound, bytes, receiver, transport_generation)
         };
 
         if outbound.send(bytes).await.is_err() {
             self.cancel_request(
                 request_id,
                 device_id,
-                expected_connection_generation,
+                &transport_generation,
                 BrowserBridgeRequestFailure::Unavailable,
             );
         }
@@ -560,7 +792,8 @@ impl BrowserBridgeInventory {
                 Err(BrowserBridgeError::Unavailable)
             }
             Err(_) => {
-                self.remove_pending(request_id, device_id, expected_connection_generation);
+                // Timeout ends only the caller's wait. The extension may still
+                // execute; a matching late result is the physical settlement.
                 Err(BrowserBridgeError::Timeout)
             }
         }
@@ -569,10 +802,10 @@ impl BrowserBridgeInventory {
     fn register(
         &self,
         device: ExtensionDevice,
-        tabs: Vec<AttachedTab>,
+        mut tabs: Vec<AttachedTab>,
         outbound: mpsc::Sender<Vec<u8>>,
     ) -> Result<(), BrowserBridgeError> {
-        validate_device(&device, &tabs)?;
+        validate_device(&device, &mut tabs)?;
         let mut state = self.state.write().expect("browser bridge inventory lock");
         if state.profiles.len() >= MAX_ATTACHED_PROFILES && !state.profiles.contains_key(&device.id)
         {
@@ -580,18 +813,23 @@ impl BrowserBridgeInventory {
                 "too many attached browser profiles".to_string(),
             ));
         }
-        let pending_to_fence = take_pending_for_profile(&mut state, &device.id, None);
+        notify_pending_for_profile(
+            &mut state,
+            &device.id,
+            None,
+            BrowserBridgeRequestFailure::Fenced,
+        );
         state.profiles.insert(
             device.id.clone(),
             ConnectedProfile {
                 device,
                 tabs,
                 outbound,
+                connected_at: Instant::now(),
             },
         );
         state.revision = state.revision.saturating_add(1);
         drop(state);
-        settle_pending(pending_to_fence, BrowserBridgeRequestFailure::Fenced);
         Ok(())
     }
 
@@ -600,9 +838,16 @@ impl BrowserBridgeInventory {
         device_id: &str,
         connection_generation: &str,
         inventory_revision: u64,
-        tabs: Vec<AttachedTab>,
+        metadata: Option<ExtensionProfileMetadata>,
+        mut tabs: Vec<AttachedTab>,
     ) -> Result<(), BrowserBridgeError> {
-        validate_tabs(&tabs)?;
+        validate_tabs(&mut tabs)?;
+        if let Some(label) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.profile_label.as_ref())
+        {
+            bounded_string(label, 1, 200, "browser profile label")?;
+        }
         let mut state = self.state.write().expect("browser bridge inventory lock");
         let profile = state.profiles.get_mut(device_id).ok_or_else(|| {
             BrowserBridgeError::Protocol("inventory arrived before profile hello".to_string())
@@ -615,28 +860,81 @@ impl BrowserBridgeInventory {
         if inventory_revision < profile.device.inventory_revision {
             return Ok(());
         }
-        if inventory_revision == profile.device.inventory_revision && tabs == profile.tabs {
+        if inventory_revision == profile.device.inventory_revision
+            && tabs == profile.tabs
+            && metadata
+                .as_ref()
+                .is_none_or(|metadata| metadata.profile_label == profile.device.profile_label)
+        {
             return Ok(());
         }
         profile.device.inventory_revision = inventory_revision;
+        if let Some(metadata) = metadata {
+            profile.device.name = metadata
+                .profile_label
+                .clone()
+                .unwrap_or_else(|| "Chrome profile".to_string());
+            profile.device.profile_label = metadata.profile_label;
+        }
         profile.tabs = tabs;
         state.revision = state.revision.saturating_add(1);
         Ok(())
     }
 
-    fn disconnect(&self, device_id: &str, connection_generation: &str) {
+    fn disconnect(&self, device_id: &str, connection_generation: &str, end: ConnectionEnd) {
         let mut state = self.state.write().expect("browser bridge inventory lock");
+        let connected = state
+            .profiles
+            .get(device_id)
+            .filter(|profile| profile.device.connection_generation == connection_generation)
+            .map(|profile| profile.connected_at.elapsed());
+        info!(
+            %device_id,
+            %connection_generation,
+            reason = end.reason.as_str_name(),
+            detail = end.detail.as_deref().unwrap_or(""),
+            connected_ms = connected.map_or(0, |duration| duration.as_millis()),
+            "attached browser connection ended"
+        );
+        if state.connection_ends.len() >= MAX_RECORDED_CONNECTION_ENDS {
+            state.connection_ends.pop_front();
+        }
+        state
+            .connection_ends
+            .push_back(v1::AttachedBrowserConnectionEnd {
+                device_id: device_id.to_string(),
+                connection_generation: connection_generation.to_string(),
+                reason: end.reason as i32,
+                detail: end
+                    .detail
+                    .map(|mut detail| {
+                        let length = truncate_utf8(&detail, MAX_CONNECTION_END_DETAIL_BYTES).len();
+                        detail.truncate(length);
+                        detail
+                    })
+                    .unwrap_or_default(),
+                ended_at_unix_ms: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |elapsed| {
+                        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+                    }),
+                connected_ms: connected.map_or(0, |duration| {
+                    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+                }),
+            });
+        state.revision = state.revision.saturating_add(1);
         if state
             .profiles
             .get(device_id)
             .is_some_and(|profile| profile.device.connection_generation == connection_generation)
         {
             state.profiles.remove(device_id);
-            state.revision = state.revision.saturating_add(1);
-            let pending =
-                take_pending_for_profile(&mut state, device_id, Some(connection_generation));
-            drop(state);
-            settle_pending(pending, BrowserBridgeRequestFailure::Unavailable);
+            notify_pending_for_profile(
+                &mut state,
+                device_id,
+                Some(connection_generation),
+                BrowserBridgeRequestFailure::Unavailable,
+            );
         }
     }
 
@@ -675,9 +973,9 @@ impl BrowserBridgeInventory {
             }
             state.pending.remove(request_id).expect("pending command")
         };
-        let _ = pending
-            .settle
-            .send(Ok(ExtensionCommandResult { payload, error }));
+        if let Some(settle) = pending.settle {
+            let _ = settle.send(Ok(ExtensionCommandResult { payload, error }));
+        }
         Ok(())
     }
 
@@ -701,43 +999,28 @@ impl BrowserBridgeInventory {
             }
         };
         if let Some(pending) = pending {
-            let _ = pending.settle.send(Err(reason));
-        }
-    }
-
-    fn remove_pending(&self, request_id: &str, device_id: &str, connection_generation: &str) {
-        let mut state = self.state.write().expect("browser bridge inventory lock");
-        if state.pending.get(request_id).is_some_and(|pending| {
-            pending.device_id == device_id && pending.connection_generation == connection_generation
-        }) {
-            state.pending.remove(request_id);
+            if let Some(settle) = pending.settle {
+                let _ = settle.send(Err(reason));
+            }
         }
     }
 }
 
-fn take_pending_for_profile(
+fn notify_pending_for_profile(
     state: &mut InventoryState,
     device_id: &str,
     connection_generation: Option<&str>,
-) -> Vec<PendingCommand> {
-    let ids = state
-        .pending
-        .iter()
-        .filter(|(_, pending)| {
-            pending.device_id == device_id
-                && connection_generation
-                    .is_none_or(|generation| pending.connection_generation == generation)
-        })
-        .map(|(request_id, _)| request_id.clone())
-        .collect::<Vec<_>>();
-    ids.into_iter()
-        .filter_map(|request_id| state.pending.remove(&request_id))
-        .collect()
-}
-
-fn settle_pending(pending: Vec<PendingCommand>, reason: BrowserBridgeRequestFailure) {
-    for command in pending {
-        let _ = command.settle.send(Err(reason));
+    reason: BrowserBridgeRequestFailure,
+) {
+    for command in state.pending.values_mut() {
+        if command.device_id == device_id
+            && connection_generation
+                .is_none_or(|generation| command.connection_generation == generation)
+        {
+            if let Some(settle) = command.settle.take() {
+                let _ = settle.send(Err(reason));
+            }
+        }
     }
 }
 
@@ -752,17 +1035,22 @@ pub struct BrowserBridgeServer {
 impl BrowserBridgeServer {
     /// Bind loopback, persist owner-only authority, and start accepting native
     /// hosts. The authority file contains no workspace credential.
+    #[cfg(test)]
     pub async fn start(config_dir: &Path) -> Result<Self, BrowserBridgeError> {
+        Self::start_with_update_drain(config_dir, Arc::new(UpdateDrain::default())).await
+    }
+
+    /// Shares the same host-wide admission boundary as every workspace RPC.
+    pub async fn start_with_update_drain(
+        config_dir: &Path,
+        update_drain: Arc<UpdateDrain>,
+    ) -> Result<Self, BrowserBridgeError> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let port = listener.local_addr()?.port();
         let token = random_opaque(32);
         let inventory = BrowserBridgeInventory {
-            state: Arc::new(RwLock::new(InventoryState {
-                bridge_generation: random_opaque(24),
-                revision: 0,
-                profiles: BTreeMap::new(),
-                pending: HashMap::new(),
-            })),
+            update_drain,
+            state: Arc::new(RwLock::new(InventoryState::new(random_opaque(24)))),
         };
         let authority_path = write_authority(
             config_dir,
@@ -875,82 +1163,97 @@ async fn serve_bridge_connection(
     }
 }
 
-async fn serve_extension(
-    mut reader: tokio::net::tcp::OwnedReadHalf,
-    mut writer: tokio::net::tcp::OwnedWriteHalf,
+async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut reader: R,
+    mut writer: W,
     inventory: BrowserBridgeInventory,
 ) -> Result<(), BrowserBridgeError> {
     let (outbound, mut outbound_rx) = mpsc::channel::<Vec<u8>>(128);
     let mut claim: Option<(String, String)> = None;
+    let mut closing: Option<(NativeHostClosingReason, Option<String>)> = None;
     let result = async {
         loop {
-            tokio::select! {
-                incoming = read_native_frame_bounded(&mut reader, MAX_RESPONSE_MESSAGE_BYTES) => {
-                    let Some(bytes) = incoming? else { break; };
-                    let message: ExtensionMessage = serde_json::from_slice(&bytes)?;
-                    match message {
-                        ExtensionMessage::Hello { protocol_version, device, tabs } => {
-                            if protocol_version != BRIDGE_PROTOCOL_VERSION {
-                                return Err(BrowserBridgeError::Protocol("extension protocol version is unsupported".to_string()));
+            // read_exact may already have consumed part of the header or body.
+            // Keep that same read alive while outbound commands are serviced.
+            let incoming = read_native_frame_bounded(&mut reader, MAX_RESPONSE_MESSAGE_BYTES);
+            tokio::pin!(incoming);
+            loop {
+                tokio::select! {
+                    frame = &mut incoming => {
+                        let Some(bytes) = frame? else { return Ok(()); };
+                        let message: ExtensionMessage = serde_json::from_slice(&bytes)?;
+                        match message {
+                            ExtensionMessage::Hello { protocol_version, device, tabs } => {
+                                if protocol_version != BRIDGE_PROTOCOL_VERSION {
+                                    return Err(BrowserBridgeError::Protocol("extension protocol version is unsupported".to_string()));
+                                }
+                                if claim.is_some() {
+                                    return Err(BrowserBridgeError::Protocol("one native-host connection sent multiple hellos".to_string()));
+                                }
+                                let device_id = device.id.clone();
+                                let generation = device.connection_generation.clone();
+                                let tab_count = tabs.len();
+                                // Claimed before validation so a rejected hello is
+                                // still recorded as this generation's end.
+                                claim = Some((device_id.clone(), generation.clone()));
+                                inventory.register(device, tabs, outbound.clone())?;
+                                let ready = serde_json::to_vec(&ExtensionReady {
+                                    kind: "ready",
+                                    protocol_version: BRIDGE_PROTOCOL_VERSION,
+                                    device_id: &device_id,
+                                    connection_generation: &generation,
+                                })?;
+                                // Write readiness before servicing the outbound queue.
+                                // A controller therefore cannot race its first command
+                                // ahead of the extension's accepted-handshake signal.
+                                write_native_frame_bounded(
+                                    &mut writer,
+                                    &ready,
+                                    MAX_COMMAND_MESSAGE_BYTES,
+                                )
+                                .await?;
+                                debug!(%device_id, connection_generation = %generation, tab_count, "attached browser profile registered");
                             }
-                            if claim.is_some() {
-                                return Err(BrowserBridgeError::Protocol("one native-host connection sent multiple hellos".to_string()));
+                            ExtensionMessage::Inventory { device_id, connection_generation, inventory_revision, profile, tabs } => {
+                                if claim.as_ref() != Some(&(device_id.clone(), connection_generation.clone())) {
+                                    return Err(BrowserBridgeError::Protocol("inventory does not belong to this native-host connection".to_string()));
+                                }
+                                inventory.update(&device_id, &connection_generation, inventory_revision, profile, tabs)?;
                             }
-                            let device_id = device.id.clone();
-                            let generation = device.connection_generation.clone();
-                            let tab_count = tabs.len();
-                            inventory.register(device, tabs, outbound.clone())?;
-                            claim = Some((device_id.clone(), generation.clone()));
-                            let ready = serde_json::to_vec(&ExtensionReady {
-                                kind: "ready",
-                                protocol_version: BRIDGE_PROTOCOL_VERSION,
-                                device_id: &device_id,
-                                connection_generation: &generation,
-                            })?;
-                            // Write readiness before servicing the outbound queue.
-                            // A controller therefore cannot race its first command
-                            // ahead of the extension's accepted-handshake signal.
-                            write_native_frame_bounded(
-                                &mut writer,
-                                &ready,
-                                MAX_COMMAND_MESSAGE_BYTES,
-                            )
-                            .await?;
-                            debug!(%device_id, connection_generation = %generation, tab_count, "attached browser profile registered");
+                            ExtensionMessage::CommandResult { request_id, device_id, connection_generation, ok, payload, error } => {
+                                if claim.as_ref() != Some(&(device_id.clone(), connection_generation.clone())) {
+                                    return Err(BrowserBridgeError::Protocol("command result does not belong to this native-host connection".to_string()));
+                                }
+                                inventory.settle_command(
+                                    &request_id,
+                                    &device_id,
+                                    &connection_generation,
+                                    ok,
+                                    payload,
+                                    error,
+                                )?;
+                            }
+                            ExtensionMessage::NativeHostClosing { reason, detail } => {
+                                closing = Some((reason, detail));
+                            }
                         }
-                        ExtensionMessage::Inventory { device_id, connection_generation, inventory_revision, tabs } => {
-                            if claim.as_ref() != Some(&(device_id.clone(), connection_generation.clone())) {
-                                return Err(BrowserBridgeError::Protocol("inventory does not belong to this native-host connection".to_string()));
-                            }
-                            inventory.update(&device_id, &connection_generation, inventory_revision, tabs)?;
-                        }
-                        ExtensionMessage::CommandResult { request_id, device_id, connection_generation, ok, payload, error } => {
-                            if claim.as_ref() != Some(&(device_id.clone(), connection_generation.clone())) {
-                                return Err(BrowserBridgeError::Protocol("command result does not belong to this native-host connection".to_string()));
-                            }
-                            inventory.settle_command(
-                                &request_id,
-                                &device_id,
-                                &connection_generation,
-                                ok,
-                                payload,
-                                error,
-                            )?;
-                        }
+                        break;
                     }
-                }
-                outbound_message = outbound_rx.recv() => {
-                    let Some(bytes) = outbound_message else { break; };
-                    write_native_frame_bounded(&mut writer, &bytes, MAX_COMMAND_MESSAGE_BYTES).await?;
+                    outbound_message = outbound_rx.recv() => {
+                        let Some(bytes) = outbound_message else { return Ok(()); };
+                        write_native_frame_bounded(&mut writer, &bytes, MAX_COMMAND_MESSAGE_BYTES).await?;
+                    }
                 }
             }
         }
-        Ok(())
     }
     .await;
     if let Some((device_id, generation)) = claim {
-        inventory.disconnect(&device_id, &generation);
-        debug!(%device_id, connection_generation = %generation, "attached browser profile disconnected");
+        inventory.disconnect(
+            &device_id,
+            &generation,
+            ConnectionEnd::observe(&result, closing),
+        );
     }
     result
 }
@@ -960,10 +1263,12 @@ async fn serve_controller(
     mut writer: tokio::net::tcp::OwnedWriteHalf,
     inventory: BrowserBridgeInventory,
 ) -> Result<(), BrowserBridgeError> {
-    let (responses, mut response_rx) = mpsc::channel::<Vec<u8>>(128);
+    let (responses, mut response_rx) = mpsc::channel::<ControllerReply>(128);
     let writer_task = tokio::spawn(async move {
-        while let Some(response) = response_rx.recv().await {
-            write_native_frame_bounded(&mut writer, &response, MAX_RESPONSE_MESSAGE_BYTES).await?;
+        while let Some(mut response) = response_rx.recv().await {
+            write_native_frame_bounded(&mut writer, &response.bytes, MAX_RESPONSE_MESSAGE_BYTES)
+                .await?;
+            response.settled = true;
         }
         Ok::<(), BrowserBridgeError>(())
     });
@@ -986,24 +1291,47 @@ async fn serve_controller(
         }
         let request_inventory = inventory.clone();
         let request_responses = responses.clone();
-        requests.spawn(async move {
-            let result = request_inventory
-                .request(
+        // Reserve before spawn/first await. A controller peer's disappearing
+        // waiter cannot cancel an accepted extension command or its publisher.
+        let reservation = inventory.update_drain.reserve_work(None);
+        let accepted = reservation.is_some();
+        let reply_reservation = reservation.clone();
+        let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
+            reservation,
+            async move {
+                let result = if accepted {
+                    request_inventory
+                        .request(
+                            &request_id,
+                            &device_id,
+                            &expected_connection_generation,
+                            payload,
+                        )
+                        .await
+                } else {
+                    Err(BrowserBridgeError::Draining)
+                };
+                let response = controller_response(
                     &request_id,
                     &device_id,
                     &expected_connection_generation,
-                    payload,
-                )
-                .await;
-            let response = controller_response(
-                &request_id,
-                &device_id,
-                &expected_connection_generation,
-                result,
-            );
-            if let Ok(bytes) = serde_json::to_vec(&response) {
-                let _ = request_responses.send(bytes).await;
-            }
+                    result,
+                );
+                if let Ok(bytes) = serde_json::to_vec(&response) {
+                    let _ = request_responses
+                        .send(ControllerReply {
+                            bytes,
+                            reservation: reply_reservation,
+                            settled: false,
+                        })
+                        .await;
+                } else if let Some(reservation) = reply_reservation {
+                    reservation.mark_unsettled();
+                }
+            },
+        ));
+        requests.spawn(async move {
+            let _ = actual.await;
         });
     }
     drop(responses);
@@ -1039,6 +1367,7 @@ fn bridge_wire_error(error: &BrowserBridgeError) -> BridgeWireError {
         BrowserBridgeError::Unavailable => ("resource_unavailable", true),
         BrowserBridgeError::Fenced => ("fenced", true),
         BrowserBridgeError::Timeout => ("timeout", true),
+        BrowserBridgeError::Draining => ("update_draining", true),
         BrowserBridgeError::Protocol(_) | BrowserBridgeError::Authority(_) => ("protocol", false),
         BrowserBridgeError::Io(_) | BrowserBridgeError::Task(_) => ("bridge_failed", true),
     };
@@ -1067,7 +1396,7 @@ fn announcement(profile: &ConnectedProfile) -> v1::AttachedBrowserDeviceAnnounce
             ExtensionArchitecture::X64 => v1::Arch::X8664 as i32,
             ExtensionArchitecture::Arm64 => v1::Arch::Aarch64 as i32,
         },
-        connection_generation: profile.device.connection_generation.clone(),
+        connection_generation: profile.device.placement_generation().to_string(),
         inventory_revision: profile.device.inventory_revision,
         tab_count: u32::try_from(profile.tabs.len()).unwrap_or(u32::MAX),
         capabilities: Some(v1::AttachedBrowserDeviceCapabilities {
@@ -1086,7 +1415,7 @@ fn announcement(profile: &ConnectedProfile) -> v1::AttachedBrowserDeviceAnnounce
 
 fn validate_device(
     device: &ExtensionDevice,
-    tabs: &[AttachedTab],
+    tabs: &mut [AttachedTab],
 ) -> Result<(), BrowserBridgeError> {
     uuid::Uuid::parse_str(&device.id).map_err(|_| {
         BrowserBridgeError::Protocol("attached browser id must be a UUID".to_string())
@@ -1104,10 +1433,18 @@ fn validate_device(
         512,
         "browser connection generation",
     )?;
+    if let Some(state_generation) = &device.state_generation {
+        bounded_string(state_generation, 1, 512, "browser state generation")?;
+    }
     validate_tabs(tabs)
 }
 
-fn validate_tabs(tabs: &[AttachedTab]) -> Result<(), BrowserBridgeError> {
+/// Validate the extension's own fields and bound the page-supplied ones. A
+/// page title or address is chosen by whatever site a tab shows, so an
+/// oversized one is clamped (or makes that one tab uncontrollable) instead of
+/// failing the whole profile connection, which would also fail every
+/// reconnect for as long as the tab stays open.
+fn validate_tabs(tabs: &mut [AttachedTab]) -> Result<(), BrowserBridgeError> {
     if tabs.len() > MAX_TABS_PER_PROFILE {
         return Err(BrowserBridgeError::Protocol(
             "attached browser tab inventory is too large".to_string(),
@@ -1115,14 +1452,26 @@ fn validate_tabs(tabs: &[AttachedTab]) -> Result<(), BrowserBridgeError> {
     }
     for tab in tabs {
         bounded_string(&tab.id, 1, 512, "browser tab id")?;
-        bounded_string(&tab.title, 0, 8_192, "browser tab title")?;
-        if let Some(url) = &tab.url {
-            bounded_string(url, 1, 65_536, "browser tab url")?;
-        }
         if tab.controllable == tab.unavailable_reason.is_some() {
             return Err(BrowserBridgeError::Protocol(
                 "unavailable reason must exist exactly when a tab is not controllable".to_string(),
             ));
+        }
+        if tab.title.len() > MAX_TAB_TITLE_BYTES {
+            let length = truncate_utf8(&tab.title, MAX_TAB_TITLE_BYTES).len();
+            tab.title.truncate(length);
+        }
+        if tab
+            .url
+            .as_ref()
+            .is_some_and(|url| url.len() > MAX_TAB_URL_BYTES)
+        {
+            tab.url = None;
+            tab.controllable = false;
+            tab.unavailable_reason = Some(TAB_URL_TOO_LONG.to_string());
+        }
+        if tab.url.as_ref().is_some_and(String::is_empty) {
+            tab.url = None;
         }
     }
     Ok(())
@@ -1354,12 +1703,282 @@ fn read_authority(path: &Path) -> Result<BridgeAuthority, BrowserBridgeError> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::{authority_path, read_authority, read_native_frame, write_native_frame};
+    use std::path::Path;
+    use tokio::net::TcpStream;
+
+    /// Connects one authenticated extension to the bridge in `config_dir` and
+    /// waits for its ready frame. `state_generation` is omitted for an older
+    /// extension.
+    pub(crate) async fn connect_extension(
+        config_dir: &Path,
+        device_id: &str,
+        connection_generation: &str,
+        state_generation: Option<&str>,
+    ) -> TcpStream {
+        let authority = read_authority(&authority_path(config_dir)).expect("authority");
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+            .await
+            .expect("connect");
+        let auth = serde_json::json!({
+            "type": "authenticate", "protocolVersion": 1, "role": "extension",
+            "token": authority.token
+        });
+        write_native_frame(&mut socket, &serde_json::to_vec(&auth).expect("auth"))
+            .await
+            .expect("write auth");
+        let mut device = serde_json::json!({
+            "id": device_id, "name": "Chrome profile", "profileLabel": null,
+            "browserName": "Chrome", "browserVersion": "151.0.0.0", "extensionVersion": "1.0.0",
+            "platform": "linux", "architecture": "x64",
+            "connectionGeneration": connection_generation, "inventoryRevision": 1,
+            "capabilities": {
+                "tabInventory": true, "debuggerAttachment": true, "semanticObservation": true,
+                "screenshots": true, "liveFrames": true, "humanInput": true, "diagnostics": true,
+                "rawCdp": false, "linkedComputer": true
+            }
+        });
+        if let Some(state) = state_generation {
+            device["stateGeneration"] = serde_json::json!(state);
+        }
+        let hello = serde_json::json!({
+            "type": "hello", "protocolVersion": 1, "device": device, "tabs": []
+        });
+        write_native_frame(&mut socket, &serde_json::to_vec(&hello).expect("hello"))
+            .await
+            .expect("write hello");
+        let ready = read_native_frame(&mut socket)
+            .await
+            .expect("ready")
+            .expect("ready frame");
+        let ready: serde_json::Value = serde_json::from_slice(&ready).expect("ready json");
+        assert_eq!(ready["type"], "ready");
+        socket
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
     use serde_json::json;
     use sha2::{Digest as _, Sha256};
     use std::io::Cursor;
+
+    struct SignalledReader<R> {
+        inner: R,
+        remaining: usize,
+        consumed: Option<oneshot::Sender<()>>,
+    }
+
+    impl<R: AsyncRead + Unpin> AsyncRead for SignalledReader<R> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let before = buf.filled().len();
+            let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+            self.remaining = self.remaining.saturating_sub(buf.filled().len() - before);
+            if self.remaining == 0 {
+                if let Some(consumed) = self.consumed.take() {
+                    let _ = consumed.send(());
+                }
+            }
+            result
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_command_preserves_partial_incoming_header() {
+        assert_partial_extension_frame_survives_command(2).await;
+    }
+
+    #[tokio::test]
+    async fn outbound_command_preserves_partial_incoming_payload() {
+        assert_partial_extension_frame_survives_command(40).await;
+    }
+
+    async fn assert_partial_extension_frame_survives_command(prefix_length: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let device_id = "11111111-1111-4111-8111-111111111111";
+            let request_id = "22222222-2222-4222-8222-222222222222";
+            let generation = "connection-1";
+            let inventory = BrowserBridgeInventory {
+                state: Arc::new(RwLock::new(InventoryState::new("test-bridge".to_string()))),
+                update_drain: Arc::new(UpdateDrain::default()),
+            };
+            let greeting = hello(device_id, generation, 1);
+            let update = serde_json::to_vec(&json!({
+                "type": "inventory", "deviceId": device_id,
+                "connectionGeneration": generation, "inventoryRevision": 2,
+                "profile": { "profileLabel": "Work browser" },
+                "tabs": [tab("11")]
+            }))
+            .expect("inventory");
+            let mut frame = u32::try_from(update.len())
+                .expect("length")
+                .to_ne_bytes()
+                .to_vec();
+            frame.extend_from_slice(&update);
+            let (client, server) = tokio::io::duplex(4096);
+            let (reader, writer) = tokio::io::split(server);
+            let (consumed, prefix_consumed) = oneshot::channel();
+            let reader = SignalledReader {
+                inner: reader,
+                remaining: 4 + greeting.len() + prefix_length,
+                consumed: Some(consumed),
+            };
+            let connection = tokio::spawn(serve_extension(reader, writer, inventory.clone()));
+            let mut client = client;
+            write_native_frame(&mut client, &greeting)
+                .await
+                .expect("hello");
+            let ready = read_native_frame(&mut client)
+                .await
+                .expect("ready")
+                .expect("open");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&ready).unwrap()["type"],
+                "ready"
+            );
+
+            client
+                .write_all(&frame[..prefix_length])
+                .await
+                .expect("prefix");
+            // The receiver has consumed the prefix before an outbound command
+            // becomes ready. No timing or TCP packet-boundary assumption.
+            prefix_consumed.await.expect("prefix consumed");
+            let request_inventory = inventory.clone();
+            let pending = tokio::spawn(async move {
+                request_inventory
+                    .request(request_id, device_id, generation, json!({ "type": "ping" }))
+                    .await
+            });
+            let command = read_native_frame(&mut client)
+                .await
+                .expect("command")
+                .expect("open");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&command).unwrap()["requestId"],
+                request_id
+            );
+            client
+                .write_all(&frame[prefix_length..])
+                .await
+                .expect("rest of frame");
+            write_native_frame(
+                &mut client,
+                &serde_json::to_vec(&json!({
+                    "type": "command_result", "requestId": request_id,
+                    "deviceId": device_id, "connectionGeneration": generation,
+                    "ok": true, "payload": { "pong": true }, "error": null
+                }))
+                .expect("result"),
+            )
+            .await
+            .expect("write result");
+            let result = pending
+                .await
+                .expect("request task")
+                .expect("command settled");
+            assert_eq!(result.payload, Some(json!({ "pong": true })));
+            assert!(result.error.is_none());
+            assert_renamed_profile(&inventory.snapshot(), generation);
+            drop(client);
+            connection
+                .await
+                .expect("connection task")
+                .expect("clean EOF");
+        })
+        .await
+        .expect("bounded partial-frame regression");
+    }
+
+    fn assert_renamed_profile(snapshot: &v1::AttachedBrowserInventorySnapshot, generation: &str) {
+        assert_eq!(snapshot.devices.len(), 1);
+        assert_eq!(snapshot.devices[0].connection_generation, generation);
+        assert_eq!(snapshot.devices[0].inventory_revision, 2);
+        assert_eq!(snapshot.devices[0].name, "Work browser");
+        assert_eq!(snapshot.devices[0].profile_label, "Work browser");
+    }
+
+    #[test]
+    fn inventory_metadata_is_optional_and_can_clear_a_profile_label() {
+        let inventory = BrowserBridgeInventory {
+            state: Arc::new(RwLock::new(InventoryState::new("test-bridge".to_string()))),
+            update_drain: Arc::new(UpdateDrain::default()),
+        };
+        let id = "11111111-1111-4111-8111-111111111111";
+        let generation = "connection-1";
+        let ExtensionMessage::Hello { device, tabs, .. } =
+            serde_json::from_slice(&hello(id, generation, 1)).unwrap()
+        else {
+            panic!("hello fixture");
+        };
+        let (outbound, _receiver) = mpsc::channel(1);
+        inventory.register(device, tabs.clone(), outbound).unwrap();
+        inventory
+            .update(id, generation, 2, None, tabs.clone())
+            .unwrap();
+        assert_eq!(
+            inventory.snapshot().devices[0].profile_label,
+            "example.test"
+        );
+        inventory
+            .update(
+                id,
+                generation,
+                3,
+                Some(ExtensionProfileMetadata {
+                    profile_label: None,
+                }),
+                tabs.clone(),
+            )
+            .unwrap();
+        let snapshot = inventory.snapshot();
+        assert_eq!(snapshot.devices[0].name, "Chrome profile");
+        assert_eq!(snapshot.devices[0].profile_label, "");
+        assert_eq!(snapshot.devices[0].connection_generation, generation);
+        inventory
+            .update(
+                id,
+                generation,
+                2,
+                Some(ExtensionProfileMetadata {
+                    profile_label: Some("Stale name".to_string()),
+                }),
+                tabs.clone(),
+            )
+            .unwrap();
+        assert_eq!(inventory.snapshot().devices[0].profile_label, "");
+        assert!(inventory
+            .update(
+                id,
+                "old-connection",
+                4,
+                Some(ExtensionProfileMetadata {
+                    profile_label: Some("Stale connection".to_string())
+                }),
+                tabs.clone()
+            )
+            .is_err());
+        assert_eq!(inventory.snapshot().devices[0].profile_label, "");
+        assert!(inventory
+            .update(
+                id,
+                generation,
+                4,
+                Some(ExtensionProfileMetadata {
+                    profile_label: Some("x".repeat(201))
+                }),
+                tabs
+            )
+            .is_err());
+        assert_eq!(inventory.snapshot().devices[0].inventory_revision, 3);
+    }
 
     #[test]
     fn native_host_accepts_only_exact_development_and_store_origins() {
@@ -1402,8 +2021,8 @@ mod tests {
             "id": id,
             "windowId": 1,
             "index": 0,
-            "title": "OpenGeni",
-            "url": "https://opengeni.ai/",
+            "title": "Example",
+            "url": "https://example.test/",
             "active": true,
             "pinned": false,
             "incognito": false,
@@ -1421,7 +2040,7 @@ mod tests {
             "device": {
                 "id": device_id,
                 "name": "Primary Chrome",
-                "profileLabel": "cloudgeni.ai",
+                "profileLabel": "example.test",
                 "browserName": "Chrome",
                 "browserVersion": "151.0.0.0",
                 "extensionVersion": "1.0.0",
@@ -1565,6 +2184,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // authenticated transport, cancellation, late result, and new-work refusal
     async fn routes_controller_commands_through_one_exact_extension_generation() {
         let directory = tempfile::tempdir().expect("tempdir");
         let server = BrowserBridgeServer::start(directory.path())
@@ -1659,6 +2279,65 @@ mod tests {
         assert_eq!(response["ok"], true);
         assert_eq!(response["payload"]["pong"], true);
 
+        // The actual extension still owns a command after its caller stops
+        // waiting. New routed work is refused without erasing that obligation.
+        let inventory = server.inventory();
+        let drain = inventory.update_drain.clone();
+        let late_id = "33333333-3333-4333-8333-333333333333";
+        let reservation = drain.reserve_work(None).unwrap();
+        let waiter = tokio::spawn(opengeni_agent_platform::with_work_reservation(
+            Some(reservation),
+            async move {
+                inventory
+                    .request(late_id, device_id, generation, json!({"type":"ping"}))
+                    .await
+            },
+        ));
+        let late_command = read_json(&mut extension).await;
+        assert_eq!(late_command["requestId"], late_id);
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        assert_eq!(
+            drain.reserve_update("other-link-update"),
+            crate::uploads::update_drain::UpdateReservation::Started
+        );
+        assert!(!drain.seal_update("other-link-update"));
+        let refused_id = "44444444-4444-4444-8444-444444444444";
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type":"request", "protocolVersion":1, "requestId":refused_id, "deviceId":device_id,
+                "expectedConnectionGeneration":generation, "payload":{"type":"ping"}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let refused = read_json(&mut controller).await;
+        assert_eq!(refused["requestId"], refused_id);
+        assert_eq!(refused["error"]["code"], "update_draining");
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        write_native_frame(
+            &mut extension,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":late_id, "deviceId":device_id,
+                "connectionGeneration":generation, "ok":true, "payload":{"pong":true}, "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain.seal_update("other-link-update"));
+        drain.release_update("other-link-update");
+
         drop(controller);
         drop(extension);
         server.shutdown().await.expect("shutdown");
@@ -1704,5 +2383,529 @@ mod tests {
         }
         remove_native_host_manifests(directory.path()).expect("remove");
         assert!(manifests.iter().all(|path| !path.exists()));
+    }
+
+    fn authentication(token: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "type": "authenticate",
+            "protocolVersion": 1,
+            "role": "extension",
+            "token": token
+        }))
+        .expect("auth")
+    }
+
+    async fn extension_socket(config_dir: &Path) -> TcpStream {
+        let authority = read_authority(&authority_path(config_dir)).expect("authority");
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+            .await
+            .expect("connect");
+        write_native_frame(&mut socket, &authentication(&authority.token))
+            .await
+            .expect("write auth");
+        socket
+    }
+
+    async fn connection_end(server: &BrowserBridgeServer) -> v1::AttachedBrowserConnectionEnd {
+        for _ in 0..400 {
+            if let Some(end) = server.inventory().snapshot().connection_ends.pop() {
+                return end;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the bridge recorded no connection end");
+    }
+
+    fn hello_with(
+        device_id: &str,
+        generation: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> Vec<u8> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&hello(device_id, generation, 1)).expect("hello");
+        edit(&mut value);
+        serde_json::to_vec(&value).expect("hello")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_native_host_reports_when_chrome_closes_its_port() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let authority = read_authority(&authority_path(directory.path())).expect("authority");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let mut chrome_output = Vec::new();
+        write_native_frame_sync(&mut chrome_output, &hello(device_id, "connection-1", 1))
+            .expect("hello");
+        let relay = std::thread::spawn(move || {
+            let mut socket =
+                std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+                    .expect("connect");
+            write_native_frame_sync(&mut socket, &authentication(&authority.token)).expect("auth");
+            // Chrome sends the hello, then closes the port (EOF).
+            relay_native_host(socket, Cursor::new(chrome_output), std::io::sink())
+        });
+
+        let end = connection_end(&server).await;
+        assert_eq!(end.device_id, device_id);
+        assert_eq!(end.connection_generation, "connection-1");
+        assert_eq!(
+            end.reason,
+            v1::AttachedBrowserConnectionEndReason::BrowserClosedPort as i32
+        );
+        assert!(end.ended_at_unix_ms > 0);
+        relay.join().expect("relay thread").expect("relay");
+        assert!(server.inventory().snapshot().devices.is_empty());
+        server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_native_host_that_vanishes_is_reported_lost() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let mut socket = extension_socket(directory.path()).await;
+        write_native_frame(&mut socket, &hello(device_id, "connection-1", 1))
+            .await
+            .expect("hello");
+        for _ in 0..200 {
+            if !server.inventory().snapshot().devices.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // No closing report: the host process crashed or was killed.
+        drop(socket);
+
+        let end = connection_end(&server).await;
+        assert_eq!(end.connection_generation, "connection-1");
+        assert_eq!(
+            end.reason,
+            v1::AttachedBrowserConnectionEndReason::NativeHostLost as i32
+        );
+        server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_hello_is_reported_with_the_agents_reason() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let mut socket = extension_socket(directory.path()).await;
+        let invalid = hello_with(
+            "11111111-1111-4111-8111-111111111111",
+            "connection-1",
+            |hello| {
+                hello["tabs"][0]["unavailableReason"] = json!("contradicts controllable");
+            },
+        );
+        write_native_frame(&mut socket, &invalid)
+            .await
+            .expect("hello");
+
+        let end = connection_end(&server).await;
+        assert_eq!(
+            end.reason,
+            v1::AttachedBrowserConnectionEndReason::AgentRejected as i32
+        );
+        assert!(end.detail.contains("unavailable reason"), "{}", end.detail);
+        assert!(server.inventory().snapshot().devices.is_empty());
+        server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn oversized_page_metadata_cannot_disconnect_a_profile() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let mut socket = extension_socket(directory.path()).await;
+        let oversized = hello_with(device_id, "connection-1", |hello| {
+            hello["tabs"][0]["title"] = json!("é".repeat(5_000));
+            hello["tabs"][0]["url"] = json!(format!("https://example.test/{}", "a".repeat(70_000)));
+        });
+        write_native_frame(&mut socket, &oversized)
+            .await
+            .expect("hello");
+        let ready = read_native_frame(&mut socket)
+            .await
+            .expect("ready")
+            .expect("ready frame");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&ready).expect("ready")["type"],
+            "ready"
+        );
+        let state = server.inventory().state;
+        let tab = state.read().expect("state").profiles[device_id].tabs[0].clone();
+        assert!(tab.title.len() <= MAX_TAB_TITLE_BYTES);
+        assert!(tab.title.chars().all(|character| character == 'é'));
+        assert_eq!(tab.url, None);
+        assert!(!tab.controllable);
+        assert_eq!(tab.unavailable_reason.as_deref(), Some(TAB_URL_TOO_LONG));
+        drop(socket);
+        server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_newer_extensions_extra_fields_are_ignored() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let mut socket = extension_socket(directory.path()).await;
+        let newer = hello_with(
+            "11111111-1111-4111-8111-111111111111",
+            "connection-1",
+            |hello| {
+                hello["device"]["previousConnection"] =
+                    json!({ "reason": "service_worker_restart" });
+                hello["device"]["capabilities"]["futureCapability"] = json!(true);
+                hello["tabs"][0]["groupId"] = json!(4);
+            },
+        );
+        write_native_frame(&mut socket, &newer)
+            .await
+            .expect("hello");
+        let ready = read_native_frame(&mut socket)
+            .await
+            .expect("ready")
+            .expect("ready frame");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&ready).expect("ready")["type"],
+            "ready"
+        );
+        assert_eq!(server.inventory().snapshot().devices.len(), 1);
+        drop(socket);
+        server.shutdown().await.expect("shutdown");
+    }
+
+    async fn wait_for_placement(server: &BrowserBridgeServer, expected: Option<&str>) {
+        for _ in 0..400 {
+            let snapshot = server.inventory().snapshot();
+            let current = snapshot
+                .devices
+                .first()
+                .map(|device| device.connection_generation.clone());
+            if current.as_deref() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!(
+            "placement never became {expected:?}: {:?}",
+            server.inventory().snapshot().devices
+        );
+    }
+
+    async fn controller_ping(
+        controller: &mut TcpStream,
+        request_id: &str,
+        device_id: &str,
+        placement: &str,
+    ) {
+        write_native_frame(
+            controller,
+            &serde_json::to_vec(&json!({
+                "type": "request",
+                "protocolVersion": 1,
+                "requestId": request_id,
+                "deviceId": device_id,
+                "expectedConnectionGeneration": placement,
+                "payload": { "type": "ping" }
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("write request");
+    }
+
+    async fn answer_ping(extension: &mut TcpStream, device_id: &str, transport: &str) -> String {
+        let command = read_json(extension).await;
+        assert_eq!(command["type"], "command");
+        // The extension fences on its exact live port, never on the placement.
+        assert_eq!(command["connectionGeneration"], transport);
+        let request_id = command["requestId"]
+            .as_str()
+            .expect("request id")
+            .to_string();
+        write_native_frame(
+            extension,
+            &serde_json::to_vec(&json!({
+                "type": "command_result",
+                "requestId": request_id,
+                "deviceId": device_id,
+                "connectionGeneration": transport,
+                "ok": true,
+                "payload": { "pong": true },
+                "error": null
+            }))
+            .expect("result"),
+        )
+        .await
+        .expect("write result");
+        request_id
+    }
+
+    async fn wait_for_device(
+        server: &BrowserBridgeServer,
+    ) -> v1::AttachedBrowserDeviceAnnouncement {
+        for _ in 0..600 {
+            if let Some(device) = server.inventory().snapshot().devices.pop() {
+                return device;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("Chromium's extension never connected to the bridge");
+    }
+
+    async fn controller_tab_count(config_dir: &Path, device_id: &str, placement: &str) -> usize {
+        let authority = read_authority(&authority_path(config_dir)).expect("authority");
+        let mut controller = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+            .await
+            .expect("controller connect");
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type": "authenticate", "protocolVersion": 1, "role": "controller",
+                "token": authority.token
+            }))
+            .expect("auth"),
+        )
+        .await
+        .expect("auth");
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type": "request", "protocolVersion": 1,
+                "requestId": uuid::Uuid::new_v4().to_string(), "deviceId": device_id,
+                "expectedConnectionGeneration": placement, "payload": { "type": "tabs.list" }
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("request");
+        let frame =
+            tokio::time::timeout(Duration::from_secs(10), read_native_frame(&mut controller))
+                .await
+                .expect("controller response timeout")
+                .expect("controller response")
+                .expect("controller frame");
+        let response: serde_json::Value = serde_json::from_slice(&frame).expect("response");
+        assert_eq!(response["ok"], true, "{response}");
+        response["payload"]["tabs"].as_array().expect("tabs").len()
+    }
+
+    /// Real Chromium + the unpacked extension + this agent binary as its native
+    /// host. The bridge is restarted, as an agent restart or update does, and
+    /// the profile must keep its placement so live sessions stay bound.
+    ///
+    /// OPENGENI_REAL_CHROME_AGENT_BINARY=<built opengeni-agent>
+    /// OPENGENI_REAL_CHROME_EXTENSION=<apps/browser-extension/dist> DISPLAY=:N
+    /// cargo test ... attached_chrome_keeps_its_placement_across_a_bridge_restart -- --ignored
+    #[tokio::test]
+    #[ignore = "needs Chromium, a display, a built agent binary and the unpacked extension"]
+    async fn attached_chrome_keeps_its_placement_across_a_bridge_restart() {
+        let binary = std::env::var("OPENGENI_REAL_CHROME_AGENT_BINARY").expect("agent binary");
+        let extension = std::env::var("OPENGENI_REAL_CHROME_EXTENSION").expect("extension");
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join("agent");
+        let xdg = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::create_dir_all(xdg.join("chromium")).expect("xdg");
+        // This ignored test runs alone; the variable only steers where the
+        // manifest installer writes.
+        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        install_native_host_manifests(Path::new(&binary), root.path()).expect("manifest");
+        let server = BrowserBridgeServer::start(&config_dir)
+            .await
+            .expect("bridge");
+        let mut chromium = tokio::process::Command::new(
+            std::env::var("CHROMIUM").unwrap_or_else(|_| "chromium".to_string()),
+        )
+        // Chromium reads user-level native-host manifests from its user-data
+        // directory; the installer writes the default one.
+        .arg(format!(
+            "--user-data-dir={}",
+            xdg.join("chromium").display()
+        ))
+        .arg(format!("--load-extension={extension}"))
+        // Chromium 137+ ignores --load-extension unless this is disabled.
+        .arg("--disable-features=DisableLoadExtensionCommandLineSwitch")
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+        ])
+        .arg("data:text/html,<title>user page</title>")
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("OPENGENI_CONFIG_DIR", &config_dir)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("chromium");
+
+        let before = wait_for_device(&server).await;
+        let tabs =
+            controller_tab_count(&config_dir, &before.id, &before.connection_generation).await;
+        assert!(tabs >= 1);
+
+        // Agent restart: the listener, its token and every native host go away;
+        // the extension reconnects to the successor's bridge on its own.
+        server.shutdown().await.expect("shutdown");
+        let server = BrowserBridgeServer::start(&config_dir)
+            .await
+            .expect("successor bridge");
+        let after = wait_for_device(&server).await;
+        assert_eq!(after.id, before.id);
+        assert_eq!(
+            after.connection_generation, before.connection_generation,
+            "the restart must not move the profile to a new placement"
+        );
+        // A re-created controller still drives the same live profile.
+        assert_eq!(
+            controller_tab_count(&config_dir, &before.id, &before.connection_generation).await,
+            tabs
+        );
+        let _ = chromium.kill().await;
+        server.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One reconnect story, read top to bottom.
+    async fn a_reconnected_extension_keeps_its_placement_for_live_controllers() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let authority = read_authority(&authority_path(directory.path())).expect("authority");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let with_state = |state: &'static str| {
+            move |hello: &mut serde_json::Value| {
+                hello["device"]["stateGeneration"] = json!(state);
+            }
+        };
+
+        let mut first = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut first,
+            &hello_with(device_id, "connection-1", with_state("state-1")),
+        )
+        .await
+        .expect("hello");
+        assert_eq!(
+            read_json(&mut first).await["connectionGeneration"],
+            "connection-1"
+        );
+        wait_for_placement(&server, Some("state-1")).await;
+        assert!(!server.inventory().placement_ends_on_reconnect("state-1"));
+        assert!(!server
+            .inventory()
+            .placement_ends_on_reconnect("connection-1"));
+
+        // One long-lived controller, as a browser controller keeps for its
+        // whole session.
+        let mut controller = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, authority.port))
+            .await
+            .expect("controller connect");
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type": "authenticate",
+                "protocolVersion": 1,
+                "role": "controller",
+                "token": authority.token
+            }))
+            .expect("controller auth"),
+        )
+        .await
+        .expect("write controller auth");
+        let first_request = "22222222-2222-4222-8222-222222222222";
+        controller_ping(&mut controller, first_request, device_id, "state-1").await;
+        assert_eq!(
+            answer_ping(&mut first, device_id, "connection-1").await,
+            first_request
+        );
+        let response = read_json(&mut controller).await;
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["connectionGeneration"], "state-1");
+
+        // The native host goes away (agent or host restart, port reconnect)
+        // while Chrome and the extension's worker stay alive.
+        drop(first);
+        wait_for_placement(&server, None).await;
+        let mut second = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut second,
+            &hello_with(device_id, "connection-2", with_state("state-1")),
+        )
+        .await
+        .expect("hello");
+        assert_eq!(
+            read_json(&mut second).await["connectionGeneration"],
+            "connection-2"
+        );
+        wait_for_placement(&server, Some("state-1")).await;
+
+        let second_request = "33333333-3333-4333-8333-333333333333";
+        controller_ping(&mut controller, second_request, device_id, "state-1").await;
+        assert_eq!(
+            answer_ping(&mut second, device_id, "connection-2").await,
+            second_request
+        );
+        let response = read_json(&mut controller).await;
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["connectionGeneration"], "state-1");
+
+        // A restarted worker lost its live state: that is a new placement and
+        // the old one is fenced.
+        drop(second);
+        wait_for_placement(&server, None).await;
+        let mut third = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut third,
+            &hello_with(device_id, "connection-3", with_state("state-2")),
+        )
+        .await
+        .expect("hello");
+        assert_eq!(read_json(&mut third).await["type"], "ready");
+        wait_for_placement(&server, Some("state-2")).await;
+        controller_ping(
+            &mut controller,
+            "44444444-4444-4444-8444-444444444444",
+            device_id,
+            "state-1",
+        )
+        .await;
+        let response = read_json(&mut controller).await;
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "fenced");
+
+        // An older extension's placement is its port: a restart would end it.
+        let mut legacy = extension_socket(directory.path()).await;
+        write_native_frame(
+            &mut legacy,
+            &hello("55555555-5555-4555-8555-555555555555", "legacy-1", 1),
+        )
+        .await
+        .expect("legacy hello");
+        assert_eq!(read_json(&mut legacy).await["type"], "ready");
+        for _ in 0..400 {
+            if server.inventory().snapshot().devices.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(server.inventory().placement_ends_on_reconnect("legacy-1"));
+        assert!(!server.inventory().placement_ends_on_reconnect("state-2"));
+
+        drop((third, legacy, controller));
+        server.shutdown().await.expect("shutdown");
     }
 }

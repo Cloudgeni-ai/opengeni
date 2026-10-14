@@ -56,7 +56,7 @@ function botConnection(overrides: Partial<BotConnection> = {}): BotConnection {
       slackTeamName: "Test workspace",
       botUserId: "U_TEST",
       botId: "B_TEST",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: now,
     },
     createdBySubjectId: "subject-a",
@@ -82,7 +82,7 @@ function scheduledSession(
   };
 }
 
-describe("OpenGeni Slack bot trust predicates", () => {
+describe("Opengeni Slack bot trust predicates", () => {
   test("requires the shared app role and required bot scopes", () => {
     expect(areOpenGeniSlackBotScopesAccepted(OPENGENI_SLACK_BOT_REQUIRED_SCOPES)).toBe(true);
     expect(

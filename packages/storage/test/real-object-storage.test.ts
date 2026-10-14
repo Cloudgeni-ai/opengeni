@@ -47,6 +47,8 @@ describe.skipIf(!live)("real S3-compatible retained-output ranges", () => {
       expect(head.ContentLength).toBe(body.byteLength);
       expect(head.ContentType).toBe(file.contentType);
       expect(head.Metadata?.sha256).toBe(sha256);
+      expect(head.VersionToken).toBeString();
+      expect(head.VersionToken).toBe((await storage!.headObject!(objectKey))?.VersionToken);
 
       const range = { start: 2_000_000, end: 2_123_456 };
       const expected = body.slice(range.start, range.end + 1);

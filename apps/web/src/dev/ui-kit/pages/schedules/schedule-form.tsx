@@ -423,7 +423,7 @@ function AdvancedFields({
       description: "A fresh cloud sandbox for each run.",
       leading: <ServerIcon className="size-4 text-fg-subtle" />,
       disabled: !canRunSchedules,
-      disabledReason: "Not available on this OpenGeni server.",
+      disabledReason: "Not available on this Opengeni server.",
     },
     {
       value: "machine",
@@ -628,7 +628,7 @@ export function ScheduleForm({
             </Button>
           }
         >
-          This OpenGeni server doesn't run managed sandboxes, and no machine is connected to Design
+          This Opengeni server doesn't run managed sandboxes, and no machine is connected to Design
           preview yet.
         </Notice>
       )}

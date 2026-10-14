@@ -181,7 +181,16 @@ describe("normalizeCodexUsage", () => {
     expect(out.fiveHour?.remaining).toBe(0);
   });
 
-  test("forward-compat: additionalLimits + credits are carried but unused", () => {
+  test("an unreported credit balance stays unknown, distinct from zero", () => {
+    expect(
+      normalizeCodexUsage(200, liveBody({ credits: { has_credits: true } })).credits?.balance,
+    ).toBeNull();
+    expect(normalizeCodexUsage(200, liveBody({ credits: { balance: 0 } })).credits?.balance).toBe(
+      "0",
+    );
+  });
+
+  test("additional limits and provider credit balances are preserved", () => {
     const out = normalizeCodexUsage(
       200,
       liveBody({

@@ -47,11 +47,13 @@ import {
   listEnrollments,
   MachineRemovalIdempotencyError,
   MachineRemovalRevisionConflictError,
+  PersonalMachineConnectedElsewhereError,
   removeEnrollment,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
+import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -70,6 +72,35 @@ import {
   toLookupResponse,
 } from "../sandbox/enrollment";
 
+const ENROLLMENT_OUTCOMES = new Set([
+  "ok",
+  "authorized",
+  "expired",
+  "denied",
+  "disabled",
+  "invalid",
+  "used",
+  "unauthorized",
+]);
+
+// A personal machine reconnects only from the workspace it was first connected
+// from. The install script and the approval page show this message verbatim.
+const PERSONAL_MACHINE_ELSEWHERE_MESSAGE =
+  "this machine was first connected as a personal machine from another workspace; connect it again from that workspace";
+
+/** Machine enrollment decisions that never surface as an HTTP error status. */
+function recordEnrollment(deps: ApiRouteDeps, flow: string, outcome: string): void {
+  try {
+    deps.observability?.incrementCounter({
+      name: "opengeni_machine_enrollment_total",
+      help: "Connected Machine enrollment decisions by flow (device_start, device_poll, token_exchange, renew) and closed outcome.",
+      labels: { flow, outcome: ENROLLMENT_OUTCOMES.has(outcome) ? outcome : "other" },
+    });
+  } catch {
+    // Telemetry never changes the enrollment decision.
+  }
+}
+
 export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db } = deps;
 
@@ -87,7 +118,8 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // poll). The relay tier owns the heavy stream rate-limiting; this
   // is the application-tier abuse cap on the device-flow endpoints. Per-IP buckets
   // are pruned lazily. Not a distributed limiter (one replica per bucket) — that is
-  // acceptable for a bounded, access-key-gated, short-TTL flow.
+  // acceptable for a bounded, short-TTL flow. These routes are public even behind
+  // the deployment key, because a machine never holds that key.
   const startLimiter = new TokenBucket({ capacity: 10, refillPerSecond: 0.5 });
   const pollLimiter = new TokenBucket({ capacity: 60, refillPerSecond: 2 });
   // The click-Grant approve-page lookup (authenticated, but capped against a
@@ -114,6 +146,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const parsed = RenewEnrollmentRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid renewal request" });
     const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data);
+    recordEnrollment(deps, "renew", credentials ? "ok" : "unauthorized");
     if (!credentials)
       throw new HTTPException(401, {
         message: "machine renewal not authorized",
@@ -154,6 +187,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         verificationOrigin: settings.publicBaseUrl ?? new URL(c.req.url).origin,
       },
     );
+    recordEnrollment(deps, "device_start", "ok");
     return c.json(result, 201);
   });
 
@@ -169,6 +203,8 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       { db, settings },
       { deviceCode: parsed.data.deviceCode },
     );
+    // `pending` is the normal polling loop; count only decisions.
+    if (result.state !== "pending") recordEnrollment(deps, "device_poll", result.state);
     return c.json(result, 200);
   });
 
@@ -238,11 +274,36 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         canOfferDisplay: body.canOfferDisplay,
       },
     );
+    recordEnrollment(deps, "token_exchange", result.ok ? "ok" : result.reason);
     if (!result.ok) {
       if (result.reason === "disabled") {
         // The credential plane is off for this deployment (no signing secret).
         throw new HTTPException(503, {
           message: "enrollment credential plane is not configured",
+        });
+      }
+      if (result.reason === "used") {
+        // Single-use: another machine already redeemed this token. Same 401 as
+        // an invalid token, with a message the install script prints verbatim.
+        throw new HTTPException(401, {
+          message:
+            "this connect command was already used to connect another machine; create a new one for this machine",
+        });
+      }
+      if (result.reason === "owner_unavailable") {
+        // A personal command whose creator can no longer own a machine here.
+        throw new HTTPException(403, {
+          message:
+            "the person who created this connect command can no longer connect machines to this workspace; create a new command",
+        });
+      }
+      if (result.reason === "connected_elsewhere") {
+        // Nothing changed and the command was not used up.
+        throw new HTTPException(409, { message: PERSONAL_MACHINE_ELSEWHERE_MESSAGE });
+      }
+      if (result.reason === "busy") {
+        throw new HTTPException(503, {
+          message: "workspace membership is changing; run the connect command again",
         });
       }
       // An invalid / expired / wrong-typ token — the token is the auth, so 401.
@@ -305,7 +366,13 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         approvedBySubjectId: grant.subjectId,
         approvedBySubjectLabel: grant.subjectLabel ?? null,
       },
-    );
+    ).catch((error: unknown) => {
+      if (error instanceof PersonalMachineConnectedElsewhereError) {
+        // Nothing changed; the request stays pending.
+        throw new HTTPException(409, { message: PERSONAL_MACHINE_ELSEWHERE_MESSAGE });
+      }
+      throw error;
+    });
     if (!approved) {
       // An unknown / expired / already-terminal user_code in this workspace.
       throw new HTTPException(404, {
@@ -349,9 +416,22 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Mint a short-TTL headless enroll token. Mirrors approve (enrollments:manage,
   // requireAccessGrant BEFORE the parse). The accountId comes from the grant. No
   // signing secret → 503/disabled (mirror poll). The token is SECRET — never logged.
+  // `scope: "user"` signs the authenticated person as the machine's owner. Only a
+  // verified person may ask for it: someone signed in, or a credential acting as
+  // them (a personal API key, or an organization key or organization MCP client
+  // acting as that person). A key, service or agent acting as itself gets 422.
+  // The owner is always the caller, never a request field.
   app.post("/v1/workspaces/:workspaceId/enrollments/token", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    // The permission is part of the authorization, so a request that lacks it
+    // is refused before any first-use workspace membership is provisioned.
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "enrollments:manage",
+    );
+    const grant = authorization.grant;
     assertSelfhostedEnabled();
     // All fields are optional/defaulted, so an empty POST body is valid (default
     // allowScreenControl=false). Coalesce a missing/empty body to {} before parse.
@@ -361,12 +441,20 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid mint-enroll-token request",
       });
     }
+    const personal = parsed.data.scope === "user";
+    if (personal && !isPersonalConnectionOwnerPrincipal(authorization)) {
+      throw new HTTPException(422, {
+        message:
+          "only a person, or a credential acting as that person, can connect a machine for themselves; keys, services and agents acting as themselves can connect workspace machines",
+      });
+    }
     const minted = await mintEnrollToken(
       { db, settings },
       {
         accountId: grant.accountId,
         workspaceId,
         allowScreenControl: parsed.data.allowScreenControl,
+        ...(personal ? { ownerSubjectId: grant.subjectId } : {}),
       },
     );
     if (!minted) {

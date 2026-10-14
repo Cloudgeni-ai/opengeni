@@ -77,7 +77,7 @@ describe("Integration Facet lifecycle state", () => {
     const listIntegrationFacets = mock(async () => {
       if (fail) {
         throw Object.assign(
-          new Error("OpenGeni API 500: facet store unavailable Reference: req-facets."),
+          new Error("Opengeni API 500: facet store unavailable Reference: req-facets."),
           { status: 500, correlationId: "req-facets" },
         );
       }
@@ -94,7 +94,7 @@ describe("Integration Facet lifecycle state", () => {
         "Opengeni couldn't finish the request. Try again in a moment.",
       );
       expect(failure.textContent).toContain("Technical details");
-      expect(rendered.container.textContent).not.toContain("OpenGeni API 500");
+      expect(rendered.container.textContent).not.toContain("Opengeni API 500");
 
       fail = false;
       await act(async () => button(rendered.container, "Try again").click());

@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 
-import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/src/activities/codex-rotation";
-import { acquireCodexCredentialLease, createDb, withSessionActivityRlsContext } from "../src/index";
+import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/test/fixtures/legacy-codex/rotation";
+import { createDb, withSessionActivityRlsContext } from "../src/index";
+import { acquireCodexCredentialLease } from "./fixtures/legacy-codex";
 import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -132,6 +133,28 @@ describe("migration 0053 (Codex credential leases)", () => {
         allocator_enabled: true,
       });
 
+      // This exercises the legacy Codex lease protocol, which the drained
+      // 0689 cutover moves onto the shared core (M3 PR 4 deletes the legacy
+      // path). Hold that one migration back so the fixture stays legacy,
+      // with 0712, 0713, 0714, 0715, 0716 and 0717, which build on it.
+      await admin`
+        insert into schema_migrations (name)
+        values ('0689_subscription_core_codex_cutover.sql'),
+          -- 0712 requires the committed 0689 cutover; hold it back too.
+          ('0712_subscription_core_generic_precursor.sql'),
+          -- 0713 alters objects 0689 creates; hold it back too.
+          ('0713_subscription_core_provider_keyed_reach.sql'),
+          -- 0714 redefines 0713's reach setters and 0715 rewrites routines
+          -- 0713 and 0714 create; hold them back too.
+          ('0714_subscription_workspace_managed_organization_accounts.sql'),
+          ('0715_subscription_core_api_key_connections.sql'),
+          -- 0716 builds on 0712 and 0717 on 0716; hold them back too.
+          ('0716_subscription_authority_compat.sql'),
+          ('0717_subscription_authority_fences.sql'),
+          -- The SuperGrok cutover requires 0712 through 0717; the retirement
+          -- requires both cutovers.
+          ('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'),
+          ('0751_subscription_core_legacy_retirement.sql'), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql'), ('0752_subscription_personal_sharing.sql') on conflict do nothing`;
       await migrate(databaseUrl);
       client = createDb(databaseUrl, { max: 2 });
 

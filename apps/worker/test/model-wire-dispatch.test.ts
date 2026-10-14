@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { parseSync, type Node } from "oxc-parser";
 import { InitialModelWireDispatchClock } from "../src/activities/agent-turn/model-wire-dispatch";
+import { assertProviderOverloadRecoveryActive } from "../src/activities/agent-turn/errors";
+import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
+import { withModelTransportStartedObserver } from "../../../packages/runtime/src/model-preparation-diagnostics";
 
 const identity = { provider: "azure", dispatchId: "dispatch-1" };
 const firstUnixMs = Date.parse("2026-10-03T15:00:00.000Z");
@@ -32,6 +35,90 @@ function sourceAst(path: string) {
 }
 
 describe("attempt-local initial wire dispatch clock", () => {
+  test("the real pre-fetch publisher refuses overload recovery when its audit outlasts the window", async () => {
+    const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
+    const declaration = parsed.nodes.find(
+      (node) =>
+        node.type === "VariableDeclarator" &&
+        node.id.type === "Identifier" &&
+        node.id.name === "recordFallbackProviderDispatchAtWire",
+    );
+    if (declaration?.type !== "VariableDeclarator" || !declaration.init)
+      throw new Error("Missing wire publisher");
+    const expression = parsed.source.slice(declaration.init.start, declaration.init.end);
+    const compiled = new Bun.Transpiler({ loader: "ts" }).transformSync(
+      `const publish = ${expression};`,
+    );
+    const startedAt = Date.parse("2026-01-01T00:00:00Z");
+    let now = startedAt + 15 * 60_000 - 10;
+    const attempt = {
+      providerRecoveryPolicyCode: "provider_overloaded",
+      providerRecoveryCount: 3,
+      providerRecoveryStartedAt: startedAt,
+      executionGeneration: 7,
+    };
+    const check = (input: Parameters<typeof assertProviderOverloadRecoveryActive>[0]) =>
+      assertProviderOverloadRecoveryActive({ ...input, now });
+    const callback = new Function(
+      "checkpointBeforeProviderDispatch",
+      "assertProviderOverloadRecoveryActive",
+      "eventing",
+      "attempt",
+      `
+      const providerPublishesNativeRequestEvents = false;
+      const sandboxState = {};
+      const performance = { now: () => 100 };
+      const recordTurnStartupPhase = () => {};
+      const observability = {};
+      const turnExecutionPolicy = { providerId: "anthropic" };
+      const activeSandboxBackend = "none";
+      const groupBoxBackend = "none";
+      const turnTools = [];
+      const streamProvider = "anthropic";
+      const activeTurnId = "turn";
+      const input = { attemptId: "attempt" };
+      const dispatchId = "dispatch";
+      let fallbackProviderRequestStartedAt = null;
+      let fallbackProviderRequestLifecycleStartedAt = null;
+      ${compiled}
+      return publish;
+    `,
+    )(
+      async () =>
+        check({
+          failureCode: "provider_overloaded",
+          providerRecoveryCount: 3,
+          recoveryStartedAt: startedAt,
+        }),
+      check,
+      {
+        firstModelRequestPreparationRecorded: false,
+        firstModelRequestPreparationStartedAt: 0,
+        publish: async () => {
+          now += 10;
+        },
+      },
+      attempt,
+    ) as () => Promise<void>;
+    let dispatches = 0;
+    const fetch = instrumentedModelFetch("anthropic", (async () => {
+      dispatches += 1;
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    await expect(
+      withModelTransportStartedObserver(callback, () =>
+        fetch("https://provider.invalid/v1/messages", { method: "POST", body: "{}" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ProviderOverloadRecoveryExpiredError",
+      failure: {
+        retryable: false,
+        providerRecoveryExhaustedReason: "deadline",
+        providerRecoveryCount: 2,
+      },
+    });
+    expect(dispatches).toBe(0);
+  });
   test("has no timestamp until an actual fetch-entry observation", () => {
     expect(new InitialModelWireDispatchClock().payload(identity)).toEqual({});
   });

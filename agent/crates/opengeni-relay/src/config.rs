@@ -14,7 +14,7 @@ use clap::Parser;
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "opengeni-relay",
-    about = "The OpenGeni stateless stream-relay edge (pty/desktop byte-pump)."
+    about = "The Opengeni stateless stream-relay edge (pty/desktop byte-pump)."
 )]
 pub struct RelayConfig {
     /// The `host:port` the wss listener binds.

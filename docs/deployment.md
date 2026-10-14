@@ -1,9 +1,23 @@
 # Deployment
 
+## Database backup and recovery
+
+The optional standalone [database backup runner](backups.md) provides verified
+encrypted dumps, latest-nightly/weekly retention, freshness checks and isolated
+restoration. Use `bun run deployment:backup --help` or the independent operator
+image. Helm's `backup` settings schedule it without giving backup credentials to
+the application. This is database-only protection, not a snapshot of object files
+or host state; retain provider-native recovery where appropriate.
+
 Workspace/member allowances use rolling migrations and a default-off producer
 gate. Upgrade every API, control worker, and turn worker before enabling
 `OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement
 of persisted policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
+
+Per-task usage limits follow the same pattern: apply migrations 0773–0775, upgrade
+every API, worker, web, SDK/React and embedded consumer, then enable
+`OPENGENI_SESSION_USAGE_LIMITS_ENABLED`. Disabling it refuses new limits but
+keeps enforcing persisted ones. See [task usage limit rollout](session-usage-limits.md#rollout-and-activation).
 
 Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
 EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
@@ -11,6 +25,19 @@ inventory during a rolling upgrade; no maintenance drain is required for these
 additions. The final `knowledge_index_claim` replacement pins
 `pg_catalog, <data schema>, pg_temp`, so temporary tables cannot shadow its
 accounting sources. Upgrade consumers before enabling producer writes.
+
+## Receiving chat execution context (0608)
+
+`0608_receiver_execution_context.sql` requires maintenance. Stop every API,
+control-worker and turn-worker database writer; supply their complete login list
+through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, migrate, and provision
+runtime roles. Start only images containing this migration's context-aware inbox
+code. After activation, recover forward; do not restart older writers.
+
+The backfill selects each chat's latest proved, started user/API request within
+its current execution-authority epoch. Queued or refused requests do not qualify.
+Chats without a qualifying request retain explicit-source inbox behavior until
+a new user/API request starts. Existing inbox rows and read receipts are unchanged.
 
 ## Scheduled Slack channel posts (0530)
 
@@ -21,6 +48,14 @@ unchanged. Run `db:provision-roles` after it as usual. Older API and worker
 processes ignore the new `slackBotChannelId` task field, so a task keeps
 running without the posting tools until the matching worker creates its next
 run. See [`slack-bot.md`](slack-bot.md#scheduled-tasks).
+
+## Organization Slack bot posting (0622)
+
+`0622_organization_slack_bot_delivery.sql` is rolling. It adds private, explicit
+organization-admin bot sharing and extends immutable prepared messages to ordinary
+chats. Existing installations are not automatically shared. Deploy the matching
+API and workers, then enable **Use the bot across the organization** in the
+installation workspace's Slack settings. Personal accounts are unchanged.
 
 ## Assistant message phases (0527)
 
@@ -473,7 +508,7 @@ for live authorization. No worker needs the original host API key. Drain the
 complete API/control-worker/turn-worker fleet for these maintenance migrations;
 deploy matching code and provision runtime privileges before enabling host renewal.
 
-OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
+Opengeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
 Managed deployments using organization recovery must first complete the
 provider-neutral browser-slot rollout and then follow the migration,
@@ -527,8 +562,8 @@ separate service subject when projecting lifecycle audit records.
 
 Migration `0442_external_owning_user_authority.sql` adds persisted external-owner
 consistency checks to the existing self-membership and private-create routines.
-It does not activate private sessions: platform readiness and shared-workspace
-organization settings still apply. Pair it with the API's dedicated external
+It does not enable private sessions by itself: shared-workspace organization
+settings still apply. Pair it with the API's dedicated external
 owning-user proof; do not synthesize native-cookie flags or grant Personal
 workspace membership to service keys. The matching runtime adds live external
 authority checks before session-create, visibility-change, and fork commits.
@@ -610,14 +645,17 @@ operation, source, and outcome labels. The same observer emits
 (`surface`, `op`, `provider`, `outcome`, `durationMs`). It never emits workspace,
 subject, tool-name, argument, result, credential, or approval-token values.
 
-## MCP provider OAuth short-state rollout (0507)
+## MCP provider OAuth short state (0507)
 
-Apply rolling migration `0507_integration_oauth_pending_states.sql`, then deploy
-the new API with `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED=false` on all
-replicas. Once every old API replica has drained, set the flag to `true` in a
-separate configuration rollout. Both flag values accept old and short callback
-states; only new replicas can read short states. Providers such as Resend that
-limit `state` length work after the flag is enabled.
+MCP OAuth always sends providers a short signed reference as `state` and keeps
+the full callback context encrypted in `integration_oauth_pending_states`
+(rolling migration `0507_integration_oauth_pending_states.sql`). Callbacks still
+accept a full signed state, so grants started before an upgrade finish normally.
+The former `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED` switch is retired:
+the API ignores it with a one-time startup warning, so remove it from deployment
+configuration. An API older than migration 0507 cannot read a short reference;
+when upgrading straight from one, a connect started on a new replica whose
+callback lands on an old replica during the rollout fails and the user retries.
 
 ## Personal GitHub OAuth
 
@@ -774,7 +812,7 @@ context rules. On an insecure self-hosted origin, the stock console keeps a
 persistent warning visible, and picker, drag-and-drop, and pasted-image
 attachments all fail before any upload request with the typed SDK code
 `secure_context_required` plus HTTPS setup guidance on the attachment card.
-OpenGeni deliberately does not provide a hashing fallback that would make only
+Opengeni deliberately does not provide a hashing fallback that would make only
 uploads appear healthy while the rest of the secure-browser feature contract
 remains broken.
 
@@ -902,7 +940,7 @@ helm upgrade opengeni deploy/helm/opengeni \
 ```
 
 Generated Kubernetes deployment plans default to one rolling `helm upgrade
---install`. Profiles whose durable dependencies live inside the OpenGeni chart
+--install`. Profiles whose durable dependencies live inside the Opengeni chart
 add the disabled-application revision only when the Helm release does not yet
 exist, so bootstrap can create Postgres/Temporal/NATS/object storage before the
 migration hook without turning every later release into an outage. A reviewed
@@ -1040,7 +1078,7 @@ posture checks accept only that exact creator-management edge when `SET=false`,
 role's privileges or activate them with `SET ROLE`; every outbound edge,
 privilege-bearing reverse edge, uncertain grantor, and PostgreSQL 15 edge is
 still rejected.
-When the provisioning principal is not a superuser, OpenGeni first proves
+When the provisioning principal is not a superuser, Opengeni first proves
 `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, and `REPLICATION` are already false, then
 converges only the role attributes PostgreSQL permits a `CREATEROLE`
 administrator to alter. An unsafe protected attribute fails with an explicit
@@ -1064,7 +1102,7 @@ serving, or workflow polling begins. Their readiness endpoints repeat it instead
 of treating `select 1` as database readiness. `OPENGENI_RUNTIME_DATABASE_ROLE`
 defaults to and should remain `opengeni_app` for standalone deployments.
 
-The `scoped` strategy is an explicit embedding contract: OpenGeni checks only
+The `scoped` strategy is an explicit embedding contract: Opengeni checks only
 coherent connectivity/identity because the host owns the role and isolation
 boundary. It must not be used to bypass the standalone `force` posture.
 
@@ -1235,7 +1273,7 @@ Managed deployments may enable either provider independently with
 `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` plus
 `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET`. A partial pair is rejected at
 startup. These credentials are separate from the Google Drive connector, the
-personal GitHub connector, and the OpenGeni GitHub App, although an operator may
+personal GitHub connector, and the Opengeni GitHub App, although an operator may
 deliberately use an existing provider application when its redirect and consent
 configuration is compatible.
 
@@ -1271,11 +1309,32 @@ start the matching release. Do not restart an older API that exposes the raw
 provider-management routes. This feature does not authorize changing the
 deployment's configured browser session-set mode.
 
+### Password sign-up email verification
+
+`OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION` optionally overrides the
+password sign-up verification requirement. Unset preserves the existing default:
+required outside `local`, skipped in `local`. `true` requires it in every
+environment; `false` skips the verification email and attests new password
+sign-ups before provisioning and session creation. Restart all API replicas with
+the same setting.
+
+Disabling this check trusts the supplied email address, including email-based
+invitation claims and later account linking. Only use this setting where an
+independent access boundary admits trusted users. Existing users are not
+bulk-verified or migrated. Social providers still need a verified email assertion
+outside `local`; provider-linking, allowlists and paused sign-up gates remain in
+force. Password reset and invitation delivery still need an email provider;
+this setting does not remove production email-provider configuration requirements.
+
 ### Durable invited-user email delivery (0351)
 
 Migration 0351 is rolling and additive. Before inviting users, configure
 `OPENGENI_RESEND_API_KEY` and `OPENGENI_EMAIL_FROM`; production managed-mode
-configuration validation requires the provider key. Embedded hosts may bind an
+configuration validation requires the provider key unless
+`OPENGENI_MANAGED_EMAIL_DELIVERY=disabled`. That explicit setting is for
+deployments that provision accounts another way: the provider key must then be
+unset, nothing is ever sent, and sign-up verification, organization user setup
+and sign-in method notices settle as failed with `delivery_disabled`. Embedded hosts may bind an
 equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
 does not relax the deployment preflight today. Keep
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
@@ -1421,17 +1480,24 @@ must never be interpreted as authorization to mutate staging or production.
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one
-subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself -
-what is reversible before activation, what becomes forward-recovery-only after,
-and the exact preconditions - and this section owns the operator procedure.
+subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself;
+this section owns the operator procedure. A pre-0264, pre-0275, or pre-0303
+image must never be started again.
 
-The named switch for declining or deferring the boundary is
-`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`. It defaults to
-`false` in both `.env.example` and the chart's `config` map, and leaving it at
-`false` is the supported way to decline or defer activation indefinitely: the
-deployment keeps the legacy workspace-owned lane and an image rollback stays an
-ordinary deployment decision. Every rolling tenancy migration still applies
-normally with the switch off.
+`0611_universal_session_tenancy_activation.sql` makes session tenancy
+product-active for every organization and is `-- deployment-mode: rolling`: it
+only rewrites routine predicates (no table lock, backfill, or receipt write), so
+old and new images run side by side and an image rollback stays an ordinary
+deployment decision. Only-me chats default to enabled for every organization
+with no `organization_private_session_settings` row; owners and admins can
+still turn them off. Activation receipts keep only their legacy-lane meaning
+(see [`organization-tenancy.md`](organization-tenancy.md)).
+
+History: the `db:activate-session-tenancy` command (single and
+`--all-organizations`), the 0586 fleet marker procedure, and
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` with its startup
+interlock are retired; the variable is accepted and ignored with a warning, so
+remove it from Helm values and environments at your convenience.
 
 Connection-backed MCP servers use ordinary native connections. Host-provenance
 connection refs and the former host credential callback are retired. Integrating
@@ -1446,208 +1512,6 @@ workspace `settings.sessionAgentDefaults`, and a top-level session that omits
 `agent` resolves to the workspace default or `{ capabilities: "all" }`. Sessions
 created before 0559 keep their NULL configuration and legacy behavior. See
 `packages/contracts/src/agent-config.ts`.
-
-Migration 0303 is intentionally rolling and applies while the switch remains
-`false`; applying the ordinary migration chain does not activate an
-organization. The switch is enforced by the separately invoked session-tenancy
-activation command and by API/worker startup posture after the first durable
-activation receipt exists. It is not a reversible feature flag: once any
-organization is activated, every subsequently started API and worker must keep
-the switch `true`, and a pre-0303 image or a new image with the switch disabled
-fails closed.
-
-Consequently, a normal local stack creates workspace-visible sessions and omits
-the visibility chooser while Only me is unavailable. That is the expected
-pre-activation posture, not a missing browser feature. Testing Only me requires
-the same explicit version-1 activation receipt and enabled deployment switch
-described below; do not seed the receipt through direct table DML.
-
-The migration deliberately drops the legacy eight-argument visibility/fork
-routines and exposes only nine-argument, activation-versioned routines with no
-defaults. This is a drained protocol cutover, not an overload-compatible API:
-an old caller fails with undefined-function, and operators must not add a
-wrapper that supplies an activation version on its behalf.
-
-Three tenancy cutovers have now used this maintenance shape, and a pre-0264,
-pre-0275, or pre-0303 image must never be started again after its corresponding
-activation:
-
-- `0264_connection_authority_runtime_activation.sql` activated canonical
-  Connection authority; and
-- `0275_scheduled_connection_authority.sql` froze common-user Connection
-  authority on scheduled-task revisions; and
-- `0303_session_tenancy_product_activation.sql` installed the per-organization
-  session-tenancy receipt plus hardened visibility/fork contract. Unlike the
-  first two, applying 0303 is inert; the drained operator command performs the
-  forward-only per-organization activation.
-
-The first two migration files declare `-- deployment-mode: maintenance`; 0303
-and 0340 install their contracts as rolling migrations but the separate
-activation command is still a drained, forward-only cutover. Each activation
-rejects a live application with SQLSTATE `55000` before taking `ACCESS
-EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For the **fleet activation** cutover, rolling migration
-`0583_session_tenancy_operator_permission.sql` is inert preparation only. It
-adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
-it neither activates organizations nor changes sessions. The CLI additionally
-requires the separately reviewed maintenance marker
-`0586_private_sessions_fleet_activation.sql` before accepting:
-
-```bash
-bun run db:activate-session-tenancy -- \
-  --all-organizations \
-  --activated-by '<bounded-operator-identity>'
-```
-
-Run this only inside the existing protected, drained maintenance release after
-fresh all-organization evidence and release admission clearance. Persist and
-prove canonical activation `true` in durable Helm values **while the runtime is
-parked and before the first committed witness**; a Job-only override is not
-sufficient. Recovery and every later release must retain that value after any
-activation witness. Before a witness, an unwind additionally requires verified
-zero activation receipts; after one, recovery is forward-only.
-
-The fleet command freezes `managed_accounts`, preflights pending activations,
-then writes receipts for pending accounts in one transaction. It checks final
-receipt coverage before committing. Both activation scopes preserve all
-existing organization preferences byte-identically, including missing settings
-and explicit OFF or ON choices. The fleet command rejects the retired
-`--enable-organization-private-sessions` override and never invokes the 0583
-preference-enable helper. After activation, an organization owner or admin opts
-in separately through organization settings; shared-workspace Only me remains
-unavailable while that setting is OFF. No existing session visibility, chat
-default, credential owner, or authority is changed. Marker ordinal references
-must follow the project renumber command
-if newer main migrations claim these ordinals.
-
-The CLI validates every supplied runtime identity as an existing restricted
-database login (no superuser or BYPASSRLS), clears PostgreSQL's transaction-cached
-activity snapshot before its initial drain check and each guarded activation,
-then clears and checks again after receipt coverage while source locks remain
-held, before commit. A late application reconnect rejects and rolls back the
-entire transaction. The already-activated replay-only fleet must pass the same
-fresh initial and final drain checks; it never uses preference enablement as a
-drain mechanism.
-
-The activation CLI's migration-owner connection carries the same canonical
-`application_name` protocol identity as `createDb`, including through a
-transaction pooler. Before connecting, it replaces only `application_name` in
-the migration URL's query parameters: a legacy operator Job tag must not
-override the current protocol identity. Credentials, multi-host authority,
-schema, TLS, timeout budgets, and all other URL options are preserved. This
-normalization applies only to activation, not ordinary migration steps.
-An unversioned raw connection is not a supported operator
-substitute: the current sessions policy rejects it even when the backfill
-receipts and parity evidence are ready.
-
-For each subsequent single-organization activation:
-
-1. bind and verify the exact production subscription, cluster context,
-   namespace, release, database, and image digests;
-2. prove the activation preconditions in
-   [`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation)
-   - completed membership, resource-classification, and final session-classifier
-   receipts under fresh run keys, current counters from
-   `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
-   cross-organization/RLS evidence, and immediate-revocation evidence - and
-   record that evidence in private operator storage before touching the cluster;
-3. prepare canonical activation `true` for the new image generation. Never
-   flip it on a running pre-activation generation as a way to "test" activation;
-4. stop the API plus every control and turn worker while preserving the
-   migration-only secret and Job identity, then persist and verify canonical
-   activation `true` in durable Helm values while they remain parked;
-5. query `pg_stat_activity` through the migration connection and prove zero
-   other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
-   migration to appear in `schema_migrations`;
-7. with the application still drained, run:
-
-   ```bash
-   OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true \
-   OPENGENI_MIGRATIONS_DATABASE_URL='<migration-owner-url>' \
-   OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES='opengeni_app' \
-   bun run db:activate-session-tenancy -- \
-     --organization-id <organization-uuid> \
-     --activated-by '<bounded-operator-identity>'
-   ```
-
-   The command reruns the canonical inventory, parity, and backfill-evidence
-   reports, retains and hashes the inventory snapshot, and requires every parity invariant plus each
-   exact drainable/bounded activation lane to be zero. It deliberately does not
-   gate on total ownerless sessions or all-time immutable legacy writer rows;
-   migration 0298 supplies their truthful attributable and observation-window
-   refinements. Migration 0340 also requires the newest
-   `organization_memberships`, `sessions`, `variable_sets`, `rigs`, `machines`,
-   and `connections` receipts to be completed, verifies full-population counts
-   for the resource/session/connection classifiers, requires zero unresolved
-   resource or connection rows, and binds those six exact receipt ids into every
-   new activation row. It then recomputes inventory, parity, and receipt evidence
-   under the complete source-table lock, checks the supplied exact application-
-   role inventory twice around that fence, and is idempotent only for the same
-   evidence digests. A stale or fabricated digest rejects with SQLSTATE `40001`.
-   A live application session rejects activation with SQLSTATE `55000`; changed
-   evidence against an existing receipt is a conflict. Immediately before the
-   final recompute and receipt write, the database also takes the owner-only
-   `session-tenancy-canonical-boundary:v1` transaction fence. This happens only
-   after all source-table locks; do not move the boundary earlier, because future
-   greenfield provisioning writes its complete graph before taking the same
-   fence and the reversed order would deadlock.
-
-   Migration 0349 implements that greenfield side. After at least one operator
-   activation is committed, an ordinary eligible self-service signup
-   automatically appends its version-1 activation receipt, deterministic
-   greenfield evidence, and enabled private-session setting/event in the same
-   transaction as its owner + Personal-workspace graph and setup receipt. There
-   is no second operator command for that newly inserted organization. A signup
-   that wins the boundary before the first committed witness stays unactivated,
-   as do every 0348 adopted legacy account and all existing organizations; run
-   this drained operator procedure for those organizations. Never hand-insert a
-   greenfield evidence or activation row to bypass that distinction.
-
-   Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
-   SECURITY` and a `FOR SELECT`-only policy, so under this exact
-   non-superuser-owner posture the activation's own receipt `INSERT` was denied
-   with SQLSTATE `42501` after every gate had already passed. Migration 0340
-   re-opens that single command behind an owner-only marker policy; the runtime
-   role keeps `SELECT` and nothing else, and the table has no `UPDATE` or
-   `DELETE` writer at all. `packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`
-   commits a real receipt through this posture, so the cutover is executable end
-   to end ([`force-rls-migration-backfills.md`](force-rls-migration-backfills.md)).
-8. start only that same digest's API and workers, and require the startup and
-   readiness posture checks to pass before reopening admission.
-
-After the activation migration commits, rollback to an earlier application image
-is forbidden, and setting the switch back to `false` is not a rollback - it
-cannot restore the legacy authority. Remain in maintenance and fix forward.
-
-### Production all-organization Only me availability cutover
-
-Migration `0586_private_sessions_fleet_activation.sql` is a maintenance-classified
-release marker, not an activation shortcut. The protected production release
-parks application database clients, applies the candidate migrations, then runs
-`db:activate-session-tenancy -- --all-organizations --activated-by
-production-release:<source-sha>` in its migration Job. The command takes a
-fixed snapshot of `managed_accounts`, checks the required migration, inventory,
-parity and six backfill receipt families for every not-yet-activated account,
-and calls the existing guarded SQL activation for each. All receipts commit in
-**one transaction**, including final coverage verification. An unready
-organization fails the entire Job without activating any new organization; do
-not bypass this gate or insert activation rows by hand. The maintenance lease
-owns forward recovery once the migration Job is authorized.
-An empty fleet also fails: without an initial activation receipt, migration
-0349 has no witness to auto-activate the first future signup.
-
-Before admitting that release, prepare and retain per-organization evidence
-using the fresh-key membership, resource, connection and final session
-backfills and the parity/RLS/revocation checks in
-[`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation).
-Fix unresolved cases first. The migration Job's 40-minute deadline is not a
-substitute for this preflight; a large fleet may require a deliberately budgeted
-maintenance window. The protected Helm reconciliation enables
-`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` on the new runtime
-and preserves it for later releases. Existing organizations' independent
-`organization_private_session_settings` remain disabled until their owner or
-admin opts in; this cutover makes that toggle available, not automatically on.
 
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
@@ -1666,7 +1530,7 @@ Run live connectivity probes against the current shell variable set and Kubernet
 KUBECONFIG=/path/to/kubeconfig bun run deployment:preflight -- --profile azure-managed --live
 ```
 
-Run API-level deployment conformance against a reachable OpenGeni API:
+Run API-level deployment conformance against a reachable Opengeni API:
 
 ```bash
 bun run deployment:conformance -- --base-url https://opengeni.example.com
@@ -1683,7 +1547,7 @@ OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- --base-url https://opengeni.example.com
 ```
 
-For managed deployments, conformance should use an OpenGeni product API key for
+For managed deployments, conformance should use an Opengeni product API key for
 the test workspace:
 
 ```bash
@@ -1726,8 +1590,8 @@ bun run deployment:conformance -- \
 
 The object-storage check performs a browser-style `OPTIONS` preflight before
 the signed `PUT`. Managed and external buckets must allow direct upload CORS
-from `*` because the OpenGeni browser SDK is designed to run inside arbitrary
-customer products, whose origins are not known to the OpenGeni operator. CORS
+from `*` because the Opengeni browser SDK is designed to run inside arbitrary
+customer products, whose origins are not known to the Opengeni operator. CORS
 is transport policy, not upload authorization: the API first authenticates the
 workspace request, then returns a short-lived, object-scoped signed URL. The
 storage account/container remains private and browser PUTs carry no storage
@@ -1887,6 +1751,28 @@ selects managed access or a remote sandbox does not require sharing API signing,
 email or sandbox-provider secrets with either sidecar. API and ordinary worker
 authentication and provider validation are unchanged.
 
+Artifact sidecar images use slim Bun runtime stages. Neither ships the
+development checkout or npm dependency tree: the outbox needs only its bundled
+entrypoint, while the materializer also carries the verified read-only native
+runtime and isolated executable. The materializer identity/ABI probe runs in the
+final image as the unprivileged runtime user. API/worker image capabilities and
+the sidecars' separate database roles, health ports and sandboxing are unchanged.
+
+API and ordinary worker images also use slim final stages. Their builders retain
+the full frozen development install; `scripts/assemble-server-runtime.ts` copies
+only the process bundle, runtime assets and the exact installed dependency graph
+of its external packages (including optional native bindings and required peers).
+The worker retains its prebuilt workflows and managed Codemode client; API retains
+signed machine installers, the read-only artifact runtime, bundled database
+commands with the unchanged SQL ledger, and the stock catalog-import command and
+reviewed catalog/logo assets. Office/OCR/media, Docker and source-control tools
+are unchanged. Temporal retains only its loader-selected native platform binary;
+its Rust build tree and foreign binaries are not runtime dependencies. Source
+workflow compilation remains available but its compiler is loaded only on demand.
+Run the assembled-runtime conformance gate with
+`OPENGENI_VERIFY_SERVER_RUNTIME=1 bun test scripts/server-runtime-image.test.ts`
+after building/assembling both roles; it executes without monorepo ancestors.
+
 Native dependencies remain running after `Ctrl-C`, matching Compose's warm
 restart behavior. `bun run dev:down` stops only the infrastructure recorded for
 this worktree. `bun run dev:clean -- --yes` also removes its PostgreSQL/object
@@ -1909,6 +1795,17 @@ system loader libraries, and proves CPU, memory, open-file, process-count, and
 per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
+
+The API and workers learn that the materializer runs only from
+`OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED` (default `false`). Helm sets it from
+`artifactMaterializer.enabled` unless `config` already names it, and `bun run dev`
+sets it to `true`. While it is false, the `editable_artifact_export` and
+`editable_artifact_export_status` tools are removed from the first-party tool
+ceiling, Google Drive publication of editable artifacts is unavailable, and
+`POST .../editable-artifacts/:artifactId/materializations` returns a
+non-retryable 503 instead of queuing a job nothing would drain. Collaborative
+editing is unaffected. A deployment that runs the materializer outside the
+chart must set it to `true` explicitly.
 
 For Kubernetes nodes that restrict nested user namespaces or mask `/proc`, the
 materializer may require a pod user namespace in addition to its child sandbox:
@@ -1995,7 +1892,7 @@ file such as `/robots.txt` answers 404 instead of the SPA HTML.
 
 The console's account menu links to product documentation under Help. The API
 advertises the link in `/v1/config/client` as `documentationUrl`, defaulting to
-the public OpenGeni docs at `https://docs.opengeni.ai`. Set
+the public Opengeni docs at `https://docs.opengeni.ai`. Set
 `OPENGENI_DOCUMENTATION_URL` on the API to an absolute http(s) URL for your own
 documentation, or to `none` to hide the entry; any other value fails startup.
 
@@ -2004,7 +1901,7 @@ native build platform. The amd64 and arm64 web images copy those portable
 outputs into their respective Bun runtime images without executing target
 architecture build steps. Web image publication therefore does not need QEMU.
 
-Build local OpenGeni workload images:
+Build local Opengeni workload images:
 
 ```bash
 bun run image:build:api
@@ -2037,10 +1934,10 @@ SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish pa
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The publisher runs from protected `main`
-and admits an exact ancestor commit, so branch movement does not invalidate a
-frozen candidate. Standard npm provenance identifies the trusted workflow
-controller; the verified checkout and source-named receipt identify the package
-source, which can be older. The runtime includes these pins beside
+and admits only the exact commit the workflow run is on: npm provenance attests
+that commit, so the workflow, checkout and published source must all match, and
+an older ancestor is rejected. If `main` moves before the dispatch, publish the
+new `main` commit instead. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
@@ -2134,7 +2031,7 @@ will be used directly as a release source, dispatch
 number and exact base/head SHAs before merging. The base-owned workflow reruns
 the complete source-admission verifier, requires the existing successful
 exact-head admission check, then creates or verifies the tag idempotently. It
-also publishes a prerelease named `Retained OpenGeni release head <sha>` for
+also publishes a prerelease named `Retained Opengeni release head <sha>` for
 that exact tag. Repository-level immutable releases must be enabled: the
 provider response must identify the GitHub Actions bot as author and report the
 published prerelease as `immutable: true`, or sealing fails closed. GitHub then
@@ -2206,7 +2103,7 @@ object with the top-level keys sorted in ascending ASCII order:
   "draft": false,
   "id": 123,
   "immutable": true,
-  "name": "Retained OpenGeni release head <sha>",
+  "name": "Retained Opengeni release head <sha>",
   "prerelease": true,
   "publishedAt": "2026-07-27T02:00:00.000Z",
   "tagName": "opengeni-release-head-<sha>",
@@ -2330,7 +2227,7 @@ The workflow retains publication evidence; its legacy GHCR `sha-<source-sha>` an
 `canary-sha-<source-sha>` tags are best-effort mirrors in a separate bounded,
 error-tolerant job, not publication gates.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
-Publication does not update deployment pins or rotate existing sandboxes. OpenGeni defaults to
+Publication does not update deployment pins or rotate existing sandboxes. Opengeni defaults to
 a public, digest-pinned desktop image in both runtime config and Helm. Override
 Helm `desktop.imageRef` only with another compatible digest
 (`registry/opengeni-desktop@sha256:…`). The chart fails closed when
@@ -2384,7 +2281,7 @@ every later workflow verifies them against the same source-controlled prefix.
 Each official workload image is one OCI index containing both `linux/amd64`
 and `linux/arm64`; candidate creation builds both variants before freezing the
 index digest, so downstream hosts select their native architecture without
-building OpenGeni locally.
+building Opengeni locally.
 
 For the default GHCR location, the owning organization must allow public
 package creation and each existing `opengeni-*` container package must be made
@@ -2417,11 +2314,11 @@ receipt makes no hosted Workbench, staging, production, or canary claim.
 An application-only embedded release additionally supplies the exact source SHA
 and successful run ID of the canonical `publish-packages.yml` workflow whose
 owned, unexpired `package-publication-verified-*` artifact defines the package
-overlay. OpenGeni verifies that run and provider artifact digest, requires the
+overlay. Opengeni verifies that run and provider artifact digest, requires the
 run to have executed from `main`, retains the exact controller branch and SHA in
 the new provenance evidence, and proves that controller SHA remains an ancestor
 of current `main` before any release mutation. The package source SHA remains a
-separate identity. OpenGeni then requires the receipt to cover the exact
+separate identity. Opengeni then requires the receipt to cover the exact
 publishable package-name closure and re-reads every recorded version from npm to
 match its immutable `gitHead` and SHA-512 integrity before using the receipt's
 complete BOM. It publishes zero npm packages in this mode. This permits reviewed
@@ -2438,11 +2335,11 @@ tag as the candidate: the accepted source is checked out only as data, while
 the workflow graph, provenance verifiers, and bundle assembler are executed
 from the exact controller bytes. That environment pins the operator repository
 and canonical workflow path and holds a narrow artifact-read credential. A
-dispatcher supplies only the operator run ID: OpenGeni requires a successful
+dispatcher supplies only the operator run ID: Opengeni requires a successful
 `workflow_dispatch` run from the configured operator `main`, proves that run's
 head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
-OpenGeni then replaces all operator-supplied candidate/public-producer authority
+Opengeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
 before validating every schema-v2 row. A 72-hour production soak row is
 optional evidence, not a publish gate; when present it is still bound to the
@@ -2591,11 +2488,11 @@ or move stable tags. Consumers must separately select and verify immutable runti
 images and package compatibility. Use the returned chart version and digest;
 do not infer successful publication from the source merge or a workflow dispatch.
 
-Released OpenGeni charts are published as public OCI artifacts. The immutable
+Released Opengeni charts are published as public OCI artifacts. The immutable
 release BOM is authoritative for the chart reference and manifest digest. For
 release installs, use that `chart.reference` and pin the chart version
 explicitly; the release pipeline packages the chart with `appVersion` set to
-the same OpenGeni version, and the default image tags resolve to that
+the same Opengeni version, and the default image tags resolve to that
 appVersion:
 
 ```bash
@@ -2608,6 +2505,22 @@ helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
   --version "$OPENGENI_VERSION" \
   --set secret.existingSecret=opengeni-runtime
 ```
+
+Every migration declares `-- deployment-mode: rolling` or
+`-- deployment-mode: maintenance`. Rolling migrations apply while the previous
+release keeps serving; a maintenance migration needs every API, control and
+turn worker database login drained first. Before an upgrade, run the
+read-only plan from the new release's API image against the live database to
+decide whether the rollout needs a drain:
+
+```bash
+bun run db:migrate-plan
+# { "pending": [{ "name": "0703_….sql", "deploymentMode": "rolling" }], "requiresDrain": false }
+```
+
+It takes no lock and writes nothing. When `requiresDrain` is `false`, let the
+normal pre-upgrade migration hook and surge rollout run without scaling the
+runtime to zero; drain only when it is `true`.
 
 Use the repo checkout chart path only for development, chart edits, local
 rendering, or smoke tests against locally built images. `deploy/helm/opengeni`
@@ -2683,7 +2596,7 @@ The chart defaults API, worker, and web deployments to zero-surge rolling update
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
-Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
+Production self-hosted platform dependencies should use mature upstream projects rather than Opengeni-owned replicas of those systems:
 
 - NATS: official NATS Helm chart, or an existing managed/customer NATS endpoint.
 - Temporal: Temporal Cloud, an existing customer endpoint, or the official Temporal Helm chart connected to external persistence.
@@ -2692,11 +2605,11 @@ Production self-hosted platform dependencies should use mature upstream projects
 - TLS: cert-manager, cloud load balancer certificate integration, or an existing ingress/TLS stack.
 - Observability: OpenTelemetry Collector/Operator plus Prometheus Operator-compatible resources, exported to a self-hosted LGTM-compatible stack or a managed cloud backend.
 
-The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, optional Terraform Registry MCP docs service, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
+The Opengeni Helm chart owns Opengeni API, web, worker, migrations, optional Terraform Registry MCP docs service, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
 
 The stack wrapper may install upstream charts as a convenience layer. That
 keeps lifecycle commands visible and reversible without making those charts
-OpenGeni chart dependencies.
+Opengeni chart dependencies.
 
 ### Shared Prometheus and Grafana distribution
 
@@ -2717,13 +2630,13 @@ bun run deployment:observability -- --profile single-node
 On a cluster that explicitly selects `sandbox.backend=opensandbox`, use
 `--opensandbox`. The additional values overlay enables kube-state-metrics for
 the pinned `Pool` CRD plus a `ServiceMonitor` for the controller metrics
-Service. The OpenGeni control worker separately projects BatchSandbox and
+Service. The Opengeni control worker separately projects BatchSandbox and
 workload-Pod state into fixed-label aggregate gauges through namespace-scoped,
 list-only Kubernetes RBAC. The base wrapper leaves this optional integration
 off, so clusters without OpenSandbox CRDs retain the prior monitoring behavior.
 
 The wrapper plan installs only the monitoring platform; it never reconciles
-OpenGeni workloads and never runs application hooks. After it is ready, include
+Opengeni workloads and never runs application hooks. After it is ready, include
 `deploy/observability/opengeni.values.example.yaml` in the next ordinary
 application release using that release's exact chart version and complete
 authoritative values. The application chart deliberately renders
@@ -2755,7 +2668,7 @@ bun run deployment:observability-verify -- \
 
 The receipt binds dashboard bytes to their hashes and source revision, checks
 the application monitoring resources, confirms required rules through the live
-Prometheus API, requires healthy discovered targets for every OpenGeni
+Prometheus API, requires healthy discovered targets for every Opengeni
 `ServiceMonitor`, and verifies Grafana health plus the dashboard provisioner
 files. Existing Kubernetes monitoring platforms can pass explicit Prometheus
 and Grafana URLs plus the Grafana pod selector, sidecar container, namespace,
@@ -2771,7 +2684,7 @@ For managed cloud profiles, the generated stack plan includes:
 - upstream Temporal from `https://go.temporal.io/helm-charts`, release
   `opengeni-temporal` in namespace `opengeni-platform`;
 - `deploy/stacks/opengeni-platform-networkpolicies.yaml`, which keeps those
-  ClusterIP services limited to OpenGeni API/worker pods when the cluster CNI
+  ClusterIP services limited to Opengeni API/worker pods when the cluster CNI
   enforces Kubernetes `NetworkPolicy`;
 - runtime endpoints wired as `nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222`
   and `opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233`.
@@ -2793,7 +2706,7 @@ Postgres admin user `opengeni` and asks the upstream Temporal schema jobs to
 create/manage the `temporal` and `temporal_visibility` databases. Create a
 Kubernetes Secret named `opengeni-temporal-postgres` in `opengeni-platform`
 with that user's password. Keep that database server and secret outside the
-OpenGeni app chart lifecycle.
+Opengeni app chart lifecycle.
 Use `TEMPORAL_POSTGRES_CONNECT_ADDR=host:port` instead of
 `TEMPORAL_POSTGRES_HOST` when the provider-specific connection endpoint already
 includes a port or needs a proxy-local address.
@@ -2809,21 +2722,21 @@ TEMPORAL_POSTGRES_TLS_CA_FILE=/etc/opengeni/postgres-ca/ca.pem
 TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME=opengeni-postgres-ca
 ```
 
-Use an encrypted OpenGeni application database URL for the same service, for
+Use an encrypted Opengeni application database URL for the same service, for
 example `OPENGENI_DATABASE_URL=postgres://.../opengeni?sslmode=require` for AWS
 RDS. If a different provider or customer database requires a custom CA, mount
 that CA through a private ConfigMap/Secret before running
 `bun run deployment:temporal-values`. That database-to-Temporal-server TLS is
-separate from the OpenGeni-to-Temporal client settings below.
+separate from the Opengeni-to-Temporal client settings below.
 
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
-namespace used by OpenGeni (`default` by default). The OpenGeni worker cannot
+namespace used by Opengeni (`default` by default). The Opengeni worker cannot
 poll task queues until that Temporal namespace exists.
 
 Use this boundary when building a production cluster:
 
-| Capability    | Production source                                                                                                                 | OpenGeni wiring                                                                                            |
+| Capability    | Production source                                                                                                                 | Opengeni wiring                                                                                            |
 | --- | --- | --- |
 | NATS          | Existing endpoint or official NATS chart from `https://nats-io.github.io/k8s/helm/charts/`                                        | `nats.enabled=false` plus `nats.url` or `OPENGENI_NATS_URL`                                                |
 | Temporal      | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST`; add `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud |
@@ -2831,7 +2744,7 @@ Use this boundary when building a production cluster:
 | Secrets       | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery                       | `externalSecret.enabled=true` or `secret.existingSecret`                                                   |
 | TLS           | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack                                                  | `ingress.tls` and SSE-safe ingress annotations                                                             |
 | Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend   | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels                       |
-| OpenSandbox (optional) | Exact upstream source/chart pin recorded in `deploy/stacks/opensandbox-source.lock` | Select `sandbox.backend=opensandbox`; the stack wrapper installs a private API-key-authenticated lifecycle service outside the OpenGeni app chart |
+| OpenSandbox (optional) | Exact upstream source/chart pin recorded in `deploy/stacks/opensandbox-source.lock` | Select `sandbox.backend=opensandbox`; the stack wrapper installs a private API-key-authenticated lifecycle service outside the Opengeni app chart |
 
 The runtime secret must provide values such as:
 
@@ -2847,34 +2760,43 @@ The runtime secret must provide values such as:
 - `OPENGENI_OPENAI_API_KEY` or Azure OpenAI equivalents
 - optional `OPENGENI_OPENROUTER_API_KEY` for the deployment-managed reviewed
   OpenRouter rail; keep it in the runtime Secret, never catalog JSON
+- optional `OPENGENI_OPPER_API_KEY` for the deployment-managed reviewed Opper
+  rail (EU-pinned `opper/…` routes billed in Opengeni credits at Opper's
+  reported cost +5%; default Claude Opus 5.5 EU); keep it in the runtime Secret,
+  never catalog JSON
 - optional `OPENGENI_MODEL_CATALOG_SOURCE=code|database` (default `code`),
   `OPENGENI_MODEL_COST_POLICY_JSON`, and `OPENGENI_MODEL_NOTES_JSON`
+- optional `OPENGENI_MANAGED_MODELS_JSON` (code mode only; ignored in database
+  mode): replaces the managed Gateway/OpenRouter/Opper model lists without a
+  code deploy, using the catalog document's `gatewayModels`/`openrouterModels`/
+  `opperModels` entry schemas; see "Code-mode managed model lists" in
+  [`model-providers.md`](model-providers.md)
 - `OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible` plus endpoint/access-key settings for local/self-contained modes
 - `OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob` plus Azure Blob connection string/account-key settings
 - `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged. While the grant leaves a positive balance, new work that names no model defaults to `OPENGENI_CREDITS_DEFAULT_MODEL` (unless a saved workspace default or connected subscription wins), and the post-signup model step shows the balance; at zero or below it falls back to the deployment default. See "Default model for new work" in [`model-providers.md`](model-providers.md).
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide. Operators can restrict and update eligible models with `bun run credits:policy`; `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is a bootstrap fallback until the first runtime policy revision. With neither configured, new grants remain unrestricted. See [scoped promotional credits](scoped-promotional-credits.md) for activation and existing-balance behavior. No payment card is required. A completed in-flight resource can leave a negative general balance, and future top-ups clear that balance first; no card is automatically charged. New work that names no model chooses a funded credits-billed model unless a saved workspace default or connected subscription wins; with no funded candidate it falls back to the deployment default. The signup welcome shows the amount, and the picker shows each model's current payment source. See "Default model for new work" in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
-- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
-- Workspace-owned Vercel AI Gateway and OpenRouter keys are entered by workspace
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for hosted vault values (and other encrypted connection material); required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (hosted vault writes and reference resolution fail with `encryption_key_missing` until it is set). See `docs/secrets.md`.
+- Workspace-owned Vercel AI Gateway, OpenRouter, and Opper keys are entered by workspace
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
-- Stripe Checkout accepts customer-entered promotion codes on credit packages.
+- Promotional codes are entered and reviewed in the app; paid Stripe top-ups have no promotion-code field.
   Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
   origins; Checkout and billing-portal return URLs may use that configured web
   origin or `OPENGENI_PUBLIC_BASE_URL`, and the default return uses the web
   origin. Unconfigured external origins remain rejected.
-  OpenGeni owns the generic redemption and credit-ledger contract. Operators
+  Opengeni owns the generic redemption and credit-ledger contract. Operators
   manage Stripe products, coupons, promotion codes, customer eligibility,
   redemption limits, and expiry in their own operations workflow; campaign
   creation and account-specific offers are not part of the source package.
-  A discount changes the checkout price while OpenGeni credits the selected
+  A discount changes the checkout price while Opengeni credits the selected
   package's full face value after the signed completion webhook, including a
   zero-dollar checkout. For coupons restricted to the credits product, configure
   `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
@@ -2921,9 +2843,9 @@ customer.updated
 Credits are granted only once Stripe reports the Checkout payment `paid`: at
 `checkout.session.completed` for immediate payment methods, or at
 `checkout.session.async_payment_succeeded` for delayed ones. Checkout Sessions
-without OpenGeni metadata (another product sharing the Stripe account) and
-OpenGeni sessions for an account this deployment does not hold (another
-OpenGeni deployment sharing the account) are acknowledged and ignored.
+without Opengeni metadata (another product sharing the Stripe account) and
+Opengeni sessions for an account this deployment does not hold (another
+Opengeni deployment sharing the account) are acknowledged and ignored.
 
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
 
@@ -3119,7 +3041,12 @@ fleet is unsupported even while every process still uses `code`:
    than switching providers; workspace-facing cost is a separate live
    deployment policy and therefore must not change underneath accepted turns.
    A full maintenance window that stops catalog consumers is the simpler
-   alternative.
+   alternative. Turning on hosted web search for an existing model (changing
+   only `capabilities.hostedTools.webSearch` from `{ "upstream": "unknown",
+   "runnable": false }` to a runnable state, plus a matching legacy
+   `hostedWebSearch: true` when present) needs no drain: accepted turns keep
+   running without the tool and new turns get it. See
+   [`model-providers.md`](model-providers.md#secret-safe-definition-versions).
 
 Database mode fails closed when the singleton is missing or invalid and never
 falls back to code. After the maintenance cutover, rollback is limited to the
@@ -3140,7 +3067,7 @@ credential. The database document controls model membership and labels. Any
 transport mismatch fails closed instead of forwarding a host credential to a
 database-selected endpoint.
 
-Workspace custom Vercel AI Gateway and OpenRouter slugs are not part of this
+Workspace custom Vercel AI Gateway, OpenRouter, and Opper slugs are not part of this
 singleton. They are provider-qualified admin-managed rows protected by FORCE
 RLS, overlaid only for that workspace, and become selectable only when the
 matching encrypted workspace provider connection and workspace policy are
@@ -3195,10 +3122,10 @@ OPENGENI_OPENSANDBOX_IMAGE=ghcr.io/your-org/opengeni-sandbox@sha256:...
 The platform plan supplies
 `OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local`.
 `OPENGENI_OPENSANDBOX_TTL_SECONDS` defaults to 3,600 seconds and is renewed only
-while the matching authoritative OpenGeni lease remains warm. OpenGeni idle
+while the matching authoritative Opengeni lease remains warm. Opengeni idle
 reaping is primary; provider expiry is a leak backstop.
 
-OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
+OpenSandbox v1 uses exact ID-addressed attach and Opengeni portable
 `/workspace` tar capture/hydration. Tar bytes live in object storage; the lease
 keeps the SHA-256 descriptor plus an object ref. Object storage is required when
 this backend is active: missing storage fails closed at boot and on capture rather
@@ -3215,7 +3142,7 @@ Bearer passthrough and WebSocket subprotocol preservation with
 lifecycle + ingress port-forwards. The script writes a redacted JSON artifact and
 must not log signatures or browserd tokens. The
 Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
-is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
+is unsupported; Opengeni's internal finalizer can still poll and Ctrl-C an
 exact retained provider command. `runAs` remains unavailable.
 
 Prepare/render the pinned upstream chart without cluster mutation. Helm 3
@@ -3241,7 +3168,7 @@ kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml
 bun run deployment:observability -- --profile single-node --opensandbox
 ```
 
-The OpenGeni `PrometheusRule` then adds backend-fenced alerts for create and
+The Opengeni `PrometheusRule` then adds backend-fenced alerts for create and
 warming failures, Pool depletion, Pending and unschedulable workload Pods,
 immutable-image pull failures, controller reconcile/readiness/restarts,
 provider and controller Kubernetes-API 429s, TTL-renewal failures, stuck
@@ -3279,7 +3206,7 @@ Keep `OPENGENI_MIGRATIONS_DATABASE_URL` and
 `OPENGENI_APP_DATABASE_PASSWORD` out of the runtime Secret. Put them in a
 separate migration-only Secret referenced by `migrations.secret.existingSecret`.
 
-OpenGeni's storage package intentionally exposes a small provider-neutral boundary instead of calling provider SDKs directly from routes. The current shipped backends are `s3-compatible`, `azure-blob`, `aws-s3`, and `gcs`; sandbox file resources are emitted as native storage mounts when the sandbox backend supports them, or materialized through short-lived signed downloads when a backend cannot mount that provider directly. Additional providers should be added behind the same boundary, or bridged through a library such as `files-sdk` if that becomes the lowest-maintenance adapter layer.
+Opengeni's storage package intentionally exposes a small provider-neutral boundary instead of calling provider SDKs directly from routes. The current shipped backends are `s3-compatible`, `azure-blob`, `aws-s3`, and `gcs`; sandbox file resources are emitted as native storage mounts when the sandbox backend supports them, or materialized through short-lived signed downloads when a backend cannot mount that provider directly. Additional providers should be added behind the same boundary, or bridged through a library such as `files-sdk` if that becomes the lowest-maintenance adapter layer.
 
 Sandbox file mount support is also backend-specific:
 
@@ -3287,6 +3214,28 @@ Sandbox file mount support is also backend-specific:
 | --- | --- | --- | --- | --- |
 | Docker/local in-container sandboxes | rclone mount           | rclone mount                    | signed download materialization | signed download materialization |
 | Modal                               | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
+
+## Provider web search
+
+Models without hosted web search (Claude, Gemini, DeepSeek, GLM and other
+registry models) get `web_search` / `web_fetch` agent tools only when the
+deployment configures a search provider. TinyFish (free) is the default
+provider and turns on once its key is set; it needs no migration. The worker
+calls the provider; keys never reach a sandbox.
+
+```bash
+OPENGENI_WEB_TINYFISH_API_KEY=...            # free key; TinyFish is the default provider
+# Optional: OPENGENI_WEB_SEARCH_PROVIDER / OPENGENI_WEB_FETCH_PROVIDER as
+# comma-separated failover lists (tinyfish, parallel, perplexity, exa, tavily,
+# firecrawl, brave, jina, searxng; or none), OPENGENI_WEB_<PROVIDER>_API_KEY and
+# _BASE_URL per provider (searxng needs a base URL), OPENGENI_WEB_SEARCH_PREFER=native|provider,
+# OPENGENI_WEB_SEARCH_PRICING_JSON, OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS.
+```
+
+Set them on both the API and the worker (the API projects the effective tool
+list; the worker runs the tools). With credit billing active, priced calls are
+billed at provider cost + 5%. [Web search](web-search.md) owns the provider
+table, failover, URL rules, prices and the evaluation script.
 
 ## Terraform Registry MCP Docs
 
@@ -3423,7 +3372,7 @@ and the self-update channel. Route these paths (and an optional `get.<domain>`
 host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.46`).
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.54`).
 `OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
 back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move
@@ -3443,6 +3392,20 @@ The same deployment serves signed `/agent/stable/manifest.json` and
 plane it already trusts instead of depending on public DNS. Beta is independent
 and unavailable unless `OPENGENI_AGENT_BETA_VERSION` points at an existing signed
 immutable release.
+
+Live machines follow their channel's promoted build automatically. A machine
+running an older build is asked to update from its next heartbeat; the agent
+applies the update only at an idle point, so accepted work is never interrupted.
+An older agent that postpones because it is busy is asked again every 10
+minutes, an unanswered request is re-sent under the same operation after 10
+minutes, and other retryable failures are retried hourly. A non-retryable
+failure waits for a newer promotion or an explicit "Update now". Automatic
+updates only move machines forward: rolling the channel back to an older build
+leaves newer machines alone until someone requests the older build per machine.
+Macs that must first bootstrap through the whole-app installer are never updated
+this way. Set `OPENGENI_AGENT_AUTO_UPDATE=false` to update only on request. The
+agent fetches the release manifest from `OPENGENI_PUBLIC_BASE_URL`, so automatic
+updates also need it set.
 
 ### Enrolling a machine
 
@@ -3465,13 +3428,13 @@ with `CreateSessionRequest.targetSandboxId` (plus an optional `workingDir`).
 
 ## Security Boundary
 
-OpenGeni separates deployment edge access from product access. `OPENGENI_AUTH_REQUIRED=true` is an optional deployment shared-key boundary for smoke tests and simple self-hosting. It is not the tenant model and it does not create users, accounts, workspaces, or billing state. Set `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager; ordinary clients send it as `x-opengeni-access-key`. A valid first-party delegated bearer may enter the `/v1` product API without carrying that static key, but the normal access resolver and attempt fences still enforce its exact embedded authority. Deployment-only surfaces continue to require the static key.
+Opengeni separates deployment edge access from product access. `OPENGENI_AUTH_REQUIRED=true` is an optional deployment shared-key boundary for smoke tests and simple self-hosting. It is not the tenant model and it does not create users, accounts, workspaces, or billing state. Set `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager; ordinary clients send it as `x-opengeni-access-key`. A valid first-party delegated bearer may enter the `/v1` product API without carrying that static key, but the normal access resolver and attempt fences still enforce its exact embedded authority. Deployment-only surfaces continue to require the static key.
 
 Product access is controlled by `OPENGENI_PRODUCT_ACCESS_MODE`:
 
 - `local` bootstraps a local default account/workspace.
 - `configured` supports self-hosted embedded deployments with delegated bearer tokens or the deployment shared-key boundary.
-- `managed` uses Better Auth for browser human auth, OpenGeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
+- `managed` uses Better Auth for browser human auth, Opengeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
 
 Configured deployments using `OPENGENI_AUTH_REQUIRED=true` reuse
 `OPENGENI_ACCESS_KEY` to sign internal first-party delegation when
@@ -3489,7 +3452,7 @@ Long-lived public deployments should still sit behind a gateway or ingress stack
 - Access logs that include request id, user or tenant id from the gateway, route, status, and duration.
 - Explicit deny rules for internal-only surfaces if you expose only the public client API.
 
-When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `POST /v1/client-errors` remains public so the web app can count failures before sign-in (it accepts only a closed, content-free report from the deployment's own web origins and bounds its own admission; the browser sends it with `credentials: "omit"`, so a host behind edge basic auth must also list `/v1/client-errors` as an `Exact` path on the Helm `publicIngress` to receive it), `POST /v1/analytics-consent` remains public on the same terms so the analytics banner's answer is counted before sign-in (list it as an `Exact` `publicIngress` path too behind edge basic auth), `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
+When `OPENGENI_AUTH_REQUIRED=true`, `/v1/config/client` remains public but does not expose the access key, `POST /v1/client-errors` remains public so the web app can count failures before sign-in (it accepts only a closed report with scrubbed, bounded error diagnostics from the deployment's own web origins and bounds its own admission; the browser sends it with `credentials: "omit"`, so a host behind edge basic auth must also list `/v1/client-errors` as an `Exact` path on the Helm `publicIngress` to receive it), `POST /v1/analytics-consent` remains public on the same terms so the analytics banner's answer is counted before sign-in (list it as an `Exact` `publicIngress` path too behind edge basic auth), the Connected Machine agent's own `POST /v1/enrollments/token/exchange`, `/v1/enrollments/device/start`, `/v1/enrollments/device/poll`, and `/v1/enrollments/renew` remain public because a machine never holds the access key and each route authenticates its own enroll token, device code, or signed install-key proof (device-code lookup and approval stay behind the key), `/healthz` is public by default for Kubernetes probes, and `/metrics` is protected by default unless `OPENGENI_AUTH_ALLOW_METRICS=true` is set for an internal scraper path.
 
 For AKS smoke deployments using `ingress-nginx` behind an Azure LoadBalancer service, configure the ingress controller service health probes explicitly. HTTP/HTTPS probes to `/` can mark ingress-nginx unhealthy when the default backend returns a non-200 response, leaving the public VIP allocated but unrouted. TCP probes are sufficient for the temporary ingress-controller smoke path:
 
@@ -3513,7 +3476,7 @@ reported by Bun, and caller-supplied `X-Forwarded-For` and `X-Real-IP` are
 ignored, so a caller cannot choose its own bucket.
 
 Behind a fixed proxy chain, set `OPENGENI_API_TRUSTED_PROXY_HOPS=<count>`
-(0-16, default 0). OpenGeni then takes the client address from
+(0-16, default 0). Opengeni then takes the client address from
 `X-Forwarded-For`, walking that many entries from the server side, so values a
 caller prepends never replace the address the trusted edge observed. Each
 trusted proxy must append the address of the peer that connected to it, or
@@ -3635,7 +3598,7 @@ authority boundaries are in
 
 ## Observability
 
-OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
+Opengeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
 
 ### Out-of-band read-only health audit
 
@@ -3669,7 +3632,7 @@ deployment behind upstream is healthy. `--expected-revision` is declarative
 authority: a mismatch between that value and the API/workers is an incident.
 Raw command stderr is never copied into the JSON result.
 
-Use `--verify-observability` only from the exact deployed OpenGeni source tree.
+Use `--verify-observability` only from the exact deployed Opengeni source tree.
 It composes `scripts/verify-observability-stack.ts`, which compares canonical
 dashboard bytes and source annotations as well as live Prometheus/Grafana state.
 
@@ -3734,13 +3697,38 @@ or later: an older relay binary ignores `OPENGENI_RELAY_METRICS_BIND` and keeps
 relay image, set `relay.metricsPort: null` to keep the legacy layout. The managed
 example values files carry a commented `monitoring` block.
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog (a running session background command is session-owned and excluded; one asked to stop still counts), expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current Opengeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
-When one Prometheus evaluates several OpenGeni releases, node recording-rule
-consumers select their exact namespace, Helm release and environment. Rule-group
-labels identify the output; they do not restrict an expression's input series.
-Keep the deployment selectors on both node-map joins and workload-node filters:
-removing them causes duplicate joins or borrows another release's node alert.
+Every canonical alert also carries plain-language notification annotations for on-call receivers: `headline` (what is affected and what is wrong, no rule name or threshold), an optional `value` (the current measurement rendered from `$value`, omitted when the output sample is a boolean such as `absent()` or `up == 0`), `user_impact`, and `next_step`, beside `summary`, `description`, optional `action`, and `runbook_url` (required on every critical alert). Alertmanager receiver templates are owned by the deployment's ops values; they title a notification from `headline` and `value` and render the impact and next step as its body. Custom rules appended through `observability.prometheusRule.rules` should follow the same keys. `deploy/helm/opengeni/test/alert-notification-annotations.test.ts` pins the contract.
+
+When one Prometheus evaluates several Opengeni releases, all canonical Opengeni
+metric selectors and recording-rule consumers select their exact namespace,
+Helm release and configured environment, including inventory `absent()` checks.
+Rule-group labels identify the output; they do not restrict an expression's
+input series. Keep these selectors on both the recording inputs and consumers:
+removing them borrows another release's failure or masks missing local inventory.
+Scrape-owned `up` selects namespace and release only; exporter default labels such
+as environment are not labels on `up`. The chart's `ServiceMonitor` supplies the
+namespace/release relabeling; custom or annotation-based scrape jobs must retain
+the equivalent target labels. Kubernetes memory/node signals use the
+actual Pod instance label to prove release ownership (not a shared name prefix),
+and HPA signals select the release's exact worker names. The bundled
+kube-state-metrics label allowlist supplies that Pod instance label. External
+OpenSandbox controller/pool signals remain provider-namespace-wide: they do not
+carry Opengeni release/environment labels. Custom rules appended through
+`observability.prometheusRule.rules` must fence their own inputs explicitly.
+
+The all-selector regression renders separate namespaces, same-namespace releases
+with overlapping names, and every sandbox backend. It requires checksum-verified
+Prometheus 3.5.0 for native group-label evaluation, including firing, recovery and
+stale/absent-inventory isolation. Expression compatibility is also evaluated on
+2.55.1 with group labels materialized on individual fixture rules; this does not
+qualify the chart's pre-existing group-label format for that older engine:
+
+```bash
+bun test ./deploy/helm/opengeni/test/release-rule-isolation.test.ts
+```
+
 The chart regression test renders co-located releases and verifies firing,
 recovery and missing-workload isolation using real Prometheus rule evaluation:
 
@@ -3756,16 +3744,26 @@ Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`. `route` is a bounded template, never a raw path: an explicit established label, or else the registered path template of the Hono handler that answers the request (for example `/v1/organizations/:organizationId/members`). Better Auth endpoints behind the `/v1/auth/*` registration keep a closed set of labels (`/v1/auth/sign-up/email`, `/v1/auth/callback/google`, and so on). `/v1/unknown` and `/unknown` now mean that no registered handler matched, so a sustained rise indicates 404 probing or a client/server route mismatch rather than unlabeled product traffic.
 - Sign-up funnel (managed access mode): `opengeni_auth_events_total{event="sign_up"|"email_verified"|"sign_in",method="email"|"google"|"github"|"other"}`, `opengeni_organization_setup_total{outcome="created"|"failed"}` for the self-service post-sign-in organization setup, and `opengeni_signup_acquisition_total{source="producthunt"|"website"|"direct"|"other"}` for new accounts. Every series initializes at zero. `sign_up` counts Better Auth user creation (a duplicate sign-up for an existing address is not counted); `sign_in` counts non-discarded provider sessions, including the first session of a new social account and, in the default `legacy` session-set mode, the session that the first successful email-verification click creates (a reused link creates none). A new email user's first `sign_in` is therefore normally that click, the session they continue into organization setup with, not a later password sign-in; read the funnel as `sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`. `sign_in` is a session count that includes returning sign-ins, not a unique-user count. A mail link scanner that follows the verification link first takes that automatic sign-in, so the person's later password sign-in is a second `sign_in` and `sign_in` can exceed one per new email user. Invited-user account setup is not a sign-up. The acquisition source is normalized server-side from first-touch `utm_*`/`ref` parameters the web app forwards with the sign-up request or OAuth state (including the session-set social start in `dual`/`broker` mode); no per-user acquisition data is stored. The acquisition counter increments when the account is created, before email verification, so it includes accounts that never verify (and bot sign-ups); `email_verified` carries no source label, so compare the two only in aggregate. A Product Hunt listing adds `?ref=producthunt` to its link, and a `producthunt` `ref` wins over any `utm_source`: point the listing at `https://app.opengeni.ai/?mode=signup&ref=producthunt`, or at the marketing site only while it forwards the inbound `ref` onto its app links, otherwise those visitors count as `website`. An idempotent replay of a committed organization setup request counts `created` again. These counters are process-local; aggregate them with `sum` across API replicas and use `increase()` over the reporting window.
-- Product usage (server-side, consent-independent): `opengeni_sessions_created_total{surface,created_by_kind,root}` counts newly created sessions (`surface` is the fixed turn-surface list plus `unknown`; `created_by_kind` is `subject` or `service`; `root` is `true` for a session without a parent and `false` for a child), and `opengeni_user_messages_total{surface}` counts accepted user messages: the initial message of a created session unless its first turn is deferred, every accepted Send/Steer (web, API key, Slack, MCP, embedded), and each accepted scheduled occurrence (`surface="scheduled"`). Idempotent replays are not counted. Both are process-local counters that initialize at zero: aggregate with `sum` across API and control-worker replicas. `opengeni_active_users{window="5m"|"15m"|"1h"|"24h"|"7d"|"30d"}` is the number of distinct managed people active inside the window: a canonical managed browser request that the web console marks with `x-opengeni-user-activity: active`, which it sends only while the tab is visible and the person interacted with it in the last 5 minutes. Idle open tabs, background polling, and event streams never count. API processes record presence throttled to once per person per minute and batched off the request path; API keys, services, agents, embedded-host and local subjects are never counted. Every control worker publishes the same global database value, so aggregate it with `max`, never `sum`. `opengeni_credit_grants_total{grant_class="signup_trial"|"coupon"|"manual"|"other"}` and `opengeni_credit_granted_micros_total{grant_class}` are cumulative totals of positive credit grants observed by a ledger trigger since migration 0565, so they include the verified-signup trial grant (written by a database trigger) and operator grants that no application process writes; they are global gauges, so use `max` across control workers and then `increase()`. `opengeni_credit_micros_total{kind="grant"}` remains the process-local counter for grants written in application code. Per-person history for the same activity is the `user.active`, `credits.granted`, and `connection.revoked` lifecycle facts; see [`embedding.md`](embedding.md#product-lifecycle-facts).
+- Product usage (server-side, consent-independent): `opengeni_sessions_created_total{surface,created_by_kind,root}` counts newly created sessions (`surface` is the fixed turn-surface list plus `unknown`; `created_by_kind` is `subject` or `service`; `root` is `true` for a session without a parent and `false` for a child), and `opengeni_user_messages_total{surface}` counts accepted user messages: the initial message of a created session unless its first turn is deferred, every accepted Send/Steer (web, API key, Slack, MCP, embedded), and each accepted scheduled occurrence (`surface="scheduled"`). Idempotent replays are not counted. Both are process-local counters that initialize at zero: aggregate with `sum` across API and control-worker replicas. `opengeni_active_users{window="5m"|"15m"|"1h"|"24h"|"7d"|"30d"}` is the number of distinct managed people active inside the window: a canonical managed browser request that the web console marks with `x-opengeni-user-activity: active`, which it sends only while the tab is visible and the person interacted with it in the last 5 minutes. Idle open tabs, background polling, and event streams never count. API processes record presence throttled to once per person per minute and batched off the request path; API keys, services, agents, embedded-host and local subjects are never counted. Every control worker publishes the same global database value, so aggregate it with `max`, never `sum`. `opengeni_credit_grants_total{grant_class="signup_trial"|"coupon"|"manual"|"other"}` and `opengeni_credit_granted_micros_total{grant_class}` are cumulative totals of positive credit grants observed by a ledger trigger since migration 0565, so they include the verified-signup trial grant (written by a database trigger) and operator grants that no application process writes; they are global gauges, so take `max` across control workers first and then subtract the same expression `offset` by the window. Do not apply `increase()` per pod series: every control-worker restart starts a new series, so a per-pod `increase()` sees only that pod's lifetime and undercounts. `opengeni_credit_micros_total{kind="grant"}` remains the process-local counter for grants written in application code. Per-person history for the same activity is the `user.active`, `credits.granted`, and `connection.revoked` lifecycle facts; see [`embedding.md`](embedding.md#product-lifecycle-facts).
 - Analytics consent: `opengeni_analytics_consent_total{decision="granted"|"denied"}` counts answers to the web console's optional-analytics banner, and `opengeni_analytics_consent_reports_rejected_total{reason}` counts refused reports; both initialize at zero. Only a changed answer is counted, so it is a count of decisions, not of people. Use the `denied` share to state how much of the consenting audience PostHog cannot see; people who never answer the banner are not counted at all, so also compare PostHog's consented sign-ins with the server `sign_in` counter. See [`application-observability.md`](application-observability.md#analytics-consent).
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
 - Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0512): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
-- Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
-- Turn startup: the canonical `OpenGeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
-- Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome}`, `opengeni_mcp_tool_call_duration_seconds{outcome}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`. Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
+- Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. Durable recovery is a separate control-worker projection: `opengeni_session_recovery_backlog{state}` counts recovering sessions with no active attempt (including ones in recorded backoff), `opengeni_session_recovery_scheduled{state}` counts those still inside their recorded Retry-After/connectivity backoff, and `opengeni_session_recovery_oldest_overdue_seconds{state}` drives `OpenGeniSessionRecoveryBacklogStale`; see [`run-lifecycle.md`](run-lifecycle.md). In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
+- Turn startup: the canonical `Opengeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
+- Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome,tool}`, `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` (`tool` is a first-party catalog name or `external`), `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, the shared subscription core shadow (`opengeni_subscription_core_shadow_comparisons_total{provider,parity,placement}`, `..._parity_failures_total{provider,reason}`, `..._violations_total{provider,requirement}`, `..._inputs_total{provider,input}`, `..._skips_total{provider,reason}`, `..._duration_seconds{provider}`; see [subscription-accounts.md](subscription-accounts.md#shadow-comparison)), `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, `opengeni_sandbox_orphans_terminated_total`, and the Modal orphan sweep's provider inventory `opengeni_modal_sandbox_inventory{state=running|unleased|lease_missing_instance}` (inventory domain `modal_provider`, published only after a complete app listing). `opengeni_sandbox_leases_interaction_only{idle_bucket}` (inventory domain `interaction_idle`) counts warm leases held only by Browser/Computer sessions by time since their last interaction activity: interaction holders never expire by timestamp; once every Browser/Computer session on a box has been unused for the sandbox idle grace they are saved or released and the box drains (`opengeni_sandbox_idle_interaction_release_total{outcome}`, see [run-lifecycle.md](run-lifecycle.md)). Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
+- Product failures users hit (all labels are closed sets; no account, workspace, user, session, provider URL, or tool name is ever a label):
+  - `opengeni_http_request_rejections_total{method,route,status,code,reason,component}` counts every API response with status >= 400. `code` is the public `ErrorEnvelope.code`; `reason` is `permission:<catalog permission>` when the refusal names a missing permission, else the typed `details.code`, else `control:<code>` for a Connected Machine control failure, else `unclassified`. The API `HTTP request completed` log line carries the same `rejectionCode`/`rejectionReason` plus a one-way `rejectionFingerprint` (`m_<10 hex>`) of the message with identifiers, quoted values, and numbers normalized away; `bun run scripts/resolve-rejection-fingerprint.ts m_...` maps it back to the source literal. Message text never reaches logs or metrics.
+  - `opengeni_interaction_operations_total{resource,operation,mode,outcome,reason}` now covers every Browser/Computer control route (observe, state, DOM read, screenshot, tab list/open/select/close, attach, plus failures of act/create/lifecycle/auth routes); `outcome="denied"` is a 401/403 refusal and `reason` is a receipt `InteractionError` code or an HTTP-derived refusal (`permission_denied`, `access_denied`, `not_found`, `conflict`, `control_<code>`, ...).
+  - `opengeni_interaction_interventions_total{kind,outcome}` now includes agent-opened handoffs (`opened`, counted by the turn worker when the interruption settles) and timer expiry (`expired`, counted by the worker expiry activity).
+  - `opengeni_connect_attempts_total{provider,state,error}` counts every committed Connect attempt transition (`state="started"` for a new attempt); `provider` is the reviewed Connect catalog or `other`.
+  - `opengeni_integration_oauth_callbacks_total{flow,provider,outcome,stage,reason}` classifies every provider redirect back to Opengeni (MCP OAuth, Integration Definition OAuth, Slack bot, Google Drive, Fiken, Atlassian, personal GitHub, social, GitHub App/Lens) from its result marker and status; popup Connect callbacks are `outcome="handoff"`. `opengeni_integration_oauth_starts_total{flow,outcome,stage,reason}` covers MCP OAuth discovery/registration.
+  - `opengeni_agent_tool_calls_total{family,outcome}` and `opengeni_agent_tool_call_duration_seconds{family}` count every completed model-dispatched tool call by closed family (`shell`, `browser`, `computer`, `human_handoff`, `integration`, `custom_mcp`, ...) and structural outcome (`ok`, `error`, `rejected`, `cancelled`).
+  - `opengeni_machine_connect_total{outcome,reason}` (NATS auth-callout decisions), `opengeni_machine_enrollment_total{flow,outcome}` (device/token/renew decisions that are not HTTP errors), and `opengeni_attached_browser_unavailable_total{reason}`.
+  - Alerts: `OpenGeniApiRouteRejectionsAbnormal`, `OpenGeniApiMissingPermissionSpike`, `OpenGeniHandoffAttachRefused`, `OpenGeniHandoffsExpiringUnanswered`, `OpenGeniInteractionOperationFailureRatio`, `OpenGeniConnectFailureRatio`, `OpenGeniIntegrationOAuthCallbackFailures`, `OpenGeniAgentToolErrorRatio`, `OpenGeniMachineConnectRejected`, `OpenGeniAttachedBrowserUnavailable` (see `docs/launch-monitoring.md`).
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, `opengeni_verified_signup_trial_credits_runtime_enabled`, `opengeni_verified_signup_trial_credits_deployment_enabled`, and `opengeni_build_info{version,revision}`.
+- Model usage and money (turn worker, process-local counters: aggregate with `sum` and use `increase()`/`rate()`): `opengeni_model_responses_total{provider,model,priced}` counts authoritative model responses that reported usage (`priced="false"` when no provider cost estimate exists); `opengeni_model_tokens_total{provider,model,type}` counts their tokens, where `type` is `input` (every prompt token, including cached and cache-write tokens), `cached_input` and `cache_write` (subsets of `input`), `output`, or `reasoning` (a subset of `output`), so the cache hit rate is `cached_input / input`; `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}` is the estimated upstream provider cost in USD micros at the provider rate of the configured model pricing (`OPENGENI_MODEL_PRICING_JSON`, keyed by catalog product id) or the AI Gateway's reported cost (`pricing_source="gateway_reported"`), where `payer="external"` marks a customer-paid subscription or key whose cost Opengeni does not pay; `opengeni_model_web_search_requests_total{provider,model,payer}` counts provider-run web searches the provider reports billing with a response (Claude's server-side search; each search is billed per request by the provider, separately from tokens); and `opengeni_model_credits_charged_micros_total{provider,model,funding}` is the credit actually debited for model usage, split by `funding="promotional"` (scoped promotional grants: the verified-signup trial and scoped coupon offers) and `funding="general"` (general credit: purchased credit plus any unscoped grant; the ledger does not track which dollar of the general pool was purchased). Usage and cost are recorded behind the same durable usage-event fence as the Insights model-call fact, so a duplicate or late response is not counted; charged credits are recorded once when the debit ledger row is inserted. `model` is the deployment catalog product id, `custom` for a workspace gateway or customer-key model and for any id the deployment catalog does not list, and `other` after 64 distinct values in one process; account, workspace, user and session ids are never labels. Sandbox, voice, web-search and knowledge debits are not split by funding here; `opengeni_credit_micros_total{kind="usage"}` remains the worker's total of model and sandbox debits. Paid credit purchases (Stripe checkout top-ups, API) are `opengeni_credit_purchases_total{mode}`, `opengeni_credit_purchased_micros_total{mode}` (credits added) and `opengeni_credit_purchase_paid_usd_micros_total{mode}` (USD paid after discounts), with `mode` `live` or `test`; each is counted once by the request that inserted the ledger row. A fully discounted coupon checkout is a grant (`grant_class="coupon"`), not a purchase.
 - Sandbox rollout state: `opengeni_sandbox_rollout_config{feature,state}` across API, control-worker, and turn-worker revisions; alert on disagreement before advancing a staged rollout.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.
@@ -3806,11 +3804,25 @@ max by (window) (opengeni_active_users{environment="production"})
 ```
 
 ```promql
-max by (grant_class) (increase(opengeni_credit_grants_total{environment="production"}[7d]))
+max by (grant_class) (opengeni_credit_grants_total{environment="production"})
+-
+max by (grant_class) (opengeni_credit_grants_total{environment="production"} offset 7d)
 ```
 
 ```promql
 sum by (surface) (increase(opengeni_user_messages_total{environment="production"}[1d]))
+```
+
+```promql
+sum by (provider, model) (increase(opengeni_model_tokens_total{environment="production",type="cached_input"}[1d]))
+/
+sum by (provider, model) (increase(opengeni_model_tokens_total{environment="production",type="input"}[1d]))
+```
+
+```promql
+sum by (provider, model) (increase(opengeni_model_credits_charged_micros_total{environment="production"}[1d])) / 1e6
+-
+sum by (provider, model) (increase(opengeni_model_provider_cost_micros_total{environment="production",payer="deployment"}[1d])) / 1e6
 ```
 
 ```promql
@@ -3837,10 +3849,13 @@ Minimum production alerts:
 - API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/workspaces/:workspaceId/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
 - Turn stuck: a physical worker attempt has made no durable progress for more than 15 minutes for 5 minutes. Overlapping recovery attempts are counted and aged independently.
 - Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
-- Turn startup SLOs: cumulative queue p95 above 5 seconds, queue-to-provider-dispatch p95 above 60 seconds, or queue-to-first-byte p95 above 120 seconds for 15 minutes with at least five samples. The Helm values are configurable; use the phase dashboard before assigning the delay to the sandbox or provider.
+- Turn startup SLOs: cumulative queue p95 above 5 seconds, queue-to-provider-dispatch p95 above 20 seconds (warning; a paging critical tier above 60 seconds replaces it), or queue-to-first-byte p95 above 120 seconds for 15 minutes with at least five samples. The Helm values are configurable; use the phase dashboard before assigning the delay to the sandbox or provider.
+- Model-request latency split: Opengeni's own per-request pre-dispatch work (`opengeni_model_request_pre_dispatch_seconds`: SDK model entry through admission, durable history/audit checkpoints and credit revalidation to the literal provider dispatch) warns when its p95 exceeds 2 seconds for 10 minutes with at least 20 requests. Provider time-to-first-token (`opengeni_model_provider_ttft_seconds{content="any"}`: literal dispatch to the first streamed reasoning-or-answer delta) never alerts on an absolute number; `OpenGeniModelProviderTtftRegression` warns only when a provider's 30-minute p90 exceeds 2x its own trailing 24-hour p90 (offset by 30 minutes), above a 5-second floor, with at least 30 recent and 200 baseline requests, and not while the pre-dispatch condition holds. A provider that is simply slower - reasoning models, subscription routes - stays quiet; the absolute `opengeni_stream_ttft_seconds` view remains on Streaming Health for investigation. Ratio, floor and sample gates are Helm values; a freshly deployed metric has no baseline and stays quiet until it accrues one.
 - Context compaction: an exact active attempt's latest automatic compaction landmark remains durably `started` for 15 minutes. Terminal skips settle normally, and the control-worker projection survives turn-worker replacement while following each resolved model's actual threshold.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
+- Modal backend only: running Modal boxes without a live lease (`opengeni:modal_sandbox_inventory:fresh_max{state="unleased"} > 0` for 15m), warm leases whose exact Modal box is no longer running (`state="lease_missing_instance"` for 15m; draining leases excluded), and a stale/absent `modal_provider` inventory for 15m.
+- Boxes kept warm only by idle Browser/Computer sessions: `sum(opengeni:sandbox_leases_interaction_only:fresh_max{idle_bucket=~"2h_6h|gte_6h"}) > 5` for 30m.
 - Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`. The matching "Codex eligible credential pool is low" log line is throttled to the first observation per workspace pool depth and then one line per 10 minutes carrying `suppressedCount` and `reason` (`eligible_pool_zero` or `eligible_pool_one`); alert on the counter, not the log. Connected Machine auth-callout denial warnings use the same per-source throttle (one line per minute per rejected bearer or enrollment, with `reason` `invalid_bearer`, `inactive_enrollment`, or `duplicate_runner`); the denial itself is never throttled.
 - Worker failures: `runAgentTurn` failure ratio is above 5% for 10 minutes.
 - Worker duration: p95 `runAgentTurn` duration is above the expected model/tool budget for 15 minutes.
@@ -3856,7 +3871,7 @@ The Azure Terraform root lives at `deploy/terraform/azure`.
 
 It supports:
 
-- AKS for OpenGeni workloads.
+- AKS for Opengeni workloads.
 - ACR for images.
 - Key Vault for runtime secret storage.
 - Managed Azure PostgreSQL when `postgres.mode = "managed"`, with optional
@@ -4116,7 +4131,8 @@ boundary validation and compacted-history limitations.
 
 Set `OPENGENI_ALLOWED_USER_EMAILS` to a comma-separated list of exact email
 addresses to restrict native human signup, sign-in and existing browser sessions.
-Addresses are case-insensitive; email verification remains required. Unset keeps
+Addresses are case-insensitive; email verification follows the
+[password sign-up setting](#password-sign-up-email-verification). Unset keeps
 open registration; an explicitly empty or invalid list fails startup. Apply the
 same value to all API replicas and restart them when changing the list.
 
@@ -4144,6 +4160,1680 @@ restores original FORCE-RLS and trigger modes on success; any failure rolls back
 DDL, converted credentials and the activation receipt together. Never restart
 a pre-cutover image after commit. Restart sign-in attempts that were pending
 during the cutover. Anthropic API-key connections are unchanged.
+
+### Codex on the shared subscription core (0689)
+
+Migration `0689_subscription_core_codex_cutover.sql` is a one-way maintenance
+cutover. It moves every organization's Codex (ChatGPT subscription) state onto
+the shared subscription core and enables the Codex cutover for every
+organization in the same transaction. Design record:
+[subscription core, PR 3](design/subscription-core-2026-10-07.md#pr-3-the-drained-codex-cutover).
+The dormant core Codex writers (rolling migration 0688, after 0679 credit consent) ship before it, so
+connect, disconnect and redemption keep working on the core once 0689
+enables the cutover.
+
+M3 PR 4 is a **runtime-only deletion**, not a cutover operation. Merging its
+source does not activate it. Start that binary only after the drained,
+codec-aware 0689 transaction has committed its receipt and the matching runtime
+readiness check succeeds. A missing or disabled Codex cutover row now means
+fail-closed maintenance; it must never consult the scrubbed legacy decision
+tables. Do not restart an older binary after scrub, remove a gate to recover,
+or bypass the receipt. Fix forward. Schema/columns, historical SQL, the codec
+stage, migration dispatch, seeding and readiness remain intact.
+
+Migrated logins without a verified signed-in upstream person remain separate;
+reconnect returns `identity_unverified` (409) rather than guessing which person
+owns them. An authorized administrator can disconnect the old login and then
+connect anew. Live chat/operation leases or unresolved provider-started
+redemptions still refuse disconnect; expired leases are retired under the
+connection lock. A personal legacy alias can be disconnected only by its owner
+from their own Personal workspace. Disconnect-all followed by reconnect starts
+a higher personal-authority generation, so old frozen work does not regain it.
+Scheduled-task renames and pause/resume preserve execution digests both before
+and after authority backfill; firings consume the accepted revision's frozen
+authority, with no personal entry for a missing human authorizer.
+
+Rolling 0688 keeps owner-only writer implementations outside the previous
+binary's runtime capability inventory, in `opengeni_subscription_internal`.
+Never grant that schema or its functions to runtime roles to repair readiness.
+Old and new binaries remain compatible before 0689; after 0689, only matching
+cutover binaries may start.
+
+Duplicate personal and shared connection ceilings, and local assignment policies,
+merge the model policies of **enabled** rows only; a paused unrestricted row cannot
+widen an enabled restricted one. If every source is paused, its model union stays
+paused. This includes Personal-workspace rows with NULL stored account IDs and
+verified user-authority rows identifying the same upstream person/account. SQL
+parity independently checks the connection ceiling (`connection_model_policies`)
+as well as the local assignment union; a mismatch rolls back before activation.
+The repair preserves legitimate enabled unions and canonical credentials/aliases;
+it does not reject representable duplicates. Extra-credit opt-in carries forward only when all merged rows
+opted in, retaining the maximum consent version. A mixed opt-in is disabled and
+reported as `extra_credit_consent_conflict_disabled`; an administrator may make
+a fresh explicit decision after cutover. Live/Apps retain their existing source
+policy; automatic chat catalogs consider both eligible shared pools. Personal
+funding outside a Personal workspace requires the exact durable accepted turn,
+not a viewer's live membership. Prompt admission checks this frozen context
+inside its transaction; generic shared-workspace catalogs remain personal-free.
+
+**1. Inventory (before the window).** Record the source counts the migration
+will compare, by organization and legacy source, as the schema owner:
+
+```sql
+SELECT account_id, authority_scope, count(*) FROM codex_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, count(*) FROM codex_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM codex_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM codex_apps_settings WHERE credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM sessions
+  WHERE codex_pinned_credential_id IS NOT NULL OR codex_last_credential_id IS NOT NULL GROUP BY 1;
+```
+
+The migrator runs the same queries inside its owner window; these are for
+your change record.
+
+**2. Stop and drain.** Stop every API, control worker and turn worker of the
+old and the new release, including idle pooled connections. Drain processes,
+not work: queued, waiting, checkpointed and scheduled work stays in the
+database and is moved by the migration. Do not cancel turns.
+
+**3. Back up.** Take a consistent database backup (or snapshot) after the drain
+and before migrating. It is the only recovery point before the one-way commit.
+
+**4. Migrate.** Run the normal TypeScript migrator (plain `psql` cannot run the
+codec stage and is refused) as the schema owner with:
+
+- `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`: the complete list of old and
+  new runtime logins (for example `["opengeni_app"]`). Any live session for a
+  listed login aborts with SQLSTATE `55000` before anything changes;
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`: the existing key. Each credential is
+  decrypted and re-encrypted through the environment codec and read back
+  before the legacy copy is retired. An installation without legacy Codex
+  credentials needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drained-check
+failure; an undecodable credential (fixed message, no material); identity or
+ownership ambiguity (the message lists content-free classes such as
+`provider_identity_mismatch`, `personal_workspace_owner_ambiguous`,
+`personal_owner_missing`, `fedramp_mismatch`, `unrepresentable_status`,
+`session_owner_ambiguous`); pre-existing core Codex state; or any parity
+mismatch (`0689 parity mismatch (<metrics>)`). A database error while writing
+the core surfaces only as `could not write the shared core (SQLSTATE <code>,
+<constraint>)`: no statement parameter, credential, label or email leaves the
+migration. Fix the named legacy rows (for example disconnect a duplicate
+account whose `id_token` names another ChatGPT account) and run the migrator
+again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles`, then start only
+binaries of this release. Runtime readiness refuses a database without the 0689
+receipt (`opengeni_private.subscription_codex_cutover_v1_active()`), so a new
+binary cannot run before the migration, and an older binary must never be
+restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The parity report has no mismatch:
+  `SELECT metric, account_id, legacy_count, core_count FROM
+  opengeni_private.subscription_codex_cutover_report WHERE legacy_count <>
+  core_count AND metric NOT LIKE 'disposition:%';` returns no rows. Rows named
+  `disposition:*` record accepted non-parity outcomes (for example a Personal
+  workspace's Apps designation, which cannot point at a personal connection;
+  dropped Personal-pool rotation rows; expired leases; pins the session owner
+  may not use; organization accounts whose reach over later workspaces is kept
+  by auto-assignment, `organization_reach_auto_assigned`; logins whose ChatGPT
+  person is unknown or contradictory kept as separate connections,
+  `person_identity_*_kept_separate`; two logins of one person in one pool
+  merged, `duplicate_pool_policy_merged`).
+- Every organization has `subscription_provider_cutovers (provider = 'codex',
+  enabled = true)`.
+- Spot-check a workspace's Codex accounts, source and rotation in the web UI or
+  `GET /v1/workspaces/:id/codex/status`; legacy account ids still resolve
+  through aliases.
+- Waiting Codex turns resume on their own when capacity returns (their waiter
+  ids and wake revisions were preserved); no workflow reset is needed.
+
+**Release notes (behaviour users can see).**
+
+- Different people's logins of one ChatGPT Team/Business/Enterprise workspace
+  are separate accounts on the core (legacy kept one per pool and replaced the
+  older login on reconnect). Signing in again replaces only your own login.
+- A workspace in `automatic` mode with its own accounts now also admits the
+  organization's accounts (the core treats both shared pools as eligible), and
+  accounts connected in a Personal workspace become their owner's personal
+  connections, used only for the owner's own work and as Personal-workspace
+  fallback where allowed (D-18).
+
+**Containment.** An organization administrator (or an operator acting for one)
+may set that organization's Codex cutover row `enabled = false`. That is
+fail-closed maintenance: Codex routes answer `503 subscription_core_cutover_disabled`,
+Codex turns fail with typed copy or stay parked, and nothing reads a legacy
+Codex table. The row cannot be deleted by the application role nor moved to
+another provider or organization, and every new organization is seeded
+enabled.
+
+**Fix forward.** After commit there is no down migration and no rollback image.
+Restoring the pre-migration backup discards every change made since; use it
+only if the migration itself is wrong and no traffic has been served. Otherwise
+ship a fix-forward binary and, if data needs repair, a narrowly scoped forward
+migration that is idempotent, alias-aware and parity-checked. Keep affected
+organizations switched off meanwhile. Never copy rows back to the legacy
+tables, drop aliases, reset refresh generations or clear waiters.
+
+### Shared subscription core generic precursor (0712)
+
+Migration `0712_subscription_core_generic_precursor.sql` is **rolling**: deploy
+it like any release, without draining. Design record:
+[subscription core, PR 0a](design/subscription-core-2026-10-07.md#pr-0a-receipts-restrictions-and-personal-helpers).
+It requires 0689 and acts on deploy. Like 0706, it grants to the configured
+application roles: a deployment whose runtime role is not `opengeni_app`
+(dedicated schema or custom role) must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (the Helm chart's migration
+secret already does), or `migrate` stops before applying anything.
+
+- Provider cutover receipts. Codex has one; SuperGrok (`xai`) and Claude get
+  theirs only from their own drained cutovers. A binary of this release
+  refuses to start against a database without the Codex receipt.
+- No runtime or migration-owner role can insert or enable a
+  `subscription_provider_cutovers` row, or insert a `subscription_connections`
+  row, for `xai` or `claude` before their receipts, and none can delete a
+  cutover row (superusers bypass row security). No cutover row or connection
+  can change its organization or provider, whoever updates it. Disabling a row
+  (Codex containment) still works.
+- A settings primary that pointed at another provider's connection is cleared.
+- Codex connects emit the `model.connected` lifecycle fact again.
+
+Codex chat, connect, refresh and containment behave as before. SuperGrok and
+Claude keep running on their legacy path.
+
+Codex connections created between 0689 and 0712 have no `model.connected`
+fact; the operator-run lifecycle backfill does not read core connections.
+
+**Readiness report and inventory.** As the migration owner:
+
+```sql
+SELECT provider, metric, account_id, legacy_count, core_count
+FROM opengeni_private.subscription_cutover_report
+WHERE metric LIKE 'readiness:%' OR metric LIKE 'inventory:%'
+  OR metric = 'disposition:primary_of_other_provider_cleared'
+ORDER BY provider, metric, account_id NULLS LAST;
+```
+
+`inventory:switch_rows_without_receipt` and
+`inventory:connections_without_receipt` count, per provider and organization,
+the `xai` and `claude` rows that existed at 0712. They were never usable and
+grant nothing, but the SuperGrok and Claude cutovers abort on them, so they
+must be removed before those cutovers. Row security hides them from the
+migration owner; inspect and remove them as a superuser (or another role with
+`BYPASSRLS`), after checking each connection is not in use:
+
+```sql
+-- Only providers without a receipt: never run this for a provider whose
+-- cutover has committed (its rows are live).
+SELECT account_id, provider, enabled
+FROM subscription_provider_cutovers cutover
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = cutover.provider);
+SELECT account_id, provider, id, ownership, status
+FROM subscription_connections connection
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = connection.provider);
+DELETE FROM subscription_provider_cutovers cutover
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = cutover.provider);
+DELETE FROM subscription_connections connection
+WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.subscription_provider_cutover_receipts receipt
+  WHERE receipt.provider = connection.provider);
+```
+
+`readiness:owners_with_multiple_current_personal_generations` counts Codex
+owners whose active personal connections carry more than one current
+authority generation (`core_count`; the row with a NULL `account_id` is the
+total). New work those owners accept gets no personal Codex access. If the
+total is not zero, raise it with the product owner; the repair is a separate
+decision and is not part of this migration.
+
+### Provider-keyed reach (0713)
+
+Migration `0713_subscription_core_provider_keyed_reach.sql` is **rolling**:
+deploy it like any release, without draining. Design record:
+[subscription core, PR 0c](design/subscription-core-2026-10-07.md#pr-0c-provider-keyed-cutover-planner-and-organization-reach).
+It requires 0689 and acts on deploy. Like 0712, it grants its three new
+runtime routines to the configured application roles: a deployment whose
+runtime role is not `opengeni_app` must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (the Helm chart's migration
+secret already does).
+
+- The reach rows that assign an organization connection to workspaces created
+  later (`opengeni_private.subscription_codex_auto_assignments`) gain a
+  `provider` column; every existing row is a Codex row and is kept exactly.
+  The new routines read them through the owner-only view
+  `opengeni_private.subscription_core_auto_assignments`; the table keeps its
+  name, and the column its `codex` default for older binaries' reach writes,
+  until the retirement migration (0751, "Subscription legacy retirement"
+  below), which renames the table to the view's name.
+- Applying reach on workspace and Personal-workspace creation, reading and
+  setting reach, plan-change history and the organization workspace inventory
+  take the provider as data, so a later SuperGrok or Claude cutover adds rows,
+  not routines.
+- Codex behaves as before, and older binaries keep working: every Codex-named
+  routine keeps its name, signature and grants and acts on the same rows.
+
+**Locks.** 0713 locks owner data only, first and in this order: the reach
+table `ACCESS EXCLUSIVE`, then the provider registry `SHARE ROW EXCLUSIVE`,
+which no runtime lock conflicts with. It locks no workspace, membership,
+connection or assignment table, so it cannot deadlock with runtime work.
+While it runs, workspace and Personal-workspace creation, access-editor
+reach changes and deleting a subscription connection or an organization
+(their cascades reach the reach table) wait for it briefly. If a transaction
+already using the reach table keeps it past the runner's 5-second
+`lock_timeout`, the Job fails without recording 0713 and changes nothing;
+retry the Job.
+
+Nothing else needs an operator.
+
+### Workspace-managed accounts as organization accounts (0714)
+
+Migration `0714_subscription_workspace_managed_organization_accounts.sql` is
+**rolling**. It changes no row: since 0689 an account connected in a shared
+workspace is already a shared connection of the organization, scoped to that
+workspace and managed by it. The migration only lets the organization access
+editor's reach setters (`set_subscription_core_reach` and its Codex wrapper
+`set_subscription_codex_reach`, from 0713) accept such a connection when its
+manager is a shared workspace of the organization, so an organization
+administrator can give it to the whole
+organization, chosen workspaces or chosen people without reconnecting. Design
+record: [workspace-managed connections as organization accounts](design/subscription-core-2026-10-07.md#54-workspace-managed-connections-as-organization-accounts).
+It also adds one routine, `opengeni_private.set_subscription_core_reach_allocator`
+(organization administrators only, granted to the application roles like the
+setters): the organization's rotation switch sets the reach row's switch
+without copying the connection's model list, which the managing workspace's
+administrators also write. The organization's choices for other workspaces
+live on its organization-pool rows and that reach row, so a managing
+workspace can narrow other workspaces' use but never widen it; giving such an
+account to every workspace stores every workspace's row plus the reach
+instead of organization scope. Each route's rotation switch shows and flips
+its own side's copies; a request is unchanged only when every copy it writes
+already has the value. 0714 also makes the reach reader
+(`opengeni_private.subscription_core_reach`) report the reach row's switch and
+model list, additive keys older binaries ignore.
+It needs no drain or window (but see the Rollout rule and Rollback below for
+sharing and people choices): older binaries never call the helper for a
+managed connection and read the same rows with the same meaning. This
+release's API calls the new routine on every organization rotation switch and
+access save, so apply 0714 before rolling out the API (the normal order). It can ship
+alone or in the same release as the SuperGrok and Claude cutovers. It must
+run after 0713 (ordinal order guarantees it).
+
+**Parity check.** Run this read-only inventory before and after the release
+as a superuser or another role with `BYPASSRLS` (row security hides these
+tables from the migration owner, so as that role every count reads 0). The
+migration writes no row, so run it immediately before and after applying
+0714: the counts must be identical. Later comparisons can differ only by
+accounts connected or disconnected in between (check those against the
+connect and disconnect audit events). In every run
+`personal_managed` must be 0 (a shared connection managed by a
+Personal workspace is not an organization account; investigate before any
+repair). On a database without 0713 yet, the reach table is still named
+`opengeni_private.subscription_codex_auto_assignments`:
+
+```sql
+SELECT connection.account_id, connection.provider,
+  count(*) AS managed,
+  count(*) FILTER (WHERE connection.scope_kind = 'workspaces') AS workspaces_scope,
+  count(*) FILTER (WHERE membership.id IS NOT NULL) AS personal_managed,
+  count(policy.connection_id) AS local_policies,
+  count(auto.connection_id) AS reach_rows
+FROM subscription_connections connection
+LEFT JOIN organization_memberships membership
+  ON membership.account_id = connection.account_id
+  AND membership.personal_workspace_id = connection.managed_by_workspace_id
+LEFT JOIN subscription_connection_assignment_policies policy
+  ON policy.connection_id = connection.id
+  AND policy.workspace_id = connection.managed_by_workspace_id
+  AND policy.inference_pool = 'workspace'
+LEFT JOIN opengeni_private.subscription_core_auto_assignments auto
+  ON auto.connection_id = connection.id
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.managed_by_workspace_id IS NOT NULL
+GROUP BY connection.account_id, connection.provider
+ORDER BY connection.account_id, connection.provider;
+```
+
+The inventory compares counts. To compare every subscription row, rehearse
+on a restored copy of the production backup (live traffic changes leases and
+waits, so a live before/after digest differs for unrelated reasons): run this
+block as a superuser before and after applying 0714 there; every digest must
+match. Run it with the application data schema first on the `search_path`
+(the block reads `current_schema()`).
+
+```sql
+DO $$
+DECLARE source record; digest text;
+BEGIN
+  FOR source IN SELECT table_schema, table_name FROM information_schema.columns
+    WHERE column_name = 'account_id' AND table_name LIKE 'subscription%'
+      AND table_schema IN (current_schema(), 'opengeni_private')
+    ORDER BY 1, 2
+  LOOP
+    EXECUTE format('SELECT md5(coalesce(string_agg(to_jsonb(r)::text, %L ORDER BY to_jsonb(r)::text), %L)) FROM %I.%I r',
+      ',', '', source.table_schema, source.table_name) INTO digest;
+    RAISE NOTICE '%.%: %', source.table_schema, source.table_name, digest;
+  END LOOP;
+END $$;
+```
+
+**Rollout rule.** Do not share a workspace-managed account with other
+workspaces until every API pod runs this release: an older pod still lets
+another workspace's route switch only the connection, and the managing
+workspace's next "on" would then undo the organization's "off" for every other
+workspace. A managing workspace's "on" that lands on an older pod after the
+organization switched the account on is answered "unchanged" and lost; it takes
+effect when retried on this release. Do not limit any account to chosen people
+(`allowedPeople`) until every API pod runs this release. An older pod reads a
+people-scoped account as "no workspaces", and a save there would switch it back
+to workspace scope (leaving its people rows behind). Workspace-managed accounts
+can't be limited to people at all (`peopleSupported: false`, refused with 422)
+so their workspace's administrators keep managing them. Organizations with more
+than 1000 memberships (revoked ones count) are not offered people: the member
+list refuses them, so the editor reads `peopleSupported: false`. An account
+that already has people there can still have them kept or removed and its
+models edited; adding someone is refused with 422.
+
+**Rollback.** The same rules hold before an older API image runs again. Older
+organization routes refuse workspace-managed accounts, so a shared one can't
+be narrowed after the rollback. Before rolling back, run this read-only check
+as a superuser or `BYPASSRLS` role (like the parity check). Row security hides
+these tables from any other role, including the migration owner, where an
+empty result proves nothing, so under one the block stops with an error; run
+it again as a superuser or `BYPASSRLS` role. Run it in `psql` from a file or
+standard input (`psql -X -f check.sql`, or `psql -X -f - < check.sql`), or
+paste it; never with `psql -c`, which runs only the first `\set` and checks
+nothing. The two `\set` lines make the guard's error abort the transaction,
+so both queries fail even when `~/.psqlrc` sets `ON_ERROR_ROLLBACK`, which
+would otherwise undo the error and print the passing empty results. Keep the
+`\\` that ends the second line: it ends the `\set` when a terminal pastes the
+block as one line. From a file or standard input, psql stops at the guard and
+exits with status 3. Pasted, or read with `\i`, the queries fail or are
+skipped. If the prompt then shows `!` (`=!>`), the session is still in an
+aborted transaction: send `ROLLBACK` before anything else. That happens after
+`\i`, or after a one-line paste when `ON_ERROR_STOP` was already on (as it is
+after an earlier run of this block in the same session). Both queries must
+return no rows:
+
+```sql
+\set ON_ERROR_ROLLBACK off
+\set ON_ERROR_STOP on \\
+BEGIN TRANSACTION READ ONLY;
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the 0714 rollback check as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+SELECT connection.account_id, connection.provider, connection.id,
+  connection.managed_by_workspace_id,
+  coalesce(to_jsonb(connection.allowed_model_ids), 'null'::jsonb)
+    AS allowed_models
+FROM subscription_connections connection
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.managed_by_workspace_id IS NOT NULL
+  AND (EXISTS (SELECT 1 FROM subscription_connection_assignment_policies policy
+      WHERE policy.connection_id = connection.id
+        AND policy.inference_pool = 'organization')
+    OR EXISTS (SELECT 1 FROM subscription_connection_workspaces assignment
+      WHERE assignment.connection_id = connection.id
+        AND assignment.workspace_id <> connection.managed_by_workspace_id)
+    OR EXISTS (SELECT 1 FROM opengeni_private.subscription_core_auto_assignments auto
+      WHERE auto.connection_id = connection.id))
+ORDER BY connection.account_id, connection.provider, connection.id;
+SELECT connection.account_id, connection.provider, connection.id,
+  connection.managed_by_workspace_id
+FROM subscription_connections connection
+JOIN subscription_connection_assignment_policies own
+  ON own.connection_id = connection.id AND own.inference_pool = 'workspace'
+  AND own.workspace_id = connection.managed_by_workspace_id
+WHERE connection.ownership = 'shared' AND connection.disconnected_at IS NULL
+  AND connection.allocator_enabled AND NOT own.allocator_enabled;
+COMMIT;
+```
+
+Clear the rows in this order:
+
+1. For each row of the first query, that organization's administrator narrows
+   the account back to its workspace with both `allowedWorkspaces: []` and
+   `allowPersonalWorkspaces: false` (an account given to the whole organization
+   otherwise stays in every Personal workspace), and with `allowedModels` set
+   to the row's `allowed_models`: `null` when it prints `null` (every model),
+   otherwise the printed list, including `[]` when the managing workspace chose
+   no models. Never turn a `null` into `[]`, which admits none, or a printed
+   `[]` into `null`, which admits every model. That is the managing workspace's
+   current list; the editor shows the organization's list, and saving it would
+   widen a list the workspace narrowed.
+2. Run the check again. The second query lists workspace-managed accounts the
+   organization switched on after their workspace switched them off (for a
+   shared account, do this after narrowing: before it, the managing workspace
+   can be served through the organization's copy, and then its page reads the
+   organization's "on"): an older image's workspace route reads only the
+   connection's switch, so its "on" there answers "unchanged" and the
+   workspace stays off. For each such row, either that workspace switches the
+   account on on its page, or the organization's administrator switches it off
+   on the organization route; either way the older image can switch it again
+   once that workspace's page lists it. A workspace whose page doesn't list the
+   account after narrowing (one set to use only the organization's accounts,
+   or with Codex switched off) answers `not_found`: use the organization's
+   "off" for it.
+3. Run the check again until both queries return no rows; otherwise fix
+   forward instead of rolling back.
+4. Run it once more when every pod runs the older image: an account shared
+   while pods were still being replaced can't be narrowed then, so any row of
+   the first query means rolling forward again; for a row of the second, the
+   workspace's administrator sends "off" and then "on" through the API. If
+   that workspace's page doesn't list the account (it uses only the
+   organization's accounts, or Codex is off there), both routes answer
+   `not_found` on the older image, and the account is served nowhere until
+   that workspace uses its own accounts again; its administrator then sends
+   "off" and then "on" (or roll forward and use the organization's "off").
+
+Before rolling back, shared accounts limited to people (`ownership = 'shared'
+AND scope_kind = 'people'`) are read as "no workspaces" by an older image, and
+a save there replaces the people: move them back to workspaces first, or accept
+that. Run right after the rollout, the first query also shows whether anything
+was shared while older pods still served; for each such row, confirm with that
+organization's administrator that the account's workspaces and rotation switch
+are what they meant, since an "off" sent from another workspace's page on an
+older pod switched only the connection, which the managing workspace's next
+"on" undid.
+
+**Validation.** Once every API pod runs this release, use an operator-owned
+test organization (never a customer account: the `PUT` below widens a real
+account). As its administrator, call
+`GET /v1/organizations/<organization id>/model-connections/codex/<connection id>/access`
+for a workspace-managed account: it returns its workspace's own copy in
+`localWorkspaceIds`, its manager in `managedByWorkspaceId`,
+`allowedWorkspaces: []` and `peopleSupported: false`. Before this release the
+same call is refused. A `PUT` to the same path with the returned `version`
+and `allowedWorkspaces` naming another shared workspace makes the account
+available there; it changes only scope, assignments, organization-pool rows
+and the reach row (and copies the account's model list onto its workspace's
+own row). Credentials, refresh generations, quota, bindings, leases
+and waiters are untouched, and the account-wide wake follows every save. A
+`PUT` with `allowedPeople` for that account returns 422. Until the owner
+approves the Accounts page change, the page still lists these accounts under
+their workspace.
+
+In the same test organization, switch the account's rotation off on the
+organization route and on again on its workspace's route: the workspace's
+own copy serves again (under the workspace's own source) and other workspaces
+and a workspace created afterwards stay off until the organization turns it on
+on its route. Then the other order:
+switch it off on the workspace's route, off on the organization route (it
+answers `changed: true`), and on again on the workspace's route: other
+workspaces and a workspace created afterwards stay off.
+Switching it on another workspace's route returns 404: a workspace-managed
+account switches only on the organization route and its managing workspace's.
+Narrowing it back to its workspace alone (`allowedWorkspaces: []`) removes the
+organization's copies, so an organization "off" is not kept: the account page
+then shows the connection's switch, which a later share copies.
+
+**Accounts page change (separate release, after owner approval).** The
+organization Accounts page then lists a workspace-connected account once, as
+an organization account whose access the editor changes. Validate:
+`GET /v1/organizations/<organization id>/codex/accounts` returns each such
+account with `ownInWorkspaceIds` naming its workspace, and that workspace's
+`GET /v1/workspaces/<workspace id>/codex/accounts` returns
+`source.workspaceSetAside` and `source.organizationCount` (how many
+organization accounts other than its own reach it; after sharing only its own
+account it is 0, while `organizationAvailable` reads true). A browser tab
+still running the previous page lists the account twice (once as "<workspace>
+only") and offers "Make primary" for it, which the server refuses as not
+found, until it reloads. API
+and SDK callers of the organization account list now also receive
+workspace-connected accounts, each with `ownInWorkspaceIds`, and the
+workspace account list's `source` gains the two optional fields above; nothing
+else changes.
+
+**Fix forward.** The previous setter definitions are in 0713. If they
+misbehave, ship a forward migration restoring those definitions and keeping
+`set_subscription_core_reach_allocator` (this release's API calls it on every
+organization rotation switch and access save; dropping it makes those fail).
+Organization access saves on managed accounts then fail (the setter's "not
+found" surfaces as a server error while this release's API is deployed) and
+write nothing; rotation switches keep working on both routes; nothing else
+changes. That includes narrowing: an account already given to more
+workspaces stays that way. Narrow such accounts back to their workspace
+as in Rollback (the check there lists them, with the model list to keep)
+before restoring the setters, or restore only if a defect requires it.
+
+### Accepted authority compatibility (0716)
+
+Migration `0716_subscription_authority_compat.sql` is **rolling** and inert on
+deploy. Design record:
+[subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
+It requires 0712 and, like 0712, grants to the configured application roles
+(`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`).
+
+- It adds the server-owned `authority_inserted_at` column (constant default,
+  no table rewrite) and two triggers to `sessions`, `session_turns`,
+  `scheduled_tasks`, `scheduled_task_revision_authorities`,
+  `session_system_updates` and `session_system_update_outbox`, plus a
+  deferred check trigger on each.
+- Locks: it first takes ACCESS EXCLUSIVE on those six tables together, in
+  the order above starting with `sessions` and `session_turns`, waiting at
+  most 100 ms per lock and releasing everything and retrying after a short
+  pause when it cannot take them all. It never holds a carrier lock for more
+  than about 600 ms while it waits, so no cycle between it and one live
+  transaction can form as long as `deadlock_timeout` keeps its default of
+  one second or more. A cycle through a third transaction can still abort a
+  live one with a deadlock error (one that had already waited about a second
+  behind other live work); this is rare and reported as retryable, and the
+  migration is never the victim. While it retries, session and scheduled
+  reads and writes stall up to 100 ms at a time. Once it holds the set the
+  migration runs in well under a second; session and scheduled work waits
+  for it meanwhile. If it cannot take the whole set within 30 seconds the Job
+  fails with `55P03`, the migration rolls back entirely, and it is safe to
+  retry. Before retrying, look for what held a carrier table: a running
+  vacuum (`pg_stat_progress_vacuum`; the short waits never cancel
+  autovacuum) or a long-open transaction (`pg_stat_activity`).
+- The compatibility relation stays empty, and the copy routine, the
+  deferred check and the personal helpers' record branch do nothing, until
+  SuperGrok's or Claude's own drained cutover records its receipt. Codex and
+  every other provider behave as before.
+- The scheduled-task execution digest ignores the new column, so existing run
+  receipts stay valid.
+
+### Subscription authority fences (0717)
+
+Migration `0717_subscription_authority_fences.sql` is **rolling**, requires
+0716 and grants nothing. Design record:
+[subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
+Unlike 0716, part of it acts on deploy:
+
+- Codex (already cut over): an internal turn delivered into a receiving
+  context must carry the v2 accepted authority it copies (the context's, or
+  for a pure goal continuation the goal's causal turn's), a delivered causal
+  update frozen with another value is refused, and a scheduled occurrence
+  must carry its firing's value. Writers already copy these values, so only
+  drifted rows are refused; nothing else changes for Codex.
+- Claude: admission, occurrences, the generated session and the scheduled
+  turn compare the accepted Claude snapshot and causal subject as they do
+  for SuperGrok. A live run whose accepted `user` Claude authority was
+  revoked fails with `scheduled_claude_authority_changed` at claim, and the
+  host MCP, external link and MCP operation guards refuse it.
+- Personal (`user`) SuperGrok and Claude accounts: under a migration owner
+  without `BYPASSRLS` (the documented posture), disconnecting one deleted the
+  credential but left its authority active, and connecting a personal Claude
+  account failed with `42501`. 0717 adds the missing owner policies and
+  revokes every active personal SuperGrok or Claude authority whose
+  credential is gone: those earlier disconnects left active, and those whose
+  credential went with a deleted workspace (the credential's workspace
+  foreign key cascades, the authority's only loses its origin workspace). A
+  live run accepted for such an account then fails with
+  `scheduled_xai_authority_changed` or `scheduled_claude_authority_changed`;
+  connected accounts are unaffected. 0717 fixes the disconnect path only, so
+  after it an authority whose credential went with a deleted workspace stays
+  active (and without a credential grants nothing) until a later fix; the
+  inventory below lists both kinds.
+- The receipt switch and the effective-authority comparisons stay inert
+  until SuperGrok's or Claude's own cutover records its receipt.
+- It recreates the `scheduled_turn_execution_immutable` trigger on
+  `session_turns`, adds policies on `organization_memberships` and
+  `organization_user_resource_authorities`, and briefly relaxes FORCE row
+  security for the owner on that table and both personal credential tables
+  for the repair.
+- Locks: it first takes ACCESS EXCLUSIVE on `organization_memberships`, both
+  personal credential tables, `organization_user_resource_authorities` and
+  `session_turns` together, waiting at most 100 ms per lock and releasing
+  everything and retrying after a short pause when it cannot take them all,
+  so no cycle between it and one live transaction can form (with
+  `deadlock_timeout` at its default of one second or more). A cycle through
+  a third transaction can still abort a live one with a deadlock error (one
+  that had already waited about a second behind other live work); this is
+  rare and reported as retryable, and the migration is never the victim.
+  While it retries, reads of these tables stall up to 100 ms at a time.
+  While it holds them, for well under a second, private-session reads, turn
+  writes and personal connects and disconnects wait for it. If it cannot
+  take the whole set within 30 seconds the Job fails with `55P03`, the
+  migration rolls back entirely, and it is safe to retry. Before retrying,
+  look for what held one of these tables: a running vacuum
+  (`pg_stat_progress_vacuum`; the short waits never cancel autovacuum) or a
+  long-open transaction (`pg_stat_activity`).
+
+**Before deploying**, run this read-only inventory as a role that bypasses
+row security. Each row is one finding. Resolve the scheduled findings first
+(pause or edit the task, or let the run finish): after 0717, their tasks
+cannot be admitted, their occurrences or reusable sessions are refused, or
+the run fails at claim. Record the counts of the two `inbox_` findings
+(history the fences never check again) and of
+`disconnected_personal_authority` (the authorities 0717 revokes: credentials
+removed by a disconnect or with a deleted workspace).
+
+```sql
+WITH live_run AS (
+  SELECT run.id, run.account_id, run.workspace_id, run.task_id, run.session_id,
+    run.task_authority_revision, run.accepted_execution_snapshot AS accepted,
+    coalesce(run.accepted_execution_snapshot -> 'claudeProviderAccountAuthoritySnapshot',
+      '{"version":1,"scope":"workspace"}'::jsonb) AS accepted_claude,
+    task.owner_subject_id AS task_owner, task.deleted_at AS task_deleted_at,
+    task.authority_revision AS task_revision,
+    task.claude_provider_account_authority_snapshot AS task_claude,
+    task.reusable_session_id
+  FROM scheduled_task_runs run
+  JOIN scheduled_tasks task ON task.id = run.task_id
+    AND task.account_id = run.account_id AND task.workspace_id = run.workspace_id
+  WHERE run.action_kind = 'agent_turn' AND run.status IN ('queued', 'dispatched')
+    AND run.accepted_execution_snapshot IS NOT NULL
+), occurrence AS (
+  SELECT update_row.id, update_row.account_id, update_row.workspace_id,
+    update_row.lineage, update_row.subscription_authority,
+    update_row.claude_provider_account_authority_snapshot AS claude,
+    run.accepted, run.accepted_claude, run.task_owner, run.task_deleted_at,
+    run.task_id, run.task_authority_revision
+  FROM session_system_updates update_row
+  JOIN live_run run ON run.id = update_row.scheduled_task_run_id
+    AND run.account_id = update_row.account_id AND run.workspace_id = update_row.workspace_id
+)
+SELECT 'scheduled_task_claude_subject' AS finding, task.account_id, task.workspace_id,
+  task.id AS row_id
+FROM scheduled_tasks task
+WHERE task.status = 'active' AND task.deleted_at IS NULL
+  AND task.action ->> 'kind' = 'agent_turn'
+  AND task.claude_provider_account_authority_snapshot ->> 'scope' = 'user'
+  AND (task.owner_subject_id IS NULL
+    OR (task.xai_provider_account_authority_snapshot ->> 'scope' = 'user'
+      AND task.created_by_subject_id IS DISTINCT FROM task.owner_subject_id))
+UNION ALL
+SELECT 'scheduled_run_claude_accepted', run.account_id, run.workspace_id, run.id
+FROM live_run run
+WHERE (run.task_revision = run.task_authority_revision
+    AND run.accepted_claude IS DISTINCT FROM run.task_claude)
+  OR CASE WHEN run.accepted_claude ->> 'scope' = 'user'
+    THEN run.task_owner IS NULL
+      OR run.accepted ->> 'claudeAuthoritySubjectId' IS DISTINCT FROM run.task_owner
+      OR (run.accepted -> 'xaiProviderAccountAuthoritySnapshot' ->> 'scope' = 'user'
+        AND run.accepted ->> 'xaiAuthoritySubjectId' IS DISTINCT FROM run.task_owner)
+    ELSE run.accepted ->> 'claudeAuthoritySubjectId' IS NOT NULL END
+UNION ALL
+SELECT 'scheduled_occurrence_claude', occurrence.account_id, occurrence.workspace_id,
+  occurrence.id
+FROM occurrence
+WHERE occurrence.claude IS DISTINCT FROM occurrence.accepted_claude
+  OR occurrence.lineage ->> 'claudeAuthoritySubjectId'
+    IS DISTINCT FROM occurrence.accepted ->> 'claudeAuthoritySubjectId'
+UNION ALL
+SELECT 'scheduled_occurrence_v2', occurrence.account_id, occurrence.workspace_id,
+  occurrence.id
+FROM occurrence
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM (VALUES ((occurrence.accepted -> 'task' ->> 'authorityRevision')::bigint),
+    (occurrence.task_authority_revision)) candidate(revision_number)
+  LEFT JOIN LATERAL (
+    SELECT CASE
+      WHEN revision.subscription_authority IS NULL THEN NULL
+      WHEN jsonb_typeof(revision.subscription_authority -> 'personal') = 'array'
+        AND jsonb_array_length(revision.subscription_authority -> 'personal') > 0
+        AND revision.subject_id IS DISTINCT FROM occurrence.task_owner
+      THEN '{"version":2,"personal":[]}'::jsonb
+      ELSE revision.subscription_authority END AS v2
+    FROM scheduled_task_revision_authorities revision
+    WHERE revision.account_id = occurrence.account_id
+      AND revision.workspace_id = occurrence.workspace_id
+      AND revision.task_id = occurrence.task_id
+      AND revision.task_authority_revision = candidate.revision_number
+      AND occurrence.task_deleted_at IS NULL
+  ) firing ON true
+  WHERE CASE WHEN firing.v2 IS NULL
+    THEN occurrence.subscription_authority IS NULL
+      OR occurrence.subscription_authority = '{"version":2,"personal":[]}'::jsonb
+    ELSE occurrence.subscription_authority = firing.v2 END)
+UNION ALL
+SELECT 'scheduled_session_claude', run.account_id, run.workspace_id, run.id
+FROM live_run run
+JOIN sessions session_row ON session_row.account_id = run.account_id
+  AND session_row.workspace_id = run.workspace_id
+  AND session_row.id = coalesce(run.session_id, CASE
+    WHEN run.accepted -> 'task' ->> 'runMode' = 'reusable_session'
+    THEN run.reusable_session_id END)
+WHERE coalesce(run.accepted -> 'targetSessionExecution', 'null'::jsonb) = 'null'::jsonb
+  AND session_row.initial_claude_provider_account_authority_snapshot
+    IS DISTINCT FROM run.accepted_claude
+UNION ALL
+SELECT 'scheduled_run_claude_authority', run.account_id, run.workspace_id, run.id
+FROM live_run run
+WHERE run.accepted_claude ->> 'scope' = 'user'
+  AND NOT EXISTS (
+    SELECT 1 FROM organization_user_resource_authorities authority
+    WHERE authority.account_id = run.account_id
+      AND authority.organization_membership_id::text
+        = run.accepted -> 'causalHumanAuthority' ->> 'organizationMembershipId'
+      AND authority.resource_kind = 'claude_subscription'
+      AND authority.generation::text = run.accepted_claude ->> 'authorityGeneration'
+      AND authority.status = 'active' AND authority.revoked_at IS NULL
+      AND EXISTS (SELECT 1 FROM claude_subscription_credentials credential
+        WHERE credential.id = authority.resource_id))
+UNION ALL
+SELECT 'scheduled_run_xai_authority', run.account_id, run.workspace_id, run.id
+FROM live_run run
+WHERE run.accepted -> 'xaiProviderAccountAuthoritySnapshot' ->> 'scope' = 'user'
+  AND NOT EXISTS (
+    SELECT 1 FROM organization_user_resource_authorities authority
+    WHERE authority.account_id = run.account_id
+      AND authority.organization_membership_id::text
+        = run.accepted -> 'causalHumanAuthority' ->> 'organizationMembershipId'
+      AND authority.resource_kind = 'xai_subscription'
+      AND authority.generation::text
+        = run.accepted -> 'xaiProviderAccountAuthoritySnapshot' ->> 'authorityGeneration'
+      AND authority.status = 'active' AND authority.revoked_at IS NULL
+      AND EXISTS (SELECT 1 FROM xai_subscription_credentials credential
+        WHERE credential.id = authority.resource_id))
+UNION ALL
+SELECT 'disconnected_personal_authority', authority.account_id,
+  authority.origin_workspace_id, authority.id
+FROM organization_user_resource_authorities authority
+WHERE authority.status = 'active'
+  AND ((authority.resource_kind = 'xai_subscription' AND NOT EXISTS (
+      SELECT 1 FROM xai_subscription_credentials credential
+      WHERE credential.id = authority.resource_id))
+    OR (authority.resource_kind = 'claude_subscription' AND NOT EXISTS (
+      SELECT 1 FROM claude_subscription_credentials credential
+      WHERE credential.id = authority.resource_id)))
+UNION ALL
+SELECT 'inbox_turn_v2', turn.account_id, turn.workspace_id, turn.id
+FROM session_turns turn
+JOIN session_turns context ON context.account_id = turn.account_id
+  AND context.workspace_id = turn.workspace_id AND context.session_id = turn.session_id
+  AND context.id = turn.execution_context_turn_id
+CROSS JOIN LATERAL (
+  SELECT count(*) > 0 AND bool_and(delivered.kind = 'goal_continuation') AS pure_goal,
+    (array_agg(lower(delivered.lineage ->> 'causalTurnId')
+      ORDER BY delivered.created_at, delivered.id))[1] AS goal_turn_id
+  FROM session_system_updates delivered
+  WHERE delivered.account_id = turn.account_id AND delivered.workspace_id = turn.workspace_id
+    AND delivered.session_id = turn.session_id AND delivered.delivered_turn_id = turn.id
+    AND delivered.state = 'delivered'
+) delivery
+LEFT JOIN session_turns goal ON delivery.pure_goal
+  AND goal.workspace_id = turn.workspace_id AND goal.session_id = turn.session_id
+  AND goal.id::text = delivery.goal_turn_id
+  AND goal.initiating_human_subject_id = turn.initiating_human_subject_id
+CROSS JOIN LATERAL (SELECT CASE WHEN delivery.pure_goal THEN goal.subscription_authority
+  ELSE context.subscription_authority END AS v2) expected
+WHERE turn.execution_context_turn_id IS NOT NULL
+  AND NOT CASE WHEN expected.v2 IS NULL
+    THEN turn.subscription_authority IS NULL
+      OR turn.subscription_authority = '{"version":2,"personal":[]}'::jsonb
+    ELSE turn.subscription_authority = expected.v2 END
+UNION ALL
+SELECT 'inbox_update_v2', update_row.account_id, update_row.workspace_id, update_row.id
+FROM session_turns turn
+JOIN session_system_updates update_row ON update_row.account_id = turn.account_id
+  AND update_row.workspace_id = turn.workspace_id AND update_row.session_id = turn.session_id
+  AND update_row.delivered_turn_id = turn.id AND update_row.state = 'delivered'
+WHERE turn.execution_context_turn_id IS NOT NULL
+  AND update_row.kind <> 'agent_message' AND update_row.kind NOT LIKE 'child\_%'
+  AND update_row.subscription_authority IS NOT NULL
+  AND update_row.subscription_authority IS DISTINCT FROM turn.subscription_authority
+  AND EXISTS (
+    SELECT 1 FROM session_system_updates other
+    WHERE other.account_id = turn.account_id AND other.workspace_id = turn.workspace_id
+      AND other.session_id = turn.session_id AND other.delivered_turn_id = turn.id
+      AND other.state = 'delivered' AND other.kind <> 'goal_continuation')
+ORDER BY 1, 2, 3, 4;
+```
+
+| Finding | After 0717 |
+| --- | --- |
+| `scheduled_task_claude_subject` | Every firing is refused (the dispatcher already refuses it). |
+| `scheduled_run_claude_accepted` | Admission would not accept this run's Claude values. |
+| `scheduled_occurrence_claude`, `scheduled_occurrence_v2` | The occurrence would be refused at insert. |
+| `scheduled_session_claude` | Binding the run to its session is refused. |
+| `scheduled_run_claude_authority` | The run fails with `scheduled_claude_authority_changed`. |
+| `scheduled_run_xai_authority` | The run fails with `scheduled_xai_authority_changed`. |
+| `disconnected_personal_authority` | Revoked: its credential was disconnected. |
+| `inbox_turn_v2`, `inbox_update_v2` | Such a delivery is refused; existing rows are not checked again. |
+
+Staging and production were not queried when 0717 was written; run the
+inventory there before deploying it.
+
+### Organization settings locks (0724)
+
+Migration `0724_subscription_settings_locks.sql` is **rolling**. It changes no
+column, no existing routine and no stored value, so every workspace's
+effective model-account settings are the same before and after it. It adds:
+
+- two CHECKs on `subscription_settings` (`locked_settings` names only the six
+  setting keys; `fallback_order` maps each model to an array of model ids),
+  added `NOT VALID` and validated in place without a rewrite;
+- a `BEFORE INSERT OR UPDATE` guard on workspace rows that refuses (SQLSTATE
+  42501, detail `subscription_setting_locked:<key>`) a write setting or
+  changing a setting the organization locked, from every writer;
+- an `AFTER INSERT OR UPDATE OF locked_settings` trigger on the organization
+  row that clears newly locked settings from the organization's workspace
+  rows in the same transaction;
+- a `BEFORE UPDATE OF account_id, workspace_id` trigger that keeps every
+  settings row in its organization and workspace (42501, detail
+  `subscription_settings_identity_immutable`);
+- an owner-only `SELECT` policy through which the guard reads the
+  organization row, and `EXECUTE` on the four new `opengeni_private`
+  routines for the configured application roles (so an older binary's
+  posture check stays clean before roles are provisioned again).
+
+A workspace-row write that sets or changes any setting, and a lock change,
+run only at READ COMMITTED (SQLSTATE 0A000, detail
+`subscription_settings_requires_read_committed`, otherwise); writes that only
+clear or keep values are unaffected. Application writers pin READ COMMITTED on
+their own transactions. A database whose `default_transaction_isolation` is
+stricter must run any later migration that writes workspace overrides (for
+example a provider cutover) at READ COMMITTED.
+
+A lock change never waits for a workspace row: the trigger locks the rows it
+clears with `NOWAIT` and raises 55P03 (detail
+`subscription_settings_lock_busy`) when one is held. The API queues for the
+organization's settings lock first, retries, and answers 503 `settings_busy`
+(nothing written) if it stays busy for about 5 to 8 seconds. Writers outside
+this release's repository can cause that: the previous release's workspace
+writers during the rolling upgrade, and raw or migration writers. Migrations
+that write workspace overrides should take
+`pg_advisory_xact_lock_shared(hashtextextended('subscription-settings-locks:'
+|| account_id::text, 0))` for each organization before locking its rows.
+
+No release before this one writes `locked_settings` (a workspace row cannot
+hold locks, and no API wrote the organization's), so the guard refuses
+nothing an older binary does. It needs no drain or window. Apply it before
+rolling out this release's API, whose organization and workspace
+model-account settings routes rely on it.
+
+**Pre-check.** Validation fails (and the migration rolls back, changing
+nothing) if a stored row already breaks either CHECK. Run this read-only
+query as a superuser or another `BYPASSRLS` role; it must return no rows:
+
+```sql
+SELECT id, account_id, workspace_id, locked_settings, fallback_order
+FROM subscription_settings
+WHERE NOT (locked_settings <@ ARRAY['rotation', 'providers', 'crossProviderFailover',
+    'fallbackOrder', 'personalConnectionsAllowed', 'personalFallbackAllowed']::text[])
+  OR (fallback_order IS NOT NULL AND (
+    jsonb_path_exists(fallback_order, 'strict $.* ? (@.type() != "array")', '{}', true)
+    OR jsonb_path_exists(fallback_order, 'strict $.*[*] ? (@.type() != "string")', '{}', true)));
+```
+
+**Rollback.** Older binaries never write locks and run unchanged on 0724, so
+rolling the application back needs nothing. Locks set after the rollout stay
+enforced. To remove enforcement, ship a forward migration dropping the three
+triggers, the policy `subscription_settings_lock_guard_read`, the four
+routines and the two CHECKs; the stored locks stay and the resolver keeps
+ignoring locked workspace overrides.
+
+### Shared-chat explicit personal choice (0749)
+
+This is a **maintenance**, one-way runtime protocol upgrade. Stop all API,
+control-worker and turn-worker processes using this database, including old
+and candidate versions; supply their exact login names through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`).
+The migration checks the inventory and refuses live sessions before and after
+locking the accepted-work tables. It installs strict readers before enabling
+the acceptance writer. Start only the matching runtime after commit; its
+transaction-local protocol receipt prevents an incompatible writer from
+emitting restricted authority and incompatible readers from spending it.
+This receipt is not a feature flag or delegated permission.
+
+New explicit shared-chat consent is restricted to the exact session and
+connection owned by the accepting human, who need not be the chat creator.
+Existing v2 entries, compatibility records, waiting turns, background launch
+receipts and replay histories are not rewritten or reauthorized. Live owner,
+membership, resource-generation and effective-policy checks still apply.
+Other senders and automatic placement do not inherit the choice.
+
+After any restricted entry exists, do not restart a pre-upgrade image: its
+strict readers cannot parse that entry. Recovery is forward-only with readers
+that preserve the exact restriction; removing the field or regenerating old
+pools is not rollback. No provider cutover, data move or deployment is performed
+by this source change. The provisional ordinal must be reconciled against the
+published ledger during batch integration without renaming published SQL.
+
+### Personal Codex acceptance under row security (0726)
+
+Migration `0726_subscription_personal_acceptance_reads.sql` is **rolling**
+and grants nothing. Design record:
+[subscription core, PR 0b](design/subscription-core-2026-10-07.md#pr-0b-authority-compatibility-and-fences).
+It acts on deploy for Codex, on databases whose migration owner is neither a
+superuser nor `BYPASSRLS` (the documented posture):
+
+- Before it, the routines that freeze a turn's or scheduled task's v2
+  accepted authority could not see the owner's personal connections, so they
+  froze the empty value: an owner's personal Codex account was never used,
+  even in their private session or Personal workspace (the work used shared
+  capacity or waited for it).
+- After it, a new acceptance by an owner whose personal Codex connections
+  carry exactly one current generation freezes the owner's personal entry,
+  as it already did where the owner bypasses row security. The rules are
+  unchanged; only the read is fixed.
+- Values frozen earlier are not rewritten: the next turn accepted in a
+  private session uses the personal account, but a scheduled task keeps the
+  value frozen when it was created, so tasks created before 0726 keep using
+  shared capacity until they are recreated.
+- Health recovery had the same blind spot: a personal Codex account
+  quarantined after a refused request (a time-bound `error` status with a
+  retry time) was never returned to service. After 0726 the owner's own turn
+  whose frozen entry names the account recovers it once the retry time
+  passes, as shared accounts already were. Sign-in failures still need a new
+  sign-in.
+
+To see whether a database is affected, and which owners' new acceptances
+0726 will freeze the personal entry for, run as a role that bypasses row
+security. Placement still applies the effective `personalConnectionsAllowed`
+of the session's workspace (the workspace's own value unless the organization
+has locked the setting, otherwise the organization's), so where it is off
+these owners' work keeps using shared capacity:
+
+```sql
+SELECT rolname, rolsuper, rolbypassrls
+FROM pg_roles
+WHERE oid = (SELECT proowner FROM pg_proc
+  WHERE oid = 'opengeni_private.subscription_core_acceptance_authority_v2(text,uuid,uuid,uuid,text)'::regprocedure);
+-- Nothing changes when rolsuper or rolbypassrls is true.
+
+SELECT connection.account_id, connection.owner_organization_membership_id
+FROM subscription_connections connection
+JOIN organization_memberships membership
+  ON membership.id = connection.owner_organization_membership_id
+  AND membership.account_id = connection.account_id
+  AND membership.subject_id = connection.owner_subject_id
+  AND membership.status = 'active' AND membership.revoked_at IS NULL
+JOIN organization_user_resource_authorities authority
+  ON authority.id = connection.authority_id AND authority.account_id = connection.account_id
+  AND authority.resource_kind = 'subscription_connection' AND authority.resource_id = connection.id
+  AND authority.organization_membership_id = connection.owner_organization_membership_id
+  AND authority.generation = connection.authority_generation
+  AND authority.status = 'active' AND authority.revoked_at IS NULL
+WHERE connection.provider = 'codex' AND connection.kind = 'subscription'
+  AND connection.ownership = 'personal' AND connection.status IN ('active', 'error')
+GROUP BY 1, 2
+HAVING count(DISTINCT authority.generation) = 1;
+```
+
+### Personal connect writer with a credential format (0728)
+
+Migration `0728_subscription_core_personal_connect_format.sql` is
+**rolling**: deploy it like any release, without draining. Design record:
+[subscription core, SuperGrok track](design/subscription-core-2026-10-07.md#x2b-routes-and-writers).
+It adds one overload of the neutral personal connect writer,
+`opengeni_private.connect_subscription_core_personal`, whose last argument
+is the stored credential format (SuperGrok stores `xai_oauth_v1`), built
+from the live 0707 definition with every check, lock and security setting
+unchanged. The 0707 writer stays for older binaries; Codex keeps calling it
+and still stores `v1`. It also adds
+`opengeni_private.subscription_authority_carrier_inserted_now`, which tells
+the compatibility copy (0716) whether this transaction inserted a scheduled
+task revision, so a replayed materialization skips the copy instead of
+failing. Like 0712 and 0713, it grants both routines to the
+configured application roles: a deployment whose runtime role is not
+`opengeni_app` must pass them through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. It locks no table and
+changes no row. Nothing acts on deploy: only a provider whose own cutover
+receipt exists reaches either routine, so both stay unused until the
+SuperGrok cutover.
+
+### A person's own subscription preferences (0729)
+
+Migration `0729_subscription_person_preferences_owner.sql` is **rolling**.
+Design record:
+[subscription core, M5 explicit choice](design/subscription-core-2026-10-07.md#56-m5-explicit-account-choice-and-personal-preferences).
+It changes no column, value or existing policy. It adds two
+`SECURITY DEFINER` routines that answer only for the caller's own active
+human membership in the caller's organization scope, and three owner
+policies (read, insert, update; no delete) on
+`subscription_person_preferences`, so a person can read and change their own
+personal-fallback opt-in through
+`/v1/organizations/{organizationId}/me/model-account-preferences`. Nobody
+else gains access to the row; placement keeps reading it under the accepted
+turn's capability as before.
+
+Because `organization_memberships` is FORCE row security and the migration
+owner has no `BYPASSRLS` in the documented posture, it also adds one
+SELECT-only policy there, `subscription_own_person_membership_read`. It
+applies only to the migration owner while the transaction-local marker
+`opengeni.organization_tenancy_lifecycle = 'subscription_own_person_membership'`
+is set, and only to the caller's own row (`opengeni.account_id` and
+`opengeni.subject_id`). The membership routine sets the marker for its single
+read and restores the caller's value right after; the runtime role still has
+no privilege on the table.
+
+**Rollback.** Older binaries never call the new routines or routes and run
+unchanged on 0729. An opt-in a person turned on stays in effect after a
+rollback (placement already read it); dropping the four policies and two
+routines removes only the person's own access.
+
+### SuperGrok on the shared subscription core (0747)
+
+Migration `0747_subscription_core_xai_cutover.sql` is a one-way maintenance
+cutover, the SuperGrok counterpart of 0689. It moves every organization's
+SuperGrok (`xai`) subscription state onto the shared subscription core,
+records the `xai` receipt and registry row, and enables the SuperGrok cutover
+row for every organization, in one transaction. Design record:
+[subscription core, X3](design/subscription-core-2026-10-07.md#x3-the-drained-supergrok-cutover).
+It requires the generic precursor, core acceptance reads, SuperGrok runtime
+and personal-status recovery, and per-provider session-binding migration.
+The latter must supply the `(workspace_id, session_id, provider)` primary
+key and enabled `subscription_session_bindings_provider_fixed` trigger;
+the cutover refuses a missing or malformed prerequisite before writing state.
+The release that carries it must also carry the dormant SuperGrok core
+runtime (chat, refresh, media, routes and capacity waits); after the receipt
+the runtime serves SuperGrok only through the core.
+
+What it moves, per organization: credentials (shared workspace accounts
+become organization-owned connections assigned to their workspace, as for
+any account connected in a workspace; organization accounts keep their
+allowlist and Personal-workspace reach; a Personal workspace's accounts and
+every `user`-scoped account become their owner's personal connections), one
+secret copy each with its health, quota and allocator counters, rotation and
+primaries, the workspace inference source, session pins as bindings, live
+leases with their exact fences, waiting capacity waiters with their ids,
+generations, wake revisions and pending wakes, an accepted-authority
+compatibility record for every live carrier, one fresh personal authority
+generation per owner, and in-flight video operations (their token envelope
+is replaced by a reference to the canonical connection). Legacy rows stay
+for forensics. The five legacy SuperGrok tables become read-only: the
+runtime role keeps only `SELECT`, and restrictive policies that apply once
+the receipt exists refuse every insert or update of them, also by the legacy
+connect and rotation routines that run as the schema owner; the legacy
+disconnect refuses (accounts are disconnected on the core); and no role can
+add a legacy SuperGrok personal authority.
+
+Every pre-existing binding for another provider stays byte-identical.
+Eligible automatic and explicit SuperGrok pins become a separate `xai`
+binding regardless of the session's current model; Codex and Claude pins
+coexist with it. After the drained preflight, before inserting new-provider
+bindings or enabling SuperGrok, the first provider cutover drops
+`subscription_session_bindings_rolling_session_idx`. A later provider
+cutover tolerates its absence. The provider-identity trigger stays enabled
+throughout the owner window. Shared settings rows gain
+only their `xai` keys and the SuperGrok primary, and a Personal workspace
+with moved accounts gets the provider-neutral `personal_fallback_allowed`
+override. Existing per-person fallback preferences remain unchanged. D-28
+already permits automatic use in the owner's Personal workspace; moving a
+credential does not opt its owner into fallback in other workspaces.
+
+**1. Inventory (before the window).** As a superuser or `BYPASSRLS` role,
+record the source counts the migration compares. The schema owner is subject
+to row security on these tables and would count zero rows, so the block
+refuses any other role:
+
+```sql
+\set ON_ERROR_STOP on
+BEGIN TRANSACTION READ ONLY;
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the SuperGrok inventory as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+SELECT account_id, authority_scope, count(*) FROM xai_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, authority_scope, count(*) FROM xai_rotation_settings GROUP BY 1, 2;
+SELECT account_id, count(*) FROM xai_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM xai_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM xai_session_account_pins
+  WHERE pinned_credential_id IS NOT NULL OR last_credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+  GROUP BY 1;
+SELECT account_id, count(*) FROM video_generation_operations
+  WHERE funding_source = 'supergrok_subscription' AND terminal_at IS NULL GROUP BY 1;
+SELECT account_id, count(*) FROM image_generation_operations
+  WHERE provider_id = 'supergrok-subscription' AND status IN ('prepared', 'provider_started')
+  GROUP BY 1;
+COMMIT;
+```
+
+With the same role, confirm the core holds no SuperGrok state yet. Each query
+must return no rows; the migration aborts otherwise.
+Rows left over from before 0712 are removed as described in
+[Shared subscription core generic precursor (0712)](#shared-subscription-core-generic-precursor-0712).
+
+```sql
+SELECT account_id, id, ownership FROM subscription_connections WHERE provider = 'xai';
+SELECT account_id, alias_connection_id FROM subscription_connection_aliases WHERE provider = 'xai';
+SELECT account_id, session_id FROM subscription_session_bindings WHERE provider = 'xai';
+SELECT account_id, turn_id FROM subscription_leases WHERE provider = 'xai';
+SELECT account_id, session_id FROM subscription_capacity_waiters WHERE provider = 'xai';
+SELECT account_id FROM subscription_operation_leases WHERE provider = 'xai';
+SELECT account_id, enabled FROM subscription_provider_cutovers WHERE provider = 'xai';
+SELECT account_id, carrier_kind FROM opengeni_private.subscription_authority_compat
+  WHERE provider = 'xai';
+SELECT account_id, workspace_id FROM subscription_settings
+  WHERE xai_primary_connection_id IS NOT NULL;
+```
+
+Before the window, with the same role, list the workspaces whose SuperGrok
+setting will follow a locked organization value instead of the workspace's
+legacy one. A workspace with its own SuperGrok accounts is normally frozen on its own
+accounts (`inferenceSource: workspace`) with its local rotation and primary;
+where the organization locks `providers` or `rotation`, the cutover leaves
+that key to the organization and records the workspace in the report. Decide
+with the organization whether to unlock first; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM xai_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+;
+```
+
+**2. Stop and drain.** Stop every API, control worker and turn worker of the
+old and the new release, including idle pooled connections. Drain processes,
+not work: queued, waiting, checkpointed and scheduled work stays in the
+database and is moved. Do not cancel turns or video operations.
+Prevent old images from restarting (including autoscalers, rollback jobs and
+restart policies) before releasing the drain. Dropping the rolling index
+does not make old readers or Codex's old automatic-binding UPDATE fail
+closed: an old process can read or mutate another provider's pin. Keep the
+drain and startup refusal effective until an old image cannot run again.
+
+**3. Back up.** Take a consistent backup (or snapshot) after the drain and
+before migrating. It is the only recovery point before the one-way commit.
+
+**4. Migrate.** Run the normal TypeScript migrator as the schema owner (plain
+`psql` cannot run the codec stage and is refused) with:
+
+- `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`: the complete list of old
+  and new runtime logins (for example `["opengeni_app"]`). Any live session
+  for a listed login, or for any other non-superuser login that can write a
+  relation the cutover moves, aborts with SQLSTATE `55000` before anything
+  changes;
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`: the existing key. Each credential
+  is decrypted, canonicalized to the core format, re-encrypted and read back
+  before the legacy copy is blanked; each in-flight video envelope is
+  replaced by an encrypted connection reference and read back. An
+  installation without legacy SuperGrok credentials or in-flight SuperGrok
+  videos needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drain-check
+failure; a transaction isolation other than READ COMMITTED (the runner's
+default: do not set `default_transaction_isolation` for the migrating role or
+database); an undecodable credential (fixed message, no material); identity or
+ownership ambiguity, named by content-free classes such as
+`provider_identity_mismatch` (the stored account id differs from the token's),
+`personal_workspace_owner_ambiguous`, `personal_owner_missing`,
+`unrepresentable_status`, `unrepresentable_scope`, `session_owner_ambiguous`,
+`personal_generation_ambiguous` or `pin_pool_ambiguous`; a turn leased or a
+session waiting on both runtimes (`lease_conflict`, `waiter_conflict`); a
+waiter whose workflow is not its session's (`waiter_workflow_mismatch`);
+pre-existing core SuperGrok state; or any parity mismatch (`0747 parity
+mismatch (<metrics>)`). A database error while writing the core surfaces only
+as `could not write the shared core (SQLSTATE <code>, <constraint>)`: no
+statement parameter, token, label or email leaves the migration. Fix the named
+legacy rows (for example disconnect a duplicate account) and run the migrator
+again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles`, which now grants
+the runtime role only `SELECT` on the five legacy SuperGrok tables, then start
+only binaries of this release. Runtime readiness refuses a database without
+the `xai` receipt
+(`opengeni_private.subscription_provider_cutover_committed('xai')`), so a new
+binary cannot run before the migration, and an older binary must never be
+restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The parity report has no mismatch, as the migration owner:
+
+  ```sql
+  SELECT metric, account_id, legacy_count, core_count
+  FROM opengeni_private.subscription_cutover_report
+  WHERE provider = 'xai' AND legacy_count <> core_count
+    AND metric NOT LIKE 'disposition:%' AND metric NOT LIKE 'readiness:%'
+    AND metric <> 'compat:carriers_that_will_wait';
+  ```
+
+  returns no rows. `compat:dependent_sources_without_record` is zero.
+  `disposition:*` rows record accepted non-parity outcomes: expired leases,
+  dropped rotation rows with no local accounts, `user` rotation rows and fairness cursors, pins
+  whose target has no connection the session may use, collapsed duplicate
+  waiters, in-flight videos whose credential no longer existed (their
+  reference names no connection, so they are never polled again and end at
+  their recovery deadline), owners whose organization disallows personal
+  connections, locked-off personal fallback, one
+  `disposition:local_pool_freeze_locked:<workspace>` or
+  `disposition:local_rotation_locked:<workspace>` row per workspace whose
+  frozen source or local rotation and primary the organization's lock kept
+  (the workspace follows the organization; `locked_workspace_keys_untouched`
+  proves the workspace row kept those keys), logins of unknown or
+  contradictory identity kept separate, merged duplicate pool policies and
+  organization reach kept by auto-assignment.
+  `compat:carriers_that_will_wait` counts accepted work whose recorded
+  account cannot serve it now; it waits for capacity rather than failing.
+  `readiness:owners_with_multiple_current_personal_generations` is zero for
+  `xai`.
+- Every organization has `subscription_provider_cutovers (provider = 'xai',
+  enabled = true)`.
+- Spot-check a workspace's SuperGrok accounts, source and rotation in the web
+  UI; legacy account ids still resolve through aliases.
+- Waiting SuperGrok turns keep their waiter (same id, generation and wake
+  revisions; a wake they had not observed is in the core wake outbox) and
+  resume through the core when capacity returns; no workflow reset is
+  needed.
+
+**Release notes (behaviour users can see).**
+
+- Transcription and realtime voice use only organization and workspace
+  SuperGrok accounts, never a personal one.
+- An account a person connected for themselves (`user` scope) becomes their
+  personal connection, usable in their own private sessions in any workspace
+  that allows personal connections, not only the workspace it was connected
+  in. Accounts connected in a Personal workspace become the owner's personal
+  connection; personal fallback is switched on in that Personal workspace
+  unless the organization locked it off, and the owner is opted in to
+  personal fallback (a per-person preference that covers every provider).
+- A workspace that had its own SuperGrok accounts keeps using only them: its
+  inference source is frozen on `workspace` with organization accounts off,
+  as before. An administrator can change that afterwards. Where the
+  organization locks the provider settings or rotation, the workspace
+  follows the organization's locked value instead (listed in the report).
+- Work accepted before the cutover keeps exactly the accounts it was
+  accepted with. Personal access is re-issued at one new generation per
+  owner, so a later disconnect-all revokes it as for Codex.
+- Personal-workspace rotation and primary selection move with the owner's
+  accounts, unless an organization lock requires the organization value
+  instead. The owner's rotation and activate routes remain available subject
+  to those locks; the administrator settings API still refuses Personal
+  overrides.
+- Activating an account through a legacy alias returns its new canonical
+  connection id in `accountId`.
+
+**Containment.** An organization administrator (or an operator acting for one)
+may set that organization's SuperGrok cutover row `enabled = false`. That is
+fail-closed maintenance: SuperGrok turns fail with typed copy
+(`subscription_core_cutover_disabled`) or stay parked, SuperGrok routes and
+media refuse, and nothing reads a legacy SuperGrok table. The row cannot be deleted by the
+application role nor moved to another provider or organization.
+
+**Fix forward.** After commit there is no down migration. Restoring the
+pre-migration backup discards every change made since; use it only if the
+migration itself is wrong and no traffic has been served. Otherwise ship a
+fix-forward binary and, if data needs repair, a narrowly scoped, idempotent,
+alias-aware, parity-checked forward migration, keeping affected
+organizations switched off meanwhile. Never copy rows back to the legacy
+tables, drop aliases, reset refresh generations or clear waiters.
+
+**With the Claude cutover.** The SuperGrok and Claude cutovers touch disjoint
+legacy tables and only their own provider's keys in shared relations, and
+each commits in its own transaction with its own parity. Either order of
+releases works:
+
+- Separately: deploy the release that carries 0747, run steps 1 to 6 in one
+  window, and run the Claude cutover's window with its later release.
+- In one window: deploy a release that carries both. Drain and back up once,
+  take both inventories, and run the migrator once with the same roles and
+  key; it applies 0747 and then the Claude cutover in ledger order. If the
+  Claude cutover aborts, 0747 stays committed: fix the named Claude rows and
+  run the migrator again (it resumes at the Claude cutover). Start binaries
+  only after both receipts exist; readiness refuses a database missing
+  either. Validate each provider's report rows separately. While only 0747
+  is committed no binary can start: this release needs both receipts and
+  the old release must not run after 0747. If the Claude rows cannot be
+  fixed within the window, restore the step 3 backup and use the separate
+  path, or deploy a release that carries 0747 but not the Claude cutover.
+  The Claude steps are in
+  [Claude on the shared subscription core (0748)](#claude-on-the-shared-subscription-core-0748).
+
+### Claude on the shared subscription core (0748)
+
+Migration `0748_subscription_core_claude_cutover.sql` is a one-way
+maintenance cutover, the Claude counterpart of 0689 and 0747, and shares
+0747's receipt, readiness, report, compatibility-record and stage machinery.
+It moves every organization's Claude (`claude`) subscription state onto the
+shared subscription core, records the `claude` receipt and registry row, and
+enables the Claude cutover row for every organization, in one transaction.
+Design record:
+[subscription core, C3](design/subscription-core-2026-10-07.md#c3-the-drained-claude-cutover).
+The release that carries it must also carry the dormant Claude core runtime
+(chat placement, settlement, waits, usage, routes and writers); after the
+receipt the runtime serves Claude only through the core.
+
+What it moves, per organization: credentials (OAuth logins and setup tokens,
+each copied unchanged as `claude_oauth_v1` or `claude_setup_token_v1`; shared
+workspace accounts become organization-owned connections assigned to their
+workspace; organization accounts keep their allowlist, workspace reach and
+Personal-workspace reach; a Personal workspace's accounts and every
+`user`-scoped account become their owner's personal connections), one
+secret copy each with its health, allocator counters and legacy
+`exhausted_until`, the current usage reading from
+`claude_subscription_account_usage` with its per-model cooldowns and request
+restrictions re-keyed from Anthropic's model ids to Opengeni's product model
+ids, rotation and primaries, the workspace inference source, session pins as
+bindings, live leases with their exact fences, waiting capacity waiters with
+their ids, generations, wake revisions and pending wakes, each live turn's
+`claudeAuthRecovery` value as a turn-failure receipt, an accepted-authority
+compatibility record for every live carrier, and one fresh personal
+authority generation per owner. Legacy rows stay for forensics. The six
+legacy Claude tables (`claude_subscription_credentials`,
+`claude_rotation_settings`, `claude_credential_leases`,
+`claude_session_account_pins`, `claude_capacity_waiters`,
+`claude_subscription_account_usage`) become read-only as 0747 does for
+SuperGrok: the runtime role keeps only `SELECT`, restrictive policies refuse
+every insert or update once the receipt exists, the legacy disconnect
+refuses, and no role can add a legacy Claude personal authority.
+
+Every eligible Claude pin in its effective pool becomes a Claude binding,
+regardless of the session's current model. Codex and SuperGrok bindings stay
+exactly unchanged, including choice, version and cache clock; the
+`other_provider_session_bindings` parity metric checks every stored field.
+There is no Claude `pin_other_provider_binding_kept` disposition. Shared
+settings rows gain only their `claude` keys and the Claude primary, subject
+to organization locks, plus the Personal-workspace fallback override.
+Existing per-person fallback preferences remain unchanged; D-28 preserves
+Personal-workspace use without inventing consent elsewhere. No SuperGrok
+legacy data is moved.
+
+**Provider-keyed binding prerequisite.** The release must include the
+provider-keyed binding precursor before the first provider cutover (planned
+SuperGrok), with primary key `(workspace_id, session_id, provider)` and
+`subscription_session_bindings_provider_fixed` enabled. Claude preflight
+refuses a missing key or disabled guard. After both runtime drain checks,
+Claude drops `subscription_session_bindings_rolling_session_idx` with
+`DROP INDEX IF EXISTS`, before any binding writes or activation. Normally
+SuperGrok already removed it. Claude keeps the provider-fixed trigger
+enabled even while other row triggers are disabled for the owner window.
+Exclude every previous binary, including its ability to restart: losing
+the old upsert conflict target does not fence its unscoped reads or UPDATEs.
+Do not activate a stack whose ledger runs the binding precursor after X3;
+renumber dependencies through their owners before shipping.
+
+**1. Inventory (before the window).** Run every query in this step as a
+superuser or another `BYPASSRLS` role: the schema owner is subject to row
+security and sees no legacy Claude rows, so its counts all read 0. Start the
+session with this guard, which stops otherwise:
+
+```sql
+\set ON_ERROR_STOP on
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper OR rolbypassrls FROM pg_roles
+      WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'run the 0748 inventory as a superuser or BYPASSRLS role';
+  END IF;
+END $$;
+```
+
+```sql
+SELECT account_id, authority_scope, count(*) FROM claude_subscription_credentials GROUP BY 1, 2;
+SELECT account_id, authority_scope, count(*) FROM claude_rotation_settings GROUP BY 1, 2;
+SELECT account_id, count(*) FROM claude_credential_leases WHERE leased_until > now() GROUP BY 1;
+SELECT account_id, count(*) FROM claude_capacity_waiters WHERE status = 'waiting' GROUP BY 1;
+SELECT account_id, count(*) FROM claude_session_account_pins
+  WHERE pinned_credential_id IS NOT NULL OR last_credential_id IS NOT NULL GROUP BY 1;
+SELECT account_id, count(*) FROM claude_subscription_account_usage GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+  GROUP BY 1;
+SELECT account_id, count(*) FROM session_turns
+  WHERE status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+    AND metadata ? 'claudeAuthRecovery'
+  GROUP BY 1;
+```
+
+0598 moved every legacy Claude model connection into the account pools and
+revoked it. Confirm none is left; the migration aborts with
+`legacy_connection_not_revoked` otherwise:
+
+```sql
+SELECT account_id, id FROM connections
+  WHERE metadata->>'credentialRole' = 'claude_subscription'
+    AND (status <> 'revoked' OR credential_encrypted <> '');
+SELECT account_id, id FROM organization_model_provider_connections
+  WHERE provider_kind = 'claude_subscription'
+    AND (status <> 'revoked' OR credential_encrypted <> '');
+```
+
+Still as that role, confirm the core holds no Claude state
+yet. Each query must return no rows:
+
+```sql
+SELECT account_id, id, ownership FROM subscription_connections WHERE provider = 'claude';
+SELECT account_id, alias_connection_id FROM subscription_connection_aliases WHERE provider = 'claude';
+SELECT account_id, session_id FROM subscription_session_bindings WHERE provider = 'claude';
+SELECT account_id, turn_id FROM subscription_leases WHERE provider = 'claude';
+SELECT account_id, session_id FROM subscription_capacity_waiters WHERE provider = 'claude';
+SELECT account_id FROM subscription_operation_leases WHERE provider = 'claude';
+SELECT account_id, turn_id FROM subscription_turn_failures WHERE provider = 'claude';
+SELECT account_id, enabled FROM subscription_provider_cutovers WHERE provider = 'claude';
+SELECT account_id, carrier_kind FROM opengeni_private.subscription_authority_compat
+  WHERE provider = 'claude';
+SELECT account_id, workspace_id FROM subscription_settings
+  WHERE claude_primary_connection_id IS NOT NULL;
+```
+
+List the workspaces whose Claude setting will follow a locked organization
+value; nothing aborts either way:
+
+```sql
+SELECT workspace.account_id, workspace.id AS workspace_id,
+  'providers' = ANY(org.locked_settings) AS freeze_follows_organization,
+  'rotation' = ANY(org.locked_settings) AS rotation_follows_organization
+FROM workspaces workspace
+JOIN subscription_settings org
+  ON org.account_id = workspace.account_id AND org.workspace_id IS NULL
+WHERE org.locked_settings && ARRAY['providers', 'rotation']
+  AND EXISTS (SELECT 1 FROM claude_subscription_credentials credential
+    WHERE credential.account_id = workspace.account_id
+      AND credential.workspace_id = workspace.id
+      AND credential.authority_scope = 'workspace')
+  AND NOT EXISTS (SELECT 1 FROM organization_memberships owner
+    WHERE owner.account_id = workspace.account_id
+      AND owner.personal_workspace_id = workspace.id);
+```
+
+After the drained-role preflight, the migration holds `ACCESS EXCLUSIVE`
+locks on `subscription_settings` and the other moved relations until commit.
+These protect the organization-lock reads and workspace override writes;
+the owner window disables and restores the fence-checking triggers while
+keeping the provider-fixed trigger enabled. It takes no organization settings
+advisory locks: waiting on one after a table lock would invert the runtime
+writers' lock order. `READ COMMITTED` is still required, and locked keys,
+Personal-workspace fallback handling and their parity assertions are unchanged.
+
+**2. Stop and drain. 3. Back up.** As for 0747. Do not cancel turns.
+
+**4. Migrate.** Run the TypeScript migrator as the schema owner with
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` and
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, as for 0747. Plain `psql` is refused.
+Each credential is decrypted, checked, re-encrypted and read back before the
+legacy copy is blanked. An installation without legacy Claude credentials
+needs no key.
+
+The migration aborts and rolls back everything (`55000`) on: a drain-check
+failure; an undecodable credential (fixed message, no material); a legacy
+Claude model connection that is not revoked
+(`legacy_connection_not_revoked`); identity or ownership ambiguity, named by
+content-free classes such as `provider_identity_mismatch` (the stored
+account id is neither the token's Claude account nor its `oauth:` or
+`setup:` derived id), `personal_workspace_owner_ambiguous`,
+`personal_owner_missing`, `unrepresentable_status`, `unrepresentable_scope`,
+`session_owner_ambiguous`, `personal_generation_ambiguous` or
+`pin_pool_ambiguous`; `lease_conflict`, `waiter_conflict` or
+`waiter_workflow_mismatch`; pre-existing core Claude state; or a parity
+mismatch (`0748 parity mismatch (<metrics>)`). Database errors surface only
+as `could not write the shared core (SQLSTATE <code>, <constraint>)`. Fix the
+named legacy rows and run the migrator again; nothing was committed.
+
+**5. Provision roles and start.** Run `db:provision-roles` (the runtime role
+keeps only `SELECT` on the six legacy Claude tables), then start only
+binaries of this release. Readiness refuses a database without the `claude`
+receipt (`opengeni_private.subscription_provider_cutover_committed('claude')`);
+an older binary must never be restarted after it.
+
+**6. Validate after start.**
+
+- Runtime posture is ready on every API and worker.
+- The 0747 report query with `provider = 'claude'` returns no rows, and
+  `compat:dependent_sources_without_record` is zero. Claude adds these
+  `disposition:*` rows to 0747's: `auth_recovery_unmapped` (a live
+  `claudeAuthRecovery` value naming no moved credential; nothing to bound),
+  `auth_recovery_not_current` (a live value naming a duplicate login, now an
+  alias, or an older credential version; no receipt),
+  `auth_recovery_malformed` (a value without a credential id and a positive
+  version; ignored), `usage_rows_stale` (a usage row of an older credential
+  version; only the legacy `exhausted_until` moved), `usage_snapshot_unreadable`
+  (a current usage row that does not decode; the connection's usage is
+  unknown until its first reading) and `usage_reconnect_pending` (the last
+  usage refresh asked for a reconnect; it stays a quota fact and the
+  connection status is unchanged). The `local_pool_freeze_locked:<workspace>`
+  and `local_rotation_locked:<workspace>` rows list each workspace whose
+  Claude source, rotation or primary the organization's lock kept.
+  `readiness:owners_with_multiple_current_personal_generations` is zero for
+  `claude`.
+- Every organization has `subscription_provider_cutovers (provider = 'claude',
+  enabled = true)`.
+- Waiting Claude turns keep their waiter (same id, generation and wake
+  revisions) and resume through the core; no workflow reset is needed. A
+  live turn that had already spent its one forced token refresh of a
+  connection's current credential has an `unauthorized` row in
+  `subscription_turn_failures` for that connection with `refusals: 0` (it
+  does not use the turn's failover bound); one that renewed a duplicate
+  login or an older version is listed as `auth_recovery_not_current`.
+
+**Release notes (behaviour users can see).**
+
+- An OAuth login and a setup token of the same Claude account stay two
+  accounts; neither is merged into the other.
+- An account a person connected for themselves (`user` scope) becomes their
+  personal connection, usable in their own private sessions in any
+  workspace that allows personal connections. Accounts connected in a
+  Personal workspace become the owner's personal connection, as for
+  SuperGrok.
+- A workspace that had its own Claude accounts keeps using only them, unless
+  the organization locks the provider settings or rotation (listed in the
+  report).
+- Work accepted before the cutover keeps exactly the accounts it was
+  accepted with; personal access is re-issued at one new generation per
+  owner.
+- Usage windows, per-model cooldowns and request restrictions of the current
+  reading carry over; a stale or unreadable reading does not (only a running
+  account exhaustion does), so such an account shows unknown usage until its
+  next reading.
+- An account whose last usage check asked for a reconnect was held out of
+  selection; after the cutover it is selectable again (and chosen first when
+  it is the primary or a session's explicit choice) until a request or the
+  next refresh shows it still needs signing in, which then marks it.
+
+**Containment and fix forward.** As for 0747, with the Claude cutover row.
+
+**With the SuperGrok cutover.** 0747 and 0748 touch disjoint legacy tables
+and only their own provider's keys, each with its own parity report and
+readiness gate. Run them in separate windows (each release carries one) or
+together as described in "With the Claude cutover" above. A release that
+carries 0748 also carries 0747, so the SuperGrok window comes first or
+shares the Claude window.
+
+### Subscription legacy retirement (0751)
+
+Migration `0751_subscription_core_legacy_retirement.sql` is a one-way
+**maintenance** migration: drained, never rolling. It retires what the
+SuperGrok (0747) and Claude (0748) cutovers left unused:
+
+- the legacy SuperGrok and Claude pool routines: account writers, pool
+  resolvers, revalidators, liveness and visibility predicates, and their
+  trigger functions;
+- the triggers and row policies that call them;
+- the 19 Codex-named twins of the provider-neutral routines and their two
+  owner-only internals;
+- 0689's unused Codex auto-assignment routine.
+
+It also gives the organization reach rows provider-free names. The table
+`opengeni_private.subscription_codex_auto_assignments` becomes
+`opengeni_private.subscription_core_auto_assignments`, replacing 0713's view
+of that name. Each row must name a connection of its own provider, and the
+`codex` column default goes.
+
+Legacy tables and columns, every cutover receipt and the `*_closed`
+restrictive policies stay. The legacy SuperGrok and Claude tables keep
+FORCE RLS without a permissive policy, so the runtime role reads no row
+from them. The migration changes no row and needs no encryption key.
+Design record:
+[subscription core, R](design/subscription-core-2026-10-07.md#r-retirement-of-the-legacy-pool-routines-and-the-codex-twins).
+
+**When.** Run it after the `xai` and `claude` cutover receipts are
+committed: in the Claude window right after 0748, or in a later window.
+Only the release that carries it, or a later one, starts on a retired
+database. Older releases refuse it because their runtime posture requires
+the dropped routines. This release refuses a database without it
+(`retired subscription <object> is present; apply the drained retirement
+migration 0751_subscription_core_legacy_retirement.sql`). Stop everything
+before migrating, and start only this release afterwards.
+
+**1. Check (before the window).** Run these queries as a superuser or
+another `BYPASSRLS` role, behind the guard from 0748 step 1. Every row of
+the first query must read `committed = true`, and the second must return no
+rows:
+
+```sql
+SELECT provider, opengeni_private.subscription_provider_cutover_committed(provider) AS committed
+FROM unnest(ARRAY['codex', 'xai', 'claude']) AS provider;
+
+SELECT auto.account_id, auto.connection_id, auto.provider, connection.provider
+FROM opengeni_private.subscription_codex_auto_assignments auto
+JOIN subscription_connections connection
+  ON connection.account_id = auto.account_id AND connection.id = auto.connection_id
+WHERE connection.provider <> auto.provider;
+```
+
+No supported path writes a reach row whose provider differs from its
+connection's provider, so investigate any such row before the window.
+Deleting it removes only that connection's reach to workspaces created
+later; an administrator can set the reach again in the access editor.
+
+**2. Stop and drain. 3. Back up.** As for 0747. Include idle pooled
+connections: the migration refuses while any application login is
+connected.
+
+**4. Migrate.** Run the TypeScript migrator as the schema owner with
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, the complete list of old
+and new runtime logins (for example `["opengeni_app"]`). Plain `psql` is
+refused, because it does not pass that list. The preflight changes nothing.
+Every refusal rolls back the whole migration, and nothing is committed:
+
+| SQLSTATE | Message | Meaning and fix |
+|---|---|---|
+| `55000` | `0751 requires explicit application database roles` or `received invalid application roles` | The role list is missing or malformed. Pass it and run again. |
+| `55000` | `0751 requires drained application sessions` | A listed login, or another non-superuser login that could execute a retired routine or write an affected table, is connected. This includes transitive `SET ROLE` access by `NOINHERIT` logins, before or after switching roles. Stop it and run again. |
+| `55000` | `0751 requires the provider cutover receipts (0712)` or `the committed cutover receipt of every provider; missing: <providers>` | A cutover has not committed. Complete 0747 or 0748 first. |
+| `55000` | `0751 found a retired routine missing or changed`, `an unexpected overload of a retired routine`, `a retired policy missing`, `a retired trigger missing or changed`, `the reach table, its view, its default or the connection key changed`, or `a reach routine` (or `reach trigger`, `reach policy`) `missing, changed or already renamed` | The schema differs from what 0747 and 0748 leave. Something changed it out of band, so do not edit around it: restore the step 3 backup or escalate. |
+| `2BP01` | `0751 found a kept object that depends on a retired routine`, `names a retired object` or `names a Codex-named reach object` | Something that stays still calls or names a retired object: a routine (SQL-standard bodies included), a policy, a trigger's `WHEN` clause or arguments, a view, a default or a `CHECK` constraint. Matching is case-insensitive and covers `format()` patterns and ordinary or dollar-quoted fragments concatenated around the provider. Escalate; never drop it by hand. |
+| `55000` | `0751 received an invalid retired name` | A defect in the migration's own lists. Escalate. |
+| `23503` | `0751 found a reach row whose provider is not its connection's` | Fix it as in step 1 and run again. |
+| `55P03` | lock timeout | A session still holds a table. Drain it and run again. |
+
+The FK validation temporarily removes FORCE RLS from
+`subscription_connections` within the migration transaction so the restricted
+schema owner can validate populated reach rows, then restores it. A refusal
+rolls back that change together with the migration; runtime sessions remain
+drained throughout.
+
+**5. Provision roles and start.** Run `db:provision-roles`. Its inventory-derived
+conditional revokes protect old owner-only helpers if provisioning runs before
+retirement and become no-ops after those objects disappear. It also revokes the
+renamed reach trigger functions by their new names. Then start only binaries
+of this release.
+
+**6. Validate after start.** Runtime posture is ready on every API and
+worker; the posture checks that every retired object is absent.
+`\d opengeni_private.subscription_core_auto_assignments` shows a table with
+`subscription_core_auto_assignments_connection_provider_fkey` and no
+`provider` default. Organization connections still reach workspaces created
+later.
+
+**Forward-only.** There is no down migration, and recovery is fix-forward.
+Before the new release has written anything, restoring the step 3 backup
+and starting the previous release is the only way back. After that,
+restoring loses every write since.
 
 ### Slack API pilot activation (0597)
 

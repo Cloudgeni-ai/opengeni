@@ -1,4 +1,4 @@
-# OpenGeni Timeline Hardening Implementation Report
+# Opengeni Timeline Hardening Implementation Report
 
 Status: merge-ready implementation; pull-request review pending
 
@@ -12,7 +12,7 @@ Baseline source: `1135a6b24e125bd65b1db6e1b19bbe54e29161f2`
 
 ## 1. One-sentence goal
 
-Make the published OpenGeni React message timeline measurably stable under real-time streaming, backward and forward history paging, reader-driven navigation, dynamic layout, and responsive viewport changes by reproducing and root-causing important defects, fixing only validated defects, and retaining deterministic regression evidence strong enough for an autonomous merge decision.
+Make the published Opengeni React message timeline measurably stable under real-time streaming, backward and forward history paging, reader-driven navigation, dynamic layout, and responsive viewport changes by reproducing and root-causing important defects, fixing only validated defects, and retaining deterministic regression evidence strong enough for an autonomous merge decision.
 
 ## 2. Reconstructed intent
 
@@ -57,7 +57,7 @@ The published `MessageTimeline` and its `useSessionEvents` integration should be
 - Older-page request ownership is fenced by the exact oldest source item and, for first-party loaders, a synchronous committed receipt.
 - Real Chromium behavior is required for browser scroll conclusions; happy-dom alone cannot represent layout, quantization, scroll anchoring, `ResizeObserver`, `IntersectionObserver`, or real scroll-event timing.
 - Existing harnesses are the starting point. Extend them instead of creating a parallel fake timeline implementation.
-- Public API compatibility matters because `@opengeni/react` is published and consumed by OpenGeni's app, examples, and CloudGeni.
+- Public API compatibility matters because `@opengeni/react` is published and consumed by Opengeni's app, examples, and CloudGeni.
 - No merge, package release, staging deployment, production mutation, or broad host rewrite is authorized by this task.
 
 ## 4. Constraints
@@ -185,7 +185,7 @@ The published `MessageTimeline` and its `useSessionEvents` integration should be
   - external-style package consumer.
 - The external CloudGeni host integration was inspected separately for its use of the
   published component with `autoFollow`; its repository-local path is intentionally not
-  treated as an OpenGeni documentation reference.
+  treated as an Opengeni documentation reference.
 
 ### Existing deterministic harnesses
 
@@ -540,7 +540,7 @@ No acceptance criterion requires subjective human verification.
 
 ### 1 — available now
 
-- OpenGeni repository and clean main baseline.
+- Opengeni repository and clean main baseline.
 - CloudGeni repository for read-only host inspection.
 - Authenticated GitHub CLI for branch/PR operations.
 - Exact Bun 1.4.0 via `bunx --bun bun@1.4.0`.

@@ -17,8 +17,11 @@ export function MarkdownText({
   suppressImages = false,
   searchTarget,
   artifactHref,
+  softLineBreaks = false,
 }: {
   text: string;
+  /** Chat message bodies: render single newlines as line breaks. */
+  softLineBreaks?: boolean;
   artifactHref?: MarkdownProps["artifactHref"];
   searchTarget?: MarkdownProps["searchTarget"];
   renderImage?: MarkdownProps["renderImage"];
@@ -33,6 +36,7 @@ export function MarkdownText({
       artifactHref={artifactHref}
       resolveLink={consoleLinkResolver}
       searchTarget={searchTarget}
+      softLineBreaks={softLineBreaks}
       streaming={streaming}
       renderImage={renderImage}
       suppressImages={suppressImages}

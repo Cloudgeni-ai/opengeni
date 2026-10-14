@@ -263,7 +263,7 @@ export interface DecodedAuthRequest {
   authToken: string | undefined;
   /** The connect username, if any (unused today; present for completeness). */
   user: string | undefined;
-  /** Client-reported process identity. OpenGeni agents use a strict
+  /** Client-reported process identity. Opengeni agents use a strict
    *  `opengeni-agent/connection/<uuid>` shape; auth-callout rejects anything
    *  else before granting machine subjects. */
   name: string | undefined;

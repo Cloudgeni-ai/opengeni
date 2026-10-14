@@ -27,7 +27,7 @@ export function useSessionBackgroundCommands(
     async (signal?: AbortSignal) => {
       if (!sessionId) return { commands: [] };
       if (!client.listSessionBackgroundCommands) {
-        throw new Error("The configured OpenGeni client does not support background commands");
+        throw new Error("The configured Opengeni client does not support background commands");
       }
       return await client.listSessionBackgroundCommands(workspaceId, sessionId, { signal });
     },
@@ -49,7 +49,7 @@ export function useSessionBackgroundCommands(
     async (commandId: string): Promise<void> => {
       if (!sessionId) return;
       if (!client.cancelSessionBackgroundCommand) {
-        throw new Error("The configured OpenGeni client does not support background commands");
+        throw new Error("The configured Opengeni client does not support background commands");
       }
       const ticket = generation.current;
       await client.cancelSessionBackgroundCommand(workspaceId, sessionId, commandId);

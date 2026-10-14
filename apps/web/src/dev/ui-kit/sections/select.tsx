@@ -264,7 +264,7 @@ export default function SelectSection() {
             preview
             options={[]}
             value={null}
-            emptyMessage="No models yet. Connect a Codex account or add OpenGeni credits in Models."
+            emptyMessage="No models yet. Connect a Codex account or add Opengeni credits in Models."
           />
         </StateCell>
 

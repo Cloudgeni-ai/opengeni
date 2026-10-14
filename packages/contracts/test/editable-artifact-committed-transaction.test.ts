@@ -10,6 +10,39 @@ const encoder = new TextEncoder();
 const U32_MASK = 0xffff_ffffn;
 
 describe("current OGACO002 committed transaction metadata", () => {
+  test("validates durable resize/reset operation bodies without changing the version", () => {
+    const dimension = (tag: number, pixels: number): Uint8Array =>
+      new FixtureWriter()
+        .u8(tag)
+        .generation(0x10n, 1n, 0x20n, 1n)
+        .u32(0xffff_ffff)
+        .u32(pixels)
+        .finish();
+    for (const [tag, pixels] of [
+      [6, 48],
+      [7, 180],
+      [6, 0],
+      [7, 0],
+      [6, 4096],
+      [7, 1],
+    ] as const) {
+      expect(
+        decodeCommittedTransactionSummary(envelope({ commands: [dimension(tag, pixels)] }))
+          .operationProtocolVersion,
+      ).toBe(2);
+    }
+    for (const [tag, pixels] of [
+      [6, 24],
+      [7, 96],
+      [6, 4097],
+      [7, 0xffff_ffff],
+    ] as const) {
+      expectInvalidCommand(dimension(tag, pixels), "dimension pixels");
+    }
+    expect(() =>
+      decodeCommittedTransactionSummary(envelope({ commands: [dimension(6, 48).subarray(0, 40)] })),
+    ).toThrow();
+  });
   test("matches the exact shared Rust-authored OGACO002 golden", () => {
     const summary = decodeCommittedTransactionSummary(unhex(fixture.committedHex));
 

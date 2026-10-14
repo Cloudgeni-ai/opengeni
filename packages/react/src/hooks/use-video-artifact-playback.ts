@@ -15,7 +15,7 @@ export function useVideoArtifactPlaybackLoader(
   return useMemo(
     () => async (artifactId: string, signal?: AbortSignal) => {
       if (typeof client.createVideoArtifactPlaybackSource !== "function") {
-        throw new Error("This OpenGeni host does not expose retained-video playback.");
+        throw new Error("This Opengeni host does not expose retained-video playback.");
       }
       return await client.createVideoArtifactPlaybackSource(
         workspaceId,

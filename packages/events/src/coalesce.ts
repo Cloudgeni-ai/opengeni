@@ -106,7 +106,7 @@ export function coalesceSessionEventDeltasWithCoverage(
       ) {
         run.text += text;
         run.textBytes += textBytes;
-        run.lastSequence = event.sequence;
+        run.lastSequence = storedCoverageEnd(event);
         continue;
       }
       // The current segment is already useful and bounded. Flush before adding
@@ -119,7 +119,7 @@ export function coalesceSessionEventDeltasWithCoverage(
 
     run = {
       first: event,
-      lastSequence: event.sequence,
+      lastSequence: storedCoverageEnd(event),
       text,
       textBytes: encoder.encode(text).byteLength,
       sandboxName,
@@ -132,6 +132,18 @@ export function coalesceSessionEventDeltasWithCoverage(
 
   flush();
   return { events: coalesced, coveredThroughBySequence };
+}
+
+/**
+ * A stored delta may already cover later sequences: a folded run (see
+ * docs/session-storage-lifecycle.md) keeps `coalescedUntil`, the last sequence
+ * whose text it holds.
+ */
+function storedCoverageEnd(event: SessionEvent): number {
+  const until = asRecord(event.payload).coalescedUntil;
+  return typeof until === "number" && Number.isSafeInteger(until) && until > event.sequence
+    ? until
+    : event.sequence;
 }
 
 function isCoalescibleDelta(event: SessionEvent): boolean {

@@ -14,7 +14,7 @@ describe("withPublicApprovalFields", () => {
         name: "umami__update_website",
         arguments: '{"id":"w1"}',
       },
-      agent: { name: "OpenGeni" },
+      agent: { name: "Opengeni" },
       toolName: "umami__update_website",
     };
     const projected = withPublicApprovalFields(first);

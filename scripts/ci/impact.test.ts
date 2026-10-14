@@ -28,6 +28,8 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
+/** The only root browser e2e that drives the real browserd (BR-7). */
+const SECRETS_FAKE_LOGIN_E2E = "test/e2e/secrets-fake-login.browser.e2e.ts";
 const CLAUDE_SUBSCRIPTION_E2E = "test/e2e/claude-subscription.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
@@ -222,7 +224,13 @@ describe("fail-closed change impact", () => {
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual([]);
-    expect(plan.guards).toEqual(["format", "docs-refs", "generated-fonts", "public-hygiene"]);
+    expect(plan.guards).toEqual([
+      "format",
+      "docs-refs",
+      "generated-fonts",
+      "public-hygiene",
+      "subscription-contract",
+    ]);
   });
 
   test.each([
@@ -245,6 +253,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-schema-contract");
     expect(plan.guards).toContain("migration-test-budgets");
+    expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
     expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
@@ -265,6 +274,20 @@ describe("fail-closed change impact", () => {
     const web = createImpactPlan(["apps/web/src/main.tsx"]);
     expect(web.guards).not.toContain("public-api");
     expect(web.guards).not.toContain("sdk-compat");
+  });
+
+  test("the subscription contract guard runs on docs-only and focused plans", () => {
+    const contract = createImpactPlan(["docs/subscription-accounts.md"]);
+    expect(contract.mode).toBe("docs");
+    expect(contract.guards).toContain("subscription-contract");
+    for (const path of [
+      "packages/testing/src/subscription-reference-model.ts",
+      "apps/web/src/main.tsx",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.guards, path).toContain("subscription-contract");
+    }
   });
 
   test("empty and invalid change sets fail closed", () => {
@@ -292,6 +315,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/chat-media-entry.browser.e2e.ts",
       CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
+      "test/e2e/codex-account.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
       COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
@@ -308,6 +332,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
+      "test/e2e/new-conversation.browser.e2e.ts",
+      "test/e2e/onepassword-catalog.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -319,13 +345,17 @@ describe("fail-closed change impact", () => {
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
+      "test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+      "test/e2e/secrets-fake-login.browser.e2e.ts",
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
+      "test/e2e/session-conversation-controller.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
+      "test/e2e/session-usage-limit.browser.e2e.ts",
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
@@ -566,7 +596,7 @@ describe("fail-closed change impact", () => {
     const plan = createImpactPlan(["packages/browserd/src/index.ts"]);
     expect(plan.mode).toBe("focused");
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
-    expect(plan.e2eTests).toEqual([]);
+    expect(plan.e2eTests).toEqual([SECRETS_FAKE_LOGIN_E2E]);
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
   });
@@ -674,7 +704,7 @@ describe("fail-closed change impact", () => {
     for (const path of ["packages/browserd/src/index.ts"]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode, path).toBe("focused");
-      expect(plan.e2eTests, path).toEqual([]);
+      expect(plan.e2eTests, path).toEqual([SECRETS_FAKE_LOGIN_E2E]);
     }
   });
 
@@ -735,7 +765,9 @@ describe("fail-closed change impact", () => {
       expect(plan.unitTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
       expect(plan.integrationTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
     }
-    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([]);
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([
+      SECRETS_FAKE_LOGIN_E2E,
+    ]);
   });
 
   test("connector account controls follow web dependencies without widening leaf plans", () => {
@@ -851,6 +883,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/chat-media-entry.browser.e2e.ts",
       CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
+      "test/e2e/codex-account.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
       COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
@@ -867,6 +900,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
+      "test/e2e/new-conversation.browser.e2e.ts",
+      "test/e2e/onepassword-catalog.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -878,13 +913,17 @@ describe("fail-closed change impact", () => {
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
+      "test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+      "test/e2e/secrets-fake-login.browser.e2e.ts",
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
+      "test/e2e/session-conversation-controller.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
+      "test/e2e/session-usage-limit.browser.e2e.ts",
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
@@ -1009,7 +1048,7 @@ describe("deterministic bounded execution", () => {
     expect(usesBrowserRunner("test/e2e/sandbox.e2e.ts")).toBe(false);
   });
 
-  test("test environments scrub ambient OpenGeni state and preserve only fail-closed DB intent", () => {
+  test("test environments scrub ambient Opengeni state and preserve only fail-closed DB intent", () => {
     expect(
       sanitizedTestEnvironment({
         PATH: "/bin",
@@ -1291,7 +1330,7 @@ describe("workflow fail-closed contracts", () => {
     expect(step).toContain("matrix.lane == 'interaction'");
     expect(step).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
     expect(step).toContain(
-      "--test-name-pattern 'desktop expanded header keeps icon-only search inline'",
+      "--test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'",
     );
     expect(step).toContain("./test/e2e/session-search.browser.e2e.ts");
     expect(ci).toContain("name: session-search-header-evidence");

@@ -20,7 +20,15 @@ export function isRetainedImageContentType(contentType: string): boolean {
   ].includes(contentType);
 }
 
-/** Deliberately published images are primary output, not incidental screenshots. */
+/** A published patch, applied locally with `git apply`. */
+export function isPatchFilename(filename: string): boolean {
+  return /\.(patch|diff)$/iu.test(filename.trim());
+}
+
+/**
+ * Deliberately published images and patches are primary output, not
+ * incidental screenshots or work files.
+ */
 export function activityPresentsImage(items: readonly ActivityItem[]): boolean {
   return items.some((item) => {
     if (item.kind !== "tool-call") return false;
@@ -30,7 +38,13 @@ export function activityPresentsImage(items: readonly ActivityItem[]): boolean {
     const output = normalizeMcpOutput(item.output);
     if (output.isError) return false;
     const receipt = parseSandboxFileArtifactReceipt(output.text);
-    return receipt !== null && isRetainedImageContentType(receipt.artifact.contentType);
+    return (
+      receipt !== null &&
+      (isRetainedImageContentType(receipt.artifact.contentType) ||
+        // A published patch is the deliverable when there's no pull request:
+        // keep its card (with the apply command) visible like an image.
+        isPatchFilename(receipt.filename))
+    );
   });
 }
 

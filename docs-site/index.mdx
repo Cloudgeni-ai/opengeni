@@ -1,22 +1,24 @@
 ---
 title: "Add agents that finish real work to your product"
 sidebarTitle: "Introduction"
-description: "OpenGeni is the open, self-hostable runtime for long-running AI agents. Embed a complete agent conversation in your product, use it with your team, or run it on your own infrastructure."
+description: "Opengeni is the open, self-hostable runtime for long-running AI agents. Embed a complete agent conversation in your product, use it with your team, or run it on your own infrastructure."
 icon: "house"
 ---
 
-OpenGeni gives your product an agent that does real work: it calls your APIs, asks for approval before it acts, pauses for answers, and keeps going until the job is done. You add one backend route and one React component. OpenGeni runs the sessions, streaming, approvals, history, and compute.
+Opengeni gives your product an agent that does real work: it calls your APIs, asks for approval before it acts, pauses for answers, and keeps going until the job is done. You add one backend route and one React component. Opengeni runs the sessions, streaming, approvals, history, and compute.
 
-<img
-  className="block dark:hidden"
-  src="/images/embedded-conversation.png"
-  alt="The OpenGeni conversation embedded in a support product, asking to approve a refund"
-/>
-<img
-  className="hidden dark:block"
-  src="/images/embedded-conversation-dark.png"
-  alt="The OpenGeni conversation embedded in a support product, asking to approve a refund"
-/>
+## How it works
+
+1. Sign up at [app.opengeni.ai](https://app.opengeni.ai) and get an API key.
+2. Add one backend route and `<OpenGeniChat />` to your app, or let Opengeni or your coding agent do it.
+3. Your users get agents in your product that call your APIs, ask before acting, and finish the work.
+
+<Frame>
+  <img
+    src="/images/opengeni-app.png"
+    alt="The Opengeni web app: an agent found the cause of checkout errors, ran tests, opened a pull request, and is asking for approval to release the fix to production"
+  />
+</Frame>
 
 ## Choose your path
 
@@ -25,7 +27,7 @@ OpenGeni gives your product an agent that does real work: it calls your APIs, as
     Add the full agent conversation to your app. Hand the integration to your coding agent, or
     follow four manual steps.
   </Card>
-  <Card title="Use OpenGeni for your team" icon="users" href="/quickstart">
+  <Card title="Use Opengeni for your team" icon="users" href="/quickstart">
     Sign in at app.opengeni.ai, connect a model, and give agents work from the web app.
   </Card>
   <Card title="Self-host" icon="server" href="/guides/self-host">
@@ -35,7 +37,14 @@ OpenGeni gives your product an agent that does real work: it calls your APIs, as
 
 ## The fastest way to embed
 
-Most teams integrate OpenGeni with a coding agent such as Claude Code, Codex, or Cursor. Give it the `opengeni-client` skill and one prompt, and it wires up your backend, your users, and the UI. See [Embed with your coding agent](/embed-with-a-coding-agent).
+Most teams integrate Opengeni with a coding agent such as Claude Code, Codex, or Cursor. Install the Opengeni plugin, give your agent one prompt, and it wires up your backend, your users, and the UI.
+
+```bash
+claude plugin marketplace add Cloudgeni-ai/opengeni && claude plugin install opengeni@opengeni --scope user
+# or: codex plugin marketplace add Cloudgeni-ai/opengeni && codex plugin add opengeni@opengeni
+```
+
+See [Embed with your coding agent](/embed-with-a-coding-agent) and the [plugin guide](/guides/developer-plugin).
 
 ## What you get
 
@@ -51,7 +60,7 @@ Most teams integrate OpenGeni with a coding agent such as Claude Code, Codex, or
 
 <CardGroup cols={2}>
   <Card title="How it fits together" icon="diagram-project" href="/integrate/how-it-fits-together">
-    The browser, your backend, and OpenGeni, and how tenants map to workspaces.
+    The browser, your backend, and Opengeni, and how tenants map to workspaces.
   </Card>
   <Card title="Concepts" icon="book" href="/concepts/sessions">
     Sessions, turns, goals, approvals, compute targets, and knowledge.

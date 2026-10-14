@@ -1,6 +1,9 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { Client, Server, ServerCredentials, status, type ServiceDefinition } from "@grpc/grpc-js";
-import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import { runInNewContext } from "node:vm";
+import protobuf from "protobufjs";
+import * as t from "oxc-parser";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -414,22 +417,137 @@ test("isolated ambient profile/pair/endpoint values cannot replace the explicit 
   expect(f.calls).toEqual(["auth", "namespace"]);
 }, 10_000);
 
-test("wire projection remains pinned to the installed 0.9.0 generated source and exact field bytes", () => {
-  const source = readFileSync(new URL(import.meta.resolve("modal")), "utf8");
-  expect(createHash("sha256").update(source).digest("hex")).toBe(
-    "bb830ded1925e1d927d1fc221b2329d961f9a57eafdd9a85bf13fb7cfc982599",
+// Inspect only the generated read descriptors/codecs. Do not construct an SDK
+// client, read ambient configuration, or execute the rest of the SDK bundle.
+function installedReadProjection(source: string) {
+  const parsed = t.parseSync("modal.js", source);
+  if (parsed.errors.length) throw new Error("Invalid generated SDK source");
+  const declarations = parsed.program.body.flatMap((statement) =>
+    statement.type === "VariableDeclaration" ? statement.declarations : [],
   );
-  for (const name of ["AuthTokenGet", "WorkspaceNameLookup", "TaskGetCommandRouterAccess"])
-    expect(source).toContain(`name: "${name}"`);
+  const object = (name: string) => {
+    const initializer = declarations.find(
+      (item) => item.id.type === "Identifier" && item.id.name === name,
+    )?.init;
+    if (!initializer || initializer.type !== "ObjectExpression")
+      throw new Error(`Missing generated SDK object ${name}`);
+    return initializer;
+  };
+  const property = (value: t.ObjectExpression, name: string) => {
+    const member = value.properties.find(
+      (item) =>
+        item.type === "Property" && item.key.type === "Identifier" && item.key.name === name,
+    );
+    if (!member || member.type !== "Property")
+      throw new Error(`Missing generated SDK property ${name}`);
+    return member;
+  };
+  const clientDefinition = object("ModalClientDefinition");
+  const methods = property(clientDefinition, "methods").value;
+  if (methods.type !== "ObjectExpression") throw new Error("Missing SDK methods");
+  const codec = (name: string) => {
+    const value = object(name);
+    const codecMethods = ["encode", "decode"].map((method) => {
+      const member = property(value, method);
+      if (!member.method || member.value.type !== "FunctionExpression")
+        throw new Error(`Missing SDK codec ${method}`);
+      return source.slice(member.start, member.end);
+    });
+    const base = parsed.program.body.find(
+      (item) => item.type === "FunctionDeclaration" && item.id?.name === `createBase${name}`,
+    );
+    if (!base) throw new Error(`Missing SDK defaults ${name}`);
+    return runInNewContext(`${source.slice(base.start, base.end)}; ({${codecMethods.join(",")}})`, {
+      BinaryReader: protobuf.Reader,
+      BinaryWriter: protobuf.Writer,
+    }) as {
+      encode(input: object): protobuf.Writer;
+      decode(input: Uint8Array): object;
+    };
+  };
+  return {
+    codec,
+    method(name: string) {
+      const value = property(methods, name).value;
+      if (value.type !== "ObjectExpression") throw new Error(`Missing SDK RPC ${name}`);
+      return Object.fromEntries(
+        ["name", "requestType", "requestStream", "responseType", "responseStream"].map((key) => {
+          const item = property(value, key).value;
+          return [key, item.type === "Literal" ? item.value : source.slice(item.start, item.end)];
+        }),
+      );
+    },
+    fullName: property(clientDefinition, "fullName").value,
+  };
+}
+
+test("wire projection matches installed Modal 0.9.0 read RPCs and exact field bytes", () => {
+  const require = createRequire(import.meta.resolve("modal"));
+  expect(require("modal/package.json").version).toBe("0.9.0");
+  const source = readFileSync(new URL(import.meta.resolve("modal")), "utf8");
+  // Command-router transport patches may change bundle bytes without changing
+  // these read RPCs. Guard the actual generated schema, not unrelated code.
+  const sdk = installedReadProjection(source);
+  expect(sdk.fullName).toMatchObject({ type: "Literal", value: "modal.client.ModalClient" });
+  for (const [method, name, requestType, responseType] of [
+    ["authTokenGet", "AuthTokenGet", "AuthTokenGetRequest", "AuthTokenGetResponse"],
+    ["workspaceNameLookup", "WorkspaceNameLookup", "Empty", "WorkspaceNameLookupResponse"],
+    [
+      "taskGetCommandRouterAccess",
+      "TaskGetCommandRouterAccess",
+      "TaskGetCommandRouterAccessRequest",
+      "TaskGetCommandRouterAccessResponse",
+    ],
+  ])
+    expect(sdk.method(method!)).toEqual({
+      name,
+      requestType,
+      responseType,
+      requestStream: false,
+      responseStream: false,
+    });
   const samples = [
-    ["AuthToken", { token: "t" }, "0a0174"],
-    ["Namespace", { workspaceName: "w", username: "u" }, "0a0177120175"],
-    ["Task", { taskId: "t" }, "0a0174"],
-    ["RouterAccess", { jwt: "j", url: "u" }, "0a016a120175"],
+    ["Empty", "AuthTokenGetRequest", {}, ""],
+    ["Empty", "Empty", {}, ""],
+    ["AuthToken", "AuthTokenGetResponse", { token: "t" }, "0a0174"],
+    [
+      "Namespace",
+      "WorkspaceNameLookupResponse",
+      { workspaceName: "w", username: "u" },
+      "0a0177120175",
+    ],
+    ["Task", "TaskGetCommandRouterAccessRequest", { taskId: "t" }, "0a0174"],
+    ["RouterAccess", "TaskGetCommandRouterAccessResponse", { jwt: "j", url: "u" }, "0a016a120175"],
   ] as const;
-  for (const [name, input, hex] of samples) {
+  for (const [name, generated, input, hex] of samples) {
     const type = modalOriginalReadSchema.lookupType(name);
     expect(Buffer.from(type.encode(type.fromObject(input)).finish()).toString("hex")).toBe(hex);
     expect(type.toObject(type.decode(Buffer.from(hex, "hex")))).toEqual(input);
+    const codec = sdk.codec(generated);
+    expect(Buffer.from(codec.encode(input).finish()).toString("hex")).toBe(hex);
+    expect(codec.decode(Buffer.from(hex, "hex"))).toEqual(input);
   }
+  // Generated decoding supplies empty defaults; the narrow projection keeps
+  // absent fields absent so username-only output retains honest provenance.
+  const usernameOnly = Buffer.from("120175", "hex");
+  expect(sdk.codec("WorkspaceNameLookupResponse").decode(usernameOnly)).toEqual({
+    workspaceName: "",
+    username: "u",
+  });
+  expect(
+    modalOriginalReadSchema
+      .lookupType("Namespace")
+      .toObject(modalOriginalReadSchema.lookupType("Namespace").decode(usernameOnly)),
+  ).toEqual({ username: "u" });
+  // A token on a different field must not become authenticated read output.
+  expect(sdk.codec("AuthTokenGetResponse").decode(Buffer.from("1a0174", "hex"))).toEqual({
+    token: "",
+  });
+  expect(
+    modalOriginalReadSchema
+      .lookupType("AuthToken")
+      .toObject(
+        modalOriginalReadSchema.lookupType("AuthToken").decode(Buffer.from("1a0174", "hex")),
+      ),
+  ).toEqual({});
 });

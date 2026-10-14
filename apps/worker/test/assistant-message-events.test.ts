@@ -20,7 +20,10 @@ import {
 } from "@opengeni/testing";
 import OpenAI from "openai";
 import { createActivityTestHarness } from "../src/activities";
-import { latestDurableTurnMessageText } from "../src/activities/agent-turn/input-wait-reply";
+import {
+  INPUT_WAIT_REPLY_REFUSAL,
+  latestDurableTurnMessageText,
+} from "../src/activities/agent-turn/input-wait-reply";
 
 /** One Responses API stream: each message is announced, streamed, then done. */
 function responsesStream(
@@ -187,7 +190,10 @@ describe("assistant message events from a real agent turn", () => {
               name: "wait_for_input",
               parameters: { type: "object", properties: {}, additionalProperties: false },
               strict: false,
-              execute: () => {
+              execute: async () => {
+                // Same admission order as the first-party MCP wrapper.
+                const refusal = await agentOptions?.inputWaitYield?.replyRefusal();
+                if (refusal) return { isError: true, error: refusal };
                 agentOptions?.inputWaitYield?.beginWait()(true);
                 return { status: "waiting_for_input" };
               },
@@ -313,6 +319,34 @@ describe("assistant message events from a real agent turn", () => {
     expect(
       await latestDurableTurnMessageText(client.db, { ...scope, turnId: crypto.randomUUID() }),
     ).toBeNull();
+  }, 60_000);
+
+  test("a person's turn that waits before any visible reply is sent back to answer first", async () => {
+    const status = "Four more pieces merged overnight; the worker is on the next one.";
+    const model = new ScriptedModel([
+      // The status drafted only in reasoning: the wait alone would end the turn silently.
+      { output: [functionCall("wait_for_input", {}, "call_silent_wait")] as never },
+      {
+        output: [
+          { ...assistantMessage(status, "msg_status"), phase: "commentary" },
+          functionCall("wait_for_input", {}, "call_wait"),
+        ] as never,
+      },
+      { error: new Error("a yielded wait must not reach another inference") },
+    ]);
+    const events = await runTurn(model, "chat", { waitForInputTool: true });
+    expect(model.calls).toBe(2);
+    const outputs = events.filter((event) => event.type === "agent.toolCall.output");
+    expect(JSON.stringify(outputs[0]?.payload)).toContain(INPUT_WAIT_REPLY_REFUSAL);
+    expect(
+      events
+        .filter((event) => event.type === "agent.message.completed")
+        .map((event) => event.payload),
+    ).toEqual([{ text: status, messageId: "msg_status", phase: "commentary" }]);
+    expect(events.find((event) => event.type === "turn.completed")?.payload).toEqual({
+      output: "",
+      reply: status,
+    });
   }, 60_000);
 
   test("an agent-spawned child's first turn that waits for input records no reply", async () => {

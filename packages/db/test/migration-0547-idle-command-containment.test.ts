@@ -250,9 +250,13 @@ describe("0547 idle command containment", () => {
     expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
     await admin`update sandbox_leases set reaper_hold_id = null, reaper_hold_until = null,
       reaper_hold_reason = null where id = ${fixture.leaseId}`;
-    await admin`update session_turns set status = 'requires_action'
+    await admin`update session_turns set status = 'waiting_capacity'
       where session_id = ${fixture.sessionId}`;
     expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
+    // A turn parked for a person's answer is not use (0687).
+    await admin`update session_turns set status = 'requires_action'
+      where session_id = ${fixture.sessionId}`;
+    expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
     await admin`update session_turns set status = 'completed' where session_id = ${fixture.sessionId}`;
     await unusedFor(fixture, 31);
     expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
@@ -317,7 +321,7 @@ describe("0547 idle command containment", () => {
         [
           "open turn",
           () =>
-            admin`update session_turns set status = 'requires_action' where id = ${attempt!.turn_id}`,
+            admin`update session_turns set status = 'waiting_capacity' where id = ${attempt!.turn_id}`,
           () => admin`update session_turns set status = 'completed' where id = ${attempt!.turn_id}`,
         ],
         [
@@ -329,11 +333,18 @@ describe("0547 idle command containment", () => {
         ],
         [
           "pending machine input",
-          () => admin`insert into session_system_updates (
-              account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
-            ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId},
-              'agent_message', ${crypto.randomUUID()}, ${`probe-${crypto.randomUUID()}`},
-              'probe', ${admin.json({ type: "agent_message" })})`,
+          // The subscription authority compat check reads the new row back
+          // under FORCE RLS, whose session visibility requires the runtime's
+          // 0352 protocol marker; stamp it exactly as the runtime does.
+          () =>
+            admin.begin(async (tx) => {
+              await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+              await tx`insert into session_system_updates (
+                account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
+              ) values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId},
+                'agent_message', ${crypto.randomUUID()}, ${`probe-${crypto.randomUUID()}`},
+                'probe', ${tx.json({ type: "agent_message" })})`;
+            }),
           () =>
             admin`update session_system_updates set state = 'superseded'
               where session_id = ${fixture.sessionId}`,

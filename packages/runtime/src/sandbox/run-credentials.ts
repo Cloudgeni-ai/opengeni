@@ -210,7 +210,7 @@ function assertEnvironmentName(name: string, label: string): void {
 
 /**
  * Validate the untrusted host-port response before any secret is written to a
- * box. The host owns credential selection; OpenGeni owns scope checks, bounds,
+ * box. The host owns credential selection; Opengeni owns scope checks, bounds,
  * path safety, and the transport lifecycle.
  */
 export function normalizeRunCredentialsResolution(

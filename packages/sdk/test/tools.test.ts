@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient as CurrentOpenGeniClient } from "../src/client";
+// Retain all v1 discovery/approval regressions through the explicit compatibility mode.
+class OpenGeniClient extends CurrentOpenGeniClient {
+  constructor(options: ConstructorParameters<typeof CurrentOpenGeniClient>[0]) {
+    super({ toolGatewayMode: "catalog", ...options });
+  }
+}
 import { OpenGeniToolCallError, OpenGeniToolReapprovalRequiredError } from "../src/tools";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 
@@ -56,6 +62,34 @@ function staleCatalogResponse(): Response {
 }
 
 describe("OpenGeniClient tools", () => {
+  test("retained catalog HTTP calls veto uncertain and explicitly nonretryable stale responses", async () => {
+    for (const flags of [
+      { retryable: true, outcomeUnknown: true },
+      { retryable: false, outcomeUnknown: false },
+      { retryable: false, outcomeUnknown: true },
+    ]) {
+      const paths: string[] = [];
+      let effects = 0;
+      const client = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        fetch: (async (input) => {
+          const path = String(input).split("/").at(-1)!;
+          paths.push(path);
+          if (path === "catalog") return response(catalog);
+          effects++;
+          return response(
+            { error: { code: "conflict", details: { code: "catalog_stale" }, ...flags } },
+            409,
+          );
+        }) as typeof fetch,
+      });
+      await expect(
+        client.tools.forWorkspace(workspaceId).$call(catalog.entries[0]!.identity),
+      ).rejects.toMatchObject(flags);
+      expect(paths).toEqual(["catalog", "calls"]);
+      expect(effects).toBe(1);
+    }
+  });
   test("loads one catalog and invokes a generated path through the HTTP adapter", async () => {
     const requests: Request[] = [];
     const client = new OpenGeniClient({

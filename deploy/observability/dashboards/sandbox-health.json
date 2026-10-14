@@ -1,6 +1,6 @@
 {
   "uid": "opengeni-sandbox-health",
-  "title": "OpenGeni · Sandbox Health",
+  "title": "Opengeni · Sandbox Health",
   "description": "Provider operations, sandbox lifecycle, durable recovery, and reconciliation. Database inventory panels admit only fresh projections and never sum replicated control-worker gauges.",
   "schemaVersion": 39,
   "version": 2,
@@ -915,6 +915,72 @@
         "w": 24,
         "h": 8
       }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Unsaved sandbox changes",
+      "description": "Live Modal sandboxes with a write their last checkpoint did not capture, by age of the first such write. A box past 12h fires OpenGeniSandboxCheckpointStale.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_checkpoint_staleness:fresh_max",
+          "legendFormat": "{{kind}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 131, "w": 12, "h": 8 }
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Skipped warm checkpoints",
+      "description": "Warm checkpoint attempts that could not start, by fixed reason. A blocked checkpoint is retried on every turn heartbeat.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(opengeni_workspace_capture_skipped_total[5m]))",
+          "legendFormat": "{{reason}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 131, "w": 12, "h": 8 }
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Oldest unsaved sandbox change",
+      "description": "Age of the oldest write a live Modal sandbox's last checkpoint did not capture. Fresh inventory only; a replica that stopped refreshing drops out.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:sandbox_checkpoint_age_max_seconds:fresh_max",
+          "legendFormat": "oldest",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 139, "w": 12, "h": 8 }
     }
   ]
 }

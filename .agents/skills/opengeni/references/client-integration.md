@@ -1,6 +1,6 @@
 # Client Integration Reference
 
-Use this when building or explaining a client that consumes OpenGeni as a service. The client may be a SaaS product, internal portal, CLI, SDK, workflow engine, or custom UI. Do not assume the OpenGeni source repo is checked out locally.
+Use this when building or explaining a client that consumes Opengeni as a service. The client may be a SaaS product, internal portal, CLI, SDK, workflow engine, or custom UI. Do not assume the Opengeni source repo is checked out locally.
 
 Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`.
 
@@ -16,18 +16,18 @@ runtime sessions.
 
 Ask or infer:
 
-- API base URL for the deployed OpenGeni service.
-- Product tenant identity and its persisted OpenGeni organization-workspace id,
+- API base URL for the deployed Opengeni service.
+- Product tenant identity and its persisted Opengeni organization-workspace id,
   or the stable external mapping used by `ensureWorkspace`.
 - Whether the user needs a browser UI, server-side integration, CLI, SDK wrapper, or docs.
 - Whether file upload, repository attachment, MCP tools, approvals, interrupts, or schedules are in scope.
 - Which product access mode the target uses: `local`, `configured`, or `managed`.
-- Whether the deployment shared-key boundary is enabled, and whether a product gateway, reverse proxy, VPN, or tenancy layer sits in front of OpenGeni.
+- Whether the deployment shared-key boundary is enabled, and whether a product gateway, reverse proxy, VPN, or tenancy layer sits in front of Opengeni.
 - Whether exact source behavior is needed. If yes, inspect the repo or the deployed service contract rather than trusting this reference.
 
 ## Client Mental Model
 
-A client should treat OpenGeni as a durable agent-work API:
+A client should treat Opengeni as a durable agent-work API:
 
 1. Read client config and capabilities.
 2. For an external product, load the server-held organization API key and call
@@ -44,7 +44,7 @@ A client should treat OpenGeni as a durable agent-work API:
 9. Handle approvals, interrupts, failed states, and reconnect/replay.
 10. Optionally create and manage scheduled tasks.
 
-The client should not talk directly to the worker, NATS, Temporal, Postgres, or sandbox backend. Those are OpenGeni internals.
+The client should not talk directly to the worker, NATS, Temporal, Postgres, or sandbox backend. Those are Opengeni internals.
 
 ## Discover The Current Public Surface
 
@@ -104,7 +104,7 @@ The client should not send large file bytes through session creation. Use the up
 
 1. Create a workspace-scoped upload with filename, content type, size, and optional checksum.
 2. PUT bytes to the returned object-storage URL with required headers.
-3. Complete the upload so OpenGeni verifies metadata and marks the file ready.
+3. Complete the upload so Opengeni verifies metadata and marks the file ready.
 4. Attach the resulting file id as a file resource on a session, turn, or scheduled task.
 
 Do not show file resources as usable until upload completion returns a ready file.
@@ -118,7 +118,7 @@ Client UX should distinguish:
 - **File attachments**: upload, then attach by file id.
 - **Repository attachments**: select repo URL/ref/mount information; GitHub App metadata may be needed for scoped token minting.
 - **Tool providers**: select configured MCP server ids, such as document search or custom enterprise search.
-- **Compute target**: expose only if the product wants users to choose where a session runs; otherwise use deployment defaults. Two distinct axes: a managed **sandbox backend** (a platform-owned ephemeral box; the `sandboxBackend` enum) versus an enrolled **Connected Machine** (user-owned compute addressed by `targetSandboxId` + an optional `workingDir`, run as first-class primary compute — no cloud box behind it, its own git auth, repos not cloned onto it). Do not conflate a **self-hosted deployment** (an operator running the whole OpenGeni service themselves — the `configured` product access mode) with a **Connected Machine** (an end user attaching their own machine as a session's compute, possible inside any deployment, managed or self-hosted). `selfhosted` is only the internal `sandboxBackend` enum value for a Connected Machine; prefer the product term in UI copy.
+- **Compute target**: expose only if the product wants users to choose where a session runs; otherwise use deployment defaults. Two distinct axes: a managed **sandbox backend** (a platform-owned ephemeral box; the `sandboxBackend` enum) versus an enrolled **Connected Machine** (user-owned compute addressed by `targetSandboxId` + an optional `workingDir`, run as first-class primary compute — no cloud box behind it, its own git auth, repos not cloned onto it). Do not conflate a **self-hosted deployment** (an operator running the whole Opengeni service themselves — the `configured` product access mode) with a **Connected Machine** (an end user attaching their own machine as a session's compute, possible inside any deployment, managed or self-hosted). `selfhosted` is only the internal `sandboxBackend` enum value for a Connected Machine; prefer the product term in UI copy.
 
 ## Approvals And Interrupts
 

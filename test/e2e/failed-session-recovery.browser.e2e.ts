@@ -262,7 +262,7 @@ for (const lane of ["checkpoint", "fresh_workspace"] as const) {
           expect(text).toContain("Newer files are unavailable.");
         } else {
           expect(text).toContain(
-            "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+            "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
           );
         }
         expect(await banner.getByRole("button").count()).toBe(1);

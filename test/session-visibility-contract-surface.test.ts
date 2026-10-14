@@ -12,15 +12,24 @@ import { join } from "node:path";
 // literals, and a `session.visibility.changed` event type. The surrounding
 // database authority (owner derivation on insert, the capability-fenced direct
 // write guard, and the restrictive `session_visibility_isolation` policies) is
-// ACTIVE for organizations carrying the durable activation receipt. The first
-// public caller is deliberately narrow: one core application service reached
-// by the two HTTP routes and the framework-neutral SDK, with the activation-
-// gated web control using only that SDK boundary. Worker, MCP, runtime, React,
+// ACTIVE for every organization: rolling migration 0611 retired the
+// per-organization activation receipt prerequisite. The first public caller is
+// deliberately narrow: one core application service reached by the two HTTP
+// routes and the framework-neutral SDK, with the web control using only that
+// SDK boundary. Worker, MCP, runtime, React,
 // cross-workspace, attachment, and personal-grant callers remain forbidden.
 // ---------------------------------------------------------------------------
 
 const repo = join(import.meta.dir, "..");
 
+/** Owner-only preview reads, named by the visibility-work reader instead of the adapter. */
+const OWNER_PREVIEW_ROUTINES = [
+  // 0768's preview of a standing block; since 0769 it always answers NULL and
+  // stays granted only for older releases.
+  "session_visibility_change_blocker",
+  // Owner-only counts of other people's access a private change drops (0769).
+  "session_visibility_foreign_authority_items",
+] as const;
 const SQL_ENTRY_POINTS = [
   "transition_session_visibility",
   "fork_session_content",
@@ -30,11 +39,14 @@ const SQL_ENTRY_POINTS = [
   // functions: it is granted to `opengeni_app`, so any new importer would
   // otherwise pass every guard in the tree.
   "replay_applied_session_fork",
+  ...OWNER_PREVIEW_ROUTINES,
 ] as const;
 const ADAPTER_ENTRY_POINTS = [
   "transitionSessionVisibility",
   "forkSessionContent",
   "replayAppliedSessionFork",
+  "inspectSessionVisibilityChange",
+  "stopSessionWorkForVisibilityChange",
 ] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
 const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
@@ -65,7 +77,18 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0502_active_message_boundary_forks.sql",
   // Check only copied history for compaction when forking at a retained message.
   "packages/db/drizzle/0513_message_fork_prefix_compaction.sql",
+  // Lets an Only-me session keep its shared sandbox group: flips only the
+  // singleton-group assertion in the visibility transition and fork bodies.
+  "packages/db/drizzle/0738_private_sessions_share_sandboxes.sql",
+  // Settles leftovers inside the private transition and adds the owner-only
+  // blocker preview; same owner-only boundary and locks.
+  "packages/db/drizzle/0768_private_visibility_ignores_leftovers.sql",
+  // Never refuses the private transition: drops other people's pending
+  // updates and account choices inside it; same owner-only boundary and locks.
+  "packages/db/drizzle/0769_private_visibility_never_blocks.sql",
   "packages/db/src/session-tenancy.ts",
+  // Reads the owner-only foreign-authority counts for the preview and consent.
+  "packages/db/src/session-visibility-work.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",
 ]);
@@ -123,18 +146,71 @@ describe("session visibility and fork product activation stays on its exact publ
 
   test("the adapter still exists so the db test lane keeps proving the fenced behaviour", async () => {
     const adapter = await readFile(join(repo, "packages/db/src/session-tenancy.ts"), "utf8");
+    const previews = new Set<string>(OWNER_PREVIEW_ROUTINES);
     for (const marker of [...SQL_ENTRY_POINTS, ...ADAPTER_ENTRY_POINTS]) {
-      expect(adapter).toContain(marker);
+      if (!previews.has(marker)) expect(adapter).toContain(marker);
     }
+    const workReader = await readFile(
+      join(repo, "packages/db/src/session-visibility-work.ts"),
+      "utf8",
+    );
+    expect(workReader).toContain("session_visibility_foreign_authority_items");
     const posture = await readFile(join(repo, "packages/db/src/runtime-posture.ts"), "utf8");
     for (const marker of SQL_ENTRY_POINTS) {
       expect(posture).toContain(marker);
     }
     expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
-    // One probe plus the exact version supplied to visibility transition, the
+    // The exact frozen protocol version supplied to visibility transition, the
     // base and runtime-configured fork paths, and both applied-fork receipt
-    // recovery paths.
-    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(6);
+    // recovery paths. There is no activation probe since 0611.
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(5);
+  });
+
+  test("no product path consults a per-organization activation receipt (0611)", async () => {
+    const migration = await readFile(
+      join(repo, "packages/db/drizzle/0611_universal_session_tenancy_activation.sql"),
+      "utf8",
+    );
+    expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    for (const routine of [
+      "session_tenancy_product_activated(uuid,integer)",
+      "session_tenancy_any_product_activation()",
+      "list_self_user_resource_authorities(uuid,uuid,text,uuid,integer)",
+      "issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,integer,boolean)",
+      "revoke_self_user_resource_grant(uuid,uuid,uuid)",
+      "accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)",
+      "organization_private_sessions_enabled(uuid)",
+      "get_organization_private_session_settings(uuid,text)",
+      "update_organization_private_session_settings(uuid,text,boolean,bigint,uuid)",
+    ]) {
+      expect(migration).toContain(routine);
+    }
+    const roots = [
+      "apps/api/src",
+      "apps/worker/src",
+      "apps/web/src",
+      "packages/core/src",
+      "packages/db/src",
+      "packages/runtime/src",
+      "packages/sdk/src",
+      "packages/react/src",
+      "scripts",
+    ];
+    for (const root of roots) {
+      for (const file of await sourceFiles(root)) {
+        const content = await readFile(join(repo, file), "utf8");
+        for (const marker of [
+          "sessionTenancyProductActivated",
+          "select session_tenancy_any_product_activation()",
+          "organizationTenancyCanonicalActivationEnabled",
+        ]) {
+          expect(
+            content.includes(marker),
+            `${file} must not gate on per-organization session-tenancy activation (${marker})`,
+          ).toBe(false);
+        }
+      }
+    }
   });
 
   test("the two authorization operations are enforced only by core and the HTTP classifier", async () => {

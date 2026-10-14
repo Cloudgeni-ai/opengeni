@@ -609,6 +609,14 @@ export function registerEditableArtifactRoutes(
     const body = await parseBoundedMaterializationRequest(context);
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
+    // Without a materializer workload the job would stay queued forever.
+    if (!deps.settings.artifactMaterializerDeployed) {
+      throw new ApiHttpError(503, {
+        code: "upstream_unavailable",
+        message: "File export is not available on this deployment.",
+        retryable: false,
+      });
+    }
     try {
       const result = await requireEditableArtifactExports(deps).enqueueMaterialization({
         scope,

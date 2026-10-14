@@ -44,6 +44,8 @@ type RouterEntry = {
   idle?: ReturnType<typeof setTimeout>;
 };
 type RouterLookup = { controller: AbortController; waiters: number; settled: boolean };
+/** A post-EOF exit re-poll may finish this long after the read deadline. */
+const REPOLL_GRACE_MS = 250;
 type ControlObservation = { command: ModalRouterProviderCommand; output: string };
 type SupervisionControlResult = {
   state: "idle" | "running" | "quiescent";
@@ -832,7 +834,9 @@ export class ModalCommandControl {
           .value;
         const stderr = (results[1] as PromiseFulfilledResult<{ bytes: Buffer; eof: boolean }>)
           .value;
-        const exit = (results[2] as PromiseFulfilledResult<number | null>).value;
+        let exit = (results[2] as PromiseFulfilledResult<number | null>).value;
+        if (exit === null && stdout.eof && stderr.eof)
+          exit = await this.pollAfterEof(router, command, cancellation.signal, deadline);
         return collectModalRawOutputPage(
           command,
           { stdout, stderr },
@@ -842,6 +846,51 @@ export class ModalCommandControl {
     } finally {
       clearTimeout(lookupTimeout);
       signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  /** TaskExecPoll is a point-in-time status, issued concurrently with stream
+   * reads that may wait for EOF. A poll answered before the command exited
+   * reports "running" even when both streams then finish, and callers that
+   * read once (internal Channel-A commands) would treat a finished command as
+   * still running. After both streams reach EOF, poll again within this read's
+   * existing budget. EOF is not exit proof: a re-poll fault or an exhausted
+   * budget keeps the observed bytes and reports the exit as still unknown, and
+   * only caller cancellation propagates. Re-poll faults are deliberately not
+   * classified here; the next page's concurrent poll classifies the same
+   * provider state. Each re-poll is bounded by the read deadline so a slow
+   * poll cannot exhaust the outer budget and discard the page. */
+  private async pollAfterEof(
+    router: ModalCommandRouterWire,
+    command: ModalRouterProviderCommand,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<number | null> {
+    let pause = 10;
+    for (;;) {
+      signal.throwIfAborted();
+      const budget = deadline - performance.now();
+      if (budget <= 0) return null;
+      let exit: number | null;
+      try {
+        exit = await router.poll(
+          command,
+          AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(budget) + REPOLL_GRACE_MS)]),
+        );
+      } catch {
+        signal.throwIfAborted();
+        return null;
+      }
+      if (exit !== null) return exit;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return null;
+      try {
+        await delay(Math.min(pause, remaining), undefined, { signal });
+      } catch {
+        signal.throwIfAborted();
+        return null;
+      }
+      pause = Math.min(pause * 2, 250);
     }
   }
 

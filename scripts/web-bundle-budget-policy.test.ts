@@ -69,10 +69,10 @@ describe("web bundle budget policy", () => {
       "initialRaw: 1485 * kib",
       "initialGzip: 405 * kib",
       "initialFileGzip: wholeKibEnvelope(82_325)",
-      "initialFiles: 18",
+      "initialFiles: 20",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
-      "cssGzip: wholeKibEnvelope(44_100)",
+      "cssGzip: wholeKibEnvelope(46_869)",
     ])
       expect(source).toContain(limit);
     expect(source).toContain("39,");
@@ -90,13 +90,13 @@ describe("web bundle budget policy", () => {
       "initialGzip: 405 * kib",
       "initialFileGzip: wholeKibEnvelope(82_325)",
       // Usage allowances split one shared members chunk (807 gzip bytes).
-      "initialFiles: 18",
+      "initialFiles: 20",
       "directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400))",
       "directSessionFiles: 31",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
       // The neutral retheme's documented stylesheet growth.
-      "cssGzip: wholeKibEnvelope(44_100)",
+      "cssGzip: wholeKibEnvelope(46_869)",
     ])
       expect(source).toContain(limit);
   });
@@ -108,6 +108,22 @@ describe("web bundle budget policy", () => {
     expect(wholeKibEnvelope(82_325)).toBe(82 * KIB);
     expect(wholeKibEnvelope(82_325) - 82_325).toBeGreaterThanOrEqual(KIB);
     expect(wholeKibEnvelope(2_455_346, 1.5 * KIB) - 2_455_346).toBeGreaterThanOrEqual(1.5 * KIB);
+  });
+
+  test("pins the direct-session growth measured after removing misplaced lazy code", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_933_830, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(838_954, 1.5 * kib)");
+    expect(source).toContain("apps/web/vite-eager-graph.ts");
+    expect(source).toContain("    52,\n  ),");
+    for (const [measured, limit] of [
+      [2_933_830, wholeKibEnvelope(2_933_830, 1.5 * KIB)],
+      [838_954, wholeKibEnvelope(838_954, 1.5 * KIB)],
+      [46_869, wholeKibEnvelope(46_869)],
+    ] as const) {
+      expect(limit % KIB).toBe(0);
+      expect(limit - measured).toBeGreaterThanOrEqual(measured === 46_869 ? KIB : 1.5 * KIB);
+    }
   });
 
   test("retains at least one KiB above the combined personal GitHub and current-main graph", () => {

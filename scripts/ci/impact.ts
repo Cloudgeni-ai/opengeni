@@ -135,6 +135,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/storage",
   ],
   "test/integration/db.integration.ts": ["@opengeni/db"],
+  "test/integration/subscription-core-codex-wait.integration.ts": [
+    "@opengeni/worker-bundle",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/durable-queue-control.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -169,6 +175,13 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/worker-bundle",
     "@opengeni/db",
     "@opengeni/events",
+  ],
+  "test/integration/session-usage-limit-restart.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/testing",
   ],
   "test/integration/workspace-capture.integration.ts": [
     "@opengeni/api-router",
@@ -224,6 +237,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/codex-account.browser.e2e.ts": ["opengeni-web", "@opengeni/sdk", "@opengeni/testing"],
   "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/workspace-pause-timers.browser.e2e.ts": [
@@ -310,6 +324,14 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/secrets-fake-login-suite.browser.e2e.ts": ["@opengeni/testing"],
+  "test/e2e/secrets-fake-login.browser.e2e.ts": [
+    "@opengeni/api-router",
+    "@opengeni/browserd",
+    "@opengeni/contracts",
+    "@opengeni/testing",
+    "@opengeni/vaults",
+  ],
   "test/e2e/preview-loading.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/restored-attachment-preview.browser.e2e.ts": [
     "opengeni-web",
@@ -379,6 +401,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
   "test/e2e/managed-actor-response.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/member-connection-access.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/onepassword-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -398,6 +421,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/e2e/skill-review.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/session-skill-review.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/session-usage-limit.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
     "@opengeni/sdk",
@@ -423,6 +452,16 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/api-router",
     "@opengeni/db",
+    "@opengeni/testing",
+  ],
+  "test/e2e/new-conversation.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/session-conversation-controller.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
     "@opengeni/testing",
   ],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
@@ -680,8 +719,11 @@ function fullPlan(
       // another file is a real conflict; catch it while the fix is one command.
       "migration-ordinals",
       // A migration-time backfill over a FORCE-RLS table silently matches zero
-      // rows for the non-superuser owner OpenGeni migrates as.
+      // rows for the non-superuser owner Opengeni migrates as.
       "migration-rls-backfills",
+      // A migration that waits for an advisory fence after a table lock
+      // deadlocks with application transactions during the rollout.
+      "migration-lock-order",
       // A migration missing from the release-schema forward list is framed by
       // the governed checkpoint input, so the pinned aggregate only breaks after
       // merge, on protected main.
@@ -689,6 +731,8 @@ function fullPlan(
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
+      // Contract requirement IDs and the tests that claim them stay consistent.
+      "subscription-contract",
       // The public API surface snapshot and the published-SDK compatibility
       // run (docs/design/api-compatibility-policy.md).
       "public-api",
@@ -768,7 +812,9 @@ export function createImpactPlan(
       artifactRuntimeRequired: false,
       buildPackages: [],
       exampleBuildProjects: [],
-      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene"],
+      // The subscription contract is a document, so a docs-only change to it
+      // must still be checked against the tests that claim its requirements.
+      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene", "subscription-contract"],
       reasons: changedFiles.map((path) => ({
         path,
         reason: "documentation-only change",
@@ -896,9 +942,17 @@ export function createImpactPlan(
     // ledger-replaying test, which adds a `*.test.ts` and touches no migration.
     // It parses every test file in about two seconds, so it runs unconditionally.
     "migration-test-budgets",
+    // Any test file can name a contract requirement ID; the check reads every
+    // test file in about a second, so it runs unconditionally too.
+    "subscription-contract",
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
-    guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");
+    guards.push(
+      "migration-ordinals",
+      "migration-rls-backfills",
+      "migration-lock-order",
+      "migration-schema-contract",
+    );
   }
   if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
     guards.push("public-api", "sdk-compat");

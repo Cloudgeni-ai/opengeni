@@ -1480,6 +1480,47 @@ describe("web API auth helpers", () => {
     expect(assigned).toEqual(["https://accounts.google.com/o/oauth2/v2/auth?state=s"]);
   });
 
+  test("signing in from the agent sign-in page returns there, keeping the pending sign-in", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const authorize = "/oauth/authorize?client_id=c&state=s";
+    const page = new URL(
+      `https://app.example.test/connect-agent?authorize=${encodeURIComponent(authorize)}`,
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: Object.assign(page, { assign: () => undefined }),
+        history: { state: null, replaceState: () => undefined },
+      },
+    });
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ url: "https://github.com/login/oauth/authorize?state=s" });
+    }) as unknown as typeof fetch;
+    try {
+      resetSignupAttributionForTests();
+      await signUpEmail({ name: "Human", email: "human@example.test", password: "secret-123" });
+      await startManagedSocialSignIn("github");
+    } finally {
+      resetSignupAttributionForTests();
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+    for (const value of [
+      bodies[0]!.callbackURL,
+      bodies[1]!.callbackURL,
+      bodies[1]!.errorCallbackURL,
+      bodies[1]!.newUserCallbackURL,
+    ]) {
+      const url = new URL(String(value), "https://app.example.test");
+      expect(url.pathname).toBe("/connect-agent");
+      expect(url.searchParams.get("authorize")).toBe(authorize);
+    }
+  });
+
   test("sends the exact API contract revision on product-owned auth mutations", async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{

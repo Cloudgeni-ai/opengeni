@@ -1,7 +1,7 @@
-// OpenGeni self-hosted agent — wire protocol (single source of truth).
+// Opengeni self-hosted agent — wire protocol (single source of truth).
 //
 // This file is the ONE definition of the control-plane RPC surface and the
-// stream-channel framing exchanged between the OpenGeni control plane (TypeScript)
+// stream-channel framing exchanged between the Opengeni control plane (TypeScript)
 // and the `opengeni-agent` Rust binary running on a user's machine. It is
 // code-generated to BOTH Rust (via prost) and TypeScript (via ts-proto) so the
 // two stacks can never drift. See `agent/scripts/codegen.sh` for the single
@@ -107,7 +107,7 @@ enum StreamKind {
   // A desktop framebuffer (noVNC-equivalent) for view + computer-use.
   STREAM_KIND_DESKTOP = 2;
   // Browser-native encoded frames from one BrowserSession target. The payload is
-  // the canonical OpenGeni browser-frame message, not a desktop capture.
+  // the canonical Opengeni browser-frame message, not a desktop capture.
   STREAM_KIND_BROWSER = 3;
   // Native app/window/screen frames from one ComputerSession target. Browser and
   // Computer frames share the relay transport, but never the resource label.
@@ -198,6 +198,20 @@ message Capabilities {
   // Transactional uploads via OpStart.fs_write / WriteChunk / OpQuery / OpCancel.
   // Independent of op_stream. Absent/false runners MUST NOT receive this path.
   bool transactional_fs_write = 14;
+  // The runner serves CredentialRenewRequest: renew this connection's enrollment
+  // credentials immediately with the install-key proof, so a consent change on
+  // the enrollment (screen control turned on) applies without reconnecting.
+  bool credential_renew = 15;
+  // macOS desktop permissions (TCC), read without prompting. Present only on Mac
+  // builds with desktop support; absence means unknown, never denied.
+  MacDesktopPermissions mac_permissions = 16;
+}
+
+// The three macOS Privacy & Security grants desktop capture and input need.
+message MacDesktopPermissions {
+  bool screen_recording = 1;
+  bool accessibility = 2;
+  bool input_monitoring = 3;
 }
 
 // Capabilities of one live browser-profile bridge endpoint. This describes the
@@ -239,6 +253,36 @@ message AttachedBrowserInventorySnapshot {
   string bridge_generation = 1;
   uint64 revision = 2;
   repeated AttachedBrowserDeviceAnnouncement devices = 3;
+  // The bridge's most recent ended extension connections (bounded, newest
+  // last). Repeated on every snapshot of this bridge generation so the
+  // control plane can record why a connection generation ended.
+  repeated AttachedBrowserConnectionEnd connection_ends = 4;
+}
+
+// Why one browser extension connection to the local bridge ended.
+enum AttachedBrowserConnectionEndReason {
+  ATTACHED_BROWSER_CONNECTION_END_REASON_UNSPECIFIED = 0;
+  // The native host saw Chrome close its input: the extension disconnected
+  // its port, its service worker stopped, or Chrome exited.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_CLOSED_PORT = 1;
+  // The native host received a message from Chrome it could not relay.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_MESSAGE_INVALID = 2;
+  // The native host could no longer write to Chrome.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_OUTPUT_FAILED = 3;
+  // The native host disappeared without reporting why (crash or kill).
+  ATTACHED_BROWSER_CONNECTION_END_REASON_NATIVE_HOST_LOST = 4;
+  // The agent rejected a message on the connection and closed it.
+  ATTACHED_BROWSER_CONNECTION_END_REASON_AGENT_REJECTED = 5;
+}
+
+message AttachedBrowserConnectionEnd {
+  string device_id = 1;
+  string connection_generation = 2;
+  AttachedBrowserConnectionEndReason reason = 3;
+  // Bounded, secret-free error text; empty when the reason says it all.
+  string detail = 4;
+  int64 ended_at_unix_ms = 5;
+  uint64 connected_ms = 6;
 }
 
 // Detail about the agent's graphical display, when one is present.
@@ -564,7 +608,7 @@ message PtyOpenRequest {
   // Stable caller-owned identity for an idempotent terminal. Repeating pty_open
   // with the same non-empty scope_id returns the existing live PTY/channel rather
   // than spawning another shell. Empty preserves the explicit "open a new PTY"
-  // behavior. The control plane uses the durable OpenGeni session id here so
+  // behavior. The control plane uses the durable Opengeni session id here so
   // capability/token refreshes reattach the same terminal while separate sessions
   // on one machine remain isolated.
   string scope_id = 7;
@@ -759,6 +803,8 @@ message Heartbeat {
 message DesktopStatus {
   bool available = 1;
   string unavailable_reason = 2;
+  // Live macOS permission snapshot; absent off macOS or on older runners.
+  MacDesktopPermissions mac_permissions = 3;
 }
 
 // A point-in-time host-capacity sample: the impure sampler's reading of
@@ -963,6 +1009,22 @@ message AgentUpdateApplyResponse {
   string current_version = 3;
   string current_sha256 = 4;
   string target_version = 5;
+}
+
+// Renew the credentials of the connection this request arrived on, now, through
+// the same install-key-signed POST /v1/enrollments/renew the periodic renewal
+// uses. Sent when the enrollment's consent changed. The renewed credentials are
+// saved over the same connection file, and the live reconciler adopts them
+// without restarting the process. Requests are served one at a time, and
+// credentials on disk that already carry the consent are reported without
+// renewing, so repeated requests (one per API replica) never churn the link.
+// Requires Capabilities.credential_renew.
+message CredentialRenewRequest {}
+
+message CredentialRenewResponse {
+  bool renewed = 1;
+  // The screen-control consent carried by the credentials now on disk.
+  bool consented_screen_control = 2;
 }
 
 enum AgentUpdateStage {
@@ -1265,6 +1327,7 @@ message ControlRequest {
     BrowserFramesOpenRequest browser_frames_open = 37;
     ComputerFramesOpenRequest computer_frames_open = 38;
     AgentUpdateApplyRequest agent_update_apply = 39;
+    CredentialRenewRequest credential_renew = 40;
   }
 }
 
@@ -1305,6 +1368,7 @@ message ControlResponse {
     BrowserFramesOpenResponse browser_frames_open = 37;
     ComputerFramesOpenResponse computer_frames_open = 38;
     AgentUpdateApplyResponse agent_update_apply = 39;
+    CredentialRenewResponse credential_renew = 40;
   }
 }
 

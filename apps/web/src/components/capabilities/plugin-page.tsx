@@ -228,7 +228,7 @@ export function PluginPage({
             type="button"
             aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}
-            className="mt-2 rounded-sm text-xs font-medium text-brand hover:underline"
+            className="mt-2 rounded-sm text-xs font-medium og-link"
           >
             {expanded ? "Show less" : "Read more"}
           </button>
@@ -321,7 +321,7 @@ export function PluginPage({
                 href={item.sourceUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-medium text-brand hover:underline"
+                className="font-medium og-link"
               >
                 {item.sourceUrl.replace(/^https?:\/\//, "")}
               </a>

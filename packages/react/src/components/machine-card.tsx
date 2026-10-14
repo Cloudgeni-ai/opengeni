@@ -2,20 +2,20 @@ import {
   AlertTriangleIcon,
   ArrowRightIcon,
   CpuIcon,
-  CircleCheckIcon,
-  DownloadIcon,
   LaptopIcon,
   MonitorIcon,
   MonitorOffIcon,
-  LoaderCircleIcon,
   ServerIcon,
   UsersIcon,
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
+import { machineScopeLabel } from "../sandbox-label-model";
 import type { MachineView, MetricSample } from "../types/machines";
 import { MachineHealthPill } from "./machine-health-pill";
 import { MachineMetrics } from "./machine-metrics";
+import { AgentStatusIcon } from "./machines/agent-status-icon";
+import { describeAgentRuntime, runnerConflict, STATUS_TONE_TEXT } from "./machines/machine-status";
 import { MetricSparkline } from "./machines/metric-sparkline";
 
 export type MachineCardProps = {
@@ -71,43 +71,10 @@ export function MachineCard({
   const cpuPts = (series ?? []).map((s) => ({ t: new Date(s.sampledAt).getTime(), v: s.cpuPct }));
   const openable = Boolean(onOpenDetail);
   const runtime = machine.runtime;
-  const updateRunning = runtime?.versionState === "updating";
-  const dispatchConfirmationStalled =
-    runtime?.update?.status === "requested" &&
-    clockNow - new Date(runtime.update.updatedAt).getTime() >= 30_000;
-  const canUpdate =
-    Boolean(machine.enrollmentId && onUpdateAgent) &&
-    !offline &&
-    !runtime?.updateBlockedReason &&
-    (runtime?.versionState === "outdated" ||
-      runtime?.versionState === "update_failed" ||
-      dispatchConfirmationStalled);
-  const updateLabel = (() => {
-    const update = runtime?.update;
-    if (!update) return null;
-    switch (update.status) {
-      case "requested":
-        return dispatchConfirmationStalled ? "Agent confirmation delayed" : "Confirming with agent";
-      case "accepted":
-        return "Update accepted";
-      case "waiting_for_idle":
-        return "Waiting for current work";
-      case "downloading":
-      case "verifying":
-      case "applying":
-        return `${update.status}…`;
-      case "restarting":
-        return "Restarting agent";
-      case "succeeded":
-        return `Updated · v${update.targetVersion}`;
-      case "failed": {
-        const detail = update.errorCode?.replaceAll("_", " ");
-        return update.rolledBack
-          ? `Update rolled back safely${detail ? ` · ${detail}` : ""}`
-          : `Update failed${detail ? ` · ${detail}` : ""}`;
-      }
-    }
-  })();
+  const agent = runtime ? describeAgentRuntime(runtime, clockNow) : null;
+  const updateAction =
+    agent?.action && machine.enrollmentId && onUpdateAgent && !offline ? agent.action : null;
+  const conflict = runnerConflict(machine.connectionAuthority, clockNow);
 
   return (
     <div
@@ -157,9 +124,7 @@ export function MachineCard({
               ) : null}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
-              <span data-machine-scope={machine.scope} className="capitalize">
-                {machine.scope === "user" ? "personal" : machine.scope}
-              </span>
+              <span data-machine-scope={machine.scope}>{machineScopeLabel(machine.scope)}</span>
               <span aria-hidden>·</span>
               <span className="capitalize">{machine.kind}</span>
               <span aria-hidden>·</span>
@@ -197,51 +162,45 @@ export function MachineCard({
         </p>
       ) : null}
 
-      {machine.connectionAuthority.duplicateRunnerDeniedCount > 0 ? (
+      {conflict?.active ? (
         <p
           data-runner-conflict
-          className="flex items-center gap-1.5 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/5 px-2.5 py-1.5 text-og-xs text-og-status-failed"
+          className="flex items-start gap-1.5 rounded-og-md border border-og-status-waiting/30 bg-og-status-waiting/5 px-2.5 py-1.5 text-og-xs text-og-fg-muted"
         >
-          <AlertTriangleIcon className="size-3.5 shrink-0" aria-hidden />
-          Competing agent process blocked. Open diagnostics for details.
+          <AlertTriangleIcon
+            className="mt-px size-3.5 shrink-0 text-og-status-waiting"
+            aria-hidden
+          />
+          <span>
+            A second copy of the agent is running on this machine. It's kept out, so work isn't
+            affected. Stop the extra copy.
+          </span>
         </p>
       ) : null}
 
-      {runtime ? (
+      {agent ? (
         <div
           data-agent-runtime
           className="flex items-center justify-between gap-3 rounded-og-md border border-og-border/70 bg-og-surface-2/35 px-2.5 py-2 text-og-xs"
         >
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-og-fg-muted">
-              {runtime.versionState === "current" ? (
-                <CircleCheckIcon className="size-3.5 text-og-status-idle" aria-hidden />
-              ) : updateRunning ? (
-                <LoaderCircleIcon className="size-3.5 animate-og-spin text-og-accent" aria-hidden />
-              ) : (
-                <DownloadIcon className="size-3.5" aria-hidden />
-              )}
-              <span className="truncate">
-                Agent{" "}
-                {runtime.installedVersion ? `v${runtime.installedVersion}` : "version unknown"}
-              </span>
+              <AgentStatusIcon tone={agent.tone} />
+              <span className="truncate">{agent.title}</span>
             </div>
-            <p className="mt-0.5 truncate text-og-fg-subtle">
-              {updateLabel ??
-                (runtime.versionState === "current"
-                  ? `Current · ${runtime.updateChannel ?? "channel unknown"}`
-                  : runtime.desiredVersion
-                    ? `Promoted v${runtime.desiredVersion}`
-                    : "No promoted version configured")}
+            <p
+              data-agent-status={agent.tone}
+              className={cn("mt-0.5", STATUS_TONE_TEXT[agent.tone])}
+            >
+              {agent.status}
             </p>
-            {runtime.updateBlockedReason ? (
-              <p className="mt-1 text-og-fg-muted">{runtime.updateBlockedReason}</p>
-            ) : null}
+            {agent.note ? <p className="mt-1 text-og-fg-muted">{agent.note}</p> : null}
           </div>
-          {canUpdate ? (
+          {updateAction ? (
             <button
               type="button"
               data-update-agent
+              data-update-action={updateAction.kind}
               disabled={updatingAgent}
               onClick={(event) => {
                 event.stopPropagation();
@@ -249,13 +208,7 @@ export function MachineCard({
               }}
               className="shrink-0 rounded-og-sm border border-og-border px-2 py-1 font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
             >
-              {updatingAgent
-                ? "Starting…"
-                : dispatchConfirmationStalled
-                  ? "Retry delivery"
-                  : runtime.versionState === "update_failed"
-                    ? "Retry"
-                    : "Update"}
+              {updatingAgent ? "Starting…" : updateAction.label}
             </button>
           ) : null}
         </div>

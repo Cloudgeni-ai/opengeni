@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { CLAUDE_DEFAULT_CONNECTION_MODEL_IDS } from "@opengeni/config";
 import { and, count, eq, isNull, sql } from "drizzle-orm";
 import { unionAll } from "drizzle-orm/pg-core";
 
@@ -14,7 +16,8 @@ export type WorkspaceCustomModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper";
 
 export type WorkspaceProviderCustomModel = {
   id: string;
@@ -36,6 +39,10 @@ export type WorkspaceGatewayCustomModel = WorkspaceProviderCustomModel & {
 
 export type WorkspaceOpenRouterCustomModel = WorkspaceProviderCustomModel & {
   providerKind: "openrouter";
+};
+
+export type WorkspaceOpperCustomModel = WorkspaceProviderCustomModel & {
+  providerKind: "opper";
 };
 
 export const MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS = 100;
@@ -78,9 +85,26 @@ export class WorkspaceOpenRouterCustomModelHistoryLimitError extends Error {
   }
 }
 
+export class WorkspaceOpperCustomModelLimitError extends Error {
+  constructor() {
+    super(`workspace Opper custom model limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS})`);
+    this.name = "WorkspaceOpperCustomModelLimitError";
+  }
+}
+
+export class WorkspaceOpperCustomModelHistoryLimitError extends Error {
+  constructor() {
+    super(
+      `workspace Opper custom model history limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS})`,
+    );
+    this.name = "WorkspaceOpperCustomModelHistoryLimitError";
+  }
+}
+
 function customModelLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
   if (providerKind === "anthropic" || providerKind === "claude_subscription")
     return new WorkspaceClaudeCustomModelLimitError(false);
+  if (providerKind === "opper") return new WorkspaceOpperCustomModelLimitError();
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelLimitError()
     : new WorkspaceOpenRouterCustomModelLimitError();
@@ -89,6 +113,7 @@ function customModelLimitError(providerKind: WorkspaceCustomModelProviderKind): 
 function customModelHistoryLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
   if (providerKind === "anthropic" || providerKind === "claude_subscription")
     return new WorkspaceClaudeCustomModelLimitError(true);
+  if (providerKind === "opper") return new WorkspaceOpperCustomModelHistoryLimitError();
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelHistoryLimitError()
     : new WorkspaceOpenRouterCustomModelHistoryLimitError();
@@ -172,6 +197,59 @@ async function withWorkspaceProviderCustomModelWriteLock<T>(
     );
     return await fn(scopedDb);
   });
+}
+
+/**
+ * First connection of a Claude account in a workspace: offer the default
+ * models. Does nothing once the workspace has any Claude model record of this
+ * kind, active or removed, so a configured or trimmed list is never changed.
+ * Returns how many models were added.
+ */
+export async function seedWorkspaceClaudeDefaultModels(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKind: "anthropic" | "claude_subscription";
+    actorSubjectId: string;
+  },
+): Promise<number> {
+  return await withWorkspaceProviderCustomModelWriteLock(db, input, async (scopedDb) => {
+    const [existing] = await scopedDb
+      .select({ value: count() })
+      .from(schema.workspaceGatewayCustomModels)
+      .where(
+        and(
+          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+          eq(schema.workspaceGatewayCustomModels.providerKind, input.providerKind),
+        ),
+      );
+    if ((existing?.value ?? 0) > 0) return 0;
+    await scopedDb.insert(schema.workspaceGatewayCustomModels).values(
+      CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.map((upstreamModelId) => ({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKind: input.providerKind,
+        upstreamModelId,
+        label: null,
+        createOperationId: crypto.randomUUID(),
+        createRequestHash: defaultModelRequestHash(upstreamModelId),
+        createdBySubjectId: input.actorSubjectId,
+      })),
+    );
+    return CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.length;
+  });
+}
+
+/**
+ * Request digest recorded for a seeded default model. Each seed uses a fresh
+ * operation ID, so no client request ever replays against it.
+ */
+export function defaultModelRequestHash(upstreamModelId: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ action: "seed_default", upstreamModelId }))
+    .digest("hex");
 }
 
 function mapCustomModel(
@@ -278,6 +356,7 @@ export async function listWorkspaceProviderCustomModelsByKind(
     openrouter: [],
     anthropic: [],
     claude_subscription: [],
+    opper: [],
   };
   const providerKinds = [...new Set(input.providerKinds)];
   if (providerKinds.length === 0) return models;

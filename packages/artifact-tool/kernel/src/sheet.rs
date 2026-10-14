@@ -5,6 +5,30 @@ use crate::{AuthoredCellContent, Cell, StableId};
 pub const TILE_EDGE: u32 = 256;
 pub const TILE_CELL_COUNT: u32 = TILE_EDGE * TILE_EDGE;
 
+pub const DEFAULT_ROW_HEIGHT: u32 = 24;
+pub const DEFAULT_COLUMN_WIDTH: u32 = 96;
+pub const MAX_DIMENSION_PIXELS: u32 = 4096;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DimensionAxis {
+    Row,
+    Column,
+}
+
+impl DimensionAxis {
+    #[must_use]
+    pub const fn default_pixels(self) -> u32 {
+        match self {
+            Self::Row => DEFAULT_ROW_HEIGHT,
+            Self::Column => DEFAULT_COLUMN_WIDTH,
+        }
+    }
+    #[must_use]
+    pub fn valid_pixels(self, pixels: Option<u32>) -> bool {
+        pixels.is_none_or(|value| value > 0 && value <= MAX_DIMENSION_PIXELS)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CellCoord {
     pub row: u32,
@@ -262,6 +286,8 @@ pub struct Sheet {
     pub(crate) id: StableId,
     pub(crate) name: String,
     pub(crate) tiles: BTreeMap<TileCoord, Tile>,
+    pub(crate) row_heights: BTreeMap<u32, u32>,
+    pub(crate) column_widths: BTreeMap<u32, u32>,
 }
 
 impl Sheet {
@@ -270,6 +296,8 @@ impl Sheet {
             id,
             name,
             tiles: BTreeMap::new(),
+            row_heights: BTreeMap::new(),
+            column_widths: BTreeMap::new(),
         }
     }
 
@@ -281,6 +309,55 @@ impl Sheet {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn dimension_entries(&self, axis: DimensionAxis) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.dimensions(axis)
+            .iter()
+            .map(|(index, pixels)| (*index, *pixels))
+    }
+
+    /// Iterates an inclusive, ordered index range without scanning other overrides.
+    pub fn dimension_range(
+        &self,
+        axis: DimensionAxis,
+        start: u32,
+        end: u32,
+    ) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.dimensions(axis)
+            .range(start..=end)
+            .map(|(index, pixels)| (*index, *pixels))
+    }
+
+    #[must_use]
+    pub fn dimension_pixels(&self, axis: DimensionAxis, index: u32) -> u32 {
+        self.dimensions(axis)
+            .get(&index)
+            .copied()
+            .unwrap_or(axis.default_pixels())
+    }
+
+    pub(crate) fn dimensions(&self, axis: DimensionAxis) -> &BTreeMap<u32, u32> {
+        match axis {
+            DimensionAxis::Row => &self.row_heights,
+            DimensionAxis::Column => &self.column_widths,
+        }
+    }
+
+    pub(crate) fn set_dimension(
+        &mut self,
+        axis: DimensionAxis,
+        index: u32,
+        pixels: Option<u32>,
+    ) -> Option<u32> {
+        let dimensions = match axis {
+            DimensionAxis::Row => &mut self.row_heights,
+            DimensionAxis::Column => &mut self.column_widths,
+        };
+        match pixels.filter(|pixels| *pixels != axis.default_pixels()) {
+            Some(pixels) => dimensions.insert(index, pixels),
+            None => dimensions.remove(&index),
+        }
     }
 
     #[must_use]

@@ -78,7 +78,7 @@ export async function exportPresentationPptx(
     height: presentation.slideSize.height / 96,
   });
   pptx.layout = "OPENGENI_CUSTOM";
-  pptx.author = "OpenGeni";
+  pptx.author = "Opengeni";
 
   for (const slide of presentation.slides.items) {
     const target = pptx.addSlide();

@@ -15,6 +15,7 @@ import type {
   ResolveConnectionCredentialInput,
   ResolveConnectionCredentialResult,
 } from "@opengeni/db";
+import { apiIntegrationToolEffect } from "@opengeni/db";
 import type { FetchLike } from "@opengeni/network";
 import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 
@@ -79,6 +80,14 @@ export function buildApiIntegrationMcpServers(
     return {
       id: integration.serverId,
       server,
+      effectAuthority: (toolName) => ({
+        kind: "api_integration",
+        instanceId: integration.instanceId,
+        baseUrl: integration.baseUrl,
+        connectionRef: integration.connectionRef,
+        connectionAuthorityGeneration: integration.connectionAuthorityGeneration,
+        effect: apiIntegrationToolEffect(integration.revision, toolName),
+      }),
       approvalAuthority: {
         kind: "api_integration",
         capabilityId: integration.capabilityId,

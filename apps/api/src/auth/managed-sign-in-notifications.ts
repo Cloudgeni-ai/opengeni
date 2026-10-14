@@ -33,9 +33,9 @@ export async function deliverManagedSignInNotification(
           from: claim.sender,
           to: claim.email,
           idempotencyKey: `sign-in-method:${claim.operationId}`,
-          subject: "Your OpenGeni sign-in methods changed",
-          text: `Your OpenGeni ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.`,
-          html: `<p>Your OpenGeni ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.</p>`,
+          subject: "Your Opengeni sign-in methods changed",
+          text: `Your Opengeni ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.`,
+          html: `<p>Your Opengeni ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.</p>`,
         }),
         new Promise<{ status: "outcome_unknown" }>((resolve) => {
           timer = setTimeout(() => resolve({ status: "outcome_unknown" }), 5_000);

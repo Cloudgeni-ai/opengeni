@@ -85,7 +85,7 @@ function SupportAgentPanelView({
           </div>
           <div className="min-w-0">
             <h2 className="truncate text-[14px] font-semibold tracking-[-0.01em] text-white">
-              OpenGeni
+              Opengeni
             </h2>
             <p className="mt-0.5 truncate text-[10px] text-white/55">
               Live inside Northstar · {supportCase.ticket.id}
@@ -106,7 +106,7 @@ function SupportAgentPanelView({
           )}
           <button
             type="button"
-            aria-label={expanded ? "Collapse OpenGeni panel" : "Expand OpenGeni panel"}
+            aria-label={expanded ? "Collapse Opengeni panel" : "Expand Opengeni panel"}
             aria-pressed={expanded}
             title={expanded ? "Collapse panel" : "Expand panel"}
             onClick={() => onExpandedChange(!expanded)}
@@ -137,7 +137,7 @@ function SupportAgentPanelView({
               <ShieldCheckIcon className="size-3.5" /> Connected to Northstar
             </div>
             <h3 className="mt-5 max-w-sm text-[27px] font-semibold leading-[1.12] tracking-[-0.04em] text-[#25222c]">
-              Investigate with OpenGeni
+              Investigate with Opengeni
             </h3>
             <p className="mt-3 max-w-sm text-[13px] leading-5 text-[#6d6973]">
               The agent reads this case, uses Northstar’s tools, and writes each result back here.

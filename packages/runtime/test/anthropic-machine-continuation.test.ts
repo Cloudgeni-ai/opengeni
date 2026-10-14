@@ -37,7 +37,7 @@ test.each([false, true])(
     ]);
     expect(body.messages[1].content).toEqual([{ type: "text", text: "Prior answer" }]);
     expect(body.messages[2].content[0].text).toBe(
-      "OpenGeni continuation (machine-origin input; no new human message).",
+      "Opengeni continuation (machine-origin input; no new human message).",
     );
     expect(body.messages[3].content.map((block: any) => block.text)).toEqual([
       "First update",

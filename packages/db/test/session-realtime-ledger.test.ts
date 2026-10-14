@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
   acceptSessionHumanInputResponse,
@@ -35,7 +35,6 @@ import {
   resolveCompanyBrainContextSelection,
   SessionControlInvariantError,
   SessionRealtimeConflictError,
-  settleCodexCredentialLeaseLoss,
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
   syncSessionRealtimeLedgerInTransaction,
@@ -45,6 +44,7 @@ import {
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   type SessionActivityDatabase,
 } from "../src/index";
+import { settleCodexCredentialLeaseLoss } from "./fixtures/legacy-codex";
 import * as schema from "../src/schema";
 import { realtimeConnectionFixture } from "./realtime-connection-fixture";
 
@@ -855,6 +855,7 @@ describe("session realtime ledger", () => {
     const base = delegationSyncInput(value, first.claimed.connection);
     const input = {
       ...base,
+      ownerSubjectLabel: "voice.owner@example.com",
       entries: [{ ...base.entries[0]!, modelContext: `  ${modelContext}  ` }],
     };
 
@@ -926,7 +927,11 @@ describe("session realtime ledger", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${modelContext}` },
-        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
+        // A voice request names the person on the call, not the voice channel.
+        {
+          type: "input_text",
+          text: renderMessageSentAtForModel(claim.turn.createdAt, "voice.owner@example.com"),
+        },
         { type: "input_text", text: input.entries[0]!.text },
       ],
     });
@@ -1321,7 +1326,23 @@ describe("session realtime ledger", () => {
     expect(admitted.accepted).toHaveLength(1);
     expect(admitted.accepted[0]).toMatchObject({ replay: false });
     expect(admitted.accepted[0]!.entry.turnId).toBeString();
-    expect(admitted.eventIds).toHaveLength(2);
+    // user.message + turn.queued, plus the idle shell's move to queued (#4330:
+    // creation reserves an idle shell rather than a queued projection).
+    expect(admitted.eventIds).toHaveLength(3);
+    const statusEvents = await transaction(value.owner.workspaceId, async (tx) =>
+      tx
+        .select({ type: schema.sessionEvents.type, payload: schema.sessionEvents.payload })
+        .from(schema.sessionEvents)
+        .where(inArray(schema.sessionEvents.id, admitted.eventIds)),
+    );
+    expect(statusEvents.map((event) => event.type).sort()).toEqual([
+      "session.status.changed",
+      "turn.queued",
+      "user.message",
+    ]);
+    expect(
+      statusEvents.find((event) => event.type === "session.status.changed")?.payload,
+    ).toMatchObject({ status: "queued" });
     expect(admitted.workflowWakeRevision).toBeGreaterThan(0);
     expect(replay.accepted[0]).toMatchObject({
       replay: true,
@@ -1428,6 +1449,21 @@ describe("session realtime ledger", () => {
     expect(persisted.count).toBe(before.count);
     expect(persisted.children).toBe(0);
     expect(persisted.session).toEqual(before.session);
+  });
+
+  test("a delegation without an echoed input transcript is admitted, not a failed sync", async () => {
+    // Azure Live delegates without echoing the user's words. Throwing here
+    // failed the whole sync batch, which the browser retried forever.
+    const value = await privateFixture(true);
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const input = delegationSyncInput(value, connection.claimed.connection);
+    input.entries[0]!.payload.inputTranscript = "";
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(admitted.accepted[0]!.entry.turnId).toEqual(expect.any(String));
   });
 
   test("voice delegation preserves its frozen connector snapshot through replay", async () => {

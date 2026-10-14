@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { Agent, Runner, type AgentOutputItem } from "@openai/agents";
+import { assistantMessage, ScriptedModel, testSettings } from "@opengeni/testing";
 import { status } from "@grpc/grpc-js";
 import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
 import { isModalTaskExecStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal";
@@ -25,6 +26,158 @@ describe("portable local compaction capability boundary", () => {
       expect(types).toContain("shell");
       expect(types).not.toContain("skills");
     }
+  });
+});
+
+describe("filesystem function tool schemas", () => {
+  test("apply_patch presents one string patch field and preserves tuple invocation", async () => {
+    const operations: unknown[] = [];
+    const session = {
+      createEditor: () => ({
+        createFile: async (operation: unknown) => {
+          operations.push(operation);
+          return { status: "completed", output: "created" };
+        },
+      }),
+    };
+    for (const structuredToolTransport of [undefined, false]) {
+      const filesystem = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport,
+      }).find((cap) => cap.type === "filesystem")!;
+      const patch = filesystem
+        .clone()
+        .bind(session as never)
+        .tools()
+        .find((tool) => tool.name === "apply_patch");
+      if (!patch || patch.type !== "function") throw new Error("No apply_patch function");
+      expect(Object.keys(patch.parameters.properties ?? {})).toEqual(["patch"]);
+      expect(patch.parameters.properties?.patch).toMatchObject({ type: "string" });
+      expect(patch.parameters.required).toEqual(["patch"]);
+      expect(patch.description).toContain("*** Begin Patch");
+      await patch.invoke(
+        {} as never,
+        JSON.stringify({
+          command: [
+            "apply_patch",
+            "*** Begin Patch\n*** Add File: example.txt\n+example\n*** End Patch",
+          ],
+        }),
+      );
+    }
+    // The trailing empty "+" line gives the created file Codex's final newline.
+    expect(operations).toEqual([
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
+    ]);
+  });
+});
+
+// Production soak: an OpenAI-compatible chat model sent apply_patch arguments
+// that were truncated JSON. The SDK forces a human approval for unparseable
+// arguments of any tool whose approval policy is dynamic, and the filesystem
+// fallback's never-approve closure counted as dynamic: the session stalled in
+// requires_action on a broken patch. Malformed arguments must be a tool error.
+describe("malformed apply_patch arguments", () => {
+  const malformedArguments = [
+    // Exact production arguments: unterminated JSON string.
+    '{"diff": "*** Begin Patch\\n*** Add File: notes/soak.txt\\n+alpha\\n+beta\\n+gamma\\n*** End Patch\\n',
+    // The same intent as valid JSON under an unrecognized key.
+    JSON.stringify({
+      diff: "*** Begin Patch\n*** Add File: notes/soak.txt\n+alpha\n+beta\n+gamma\n*** End Patch\n",
+    }),
+  ];
+
+  for (const [index, args] of malformedArguments.entries()) {
+    test(`returns a model-visible tool error, never an approval (${index})`, async () => {
+      const operations: unknown[] = [];
+      const session = {
+        createEditor: () => ({
+          createFile: async (operation: unknown) => {
+            operations.push(operation);
+            return { status: "completed", output: "created" };
+          },
+        }),
+      };
+      const filesystem = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport: false,
+      }).find((cap) => cap.type === "filesystem")!;
+      const tools = filesystem
+        .clone()
+        .bind(session as never)
+        .tools()
+        .filter((tool) => tool.name === "apply_patch");
+      const model = new ScriptedModel([
+        {
+          output: [
+            {
+              id: "call-malformed",
+              type: "function_call",
+              callId: "call-malformed",
+              name: "apply_patch",
+              status: "completed",
+              arguments: args,
+            } as AgentOutputItem,
+          ],
+        },
+        { output: [assistantMessage("retrying")] },
+      ]);
+      const agent = new Agent({ name: "patcher", model, tools });
+      const result = await new Runner({ tracingDisabled: true }).run(agent, "create the file");
+
+      expect(result.interruptions).toHaveLength(0);
+      expect(operations).toEqual([]);
+      expect(model.calls).toBe(2);
+      const toolOutput = result.newItems.find((item) => item.type === "tool_call_output_item");
+      expect(toolOutput).toBeDefined();
+      const text = JSON.stringify(toolOutput!.rawItem);
+      expect(text).toMatch(
+        index === 0 ? /parsing tool arguments/ : /Invalid apply_patch arguments/,
+      );
+      if (index === 1) expect(text).toContain("got keys diff");
+    });
+  }
+
+  test("a well-formed patch still runs without approval", async () => {
+    const operations: unknown[] = [];
+    const session = {
+      createEditor: () => ({
+        createFile: async (operation: unknown) => {
+          operations.push(operation);
+          return { status: "completed", output: "created" };
+        },
+      }),
+    };
+    const filesystem = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport: false,
+    }).find((cap) => cap.type === "filesystem")!;
+    const tools = filesystem
+      .clone()
+      .bind(session as never)
+      .tools()
+      .filter((tool) => tool.name === "apply_patch");
+    const model = new ScriptedModel([
+      {
+        output: [
+          {
+            id: "call-ok",
+            type: "function_call",
+            callId: "call-ok",
+            name: "apply_patch",
+            status: "completed",
+            arguments: JSON.stringify({
+              patch: "*** Begin Patch\n*** Add File: notes/soak.txt\n+alpha\n*** End Patch",
+            }),
+          } as AgentOutputItem,
+        ],
+      },
+      { output: [assistantMessage("done")] },
+    ]);
+    const agent = new Agent({ name: "patcher", model, tools });
+    const result = await new Runner({ tracingDisabled: true }).run(agent, "create the file");
+    expect(result.interruptions).toHaveLength(0);
+    expect(operations).toEqual([
+      { type: "create_file", path: "notes/soak.txt", diff: "+alpha\n+\n" },
+    ]);
   });
 });
 

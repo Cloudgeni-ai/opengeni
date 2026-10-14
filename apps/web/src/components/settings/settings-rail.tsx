@@ -14,11 +14,11 @@ import {
   GraduationCapIcon,
   KeyRoundIcon,
   LaptopIcon,
+  LockKeyholeIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
   UsersIcon,
-  VariableIcon,
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 
@@ -31,6 +31,7 @@ import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { lastSessionMemoryId, readLastSessionId } from "@/lib/last-session-memory";
 import { orgLabel } from "@/lib/org";
 import {
   organizationSettingsAccess,
@@ -83,7 +84,7 @@ export const WORKSPACE_SETTINGS_COPY: Record<
   },
   learning: {
     title: "Agent learning",
-    description: () => "How agents save knowledge, instructions and skills.",
+    description: () => "What agents can change on their own, and what waits for your OK.",
   },
 };
 
@@ -97,12 +98,14 @@ const SECTION_ICONS = {
   developer: CodeIcon,
 } as const;
 
-// Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
+// Agent learning sits with the workspace's own settings. A Personal workspace
+// keeps it too: it holds your private-chat modes.
 // Models is not a workspace page: every model setting, each workspace's included,
 // lives on Organization > Models, and the old workspace URL redirects there.
 const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "general",
   "access",
+  "learning",
   "usage",
   "api-keys",
   "developer",
@@ -120,9 +123,9 @@ export const ACTIVITY_PAGES = [
 
 export const RUNTIME_PAGES = [
   {
-    to: "/workspaces/$workspaceId/variable-sets" as const,
-    label: "Variable sets",
-    icon: VariableIcon,
+    to: "/workspaces/$workspaceId/secrets" as const,
+    label: "Secrets",
+    icon: LockKeyholeIcon,
   },
   {
     to: "/workspaces/$workspaceId/rigs" as const,
@@ -440,14 +443,24 @@ export function useSettingsRail(input: {
     });
   }
 
-  // Leaving settings returns to the sessions settings were opened from.
+  // Leaving settings returns to the sessions settings were opened from: the
+  // session last open there in this tab, otherwise a new session.
   const sessionsWorkspaceId = managedWorkspace
     ? (managedWorkspace.organizationSettingsWorkspaceId ?? null)
     : (workspace?.id ?? null);
+  const lastSessionId = sessionsWorkspaceId
+    ? readLastSessionId(lastSessionMemoryId(context.accessContext.subjectId, sessionsWorkspaceId))
+    : null;
   const back = sessionsWorkspaceId
     ? {
         label: "Back to sessions",
-        link: (
+        link: lastSessionId ? (
+          <Link
+            to="/workspaces/$workspaceId/sessions/$sessionId"
+            params={{ workspaceId: sessionsWorkspaceId, sessionId: lastSessionId }}
+            state={{ restoredSessionId: lastSessionId }}
+          />
+        ) : (
           <Link
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: sessionsWorkspaceId }}

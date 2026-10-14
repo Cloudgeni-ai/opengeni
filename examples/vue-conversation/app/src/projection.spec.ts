@@ -78,13 +78,13 @@ test("future events do not become chat prose and failures are visible", () => {
     ]).messages,
   ).toEqual([]);
   expect(
-    project([event(1, "turn.failed", { error: "OpenGeni internal error" })]).failure,
+    project([event(1, "turn.failed", { error: "Opengeni internal error" })]).failure,
   ).toContain("could not finish");
 });
 test("host error copy never leaks provider branding or raw diagnostic bodies", () => {
   for (const status of [401, 402, 403, 409, 422, 500, 503]) {
     expect(
-      friendlyError(new OpenGeniApiError(status, "OpenGeni internal diagnostic")),
-    ).not.toContain("OpenGeni");
+      friendlyError(new OpenGeniApiError(status, "Opengeni internal diagnostic")),
+    ).not.toContain("Opengeni");
   }
 });

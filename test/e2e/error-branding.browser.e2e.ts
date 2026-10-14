@@ -100,7 +100,7 @@ describe("native embedded error presentation", () => {
           );
           expect(await input.evaluate((node) => getComputedStyle(node).fontFamily)).not.toBe("");
           const field = page
-            .locator("[data-og-new-chat-composer] > div")
+            .locator("[data-og-new-chat-composer] [data-og-composer-surface]")
             .filter({ has: page.locator("textarea") });
           expect(await field.count()).toBe(1);
           expect(await field.evaluate((node) => getComputedStyle(node).borderRadius)).not.toBe(

@@ -52,6 +52,8 @@
       "@opengeni/codex": ["./packages/codex/src/index.ts"],
       "@opengeni/codex/realtime-v3": ["./packages/codex/src/realtime-v3.ts"],
       "@opengeni/xai-subscription": ["./packages/xai-subscription/src/index.ts"],
+      "@opengeni/subscriptions": ["./packages/subscriptions/src/index.ts"],
+      "@opengeni/subscriptions/reference": ["./packages/subscriptions/src/reference.ts"],
       "@opengeni/xai-subscription/constants": ["./packages/xai-subscription/src/constants.ts"],
       "@opengeni/codemode": ["./packages/codemode/src/index.ts"],
       "@opengeni/browserd": ["./packages/browserd/src/index.ts"],
@@ -81,6 +83,12 @@
       ],
       "@opengeni/storage": ["./packages/storage/src/index.ts"],
       "@opengeni/testing": ["./packages/testing/src/index.ts"],
+      "@opengeni/testing/subscription-reference-model": [
+        "./packages/testing/src/subscription-reference-model.ts"
+      ],
+      "@opengeni/testing/subscription-reference-worlds": [
+        "./packages/testing/src/subscription-reference-worlds.ts"
+      ],
       "@opengeni/api-router": ["./apps/api/src/index.ts"],
       "@opengeni/api-router/app": ["./apps/api/src/app.ts"],
       "@opengeni/worker-bundle": ["./apps/worker/src/index.ts"]

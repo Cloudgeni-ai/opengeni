@@ -57,7 +57,7 @@ plain JSON. Close the client on page exit.
 
 - Write only an HTML fragment: no `<!doctype>`, `<html>`, `<head>`, or `<body>`.
 - Write literal markup: use `<div class="card">Hi</div>` plus a real newline, never `<div class=\"card\">Hi</div>\n`. Never embed the fragment in an inline Python, JavaScript, or shell string. Read it back; rewrite literal `\"` or `\n`.
-- Keep CSS and JavaScript in the fragment only when base classes are insufficient. Use version-pinned libraries when useful. Network requests are allowed; handle loading and failures. Use the OpenGeni client for authenticated workspace tools instead of copying credentials or calling provider APIs directly.
+- Keep CSS and JavaScript in the fragment only when base classes are insufficient. Use version-pinned libraries when useful. Network requests are allowed; handle loading and failures. Use the Opengeni client for authenticated workspace tools instead of copying credentials or calling provider APIs directly.
 - Give the fragment root a unique ID and select it with `document.getElementById(...)`. Never derive the root from `document.currentScript`; scripts may sit outside the root.
 - Keep visualizations under 1 MB. Aggregate, bin, downsample, reduce precision, or drop unused fields from large inline datasets.
 - Do not open a browser or run a separate validation pass by default. Validate when the user explicitly asks or the Maps guidance below requires it. For validation, check out this skill and wrap a temporary copy with assets/base.css in a style tag and assets/helpers.html after the fragment. These are the same styles and helpers supplied by chat. Inspect it with the browser tools; the final visualization still belongs directly in the reply. For tool-using previews, follow the existing Codemode host setup in opengeni-sites when available.
@@ -116,7 +116,7 @@ and request a fresh URL when retrying. Close the client on page exit.
 
 Keep durable file IDs in the fragment, not signed URLs from an earlier tool call:
 those expire. Use the exact File ID returned by a tool; do not guess one from an
-arbitrary artifact. Generated images in OpenGeni have a backing File with the
+arbitrary artifact. Generated images in Opengeni have a backing File with the
 same ID. Public image URLs can be used directly.
 
 This workflow needs no package installation, SDK-source inspection, shell commands,
@@ -131,7 +131,7 @@ this workflow, include the Files tool identity in their requested tools.
 ## Exporting an existing visualization
 
 - Keep the reply fragment as the editable inline source. When the user asks to save or export it, write a standalone HTML document in the sandbox, include assets/base.css and assets/helpers.html from this skill plus the fragment, and publish the exact file with sandbox_file_publish.
-- A downloaded HTML file has no OpenGeni tool host. For an offline export, embed the displayed data and images; keep live tool access in a Site. Do not claim live tools work in a standalone download.
+- A downloaded HTML file has no Opengeni tool host. For an offline export, embed the displayed data and images; keep live tool access in a Site. Do not claim live tools work in a standalone download.
 - When the user asks to publish or host an existing visualization, use opengeni-sites. A Site can be a small HTML component or a React application; follow that Skill for preview, tool access, and publication.
 - For a general website request, build a responsive Site directly rather than applying the inline visualization workflow.
 - Do not claim an export or Site was published before its tool confirms success.

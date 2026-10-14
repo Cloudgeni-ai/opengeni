@@ -12,6 +12,7 @@ import {
 import {
   ChannelAPartialMutationError,
   RoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
   SandboxChannelAService,
 } from "@opengeni/runtime/sandbox";
 
@@ -159,7 +160,8 @@ export async function materializeConnectorAttachmentsInChannel(
   } catch (error) {
     if (
       error instanceof ChannelAPartialMutationError ||
-      error instanceof RoutingMutationOutcomeUnknownError
+      error instanceof RoutingMutationOutcomeUnknownError ||
+      isRoutingMutationOutputRejectedError(error)
     ) {
       throw error;
     }

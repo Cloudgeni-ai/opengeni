@@ -58,19 +58,31 @@ describe("consistent production composer menus", () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     await page.getByRole("menuitem", { name: new RegExp(name) }).click();
   }
-  test("real resource menus share geometry and preserve mounted switches at desktop and mobile", async () => {
+  test("real resource menus share geometry and settings keep one home at desktop and mobile", async () => {
     for (const isNew of [false, true])
       for (const width of [1000, 390, 320]) {
         await page.setViewportSize({ width, height: 800 });
         await page.goto(url + (isNew ? "?new" : ""), { waitUntil: "networkidle" });
-        for (const name of ["Connectors", "Repositories", "Chat settings", "Variable sets"]) {
+        for (const name of ["Connectors", "Repositories", "Chat settings", "Secrets"]) {
           await open(name);
           const menu = page.getByRole("menu");
-          await menu.waitFor();
-          const box = (await menu.boundingBox())!;
-          expect(box.width).toBeLessThanOrEqual(Math.min(384, width - 24) + 1);
-          expect(box.x).toBeGreaterThanOrEqual(0);
-          expect(box.x + box.width).toBeLessThanOrEqual(width);
+          const settingsInAgentTab = name === "Chat settings" && !isNew;
+          const agentTab = page.getByRole("region", { name: "Agent tab", exact: true });
+          if (settingsInAgentTab) {
+            await menu.waitFor({ state: "hidden" });
+            await agentTab.waitFor();
+            expect(await agentTab.count()).toBe(1);
+            expect(await page.getByRole("dialog").count()).toBe(0);
+            const box = (await agentTab.boundingBox())!;
+            expect(box.x).toBeGreaterThanOrEqual(0);
+            expect(box.x + box.width).toBeLessThanOrEqual(width);
+          } else {
+            await menu.waitFor();
+            const box = (await menu.boundingBox())!;
+            expect(box.width).toBeLessThanOrEqual(Math.min(384, width - 24) + 1);
+            expect(box.x).toBeGreaterThanOrEqual(0);
+            expect(box.x + box.width).toBeLessThanOrEqual(width);
+          }
           expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(
             false,
           );
@@ -97,57 +109,67 @@ describe("consistent production composer menus", () => {
               .scrollIntoViewIfNeeded();
           }
           if (name === "Chat settings") {
-            const select = menu.getByLabel("Knowledge", { exact: true });
+            const surface = settingsInAgentTab ? agentTab : menu;
+            const select = surface.getByLabel("Knowledge", { exact: true });
             await select.waitFor();
+            expect(await page.getByLabel("Knowledge", { exact: true }).count()).toBe(1);
             const shown = () =>
-              select.locator("..").locator('[aria-hidden="true"]').first().innerText();
+              settingsInAgentTab
+                ? select.locator("option:checked").textContent()
+                : select.locator("..").locator('[aria-hidden="true"]').first().innerText();
             expect(await select.inputValue()).toBe("inherit");
             // An inherited value names the effective default, so it is never
             // mistaken for an override.
             expect(await shown()).toBe("Default (Automatic)");
             await select.selectOption("off");
+            if (settingsInAgentTab)
+              await surface
+                .getByRole("status")
+                .filter({ hasText: /^Saved\./ })
+                .waitFor();
             expect(await select.inputValue()).toBe("off");
             expect(await shown()).toBe("Off");
             await select.selectOption("inherit");
+            expect(await select.inputValue()).toBe("inherit");
+            expect(await shown()).toBe("Default (Automatic)");
           }
-          await page.keyboard.press("Escape");
+          if (!settingsInAgentTab) await page.keyboard.press("Escape");
           await menu.waitFor({ state: "hidden" });
         }
       }
     expect(errors).toEqual([]);
   }, 60_000);
-  test("variable shortlist preserves off rows, scrolls, removes with Undo, and saves top-first priority", async () => {
+  test("secrets checklist narrows a new chat to checked vaults and returns to all", async () => {
     await page.setViewportSize({ width: 390, height: 800 });
     await page.goto(url + "?new", { waitUntil: "networkidle" });
-    await open("Variable sets");
+    await open("Secrets");
     const menu = page.getByRole("menu");
-    const toggle = (name: string) =>
-      menu.getByRole("switch", { name: `Enable ${name}`, exact: true });
-    await toggle("Environment 1").click();
-    await menu.getByRole("button", { name: "Save", exact: true }).click();
-    expect((await state()).runtimeIds).toEqual(["set-2"]);
-    await open("Variable sets");
-    expect(await toggle("Environment 1").getAttribute("aria-checked")).toBe("false");
-    await menu.getByRole("button", { name: "Remove Environment 1", exact: true }).click();
-    expect(await toggle("Environment 1").count()).toBe(0);
-    await menu.getByRole("button", { name: "Undo", exact: true }).click();
-    expect(await toggle("Environment 1").count()).toBe(1);
-    await toggle("Environment 1").click();
-    await menu.getByRole("button", { name: "Add variable sets", exact: true }).click();
-    await toggle("Environment 20").scrollIntoViewIfNeeded();
-    await toggle("Environment 20").click();
-    expect(await menu.getByRole("button", { name: /Next page/i }).count()).toBe(0);
-    await menu.getByRole("textbox", { name: "Search variable sets" }).fill("Environment 19");
-    expect(await menu.getByRole("switch").count()).toBe(1);
-    await menu.getByRole("button", { name: "Back to selected variable sets" }).click();
-    await menu.getByRole("button", { name: "Save", exact: true }).click();
-    expect((await state()).runtimeIds).toEqual(["set-2", "set-1", "set-20"]);
-    await open("Variable sets");
-    await page.screenshot({ path: `${root}/composer-variables-mobile.png` });
-    await menu.getByRole("button", { name: "Remove Environment 20", exact: true }).click();
-    await menu.getByRole("button", { name: "Cancel", exact: true }).click();
-    await open("Variable sets");
-    expect(await toggle("Environment 20").getAttribute("aria-checked")).toBe("true");
+    const all = menu.getByRole("menuitemcheckbox", { name: "All vaults", exact: true });
+    const vault = (name: string) => menu.getByRole("menuitemcheckbox", { name, exact: true });
+    expect(await all.getAttribute("aria-checked")).toBe("true");
+    await all.click();
+    let policy = (await state()).vaultPolicy as { mode: string; vaultIds: string[] };
+    expect(policy.mode).toBe("selected");
+    expect(policy.vaultIds).toHaveLength(20);
+    await vault("Vault 2").click();
+    await vault("Vault 20").scrollIntoViewIfNeeded();
+    await vault("Vault 20").click();
+    policy = (await state()).vaultPolicy;
+    expect(policy.vaultIds).toHaveLength(18);
+    expect(policy.vaultIds).not.toContain("vault-2");
+    expect(policy.vaultIds).not.toContain("vault-20");
+    expect(await vault("Vault 2").getAttribute("aria-checked")).toBe("false");
+    await page.screenshot({ path: `${root}/composer-secrets-mobile.png` });
+    await page.keyboard.press("Escape");
+    expect(
+      await page
+        .getByRole("button", { name: "More composer actions" })
+        .click()
+        .then(() => page.getByRole("menuitem", { name: /Secrets/ }).innerText()),
+    ).toContain("18 vaults");
+    await page.getByRole("menuitem", { name: /Secrets/ }).click();
+    await all.click();
+    expect((await state()).vaultPolicy).toEqual({ mode: "all" });
     await page.keyboard.press("Escape");
     expect(errors).toEqual([]);
   });

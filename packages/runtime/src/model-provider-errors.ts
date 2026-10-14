@@ -34,6 +34,24 @@ export class OrganizationOpenRouterUnavailableError extends Error {
   }
 }
 
+export class WorkspaceOpperUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your Opper model is unavailable: connect or reconnect the workspace Opper key in Settings, then retry.",
+    );
+    this.name = "WorkspaceOpperUnavailableError";
+  }
+}
+
+export class OrganizationOpperUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Opper model is unavailable: ask an organization admin to connect or reconnect Opper in Organization settings, then retry.",
+    );
+    this.name = "OrganizationOpperUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
 
 /**
@@ -95,12 +113,15 @@ export class XaiSubscriptionUnavailableError extends Error {
  * is user-actionable and surfaces verbatim as a non-retryable turn.failed.
  */
 export class WorkspaceModelPolicyBlockedError extends Error {
-  constructor(modelName: string, providerId: string, reason: "provider" | "model") {
+  constructor(modelName: string, providerId: string, reason: "provider" | "model" | "credits") {
     super(
-      reason === "provider"
-        ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
+      reason === "credits"
+        ? `Model "${modelName}" uses Opengeni credits, which are turned off in this workspace. ` +
+            `Pick a model paid by a subscription or API key, or ask a workspace admin to turn Opengeni credits back on.`
+        : reason === "provider"
+          ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
             `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`
-        : `Model "${modelName}" is not in this workspace's allowed models. ` +
+          : `Model "${modelName}" is not in this workspace's allowed models. ` +
             `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`,
     );
     this.name = "WorkspaceModelPolicyBlockedError";

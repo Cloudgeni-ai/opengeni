@@ -697,7 +697,9 @@ function toolDescription(
 ): string {
   const description = stringValue(operation.description) ?? stringValue(operation.summary);
   const approval =
-    safety === "read" ? "Read-only." : "Changes external state and requires approval.";
+    safety === "read"
+      ? "Read-only."
+      : "Changes external state. Your tool permissions determine whether review is needed.";
   return `${description ? `${description.trim()} ` : ""}${method.toUpperCase()} ${path}. ${approval}`.trim();
 }
 

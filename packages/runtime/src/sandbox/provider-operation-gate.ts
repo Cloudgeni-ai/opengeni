@@ -51,12 +51,33 @@ function leaveOperation(gate: ProviderOperationGate): void {
   }
 }
 
-async function enterCapture(gate: ProviderOperationGate): Promise<void> {
+async function enterCapture(gate: ProviderOperationGate, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   if (!gate.captureActive && gate.activeOperations === 0) {
     gate.captureActive = true;
     return;
   }
-  await new Promise<void>((resolve) => gate.captureWaiters.push(resolve));
+  await new Promise<void>((resolve, reject) => {
+    const admit = () => {
+      signal?.removeEventListener("abort", abandon);
+      resolve();
+    };
+    // An abandoned waiter never held the gate. Remove it, and when it was the
+    // only queued capture let the operations it was holding back proceed.
+    const abandon = () => {
+      const index = gate.captureWaiters.indexOf(admit);
+      if (index < 0) return;
+      gate.captureWaiters.splice(index, 1);
+      if (!gate.captureActive && gate.captureWaiters.length === 0) {
+        const operations = gate.operationWaiters.splice(0);
+        gate.activeOperations += operations.length;
+        for (const operation of operations) operation();
+      }
+      reject(signal!.reason);
+    };
+    gate.captureWaiters.push(admit);
+    signal?.addEventListener("abort", abandon, { once: true });
+  });
 }
 
 function leaveCapture(gate: ProviderOperationGate): void {
@@ -108,13 +129,16 @@ export async function withSandboxProviderOperation<T>(
  * Hold the provider session exclusively for the complete verified archive
  * capture. The durable lease claim handles other workers; this local gate
  * closes the same-holder race between native reads and the heartbeat capture.
+ * An aborted signal abandons a capture still queued behind operations; it never
+ * interrupts a capture that already holds the gate (the capture owns that).
  */
 export async function withSandboxProviderCapture<T>(
   session: unknown,
   capture: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const gate = gateFor(sessionIdentity(session));
-  await enterCapture(gate);
+  await enterCapture(gate, signal);
   try {
     return await capture();
   } finally {

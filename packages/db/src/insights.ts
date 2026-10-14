@@ -1315,6 +1315,10 @@ async function insertModelCallFactFromUsageEvent(
       listOutputCostMicros: capturedClasses ? classValues[3]! : null,
       listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
       occurredAt: event.occurredAt,
+      connectionId:
+        provider === "codex-subscription"
+          ? await repairedCodexFactConnectionId(scopedDb, workspaceId, event)
+          : null,
     })
     .onConflictDoNothing({
       target: [
@@ -1325,6 +1329,40 @@ async function insertModelCallFactFromUsageEvent(
     })
     .returning({ id: schema.modelCallFacts.id });
   return insertedRows.length > 0;
+}
+
+/**
+ * The shared-core connection that served a repaired Codex call (M3 PR 3):
+ * the account the same turn attempt recorded in `codex.credential.selected`
+ * (one connection per attempt; a re-placement starts a new attempt), resolved
+ * through the provider's aliases to its canonical id. Read under the caller's
+ * row security, so a connection this workspace cannot see (a personal one)
+ * is not attributed and the fact keeps a NULL `connection_id`.
+ */
+async function repairedCodexFactConnectionId(
+  scopedDb: Database,
+  workspaceId: string,
+  event: ModelUsageEventRow,
+): Promise<string | null> {
+  if (!event.turnAttemptId || !event.turnId) return null;
+  const [row] = await scopedDb.execute<{ id: string | null }>(sql`
+    select coalesce(direct.id, alias.connection_id)::text as id
+    from ${schema.sessionEvents} selected
+    left join subscription_connections direct
+      on direct.account_id = selected.account_id and direct.provider = 'codex'
+     and direct.id::text = selected.payload->>'credentialId'
+    left join subscription_connection_aliases alias
+      on alias.account_id = selected.account_id and alias.provider = 'codex'
+     and alias.alias_connection_id::text = selected.payload->>'credentialId'
+    where selected.workspace_id = ${workspaceId}::uuid
+      and selected.turn_id = ${event.turnId}::uuid
+      and selected.turn_attempt_id = ${event.turnAttemptId}::uuid
+      and selected.type = 'codex.credential.selected'
+      and selected.occurred_at <= ${new Date(event.occurredAt).toISOString()}::timestamptz
+    order by selected.sequence desc
+    limit 1
+  `);
+  return row?.id ?? null;
 }
 
 /**

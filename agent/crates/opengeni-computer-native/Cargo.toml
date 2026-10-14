@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-computer-native"
-description = "Native AX/AT-SPI computer adapter used by the placement-local OpenGeni computer controller."
+description = "Native AX/AT-SPI computer adapter used by the placement-local Opengeni computer controller."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -43,6 +43,7 @@ image = { workspace = true }
 opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi" }
 
 [dev-dependencies]
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 image = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

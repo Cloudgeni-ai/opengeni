@@ -225,7 +225,7 @@ function ArtifactStart({
     event.preventDefault();
     const normalized = existingId.trim().toLowerCase();
     if (!/^[0-9a-f]{32}$/u.test(normalized) || /^0+$/u.test(normalized)) {
-      setError("Artifact ID must be the 32-character hexadecimal ID from OpenGeni.");
+      setError("Artifact ID must be the 32-character hexadecimal ID from Opengeni.");
       return;
     }
     setError(null);
@@ -243,7 +243,7 @@ function ArtifactStart({
           Create something worth keeping.
         </h1>
         <p className="mt-3 max-w-xl text-og-sm leading-6 text-og-fg-muted">
-          Native document, spreadsheet, and presentation editing through the public OpenGeni SDK.
+          Native document, spreadsheet, and presentation editing through the public Opengeni SDK.
         </p>
 
         <form onSubmit={createArtifact} className="mt-10 space-y-5">
@@ -370,7 +370,7 @@ function WorkspaceSetup({
         </p>
         <h1 className="mt-3 text-2xl font-semibold tracking-tight">Editable artifacts</h1>
         <p className="mt-2 text-og-sm leading-6 text-og-fg-muted">
-          Connect this live SDK demo to an authenticated OpenGeni workspace.
+          Connect this live SDK demo to an authenticated Opengeni workspace.
         </p>
         <div className="mt-7 space-y-4">
           <label className="block text-og-xs font-medium" htmlFor="workspace-id">

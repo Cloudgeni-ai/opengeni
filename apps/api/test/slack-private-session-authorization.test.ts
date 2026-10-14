@@ -137,7 +137,7 @@ async function fixture() {
         slackTeamName: "Slack private authorization",
         botId: `B_${suffix}`,
         botUserId: `U_${suffix}`,
-        botDisplayName: "OpenGeni",
+        botDisplayName: "Opengeni",
         verifiedAt: new Date().toISOString(),
       })}
     ) returning id`;

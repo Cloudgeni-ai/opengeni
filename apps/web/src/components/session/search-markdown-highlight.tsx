@@ -136,7 +136,7 @@ export function SearchMarkdown({
         <p className="mb-3 text-xs text-fg-muted">
           Match in message source: <SearchText text={snippet} query={query} />
         </p>
-        <MarkdownText text={text} compact suppressImages />
+        <MarkdownText text={text} compact softLineBreaks suppressImages />
       </>
     );
   return (
@@ -148,7 +148,7 @@ export function SearchMarkdown({
         </p>
       ) : null}
       <div ref={body} className="min-w-0">
-        <MarkdownText text={text} compact suppressImages />
+        <MarkdownText text={text} compact softLineBreaks suppressImages />
       </div>
     </>
   );

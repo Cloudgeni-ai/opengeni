@@ -12,6 +12,7 @@ import {
   getPortableSkillUninstallPreview,
   installPortableSkill,
   skillFilesContentHash,
+  listInstalledSkills,
   listInstalledPortableSkills,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
@@ -237,6 +238,49 @@ describe("portable Skill persistence", () => {
         totalBytes: input.totalBytes + 1,
       }),
     ).rejects.toThrow("conflicts with immutable stored content");
+    await deactivateInstalledSkill(installed);
+    await uninstallPortableSkill(client.db, {
+      skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      capabilityId: input.capabilityId,
+      expectedInstallationVersion: installed.installationVersion,
+    });
+  }, 60_000);
+
+  test("reads a Skill kept through Pack removal whose stored source is still pack", async () => {
+    if (!available || !client || !shared) return;
+    const input = skillInput("retained-pack-skill");
+    const installed = await installPortableSkill(client.db, input);
+    const [stored] = await shared.admin<
+      Array<{ manifest: Record<string, postgres.JSONValue | undefined> }>
+    >`
+      select manifest
+      from capability_plugin_versions
+      where id = ${installed.pluginVersionId}
+    `;
+    expect(stored).toBeDefined();
+    const packManifest = { ...stored!.manifest, source: "pack" };
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        update capability_plugin_versions
+        set manifest = ${tx.json(packManifest)}::jsonb,
+            manifest_digest = ${sha256(stableJson(packManifest))}
+        where id = ${installed.pluginVersionId}
+      `;
+    });
+
+    const listed = await listInstalledSkills(client.db, first.workspaceId);
+    expect(listed.find((skill) => skill.capabilityId === input.capabilityId)?.source).toBe(
+      "library",
+    );
+    expect(
+      (await listInstalledPortableSkills(client.db, first.workspaceId)).map(
+        (skill) => skill.capabilityId,
+      ),
+    ).toContain(input.capabilityId);
+
     await deactivateInstalledSkill(installed);
     await uninstallPortableSkill(client.db, {
       skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },

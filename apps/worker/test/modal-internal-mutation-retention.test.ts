@@ -1,13 +1,20 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
+import { RunContext, type MCPServer, type Tool } from "@openai/agents";
 import postgres from "postgres";
 import {
   acquireSharedTestDatabase,
   testSettings,
+  MemoryEventBus,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
   acquireLease,
+  advanceWorkspaceGeneration,
+  verifyWorkspaceMutationSettlement,
+  SandboxWorkspaceMutationFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
+  type Database,
   claimSessionWorkForAttempt,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
@@ -30,13 +37,22 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import {
+  buildAgentCapabilities,
+  buildOpenGeniAgent,
+  buildManifest,
   isModalCommandStartOutcomeUnknownError,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
   ProviderCommandObservationUnavailableError,
   RoutingMutationOutcomeUnknownError,
+  RoutingMutationOutputRejectedError,
+  withRoutingMutationOutputRejectionFence,
 } from "@opengeni/runtime";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { createSandboxTurnRuntime } from "../src/activities/agent-turn/sandbox-runtime";
+import { ChannelAPartialMutationError } from "@opengeni/runtime/sandbox";
+import { wrapTurnBoxWithRouting, wrapLazyTurnBoxWithRouting } from "../src/sandbox-routing";
+import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
@@ -197,6 +213,57 @@ async function admittedInternalMutation() {
   };
 }
 
+function routedInternalFixture(
+  fixture: Awaited<ReturnType<typeof admittedInternalMutation>>,
+  settings = testSettings({ modalCommandSupervisionEnabled: false }),
+) {
+  return wrapTurnBoxWithRouting(
+    {
+      db: client.db,
+      settings,
+      bus: new MemoryEventBus() as never,
+      opJournal: { attachGeneration: () => "1", persistSettled: async () => undefined },
+    },
+    {
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      workspaceMutationFence: {
+        accountId: fixture.accountId,
+        turnId: fixture.claim.turn.id,
+        executionGeneration: fixture.claim.turn.executionGeneration,
+        attemptId: fixture.attemptId,
+      },
+      homeLease: {
+        accountId: fixture.accountId,
+        sandboxGroupId: fixture.session.sandboxGroupId,
+        leaseEpoch: fixture.leaseEpoch,
+        instanceId: fixture.instanceId,
+        backend: "modal",
+      },
+    },
+    fixture.sandbox.established as never,
+  );
+}
+
+function sdkCapabilityFunction(session: unknown, name: string, cancellation: boolean) {
+  const capability = buildAgentCapabilities(
+    testSettings({ modalCommandSupervisionEnabled: false }),
+    [],
+    {
+      structuredToolTransport: false,
+      ...(cancellation ? { onToolCancellationFence: () => undefined } : {}),
+    },
+  ).find((entry) => entry.type === (name === "apply_patch" ? "filesystem" : "shell"))!;
+  return capability
+    .clone()
+    .bind(session as never)
+    .tools()
+    .find(
+      (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+        tool.type === "function" && tool.name === name,
+    )!;
+}
+
 function unknownCommand(instanceId: string) {
   const execId = crypto.randomUUID();
   const sdkError = new CommandStartOutcomeUnknownError(
@@ -222,6 +289,863 @@ function unknownCommand(instanceId: string) {
     error: new ProviderCommandStartOutcomeUnknownError(command, sdkError),
   };
 }
+
+test("SDK lazy setup preserves a committed physical outcome when its holder rejects output", async () => {
+  const fixture = await admittedInternalMutation();
+  const settings = testSettings({ modalCommandSupervisionEnabled: false });
+  const manifest = buildManifest(settings, [], {});
+  let setups = 0;
+  let commands = 0;
+  Object.assign(fixture.sandbox.established.session, {
+    state: { manifest },
+    exec: async () => {
+      commands++;
+      return { stdout: "/workspace", exitCode: 0 };
+    },
+  });
+  const before = await shared.admin`
+    select * from session_history_items
+    where session_id = ${fixture.session.id} order by position`;
+  const routed = wrapLazyTurnBoxWithRouting(
+    {
+      db: client.db,
+      settings,
+      bus: new MemoryEventBus() as never,
+      opJournal: { attachGeneration: () => "1", persistSettled: async () => undefined },
+    },
+    { workspaceId: fixture.workspaceId, sessionId: fixture.session.id },
+    {
+      client: { backendId: "modal" },
+      backendId: "modal",
+      agentDefaultManifest: manifest,
+      provisioner: {
+        get: async () => {
+          await fixture.runtime.runWorkspaceMutationForSandbox(
+            fixture.sandbox as never,
+            "lazyOwnedSandboxSetup",
+            async () => {
+              setups++;
+              // A real mutable output fence changes after provider admission.
+              // Physical settlement must still commit under the restricted role.
+              await shared.admin`
+                delete from sandbox_lease_holders
+                where lease_id = (select lease_id from sandbox_workspace_mutation_admissions
+                  where session_id = ${fixture.session.id})
+                  and holder_id = ${fixture.holderId}`;
+            },
+          );
+          return fixture.sandbox as never;
+        },
+      },
+    },
+  );
+  const exec = buildAgentCapabilities(settings, [], {
+    onToolCancellationFence: () => undefined,
+  })
+    .find((capability) => capability.type === "shell")!
+    .clone()
+    .bind(routed.session as never)
+    .tools()
+    .find(
+      (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+        tool.type === "function" && tool.name === "exec_command",
+    )!;
+  const error = await exec
+    .invoke({} as never, JSON.stringify({ cmd: "pwd", login: false, yield_time_ms: 10_000 }))
+    .catch((failure) => failure);
+  const admissions = await shared.admin`
+    select operation, provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where session_id = ${fixture.session.id}`;
+  expect(admissions).toHaveLength(1);
+  expect(admissions[0]).toMatchObject({
+    operation: "lazyOwnedSandboxSetup",
+    provider_outcome: "resolved",
+  });
+  expect(admissions[0]!.settled_at).toBeInstanceOf(Date);
+  expect(setups).toBe(1);
+  expect(commands).toBe(0);
+  expect(
+    await shared.admin`
+    select * from session_history_items
+    where session_id = ${fixture.session.id} order by position`,
+  ).toEqual(before);
+  expect(error).toBeInstanceOf(Error);
+  expect(agentRunFailurePayload(error)).toMatchObject({
+    code: "sandbox_mutation_output_rejected",
+    retryable: false,
+  });
+}, 60_000);
+
+test("ordinary routed provider output remains rejected after exact physical settlement", async () => {
+  const fixture = await admittedInternalMutation();
+  const settings = testSettings({ modalCommandSupervisionEnabled: false });
+  let commands = 0;
+  Object.assign(fixture.sandbox.established.session, {
+    exec: async () => {
+      commands++;
+      await shared.admin`
+        delete from sandbox_lease_holders
+        where holder_id = ${fixture.holderId}`;
+      return { stdout: "must not be returned", exitCode: 0 };
+    },
+  });
+  const routed = wrapTurnBoxWithRouting(
+    {
+      db: client.db,
+      settings,
+      bus: new MemoryEventBus() as never,
+      opJournal: { attachGeneration: () => "1", persistSettled: async () => undefined },
+    },
+    {
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      workspaceMutationFence: {
+        accountId: fixture.accountId,
+        turnId: fixture.claim.turn.id,
+        executionGeneration: fixture.claim.turn.executionGeneration,
+        attemptId: fixture.attemptId,
+      },
+      homeLease: {
+        accountId: fixture.accountId,
+        sandboxGroupId: fixture.session.sandboxGroupId,
+        leaseEpoch: fixture.leaseEpoch,
+        instanceId: fixture.instanceId,
+        backend: "modal",
+      },
+    },
+    fixture.sandbox.established as never,
+  );
+  const error = await (
+    routed.session as never as {
+      exec(args: { cmd: string }): Promise<unknown>;
+    }
+  )
+    .exec({ cmd: "touch /workspace/once" })
+    .catch((failure) => failure);
+  expect(error).toBeInstanceOf(RoutingMutationOutputRejectedError);
+  expect(error.cause).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+  expect(error.reasonCode).toBe("holder_fenced");
+  expect(commands).toBe(1);
+  const [admission] = await shared.admin`
+    select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where session_id = ${fixture.session.id}`;
+  expect(admission!.provider_outcome).toBe("resolved");
+  expect(admission!.settled_at).toBeInstanceOf(Date);
+}, 60_000);
+
+test.each([false, true])(
+  "SDK patch batches stop after exact output rejection (cancellation: %s)",
+  async (cancellation) => {
+    const fixture = await admittedInternalMutation();
+    let patches = 0;
+    Object.assign(fixture.sandbox.established.session, {
+      createEditor: () => ({
+        createFile: async () => {
+          patches++;
+          await shared.admin`delete from sandbox_lease_holders
+            where holder_id = ${fixture.holderId}`;
+          return { status: "completed", output: "created once" };
+        },
+      }),
+    });
+    const routed = routedInternalFixture(fixture);
+    const patch = sdkCapabilityFunction(routed.session, "apply_patch", cancellation);
+    const input = JSON.stringify({
+      operations: [
+        { type: "create_file", path: "first.txt", diff: "+first" },
+        { type: "create_file", path: "second.txt", diff: "+second" },
+      ],
+    });
+    const error = await patch.invoke({} as never, input).catch((failure) => failure);
+    expect(error).toBeInstanceOf(RoutingMutationOutputRejectedError);
+    expect(patches).toBe(1);
+    const admissions = await shared.admin`
+      select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+      where session_id = ${fixture.session.id}`;
+    expect(admissions).toHaveLength(1);
+    expect(admissions[0]!.provider_outcome).toBe("resolved");
+    expect(admissions[0]!.settled_at).toBeInstanceOf(Date);
+    // A fresh invocation does not supply a replacement holder or authority.
+    await patch.invoke({} as never, input).catch(() => undefined);
+    expect(patches).toBe(1);
+  },
+  60_000,
+);
+
+test.each(["unknown", "settled"] as const)(
+  "SDK mixed patch batches preserve %s-first evidence without replay",
+  async (first) => {
+    const fixture = await admittedInternalMutation();
+    let patches = 0;
+    Object.assign(fixture.sandbox.established.session, {
+      createEditor: () => ({
+        createFile: async () => {
+          patches++;
+          if (first === "unknown" && patches === 1)
+            throw new ChannelAPartialMutationError(
+              "One provider item applied; its batch was partial",
+            );
+          await shared.admin`delete from sandbox_lease_holders
+            where holder_id = ${fixture.holderId}`;
+          return { status: "completed" };
+        },
+      }),
+    });
+    const patch = sdkCapabilityFunction(
+      routedInternalFixture(fixture).session,
+      "apply_patch",
+      false,
+    );
+    const input = JSON.stringify({
+      operations: [
+        { type: "create_file", path: "first.txt", diff: "+first" },
+        { type: "create_file", path: "second.txt", diff: "+second" },
+        { type: "create_file", path: "third.txt", diff: "+third" },
+      ],
+    });
+    const failure = await patch.invoke({} as never, input).catch((error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(patches).toBe(first === "unknown" ? 2 : 1);
+    if (first === "unknown") {
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure.errors[0]).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+      expect(failure.errors[1]).toBeInstanceOf(RoutingMutationOutputRejectedError);
+      expect(agentRunFailurePayload(failure).code).not.toBe("sandbox_mutation_output_rejected");
+      expect(agentRunFailurePayload(failure).retryable).toBe(false);
+    } else {
+      // Once rejection is known, the later uncertain provider item never runs.
+      expect(failure).toBeInstanceOf(RoutingMutationOutputRejectedError);
+    }
+    const admissions = await shared.admin`
+      select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+      where session_id = ${fixture.session.id}`;
+    expect(admissions).toHaveLength(patches);
+    for (const admission of admissions) {
+      expect(admission.provider_outcome).toBe("resolved");
+      expect(admission.settled_at).toBeInstanceOf(Date);
+    }
+  },
+  60_000,
+);
+
+test.each(["start", "input", "observation"] as const)(
+  "SDK caught typed provider %s uncertainty survives a later committed output rejection",
+  async (boundary) => {
+    const fixture = await admittedInternalMutation();
+    const { error: start, command } = unknownCommand(fixture.instanceId);
+    const unknown =
+      boundary === "start"
+        ? start
+        : boundary === "input"
+          ? new ProviderCommandInputOutcomeUnknownError(
+              command,
+              0,
+              4,
+              new Error("input unavailable"),
+            )
+          : new ProviderCommandObservationUnavailableError(
+              command,
+              new Error("observation unavailable"),
+            );
+    let patches = 0;
+    Object.assign(fixture.sandbox.established.session, {
+      createEditor: () => ({
+        createFile: async () => {
+          patches++;
+          if (patches === 1) throw unknown;
+          await shared.admin`delete from sandbox_lease_holders
+            where holder_id = ${fixture.holderId}`;
+          return { status: "completed" };
+        },
+      }),
+    });
+    const patch = sdkCapabilityFunction(
+      routedInternalFixture(fixture).session,
+      "apply_patch",
+      false,
+    );
+    const failure = await patch
+      .invoke(
+        {} as never,
+        JSON.stringify({
+          operations: [
+            { type: "create_file", path: "first.txt", diff: "+first" },
+            { type: "create_file", path: "second.txt", diff: "+second" },
+            { type: "create_file", path: "third.txt", diff: "+third" },
+          ],
+        }),
+      )
+      .catch((error) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.errors[0]).toBe(unknown);
+    expect(failure.errors[1]).toBeInstanceOf(RoutingMutationOutputRejectedError);
+    expect(agentRunFailurePayload(failure).code).toBe(
+      boundary === "start"
+        ? "sandbox_command_start_outcome_unknown"
+        : boundary === "input"
+          ? undefined
+          : "sandbox_command_observation_unavailable",
+    );
+    expect(agentRunFailurePayload(failure).retryable).toBe(false);
+    expect(patches).toBe(2);
+    const admissions = await shared.admin`
+      select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+      where session_id = ${fixture.session.id}`;
+    expect(admissions).toHaveLength(2);
+    expect(admissions.filter((row) => row.provider_outcome === "resolved")).toHaveLength(1);
+    if (boundary === "start") {
+      // Missing Start acknowledgement keeps its original admission unresolved.
+      const pending = admissions.filter((row) => row.provider_outcome === null);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]!.settled_at).toBeNull();
+    } else {
+      expect(admissions.filter((row) => row.provider_outcome === "rejected")).toHaveLength(1);
+      for (const admission of admissions) expect(admission.settled_at).toBeInstanceOf(Date);
+    }
+  },
+  60_000,
+);
+
+test("SDK unknown-only patch result preserves its existing rendered inspection advice", async () => {
+  const fixture = await admittedInternalMutation();
+  let patches = 0;
+  Object.assign(fixture.sandbox.established.session, {
+    createEditor: () => ({
+      createFile: async () => {
+        patches++;
+        throw new ChannelAPartialMutationError("One provider item applied; its batch was partial");
+      },
+    }),
+  });
+  const patch = sdkCapabilityFunction(routedInternalFixture(fixture).session, "apply_patch", false);
+  const result = await patch.invoke(
+    {} as never,
+    JSON.stringify({
+      operations: [{ type: "create_file", path: "first.txt", diff: "+first" }],
+    }),
+  );
+  expect(result).not.toBeInstanceOf(Error);
+  expect(JSON.stringify(result)).toContain("not replayed");
+  expect(patches).toBe(1);
+}, 60_000);
+
+test("SDK uncaught output rejection retains an earlier rendered uncertain item", async () => {
+  const fixture = await admittedInternalMutation();
+  let patches = 0;
+  let commands = 0;
+  Object.assign(fixture.sandbox.established.session, {
+    createEditor: () => ({
+      createFile: async () => {
+        patches++;
+        throw new ChannelAPartialMutationError(
+          "An applied provider item belongs to a partial batch",
+        );
+      },
+    }),
+    execCommand: async () => {
+      commands++;
+      await shared.admin`delete from sandbox_lease_holders
+        where holder_id = ${fixture.holderId}`;
+      return "committed provider output";
+    },
+  });
+  const routed = routedInternalFixture(fixture);
+  const patch = sdkCapabilityFunction(routed.session, "apply_patch", false);
+  const exec = sdkCapabilityFunction(routed.session, "exec_command", false);
+  const failure = await withRoutingMutationOutputRejectionFence(async () => {
+    await patch.invoke(
+      {} as never,
+      JSON.stringify({
+        operations: [{ type: "create_file", path: "first.txt", diff: "+first" }],
+      }),
+    );
+    await exec.invoke({} as never, JSON.stringify({ cmd: "touch /workspace/once", login: false }));
+  }).catch((error) => error);
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect(failure.errors[0]).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+  expect(failure.errors[1]).toBeInstanceOf(RoutingMutationOutputRejectedError);
+  expect(agentRunFailurePayload(failure).code).not.toBe("sandbox_mutation_output_rejected");
+  expect(agentRunFailurePayload(failure).retryable).toBe(false);
+  expect(patches).toBe(1);
+  expect(commands).toBe(1);
+}, 60_000);
+
+test("SDK partial provider batch keeps uncertainty beside its exact rejected receipt", async () => {
+  const fixture = await admittedInternalMutation();
+  let patches = 0;
+  Object.assign(fixture.sandbox.established.session, {
+    createEditor: () => ({
+      createFile: async () => {
+        patches++;
+        await shared.admin`delete from sandbox_lease_holders
+          where holder_id = ${fixture.holderId}`;
+        throw new ChannelAPartialMutationError("First provider item applied; second was rejected");
+      },
+    }),
+  });
+  const patch = sdkCapabilityFunction(routedInternalFixture(fixture).session, "apply_patch", true);
+  const failure = await patch
+    .invoke(
+      {} as never,
+      JSON.stringify({
+        operations: [
+          { type: "create_file", path: "first.txt", diff: "+first" },
+          { type: "create_file", path: "second.txt", diff: "+second" },
+        ],
+      }),
+    )
+    .catch((error) => error);
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect(failure.errors[0]).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+  expect(failure.errors[1]).toBeInstanceOf(RoutingMutationOutputRejectedError);
+  expect(failure.errors[0].cause).toBe(failure.errors[1]);
+  expect(patches).toBe(1);
+  const [admission] = await shared.admin`
+    select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where session_id = ${fixture.session.id}`;
+  expect(admission!.provider_outcome).toBe("resolved");
+  expect(admission!.settled_at).toBeInstanceOf(Date);
+  expect(agentRunFailurePayload(failure).code).not.toBe("sandbox_mutation_output_rejected");
+  expect(agentRunFailurePayload(failure).retryable).toBe(false);
+}, 60_000);
+
+test("nested SDK rejection fences remain local to concurrent invocations", async () => {
+  const rejected = await admittedInternalMutation();
+  const unrelated = await admittedInternalMutation();
+  let rejectedPatches = 0;
+  let unrelatedPatches = 0;
+  Object.assign(rejected.sandbox.established.session, {
+    createEditor: () => ({
+      createFile: async () => {
+        rejectedPatches++;
+        await shared.admin`delete from sandbox_lease_holders
+          where holder_id = ${rejected.holderId}`;
+        return { status: "completed" };
+      },
+    }),
+  });
+  Object.assign(unrelated.sandbox.established.session, {
+    createEditor: () => ({
+      createFile: async () => {
+        unrelatedPatches++;
+        return { status: "completed" };
+      },
+    }),
+  });
+  const rejectedPatch = sdkCapabilityFunction(
+    routedInternalFixture(rejected).session,
+    "apply_patch",
+    true,
+  );
+  const unrelatedPatch = sdkCapabilityFunction(
+    routedInternalFixture(unrelated).session,
+    "apply_patch",
+    false,
+  );
+  const input = JSON.stringify({
+    operations: [
+      { type: "create_file", path: "first.txt", diff: "+first" },
+      { type: "create_file", path: "second.txt", diff: "+second" },
+    ],
+  });
+  const [failed, completed] = await Promise.allSettled([
+    withRoutingMutationOutputRejectionFence(async () => {
+      await withRoutingMutationOutputRejectionFence(async () => {
+        await rejectedPatch.invoke({} as never, input).catch(() => undefined);
+      });
+      // A nested invocation cannot replace its inherited first rejection.
+      await rejectedPatch.invoke({} as never, input).catch(() => undefined);
+    }),
+    unrelatedPatch.invoke({} as never, input),
+  ]);
+  expect(failed.status).toBe("rejected");
+  if (failed.status === "rejected")
+    expect(failed.reason).toBeInstanceOf(RoutingMutationOutputRejectedError);
+  expect(completed.status).toBe("fulfilled");
+  expect(rejectedPatches).toBe(1);
+  expect(unrelatedPatches).toBe(2);
+}, 60_000);
+
+test.each([false, true])(
+  "SDK stdin preserves exact physically settled input rejection (cancellation: %s)",
+  async (cancellation) => {
+    const fixture = await admittedInternalMutation();
+    let writes = 0;
+    Object.assign(fixture.sandbox.established.session, {
+      supportsPty: () => true,
+      execCommand: async () => "Process running with session ID 71\n\nOutput:\nstarted",
+      writeStdin: async () => {
+        writes++;
+        await shared.admin`
+          delete from sandbox_lease_holders where kind = 'process'
+            and lease_id = (select id from sandbox_leases
+              where sandbox_group_id = ${fixture.session.sandboxGroupId})`;
+        return "Process running with session ID 71\n\nOutput:\ninput applied once";
+      },
+    });
+    const routed = routedInternalFixture(fixture);
+    await (
+      routed.session as never as {
+        execCommand(args: { cmd: string }): Promise<string>;
+      }
+    ).execCommand({ cmd: "cat" });
+    const stdin = sdkCapabilityFunction(routed.session, "write_stdin", cancellation);
+    const error = await stdin
+      .invoke(
+        {} as never,
+        JSON.stringify({
+          session_id: 71,
+          chars: "once",
+          yield_time_ms: 0,
+        }),
+      )
+      .catch((failure) => failure);
+    expect(error).toBeInstanceOf(RoutingMutationOutputRejectedError);
+    expect(writes).toBe(1);
+    const [physical] = await shared.admin`
+      select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+      where session_id = ${fixture.session.id} and actor_kind = 'process'`;
+    expect(physical!.provider_outcome).toBe("resolved");
+    expect(physical!.settled_at).toBeInstanceOf(Date);
+  },
+  60_000,
+);
+
+async function settleSessionRetainedProcessExited(
+  fixture: Awaited<ReturnType<typeof admittedInternalMutation>>,
+  exitCode: number,
+) {
+  const [row] = await shared.admin<{ id: string }[]>`
+    select id from sandbox_retained_processes
+    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+  const scope = {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.session.id,
+    processId: row!.id,
+  };
+  const process = await getRetainedProcess(client.db, scope);
+  // The control-worker reaper's exact-proof reconciliation of an adopted
+  // background command, racing the owning turn's in-flight stdin poll.
+  const settled = await settleRetainedProcess(client.db, {
+    ...scope,
+    expected: retainedProcessSettlementIdentity(process!),
+    outcome: "exited",
+    exitCode,
+    reason: "provider_exit_banner",
+    idleGraceMs: 0,
+  });
+  expect(settled.settled).toBe(true);
+  return scope;
+}
+
+test("a stdin settlement fenced by a concurrent terminal reconciliation carries durable terminal truth", async () => {
+  const fixture = await admittedInternalMutation();
+  Object.assign(fixture.sandbox.established.session, {
+    supportsPty: () => true,
+    execCommand: async () => "Process running with session ID 72\n\nOutput:\nstarted",
+  });
+  const routed = routedInternalFixture(fixture);
+  await (
+    routed.session as never as {
+      execCommand(args: { cmd: string }): Promise<string>;
+    }
+  ).execCommand({ cmd: "./script.sh" });
+  const [row] = await shared.admin<{ id: string }[]>`
+    select id from sandbox_retained_processes
+    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+  const processScope = {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.session.id,
+    processId: row!.id,
+  };
+  const admission = await advanceWorkspaceGenerationForRetainedProcess(client.db, {
+    ...processScope,
+    operation: "writeStdin",
+  });
+  await settleSessionRetainedProcessExited(fixture, 1);
+
+  const rejected = await verifyRetainedProcessMutationSettlement(client.db, {
+    ...processScope,
+    admission,
+    operation: "writeStdin",
+    outcome: "resolved",
+  }).catch((error) => error);
+  expect(rejected).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+  expect(rejected).toMatchObject({
+    code: "process_fenced",
+    retainedProcessTerminal: { state: "exited", exitCode: 1 },
+  });
+  expect(
+    (rejected as SandboxWorkspaceMutationOutputRejectedError).matchesPhysicalSettlement({
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      admission,
+      operation: "writeStdin",
+      outcome: "resolved",
+    }),
+  ).toBe(true);
+  const [physical] = await shared.admin`
+    select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where id = ${admission.id}`;
+  expect(physical!.provider_outcome).toBe("resolved");
+  expect(physical!.settled_at).toBeInstanceOf(Date);
+  expect(await getRetainedProcess(client.db, processScope)).toMatchObject({
+    state: "exited",
+    exitCode: 1,
+  });
+}, 60_000);
+
+test.each([false, true])(
+  "SDK stdin racing a terminal reconciliation returns durable exit truth without replay (cancellation: %s)",
+  async (cancellation) => {
+    const fixture = await admittedInternalMutation();
+    let writes = 0;
+    let processScope: Awaited<ReturnType<typeof settleSessionRetainedProcessExited>> | null = null;
+    Object.assign(fixture.sandbox.established.session, {
+      supportsPty: () => true,
+      execCommand: async () => "Process running with session ID 73\n\nOutput:\nstarted",
+      writeStdin: async () => {
+        writes++;
+        // Admission passed while the row was active; the reaper settles the
+        // exit before this provider call's output is verified.
+        processScope = await settleSessionRetainedProcessExited(fixture, 1);
+        return "Process exited with code 1\n\nOutput:\nrejected provider bytes";
+      },
+    });
+    const routed = routedInternalFixture(fixture);
+    await (
+      routed.session as never as {
+        execCommand(args: { cmd: string }): Promise<string>;
+      }
+    ).execCommand({ cmd: "./script.sh" });
+    const stdin = sdkCapabilityFunction(routed.session, "write_stdin", cancellation);
+    const output = await stdin.invoke(
+      {} as never,
+      JSON.stringify({ session_id: 73, chars: "", yield_time_ms: 0 }),
+    );
+    expect(String(output)).toContain("Process exited with code 1");
+    expect(String(output)).not.toContain("rejected provider bytes");
+    expect(writes).toBe(1);
+    const [physical] = await shared.admin`
+      select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+      where session_id = ${fixture.session.id} and actor_kind = 'process'`;
+    expect(physical!.provider_outcome).toBe("resolved");
+    expect(physical!.settled_at).toBeInstanceOf(Date);
+    expect(
+      (routed.session as never as { hasRetainedProcess(id: number): boolean }).hasRetainedProcess(
+        73,
+      ),
+    ).toBe(false);
+    expect(await getRetainedProcess(client.db, processScope!)).toMatchObject({
+      state: "exited",
+      exitCode: 1,
+    });
+  },
+  60_000,
+);
+
+test("actual SDK MCP fallback preserves exact real-database output rejection", async () => {
+  const fixture = await admittedInternalMutation();
+  let mutations = 0;
+  const server: MCPServer = {
+    name: "physical-settlement",
+    cacheToolsList: false,
+    connect: async () => undefined,
+    close: async () => undefined,
+    listTools: async () => [
+      {
+        name: "materialize",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ],
+    callTool: async () => {
+      await fixture.runtime.runWorkspaceMutationForSandbox(
+        fixture.sandbox as never,
+        "connectorAttachmentMaterialization",
+        async () => {
+          mutations++;
+          await shared.admin`delete from sandbox_lease_holders
+            where holder_id = ${fixture.holderId}`;
+        },
+      );
+      return { content: [] };
+    },
+  } as MCPServer;
+  const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+    mcpServers: [server],
+  });
+  const tool = (await agent.getMcpTools(new RunContext()))[0]!;
+  if (tool.type !== "function") throw new Error("Expected actual SDK MCP function tool");
+  const error = await tool.invoke(new RunContext(), "{}").catch((failure) => failure);
+  expect(error).toBeInstanceOf(Error);
+  expect(agentRunFailurePayload(error)).toMatchObject({
+    code: "sandbox_mutation_output_rejected",
+    retryable: false,
+  });
+  expect(mutations).toBe(1);
+  const [physical] = await shared.admin`
+    select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where session_id = ${fixture.session.id}`;
+  expect(physical!.provider_outcome).toBe("resolved");
+  expect(physical!.settled_at).toBeInstanceOf(Date);
+}, 60_000);
+
+test.each(["mismatched_admission", "commit_rollback"] as const)(
+  "internal setup remains unknown when its exact settlement has %s",
+  async (boundary) => {
+    const fixture = await admittedInternalMutation();
+    const trigger = `test_settlement_${fixture.session.id.replaceAll("-", "")}`;
+    if (boundary === "commit_rollback") {
+      await shared.admin.unsafe(`
+        create function ${trigger}() returns trigger language plpgsql as $$
+        begin
+          if NEW.session_id = '${fixture.session.id}'::uuid then
+            raise exception 'test deferred physical settlement rollback';
+          end if;
+          return NEW;
+        end $$;
+        create constraint trigger ${trigger}
+        after update on sandbox_workspace_mutation_admissions
+        deferrable initially deferred for each row execute function ${trigger}()`);
+    }
+    try {
+      let setups = 0;
+      const failure = await fixture.runtime
+        .runWorkspaceMutationForSandbox(
+          fixture.sandbox as never,
+          "lazyOwnedSandboxSetup",
+          async () => {
+            setups++;
+            if (boundary === "mismatched_admission") {
+              await shared.admin`
+              update sandbox_workspace_mutation_admissions set operation = 'otherOperation'
+              where session_id = ${fixture.session.id}`;
+            } else {
+              await shared.admin`
+              delete from sandbox_lease_holders where holder_id = ${fixture.holderId}`;
+            }
+          },
+        )
+        .catch((error) => error);
+      expect(failure).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+      expect(failure).not.toBeInstanceOf(RoutingMutationOutputRejectedError);
+      expect(failure.cause).not.toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+      expect(setups).toBe(1);
+      const [physical] = await shared.admin`
+        select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+        where session_id = ${fixture.session.id}`;
+      expect(physical!.provider_outcome).toBeNull();
+      expect(physical!.settled_at).toBeNull();
+    } finally {
+      if (boundary === "commit_rollback") {
+        await shared.admin.unsafe(
+          `drop trigger ${trigger} on sandbox_workspace_mutation_admissions;
+           drop function ${trigger}()`,
+        );
+      }
+    }
+  },
+  60_000,
+);
+
+test.each(["turnId", "executionGeneration"] as const)(
+  "wrong immutable %s cannot claim an exact physical settlement",
+  async (field) => {
+    const fixture = await admittedInternalMutation();
+    const scope = {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      turnId: fixture.claim.turn.id,
+      executionGeneration: fixture.claim.turn.executionGeneration,
+      attemptId: fixture.attemptId,
+      holderId: fixture.holderId,
+      sandboxGroupId: fixture.session.sandboxGroupId,
+      expectedEpoch: fixture.leaseEpoch,
+      expectedInstanceId: fixture.instanceId,
+      operation: "lazyOwnedSandboxSetup",
+    };
+    const admission = await advanceWorkspaceGeneration(client.db, scope);
+    const wrongIdentity =
+      field === "turnId"
+        ? { ...scope, turnId: crypto.randomUUID() }
+        : { ...scope, executionGeneration: scope.executionGeneration + 1 };
+    const error = await verifyWorkspaceMutationSettlement(client.db, {
+      ...wrongIdentity,
+      admission,
+      outcome: "resolved",
+    }).catch((failure) => failure);
+    expect(error).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect(error).not.toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+    const [physical] = await shared.admin`
+      select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+      where id = ${admission.id}`;
+    expect(physical!.provider_outcome).toBeNull();
+    expect(physical!.settled_at).toBeNull();
+  },
+  60_000,
+);
+
+test("a savepoint cannot mint physical certainty before its outer transaction commits", async () => {
+  const fixture = await admittedInternalMutation();
+  const scope = {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.session.id,
+    turnId: fixture.claim.turn.id,
+    executionGeneration: fixture.claim.turn.executionGeneration,
+    attemptId: fixture.attemptId,
+    holderId: fixture.holderId,
+    sandboxGroupId: fixture.session.sandboxGroupId,
+    expectedEpoch: fixture.leaseEpoch,
+    expectedInstanceId: fixture.instanceId,
+    operation: "lazyOwnedSandboxSetup",
+  };
+  const admission = await advanceWorkspaceGeneration(client.db, scope);
+  await shared.admin`
+    delete from sandbox_lease_holders where holder_id = ${fixture.holderId}`;
+  let rejection: unknown;
+  await client.db
+    .transaction(async (tx) => {
+      rejection = await verifyWorkspaceMutationSettlement(tx as unknown as Database, {
+        ...scope,
+        admission,
+        outcome: "resolved",
+      }).catch((error) => error);
+      throw new Error("Rollback the caller-owned fixture transaction");
+    })
+    .catch(() => undefined);
+  expect(rejection).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+  expect(rejection).not.toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+  const [physical] = await shared.admin`
+    select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where id = ${admission.id}`;
+  expect(physical!.provider_outcome).toBeNull();
+  expect(physical!.settled_at).toBeNull();
+}, 60_000);
+
+test("a physically settled partial setup batch still forbids complete-batch replay", async () => {
+  const fixture = await admittedInternalMutation();
+  let setups = 0;
+  const failure = await fixture.runtime
+    .runWorkspaceMutationForSandbox(fixture.sandbox as never, "lazyOwnedSandboxSetup", async () => {
+      setups++;
+      await shared.admin`
+        delete from sandbox_lease_holders where holder_id = ${fixture.holderId}`;
+      throw new ChannelAPartialMutationError("First setup item applied; later item rejected");
+    })
+    .catch((error) => error);
+  expect(failure).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+  expect(failure).not.toBeInstanceOf(RoutingMutationOutputRejectedError);
+  expect(setups).toBe(1);
+  const [physical] = await shared.admin`
+    select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where session_id = ${fixture.session.id}`;
+  expect(physical!.provider_outcome).toBe("resolved");
+  expect(physical!.settled_at).toBeInstanceOf(Date);
+}, 60_000);
 
 test.each([
   ["start", "exited"],

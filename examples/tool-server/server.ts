@@ -87,7 +87,7 @@ const proxy = createSessionProxyHandler(og, {
     firstPartyMcpTools: [],
     sandboxBackend: "none",
   }),
-  // url defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS; OpenGeni calls it),
+  // url defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS; Opengeni calls it),
   // which verifyToolRequest also checks as the token audience.
   toolServer: { approvals: { ask: ["rename_post"] } }, // list your write tools here
 });

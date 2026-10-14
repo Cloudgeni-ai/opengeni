@@ -12,9 +12,9 @@ describe("company-profile contracts", () => {
   test("normalizes stable keys and rejects duplicate or empty profiles", () => {
     expect(normalizeCompanyProfileStableKey("  North Star  Platform ")).toBe("north-star-platform");
     const profile = CompanyProfileContent.parse({
-      identity: "CloudGeni builds OpenGeni.",
+      identity: "CloudGeni builds Opengeni.",
       mission: "Make durable autonomous work dependable.",
-      products: [{ key: " OpenGeni ", content: "An autonomous-work platform." }],
+      products: [{ key: " Opengeni ", content: "An autonomous-work platform." }],
       customers: [],
       goals: [{ key: " Reliable   Runs ", content: "Agents complete long-running work safely." }],
       constraints: [],

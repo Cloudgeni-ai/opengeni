@@ -20,9 +20,11 @@ function canonicalResource(value: string): string {
   }
 }
 
-function eligibleConnections(
-  ref: NativeConnectorAccountRef["connectionRef"],
+/** Credential-free projection of the backend-authorized inventory, including inactive accounts. */
+export function matchingConnectionAccounts(
+  ref: NativeConnectorAccountRef["connectionRef"] | null | undefined,
   connections: readonly ConnectionMetadata[],
+  endpoint?: string | null,
 ) {
   if (!ref || ref.authoritySource === "host") return [];
   // Inventory is authorized by the backend. This projection is not a grant,
@@ -30,12 +32,16 @@ function eligibleConnections(
   const matches = connections.filter(
     (entry) =>
       (entry.subjectId === null || entry.authorityId != null) &&
-      entry.status === "active" &&
       (!ref.kind || entry.kind === ref.kind) &&
       (ref.connectionId === undefined || entry.id === ref.connectionId) &&
       (!ref.resource ||
         (typeof entry.metadata?.resource === "string" &&
           canonicalResource(entry.metadata.resource) === canonicalResource(ref.resource))) &&
+      // An OAuth audience can differ from the transport endpoint. Compare a
+      // saved endpoint only to the catalog endpoint, not to its resource.
+      (!endpoint ||
+        typeof entry.metadata?.mcpUrl !== "string" ||
+        canonicalResource(entry.metadata.mcpUrl) === canonicalResource(endpoint)) &&
       normalizeProviderDomain(entry.providerDomain) === normalizeProviderDomain(ref.providerDomain),
   );
   return matches;
@@ -95,7 +101,9 @@ export function connectedAccountGroups(
     if (ref.connectionRef.authoritySource === "host") continue;
     const serverId = ref.serverId;
     const group = groups.get(serverId) ?? { serverId, name: ref.name, accounts: [] };
-    for (const account of eligibleConnections(ref.connectionRef, connections)) {
+    for (const account of matchingConnectionAccounts(ref.connectionRef, connections).filter(
+      (entry) => entry.status === "active",
+    )) {
       if (!group.accounts.some((existing) => existing.id === account.id))
         group.accounts.push(account);
     }

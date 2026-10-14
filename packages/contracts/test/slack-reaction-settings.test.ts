@@ -105,6 +105,8 @@ describe("Slack reaction summon workspace settings", () => {
 
   test("generates one managed or self-hosted manifest with the exact read scope and reaction event", () => {
     const managed = buildOpenGeniSlackBotManifest(OPENGENI_MANAGED_PUBLIC_BASE_URL);
+    expect(managed.display_information.name).toBe("Opengeni");
+    expect(managed.features.bot_user.display_name).toBe("Opengeni");
     expect(managed.oauth_config.scopes.bot).toEqual([...OPENGENI_SLACK_BOT_REQUESTED_SCOPES]);
     expect(managed.features.app_home).toEqual({
       home_tab_enabled: true,
@@ -124,15 +126,15 @@ describe("Slack reaction summon workspace settings", () => {
     );
 
     const staging = buildOpenGeniSlackBotManifest("https://staging.app.opengeni.ai", {
-      appName: "OpenGeni Staging",
-      botDisplayName: "OpenGeni Staging",
+      appName: "Opengeni Staging",
+      botDisplayName: "Opengeni Staging",
       slashCommand: "/opengeni-staging",
-      shortcutName: "Open in OpenGeni Staging",
+      shortcutName: "Open in Opengeni Staging",
     });
-    expect(staging.display_information.name).toBe("OpenGeni Staging");
-    expect(staging.features.bot_user.display_name).toBe("OpenGeni Staging");
+    expect(staging.display_information.name).toBe("Opengeni Staging");
+    expect(staging.features.bot_user.display_name).toBe("Opengeni Staging");
     expect(staging.features.slash_commands[0]!.command).toBe("/opengeni-staging");
-    expect(staging.features.shortcuts[0]!.name).toBe("Open in OpenGeni Staging");
+    expect(staging.features.shortcuts[0]!.name).toBe("Open in Opengeni Staging");
     expect(staging.settings.interactivity.request_url).toBe(
       "https://staging.app.opengeni.ai/v1/integrations/slack/interactions",
     );
@@ -150,7 +152,7 @@ describe("Slack reaction summon workspace settings", () => {
     );
     expect(() =>
       buildOpenGeniSlackBotManifest("https://opengeni.example.test", {
-        slashCommand: "/OpenGeni",
+        slashCommand: "/Opengeni",
       }),
     ).toThrow("slash command");
   });

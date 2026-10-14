@@ -34,6 +34,44 @@ const BROWSER_DOWNLOAD_SAVE_OPERATION_ID = "00000000-0000-4000-8000-000000000024
 const BROWSER_DOWNLOAD_FILE_ID = "00000000-0000-4000-8000-000000000025";
 
 describe("interaction control failure projection", () => {
+  test.each([null, "window-1"])(
+    "receipt accessors refuse the other operation kind (%s)",
+    async (targetId) => {
+      const operationId = "00000000-0000-4000-8000-000000000015";
+      const receipt = {
+        protocolVersion: 1 as const,
+        operationId,
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-2",
+        targetId,
+        state: "completed" as const,
+        dispatchedAt: "2026-08-10T10:01:00.000Z",
+        settledAt: "2026-08-10T10:01:00.100Z",
+        observation: null,
+        error: null,
+      };
+      const client = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        fetch: async () => json(receipt),
+      });
+      const args = [WORKSPACE_ID, COMPUTER_SESSION_ID, operationId] as const;
+      if (targetId === null) {
+        expect(await client.getNativeComputerToolReceipt(...args)).toEqual({
+          ...receipt,
+          targetId: null,
+        });
+        await expect(client.getComputerActionReceipt(...args)).rejects.toThrow(
+          "Expected a computer action receipt",
+        );
+      } else {
+        expect(await client.getComputerActionReceipt(...args)).toEqual({ ...receipt, targetId });
+        await expect(client.getNativeComputerToolReceipt(...args)).rejects.toThrow(
+          "Expected a native computer receipt",
+        );
+      }
+    },
+  );
+
   test("decodes typed control detail while retaining outer and inner correlation", () => {
     const error = new OpenGeniApiError(
       502,
@@ -422,7 +460,7 @@ describe("BrowserSession SDK", () => {
             targetGeneration: "target-1-generation",
             documentGeneration: "document-1",
             kind: "page",
-            title: "OpenGeni",
+            title: "Opengeni",
             url: "https://opengeni.ai/",
             selected: true,
             attached: true,
@@ -829,14 +867,6 @@ describe("BrowserSession SDK", () => {
         if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/report`)) {
           return json({ run: { id: AUTH_RUN_ID }, operationId: "auth-report", replayed: false });
         }
-        if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/protected-fill`)) {
-          return json({
-            run: { id: AUTH_RUN_ID },
-            status: "working",
-            operationId: "auth-fill",
-            replayed: false,
-          });
-        }
         if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/external-auth/interactive`)) {
           return json({
             authRunId: AUTH_RUN_ID,
@@ -923,16 +953,6 @@ describe("BrowserSession SDK", () => {
       expectedDocumentGeneration: "document-generation-1",
     });
     await run.report({ operationId: "auth-report", expectedVersion: 1, state: "working" });
-    await run.protectedFill({
-      operationId: "auth-fill",
-      expectedVersion: 2,
-      expectedTargetGeneration: "target-generation-1",
-      expectedDocumentGeneration: "document-generation-1",
-      expectedFrameId: null,
-      authorityId: "password-authority",
-      fields: [{ fieldId: "password", locator: { kind: "ref", ref: "e2" } }],
-      submit: { type: "press", key: "Enter" },
-    });
     await run.advanceExternal({
       operationId: "auth-external",
       expectedVersion: 3,
@@ -979,7 +999,6 @@ describe("BrowserSession SDK", () => {
       `GET /v1/workspaces/${WORKSPACE_ID}/auth-runs?browserSessionId=${BROWSER_SESSION_ID}&includeSettled=true`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/report`,
-      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/protected-fill`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/external-auth`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/external-auth/interactive`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/verify`,

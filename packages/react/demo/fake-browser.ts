@@ -113,7 +113,7 @@ async function renderDemoPage(target: BrowserTarget): Promise<Uint8Array> {
   context.fill();
   context.fillStyle = "#f2f5fb";
   context.font = "600 24px Inter, system-ui, sans-serif";
-  context.fillText("OpenGeni browser", 270, 157);
+  context.fillText("Opengeni browser", 270, 157);
 
   context.fillStyle = "#0f1624";
   roundRect(context, 214, 194, 852, 52, 12);
@@ -137,7 +137,7 @@ async function renderDemoPage(target: BrowserTarget): Promise<Uint8Array> {
   context.fill();
   context.fillStyle = "#07101f";
   context.font = "600 18px Inter, system-ui, sans-serif";
-  context.fillText("Explore OpenGeni", 241, 500);
+  context.fillText("Explore Opengeni", 241, 500);
 
   context.fillStyle = "#6f7d92";
   context.font = "14px ui-monospace, SFMono-Regular, monospace";

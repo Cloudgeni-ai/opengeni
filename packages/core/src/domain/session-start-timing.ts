@@ -2,10 +2,15 @@ import { withTraceContext, type Observability, type Span } from "@opengeni/obser
 
 type SessionStartPhase =
   | "workspace_read"
+  | "idempotent_replay"
   | "model_catalog_initial"
   | "default_model"
   | "model_catalog_effective"
   | "capability_settings"
+  | "resource_validation"
+  | "rig_binding"
+  | "model_admission"
+  | "connection_freeze"
   | "initiator_freeze"
   | "allowance"
   | "shell_insert"

@@ -1,5 +1,158 @@
 # @opengeni/observability
 
+## 2.0.0
+
+### Patch Changes
+
+- bfed4f1: Web client error reports now say why a page failed, not only where: the beacon carries the error's name, message and stack, plus React's component stack for a render failure. The browser and the API apply one shared projection that removes URL query strings, redacts obvious credentials and bounds each field, and the API logs the result as `clientErrorName`, `clientErrorMessage`, `clientErrorStack` and `clientComponentStack` on the `Web client error reported` line.
+- 1489689: Make product-level failures visible and alertable: every rejected API request is counted and logged with a bounded error code, missing-permission/domain reason, and content-free message fingerprint; Browser/Computer operations (including observe, tabs, and handoff attach) report outcome and failure reason; agent-opened handoffs and their expiry are counted; Connect attempts, provider OAuth callbacks, MCP OAuth starts, Connected Machine connects/enrollment, attached-browser reachability, and agent tool calls by closed tool family get low-cardinality metrics; new PrometheusRule alerts cover abnormal per-route refusals, missing-permission spikes, refused handoffs, and each product surface.
+- aa0f483: Route Temporal SDK and core logs through the structured logger. Each record is one JSON line, and task tokens, identifiers and raw errors are projected out.
+- Updated dependencies [fc57bd2]
+- Updated dependencies [04ebc42]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [c2f4153]
+- Updated dependencies [de2d721]
+- Updated dependencies [055015d]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [1756cfe]
+- Updated dependencies [40e2542]
+- Updated dependencies [6861501]
+- Updated dependencies [bfed4f1]
+- Updated dependencies [4532435]
+- Updated dependencies [f96605f]
+- Updated dependencies [496ce55]
+- Updated dependencies [3822e5f]
+- Updated dependencies [3962da3]
+- Updated dependencies [c4dd318]
+- Updated dependencies [ce7b403]
+- Updated dependencies [445baf4]
+- Updated dependencies [5b4a738]
+- Updated dependencies [334c470]
+- Updated dependencies [96d7167]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [6313dd8]
+- Updated dependencies [945490f]
+- Updated dependencies [8e878ac]
+- Updated dependencies [9701372]
+- Updated dependencies [bc40348]
+- Updated dependencies [5eb1c32]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [4cb80a9]
+- Updated dependencies [eb68b58]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [6960770]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [63bf721]
+- Updated dependencies [3a4a435]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [322f26c]
+- Updated dependencies [945c247]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [5cb6d71]
+- Updated dependencies [732a788]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [7ce535f]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [a91718c]
+  - @opengeni/contracts@2.0.0
+
+## 1.4.4
+
+### Patch Changes
+
+- 2edfa4c: Spans are batched on a short timer (up to 256 per OTLP request) instead of per microtask, so busy workers no longer overflow the bounded export queue and drop spans.
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/contracts@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- f9e33b5: Retain bounded HTTP method, route, cause-kind and diagnostic correlation in error logs without exposing request contents or exception text. Record protected cause diagnostics for unexpected API failures.
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

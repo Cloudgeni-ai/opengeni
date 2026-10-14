@@ -1,11 +1,11 @@
 ---
 name: opengeni-documents
-description: Create, inspect, edit, review, import, and export durable OpenGeni document artifacts and explicit DOCX file boundaries. Use when creating or editing a document Artifact or DOCX (reports, briefs, proposals, forms, tables, sections, headers, footers, comments, tracked changes, and Word-compatible delivery); ordinary chat answers do not need it.
+description: Create, inspect, edit, review, import, and export durable Opengeni document artifacts and explicit DOCX file boundaries. Use when creating or editing a document Artifact or DOCX (reports, briefs, proposals, forms, tables, sections, headers, footers, comments, tracked changes, and Word-compatible delivery); ordinary chat answers do not need it.
 ---
 
-# OpenGeni documents
+# Opengeni documents
 
-The durable OpenGeni artifact is the default working document. It is the same
+The durable Opengeni artifact is the default working document. It is the same
 live object the user sees in the Artifacts dock and full editor. Never create a
 mutable DOCX shadow, publish a sandbox file, or alternate between file and
 artifact state.

@@ -234,4 +234,17 @@ describe("projection lifecycle audit regressions", () => {
     expect(groups.at(-1)?.kind).toBe("activity");
     expect(work(groups)[0]!.work!.endedAt).toBeUndefined();
   });
+
+  test("reasoning summary parts streamed as separate bold deltas become paragraphs", () => {
+    const items = buildTimeline([
+      event(1, "agent.reasoning.delta", { text: "**Checking the workspace first**" }),
+      event(2, "agent.reasoning.delta", { text: "**Inspecting guidance**" }),
+      event(3, "agent.reasoning.delta", { text: " and then **more**" }),
+    ]);
+    const reasoning = items.filter((item) => item.kind === "reasoning");
+    expect(reasoning).toHaveLength(1);
+    expect(reasoning[0]!.kind === "reasoning" && reasoning[0]!.text).toBe(
+      "**Checking the workspace first**\n\n**Inspecting guidance** and then **more**",
+    );
+  });
 });

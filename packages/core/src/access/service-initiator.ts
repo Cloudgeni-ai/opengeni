@@ -34,12 +34,12 @@ export function serviceInitiatorFromHeaders(
       )
         throw new Error("flat");
       context = parsed as typeof context;
-      // Keep delegated provenance's reserved, OpenGeni-owned lineage fields.
+      // Keep delegated provenance's reserved, Opengeni-owned lineage fields.
       if (!ServiceTurnInitiatorContext.safeParse(context).success) throw new Error("reserved");
     } catch {
       throw new HTTPException(422, {
         message:
-          "x-opengeni-service-context must be a JSON object of flat string/number/boolean values, at most 2048 UTF-8 bytes, without reserved OpenGeni provenance fields",
+          "x-opengeni-service-context must be a JSON object of flat string/number/boolean values, at most 2048 UTF-8 bytes, without reserved Opengeni provenance fields",
       });
     }
   }

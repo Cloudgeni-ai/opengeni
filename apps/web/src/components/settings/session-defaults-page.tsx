@@ -4,7 +4,7 @@
  * A flush form page (DESIGN.md section 8): starting point, capabilities in
  * three groups, identity, Save. Running chats keep what they started with.
  *
- * Saved as `settings.sessionAgentDefaults`; OpenGeni's own defaults (every
+ * Saved as `settings.sessionAgentDefaults`; Opengeni's own defaults (every
  * capability, the default identity) are stored as no value at all.
  */
 import {
@@ -18,6 +18,12 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { AgentCapabilityPicker } from "@/components/agent/agent-capability-picker";
+import {
+  learningModesEqual,
+  useLearningSettings,
+  type LearningModes,
+} from "@/components/agent/capability-learning";
+import { InAppHelpLink } from "@/components/in-app-help-link";
 import { Button } from "@/components/ui/button";
 import { Field, FieldStack, TextArea } from "@/components/ui/field";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
@@ -32,6 +38,7 @@ import {
   workspaceAgentDefaultsDraft,
   type AgentCapabilityDraft,
 } from "@/lib/agent-capabilities";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 
 export const IDENTITY_PLACEHOLDER =
   "You are Acme's operations assistant. You help the team triage support tickets and keep answers short and friendly.";
@@ -69,6 +76,19 @@ export function SessionDefaultsPage({
     };
   }, [workspace]);
   const [draft, setDraft] = useState<AgentCapabilityDraft | null>(saved?.draft ?? null);
+  // Agent learning for this workspace's chats: Skills and Knowledge show it inline.
+  const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const learning = useLearningSettings({ workspaceId, scope: personal ? "personal" : "workspace" });
+  const [learningDraft, setLearningDraft] = useState<LearningModes | null>(null);
+  const learningKey = learning.modes ? JSON.stringify(learning.modes) : null;
+  useEffect(() => {
+    setLearningDraft(learning.modes);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- reset only when the saved value changes
+  }, [learningKey]);
+  const learningChanged =
+    learning.modes !== null &&
+    learningDraft !== null &&
+    !learningModesEqual(learning.modes, learningDraft);
   const [identity, setIdentity] = useState(saved?.identity ?? "");
   // A fresh read (first load, or someone else saved) resets the form.
   const savedKey = saved ? JSON.stringify([saved.defaults, saved.identity]) : null;
@@ -80,8 +100,9 @@ export function SessionDefaultsPage({
   }, [savedKey]);
 
   const identityChanged = saved !== null && identity.trim() !== saved.identity.trim();
-  const dirty =
+  const capabilitiesChanged =
     saved !== null && draft !== null && (!draftsEqual(draft, saved.draft) || identityChanged);
+  const dirty = capabilitiesChanged || learningChanged;
   const identityTooLong = identity.trim().length > AGENT_IDENTITY_MAX_CHARACTERS;
   const legacyHumanInputOff = workspace?.settings.agentHumanInputEnabled === false;
   const capabilitiesRequest = (current: AgentCapabilityDraft): AgentCapabilities => {
@@ -98,7 +119,6 @@ export function SessionDefaultsPage({
     !identity.trim() &&
     saved?.identitySource !== "legacy_agent_instructions";
   const readOnlyReason = canManage ? undefined : "Only workspace admins can change these.";
-
   async function save(): Promise<boolean> {
     if (!workspace || !draft || !saved || !canManage) return false;
     const invocation = context.captureWorkspaceInvocation(workspaceId);
@@ -116,13 +136,33 @@ export function SessionDefaultsPage({
           ...(nextIdentity !== undefined ? { identity: nextIdentity } : {}),
           ...(saved.defaults?.renderer ? { renderer: saved.defaults.renderer } : {}),
         };
-    try {
-      await context.client.updateWorkspaceSettings(workspaceId, { sessionAgentDefaults: next });
-    } catch (error) {
-      throw new Error(
-        agentConfigErrorText(error, "Couldn't save the defaults. Nothing was changed. Try again."),
-        { cause: error },
-      );
+    if (capabilitiesChanged) {
+      try {
+        await context.client.updateWorkspaceSettings(workspaceId, { sessionAgentDefaults: next });
+      } catch (error) {
+        throw new Error(
+          agentConfigErrorText(
+            error,
+            "Couldn't save the defaults. Nothing was changed. Try again.",
+          ),
+          { cause: error },
+        );
+      }
+    }
+    if (learningChanged && learningDraft) {
+      try {
+        await learning.save(learningDraft);
+      } catch (error) {
+        throw new Error(
+          agentConfigErrorText(
+            error,
+            capabilitiesChanged
+              ? "Saved what agents can do, but not whether their saves need review. Try again."
+              : "Couldn't save whether agent saves need review. Nothing was changed. Try again.",
+          ),
+          { cause: error },
+        );
+      }
     }
     if (context.ownsWorkspaceInvocation(workspaceId, invocation)) {
       await context.refreshWorkspace(workspaceId);
@@ -159,8 +199,20 @@ export function SessionDefaultsPage({
             availability={availability}
             disabled={!canManage}
             startingPointLabel="What agents can do"
-            startingPointDescription="People can still change this for one chat from the composer."
+            startingPointDescription="People can change this for one chat in the composer or in the chat's Agent tab."
+            learning={
+              learningDraft ? { modes: learningDraft, onChange: setLearningDraft } : undefined
+            }
           />
+          {!personal ? (
+            <p className="-mt-2 text-xs leading-4.5 text-fg-muted">
+              These apply to shared chats. Only-me chats use{" "}
+              <InAppHelpLink href={`/workspaces/${workspaceId}/settings?section=learning`}>
+                your private chat settings
+              </InAppHelpLink>
+              .
+            </p>
+          ) : null}
           <Field
             label="Who the agent is"
             optional
@@ -178,7 +230,7 @@ export function SessionDefaultsPage({
             hint={
               saved?.identitySource === "legacy_agent_instructions" && !identityChanged
                 ? "From this workspace's earlier custom persona. Saving new text replaces it for new chats."
-                : "Replaces how OpenGeni introduces the agent. Workspace instructions still apply on top. Empty uses OpenGeni's default."
+                : "Replaces how Opengeni introduces the agent. Workspace instructions still apply on top. Empty uses Opengeni's default."
             }
           >
             <TextArea
@@ -208,7 +260,7 @@ export function SessionDefaultsPage({
                   );
                 }}
               >
-                Use OpenGeni's defaults
+                Use Opengeni's defaults
               </Button>
             </div>
           ) : null}

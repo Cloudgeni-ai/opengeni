@@ -17,7 +17,7 @@ import { sessionAttachEnvironment } from "../src/sandbox/viewer";
 
 const settings = testSettings({
   sandboxBackend: "modal",
-  gitAuthorName: "OpenGeni Bot",
+  gitAuthorName: "Opengeni Bot",
   gitAuthorEmail: "bot@opengeni.dev",
   githubAppId: "12345",
   githubAppSlug: "opengeni-test",
@@ -51,7 +51,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
       null,
     );
     const expected = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws" }),
+      stableSandboxEnvironmentForRun(settings, { workspaceId: "ws" }),
       githubAppBotIdentity(settings),
     );
     expect(attachEnv).toEqual(expected);
@@ -61,7 +61,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
 
   test("a session with NO GitHub-App repo keeps the plain stable base (no pointers)", async () => {
     const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([]), null);
-    expect(attachEnv).toEqual(stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws" }));
+    expect(attachEnv).toEqual(stableSandboxEnvironmentForRun(settings, { workspaceId: "ws" }));
     expect(attachEnv.GIT_ASKPASS).toBeUndefined();
   });
 
@@ -81,12 +81,12 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
       null,
     );
     const expected = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws" }),
+      stableSandboxEnvironmentForRun(settings, { workspaceId: "ws" }),
       null,
     );
     expect(attachEnv).toEqual(expected);
     expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
-    expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+    expect(attachEnv.GIT_AUTHOR_NAME).toBe("Opengeni Bot");
     expect(attachEnv.GIT_AUTHOR_EMAIL).toBe("bot@opengeni.dev");
   });
 
@@ -113,11 +113,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
       ),
     );
     const expected = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(
-        { ...settings, sandboxBackend: "e2b" },
-        {},
-        { workspaceId: "ws" },
-      ),
+      stableSandboxEnvironmentForRun({ ...settings, sandboxBackend: "e2b" }, { workspaceId: "ws" }),
       githubAppBotIdentity(settings),
     );
     expect(attachEnv).toEqual(expected);

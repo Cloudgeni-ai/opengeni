@@ -58,6 +58,8 @@ export interface ModelsScopeLabels {
   everyone: string;
   /** "Selected workspaces": an organization account limited to some workspaces. */
   selected: string;
+  /** "No workspaces": an organization account that no workspace can use yet. */
+  none: string;
   /** "Design preview only", "This workspace only", or "Personal workspace only". */
   workspace: string;
   /** "Only you". */
@@ -74,6 +76,7 @@ export function modelsScopeLabels(
     organization: `Shared by ${organizationName}`,
     everyone: `Everyone in ${organizationName}`,
     selected: "Selected workspaces",
+    none: "No workspaces",
     workspace: personal
       ? "Personal workspace only"
       : workspaceName
@@ -84,8 +87,9 @@ export function modelsScopeLabels(
 }
 
 /**
- * The tag of an organization account, from its "Available in": everyone, or
- * selected workspaces. "Shared by Acme" until the policy is known.
+ * The tag of an organization account, from its "Available in": everyone,
+ * one named workspace, selected workspaces or people, or none. "Shared by
+ * Acme" until the policy is known.
  */
 export function organizationReachLabel(
   labels: ModelsScopeLabels,
@@ -93,10 +97,21 @@ export function organizationReachLabel(
 ): string {
   if (!access) return labels.organization;
   const { policy, personalWorkspacesSupported } = access;
-  return policy.allowedWorkspaces === null &&
-    (!personalWorkspacesSupported || policy.allowPersonalWorkspaces)
-    ? labels.everyone
-    : labels.selected;
+  if (policy.allowedPeople) return policy.allowedPeople.length ? "Selected people" : "No one";
+  const personal = personalWorkspacesSupported && policy.allowPersonalWorkspaces;
+  if (policy.allowedWorkspaces === null && (!personalWorkspacesSupported || personal))
+    return labels.everyone;
+  // A workspace that connected the account always keeps it.
+  const reached =
+    policy.allowedWorkspaces === null
+      ? null
+      : [...new Set([...policy.allowedWorkspaces, ...(access.localWorkspaceIds ?? [])])];
+  if (reached !== null && reached.length === 0 && !personal) return labels.none;
+  if (reached?.length === 1 && !personal) {
+    const only = access.workspaces.find((workspace) => workspace.id === reached[0]);
+    if (only) return `${only.name} only`;
+  }
+  return labels.selected;
 }
 
 /** "Not in use", in the usage column of an account new work here doesn't use. */
@@ -135,7 +150,7 @@ export function payerShortLabel(row: { billingClass: string; providerLabel: stri
   }
 }
 
-/** Who pays for a model, in product words: "Codex plan", "OpenGeni credits". */
+/** Who pays for a model, in product words: "Codex plan", "Opengeni credits". */
 export function payerLabel(billingClass: string, fallback?: string): string {
   switch (billingClass) {
     case "codex_subscription":

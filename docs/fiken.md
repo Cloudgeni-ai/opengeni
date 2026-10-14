@@ -1,6 +1,6 @@
 # Fiken connector (first-party)
 
-OpenGeni's first-party connector for [Fiken](https://fiken.no), the Norwegian
+Opengeni's first-party connector for [Fiken](https://fiken.no), the Norwegian
 small-business accounting service. A workspace connects Fiken either through
 the **registered-app OAuth flow** (the default in the UI) or by pasting a
 **personal API token**; both produce the same workspace-shared connection, and
@@ -81,6 +81,18 @@ choices. Send a new message to use the updated selection. Discovery reports
 ready only when a selected Fiken tool is present in the exact current attempt;
 missing runtime tools alone do not imply failed authorization. A connection
 marked `needs_reauth` still requires reconnection.
+
+A child cannot select Fiken tools outside its parent's selection, even when the
+same human initiated both chats. In the web console, **Add tools** reads the
+parent chain first. If parent chats also need Fiken, the card lists those chats
+and offers **Enable in parents and add tools**. That separate confirmation adds
+only the reviewed capability, from the root down to the child, through ordinary
+session authorization and version-fenced tool-policy updates. Existing choices
+are preserved; a changed workspace-default selection becomes explicit. Current
+accepted turns keep their frozen access. Cancel makes no changes. A stale review
+requires another review; a failure partway through can leave already-approved
+parent changes saved, and retry reviews only the remaining additions. Owning or
+initiating a chat is not an agent permission bypass.
 
 | Tool | Permission | Notes |
 | --- | --- | --- |

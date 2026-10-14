@@ -91,7 +91,6 @@ describe("trusted worker credential restriction", () => {
         groupBoxBackend: "selfhosted",
         sandboxCreationBackend: "selfhosted",
         effectiveRunCredentialBackend: "selfhosted",
-        sandboxWorkspaceEnvironmentValues: {},
         connectionScope: scope,
         runWorkspaceMutationForSandbox: async (_sandbox, _operation, mutation) => await mutation(),
       } as PrepareRunCredentialsDeps);

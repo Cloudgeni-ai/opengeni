@@ -1,11 +1,23 @@
 import { expect, test } from "bun:test";
+import { createRequire } from "node:module";
 import type { ModelRequest } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
 import { AnthropicRequestError } from "../../../packages/runtime/src/anthropic-request-error";
 import { classifyProviderQuotaError } from "../../../packages/runtime/src/provider-quota";
+import {
+  RoutingMutationOutputRejectedError,
+  RoutingMutationOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
+  ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
+} from "@opengeni/runtime";
 import { ResponsesStreamingTerminalError } from "../../../packages/runtime/src/responses-terminal-error";
-import { agentRunFailurePayload, providerRetryAfterMs } from "../src/activities/agent-turn/errors";
+import {
+  agentRunFailurePayload,
+  providerRetryAfterMs,
+  postClaimDatabaseRecoveryFailure,
+} from "../src/activities/agent-turn/errors";
 import { failedSessionCopy } from "../../web/src/lib/failed-session-copy";
 import { summarizeSessionFailure } from "../../web/src/lib/events";
 
@@ -339,5 +351,69 @@ test("authentication presentation requires typed native proof and matching statu
         consecutiveRecoveryCount: null,
       }).retryUnhelpful,
     ).not.toBe(true);
+  }
+});
+
+test("a rejected settled output never hides an uncertain sibling's terminal classification", () => {
+  const receipt = new RoutingMutationOutputRejectedError("applyPatch", "holder_fenced");
+  const command = { kind: "modal-router-v1" } as never;
+  for (const uncertain of [
+    new RoutingMutationOutcomeUnknownError("applyPatch", "Partial provider batch"),
+    new ProviderCommandObservationUnavailableError(command, new Error("observation unavailable")),
+    new ProviderCommandInputOutcomeUnknownError(
+      command,
+      0,
+      4,
+      new Error("stdin acknowledgement lost"),
+    ),
+    new ProviderCommandStartOutcomeUnknownError(command, new Error("start acknowledgement lost")),
+    new ProviderCommandStartOutcomeUnknownError(
+      command,
+      new (createRequire(import.meta.resolve("@opengeni/runtime"))(
+        "modal",
+      ).CommandStartOutcomeUnknownError)(
+        "task-fixture",
+        crypto.randomUUID(),
+        new Error("start acknowledgement lost"),
+      ),
+    ),
+  ]) {
+    const original = agentRunFailurePayload(uncertain);
+    for (const errors of [
+      [uncertain, receipt],
+      [receipt, uncertain],
+    ]) {
+      const failure = agentRunFailurePayload(
+        new Error("SDK wrapper", {
+          cause: new AggregateError(errors),
+        }),
+      );
+      expect(failure.code).toBe(original.code);
+      expect(failure.error).toBe(original.error);
+      expect(failure.retryable).toBe(false);
+      expect(failure.code).not.toBe("sandbox_mutation_output_rejected");
+    }
+  }
+});
+
+test("a rejected settled output vetoes sibling database transport recovery", () => {
+  const rejected = new RoutingMutationOutputRejectedError("writeFile", "holder_fenced");
+  const transport = Object.assign(new Error("Connection lost"), { code: "ECONNRESET" });
+  const identity = {
+    turnId: "turn-claimed",
+    triggerEventId: "trigger-claimed",
+    executionGeneration: 1,
+  };
+  expect(postClaimDatabaseRecoveryFailure({ error: transport, ...identity })).not.toBeNull();
+  for (const errors of [
+    [transport, rejected],
+    [rejected, transport],
+  ]) {
+    expect(
+      postClaimDatabaseRecoveryFailure({
+        error: new Error("SDK wrapper", { cause: new AggregateError(errors) }),
+        ...identity,
+      }),
+    ).toBeNull();
   }
 });

@@ -2,6 +2,14 @@ import { CircleAlertIcon, RefreshCwIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { DisabledReason } from "@/components/ui/disabled-reason";
+import {
+  type DateInput,
+  formatAbsoluteTime,
+  formatShortTime,
+  inSentence,
+  toDate,
+  useMinuteNow,
+} from "@/components/ui/relative-time";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -210,31 +218,41 @@ export function UsageMeter({
 
 /**
  * The usage readout at the end of an account row: "78% left this week" and a
- * 64px bar, right-aligned so it sits against the row's chevron. Without a
- * reading it says why in words ("No usage yet"). Where the row folds its
- * facts into the meta line (narrow lists), only the words stay.
+ * 64px bar, right-aligned so it sits against the row's chevron, and under it
+ * when the limits reset: "Resets Thu 09:00 · 5-hour 14:20". Without a reading
+ * it says why in words ("No usage yet"). Where the row folds its facts into
+ * the meta line (narrow lists), only the words stay.
  */
 export function UsageReadout({
   percent,
   window: windowLabel,
-  resetsLabel,
+  resets = NO_RESETS,
   loading = false,
   fallback = "No usage yet",
   limitReached = false,
+  now: fixedNow,
   className,
 }: {
   /** Share left, 0-100, or null when there is no reading. */
   percent: number | null;
   /** How the window reads after "left": "this week", "this period". */
   window: string;
-  resetsLabel?: string;
+  /**
+   * When the account's limits reset, the shown window's first (no label),
+   * then any other window by name. Times already past are left out.
+   */
+  resets?: readonly UsageReset[];
   loading?: boolean;
   /** Words for a missing reading: "No usage yet", "Usage unavailable". */
   fallback?: string;
   limitReached?: boolean;
+  /** The clock reset times are read against. Defaults to the shared minute clock. */
+  now?: number;
   className?: string;
 }) {
   const level = limitReached ? "exhausted" : usageLevel(percent);
+  const minuteNow = useMinuteNow();
+  const now = fixedNow ?? minuteNow;
   if (loading) {
     return (
       <span
@@ -260,6 +278,25 @@ export function UsageReadout({
   const shown = percent === null ? 0 : clampPercent(percent);
   const text =
     level === "exhausted" ? "Limit reached" : `${usageValueText(percent)} ${windowLabel}`;
+  const upcoming = resets.filter((reset) => toDate(reset.at).getTime() > now);
+  const resetLong = upcoming.length
+    ? upcoming
+        .map((reset, index) => {
+          const at = inSentence(formatAbsoluteTime(reset.at, { now }));
+          if (!reset.label) return `${index === 0 ? "Resets" : "resets"} ${at}`;
+          return `${reset.label} resets ${at}`;
+        })
+        .join("; ")
+    : null;
+  const resetShort = upcoming.length
+    ? upcoming
+        .map((reset, index) => {
+          const at = formatShortTime(reset.at, { now });
+          if (!reset.label) return `Resets ${at}`;
+          return index === 0 ? `${reset.label} resets ${at}` : `${reset.label} ${at}`;
+        })
+        .join(" · ")
+    : null;
   const meterProps =
     percent === null
       ? { role: "group" as const }
@@ -268,32 +305,76 @@ export function UsageReadout({
           "aria-valuemin": 0,
           "aria-valuemax": 100,
           "aria-valuenow": shown,
-          "aria-valuetext": `${text}${resetsLabel ? `, resets ${resetPhrase(resetsLabel)}` : ""}`,
+          "aria-valuetext": `${text}${resetLong ? `. ${resetLong}` : ""}`,
         };
   return (
     <span
       data-slot="usage-readout"
       aria-label={`Usage ${windowLabel}`}
       {...meterProps}
-      title={resetsLabel ? `Resets ${resetPhrase(resetsLabel)}` : undefined}
-      className={cn("inline-flex min-w-0 items-center justify-end gap-3", className)}
+      title={resetLong ?? undefined}
+      className={cn("inline-flex max-w-full min-w-0 flex-col items-end", className)}
     >
-      <span
-        className={cn(
-          "min-w-0 truncate text-xs whitespace-nowrap tabular-nums",
-          LEVEL_VALUE_TEXT[level],
-          level !== "healthy" && "font-medium",
-        )}
-      >
-        {text}
+      <span className="inline-flex max-w-full min-w-0 items-center justify-end gap-3">
+        <span
+          className={cn(
+            "min-w-0 truncate text-xs whitespace-nowrap tabular-nums",
+            LEVEL_VALUE_TEXT[level],
+            level !== "healthy" && "font-medium",
+          )}
+        >
+          {text}
+        </span>
+        <Track
+          level={level}
+          fill={level === "exhausted" ? 0 : shown}
+          className="w-16 shrink-0 @max-[639px]/list:hidden"
+        />
       </span>
-      <Track
-        level={level}
-        fill={level === "exhausted" ? 0 : shown}
-        className="w-16 shrink-0 @max-[639px]/list:hidden"
-      />
+      {resetShort ? (
+        <span
+          data-slot="usage-readout-resets"
+          aria-hidden="true"
+          className={cn(
+            "max-w-full truncate text-2xs leading-4 whitespace-nowrap tabular-nums @max-[639px]/list:hidden",
+            level === "exhausted" ? "text-fg-muted" : "text-fg-subtle",
+          )}
+        >
+          {resetShort}
+        </span>
+      ) : null}
     </span>
   );
+}
+
+/** When one quota window resets. Without a label it is the window the readout shows. */
+export interface UsageReset {
+  label?: string;
+  at: DateInput;
+}
+
+const NO_RESETS: readonly UsageReset[] = [];
+
+/**
+ * A readout's resets from an account's windows: the shown window first, then
+ * the others that report a reset, in their given order. A window resetting
+ * in the same minute as an earlier one adds nothing and is left out.
+ */
+export function usageResets(readings: readonly UsageWindowReading[], shown: string): UsageReset[] {
+  const first = readings.find((reading) => reading.label === shown);
+  const all: UsageReset[] = [
+    ...(first?.resetsAt !== undefined ? [{ at: first.resetsAt }] : []),
+    ...readings
+      .filter((reading) => reading !== first && reading.resetsAt !== undefined)
+      .map((reading) => ({ label: reading.label, at: reading.resetsAt! })),
+  ];
+  const minutes = new Set<number>();
+  return all.filter((reset) => {
+    const minute = Math.floor(toDate(reset.at).getTime() / 60_000);
+    if (minutes.has(minute)) return false;
+    minutes.add(minute);
+    return true;
+  });
 }
 
 interface Parts {
@@ -577,6 +658,8 @@ export interface UsageWindowReading {
   label: string;
   percent: number | null;
   resetsLabel?: string;
+  /** The reset time `resetsLabel` formats, for places that format it themselves. */
+  resetsAt?: number;
   limitReached?: boolean;
   valueLabel?: string;
 }

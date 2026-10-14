@@ -244,7 +244,7 @@ async fn fixture_targets(adapter: &dyn ComputerAdapter) -> (NativeTarget, Native
     loop {
         let targets = adapter.targets().await.expect("discover native targets");
         if let Some(window) = targets.iter().find(|target| {
-            target.kind == NativeTargetKind::Window && target.title == "OpenGeni Native Fixture"
+            target.kind == NativeTargetKind::Window && target.title == "Opengeni Native Fixture"
         }) {
             if let Some(application) = targets
                 .iter()
@@ -283,7 +283,7 @@ async fn chromium_targets(adapter: &dyn ComputerAdapter) -> (NativeTarget, Nativ
         let targets = adapter.targets().await.expect("discover Chromium targets");
         if let Some(window) = targets.iter().find(|target| {
             target.kind == NativeTargetKind::Window
-                && target.title.contains("OpenGeni Chromium AX Fixture")
+                && target.title.contains("Opengeni Chromium AX Fixture")
         }) {
             let application = targets
                 .iter()
@@ -544,6 +544,7 @@ async fn assert_calculator_result(adapter: &dyn ComputerAdapter, target_id: &str
 
 fn calculator_keyboard(target: &NativeTarget) -> NativeActionCommand {
     NativeActionCommand {
+        operation_id: None,
         target_id: target.id.clone(),
         expected_target_generation: target.target_generation.clone(),
         expected_observation_id: None,
@@ -603,12 +604,15 @@ async fn calculator_background_semantics_and_window_pointer_are_causal() {
     let y = (clear.y + clear.height / 2.0 - bounds.y) * f64::from(frame.height) / bounds.height;
     adapter
         .dispatch(&NativeActionCommand {
+            operation_id: None,
             target_id: window.id.clone(),
             expected_target_generation: frame.target_generation.clone(),
             expected_observation_id: None,
             expected_frame_id: Some(frame.frame_id.clone()),
             action: NativeAction::Pointer {
                 frame_id: frame.frame_id,
+                click_count: None,
+                continuation_of_operation_id: None,
                 action: NativePointerAction::Click,
                 x,
                 y,
@@ -670,6 +674,7 @@ fn semantic_command(
     value: Option<NativeActionValue>,
 ) -> NativeActionCommand {
     NativeActionCommand {
+        operation_id: None,
         target_id: observation.target.id.clone(),
         expected_target_generation: observation.target.target_generation.clone(),
         expected_observation_id: Some(observation.observation_id.clone()),
@@ -974,6 +979,7 @@ async fn chromium_accessibility_and_window_capture_are_causal() {
     assert_canvas_pixels(&frame.bytes);
 
     let focus_command = NativeActionCommand {
+        operation_id: None,
         target_id: observation.target.id.clone(),
         expected_target_generation: observation.target.target_generation.clone(),
         expected_observation_id: Some(observation.observation_id.clone()),
@@ -1021,6 +1027,7 @@ async fn chromium_accessibility_and_window_capture_are_causal() {
     tokio::time::sleep(Duration::from_millis(250)).await;
     let keyboard_marker = "native-keyboard-value";
     let keyboard_command = NativeActionCommand {
+        operation_id: None,
         target_id: observation.target.id.clone(),
         expected_target_generation: observation.target.target_generation.clone(),
         expected_observation_id: None,

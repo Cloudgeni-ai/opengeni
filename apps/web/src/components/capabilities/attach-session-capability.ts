@@ -1,1 +1,7 @@
-export { attachSessionCapability, completeSessionCapabilityOAuth } from "@opengeni/react";
+export {
+  attachSessionCapability,
+  completeSessionCapabilityOAuth,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
+} from "@opengeni/react";

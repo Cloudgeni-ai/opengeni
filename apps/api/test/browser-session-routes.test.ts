@@ -16,6 +16,7 @@ import {
   parseBrowserScreenshotOptions,
   browserScreenshotResponse,
   browserScreenshotError,
+  browserTabDiagnosisError,
   browserCreateInput,
 } from "../src/routes/browser-sessions";
 
@@ -131,7 +132,114 @@ test("automatic managed directory recovery preserves current authority and refus
   }
 }, 30_000);
 
+test("metadata-only open uses control authority, refuses stale bindings and preserves unknown outcomes", async () => {
+  const directory = await mkdtemp("/tmp/og-api-target-inventory-");
+  const script = join(directory, "synthetic-route.ts");
+  await writeFile(script, `(${automaticBrowserRecoveryFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href, "inventory"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual([
+      {
+        scenario: "inventory",
+        status: 201,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "default",
+        status: 201,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: true,
+      },
+      ...["wrong-session", "wrong-controller", "wrong-target"].map((scenario) => ({
+        scenario,
+        status: 502,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      })),
+      {
+        scenario: "unknown",
+        status: 409,
+        opens: 1,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "permission-denied",
+        status: 403,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 0,
+        touches: 0,
+        content: false,
+      },
+      {
+        scenario: "access-revoked",
+        status: 404,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 0,
+        content: false,
+      },
+      {
+        scenario: "holder-lost",
+        status: 409,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 1,
+        content: false,
+      },
+      {
+        scenario: "machine-moved",
+        status: 409,
+        opens: 0,
+        reads: 0,
+        creates: 0,
+        sourceChecks: 1,
+        touches: 0,
+        content: false,
+      },
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
 async function automaticBrowserRecoveryFixture() {
+  const inventoryOnly = process.argv[3] === "inventory";
+  let opens = 0;
   const routeHref = process.argv[2]!;
   const apiDirectory = new URL("..", routeHref).pathname;
   const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
@@ -211,11 +319,13 @@ async function automaticBrowserRecoveryFixture() {
       id: sourceSessionId,
       workspaceId,
       activeSandboxId:
-        state.missing && state.scenario === "machine-moved" ? randomUUID() : machineId,
+        (state.missing || inventoryOnly) && state.scenario === "machine-moved"
+          ? randomUUID()
+          : machineId,
     }),
     touchBrowserSessionController: async () => {
       state.touches++;
-      return !(state.missing && state.scenario === "holder-lost");
+      return !((state.missing || inventoryOnly) && state.scenario === "holder-lost");
     },
     terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
     markEphemeralBrowserSessionLost: async () => {
@@ -225,10 +335,27 @@ async function automaticBrowserRecoveryFixture() {
   }));
   mock.module(resolveFromApi("@opengeni/core"), () => ({
     ...core,
-    requireAccessGrant: async () => grant,
-    requireSessionAuthorization: async () => {
+    requireAccessGrant: async (
+      _context: unknown,
+      _deps: unknown,
+      _workspace: string,
+      permission: string,
+    ) => {
+      if (inventoryOnly && permission !== "sessions:control")
+        throw new Error("synthetic permission mismatch");
+      if (inventoryOnly && state.scenario === "permission-denied")
+        throw new FixtureHTTPException(403);
+      return grant;
+    },
+    requireSessionAuthorization: async (
+      _deps: unknown,
+      _grant: unknown,
+      input: { operation: string },
+    ) => {
       state.sourceChecks++;
-      if (state.missing && state.scenario === "access-revoked")
+      if (inventoryOnly && input.operation !== "session.control")
+        throw new Error("synthetic source operation mismatch");
+      if ((state.missing || inventoryOnly) && state.scenario === "access-revoked")
         throw new core.SessionAuthorizationDeniedError("revoked");
       return {};
     },
@@ -296,6 +423,32 @@ async function automaticBrowserRecoveryFixture() {
     hostname: "127.0.0.1",
     async fetch(request) {
       const path = new URL(request.url).pathname;
+      if (
+        inventoryOnly &&
+        request.method === "POST" &&
+        (path.endsWith("/open-with-inventory") || path.endsWith("/targets"))
+      ) {
+        opens++;
+        if (request.headers.get("authorization") !== `Bearer ${expectedTokens.controlToken}`)
+          throw new Error("synthetic control authority mismatch");
+        const body = await request.json();
+        if (JSON.stringify(body) !== JSON.stringify({ url: "https://new.example.test/" }))
+          throw new Error("synthetic open request mismatch");
+        if (state.scenario === "unknown") return failure(409, "outcome_unknown");
+        if (state.scenario === "default") return success(observation);
+        return success({
+          browserSessionId: state.scenario === "wrong-session" ? randomUUID() : browserSessionId,
+          controllerGeneration:
+            state.scenario === "wrong-controller" ? randomUUID() : controllerGeneration,
+          targets: [
+            {
+              ...observation.target,
+              controllerGeneration:
+                state.scenario === "wrong-target" ? randomUUID() : controllerGeneration,
+            },
+          ],
+        });
+      }
       if (request.method === "GET" && path.endsWith("/targets")) {
         state.reads++;
         if (request.headers.get("authorization") !== `Bearer ${expectedTokens.viewToken}`)
@@ -338,8 +491,19 @@ async function automaticBrowserRecoveryFixture() {
       _services: unknown,
       _context: unknown,
       callback: (handle: unknown) => Promise<unknown>,
-    ) =>
-      await callback({
+    ) => {
+      if (
+        inventoryOnly &&
+        (_context as { operation: string; retryControllerTransport: boolean }).operation !==
+          "browser.control"
+      )
+        throw new Error("synthetic channel operation mismatch");
+      if (
+        inventoryOnly &&
+        (_context as { retryControllerTransport: boolean }).retryControllerTransport !== false
+      )
+        throw new Error("synthetic mutation replay posture mismatch");
+      return await callback({
         routingSession: {
           prime: async () => ({
             kind: "selfhosted",
@@ -354,7 +518,8 @@ async function automaticBrowserRecoveryFixture() {
             },
           }),
         },
-      }),
+      });
+    },
     withChannelA: async () => {
       throw new Error("unexpected synthetic lifecycle operation");
     },
@@ -380,6 +545,53 @@ async function automaticBrowserRecoveryFixture() {
   };
   try {
     const results = [];
+    if (inventoryOnly) {
+      for (const scenario of [
+        "inventory",
+        "default",
+        "wrong-session",
+        "wrong-controller",
+        "wrong-target",
+        "unknown",
+        "permission-denied",
+        "access-revoked",
+        "holder-lost",
+        "machine-moved",
+      ]) {
+        state = {
+          scenario,
+          missing: false,
+          recovered: true,
+          reads: 0,
+          creates: [],
+          sourceChecks: 0,
+          touches: 0,
+          lost: 0,
+        };
+        opens = 0;
+        const response = await app.request(
+          `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/targets${scenario === "default" ? "" : "/open-with-inventory"}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ url: "https://new.example.test/" }),
+          },
+        );
+        const body = (await response.json()) as Record<string, unknown>;
+        results.push({
+          scenario,
+          status: response.status,
+          opens,
+          reads: state.reads,
+          creates: state.creates.length,
+          sourceChecks: state.sourceChecks,
+          touches: state.touches,
+          content: "semantic" in body,
+        });
+      }
+      console.log(JSON.stringify(results));
+      return;
+    }
     for (const scenario of [
       "recovered",
       "unknown",
@@ -453,6 +665,86 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("preserves a definite tab diagnosis in GET and DOM-read POST API envelopes", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const internal = new BrowserControlRequestError(409, {
+      code: "tab_not_responding",
+      message: "This tab is not responding. Reload or close it.",
+      retryable: false,
+    });
+    app.on(["GET", "POST"], "/v1/test/tab-not-responding", () => {
+      throw browserTabDiagnosisError(internal);
+    });
+    for (const method of ["GET", "POST"] as const) {
+      const response = await app.request("http://localhost/v1/test/tab-not-responding", {
+        method,
+        headers: { "x-opengeni-correlation-id": "hung-tab-request" },
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: {
+          status: 409,
+          code: "tab_not_responding",
+          message: internal.error.message,
+          retryable: false,
+          requestId: "hung-tab-request",
+        },
+      });
+    }
+    const uncertain = new BrowserControlRequestError(409, {
+      code: "outcome_unknown",
+      message: "input sent",
+      retryable: false,
+    });
+    expect(browserTabDiagnosisError(uncertain)).toBe(uncertain);
+  });
+
+  test("publishes a crashed tab as its own definite diagnosis, not a retryable outage", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const crashed = new BrowserControlRequestError(409, {
+      code: "tab_crashed",
+      message:
+        "This browser tab crashed and no longer responds. Open a new tab (and close this one), then continue there.",
+      retryable: false,
+    });
+    app.get("/v1/test/tab-crashed", () => {
+      throw browserTabDiagnosisError(crashed);
+    });
+    const response = await app.request("http://localhost/v1/test/tab-crashed", {
+      headers: { "x-opengeni-correlation-id": "crashed-tab-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "tab_crashed",
+        message: crashed.error.message,
+        retryable: false,
+        requestId: "crashed-tab-request",
+      },
+    });
+    // Any other unavailable verdict keeps the ordinary envelope, which never
+    // publishes a driver's free-form message.
+    const other = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "PRIVATE /home/user/profile detail",
+      retryable: true,
+    });
+    expect(browserTabDiagnosisError(other)).toBe(other);
+  });
+
   test("publishes a definite screenshot timeout through the ordinary API error envelope", async () => {
     const app = createApp({
       settings: testSettings(),
@@ -494,7 +786,7 @@ describe("BrowserSession route discipline", () => {
       new Error("unexpected"),
       new BrowserControlRequestError(403, {
         code: "permission_denied",
-        message: "protected authentication",
+        message: "browser action denied",
         retryable: false,
       }),
       new BrowserControlRequestError(409, {
@@ -632,7 +924,6 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report"',
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
@@ -648,7 +939,7 @@ describe("BrowserSession route discipline", () => {
       expect(source).toContain(route);
     }
     expect(await readFile(appUrl, "utf8")).toContain(
-      "registerBrowserSessionRoutes(app, routeDeps)",
+      "registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets })",
     );
   });
 
@@ -736,28 +1027,10 @@ describe("BrowserSession route discipline", () => {
     );
   });
 
-  test("brokers protected auth outside model-visible browser actions", async () => {
+  test("serves no brokered credential fill route; logins use secret references in actions", async () => {
     const source = await readFile(routeUrl, "utf8");
-    const start = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
-    );
-    const end = source.indexOf(
-      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
-      start,
-    );
-    const route = source.slice(start, end);
-    expect(route.indexOf("if (replay?.response)")).toBeLessThan(
-      route.indexOf("withActiveBrowserController"),
-    );
-    expect(route.indexOf("getProtectedAuthFillPreparation")).toBeLessThan(
-      route.indexOf("loadBoundBrowserCredential"),
-    );
-    expect(route.indexOf("dispatchProtectedAuthFill")).toBeLessThan(
-      route.indexOf("sessionClient.protectedAuthFill"),
-    );
-    expect(route).toContain("resolveProtectedAuthFieldValues");
-    expect(route).toContain("protectedAuthReceipt");
-    expect(route).not.toContain("BrowserActionCommand.parse");
+    expect(source).not.toContain("/protected-fill");
+    expect(source).not.toContain("protectedAuth");
   });
 
   test("keeps provider auth durable while gating its hosted flow to humans", async () => {
@@ -818,9 +1091,41 @@ describe("BrowserSession route discipline", () => {
       route.indexOf("sessionClient.stageWorkspaceFiles"),
     );
     expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
-      route.indexOf("sessionClient.action(command)"),
+      route.indexOf("sessionClient.action("),
     );
     expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
+  test("resolves agent secret references last, right before the canonical action", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      start,
+    );
+    const route = source.slice(start, end);
+    // The public command is validated before any reference is resolved.
+    expect(route.indexOf("BrowserActionCommand.parse(commandFields)")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
+      route.indexOf("resolveInteractionSecretValues"),
+    );
+    expect(route.indexOf("resolveInteractionSecretValues")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
+    expect(route).toContain("texts: browserActionSecretTexts(request.action)");
+    expect(route).toContain('surface: "browser"');
+    // Passkeys sync before (taking over the principal's lease) and after the
+    // action, never instead of it.
+    expect(route.match(/await passkeySync\((?:true|false)\)/g)?.length).toBe(2);
+    expect(route.indexOf("await passkeySync(true)")).toBeLessThan(
+      route.indexOf("sessionClient.action("),
+    );
+    // The response is the controller receipt; the side map is never echoed.
+    expect(route).not.toContain("secretValues: request");
   });
 
   test("binds agent uploads to the frozen initiating human, not the worker subject", () => {
@@ -902,6 +1207,7 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain('operation: "browser.download.save"');
     expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
+    expect(route).toContain("createParents: true");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {
@@ -1030,6 +1336,37 @@ describe("BrowserSession route discipline", () => {
       resume.indexOf("client.createSession"),
     );
     expect(resume).toContain("...(networkRoute ? { networkRoute } : {})");
+  });
+
+  test("resumes an expired resume only after ending its retained controller generation", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    expect(resume).toContain('before.session.failureCode === "controller_transition_expired"');
+    expect(resume.indexOf("settleExpiredBrowserResume(")).toBeLessThan(
+      resume.indexOf("prepareBrowserSessionResume(deps.db"),
+    );
+    const settle = source.slice(
+      source.indexOf("async function settleExpiredBrowserResume"),
+      source.indexOf("async function finishSuspendedBrowserControllerCleanup"),
+    );
+    // Ineligible losses (create, suspend, end) never reach a controller call.
+    expect(settle.indexOf("if (!expired) return;")).toBeGreaterThan(
+      settle.indexOf("getExpiredBrowserSessionResume(deps.db"),
+    );
+    expect(settle.indexOf("if (!expired) return;")).toBeLessThan(
+      settle.indexOf("withBrowserPlacement("),
+    );
+    expect(settle).toContain("binding.placementInstanceId");
+    expect(settle.indexOf("endCapturedBrowserController(")).toBeLessThan(
+      settle.indexOf("settleExpiredBrowserSessionResume(deps.db"),
+    );
+    expect(settle).toContain("expectedControllerGeneration: expired.controllerGeneration");
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
+import { EMPTY_ORGANIZATION_MODEL_DEFAULTS } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { requireLimit } from "../src/billing/limits";
@@ -27,9 +28,7 @@ const settings = testSettings({
 describe("fresh model admission versus live discovery", () => {
   let active: boolean;
   let mocks: { mockRestore(): void }[];
-  let availability: ReturnType<
-    typeof spyOn<typeof codexAvailability, "loadWorkspaceCodexModelAvailability">
-  >;
+  let availability: ReturnType<typeof mock<() => Promise<Record<string, any>>>>;
   let restrictions: ReturnType<
     typeof spyOn<typeof opengeniDb, "getWorkspaceConnectionModelRestrictions">
   >;
@@ -39,57 +38,70 @@ describe("fresh model admission versus live discovery", () => {
 
   beforeEach(() => {
     active = true;
-    restrictions = spyOn(opengeniDb, "getWorkspaceConnectionModelRestrictions").mockResolvedValue(
-      {},
+    restrictions = spyOn(opengeniDb, "getWorkspaceConnectionModelRestrictions").mockImplementation(
+      async (_db, _workspace, _subject, _claude, coreRestrictions) => coreRestrictions ?? {},
     );
     policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
-    availability = spyOn(
-      codexAvailability,
-      "loadWorkspaceCodexModelAvailability",
-    ).mockResolvedValue({});
+    availability = mock(async () => ({}));
     balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
       accountId: context.accountId,
       balanceMicros: 0,
       currency: "usd",
       updatedAt: "2026-10-01T00:00:00.000Z",
     });
-    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue({
-      code: "allowance_exhausted",
-      scope: "workspace",
-      resetsAt: "2026-11-01T00:00:00.000Z",
-      message: "The workspace usage allowance is exhausted.",
-    });
+    // The real check admits credit-free work unless the allowance opts into
+    // counting unbilled usage.
+    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockImplementation(
+      async (_db, check) =>
+        check.fundedWithoutCredits
+          ? null
+          : {
+              code: "allowance_exhausted",
+              scope: "workspace",
+              resetsAt: "2026-11-01T00:00:00.000Z",
+              message: "The workspace usage allowance is exhausted.",
+            },
+    );
     mocks = [
-      spyOn(
-        opengeniDb,
-        "resolveClaudeProviderAccountAuthoritySnapshotForAcceptance",
-      ).mockResolvedValue({ version: 1, scope: "workspace" }),
-      spyOn(opengeniDb, "workspaceClaudeSubscriptionActiveForAuthority").mockResolvedValue(false),
       restrictions,
       policy,
-      availability,
+      // No organization-wide model defaults: the live selections decide.
+      spyOn(opengeniDb, "getOrganizationModelDefaults").mockResolvedValue(
+        EMPTY_ORGANIZATION_MODEL_DEFAULTS,
+      ),
+      spyOn(codexAvailability, "loadWorkspaceCodexCatalogReadiness").mockImplementation(
+        async (_db, _settings, _context, options) => ({
+          active,
+          observations: options?.observeAvailability === false ? {} : await availability(),
+        }),
+      ),
       balance,
       allowance,
-      spyOn(opengeniDb, "workspaceCodexSubscriptionActive").mockImplementation(async () => active),
-      spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceVercelAiGatewayConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceOpenRouterConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "organizationModelProviderConnectionActiveForWorkspace").mockResolvedValue(
-        false,
-      ),
-      spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listWorkspaceOpenRouterCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listOrganizationModelProviderCustomModelsForWorkspace").mockResolvedValue(
-        [],
-      ),
-      spyOn(opengeniDb, "getWorkspaceProviderApiKeyConnectionMetadata").mockResolvedValue(null),
-      spyOn(opengeniDb, "listWorkspaceProviderCustomModels").mockResolvedValue([]),
+      spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
+      spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
+        vercel_gateway: [],
+        openrouter: [],
+        anthropic: [],
+        opper: [],
+        claude_subscription: [],
+      }),
+      spyOn(opengeniDb, "getOrganizationModelProviderCatalogForWorkspace").mockResolvedValue({
+        vercel_gateway: { active: false, models: [] },
+        openrouter: { active: false, models: [] },
+        anthropic: { active: false, models: [] },
+        opper: { active: false, models: [] },
+        claude_subscription: { active: false, models: [] },
+      }),
       spyOn(opengeniDb, "isCodexBilledTurn").mockImplementation(async () => active),
+      // Claude has no cutover receipt: its legacy readiness answers.
+      spyOn(opengeniDb, "readSubscriptionCoreProviderRouteForWorkspace").mockResolvedValue(
+        "legacy",
+      ),
     ];
   });
 
   afterEach(() => {
-    for (const mock of mocks) mock.mockRestore();
+    for (const mocked of mocks) mocked.mockRestore();
   });
 
   test("stable admission cannot refresh a subscription onto the zero-credit billing rail", async () => {
@@ -111,7 +123,10 @@ describe("fresh model admission versus live discovery", () => {
     expect(active).toBe(true);
     expect(availability).not.toHaveBeenCalled();
     expect(balance).not.toHaveBeenCalled();
-    expect(allowance).not.toHaveBeenCalled();
+    expect(allowance).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ fundedWithoutCredits: true }),
+    );
   });
 
   test("catalog discovery and automatic defaults retain exact live support filtering", async () => {
@@ -160,44 +175,46 @@ describe("fresh model admission versus live discovery", () => {
       expect(availability).not.toHaveBeenCalled();
     },
   );
-  test.each(["workspace", "organization"] as const)(
-    "Claude %s readiness uses the account pool rather than a legacy connection",
-    async (scope) => {
-      const snapshot = { version: 1, scope } as const;
-      const current = spyOn(
-        opengeniDb,
-        "resolveClaudeProviderAccountAuthoritySnapshotForAcceptance",
-      ).mockResolvedValue(snapshot);
-      const pool = spyOn(
-        opengeniDb,
-        "workspaceClaudeSubscriptionActiveForAuthority",
-      ).mockResolvedValue(true);
-      const legacy = spyOn(opengeniDb, "getWorkspaceProviderApiKeyConnectionMetadata");
-      mocks.push(current, pool, legacy);
-      const loaded = await loadWorkspaceModelSelectionInput(
-        db,
-        { ...settings, claudeSubscriptionEnabled: true },
-        context,
-        { observeAvailability: false },
-      );
-      expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(
-        scope === "workspace",
-      );
-      expect(loaded.claudeConnections?.claude_subscription?.active).toBe(scope === "organization");
-      expect(pool.mock.calls[0]?.[2].authoritySnapshot).toEqual(snapshot);
-      expect(legacy.mock.calls.some((call) => call[2] === "claude_subscription")).toBe(false);
-      expect(availability).not.toHaveBeenCalled();
-    },
-  );
-
-  test("a stale accepted Claude user pool cannot borrow the caller's current pool", async () => {
-    const snapshot = { version: 1, scope: "user", authorityGeneration: 1 } as const;
-    const current = spyOn(opengeniDb, "resolveClaudeProviderAccountAuthoritySnapshotForAcceptance");
-    const pool = spyOn(
+  test("Claude readiness comes only from the shared core answer, never a legacy connection", async () => {
+    const route = spyOn(
       opengeniDb,
-      "workspaceClaudeSubscriptionActiveForAuthority",
-    ).mockRejectedValue(new opengeniDb.ClaudeAuthorityPoolInactiveError());
-    mocks.push(current, pool);
+      "readSubscriptionCoreProviderRouteForWorkspace",
+    ).mockImplementation(async (_db, input) => (input.provider === "claude" ? "core" : "legacy"));
+    const core = spyOn(opengeniDb, "readSubscriptionCoreClaudeCatalogReadiness").mockResolvedValue({
+      workspace: false,
+      organization: true,
+      restrictions: {
+        "organization-claude-subscription/": ["organization-claude-subscription/claude-opus-5-5"],
+        "workspace-claude-subscription/": [],
+      },
+    });
+    const legacy = spyOn(opengeniDb, "workspaceProviderApiKeyConnectionMetadataFromConnections");
+    mocks.push(route, core, legacy);
+    const loaded = await loadWorkspaceModelSelectionInput(
+      db,
+      { ...settings, claudeSubscriptionEnabled: true },
+      context,
+      { observeAvailability: false },
+    );
+    // On the core every Claude connection belongs to the organization.
+    expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
+    expect(loaded.claudeConnections?.claude_subscription?.active).toBe(true);
+    expect(loaded.connectionModelRestrictions?.["organization-claude-subscription/"]).toEqual([
+      "organization-claude-subscription/claude-opus-5-5",
+    ]);
+    expect(loaded.connectionModelRestrictions?.["workspace-claude-subscription/"]).toEqual([]);
+    const claudeCall = core.mock.calls[0];
+    expect(claudeCall?.[1]).toMatchObject({
+      accountId: context.accountId,
+      workspaceId: context.workspaceId,
+      subjectId: context.subjectId,
+    });
+    expect(legacy.mock.calls.some((call) => call[1] === "claude_subscription")).toBe(false);
+    expect(availability).not.toHaveBeenCalled();
+  });
+
+  test("without the Claude cutover receipt nothing is ready, whatever authority is accepted", async () => {
+    const snapshot = { version: 1, scope: "user", authorityGeneration: 1 } as const;
     const loaded = await loadWorkspaceModelSelectionInput(
       db,
       { ...settings, claudeSubscriptionEnabled: true },
@@ -205,7 +222,129 @@ describe("fresh model admission versus live discovery", () => {
     );
     expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
     expect(loaded.claudeConnections?.claude_subscription?.active).toBe(false);
-    expect(current).not.toHaveBeenCalled();
-    expect(restrictions.mock.calls[0]?.[4]).toEqual(snapshot);
+    expect(restrictions.mock.calls[0]?.[3]).toEqual(snapshot);
+  });
+
+  describe("on Claude's core route", () => {
+    const claudeSettings = { ...settings, claudeSubscriptionEnabled: true };
+    function coreRoute(
+      value: { ready: boolean; allowedModelIds: string[] | null },
+      workspace = false,
+    ) {
+      const route = spyOn(
+        opengeniDb,
+        "readSubscriptionCoreProviderRouteForWorkspace",
+      ).mockImplementation(async (_db, input) => (input.provider === "claude" ? "core" : "legacy"));
+      const projection = spyOn(
+        opengeniDb,
+        "readSubscriptionCoreClaudeCatalogReadiness",
+      ).mockResolvedValue({
+        workspace: workspace && value.ready,
+        organization: !workspace && value.ready,
+        restrictions: {
+          "workspace-claude-subscription/": workspace ? value.allowedModelIds : [],
+          "organization-claude-subscription/": workspace ? [] : value.allowedModelIds,
+        },
+      });
+      const catalog = spyOn(
+        opengeniDb,
+        "getOrganizationModelProviderCatalogForWorkspace",
+      ).mockResolvedValue({
+        vercel_gateway: { active: false, models: [] },
+        openrouter: { active: false, models: [] },
+        anthropic: { active: false, models: [] },
+        claude_subscription: {
+          active: true,
+          models: [{ upstreamModelId: "claude-sonnet-5" }, { upstreamModelId: "claude-opus-5-5" }],
+        },
+      } as never);
+      const custom = spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue(
+        {
+          vercel_gateway: [],
+          openrouter: [],
+          anthropic: [],
+          claude_subscription: [{ upstreamModelId: "claude-sonnet-5" }],
+        } as never,
+      );
+      mocks.push(route, projection, catalog, custom);
+      return { route, projection };
+    }
+
+    test("an organization-only core pool replaces legacy readiness and closes the workspace prefix", async () => {
+      // Core allowlists name product model ids.
+      const { route } = coreRoute({
+        ready: true,
+        allowedModelIds: ["organization-claude-subscription/claude-sonnet-5"],
+      });
+      const loaded = await loadWorkspaceModelSelectionInput(db, claudeSettings, context, {
+        observeAvailability: false,
+      });
+      expect(route).toHaveBeenCalledWith(db, expect.objectContaining({ provider: "claude" }));
+      expect(loaded.claudeConnections?.claude_subscription?.active).toBe(true);
+      expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
+      expect(loaded.connectionModelRestrictions["organization-claude-subscription/"]).toEqual([
+        "organization-claude-subscription/claude-sonnet-5",
+      ]);
+      expect(loaded.connectionModelRestrictions["workspace-claude-subscription/"]).toEqual([]);
+      const selections = await resolveCallerWorkspaceModelSelections(db, claudeSettings, context);
+      expect(
+        admissibleWorkspaceModel(selections, "organization-claude-subscription/claude-sonnet-5"),
+      ).toBeDefined();
+      expect(
+        admissibleWorkspaceModel(selections, "organization-claude-subscription/claude-opus-5-5"),
+      ).toBeUndefined();
+      expect(
+        admissibleWorkspaceModel(selections, "workspace-claude-subscription/claude-sonnet-5"),
+      ).toBeUndefined();
+    });
+
+    test("a null core allowlist leaves the organization's Claude models unrestricted", async () => {
+      coreRoute({ ready: true, allowedModelIds: null });
+      const loaded = await loadWorkspaceModelSelectionInput(db, claudeSettings, context, {
+        observeAvailability: false,
+      });
+      expect(loaded.connectionModelRestrictions["organization-claude-subscription/"]).toBeNull();
+      expect(loaded.connectionModelRestrictions["workspace-claude-subscription/"]).toEqual([]);
+      const selections = await resolveCallerWorkspaceModelSelections(db, claudeSettings, context);
+      for (const model of ["claude-sonnet-5", "claude-opus-5-5"])
+        expect(
+          admissibleWorkspaceModel(selections, `organization-claude-subscription/${model}`),
+        ).toBeDefined();
+    });
+
+    test("maintenance shows Claude not ready with every Claude model closed", async () => {
+      const { route, projection } = coreRoute({ ready: false, allowedModelIds: [] });
+      route.mockImplementation(async (_db, input) =>
+        input.provider === "claude" ? "maintenance" : "legacy",
+      );
+      const loaded = await loadWorkspaceModelSelectionInput(db, claudeSettings, context, {
+        observeAvailability: false,
+      });
+      expect(loaded.claudeConnections?.claude_subscription?.active).toBe(false);
+      expect(loaded.workspaceClaudeConnections?.claude_subscription?.active).toBe(false);
+      expect(loaded.connectionModelRestrictions["organization-claude-subscription/"]).toEqual([]);
+      expect(projection).not.toHaveBeenCalled();
+      const selections = await resolveCallerWorkspaceModelSelections(db, claudeSettings, context);
+      expect(
+        admissibleWorkspaceModel(selections, "organization-claude-subscription/claude-sonnet-5"),
+      ).toBeUndefined();
+    });
+
+    test("a workspace core pool preserves workspace models without opening organization models", async () => {
+      coreRoute(
+        {
+          ready: true,
+          allowedModelIds: ["workspace-claude-subscription/claude-sonnet-5"],
+        },
+        true,
+      );
+      const selections = await resolveCallerWorkspaceModelSelections(db, claudeSettings, context);
+      expect(
+        admissibleWorkspaceModel(selections, "workspace-claude-subscription/claude-sonnet-5"),
+      ).toBeDefined();
+      expect(
+        admissibleWorkspaceModel(selections, "organization-claude-subscription/claude-sonnet-5"),
+      ).toBeUndefined();
+    });
   });
 });

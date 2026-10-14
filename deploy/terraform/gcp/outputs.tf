@@ -19,12 +19,12 @@ output "artifact_registry_repository" {
 }
 
 output "runtime_service_account_email" {
-  description = "GCP service account intended for OpenGeni workload identity."
+  description = "GCP service account intended for Opengeni workload identity."
   value       = google_service_account.runtime.email
 }
 
 output "runtime_secret_id" {
-  description = "Secret Manager secret intended for OpenGeni runtime values."
+  description = "Secret Manager secret intended for Opengeni runtime values."
   value       = google_secret_manager_secret.runtime.secret_id
 }
 
@@ -44,12 +44,12 @@ output "object_storage_backend" {
 }
 
 output "object_storage_bucket" {
-  description = "GCS bucket for OpenGeni file storage."
+  description = "GCS bucket for Opengeni file storage."
   value       = var.object_storage.mode == "managed" ? google_storage_bucket.files[0].name : var.object_storage.bucket
 }
 
 output "helm_set_values" {
-  description = "Non-secret Helm values that connect OpenGeni workloads to this GCP substrate."
+  description = "Non-secret Helm values that connect Opengeni workloads to this GCP substrate."
   value = {
     "global.imageRegistry"                                          = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.images.repository_id}"
     "serviceAccount.annotations.iam\\.gke\\.io/gcp-service-account" = google_service_account.runtime.email

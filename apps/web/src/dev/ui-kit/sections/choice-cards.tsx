@@ -350,11 +350,11 @@ export default function ChoiceCardsSection() {
           align="stretch"
           note="Titles and descriptions wrap; the check stays on the first line."
         >
-          <ChoiceCards label="How should OpenGeni work in Slack?" defaultValue="bot">
+          <ChoiceCards label="How should Opengeni work in Slack?" defaultValue="bot">
             <ChoiceCard
               value="bot"
-              title="Add OpenGeni to the Acme Robotics Slack for everyone"
-              description="Anyone in the workspace can mention OpenGeni in channels and direct messages, and it answers in the thread."
+              title="Add Opengeni to the Acme Robotics Slack for everyone"
+              description="Anyone in the workspace can mention Opengeni in channels and direct messages, and it answers in the thread."
             />
             <ChoiceCard
               value="personal"

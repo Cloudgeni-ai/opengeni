@@ -354,6 +354,40 @@ describe("schema compatibility rules", () => {
     );
   });
 
+  test("literal-to-enum expansion follows enum policy without weakening other guards", () => {
+    const before = withSchemas(
+      z.object({ mode: z.literal("a").optional() }),
+      z.object({ model: z.literal("a") }),
+    );
+    expect(
+      breakingIds(
+        before,
+        withSchemas(
+          z.object({ mode: z.enum(["a", "b"]).optional() }),
+          z.object({ model: z.enum(["a", "b"]) }),
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      breakingIds(
+        before,
+        withSchemas(
+          z.object({ mode: z.enum(["a", "b"]) }),
+          z.object({ model: z.enum(["a", "b"]).optional() }),
+        ),
+      ),
+    ).toEqual(["schema:Req:$.mode", "schema:Res:$.model"]);
+    expect(
+      breakingIds(
+        before,
+        withSchemas(
+          z.object({ mode: z.enum(["b", "c"]).optional() }),
+          z.object({ model: z.literal([1, 2]) }),
+        ),
+      ),
+    ).toEqual(["schema:Req:$.mode", "schema:Res:$.model"]);
+  });
+
   test("new required request fields, narrowed request enums, and optional->required are breaking", () => {
     const before = withSchemas(Request, Response);
     expect(

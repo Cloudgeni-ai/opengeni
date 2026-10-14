@@ -4,10 +4,9 @@ name: Desktop image e2e
 # apps/worker/test/desktop-image.e2e.ts. That test is intentionally excluded
 # from the default `bun test` / PR unit job (it builds the full desktop image —
 # minutes of Docker work). This workflow keeps it running automatically where it
-# matters: on PRs that touch the desktop image context, and weekly as a backstop
-# so the Dockerfile can't silently rot between such PRs.
+# matters: weekly and on manual dispatch.
 on:
-  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore after the launch window.
+  # Pull-request checks are disabled; retained triggers run below.
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC — weekly backstop
   workflow_dispatch:

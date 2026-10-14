@@ -156,7 +156,7 @@ export function providerMessageRetryHintMs(text: string): number | null {
 /**
  * Decide whether a provider refusal is an exhausted quota. Returns null for an
  * ordinary short rate limit and for anything that is not provider quota
- * evidence at all (a sandbox "disk quota exceeded", an OpenGeni credit
+ * evidence at all (a sandbox "disk quota exceeded", an Opengeni credit
  * refusal, a 5xx), so those keep their existing classification.
  */
 export function classifyProviderQuotaExhaustion(

@@ -18,7 +18,7 @@ describe("useComposer embedding policy", () => {
       retryable: true,
       outcomeUnknown: true,
       correlationId: "support-reference",
-      displayMessage: "OpenGeni private transport diagnostic",
+      displayMessage: "Opengeni private transport diagnostic",
     });
     const client = fakeClient({
       sendMessage: async () => {
@@ -63,7 +63,7 @@ describe("useComposer embedding policy", () => {
         sessionStorage.getItem(sessionStorage.key(index)!),
       ).join("\n");
       expect(stored).not.toContain("private diagnostic body");
-      expect(stored).not.toContain("OpenGeni private transport diagnostic");
+      expect(stored).not.toContain("Opengeni private transport diagnostic");
     } finally {
       await remounted.unmount();
     }

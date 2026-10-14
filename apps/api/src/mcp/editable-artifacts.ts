@@ -32,7 +32,7 @@ const ArtifactCommand = z
   .object({ kind: z.string().min(1).max(128) })
   .passthrough()
   .describe(
-    "One canonical modality command. Use the exact OpenGeni document, spreadsheet, or presentation skill command contract; never send local-file facade calls here.",
+    "One canonical modality command. Use the exact Opengeni document, spreadsheet, or presentation skill command contract; never send local-file facade calls here.",
   );
 
 const ArtifactMetadata = z

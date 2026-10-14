@@ -121,6 +121,7 @@ async function publishSandboxFileArtifactInScope(
       workspaceId: input.grant.workspaceId,
       session: input.session,
       subjectId: input.grant.subjectId,
+      grant: input.grant,
       ...(input.signal ? { waitSignal: input.signal } : {}),
       operation: "artifact.publish",
     },

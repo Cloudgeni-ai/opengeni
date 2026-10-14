@@ -23,7 +23,7 @@ export function marketplacePlugin(url: string) {
     }));
   if (!item.skills.length && !servers.length)
     throw new HTTPException(422, {
-      message: "This plugin has no skills or remote MCP servers that OpenGeni can install.",
+      message: "This plugin has no skills or remote MCP servers that Opengeni can install.",
     });
   const manifest = PluginManifest.parse({
     schemaVersion: 1,

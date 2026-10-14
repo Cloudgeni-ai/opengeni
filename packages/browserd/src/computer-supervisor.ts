@@ -1,6 +1,9 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
+  ComputerNativeCommand,
+  ComputerNativeReceipt,
+  ComputerOperationReceipt,
   ComputerActionCommand,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -27,6 +30,7 @@ import type {
   ComputerImageFrame,
 } from "./computer-media";
 import { ComputerNativeClient } from "./computer-native-client";
+import { UnsettledCleanupError } from "./cleanup-error";
 
 const DEFAULT_MAX_SESSIONS = 64;
 
@@ -108,6 +112,8 @@ export class ComputerSupervisor {
   private readonly ending = new Map<string, Promise<void>>();
   private displaceGate: Promise<void> | null = null;
   private closed = false;
+  private closePromise: Promise<void> | null = null;
+  private cleanupUncertain = false;
 
   private constructor(options: ComputerSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -194,14 +200,28 @@ export class ComputerSupervisor {
     return await this.installSession(options);
   }
 
-  /** A queued shared-seat create owns work before its runtime exists. */
+  /** A queued shared-seat create owns work before its runtime exists. An open
+   * session on the machine's own physical seat holds no state of its own: a
+   * restart only drops the controller, which the next request recreates. An
+   * isolated virtual seat owns its display and apps, so it still blocks. */
   isIdle(): boolean {
     return (
+      !this.cleanupUncertain &&
       this.displaceGate === null &&
-      this.sessions.size === 0 &&
       this.creating.size === 0 &&
-      this.ending.size === 0
+      this.ending.size === 0 &&
+      [...this.sessions.values()].every(
+        (runtime) =>
+          runtime.lifecycle === "active" &&
+          runtime.environmentLease.rfbPort === null &&
+          runtime.controller.isIdle(),
+      )
     );
+  }
+
+  /** No session of any lifecycle remains and no work is in flight. */
+  isEmpty(): boolean {
+    return this.sessions.size === 0 && this.isIdle();
   }
 
   listSessions(): Array<
@@ -249,7 +269,17 @@ export class ComputerSupervisor {
     }).controller.run(command);
   }
 
-  receipt(reference: ComputerSessionReference, operationId: string): ComputerActionReceipt | null {
+  nativeCall(command: ComputerNativeCommand): Promise<ComputerNativeReceipt> {
+    return this.requireActive({
+      computerSessionId: command.computerSessionId,
+      controllerGeneration: command.controllerGeneration,
+    }).controller.runNative(command);
+  }
+
+  receipt(
+    reference: ComputerSessionReference,
+    operationId: string,
+  ): ComputerOperationReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
   }
 
@@ -334,9 +364,14 @@ export class ComputerSupervisor {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closePromise) return await this.closePromise;
     this.closed = true;
-    await this.displaceGate;
+    this.closePromise = this.performClose();
+    return await this.closePromise;
+  }
+
+  private async performClose(): Promise<void> {
+    await this.displaceGate?.catch(() => undefined);
     await Promise.allSettled([...this.creating.values()]);
     const results = await Promise.allSettled(
       [...this.sessions.values()].map(async (runtime) => await this.endSession(binding(runtime))),
@@ -344,7 +379,10 @@ export class ComputerSupervisor {
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
     );
+    if (this.cleanupUncertain)
+      failures.push(new Error("previous computer cleanup remains unsettled"));
     if (failures.length > 0) {
+      this.cleanupUncertain = true;
       throw new AggregateError(failures, "computer supervisor shutdown failed");
     }
   }
@@ -364,7 +402,12 @@ export class ComputerSupervisor {
     try {
       const runtime = await creation;
       if (this.closed) {
-        await this.disposeRuntime(runtime, false);
+        try {
+          await this.disposeRuntime(runtime, false);
+        } catch (error) {
+          this.cleanupUncertain = true;
+          throw error;
+        }
         throw new InteractionControllerError(
           "resource_unavailable",
           "computer supervisor is closed",
@@ -466,28 +509,38 @@ export class ComputerSupervisor {
       };
       return runtime;
     } catch (error) {
+      if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
+      let driverClosed = !(error instanceof UnsettledCleanupError);
       try {
         await driver?.close();
       } catch (cleanupError) {
+        driverClosed = false;
         failures.push(cleanupError);
       }
-      try {
-        await environmentLease?.close();
-      } catch (cleanupError) {
-        failures.push(cleanupError);
+      let environmentClosed = false;
+      if (driverClosed) {
+        try {
+          await environmentLease?.close();
+          environmentClosed = true;
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
       }
       try {
         journal.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
-      try {
-        await rm(sessionDirectory, { recursive: true, force: true });
-      } catch (cleanupError) {
-        failures.push(cleanupError);
+      if (driverClosed && environmentClosed && failures.length === 1) {
+        try {
+          await rm(sessionDirectory, { recursive: true, force: true });
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
       }
       if (failures.length > 1) {
+        this.cleanupUncertain = true;
         const cleanupFailure = new Error("computer runtime creation cleanup failed", {
           cause: error,
         });
@@ -558,11 +611,15 @@ export class ComputerSupervisor {
     } catch (error) {
       failures.push(error);
     }
-    try {
-      await runtime.environmentLease.close();
-      environmentClosed = true;
-    } catch (error) {
-      failures.push(error);
+    // A still-running driver may be using this display and profile. Preserve
+    // them until its process cleanup is confirmed.
+    if (driverClosed) {
+      try {
+        await runtime.environmentLease.close();
+        environmentClosed = true;
+      } catch (error) {
+        failures.push(error);
+      }
     }
     if (removeState && driverClosed && environmentClosed && journalClosed) {
       try {

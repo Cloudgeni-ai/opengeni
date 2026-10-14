@@ -7,13 +7,13 @@
 
 ## 1. Product contract
 
-OpenGeni agents and embedded applications must be able to create, inspect,
+Opengeni agents and embedded applications must be able to create, inspect,
 edit, calculate, render, collaborate on, and export spreadsheets,
 presentations, and documents without Microsoft Office being installed. Agent
 scripts and React editors operate on the same canonical model.
 
 The authoring facade is `@opengeni/artifact-tool`. Its stable surface follows
-the workflows documented by OpenGeni's Spreadsheet, Presentation, and Document
+the workflows documented by Opengeni's Spreadsheet, Presentation, and Document
 skills: `FileBlob`, `Workbook`, `SpreadsheetFile`, `Presentation`,
 `PresentationFile`, bulk range writes, stable object ids, `inspect`, `help`,
 `trace`, render, and Office import/export. Compatibility is behavioral; no
@@ -31,7 +31,7 @@ agent scripts       @opengeni/react/artifacts       host application
                               |
                    versioned command protocol
                               |
-                 OpenGeni artifact kernel (Rust)
+                 Opengeni artifact kernel (Rust)
               native N-API             browser WASM
              import/export,             edit, calc,
              render, jobs               layout, inspect
@@ -67,7 +67,7 @@ specific kernel target.
 Agent-authored `.mjs` runs in the existing sandbox and imports the public
 package. The API never evaluates agent JavaScript. Managed sandbox images
 receive the exact package version paired with the skill documentation; custom
-sandboxes use a bounded setup helper. Completed outputs enter OpenGeni through
+sandboxes use a bounded setup helper. Completed outputs enter Opengeni through
 the ordinary authenticated file/artifact APIs.
 
 ## 4. Canonical models
@@ -479,7 +479,7 @@ unbounded native/WASM allocation.
 ## 12. Verification gates
 
 1. **Facade conformance:** execute every supported code pattern from the three
-   OpenGeni skills against TypeScript, native, and WASM backends.
+   Opengeni skills against TypeScript, native, and WASM backends.
 2. **Differential model tests:** identical command streams produce identical
    canonical snapshots, inspection records, formula values, and operation ids.
 3. **OOXML round trips:** import → inspect → edit → export → re-import and compare

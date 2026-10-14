@@ -80,6 +80,15 @@ describe("web contract runtime chunk boundary", () => {
     const imports = program.body.flatMap((node) =>
       node.type === "ImportDeclaration" && node.importKind !== "type" ? [node.source.value] : [],
     );
-    expect(imports).toEqual(["zod"]);
+    // `define-schema` (#4323) is a dependency-free leaf, so it cannot import them back.
+    expect(imports).toEqual(["./define-schema", "zod"]);
+    const leaf = parseSync(
+      "define-schema.ts",
+      await readFile(
+        new URL("../../../packages/contracts/src/define-schema.ts", import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(leaf.program.body.some((node) => node.type === "ImportDeclaration")).toBe(false);
   });
 });

@@ -1,11 +1,13 @@
 import {
   ForkSessionResponse,
+  SessionVisibilityChangePreview,
   SessionTenancyCreateCapabilities,
   UpdateSessionVisibilityResponse,
   sessionVisibilityFromPublic,
   sessionVisibilityToPublic,
   type ForkSessionRequest,
   type SessionAuthorizationSurface,
+  type SessionVisibility,
   type UpdateSessionVisibilityRequest,
   type VariableSet,
 } from "@opengeni/contracts";
@@ -16,18 +18,27 @@ import {
   getRig,
   getPrivateSessionCreatePolicy,
   getSessionEventForSubject,
+  inspectSessionVisibilityChange,
+  EMPTY_SESSION_VISIBILITY_WORK,
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   replayAppliedSessionFork,
-  sessionTenancyProductActivated,
+  sessionHasLiveAttempts,
   SessionTenancyAccessError,
   SessionTenancyInvalidRequestError,
-  SessionTenancyNotActivatedError,
+  SessionVisibilityWorkConflictError,
+  stopSessionWorkForVisibilityChange,
   transitionSessionVisibility,
   type Database,
   type ForkSessionContentResult,
+  type TransitionSessionVisibilityResult,
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
+import {
+  privacyDeploymentLimits,
+  requireDeploymentAllowsOnlyMe,
+  resolveOrganizationPrivacy,
+} from "./organization-privacy";
 import {
   requirePermission,
   hasVerifiedOwningUserAuthorization,
@@ -35,13 +46,25 @@ import {
 } from "../access";
 import { requireSessionAuthorization } from "../session-authorization";
 import type { AppDependencies } from "../dependencies";
-import { validateVariableSetAttachment } from "../domain/environments";
+import { variableSetsRemovedError } from "../domain/encryption-key";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
 
 type SessionTenancyDependencies = Pick<
   AppDependencies,
   "db" | "bus" | "sessionAuthorization" | "settings"
 >;
+
+type SessionVisibilityDependencies = SessionTenancyDependencies & {
+  workflowClient: Pick<AppDependencies["workflowClient"], "wakeSessionWorkflow">;
+};
+
+/**
+ * How long one "make private anyway" request waits for a worker to settle the
+ * response it is executing. Past it the request answers `stopping_active_work`
+ * and the same idempotency key finishes the change on retry.
+ */
+const STOP_WORK_SETTLE_TIMEOUT_MS = 15_000;
+const STOP_WORK_POLL_INTERVAL_MS = 400;
 
 export class SessionTenancyManagedHumanRequiredError extends Error {
   readonly name = "SessionTenancyManagedHumanRequiredError";
@@ -84,7 +107,7 @@ export function requireVerifiedOwningUser(
 }
 
 export async function getManagedHumanSessionCreateCapabilities(
-  deps: Pick<SessionTenancyDependencies, "db">,
+  deps: Pick<SessionTenancyDependencies, "db" | "settings">,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): Promise<SessionTenancyCreateCapabilities> {
@@ -101,16 +124,22 @@ export async function getManagedHumanSessionCreateCapabilities(
     }
     throw error;
   }
-  // Mirror the database create fence exactly: a managed human's own Personal
-  // workspace needs only the operator readiness receipt, while a shared
-  // organization workspace additionally needs the owner/admin product setting.
+  // Mirror the database create fence exactly: every organization is
+  // session-tenancy activated (migration 0611), so a member's own Personal
+  // workspace is always private-capable, while a shared organization workspace
+  // additionally needs the owner/admin Only-me product setting.
   let activated = false;
+  let sharedWorkspace = false;
   try {
     const policy = await getPrivateSessionCreatePolicy(deps.db, {
       workspaceId,
       actorSubjectId: authorization.grant.subjectId,
     });
-    activated = policy.personalWorkspace ? policy.platformAvailable : policy.organizationEnabled;
+    sharedWorkspace = !policy.personalWorkspace;
+    // A deployment that turns Only me off narrows every shared workspace.
+    activated = policy.personalWorkspace
+      ? policy.platformAvailable
+      : policy.organizationEnabled && privacyDeploymentLimits(deps.settings).onlyMeAllowed;
   } catch (error) {
     // A canonical managed human without an active organization membership or
     // stated workspace authority (legacy managed access) is simply not
@@ -123,15 +152,22 @@ export async function getManagedHumanSessionCreateCapabilities(
       throw error;
     }
   }
+  // The organization's default audience applies to shared workspaces where
+  // Only me is available; a Personal workspace has nobody else to share with.
+  const defaultVisibility =
+    activated && sharedWorkspace
+      ? (await resolveOrganizationPrivacy(deps, authorization.grant.accountId)).defaultVisibility
+      : "workspace";
   return SessionTenancyCreateCapabilities.parse({
     activated,
     canCreatePrivate: activated,
     reason: activated ? "available" : "not_activated",
+    defaultVisibility,
   });
 }
 
 export async function requireManagedHumanPrivateSessionCreate(
-  deps: Pick<SessionTenancyDependencies, "db">,
+  deps: Pick<SessionTenancyDependencies, "db" | "settings">,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): Promise<void> {
@@ -140,6 +176,10 @@ export async function requireManagedHumanPrivateSessionCreate(
   // fence, after keyed replay resolution), so a committed keyed success still
   // replays after the setting is disabled while a fresh key fails closed.
   await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:create"]);
+  await requireDeploymentAllowsOnlyMe(deps, {
+    workspaceId,
+    actorSubjectId: authorization.grant.subjectId,
+  });
 }
 
 async function requireSessionTenancyMutationGate(
@@ -153,9 +193,6 @@ async function requireSessionTenancyMutationGate(
   // missing, shared, or another owner's private session.
   requireVerifiedOwningUser(authorization, workspaceId);
   for (const permission of permissions) requirePermission(authorization.grant, permission);
-  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
-    throw new SessionTenancyNotActivatedError();
-  }
 }
 
 async function publishExactCommittedEvent(
@@ -246,7 +283,7 @@ async function projectAndPublishSessionFork(
 }
 
 export async function updateManagedHumanSessionVisibility(
-  deps: SessionTenancyDependencies,
+  deps: SessionVisibilityDependencies,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
   sessionId: string,
@@ -260,19 +297,57 @@ export async function updateManagedHumanSessionVisibility(
     operation: "session.visibility.write",
     surface: authorizationSurface,
   });
+  if (request.visibility === "private") {
+    await requireDeploymentAllowsOnlyMe(deps, {
+      workspaceId,
+      actorSubjectId: authorization.grant.subjectId,
+    });
+  }
 
-  const result = await runTenancyMutation(
-    async () =>
-      await transitionSessionVisibility(deps.db, {
-        workspaceId,
-        sessionId,
-        actorSubjectId: authorization.grant.subjectId,
-        targetVisibility: sessionVisibilityFromPublic(request.visibility),
-        expectedAuthorityEpoch: request.expectedAuthorityEpoch,
-        operationKey: request.idempotencyKey,
-        ...(beforeCommit ? { beforeCommit } : {}),
-      }),
-  );
+  const actorSubjectId = authorization.grant.subjectId;
+  const transition = async () =>
+    await runTenancyMutation(
+      async () =>
+        await transitionSessionVisibility(deps.db, {
+          workspaceId,
+          sessionId,
+          actorSubjectId,
+          targetVisibility: sessionVisibilityFromPublic(request.visibility),
+          expectedAuthorityEpoch: request.expectedAuthorityEpoch,
+          operationKey: request.idempotencyKey,
+          ...(request.stopActiveWork === true ? { stopActiveWork: true } : {}),
+          ...(beforeCommit ? { beforeCommit } : {}),
+        }),
+    );
+  let result: TransitionSessionVisibilityResult;
+  try {
+    result = await transition();
+  } catch (error) {
+    if (
+      !(error instanceof SessionVisibilityWorkConflictError) ||
+      request.stopActiveWork !== true ||
+      error.liveAttemptCount === 0
+    ) {
+      throw error;
+    }
+    // A worker is executing a response. Stopping it is asynchronous: durably
+    // interrupt it (and cancel everything queued or parked) first, let the
+    // worker cancel the turn, then make the same transition.
+    await stopLiveSessionWorkForVisibilityChange(deps, {
+      workspaceId,
+      sessionId,
+      actorSubjectId,
+      expectedAuthorityEpoch: request.expectedAuthorityEpoch,
+      operationKey: `${request.idempotencyKey}:stop-work`,
+    });
+    result = await transitionAfterLiveWorkSettles(deps, {
+      workspaceId,
+      sessionId,
+      actorSubjectId,
+      transition,
+      conflict: error,
+    });
+  }
   const response = UpdateSessionVisibilityResponse.parse({
     operationId: result.operationId,
     eventId: result.eventId,
@@ -283,14 +358,158 @@ export async function updateManagedHumanSessionVisibility(
     replay: result.replay,
     revokedGrantCount: result.revokedGrantCount,
   });
+  await publishCommittedEventIds(deps, {
+    workspaceId,
+    sessionId,
+    subjectId: actorSubjectId,
+    eventIds: result.settledEventIds,
+  });
   await publishExactCommittedEvent(deps, {
     workspaceId,
     sessionId,
-    subjectId: authorization.grant.subjectId,
+    subjectId: actorSubjectId,
     eventId: response.eventId,
     eventSequence: response.eventSequence,
   });
+  await wakeSessionWorkflowAfterVisibilityWork(deps, result.workflowWake);
   return response;
+}
+
+/**
+ * Owner-only preview for the audience dialog: what a change to `visibility`
+ * would stop, and what would still refuse it. Same gates as the change itself,
+ * so a non-owner learns nothing a refused change would not tell them.
+ */
+export async function previewManagedHumanSessionVisibilityChange(
+  deps: SessionTenancyDependencies,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+  sessionId: string,
+  targetVisibility: SessionVisibility,
+  authorizationSurface: SessionAuthorizationSurface = "core",
+): Promise<SessionVisibilityChangePreview> {
+  await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:control"]);
+  await requireSessionAuthorization(deps, authorization.grant, {
+    sessionId,
+    operation: "session.visibility.write",
+    surface: authorizationSurface,
+  });
+  const preview = await inspectSessionVisibilityChange(deps.db, {
+    workspaceId,
+    sessionId,
+    actorSubjectId: authorization.grant.subjectId,
+  });
+  const current = sessionVisibilityToPublic(preview.visibility);
+  // Only a change to Only me stops work or drops other people's access;
+  // sharing a private chat with the workspace never does either.
+  const changesToPrivate = targetVisibility === "private" && current !== "private";
+  return SessionVisibilityChangePreview.parse({
+    visibility: current,
+    targetVisibility,
+    authorityEpoch: preview.authorityEpoch,
+    work: changesToPrivate ? preview.work : EMPTY_SESSION_VISIBILITY_WORK,
+    // Kept for older clients; nothing refuses the change any more.
+    blocker: null,
+  });
+}
+
+async function stopLiveSessionWorkForVisibilityChange(
+  deps: SessionVisibilityDependencies,
+  input: Parameters<typeof stopSessionWorkForVisibilityChange>[1],
+): Promise<void> {
+  const stopped = await runTenancyMutation(
+    async () => await stopSessionWorkForVisibilityChange(deps.db, input),
+  );
+  await publishCommittedEventIds(deps, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    subjectId: input.actorSubjectId,
+    eventIds: stopped.eventIds,
+  });
+  await wakeSessionWorkflowAfterVisibilityWork(deps, stopped.workflowWake);
+}
+
+async function transitionAfterLiveWorkSettles(
+  deps: SessionVisibilityDependencies,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    actorSubjectId: string;
+    transition: () => Promise<TransitionSessionVisibilityResult>;
+    conflict: SessionVisibilityWorkConflictError;
+  },
+): Promise<TransitionSessionVisibilityResult> {
+  const deadline = Date.now() + STOP_WORK_SETTLE_TIMEOUT_MS;
+  for (;;) {
+    const live = await sessionHasLiveAttempts(deps.db, input);
+    if (!live) {
+      try {
+        return await input.transition();
+      } catch (error) {
+        // A worker claimed a new attempt between the read and the transition.
+        if (!(error instanceof SessionVisibilityWorkConflictError) || error.liveAttemptCount === 0)
+          throw error;
+      }
+    }
+    if (Date.now() >= deadline) {
+      throw new SessionVisibilityWorkConflictError(
+        "stopping_active_work",
+        input.conflict.work,
+        input.conflict.liveAttemptCount,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, STOP_WORK_POLL_INTERVAL_MS));
+  }
+}
+
+async function publishCommittedEventIds(
+  deps: { db: Database; bus: EventBus },
+  input: { workspaceId: string; sessionId: string; subjectId: string; eventIds: string[] },
+): Promise<void> {
+  for (const eventId of input.eventIds) {
+    try {
+      const event = await getSessionEventForSubject(
+        deps.db,
+        input.workspaceId,
+        input.subjectId,
+        eventId,
+      );
+      if (!event || event.sessionId !== input.sessionId) continue;
+      await publishDurableSessionEvents(deps.bus, input.workspaceId, input.sessionId, [event]);
+    } catch {
+      // Committed; live fanout is repairable from the durable stream.
+      console.warn("[session-tenancy] settled event live publication was deferred to replay", {
+        errorClass: "SessionTenancyEventPublishOperationError",
+        errorCode: "session_tenancy_event_publish_deferred",
+        origin: "core",
+        sessionId: input.sessionId,
+      });
+    }
+  }
+}
+
+async function wakeSessionWorkflowAfterVisibilityWork(
+  deps: SessionVisibilityDependencies,
+  wake: TransitionSessionVisibilityResult["workflowWake"],
+): Promise<void> {
+  if (!wake) return;
+  try {
+    await deps.workflowClient.wakeSessionWorkflow({
+      accountId: wake.accountId,
+      workspaceId: wake.workspaceId,
+      sessionId: wake.sessionId,
+      workflowId: wake.temporalWorkflowId,
+      wakeRevision: wake.wakeRevision,
+      interruptionRequested: true,
+    });
+  } catch {
+    // The wake revision committed with the change; the durable outbox retries.
+    console.warn("[session-tenancy] immediate workflow wake failed; durable outbox will retry", {
+      errorClass: "WorkflowWakeOperationError",
+      errorCode: "session_tenancy_wake_failed",
+      origin: "core",
+    });
+  }
 }
 
 export async function forkManagedHumanSession(
@@ -305,6 +524,12 @@ export async function forkManagedHumanSession(
     "sessions:read",
     "sessions:create",
   ]);
+  if (request.visibility === "private") {
+    await requireDeploymentAllowsOnlyMe(deps, {
+      workspaceId,
+      actorSubjectId: authorization.grant.subjectId,
+    });
+  }
   const beforeCommit = externalContinuationCommitAuthorizer(authorization);
   const forkInput = {
     sourceWorkspaceId: workspaceId,
@@ -337,31 +562,15 @@ export async function forkManagedHumanSession(
   const resolveRuntimeConfiguration = async () => {
     if (runtimeConfigurationPromise) return await runtimeConfigurationPromise;
     runtimeConfigurationPromise = (async () => {
+      // Variable Sets were replaced by vaults (RM-1).
+      if (request.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
       const variableSets: VariableSet[] = [];
-      for (const variableSetId of request.variableSetIds ?? []) {
-        variableSets.push(
-          await validateVariableSetAttachment(
-            { settings: deps.settings, db: deps.db },
-            authorization.grant,
-            workspaceId,
-            variableSetId,
-          ),
-        );
-      }
       let rigVersionId: string | null = null;
       if (request.rigId) {
         requirePermission(authorization.grant, "rigs:use");
         const rig = await getRig(deps.db, authorization.grant, request.rigId);
         if (!rig?.activeVersion) {
           throw new SessionTenancyInvalidRequestError();
-        }
-        for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
-          await validateVariableSetAttachment(
-            { settings: deps.settings, db: deps.db },
-            authorization.grant,
-            workspaceId,
-            defaultVariableSetId,
-          );
         }
         rigVersionId = rig.activeVersion.id;
       }

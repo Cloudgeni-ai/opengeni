@@ -427,7 +427,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     },
   );
 
-  test("resume-only materializes the stable OpenGeni identity for a legacy SDK deserializer", async () => {
+  test("resume-only materializes the stable Opengeni identity for a legacy SDK deserializer", async () => {
     let deserialized: Record<string, unknown> | null = null;
     const established = await establishRuntimeSandboxSessionFromEnvelope(
       testSettings({ sandboxBackend: "none" }),

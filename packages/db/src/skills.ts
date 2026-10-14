@@ -19,6 +19,50 @@ export function skillFilesContentHash(files: readonly SkillFile[]): string {
   return createHash("sha256").update(JSON.stringify(manifest), "utf8").digest("hex");
 }
 
+/**
+ * A Skill change the lifecycle refused, rolled back as a whole. `code` is the
+ * SQLSTATE (42501 not permitted, 40001/23505 changed or key reused, 22023/23514
+ * invalid) and `message` the lifecycle's own fixed explanation, never a query
+ * or its parameters. The original driver error stays as `cause`.
+ */
+export class SkillLifecycleRefusedError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+
+  constructor(code: string, message: string, options: { cause: unknown }) {
+    super(message, options);
+    this.name = "SkillLifecycleRefusedError";
+    this.code = code;
+    this.retryable = code === "40001";
+  }
+}
+
+const SKILL_LIFECYCLE_REFUSAL_CODES = new Set(["42501", "40001", "23505", "23514", "22023"]);
+
+/** The lifecycle routine's RAISE, if that is what failed; driver errors wrap it. */
+function skillLifecycleRefusal(error: unknown): SkillLifecycleRefusedError | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth++) {
+    const candidate = current as {
+      code?: unknown;
+      message?: unknown;
+      where?: unknown;
+      cause?: unknown;
+    };
+    if (
+      typeof candidate.code === "string" &&
+      SKILL_LIFECYCLE_REFUSAL_CODES.has(candidate.code) &&
+      typeof candidate.message === "string" &&
+      typeof candidate.where === "string" &&
+      candidate.where.includes("skill_apply_lifecycle")
+    ) {
+      return new SkillLifecycleRefusedError(candidate.code, candidate.message, { cause: error });
+    }
+    current = candidate.cause;
+  }
+  return null;
+}
+
 /** HTTP authorization must precede this boundary. Agent claims are host-bound, not model input. */
 export async function applySkillLifecycle(
   db: Database,
@@ -106,9 +150,15 @@ export async function applySkillLifecycle(
     if (!rows[0]) throw new Error("Skill lifecycle returned no durable receipt");
     return rows[0].receipt;
   };
-  return context.actor.kind !== "agent"
-    ? withWorkspaceSubjectRls(db, context.workspaceId, context.actor.subjectId, run)
-    : withWorkspaceRls(db, context.workspaceId, run);
+  try {
+    return context.actor.kind !== "agent"
+      ? await withWorkspaceSubjectRls(db, context.workspaceId, context.actor.subjectId, run)
+      : await withWorkspaceRls(db, context.workspaceId, run);
+  } catch (error) {
+    // The transaction rolled back. Name the refusal instead of a failed query
+    // that repeats every parameter, including the Skill's text.
+    throw skillLifecycleRefusal(error) ?? error;
+  }
 }
 
 export type SkillReadContext = {

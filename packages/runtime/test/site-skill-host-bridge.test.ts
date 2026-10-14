@@ -7,10 +7,10 @@ const skill = readFileSync(
 );
 
 describe("Sites skill host-bridge rule", () => {
-  test("states up front that a Site never needs its own server for OpenGeni AI", () => {
+  test("states up front that a Site never needs its own server for Opengeni AI", () => {
     const rule = skill.indexOf("## Sites have no server; AI comes from the host");
     const durable = skill.indexOf("## Start from the durable Site");
-    const bridge = skill.indexOf("## Prefer OpenGeni's UI and typed client");
+    const bridge = skill.indexOf("## Prefer Opengeni's UI and typed client");
     expect(rule).toBeGreaterThan(-1);
     expect(rule).toBeLessThan(durable);
     expect(durable).toBeLessThan(bridge);
@@ -33,13 +33,29 @@ describe("Sites skill host-bridge rule", () => {
     expect(section).toContain("say which designs are possible and ask before building");
   });
 
-  test("keeps the backend escape hatch scoped to non-OpenGeni compute and asks first", () => {
-    expect(skill).toContain("OpenGeni AI and tool access are\n  never such a backend (see above)");
+  test("keeps the backend escape hatch scoped to non-Opengeni compute and asks first", () => {
+    expect(skill).toContain("Opengeni AI and tool access are\n  never such a backend (see above)");
     expect(skill).toContain(
       "explain that constraint and ask how the user\n  wants to proceed instead of dropping functionality or choosing a host",
     );
     expect(skill).not.toContain(
       "If the app requires a backend that\n  Sites cannot host, explain that constraint instead of dropping functionality.",
     );
+  });
+
+  test("points persistent data at Site Data instead of a separate server", () => {
+    const rule = skill.indexOf("## Sites have no server; AI comes from the host");
+    const durable = skill.indexOf("## Start from the durable Site");
+    const section = skill.slice(rule, durable);
+    expect(section).toContain("Saved data needs no server either");
+    expect(section).not.toContain("a persistent database, or scheduled jobs");
+    const data = skill.indexOf("## Save data with Site Data");
+    expect(data).toBeGreaterThan(-1);
+    const guide = skill.slice(data, skill.indexOf("## Authoring, preview, and viewer access"));
+    for (const mode of ["`shared`", "`shared_read`", "`per_viewer`", "`append_only`"])
+      expect(guide).toContain(mode);
+    expect(guide).toContain("never `innerHTML`");
+    expect(guide).toContain("`quota_exceeded`");
+    expect(guide).toContain("`opengeni__site_data_define_collection`");
   });
 });

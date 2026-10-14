@@ -6,6 +6,7 @@ import {
   recordSessionRecoveryBacklogGauges,
   startContextCompactionPendingMonitor,
   startSessionRecoveryMonitor,
+  type SessionRecoveryBacklog,
 } from "../src/observability-metrics";
 
 describe("durable context compaction metrics", () => {
@@ -81,8 +82,8 @@ describe("durable session recovery metrics", () => {
     const observability = createObservability(testSettings(), { component: "worker-control" });
 
     recordSessionRecoveryBacklogGauges(observability, {
-      quiescence_missing: 2,
-      projection_stale: 4,
+      quiescence_missing: { count: 2, scheduled: 0, oldestOverdueSeconds: 12.5 },
+      projection_stale: { count: 4, scheduled: 3, oldestOverdueSeconds: 901 },
     });
 
     const metrics = await observability.prometheusMetrics();
@@ -92,19 +93,51 @@ describe("durable session recovery metrics", () => {
     expect(metrics).toMatch(
       /opengeni_session_recovery_backlog\{[^}]*state="projection_stale"[^}]*\} 4/,
     );
+    expect(metrics).toMatch(
+      /opengeni_session_recovery_scheduled\{[^}]*state="quiescence_missing"[^}]*\} 0/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_session_recovery_scheduled\{[^}]*state="projection_stale"[^}]*\} 3/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_session_recovery_oldest_overdue_seconds\{[^}]*state="quiescence_missing"[^}]*\} 12\.5/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_session_recovery_oldest_overdue_seconds\{[^}]*state="projection_stale"[^}]*\} 901/,
+    );
     expect(metrics).not.toMatch(/session_id|workspace_id|attempt_id/);
+  });
+
+  test("a backlog that is entirely inside its recorded backoff is not overdue", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordSessionRecoveryBacklogGauges(observability, {
+      quiescence_missing: { count: 0, scheduled: 0, oldestOverdueSeconds: 0 },
+      projection_stale: { count: 7, scheduled: 7, oldestOverdueSeconds: 0 },
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_session_recovery_backlog\{[^}]*state="projection_stale"[^}]*\} 7/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_session_recovery_oldest_overdue_seconds\{[^}]*state="projection_stale"[^}]*\} 0/,
+    );
   });
 
   test("refreshes immediately, does not overlap, and drains on close", async () => {
     const observability = createObservability(testSettings(), { component: "worker-control" });
-    const first = deferred<{ quiescence_missing: number; projection_stale: number }>();
+    const first = deferred<SessionRecoveryBacklog>();
     const read = mock(() => first.promise);
     const monitor = startSessionRecoveryMonitor({ observability, read, intervalMs: 2 });
 
     await Bun.sleep(10);
     expect(read).toHaveBeenCalledTimes(1);
     const closing = monitor.close();
-    first.resolve({ quiescence_missing: 1, projection_stale: 3 });
+    first.resolve({
+      quiescence_missing: { count: 1, scheduled: 0, oldestOverdueSeconds: 0 },
+      projection_stale: { count: 3, scheduled: 2, oldestOverdueSeconds: 4 },
+    });
     await closing;
     await Bun.sleep(5);
     expect(read).toHaveBeenCalledTimes(1);
@@ -114,6 +147,9 @@ describe("durable session recovery metrics", () => {
     expect(metrics).toMatch(/opengeni_session_recovery_monitor_fresh\{[^}]*\} 1/);
     expect(metrics).toMatch(
       /opengeni_session_recovery_monitor_last_success_timestamp_seconds\{[^}]*\} \d+/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_session_recovery_oldest_overdue_seconds\{[^}]*state="projection_stale"[^}]*\} 4/,
     );
   });
 

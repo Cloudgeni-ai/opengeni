@@ -59,7 +59,7 @@ import type { SessionWorkflowClient } from "../dependencies";
 import { normalizeResources } from "../domain/resources";
 import { validateDraftTimelineAnnotations } from "../domain/timeline-annotations";
 import { initiatingHumanForAllowance } from "../domain/sessions";
-import { modelFundingForAdmission } from "../billing/limits";
+import { coreRoutedSubscriptionFunding, modelFundingForAdmission } from "../billing/limits";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
 import {
   requireSessionAuthorization,
@@ -171,6 +171,8 @@ async function assertFreshAgentCommandAllowance(
   if (!target || target.accountId !== context.accountId) {
     throw new HTTPException(404, { message: "Target session not found" });
   }
+  let fundedWithoutCredits = false;
+  const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
   if (deps.settings) {
     const { settings } = await resolveWorkspaceCatalogSettings(tx, deps.settings, {
       accountId: target.accountId,
@@ -182,16 +184,26 @@ async function assertFreshAgentCommandAllowance(
       settings,
       workspaceId: context.workspaceId,
       model: target.model,
+      accountId: target.accountId,
+      subjectId: initiatingHumanForAllowance(frozen),
     });
-    if (modelFundingForAdmission(settings, target.model, codexBilled).fundedWithoutCredits) {
-      return;
-    }
+    fundedWithoutCredits = modelFundingForAdmission(
+      settings,
+      target.model,
+      codexBilled,
+      await coreRoutedSubscriptionFunding(tx, settings, {
+        accountId: target.accountId,
+        workspaceId: context.workspaceId,
+        model: target.model,
+        subjectId: initiatingHumanForAllowance(frozen),
+      }),
+    ).fundedWithoutCredits;
   }
-  const frozen = await frozenInitiatorForCommandActor(tx, context.workspaceId, agentActor(context));
   const refusal = await checkWorkspaceAllowance(tx, {
     accountId: target.accountId,
     workspaceId: context.workspaceId,
     subjectId: initiatingHumanForAllowance(frozen),
+    ...(fundedWithoutCredits ? { fundedWithoutCredits: true } : {}),
   });
   if (refusal) {
     throw new HTTPException(402, {
@@ -329,7 +341,8 @@ async function wakeSessionCommand(
 /**
  * Nudge the one bounded dispatcher after a set-based control transaction. The
  * API never materializes descendant session ids; Postgres remains the complete
- * wake ledger and the 10-second Schedule repairs a lost immediate trigger.
+ * wake ledger and the control worker's 10-second repair cadence recovers a
+ * lost immediate trigger.
  */
 async function requestControlWakeDispatch(
   deps: {

@@ -4,6 +4,7 @@ import {
   TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS,
   TOOL_GATEWAY_INPUT_ISSUES_MAX,
   ToolGatewayApprovalRequiredError,
+  ToolGatewayBlockedError,
   ToolGatewayCatalogIntegrityError,
   ToolGatewayInputValidationError,
   ToolGatewayPathCollisionError,
@@ -31,6 +32,83 @@ const definition: ToolGatewayDefinition = {
 };
 
 describe("ToolGateway", () => {
+  test("continuation semantics ignore prose, but bind account and schema changes", () => {
+    const digest = (changes: Partial<ToolGatewayDefinition>) =>
+      createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [{ ...definition, effectAuthorityDigest: "a".repeat(64), ...changes }],
+        authorize: () => {},
+      }).gateway.effectDigest(definition.identity);
+    expect(
+      digest({
+        description: "Improved documentation",
+        inputSchema: {
+          ...definition.inputSchema,
+          description: "More documentation",
+          properties: { query: { type: "string", description: "Useful help" } },
+        },
+      }),
+    ).toBe(digest({}));
+    expect(digest({ effectAuthorityDigest: "b".repeat(64) })).not.toBe(digest({}));
+    expect(
+      digest({ inputSchema: { type: "object", properties: { query: { type: "number" } } } }),
+    ).not.toBe(digest({}));
+  });
+  test("effective preference overrides catalog recommendations after validated access", async () => {
+    for (const choice of ["allow", "ask", "block"] as const) {
+      let effects = 0;
+      const phases: string[] = [];
+      const { catalog, gateway } = createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          {
+            ...definition,
+            approval: "human",
+            execute: () => {
+              effects++;
+              return { content: [] };
+            },
+          },
+        ],
+        authorize: () => {
+          phases.push("access");
+        },
+        requireApproval: () => true,
+        resolveApproval: () => {
+          phases.push("preference");
+          return choice;
+        },
+      });
+      const call = {
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: { query: "test" },
+        caller: { kind: "http" as const, subjectId: "human:test" },
+      };
+      if (choice === "allow") {
+        const prepared = await gateway.prepareCall(call);
+        expect(prepared.approvalDecision).toBe("allow");
+        await prepared.execute();
+        expect(effects).toBe(1);
+      } else {
+        await expect(gateway.call(call)).rejects.toBeInstanceOf(
+          choice === "ask" ? ToolGatewayApprovalRequiredError : ToolGatewayBlockedError,
+        );
+        expect(effects).toBe(0);
+      }
+      expect(phases).toEqual(["access", "preference"]);
+      phases.length = 0;
+      await expect(
+        gateway.call({ ...call, arguments: { action: "allow" } }),
+      ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+      expect(phases).toEqual([]);
+    }
+  });
   test("prepared gateway timing retains call context after preparation and never replays a rejection", async () => {
     const bodies: any[] = [];
     const observer = createObservability(
@@ -376,6 +454,27 @@ describe("ToolGateway argument validation errors", () => {
     return error as ToolGatewayInputValidationError;
   }
 
+  test("enforces remote patterns that are invalid in Unicode mode instead of failing the catalog", async () => {
+    // Patterns from remote servers: valid ECMAScript, but `\-` and `\#` outside
+    // a class are invalid in Unicode mode. One that no syntax accepts, too.
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        date: { type: "string", pattern: "^\\d{4}\\-\\d{2}$" },
+        tag: { type: "string", pattern: "^\\#\\w+$" },
+        note: { type: "string", pattern: "(" },
+      },
+      patternProperties: { "^x\\-": { type: "number" } },
+    });
+    const valid = { date: "2026-10", tag: "#groceries", note: "anything", "x-count": 2 };
+    await expect(callModel(valid)).resolves.toMatchObject({
+      content: [{ type: "text", text: "ok" }],
+    });
+    expect(executed).toEqual([valid]);
+    const error = await rejection(callModel({ date: "October", "x-count": "two" }));
+    expect(error.issues.map((issue) => issue.path)).toEqual(["date", "x-count"]);
+  });
+
   test("names every missing required property and executes the corrected call", async () => {
     const { callModel, executed } = gatewayFor(execSchema);
     const error = await rejection(callModel({ command: "search project-get" }));
@@ -443,6 +542,144 @@ describe("ToolGateway argument validation errors", () => {
     ]);
     expect(error.message).not.toContain("synthetic-");
     expect(error.message).not.toContain("42");
+    expect(executed).toEqual([]);
+  });
+
+  test("accepts plain decimal strings where the schema needs an integer or number", async () => {
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        top: { type: "integer", minimum: 1 },
+        ratio: { type: "number" },
+        offset: { type: ["integer", "null"] },
+        ids: { type: "array", items: { type: "integer" } },
+        window: { type: "object", properties: { days: { type: "integer" } } },
+        query: { type: "string" },
+      },
+      required: ["top"],
+      additionalProperties: false,
+    });
+    await expect(
+      callModel({
+        top: "25",
+        ratio: "-0.5e2",
+        offset: "0",
+        ids: ["1", 2, "30"],
+        window: { days: "7" },
+        query: "42",
+      }),
+    ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
+    expect(executed).toEqual([
+      { top: 25, ratio: -50, offset: 0, ids: [1, 2, 30], window: { days: 7 }, query: "42" },
+    ]);
+  });
+
+  test("decodes JSON text where the schema needs an object or array, including nested repairs", async () => {
+    const actionSchema = {
+      oneOf: [
+        {
+          type: "object",
+          properties: { kind: { const: "click" }, ref: { type: "string" } },
+          required: ["kind", "ref"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { kind: { const: "wait" }, ms: { type: "integer" } },
+          required: ["kind", "ms"],
+          additionalProperties: false,
+        },
+      ],
+    };
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        action: actionSchema,
+        actions: { type: "array", items: actionSchema },
+        options: {
+          type: ["object", "null"],
+          properties: { tags: { type: "array", items: { type: "string" } } },
+        },
+        note: { type: "string" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    });
+    await expect(
+      callModel({
+        action: '{"kind":"click","ref":"e12"}',
+        actions: '[{"kind":"wait","ms":"250"}, {"kind":"click","ref":"e3"}]',
+        options: ' {"tags": ["a"]} ',
+        note: '{"kind":"click"}',
+      }),
+    ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
+    expect(executed).toEqual([
+      {
+        action: { kind: "click", ref: "e12" },
+        actions: [
+          { kind: "wait", ms: 250 },
+          { kind: "click", ref: "e3" },
+        ],
+        options: { tags: ["a"] },
+        note: '{"kind":"click"}',
+      },
+    ]);
+  });
+
+  test("keeps rejecting JSON text of the wrong shape or that still breaks the schema", async () => {
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        filter: {
+          type: "object",
+          properties: { field: { type: "string" } },
+          required: ["field"],
+          additionalProperties: false,
+        },
+        ids: { type: "array", items: { type: "integer" } },
+      },
+      additionalProperties: false,
+    });
+    // Not JSON, the wrong JSON type, or JSON null never becomes an object/array.
+    for (const filter of ["{field: 'x'}", "[]", "null", '"{}"', "", "{"]) {
+      const error = await rejection(callModel({ filter }));
+      expect(error.issues.map((issue) => issue.path)).toEqual(["filter"]);
+    }
+    await rejection(callModel({ ids: '{"0":1}' }));
+    // Decoded values must still satisfy the rest of the schema.
+    const error = await rejection(callModel({ filter: '{"field":"x","extra":1}' }));
+    expect(error.issues.map((issue) => issue.message)).toEqual([
+      'property "filter.extra" is not allowed',
+    ]);
+    expect(executed).toEqual([]);
+  });
+
+  test("keeps rejecting strings that are not plain numbers and every other type mismatch", async () => {
+    const { callModel, executed } = gatewayFor({
+      type: "object",
+      properties: {
+        top: { type: "integer", minimum: 1 },
+        ratio: { type: "number" },
+        flag: { type: "boolean" },
+        name: { type: "string" },
+      },
+      additionalProperties: false,
+    });
+    for (const top of ["5 ", "05", "1e3", "2.5", "0x10", "", "Infinity", "9007199254740993"]) {
+      const error = await rejection(callModel({ top }));
+      expect(error.issues.map((issue) => issue.path)).toEqual(["top"]);
+    }
+    for (const ratio of ["1,5", "NaN", ".5", "+1"]) {
+      await rejection(callModel({ ratio }));
+    }
+    // Only strings become numbers: no boolean, null or number-to-string coercion.
+    await rejection(callModel({ flag: "true" }));
+    await rejection(callModel({ name: 5 }));
+    // A repaired string must still satisfy the rest of the schema.
+    await rejection(callModel({ top: "0" }));
+    // One fixable string does not rescue a call that is wrong elsewhere.
+    const error = await rejection(callModel({ top: "3", extra: true }));
+    expect(error.issues.map((issue) => issue.message)).toEqual(['property "extra" is not allowed']);
     expect(executed).toEqual([]);
   });
 

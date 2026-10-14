@@ -68,6 +68,10 @@ const LazyOrganizationConnectedAgents = lazy(async () => {
   return { default: module.OrganizationConnectedAgents };
 });
 
+const LazyOrganizationPersonalApiKeys = lazy(async () => {
+  const module = await import("@/components/organization-access/personal-api-keys");
+  return { default: module.OrganizationPersonalApiKeys };
+});
 const LazyOrganizationServiceAccounts = lazy(async () => {
   const module = await import("@/components/organization-access/organization-service-accounts");
   return { default: module.OrganizationServiceAccounts };
@@ -340,7 +344,8 @@ export function OrgSettingsRoute({
   const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
 
   const subPage =
-    (section === "models" && Boolean(modelsAccount || modelsView || workspace)) ||
+    // A workspace picked in "Models for" is a scope of the same page, so it keeps the header.
+    (section === "models" && Boolean(modelsAccount || modelsView)) ||
     (section === "people" && Boolean(person || invitation || organizationView)) ||
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
     (section === "developer" && (organizationView === "new-key" || developerSubPage)) ||
@@ -466,7 +471,21 @@ export function OrgSettingsRoute({
           {!modelsRefused &&
           section === "developer" &&
           showConnectedAgents &&
-          (developer?.view === "connect-agent" || developer?.agent) ? (
+          developer?.view === "new-personal-key" ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationPersonalApiKeys
+                key={`${identityKey}:personal-api-keys`}
+                client={client}
+                organizationId={accountId}
+                organizationName={fallbackLabel}
+                location={{ view: "new-personal-key" }}
+                onNavigate={navigateDeveloper}
+              />
+            </Suspense>
+          ) : !modelsRefused &&
+            section === "developer" &&
+            showConnectedAgents &&
+            (developer?.view === "connect-agent" || developer?.agent) ? (
             <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
               <LazyOrganizationConnectedAgents
                 key={`${identityKey}:connected-agents`}
@@ -533,6 +552,18 @@ export function OrgSettingsRoute({
                   />
                 </Suspense>
               ) : null}
+              {organizationView !== "new-key" && showConnectedAgents ? (
+                <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                  <LazyOrganizationPersonalApiKeys
+                    key={`${identityKey}:personal-api-keys`}
+                    client={client}
+                    organizationId={accountId}
+                    organizationName={fallbackLabel}
+                    location={{}}
+                    onNavigate={navigateDeveloper}
+                  />
+                </Suspense>
+              ) : null}
               {organizationView !== "new-key" && canManageOrganizationApiKeys && accountId ? (
                 <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
                   <LazyOrganizationServiceAccounts
@@ -557,7 +588,6 @@ export function OrgSettingsRoute({
                   key={`${identityKey}:organization-api-keys`}
                   organizationId={accountId}
                   canManage={canManageOrganizationApiKeys && Boolean(accountId)}
-                  agentSettings={context.clientConfig.agentConfig?.enabled === true}
                   view={organizationView === "new-key" ? "new-key" : undefined}
                   onViewChange={(view) =>
                     void navigate({
@@ -655,17 +685,22 @@ function OrganizationSettingsFrame({
     );
   }
   const body = <div className="grid min-w-0 gap-8 text-left">{children}</div>;
-  if (hideHeader) return body;
+  // One tree shape with or without the header: opening a sub-page (a Models
+  // account) must not remount the section and repeat its live provider reads.
   return (
     <>
-      <PageHeader
-        title={organizationSettingsLabel(section)}
-        description={
-          hideDescription ? undefined : organizationSettingsDescription(section, organizationLabel)
-        }
-        actions={actions}
-      />
-      <div className="mt-6">{body}</div>
+      {hideHeader ? null : (
+        <PageHeader
+          title={organizationSettingsLabel(section)}
+          description={
+            hideDescription
+              ? undefined
+              : organizationSettingsDescription(section, organizationLabel)
+          }
+          actions={actions}
+        />
+      )}
+      <div className={hideHeader ? undefined : "mt-6"}>{body}</div>
     </>
   );
 }

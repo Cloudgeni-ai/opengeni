@@ -1,8 +1,22 @@
 import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+
+/** Session storage lifecycle migrations build on the withheld 0560 import
+ * guards; this historical fixture withholds them and adds only the session
+ * columns current adapters project. */
+const sessionStorageMigrationTail = [
+  "0649_session_content_archive.sql",
+  "0650_session_archive_activity.sql",
+  "0651_session_event_delta_folding.sql",
+  "0652_session_archive_guard_search_path.sql",
+  "0653_session_archive_tenancy_fence.sql",
+  "0657_session_archive_purge_retained_evidence.sql",
+  "0660_session_archive_preference_snapshot_export.sql",
+] as const;
 
 /** Historical migration proofs run against the last schema that owned Memory.
  * Current-runtime denial and conversion are exercised by migration-0461 and
@@ -17,12 +31,41 @@ export async function acquirePreKnowledgeTestDatabase(
     await admin`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
     // These later migrations require the post-0461 Knowledge/file policies.
     await admin`INSERT INTO schema_migrations(name) VALUES
-      ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
+      ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
     for (const name of allowanceMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+    // Resolves knowledge_index_claim from the withheld 0461 migration.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+    // Rewrites the visibility transition installed by the withheld 0501 migration.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
     // The import migration extends the withheld 0499 attachment helper.
     await admin`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
+    // The session storage lifecycle extends the withheld import guards.
+    for (const name of sessionStorageMigrationTail)
+      await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+    // The drained SuperGrok cutover reads the withheld 0560 import column; this
+    // fixture never runs that maintenance step or the ones after it (the
+    // Claude cutover and the retirement), so they stay recorded.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql')`;
+    // The queue Steer admission repair is a one-time data repair that also
+    // reads the withheld 0560 import column; it changes no schema.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0763_queue_steer_admission_recheck_repair.sql')`;
+    // 0768 and 0769 rewrite the quiescence check and the visibility transition
+    // that the withheld 0501/0738 migrations shape differently here. Their
+    // standalone routines are installed after the replay below.
+    await admin`INSERT INTO schema_migrations(name) VALUES('0768_private_visibility_ignores_leftovers.sql'), ('0769_private_visibility_never_blocks.sql')`;
     await migrate(blank.databaseUrl);
+    // The current visibility transition reads the routines 0768 and 0769 add,
+    // so install everything before their exact-text rewrite blocks.
+    for (const name of [
+      "0768_private_visibility_ignores_leftovers.sql",
+      "0769_private_visibility_never_blocks.sql",
+    ]) {
+      const migration = await readFile(new URL(`../drizzle/${name}`, import.meta.url), "utf8");
+      const rewrite = migration.indexOf("\nDO $migration$");
+      if (rewrite < 0) throw new Error(`${name} has no rewrite block`);
+      await admin.begin((tx) => tx.unsafe(migration.slice(0, rewrite)));
+    }
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.
     await admin`ALTER TABLE sessions
@@ -30,12 +73,22 @@ export async function acquirePreKnowledgeTestDatabase(
       ADD COLUMN imported_archive_imported_at timestamptz,
       ADD COLUMN imported_archive_request_hash text,
       ADD COLUMN imported_archive_subject_id text,
-      ADD COLUMN imported_archive_next_offset integer`;
+      ADD COLUMN imported_archive_next_offset integer,
+      ADD COLUMN keep_live boolean NOT NULL DEFAULT false,
+      ADD COLUMN content_archive_state text,
+      ADD COLUMN content_archive_started_at timestamptz,
+      ADD COLUMN content_archived_at timestamptz,
+      ADD COLUMN content_archive jsonb,
+      ADD COLUMN content_archive_purged_at timestamptz`;
     await admin`DELETE FROM schema_migrations WHERE name IN
-      ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql','0515_autonomous_learning_defaults.sql','0561_scheduled_session_agent_identity.sql')`;
+      ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0640_knowledge_entry_created_since.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql','0515_autonomous_learning_defaults.sql','0561_scheduled_session_agent_identity.sql')`;
     for (const name of allowanceMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
+    await admin`DELETE FROM schema_migrations WHERE name='0730_maintenance_work_probes.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name='0738_private_sessions_share_sandboxes.sql'`;
     await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
+    for (const name of sessionStorageMigrationTail)
+      await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     if (!blank.appPassword)
       throw new Error("Historical fixture requires the shared runtime password");
     await provisionRoles(blank.databaseUrl, {

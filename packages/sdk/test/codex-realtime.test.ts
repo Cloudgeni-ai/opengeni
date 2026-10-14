@@ -1,3 +1,4 @@
+import { createAzureLiveTransportStarter } from "../src/azure-live-transport";
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { CodexRealtimeMicrophoneError, startCodexRealtimeWebrtc } from "../src/codex-realtime";
@@ -505,4 +506,38 @@ describe("OpenGeniClient Codex realtime negotiation", () => {
       },
     ]);
   });
+});
+
+test("Azure starter negotiates its exact model and preserves the native media lifecycle", async () => {
+  const fixture = browserFixture();
+  const starter = createAzureLiveTransportStarter({
+    remoteAudio: fixture.remoteAudio,
+    createPeerConnection: () => fixture.peer,
+  });
+  let early: RTCDataChannel | null = null;
+  const transport = await starter({
+    ...lifecycleProof,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    client: {
+      negotiateCodexRealtimeWebrtc: async () => ({
+        ...negotiated,
+        model: "opengeni-azure/gpt-live-1",
+      }),
+    } as never,
+    media: fixture.media,
+    signal: new AbortController().signal,
+    onEventsCreated: (events) => {
+      early = events;
+    },
+    onAudibleOutputState: () => {},
+    onMicrophoneEnded: () => {},
+    onConnectionHealth: () => {},
+  });
+  expect(transport.events).toBe(early!);
+  expect(transport.connectionId).toBe(negotiated.connectionId);
+  expect(fixture.calls).toContain("setRemoteDescription:answer");
+  expect(transport.microphoneHealthy()).toBe(true);
+  transport.stop();
+  expect(fixture.calls).toContain("peer.close");
 });

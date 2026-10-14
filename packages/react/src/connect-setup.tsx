@@ -19,6 +19,11 @@ const setupStatus: Record<ConnectAttempt["state"], string> = {
   uncertain: "Setup outcome needs checking",
 };
 
+/** GitHub returned from a non-owner's install request: an organization owner must approve. */
+export function isOwnerApprovalPending(attempt: Pick<ConnectAttempt, "error">): boolean {
+  return attempt.error?.code === "owner_approval_pending";
+}
+
 function deviceVerificationUrl(action: ConnectAttempt["nextAction"]): string | null {
   if (action.type !== "wait" || !action.verificationUrl) return null;
   try {
@@ -91,6 +96,11 @@ function ScopedSetup({
   const action = attempt.nextAction;
   const verificationUrl = deviceVerificationUrl(action);
   const terminal = ["complete", "cancelled", "expired"].includes(attempt.state);
+  const awaitingOwner = isOwnerApprovalPending(attempt);
+  const offersGitHubRequest =
+    action.type === "select_account" &&
+    attempt.providerId.startsWith("github") &&
+    action.accounts.some((account) => account.id === "new");
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -148,7 +158,11 @@ function ScopedSetup({
           {attempt.ownership === "personal" ? "Personal connection" : "Workspace connection"}
         </p>
         <p role="status" className="og-connect-setup-status">
-          {setupStatus[attempt.state]}
+          {awaitingOwner
+            ? "Waiting for an organization owner"
+            : attempt.mcpSetup && attempt.state === "credential_input"
+              ? "Enter the requested key"
+              : setupStatus[attempt.state]}
         </p>
         <p className="og-connect-setup-description">
           {attempt.ownership === "personal"
@@ -157,11 +171,28 @@ function ScopedSetup({
         </p>
       </div>
       {attempt.account && <p>Account: {attempt.account.label}</p>}
-      {(localError || view.error || attempt.error) && (
+      {awaitingOwner && (
+        <div className="og-connect-setup-pending">
+          <p>
+            Your request was sent. GitHub asked the owners of your organization to approve Opengeni.
+          </p>
+          <ol>
+            <li>An organization owner approves the request on GitHub.</li>
+            <li>
+              An owner then connects the organization here. If they don't use Opengeni yet, invite
+              them to this workspace first.
+            </li>
+          </ol>
+          <p>Nothing is connected until then. You can close this and keep working.</p>
+        </div>
+      )}
+      {(localError || view.error || (attempt.error && !awaitingOwner)) && (
         <p role="alert">
           {attempt.error?.code === "source_changed"
             ? "The integration source changed. Review the updated tools before adding them."
-            : "Connection setup could not continue. Refresh its status before trying again."}
+            : attempt.error?.code === "mcp_verification_failed"
+              ? "Could not verify this connection. Check the key and server, then submit again. Nothing was connected."
+              : "Connection setup could not continue. Refresh its status before trying again."}
         </p>
       )}
       {!terminal && (
@@ -170,17 +201,21 @@ function ScopedSetup({
             {["credentials", "select_account", "select_resources", "preview"].includes(
               action.type,
             ) ? (
-              <legend>Connection details</legend>
+              <legend className={attempt.mcpSetup ? "og-capability-catalog-sr-only" : undefined}>
+                Connection details
+              </legend>
             ) : null}
-            {attempt.state === "connected_but_incomplete" && action.type === "none" && (
-              <button
-                type="button"
-                className="og-connect-setup-primary"
-                onClick={() => invoke(() => view.advance({ type: "retry" }, crypto.randomUUID()))}
-              >
-                Choose tools
-              </button>
-            )}
+            {attempt.state === "connected_but_incomplete" &&
+              action.type === "none" &&
+              !awaitingOwner && (
+                <button
+                  type="button"
+                  className="og-connect-setup-primary"
+                  onClick={() => invoke(() => view.advance({ type: "retry" }, crypto.randomUUID()))}
+                >
+                  Choose tools
+                </button>
+              )}
             {action.type === "credentials" &&
               action.fields.map((field, i) => (
                 <label key={field.name}>
@@ -225,6 +260,13 @@ function ScopedSetup({
                 </select>
               </label>
             )}
+            {offersGitHubRequest && (
+              <p className="og-connect-setup-hint">
+                Don't see your organization? Only its owners can connect it. Choose "Install on
+                another GitHub account" and pick the organization: GitHub lets you send its owners a
+                request to approve.
+              </p>
+            )}
             {action.type === "select_resources" &&
               action.resources.map((resource) => (
                 <label key={resource.id}>
@@ -264,7 +306,13 @@ function ScopedSetup({
                 className="og-connect-setup-primary"
                 disabled={action.type === "select_resources" && Boolean(action.cursor)}
               >
-                {action.type === "preview" ? "Add selected tools" : "Continue"}
+                {action.type === "preview"
+                  ? "Add selected tools"
+                  : attempt.mcpSetup && action.type === "credentials"
+                    ? view.busy
+                      ? "Verifying connection…"
+                      : "Connect"
+                    : "Continue"}
               </button>
             )}
             {action.type === "authorize" && (

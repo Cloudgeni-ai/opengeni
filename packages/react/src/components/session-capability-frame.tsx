@@ -33,6 +33,8 @@ export type SessionCapabilityFrameProps = {
   actionUnavailable?: ReactNode;
   /** Host-owned content inside the card, under its status or actions. */
   details?: ReactNode;
+  /** Protected setup can stay in the conversation instead of opening a dialog. */
+  inlineSetup?: ReactNode;
 };
 
 function Mark({ src, name }: { src: string | null; name: string }) {
@@ -72,6 +74,7 @@ export function SessionCapabilityFrame({
   dialogOnly = false,
   actionUnavailable,
   details,
+  inlineSetup,
 }: SessionCapabilityFrameProps) {
   const localOpener = useRef<HTMLButtonElement>(null);
   const localCard = useRef<HTMLElement>(null);
@@ -111,7 +114,9 @@ export function SessionCapabilityFrame({
         ) : (
           <>
             <p className="og-session-capability-copy">{description}</p>
-            {actionUnavailable ? (
+            {inlineSetup ? (
+              <div className="og-session-capability-setup">{inlineSetup}</div>
+            ) : actionUnavailable ? (
               <div className="og-session-capability-actions" data-unavailable="">
                 <span role="note">
                   <InfoIcon size={13} aria-hidden />

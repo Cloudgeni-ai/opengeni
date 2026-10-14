@@ -1,4 +1,5 @@
 import { formatErrorMessage, OpenGeniApiError } from "@opengeni/sdk";
+import { parseProviderRecovery, providerRecoveryExhaustedText } from "./provider-recovery";
 
 const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -155,6 +156,32 @@ export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
 export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 
 /**
+ * A fresh Send or Steer refused because the task's own usage limit is reached.
+ * The draft is kept and an unchanged retry is never offered. The one current
+ * recovery action (raise or remove the limit, resume a goal) belongs to the
+ * composer's `SessionUsageLimitNotice`, so this line only says what happened.
+ */
+export const COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
+  "This task's usage limit is reached. Your message is saved.";
+
+/** The earlier wording, still recognized in refusals restored from storage. */
+const LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE =
+  "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
+
+/**
+ * Is this send refusal the task's usage limit? Reads the typed SDK error code
+ * (`OpenGeniSessionUsageLimitReachedError`), and also the composer's own
+ * sentence so a refusal restored from storage after a reload is recognized.
+ */
+export function isSessionUsageLimitSubmissionError(error: Error): boolean {
+  return (
+    (error instanceof OpenGeniApiError && error.code === "session_usage_limit_reached") ||
+    error.message === COMPOSER_SESSION_USAGE_LIMIT_MESSAGE ||
+    error.message === LEGACY_COMPOSER_SESSION_USAGE_LIMIT_MESSAGE
+  );
+}
+
+/**
  * Is this send refusal "the model is no longer available"? Reads the typed
  * `details.code`, and also the historical message so a refusal persisted
  * before a reload (only its text survives) or from an older API is recognized.
@@ -165,7 +192,7 @@ export function isModelUnavailableSubmissionError(error: Error): boolean {
   }
   return (
     error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
-    /^OpenGeni API 422: model is not available: /.test(error.message)
+    /^(?:Opengeni|OpenGeni) API 422: model is not available: /.test(error.message)
   );
 }
 
@@ -179,6 +206,7 @@ export function composerSubmissionErrorMessage(error: Error): string {
   if (error instanceof ComposerStateError) return error.message;
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
   if (isModelUnavailableSubmissionError(error)) return COMPOSER_MODEL_UNAVAILABLE_MESSAGE;
+  if (isSessionUsageLimitSubmissionError(error)) return COMPOSER_SESSION_USAGE_LIMIT_MESSAGE;
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
     // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
     // so this startup-path helper adds no SDK or wording imports.
@@ -204,11 +232,14 @@ export function composerSubmissionCanRetry(error: Error): boolean {
   return !(
     isComposerCreditRefusal(error) ||
     isModelUnavailableSubmissionError(error) ||
+    isSessionUsageLimitSubmissionError(error) ||
     (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
   );
 }
 
 function isComposerCreditRefusal(error: Error): boolean {
+  // A 402 for the task's own usage limit is not a credit or payment problem.
+  if (isSessionUsageLimitSubmissionError(error)) return false;
   return (
     (error instanceof OpenGeniApiError &&
       error.status === 402 &&
@@ -219,8 +250,8 @@ function isComposerCreditRefusal(error: Error): boolean {
 
 /**
  * Does this failure/completion payload (or raw error string) mean the
- * workspace ran out of OpenGeni credits? Matches the engine's
- * "insufficient OpenGeni credits" text (case-insensitive, substring — it
+ * workspace ran out of Opengeni credits? Matches the engine's
+ * "insufficient Opengeni credits" text (case-insensitive, substring — it
  * arrives both bare and wrapped in "Activity task failed: …") and the
  * budget-exhausted segment limit the engine stamps on a turn it ended early.
  */
@@ -311,6 +342,12 @@ export function presentFailure(payload: Record<string, unknown>): {
       reason: `The model provider blocked this request.${detail || message ? ` ${detail ?? message}` : ""}`,
       safetyRefusal: true,
     };
+  }
+  // Spent automatic retries: name the model and the remedy instead of the
+  // recorded wrapper plus raw provider text (still in the stored event).
+  const recovery = parseProviderRecovery(payload);
+  if (recovery && payload.recoveryExhausted === true) {
+    return { reason: providerRecoveryExhaustedText(recovery), safetyRefusal: false };
   }
   return {
     reason:

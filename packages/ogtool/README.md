@@ -16,9 +16,9 @@ ingress fail setup with an actionable error, never by accepting a different
 catalog digest, installing `latest`, or replacing a warm sandbox. Catalog and
 operation requests still use the same attempt bearer and public journal.
 
-`ogtool` is the bundled command-line wrapper for one exact OpenGeni execution attempt's Codemode
+`ogtool` is the bundled command-line wrapper for one exact Opengeni execution attempt's Codemode
 surface. It uses the same `@opengeni/codemode` client and frozen tool catalog as Bun programs;
-it does not rediscover or proxy MCP servers. Stock OpenGeni sandbox images include this exact
+it does not rediscover or proxy MCP servers. Stock Opengeni sandbox images include this exact
 package CLI. Custom rigs can run the same release-coherent artifact with Bun.
 
 ```sh
@@ -44,7 +44,7 @@ Commands:
 - `ogtool list [--json] [--query <substring>] [--limit <1..100>] [--offset <integer>]`
 - `ogtool list --full` — the previous full catalog JSON, including identity and schemas
 - `ogtool show <tool-path-or-model-name>` — one tool's details and schemas as JSON
-- `ogtool call <tool-path-or-model-name> [json-object]`
+- `ogtool call <tool-path-or-model-name> [json-object] [--full]` — the tool result as JSON. A text block that only repeats `structuredContent` as JSON is omitted, so the payload prints once; prose, differing text, annotated text, and non-text blocks stay. `--full` prints the exact result.
 - `ogtool declarations [output-file]`
 - `ogtool doctor`
 - `ogtool --version`

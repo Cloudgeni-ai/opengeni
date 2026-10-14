@@ -1,5 +1,7 @@
 import type {
   ComputerAction,
+  ComputerNativeCallRequest,
+  ComputerNativeResult,
   ComputerClipboard,
   ComputerSessionCapabilities,
   InteractionRect,
@@ -29,6 +31,8 @@ export type ComputerBackendObservation = {
 };
 
 export type ComputerBackendActionCommand = {
+  /** Durable controller operation identity. Older ordinary commands may omit it. */
+  operationId?: string;
   targetId: string;
   expectedTargetGeneration: string;
   expectedObservationId: string | null;
@@ -85,6 +89,10 @@ export class ComputerBackendError extends Error {
 }
 
 export interface ComputerBackend {
+  validateNative?(request: ComputerNativeCallRequest): Promise<void>;
+  callNative?(
+    request: ComputerNativeCallRequest,
+  ): Promise<Pick<ComputerNativeResult, "result" | "outcome" | "error">>;
   readonly identity: { adapterId: string; platform: "linux" | "macos" | "windows" };
   readonly initialCapabilities: ComputerSessionCapabilities;
   capabilities(): Promise<ComputerSessionCapabilities>;

@@ -30,11 +30,52 @@ use crate::error::{PlatformError, PlatformResult};
 /// [`resize`]: PtyProcess::resize
 pub struct PtyProcess {
     master: Box<dyn portable_pty::MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: OwnedChild,
     /// The blocking reader over the PTY master (tty output). Taken once by the pump.
     reader: Option<Box<dyn Read + Send>>,
     /// The blocking writer into the PTY master (tty input). Taken once by the pump.
     writer: Option<Box<dyn Write + Send>>,
+}
+
+/// Installed immediately after spawn, before fallible IO setup or relay awaits.
+/// A cancelled opener still owns cleanup of its actual child, not just a waiter.
+struct OwnedChild {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    reservation: Option<crate::WorkReservation>,
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let reservation = self.reservation.take();
+        let failure_witness = reservation.clone();
+        // portable-pty kill only signals (and some platforms do not report its
+        // errors). Retain ownership through a positive wait, even with no Tokio
+        // runtime or after cancellation of the relay/registration task.
+        let cleanup = std::thread::Builder::new()
+            .name("pty-cleanup".into())
+            .spawn(move || {
+                crate::with_work_reservation_sync(reservation.clone(), || {
+                    let _ = child.kill();
+                    if child.wait().is_err() {
+                        if let Some(reservation) = &reservation {
+                            reservation.mark_unsettled();
+                        }
+                    }
+                    drop(reservation);
+                });
+            });
+        if cleanup.is_err() {
+            if let Some(reservation) = failure_witness {
+                reservation.mark_unsettled();
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for PtyProcess {
@@ -87,6 +128,9 @@ impl PtyProcess {
     /// Returns [`PlatformError::Os`] if signalling the child fails.
     pub fn kill(&mut self) -> PlatformResult<()> {
         self.child
+            .child
+            .as_mut()
+            .ok_or_else(|| PlatformError::os("pty child cleanup already owns the process"))?
             .kill()
             .map_err(|e| PlatformError::os(format!("pty kill: {e}")))
     }
@@ -95,7 +139,7 @@ impl PtyProcess {
     /// exited; `None` while it still runs.
     #[must_use]
     pub fn try_exit_code(&mut self) -> Option<i32> {
-        match self.child.try_wait() {
+        match self.child.child.as_mut()?.try_wait() {
             Ok(Some(status)) => Some(i32::try_from(status.exit_code()).unwrap_or(-1)),
             _ => None,
         }
@@ -155,6 +199,10 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         .slave
         .spawn_command(cmd)
         .map_err(|e| PlatformError::os(format!("pty spawn {}: {e}", argv[0])))?;
+    let child = OwnedChild {
+        child: Some(child),
+        reservation: crate::current_work_reservation(),
+    };
     // The slave handle is no longer needed once the child holds it; dropping it
     // lets the master see EOF when the child exits.
     drop(pair.slave);

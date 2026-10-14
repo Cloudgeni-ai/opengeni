@@ -58,7 +58,7 @@ const activeFormulaBudgets = new WeakSet<FormulaEvaluationBudget>();
 
 /**
  * Functions implemented by the bounded reference evaluator. Office codecs use the same
- * allowlist so an imported/exported formula cannot become an execution channel that OpenGeni
+ * allowlist so an imported/exported formula cannot become an execution channel that Opengeni
  * itself never parsed (for example HYPERLINK, DDE, external-workbook, or data-fetch functions).
  */
 const SUPPORTED_FORMULA_FUNCTIONS = new Set([

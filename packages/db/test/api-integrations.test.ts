@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { getConnectorToolPermissions, updateConnectorToolPermissions } from "@opengeni/core";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
@@ -58,6 +63,8 @@ beforeAll(async () => {
     shared = await acquireSharedTestDatabase("api-integrations");
   }
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("Real database required for API integration verification");
     available = false;
     console.warn("[api-integrations] docker unavailable, skipping");
     return;
@@ -192,6 +199,114 @@ async function removePolicyFixtureInstallation(installed: {
 }
 
 describe("API Integration persistence", () => {
+  test("edits and cosmetic revisions preserve choices; changed effects and explicit resets restore recommendations", async () => {
+    if (!available || !client) return;
+    const input = integrationInput(undefined, `approval-preservation-${crypto.randomUUID()}`);
+    const installed = await installApiIntegration(client.db, {
+      ...input,
+      autoApprovedTools: ["update_item"],
+    });
+    const read = async () =>
+      (await listInstalledApiIntegrations(client!.db, first.workspaceId)).find(
+        (row) => row.capabilityId === input.capabilityId,
+      )!;
+    const update = async (next: InstallApiIntegrationInput) =>
+      await installApiIntegration(client!.db, {
+        ...next,
+        expectedInstanceVersion: (await read()).instanceVersion,
+      });
+    const permissionInput = {
+      db: client.db,
+      settings: testSettings(),
+      workspaceId: first.workspaceId,
+      grant: { ...first, principalKind: "human_session" as const },
+      capabilityId: input.capabilityId,
+      personalOwnerVerified: true,
+    };
+    try {
+      expect((await read()).requireApproval).toEqual([]);
+      await update({ ...input, displayName: "Renamed inventory" });
+      expect((await read()).requireApproval).toEqual([]);
+      const revised = {
+        ...input,
+        revision: {
+          ...input.revision,
+          id: `openapi:${"3".repeat(24)}`,
+          contentSha256: "3".repeat(64),
+          title: "New catalog title",
+          tools: input.revision.tools.map((tool) => ({
+            ...tool,
+            description: "Clearer documentation",
+          })),
+        },
+      };
+      await update(revised);
+      expect((await read()).requireApproval).toEqual([]);
+      const permissions = await getConnectorToolPermissions(permissionInput);
+      expect(permissions.tools.find((tool) => tool.name === "update_item")?.permission).toBe(
+        "allow",
+      );
+      await updateConnectorToolPermissions({
+        ...permissionInput,
+        payload: {
+          connectionId: permissions.connectionId,
+          target: "tools",
+          toolNames: ["update_item"],
+          permission: "allow",
+          expectedRevision: permissions.revision,
+        },
+      });
+      const changed = {
+        ...revised,
+        revision: {
+          ...revised.revision,
+          id: `openapi:${"4".repeat(24)}`,
+          contentSha256: "4".repeat(64),
+          tools: revised.revision.tools.map((tool) =>
+            tool.id === "update_item"
+              ? {
+                  ...tool,
+                  inputSchema: { type: "object", properties: { all: { type: "boolean" } } },
+                }
+              : tool,
+          ),
+        },
+      };
+      await update(changed);
+      expect((await read()).requireApproval).toEqual(["update_item"]);
+      expect(
+        (await getConnectorToolPermissions(permissionInput)).tools.find(
+          (tool) => tool.name === "update_item",
+        )?.permission,
+      ).toBe("ask");
+      expect(
+        (await getConnectorToolPermissions(permissionInput)).tools.find(
+          (tool) => tool.name === "update_item",
+        )?.resetReason,
+      ).toBe("operation_changed");
+      await update({ ...changed, autoApprovedTools: ["update_item"] });
+      expect((await read()).requireApproval).toEqual([]);
+      expect(
+        (await getConnectorToolPermissions(permissionInput)).tools.find(
+          (tool) => tool.name === "update_item",
+        )?.permission,
+      ).toBe("allow");
+      expect(
+        (await getConnectorToolPermissions(permissionInput)).tools.find(
+          (tool) => tool.name === "update_item",
+        )?.resetReason,
+      ).toBeUndefined();
+      await update({ ...changed, autoApprovedTools: [] });
+      expect((await read()).requireApproval).toEqual(["update_item"]);
+      expect(
+        (await getConnectorToolPermissions(permissionInput)).tools.find(
+          (tool) => tool.name === "update_item",
+        )?.permission,
+      ).toBe("ask");
+    } finally {
+      await removePolicyFixtureInstallation(installed);
+    }
+  });
   test("a stored reconciliation snapshot cannot restore subsequently removed authority", async () => {
     if (!client || !shared) throw new Error("Snapshot regression requires PostgreSQL");
     for (const change of ["owner", "disabled", "tools"] as const) {
@@ -307,6 +422,7 @@ describe("API Integration persistence", () => {
           allowedTools: ["list_items"],
           displayName: "Renamed fixture",
           expectedInstanceVersion: renamed.instanceVersion,
+          autoApprovedTools: [],
         }),
       ).rejects.toThrow("organization policy");
       const current = (await listInstalledApiIntegrations(client.db, first.workspaceId)).find(

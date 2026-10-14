@@ -97,30 +97,33 @@ describe("editable annotation scroll ownership", () => {
     const box = (await list.boundingBox())!;
     // Aim at list padding, outside nested textarea scrollers.
     await page.mouse.move(box.x + 4, box.y + box.height / 2);
-    await Promise.all([
-      list.evaluate(
-        (node) =>
-          new Promise<void>((resolve) => {
-            let generation = 0;
-            const onScroll = (event: Event) => {
-              if (event.target !== node) return;
-              const movedGeneration = ++generation;
-              const movedTop = node.scrollTop;
-              // Firefox's automated wheel need not emit scrollend. Wait for owned
-              // movement to survive painted frames, restarting when another scroll arrives.
-              requestAnimationFrame(() =>
-                requestAnimationFrame(() => {
-                  if (generation !== movedGeneration || node.scrollTop !== movedTop) return;
-                  node.removeEventListener("scroll", onScroll);
-                  resolve();
-                }),
-              );
-            };
-            node.addEventListener("scroll", onScroll);
-          }),
-      ),
-      page.mouse.wheel(0, 650),
-    ]);
+    // Await listener registration before dispatching the wheel. Resolving the
+    // locator concurrently with input can miss movement in a fast browser.
+    const observation = await list.evaluateHandle((node) => ({
+      settled: new Promise<void>((resolve) => {
+        let generation = 0;
+        const onScroll = (event: Event) => {
+          if (event.target !== node) return;
+          const movedGeneration = ++generation;
+          const movedTop = node.scrollTop;
+          // Firefox's automated wheel need not emit scrollend. Wait for owned
+          // movement to survive painted frames, restarting when another scroll arrives.
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              if (generation !== movedGeneration || node.scrollTop !== movedTop) return;
+              node.removeEventListener("scroll", onScroll);
+              resolve();
+            }),
+          );
+        };
+        node.addEventListener("scroll", onScroll);
+      }),
+    }));
+    try {
+      await Promise.all([observation.evaluate(({ settled }) => settled), page.mouse.wheel(0, 650)]);
+    } finally {
+      await observation.dispose();
+    }
     return listState(page);
   }
 

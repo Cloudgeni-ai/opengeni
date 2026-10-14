@@ -106,6 +106,9 @@ export type TranscriptionLifecycleStatus =
   | "error";
 
 export type TranscriptionErrorCode =
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit"
   | "permission_denied"
   | "not_supported"
   | "network"

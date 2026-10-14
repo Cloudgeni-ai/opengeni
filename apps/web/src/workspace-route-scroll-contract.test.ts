@@ -15,24 +15,22 @@ const workspaceRouteContracts = {
     source: "routes/sessions-index.tsx",
   },
   workspaceSessionRoute: { kind: "self-managed", source: "routes/session.tsx" },
-  workspaceVariableSetsRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
-  // The list and each set's page only match the URL; the parent's single
-  // VariableSetsRoute component renders both inside one ContentPage.
-  workspaceVariableSetsIndexRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
-  workspaceVariableSetDetailRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
+  workspacePlaygroundRoute: { kind: "self-managed", source: "routes/playground.tsx" },
+  // Secrets: the list, each vault and each item only match the URL; the
+  // parent's single Secrets component renders them inside one ContentPage.
+  workspaceSecretsRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsIndexRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsVaultRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsItemRoute: { kind: "page", source: "routes/secrets.tsx" },
+  // The old Variable sets URLs redirect to Secrets.
+  workspaceVariableSetsRoute: { kind: "redirect" },
+  workspaceVariableSetDetailRoute: { kind: "redirect" },
   workspaceEnvironmentsRoute: { kind: "redirect" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
+  workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
+  workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",

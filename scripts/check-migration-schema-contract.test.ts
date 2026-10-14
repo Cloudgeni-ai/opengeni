@@ -140,7 +140,7 @@ function registration(sites: Parameters<typeof miniContract>[0]): ContractRegist
 }
 
 /**
- * A repository shaped like OpenGeni: a protected `origin/main` ledger plus a
+ * A repository shaped like Opengeni: a protected `origin/main` ledger plus a
  * branch that adds migrations and registers them at whichever sites the test
  * chooses.
  */

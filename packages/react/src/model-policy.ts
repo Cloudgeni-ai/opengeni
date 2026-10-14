@@ -17,6 +17,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
   billingClassLabel: string;
   selectable: boolean;
   unavailableReason: string | null;
+  fundingHint?: string | undefined;
   provider: string;
   providerLabel: string;
   catalog: TCatalog;
@@ -51,10 +52,15 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
   provider_unhealthy: "Provider unavailable",
   policy_blocked: "Blocked by workspace policy",
   unsupported: "Unsupported",
+  credits_disabled: "Opengeni credits off",
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
-  if (model.provider === "organization-gateway" || model.provider === "organization-openrouter") {
+  if (
+    model.provider === "organization-gateway" ||
+    model.provider === "organization-openrouter" ||
+    model.provider === "organization-opper"
+  ) {
     return "organization_byok";
   }
   if (
@@ -62,7 +68,11 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
     model.provider?.startsWith("workspace-azure-openai-")
   )
     return "byok";
-  if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
+  if (
+    model.provider === "workspace-gateway" ||
+    model.provider === "workspace-openrouter" ||
+    model.provider === "workspace-opper"
+  ) {
     return "byok";
   }
   return modelPickerBillingClassFor(model);
@@ -113,6 +123,30 @@ export function coerceReasoningEffortForModel(
     return effort;
   }
   return defaultEffortForModel(model);
+}
+
+/** Whether the composer offers (and therefore labels) a reasoning-effort choice. */
+export function modelOffersEffortChoice(model: ClientModel): boolean {
+  return (
+    effortOptionsForModel(model).length > 1 && model.capabilities?.reasoning.runnable !== false
+  );
+}
+
+/**
+ * The composer model pill at phone width: the catalog's compact name (falling
+ * back to the display name) and the effort label when effort is a choice.
+ */
+export function compactModelPill(
+  models: readonly ClientModel[],
+  modelId: string,
+  effort: ReasoningEffort | null | undefined,
+): { name: string; effort: string | null } {
+  const row = findPickerRow(projectClientModelRows([...models]), modelId);
+  return {
+    name: row?.shortLabel ?? row?.label ?? modelDisplayName(modelId),
+    effort:
+      row && effort && modelOffersEffortChoice(row.catalog) ? labelReasoningEffort(effort) : null,
+  };
 }
 
 export function runnableLatencyModesForModel(model: ClientModel): LatencyModeId[] {
@@ -211,6 +245,9 @@ export function advancedSourceSummary(model: ClientModel): string | null {
     if (model.provider === "workspace-openrouter") {
       return "Workspace OpenRouter connection";
     }
+    if (model.provider === "workspace-opper") {
+      return "Workspace Opper connection";
+    }
     if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
       return "Workspace Vercel AI Gateway";
     }
@@ -228,9 +265,12 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "workspace-anthropic")
     return "Billed to the workspace Anthropic API account";
   if (model.provider === "workspace-claude-subscription")
-    return "Uses the workspace Claude subscription · no OpenGeni credits";
+    return "Uses the workspace Claude subscription · no Opengeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
+  }
+  if (model.provider === "workspace-opper") {
+    return "Billed to the workspace Opper account";
   }
   if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
     return "Billed to the workspace Vercel account";
@@ -242,9 +282,12 @@ function organizationProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return "Billed to the organization Anthropic API account";
   if (model.provider === "organization-claude-subscription")
-    return "Uses the connected Claude subscription · no OpenGeni credits";
+    return "Uses the connected Claude subscription · no Opengeni credits";
   if (model.provider === "organization-openrouter") {
     return "Billed to the organization OpenRouter account";
+  }
+  if (model.provider === "organization-opper") {
+    return "Billed to the organization Opper account";
   }
   if (model.provider === "organization-gateway") {
     return "Billed to the organization Vercel account";
@@ -253,13 +296,41 @@ function organizationProviderPayerSummary(model: ClientModel): string {
 }
 
 /**
- * The curated compact label, else the family-free name for Claude models
- * ("Opus 5.5"): the maker's mark beside it already says Claude.
+ * The curated compact label, else a derived one for narrow triggers: the name
+ * without trailing access and release-stage qualifiers ("Muse Spark 1.3
+ * Contributor Free" → "Muse Spark 1.3"), which the picker's groups and
+ * descriptions already carry. Claude names are already family-free
+ * ("Opus 5.5") in the shared display name.
  */
 function compactLabel(catalog: ClientModel): { shortLabel?: string } {
   if (catalog.shortLabel) return { shortLabel: catalog.shortLabel };
   const name = modelDisplayName(catalog);
-  return name.startsWith("Claude ") ? { shortLabel: name.slice("Claude ".length) } : {};
+  const trimmed = withoutTrailingQualifiers(name);
+  return trimmed !== name ? { shortLabel: trimmed } : {};
+}
+
+const TRAILING_QUALIFIERS = new Set([
+  "free",
+  "contributor",
+  "preview",
+  "beta",
+  "experimental",
+  "exp",
+  "latest",
+]);
+
+/** Drops trailing qualifier words ("Free", "Preview", "(free)") while a name remains. */
+function withoutTrailingQualifiers(name: string): string {
+  const words = name.trim().split(/\s+/u);
+  while (words.length > 1) {
+    const last = words
+      .at(-1)!
+      .replace(/^[([]|[)\]]$/gu, "")
+      .toLowerCase();
+    if (!TRAILING_QUALIFIERS.has(last)) break;
+    words.pop();
+  }
+  return words.join(" ");
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
@@ -274,6 +345,14 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
         billingClass,
         billingClassLabel: billingClassLabel(billingClass),
         selectable: catalog.availability.selectable,
+        fundingHint:
+          catalog.creditFunding === "promotional"
+            ? "Free credits"
+            : catalog.creditFunding === "general"
+              ? "Uses credits"
+              : catalog.creditFunding === "unavailable"
+                ? "Needs credits"
+                : undefined,
         unavailableReason: catalog.availability.selectable
           ? null
           : availabilityReasonLabel(catalog.availability.reason),

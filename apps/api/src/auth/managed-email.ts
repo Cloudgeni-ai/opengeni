@@ -33,7 +33,7 @@ export class InMemoryManagedEmailTransport implements ManagedEmailTransport {
       idempotency?: ManagedEmailTransport["idempotency"];
     } = {},
   ) {
-    this.sender = options.sender ?? "OpenGeni <auth@mail.opengeni.ai>";
+    this.sender = options.sender ?? "Opengeni <auth@mail.opengeni.ai>";
     this.idempotency = options.idempotency ?? {
       scope: "opengeni-in-memory-v1",
       retentionSeconds: 86_400,
@@ -85,6 +85,20 @@ class UnconfiguredManagedEmailTransport implements ManagedEmailTransport {
 
   async send(): Promise<ManagedEmailDeliveryResult> {
     return { status: "failed", errorClass: "provider_not_configured" };
+  }
+}
+
+/** Operator-selected OPENGENI_MANAGED_EMAIL_DELIVERY=disabled: never contacts a provider. */
+class DisabledManagedEmailTransport implements ManagedEmailTransport {
+  readonly idempotency = {
+    scope: "opengeni-disabled-v1",
+    retentionSeconds: 0,
+  } as const;
+
+  constructor(readonly sender: string) {}
+
+  async send(): Promise<ManagedEmailDeliveryResult> {
+    return { status: "failed", errorClass: "delivery_disabled" };
   }
 }
 
@@ -144,6 +158,9 @@ class ResendManagedEmailTransport implements ManagedEmailTransport {
 }
 
 export function createManagedEmailTransport(settings: Settings): ManagedEmailTransport {
+  if (settings.managedEmailDelivery === "disabled") {
+    return new DisabledManagedEmailTransport(settings.emailFrom);
+  }
   if (settings.resendApiKey) {
     if (!settings.betterAuthSecret) {
       throw new Error("OPENGENI_BETTER_AUTH_SECRET is required for managed email delivery");

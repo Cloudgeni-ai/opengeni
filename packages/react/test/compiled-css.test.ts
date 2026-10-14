@@ -208,7 +208,26 @@ describe("compiled CSS contract", () => {
     });
     expect([...foundDirectives]).toEqual([]);
     expect(Buffer.byteLength(compiled)).toBeGreaterThan(120_000);
-    expect(Buffer.byteLength(compiled)).toBeLessThan(256_000);
+    // A tripwire for accidental bloat (unscoped sources, whole palettes, prose
+    // words turned into utilities), not a feature budget. The builder already
+    // excludes non-class sources; real UI growth raises this deliberately.
+    expect(Buffer.byteLength(compiled)).toBeLessThan(272_000);
+  });
+
+  test("nests only leading-& selectors so host bundlers lower them without :is()", () => {
+    // Every utility sits under the scoped list `:where(.og-root).x, :where(.og-root) .x`.
+    // A nested selector that puts `&` after other parts (`tr:last-child>&`) can only
+    // be flattened with `:is()`, which Vite/esbuild warn about for default targets.
+    const trailing: string[] = [];
+    parsed.walkRules((rule) => {
+      if (rule.parent?.type !== "rule") return;
+      for (const selector of rule.selectors) {
+        // Tailwind's own `:where(& > …)` / `:is(& > …)` already carry the pseudo-class.
+        const trimmed = selector.trim().replace(/^:(?:where|is)\(/u, "");
+        if (trimmed.includes("&") && !trimmed.startsWith("&")) trailing.push(selector.trim());
+      }
+    });
+    expect(trailing).toEqual([]);
   });
 
   test("contains representative utilities for roots and descendants", () => {

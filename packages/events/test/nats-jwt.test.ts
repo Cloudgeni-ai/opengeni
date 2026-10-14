@@ -206,7 +206,7 @@ describe("workspaceAgentPermissions", () => {
 });
 
 describe("parseAgentConnectionName", () => {
-  test("accepts only the exact OpenGeni process-name shape", () => {
+  test("accepts only the exact Opengeni process-name shape", () => {
     const instanceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     expect(parseAgentConnectionName(`opengeni-agent/connection/${instanceId}`)).toBe(instanceId);
     expect(parseAgentConnectionName(instanceId)).toBeNull();

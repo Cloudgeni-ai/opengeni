@@ -1,5 +1,237 @@
 # @opengeni/config
 
+## 2.0.0
+
+### Minor Changes
+
+- 945c247: Add `@opengeni/vaults-onepassword`, a 1Password service-account vault provider on the pinned `@1password/sdk` 0.5.0: live value reads with a per-attempt cache, a metadata mirror, two-way item writes (generated passwords and TOTP), archive, managed-vault creation, error mapping and a plan-aware request quota. Embedders can supply their own password manager as `connectionCredentials.vaultProvider`, linked as vaults with `source: "host"`. `OPENGENI_ONEPASSWORD_FAKE_TOKENS` enables fake 1Password tokens for local development and is refused by the managed runtime.
+- 3a4a435: Organization privacy settings: owners and admins choose whether new chats and schedules start as Workspace or Only me, and whether admins see Only me schedule summaries. Deployment settings can turn Only me off, require the Workspace default, or require admin summaries, and organizations cannot widen past them.
+- 11779ba: Add optional per-task usage limits. A root session can carry a limit in USD micros of API-equivalent model usage (the pre-margin provider list-price estimate) shared by all of its child agents. New model requests are refused once recorded usage reaches it; requests already running finish, so usage can go above it. Set it with `usageLimitMicros` on create or `setSessionUsageLimit`, read it with `getSessionUsageLimit`; both verify the server's echo. A reached limit is a typed `session_usage_limit_reached` refusal and a `segmentLimit: "session_usage_limit"` stop, never a credits error. New producers are gated by `OPENGENI_SESSION_USAGE_LIMITS_ENABLED` (default off); persisted limits are always enforced.
+- 844c089: Sites can now save data. Every published Site gets persistent collections of JSON records and files that survive new versions: Site code uses `site.data` (list, get, insert, put, patch with conflict detection, delete, increment, count, batch) and `site.files` (upload, list, url, delete) from `createOpenGeniSiteClient()`, with no credentials in the Site. Each collection's access mode decides what viewers may do (shared, shared read, per viewer, append only), enforced by the server; the Site page itself always acts as a viewer, and an Only me Site's data stays its owner's. Agents and scheduled tasks manage data with new `site_data_*` and `site_files_*` tools, and the Site page has a Data tab for the people who manage the Site. Quotas, write limits, per-Site and per-workspace limits on schema-checking time, and usage metering (usage only, no charge yet) apply. Hosts opt in by giving `createSiteToolBridge` a pinned Site and `fetchResponse`; older hosts report `site_data_unsupported`.
+- 7bf1a02: Add per-workspace, exact-model compaction preferences with atomic independent
+  reset, shared effective-limit projection and a discoverable Models settings page.
+  Add the verified native Haiku 5.5 profile with a 95k compaction default and tiered
+  comparison pricing. Keep request-byte safety independent of token preferences.
+
+### Patch Changes
+
+- dbb2cb6: Connected Machines now update to their channel's promoted agent build without anyone clicking "Update now". Each live machine behind its promoted build is asked to update from its next heartbeat. The agent applies the update only at an idle point, so running work is never interrupted. An older agent that postpones because it is busy is asked again every 10 minutes, an unanswered request is re-sent after 10 minutes, and other retryable failures are retried hourly. Non-retryable failures, rollbacks to an older build, and Macs that need the whole-app installer still need an explicit request. Set `OPENGENI_AGENT_AUTO_UPDATE=false` to update only on request. "Update now" no longer re-requests the build a machine already runs after an earlier attempt failed.
+- e8a3d83: Bound Claude's final serialized request and inline image bytes. Recover a first
+  request-size rejection through one durable checkpoint while preserving the
+  latest complete input/tool batch, signed thinking, and original history. Keep
+  the recovery allowance across attempt restarts and report content-free size
+  diagnostics instead of retrying an unchanged oversized request.
+- ab1ea00: Connecting a Claude account now adds Claude Opus 5.5, Sonnet 5.5 and Haiku 5.5 by default, instead of starting with no models. This only happens where no Claude model of that kind was ever configured, so existing and trimmed lists are kept. Claude Haiku 5.5 is also offered among the Claude models you can add, and a rolling migration adds it where Claude models are already in use and Haiku 5.5 was never added or removed.
+- f5ad69f: Claude models get Anthropic's server-side web search when web search is enabled. Searches, results and citations are kept in history and sent back exactly as Anthropic requires, deferred and paused searches continue correctly, other providers and compaction see readable search facts, and the search tool is part of the stable cached prefix. A cited answer is one reply, a paused turn's context size is its last request, failed searches never wait as pending tool calls, and billed searches are counted.
+- 92b6aef: Reviewed Codex GPT-6 models declare runnable structured output (JSON-schema `text.format`, as the Codex CLI's `--output-schema` sends it), so single calls can request `json_schema` on them. A turn accepted before a model's structured output was enabled from the unknown/off declaration stays runnable; agent turns never request structured output. Docs note that the Codex backend ignores sampling and output-length controls.
+- 17b262f: Changing a model's default compaction threshold no longer fails turns that were already running. These turns resumed after a deployment and then stopped with "Turn execution policy does not match the current provider definition". The compaction threshold is no longer part of a model's frozen definition, and turns accepted before this change keep running.
+- adf96dc: Shell commands in managed sandboxes now honor a model-requested foreground wait up to 4 minutes (was 30 seconds; Connected Machines keep their 30-second background yield), so a long build or test run returns its result in one `exec_command` call instead of repeated empty `write_stdin` polls. A command that printed output and then went quiet still returns after the ordinary 30-second window, and one that ends in an input prompt returns after 2 seconds of silence. `exec_command` also uses a lean non-strict schema that requires only `cmd` and `max_output_tokens`; omitted `login`, `tty` and `yield_time_ms` run as `false`, `false` and `10000`. Both are on by default; set `OPENGENI_EXPERIMENT_CUT_POLLING=false` or `OPENGENI_EXPERIMENT_OUTPUT_COST=false` to disable either.
+- aeabfec: Stop failing turns when the deployment's own API is briefly slow. Opengeni's built-in MCP servers (`opengeni`, `files`, `docs`) inherited the MCP client's 5-second default for `initialize` and `tools/list`, so during a rolling restart or a busy period every turn start timed out, and turns exhausted their recovery budget within a few minutes. MCP server configs now accept `setupTimeoutMs`, which bounds only session setup (and the outer connect fence); the built-in servers use 30 seconds. Tool-call timeouts are unchanged.
+- ce7b403: Track built-in tool default inheritance independently of connector selection. New sessions and explicit resets follow current workspace defaults on the next attempt, while explicit lists, exclusions, deployment ceilings, capability restrictions, and frozen catalogs remain authoritative. A rolling migration adopts default intent only for older root sessions whose latest retained policy event proves a full reset and still matches their stored selection; ambiguous legacy selections remain pinned.
+- c502add: The save before a sandbox's provider deadline is now mandatory. Before, the deadline backstop waited until every background command had received and outlived its stop request, every owner turn had written its quiescence receipt and no sibling session had a recent attempt, and the zero-holder drain waited for every open request. When any of those could not finish, the box died at the provider deadline without being saved. Inside a fixed window before the deadline (the command stop grace, the drain capture budget and two reaper periods, at most the rotation lead) the reaper now saves and stops the box anyway. Only a live turn, viewer, direct request or interaction on the box, or a supervised command, still blocks it. Requests still open on the box are recorded by rolling migration 0676, left out of the saved checkpoint and settled only after the box is stopped. A file being written at that moment can be saved half-written. Enrollment through this path is counted as `opengeni_sandbox_command_containment_total{outcome="forced_deadline_enrolled"}`.
+- 72b0312: MCP OAuth always sends providers the short reference `state`, so connecting Stripe and other providers that cap `state` length works on every deployment. `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED` is retired: it is ignored with a one-time startup warning and can be removed from deployment configuration.
+- 9ffe528: Select native agent 0.1.52 as the default stable installer and update release. Explicit operator version settings remain authoritative.
+- c7f468c: Select native agent 0.1.53 as the default stable installer and update release, including macOS screen-control consent discovery before OS permissions are granted. Explicit operator version settings remain authoritative.
+- 4435af0: Select native agent 0.1.54 as the default stable installer and update release. It fails page commands on a crashed browser tab promptly with a clear error instead of hanging. Explicit operator version settings remain authoritative.
+- 38b1ba1: Use Opengeni in product copy and Slack manifest defaults, add a clearly labeled staging icon, and accept both current and historical Slack installation names without rewriting saved credentials or receipts. Expose the Opengeni chat facade while preserving the existing `OpenGeni` export and public identifiers.
+- 1da17d9: The deployment Opper rail now offers Claude Opus 5.5 (EU) (`opper/aws/claude-opus-5-5`, AWS Bedrock eu-north-1, no provider logging) instead of the Gemini 3.8 Flash and Claude Sonnet 4.6 EU starters. Reasoning is runnable (`low` through `max`, default `medium`), image input is enabled, and every Opper request without its own output cap gets the route's `maxOutputTokens`, because Opper otherwise stops at 4,096 tokens, which hidden thinking can use up. Opper streams use a 60-minute keepalive-only progress bound, because hidden thinking sends only keepalives and `max` effort exceeded the default 10 minutes. Billing still uses Opper's reported cost +5%. Workspace and organization custom Opper ids now get runnable reasoning, image input for the Claude and Gemini families, and a Claude output cap; an id that names a configured route inherits that route's definition. New `OPENGENI_MANAGED_MODELS_JSON` replaces the managed Gateway, OpenRouter, and Opper model lists in code catalog mode without a code deploy, using the catalog document's entry schemas. Database catalog mode ignores it.
+- 6960770: Opper is a first-class model provider with the same three rails as OpenRouter and Vercel AI Gateway. `OPENGENI_OPPER_API_KEY` adds reviewed EU-pinned `opper/vertexai/gemini-3.8-flash-eu` and `opper/aws/claude-sonnet-4-6-eu` routes billed in Opengeni credits at the exact Opper-reported cost +5% (reviewed list price as fallback); workspace admins can connect their own Opper key (`workspace-opper/…`, billed to their Opper account) and add exact custom Opper ids; organization owners can connect Opper once for every shared workspace (`organization-opper/…`). The SDK adds `listWorkspaceOpperCustomModels`, `createWorkspaceOpperCustomModel`, `deleteWorkspaceOpperCustomModel`, `ModelConnectionAccessKind`, and `"opper"` as an organization model provider kind. Opper management keys (`op-mak-…`) are rejected with an explanation. Deployment catalog documents accept a reviewed `opperModels` list. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `opper`, `workspace-opper`, or `organization-opper` provider ids; move a hand-written Opper registry entry to `OPENGENI_OPPER_API_KEY`. Rolling migration `0636_opper_model_providers.sql` widens the provider-kind, lifecycle-fact, and analytics allow-lists.
+- 4c73e2e: Claude Opus 5.5 now starts automatic compaction at 300,000 tokens by default, on native Claude connections and the Opper route (previously 800,000). Thresholds a workspace has set for a model are unchanged.
+- ce61681: Compare the shared subscription core with the legacy Codex, Claude and SuperGrok
+  account selection on every subscription turn. A legacy adapter that issues
+  only reads builds the core's placement world from today's tables under the
+  turn's own session access, and the worker records content-free metrics: security parity of the
+  legacy account, the reference checker's violations of the core's decision,
+  would-switch, and the legacy decision inputs. The comparison runs in the
+  background (at most two at once per worker), fails open, is bounded by
+  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS` (default 250 ms, at most
+  1000 ms), is on by default and can be turned off with
+  `OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED=false`. Placement is unchanged; no
+  migration is required.
+- 51c2be9: Add notification-specific regression coverage for default-following sessions and existing or reusable schedule targets. Verify current defaults reach fresh selections without changing stored pins or already accepted occurrences, and document how to inspect hydrated attempt catalogs. Runtime behavior is unchanged.
+- Updated dependencies [fc57bd2]
+- Updated dependencies [04ebc42]
+- Updated dependencies [e03f1ff]
+- Updated dependencies [c2f4153]
+- Updated dependencies [de2d721]
+- Updated dependencies [055015d]
+- Updated dependencies [1ee99c1]
+- Updated dependencies [1756cfe]
+- Updated dependencies [40e2542]
+- Updated dependencies [6861501]
+- Updated dependencies [bfed4f1]
+- Updated dependencies [4532435]
+- Updated dependencies [851cbdc]
+- Updated dependencies [d393b9b]
+- Updated dependencies [6d5f287]
+- Updated dependencies [0eae048]
+- Updated dependencies [f96605f]
+- Updated dependencies [496ce55]
+- Updated dependencies [3822e5f]
+- Updated dependencies [3962da3]
+- Updated dependencies [c4dd318]
+- Updated dependencies [ce7b403]
+- Updated dependencies [445baf4]
+- Updated dependencies [5b4a738]
+- Updated dependencies [334c470]
+- Updated dependencies [96d7167]
+- Updated dependencies [f7d53b2]
+- Updated dependencies [c13d080]
+- Updated dependencies [061ae01]
+- Updated dependencies [810d1d9]
+- Updated dependencies [8e7cb8d]
+- Updated dependencies [6313dd8]
+- Updated dependencies [945490f]
+- Updated dependencies [8e878ac]
+- Updated dependencies [9701372]
+- Updated dependencies [bc40348]
+- Updated dependencies [5eb1c32]
+- Updated dependencies [da01634]
+- Updated dependencies [ab3306a]
+- Updated dependencies [4cb80a9]
+- Updated dependencies [eb68b58]
+- Updated dependencies [38b1ba1]
+- Updated dependencies [6960770]
+- Updated dependencies [3426850]
+- Updated dependencies [412671a]
+- Updated dependencies [63bf721]
+- Updated dependencies [3a4a435]
+- Updated dependencies [14343e4]
+- Updated dependencies [2b8ee21]
+- Updated dependencies [71c42bf]
+- Updated dependencies [a390b9e]
+- Updated dependencies [6861501]
+- Updated dependencies [a81a567]
+- Updated dependencies [6861501]
+- Updated dependencies [6861501]
+- Updated dependencies [322f26c]
+- Updated dependencies [945c247]
+- Updated dependencies [e8c3557]
+- Updated dependencies [5cdfbaa]
+- Updated dependencies [5cb6d71]
+- Updated dependencies [732a788]
+- Updated dependencies [8cf9e0a]
+- Updated dependencies [726bdc1]
+- Updated dependencies [11779ba]
+- Updated dependencies [66b3026]
+- Updated dependencies [844c089]
+- Updated dependencies [7ce535f]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [35fb6fd]
+- Updated dependencies [9975001]
+- Updated dependencies [7bf1a02]
+- Updated dependencies [a13bf1a]
+- Updated dependencies [a91718c]
+  - @opengeni/contracts@2.0.0
+  - @opengeni/codex@2.0.0
+  - @opengeni/xai-subscription@2.0.0
+
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- 1a05862: A model stream that stalls mid-response no longer leaves a turn `running` indefinitely. Generic OpenAI-compatible streams (built-in OpenAI/Azure and registry chat/responses providers) now fail after 5 minutes without a response byte, or 10 minutes of keepalive-only traffic without model progress, measured only while the consumer is waiting. Both reset on activity and are configurable (`OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS`, `OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS`, or per registry provider `streamIdleTimeoutMs` / `streamProgressTimeoutMs`). The stall, and a fetch-layer "The operation timed out." error, now classify as retryable provider failures, so the same turn recovers within the existing finite five-attempt budget instead of failing terminally.
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/xai-subscription@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/codex@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/xai-subscription@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- 9145bad: Connector catalogs no longer offer connectors that cannot connect on the current deployment. Some providers refuse OAuth self-registration (Asana, HubSpot, Front, Box, Dropbox, Canva, Vercel, and others). When the deployment has no operator-registered OAuth client for such a provider, the catalog reports `runtime.operatorOAuthClient.configured: false` and connector discovery hides the row. Rows that are already connected stay visible.
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
+## 1.4.0
+
+### Minor Changes
+
+- 664eabf: Stop offering features whose backend this deployment does not run. The new `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED` setting (default `false`; Helm sets it from `artifactMaterializer.enabled`) removes `editable_artifact_export` and `editable_artifact_export_status` from the first-party tool ceiling when no materializer drains export jobs, and an explicit session request for them is dropped rather than rejected. The Gmail bridge offers `watch_mailbox` only when `OPENGENI_GMAIL_WATCH_TOPIC_NAME` is set.
+- 673bb53: Add provider-agnostic web search. When a deployment names a search provider (TinyFish, Exa, Tavily, Firecrawl, Brave, Jina, or self-hosted SearXNG), models without hosted search receive `web_search` and `web_fetch` tools; hosted search stays the default where it exists, and `replace` mode can swap it. Priced calls are credit-billed at provider cost plus 5%. Off until configured.
+
+### Patch Changes
+
+- 2a65d6e: Turning on hosted web search for an existing model no longer fails turns accepted under the old definition. An accepted turn whose digest matches the current model with `capabilities.hostedTools.webSearch` set back to `{ upstream: "unknown", runnable: false }` still verifies, and it keeps running without the tool; the next accepted turn gets web search. New export: `configuredModelForAcceptedTurnExecutionPolicy`. Turning web search off and every other definition change still fail closed.
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/xai-subscription@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- 4cd01cd: Every organization is now session-tenancy activated (rolling migration 0611): private ("Only me") sessions, visibility changes, forks, and personal-resource grants no longer require a per-organization activation receipt, and the owner/admin Only-me setting defaults to enabled when an organization has never changed it (owners and admins can still turn it off). `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` and `Settings.organizationTenancyCanonicalActivationEnabled` are retired (the variable is accepted and ignored with a warning), the runtime posture no longer has an activation startup interlock, and the `db:activate-session-tenancy` operator command is removed.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/xai-subscription@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

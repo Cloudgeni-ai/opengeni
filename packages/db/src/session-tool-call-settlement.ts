@@ -3,6 +3,7 @@ import { canonicalizePersistedHistoryItem, omitOutputOnlyHistoryItemFields } fro
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import * as schema from "./schema";
 import { cancelUnacceptedVideoGenerationsForToolCallsInTransaction } from "./video-generation";
 
@@ -33,6 +34,39 @@ export function historyCallId(item: Record<string, unknown>): string | null {
 
 export function historyItemType(item: Record<string, unknown>): string | null {
   return typeof item.type === "string" ? item.type : null;
+}
+
+/**
+ * Person-facing projection of a call whose command was proven never sent. The
+ * call's model-visible result is written separately into history.
+ */
+export const NOT_STARTED_TOOL_CALL_EVENT_TEXT =
+  "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run again.";
+
+/**
+ * Model-visible result for a function call whose command was proven never
+ * dispatched. Unlike an interrupted call, nothing ran, so the model may run it
+ * again without inspecting state first.
+ */
+export const NOT_STARTED_TOOL_CALL_RESULT_TEXT =
+  "The command was not started because the sandbox was not ready. Nothing ran, so it is safe to run it again.";
+
+/** Provider-valid result for a function call proven never started. */
+export function notStartedToolCallResult(input: {
+  callId: string;
+  callItem: Record<string, unknown>;
+}): Record<string, unknown> {
+  const name = typeof input.callItem.name === "string" ? input.callItem.name : "tool";
+  return {
+    type: "function_call_result",
+    name,
+    ...(typeof input.callItem.namespace === "string"
+      ? { namespace: input.callItem.namespace }
+      : {}),
+    callId: input.callId,
+    status: "incomplete",
+    output: { type: "text", text: NOT_STARTED_TOOL_CALL_RESULT_TEXT },
+  };
 }
 
 /** Provider-valid result for a started call whose durable outcome is unknown. */
@@ -119,6 +153,12 @@ export type ClosePendingSessionToolCallsInput = {
   now: Date;
   turnAssociation?: "current" | null;
   preserveInterruptionRows?: boolean;
+  /**
+   * Function calls with call-scoped proof that their command was never
+   * dispatched. Without a durable result they settle as not started (replay
+   * safe) instead of outcome unknown.
+   */
+  notStartedCallIds?: readonly string[];
 };
 
 function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
@@ -140,6 +180,75 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
   };
 }
 
+/** Same terminal fence for model and programmatic calls. Started effects remain unknown. */
+export async function settleInterruptedCodemodeCallsInTransaction(
+  tx: Database,
+  input: Pick<
+    ClosePendingSessionToolCallsInput,
+    "workspaceId" | "sessionId" | "turnId" | "reason" | "now"
+  >,
+): Promise<void> {
+  await tx
+    .update(schema.sessionAttemptCodemodeCalls)
+    .set({
+      state: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then 'cancelled' else 'outcome_unknown' end`,
+      claimId: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimId} end`,
+      claimedAt: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimedAt} end`,
+      claimExpiresAt: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimExpiresAt} end`,
+      errorCode: input.reason,
+      errorMessage:
+        "The owning turn ended. Started effects require reconciliation before retrying.",
+      completedAt: input.now,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+        eq(schema.sessionAttemptCodemodeCalls.turnId, input.turnId),
+        inArray(schema.sessionAttemptCodemodeCalls.state, [
+          "queued",
+          "running",
+          "waiting_for_approval",
+        ]),
+      ),
+    );
+}
+
+/**
+ * A completed turn owns no live tool call. Consume every receipt of this turn
+ * whose owning attempt has settled (closed, and either quiesced or never
+ * interrupted), so the receipt cannot outlive its turn and later read as
+ * unresolved work (tenancy quiescence, Retry preview, native-origin recovery).
+ * Paired calls are already model-visible and projected; an unpaired call of a
+ * completed turn (for example a hosted approval request the model moved past)
+ * can never be resumed, because only failed/cancelled/superseded settlement or
+ * an approval resume of a nonterminal turn reads these rows. This deletes
+ * ledger rows only: history and events are untouched. The predicate matches
+ * migration 0673. Runs under the settlement's session/turn locks and
+ * workspace tenancy fence, after the completing attempt has been closed.
+ */
+export async function consumeSettledPendingToolCallsForCompletedTurnInTransaction(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<number> {
+  const deleted = await tx.execute<{ id: string }>(sql`
+    delete from session_pending_tool_calls pending
+    where pending.workspace_id = ${input.workspaceId}
+      and pending.session_id = ${input.sessionId}
+      and pending.turn_id = ${input.turnId}
+      and not exists (
+        select 1 from session_turn_attempts owner_attempt
+        where owner_attempt.workspace_id = pending.workspace_id
+          and owner_attempt.id = pending.attempt_id
+          and (owner_attempt.state <> 'closed'
+            or (owner_attempt.quiesced_at is null and exists (
+              select 1 from session_attempt_interruptions interruption
+              where interruption.attempt_id = owner_attempt.id))))
+    returning pending.id`);
+  return deleted.length;
+}
+
 /**
  * Close raw tool calls for a logical turn while its owning session/turn locks
  * are held. Recoverable transitions preserve interruption rows because those
@@ -152,7 +261,9 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
 export async function closePendingSessionToolCallsInTransaction(
   tx: Database,
   input: ClosePendingSessionToolCallsInput,
-): Promise<{ sequence: number; events: SessionEvent[]; closed: number }> {
+): Promise<{ sequence: number; events: SessionEvent[]; closed: number; interrupted: number }> {
+  if (!input.preserveInterruptionRows) await settleInterruptedCodemodeCallsInTransaction(tx, input);
+  const notStartedCallIds = new Set(input.notStartedCallIds ?? []);
   const pendingRows = await tx
     .select()
     .from(schema.sessionPendingToolCalls)
@@ -179,7 +290,8 @@ export async function closePendingSessionToolCallsInTransaction(
           ? null
           : fromPostgresLosslessJson(row.eventOutput, row.eventOutputCodecVersion),
     }));
-  if (pending.length === 0) return { sequence: input.sequence, events: [], closed: 0 };
+  if (pending.length === 0)
+    return { sequence: input.sequence, events: [], closed: 0, interrupted: 0 };
 
   const history = await tx
     .select({
@@ -254,12 +366,17 @@ export async function closePendingSessionToolCallsInTransaction(
             historyCallId(item) === call.callId,
         )
       : undefined;
-    const interruptedResult = interruptedToolCallResult({
-      callType: call.callType,
-      callId: call.callId,
-      callItem: call.callItem,
-      reason: input.reason,
-    });
+    const interrupted = !existingResult && !call.resultItem;
+    const notStarted =
+      interrupted && call.callType === "function_call" && notStartedCallIds.has(call.callId);
+    const interruptedResult = notStarted
+      ? notStartedToolCallResult({ callId: call.callId, callItem: call.callItem })
+      : interruptedToolCallResult({
+          callType: call.callType,
+          callId: call.callId,
+          callItem: call.callItem,
+          reason: input.reason,
+        });
     return {
       call,
       existingCall,
@@ -272,7 +389,8 @@ export async function closePendingSessionToolCallsInTransaction(
       ),
       rawCallIsValid: historyItemType(call.callItem) === call.callType,
       result: existingResult?.item ?? call.resultItem ?? interruptedResult,
-      interrupted: !existingResult && !call.resultItem,
+      interrupted,
+      notStarted,
     };
   });
 
@@ -339,24 +457,33 @@ export async function closePendingSessionToolCallsInTransaction(
       turnAssociation: input.turnAssociation === undefined ? "current" : input.turnAssociation,
       payload: {
         id: resolution.call.callId,
-        output: resolution.interrupted
+        output: resolution.notStarted
           ? {
               isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `Tool execution was interrupted by ${input.reason}; its side-effect outcome is unknown.`,
-                },
-              ],
+              content: [{ type: "text", text: NOT_STARTED_TOOL_CALL_EVENT_TEXT }],
             }
-          : resolution.call.eventOutput !== null
-            ? resolution.call.eventOutput.value
-            : ((resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
-              resolution.existingResult?.item ??
-              resolution.call.resultItem),
+          : resolution.interrupted
+            ? {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `Tool execution was interrupted by ${input.reason}; its side-effect outcome is unknown.`,
+                  },
+                ],
+              }
+            : resolution.call.eventOutput !== null
+              ? resolution.call.eventOutput.value
+              : ((resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
+                resolution.existingResult?.item ??
+                resolution.call.resultItem),
         recovery: {
           interrupted: resolution.interrupted,
-          outcome: resolution.interrupted ? "unknown" : "durable_result_found",
+          outcome: resolution.notStarted
+            ? "not_started"
+            : resolution.interrupted
+              ? "unknown"
+              : "durable_result_found",
           reason: input.reason,
           unsupportedCallShape:
             resolution.interrupted && (!resolution.result || !resolution.rawCallIsValid),
@@ -368,9 +495,10 @@ export async function closePendingSessionToolCallsInTransaction(
   }
 
   if (historyValues.length > 0) await tx.insert(schema.sessionHistoryItems).values(historyValues);
+  const boundEventValues = withBoundSessionEventPayloads(eventValues);
   const inserted =
     eventValues.length > 0
-      ? await tx.insert(schema.sessionEvents).values(eventValues).returning()
+      ? await tx.insert(schema.sessionEvents).values(boundEventValues).returning()
       : [];
   await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(tx, {
     workspaceId: input.workspaceId,
@@ -391,5 +519,10 @@ export async function closePendingSessionToolCallsInTransaction(
       ),
     ),
   );
-  return { sequence, events: inserted.map(mapEvent), closed: pending.length };
+  return {
+    sequence,
+    events: inserted.map(mapEvent),
+    closed: pending.length,
+    interrupted: resolutions.filter((resolution) => resolution.interrupted).length,
+  };
 }

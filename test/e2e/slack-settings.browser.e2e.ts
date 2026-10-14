@@ -192,6 +192,8 @@ async function installApi(
         headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
         body: JSON.stringify(body),
       });
+    if (path === "/v1/inbox" && request.method() === "GET")
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
     if (path === "/v1/config/client")
       return json({
         deploymentRevision: "slack-settings-test",
@@ -340,7 +342,7 @@ function bot() {
       slackTeamName: "Cloudgeni",
       botId: "BACME",
       botUserId: "UACME",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
     },
     createdBySubjectId: "slack-test",
     updatedBySubjectId: "slack-test",
@@ -362,7 +364,7 @@ function binding() {
     slackTeamName: "Cloudgeni",
     botId: "BACME",
     botUserId: "UACME",
-    botDisplayName: "OpenGeni",
+    botDisplayName: "Opengeni",
     state: "active",
     quarantineReason: null,
     version: 1,

@@ -23,11 +23,14 @@ export {
 } from "./workflows/knowledge-source-sync";
 export {
   sandboxDrainWorkflow,
+  sandboxIdleCheckpointSweepWorkflow,
+  sandboxIdleCheckpointWorkflow,
   sandboxReaperMaintenanceWorkflow,
   sandboxReaperWorkflow,
   sandboxReaperWorkflowV2,
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export { sessionStorageMaintenanceWorkflow } from "./workflows/session-storage";
 export {
   browserDeadlineCheckpointWorkflow,
   browserDeadlineCheckpointSweepWorkflow,

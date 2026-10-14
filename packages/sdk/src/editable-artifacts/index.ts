@@ -99,6 +99,7 @@ export type {
   EditablePresentationSlideCatalogProjection,
   EditablePresentationSlideCatalogQuery,
   EditableSpreadsheetCellValue,
+  EditableSpreadsheetDimensions,
   EditableSpreadsheetFormulaError,
   EditableSpreadsheetMetadataProjection,
   EditableSpreadsheetMetadataQuery,

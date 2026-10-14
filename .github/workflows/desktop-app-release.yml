@@ -1,0 +1,146 @@
+# Build, sign, notarize and publish the Opengeni desktop app.
+#
+# A tag desktop-v<version> (or a manual run) builds the macOS app as a universal
+# DMG and ZIP signed with the Developer ID certificate and notarized with the
+# App Store Connect key, and publishes them as the release desktop-v<version>.
+# Installed apps update from the newest desktop-v release. Releases in this
+# repository are immutable once published, so the release is created as a
+# draft, filled, and only then published.
+name: desktop-app-release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without the desktop-v prefix), e.g. 0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-app-release
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    environment: desktop-release
+    runs-on: macos-26
+    if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${REF_NAME#desktop-v}"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "Not a version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: |
+          bun test ./packages/desktop/test
+          (cd packages/desktop && bun run typecheck)
+          (cd apps/desktop && bun run typecheck)
+
+      # electron-builder's own temporary keychain cannot be unlocked for the key
+      # partition list on the macOS 26 runner, so the job owns its keychain and
+      # electron-builder only discovers the Developer ID identity in it.
+      - name: Signing and notarization credentials
+        env:
+          APPLE_ASC_KEY: ${{ secrets.APPLE_ASC_KEY }}
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+          echo "CSC_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+          key_dir="$RUNNER_TEMP/asc"
+          mkdir -p "$key_dir"
+          # The secret is the App Store Connect key JSON the agent release passes
+          # to rcodesign, whose private_key is base64 PKCS#8 DER; notarytool
+          # needs it as a PEM .p8 file. Accept an already-armored key as well.
+          private_key="$(printf '%s' "$APPLE_ASC_KEY" | jq -r .private_key)"
+          if printf '%s' "$private_key" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$private_key" > "$key_dir/key.p8"
+          else
+            {
+              echo "-----BEGIN PRIVATE KEY-----"
+              printf '%s' "$private_key" | tr -d '\n\r ' | fold -w 64
+              echo
+              echo "-----END PRIVATE KEY-----"
+            } > "$key_dir/key.p8"
+          fi
+          openssl pkey -in "$key_dir/key.p8" -noout
+          {
+            echo "APPLE_API_KEY=$key_dir/key.p8"
+            echo "APPLE_API_KEY_ID=$(printf '%s' "$APPLE_ASC_KEY" | jq -r .key_id)"
+            echo "APPLE_API_ISSUER=$(printf '%s' "$APPLE_ASC_KEY" | jq -r .issuer_id)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize
+        working-directory: apps/desktop
+        env:
+          OPENGENI_DESKTOP_VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          bun scripts/build.ts --production
+          bunx electron-builder --mac --publish never
+
+      - name: Verify
+        working-directory: apps/desktop/release
+        run: |
+          app="$(find . -maxdepth 2 -name 'Opengeni.app' -type d | head -1)"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose "$app"
+          xcrun stapler validate "$app"
+          ls -la
+
+      - name: Publish
+        working-directory: apps/desktop/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          files=(Opengeni-"$VERSION"-mac.dmg Opengeni-"$VERSION"-mac.zip Opengeni-"$VERSION"-mac.zip.blockmap latest-mac.yml)
+          tag="desktop-v$VERSION"
+          if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            echo "$tag is already published; releases are immutable, so build a new version." >&2
+            exit 1
+          fi
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Opengeni desktop $VERSION" --latest=false \
+              --notes "Opengeni for macOS $VERSION. Download the DMG, open it and drag Opengeni to Applications."
+          fi
+          gh release upload "$tag" "${files[@]}" --clobber
+          gh release edit "$tag" --draft=false --latest=false

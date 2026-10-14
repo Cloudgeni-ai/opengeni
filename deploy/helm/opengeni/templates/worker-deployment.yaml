@@ -10,7 +10,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker-control
 spec:
-  replicas: {{ .Values.worker.control.replicaCount }}
+  {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-worker-control" (include "opengeni.fullname" .)) "replicaCount" .Values.worker.control.replicaCount "autoscaling" .Values.worker.control.autoscaling) | indent 2 }}
   {{- with .Values.worker.control.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}

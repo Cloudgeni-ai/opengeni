@@ -314,7 +314,7 @@ and the expected identity revision. Session refresh/mirroring does not create a
 new authentication timestamp. The expected canonical identity is a non-authorizing
 view fence, compared before work and at commit: a legacy cookie swap from human A
 to human B cannot apply A's form to B even when their revision numbers match.
-Freshness means a recent explicit OpenGeni password sign-in or verified provider
+Freshness means a recent explicit Opengeni password sign-in or verified provider
 authorization-code sign-in, not a guarantee of forced password/MFA entry at the
 provider; Google/GitHub may reuse their own SSO sessions. The unsupported raw
 ID-token shortcut is rejected. Dual/broker callers must first establish a selected

@@ -19,7 +19,8 @@ import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-
 import { SetWorkspaceAllowanceRequest } from "@opengeni/contracts/usage-allowances";
 import * as sdkExamples from "../../../.agents/skills/opengeni-setup/references/setup-sdk";
 
-const referencePath = `${import.meta.dir}/../../../.agents/skills/opengeni-setup/references/setup-api.md`;
+const setupRoot = `${import.meta.dir}/../../../.agents/skills/opengeni-setup`;
+const referencePath = `${setupRoot}/references/setup-api.md`;
 
 function expectPreservedRequest(
   contract: { parse(input: unknown): unknown },
@@ -36,7 +37,17 @@ describe("developer setup skill", () => {
     const examples = [...markdown.matchAll(/```json\n([\s\S]*?)\n```/g)].map((match) =>
       JSON.parse(match[1]!),
     );
-    expect(examples).toHaveLength(16);
+    expect(examples).toHaveLength(17);
+    // The canonical product agent fragment opens the walkthrough.
+    const canonical = examples.shift();
+    expect(canonical).toEqual({
+      agent: {
+        identity: "You are Acme's product assistant. Be brief and factual.",
+        capabilities: "none",
+      },
+      sandboxBackend: "none",
+    });
+    expectPreservedRequest(CreateSessionRequest, { initialMessage: "Hello", ...canonical });
     // Never permit arbitrary organization-key permissions. Tokens and remote
     // ids below are fake fixtures; the key request uses the actual public schema.
     expect(examples[0]).toEqual({
@@ -83,10 +94,10 @@ describe("developer setup skill", () => {
 
   test("bootstrap distinguishes full access from the separate limited setup tier", async () => {
     const markdown = await readFile(referencePath, "utf8");
-    expect(markdown).toContain("Select **Full access** with a 30-day expiry.");
-    expect(markdown).toContain("The full-access key uses the explicit 30-day expiry above.");
-    expect(markdown).toContain("the limited `developer_setup` tier stores exactly");
-    expect(markdown).toContain("with a 24-hour default expiry. The limited tier does");
+    expect(markdown).toContain("Create a **Full access** key with a 30-day expiry.");
+    expect(markdown).toContain('{"name":"Product setup","access":"full","expiresAt"');
+    expect(markdown).toContain("The limited `developer_setup` tier holds only");
+    expect(markdown).toContain("(24-hour default expiry); it");
   });
 
   test("cleanup distinguishes disabled automations from deleted resources", async () => {
@@ -95,9 +106,7 @@ describe("developer setup skill", () => {
       /\s+/g,
       " ",
     );
-    expect(cleanup).toContain(
-      "Cleanup **only disposable staging resources this ledger says this run created**.",
-    );
+    expect(cleanup).toContain("Clean up **only disposable staging resources this run created**.");
     expect(cleanup).toContain("Never delete reused resources.");
     expect(cleanup).toContain('status === "disabled"');
     expect(cleanup).toContain("`GET .../automations/triggers` / `listTriggers`");
@@ -108,11 +117,40 @@ describe("developer setup skill", () => {
     expect(cleanup).not.toContain("Verify inventory/GET absence after each removal.");
   });
 
+  test("recipes use the canonical none agent without legacy branches or empty lists", async () => {
+    const texts = await Promise.all(
+      ["SKILL.md", "references/setup-api.md", "references/setup-sdk.ts"].map((path) =>
+        readFile(`${setupRoot}/${path}`, "utf8"),
+      ),
+    );
+    for (const text of texts) {
+      expect(text).not.toMatch(/agentConfig\??\.enabled/);
+      expect(text).not.toMatch(/admission-disabled|older\/admission/);
+      expect(text).not.toMatch(/"?(?:bundledSkillIds|firstPartyMcpTools|tools)"?: ?\[\]/);
+      expect(text).not.toMatch(/renderer"?: ?"opengeni"/);
+    }
+    expect(sdkExamples.productAgent).toEqual({
+      identity: "You are Acme's product assistant. Be brief and factual.",
+      capabilities: "none",
+    });
+  });
+
+  test("the skill verifies a working chat before wiring product tools", async () => {
+    const skill = await readFile(`${setupRoot}/SKILL.md`, "utf8");
+    const chat = skill.indexOf("## 3. Embed a working chat agent and verify a real reply");
+    const tools = skill.indexOf("## 4. Wire the product's own tools (default next step)");
+    expect(chat).toBeGreaterThan(0);
+    expect(tools).toBeGreaterThan(chat);
+    expect(skill).toContain("createSessionProxyRoute");
+    expect(skill).toContain("whether product tools are wired");
+  });
+
   test("SDK examples remain callable and typechecked with the actual SDK", () => {
     expect(sdkExamples.productAgent.capabilities).toBe("none");
     for (const example of [
       sdkExamples.serverClient,
       sdkExamples.createSetupKey,
+      sdkExamples.tenantWorkspaceId,
       sdkExamples.ensureProductWorkspace,
       sdkExamples.configureAgent,
       sdkExamples.admitProductUser,

@@ -164,9 +164,7 @@ test.each(["Page.enable", "Emulation.setFocusEmulationEnabled", "Page.getFrameTr
       await fixture.waitUntilStalled();
       jest.advanceTimersByTime(30_000);
       await settle();
-      expect(await failed).toMatchObject(
-        method === "Page.getFrameTree" ? { code: "timeout", cause: { method } } : { method },
-      );
+      expect(await failed).toMatchObject({ code: "tab_not_responding", cause: { method } });
       const initialization = fixture.calls.find((call) => call.method === method)!;
       expect(fixture.calls.filter((call) => call.method === "Target.detachFromTarget")).toEqual([
         expect.objectContaining({ params: { sessionId: initialization.sessionId } }),
@@ -200,7 +198,10 @@ test("a stalled detach preserves the initialization failure and bounds cleanup",
     await fixture.waitUntilStalled();
     jest.advanceTimersByTime(500);
     await settle();
-    expect(await failed).toMatchObject({ method: "Page.enable" });
+    expect(await failed).toMatchObject({
+      code: "tab_not_responding",
+      cause: { method: "Page.enable" },
+    });
     expect(await fixture.driver.isAvailable()).toBe(true);
   } finally {
     jest.useRealTimers();
@@ -402,9 +403,9 @@ test("a fully fenced action preserves a frame timeout before dispatch", async ()
       state: "failed",
       dispatchedAt: null,
       error: {
-        code: "timeout",
-        retryable: true,
-        message: "browser frame inspection timed out during Page.getFrameTree",
+        code: "tab_not_responding",
+        retryable: false,
+        message: expect.stringMatching(/not responding.*close.*new tab/i),
       },
     });
     expect(fixture.calls.some((call) => call.method.startsWith("Input."))).toBe(false);

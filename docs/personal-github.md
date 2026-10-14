@@ -2,7 +2,7 @@
 
 Personal GitHub is a user-owned OAuth credential path for actions that must be
 attributed to the exact GitHub user. It is deliberately separate from the
-workspace-owned OpenGeni GitHub App described in [`github-app.md`](github-app.md).
+workspace-owned Opengeni GitHub App described in [`github-app.md`](github-app.md).
 The two clients, callbacks, stored authorities, and runtime identities must not
 be substituted for one another.
 
@@ -33,9 +33,9 @@ Local and self-hosted installations use the same ordinary browser OAuth flow:
    `/v1/integrations/github-personal/oauth/callback`. For a stock local run this
    can be `http://127.0.0.1:8000/v1/integrations/github-personal/oauth/callback`.
 3. Configure the client ID, client secret, state-signing secret, and environment
-   encryption key above, then restart OpenGeni.
+   encryption key above, then restart Opengeni.
 4. Open **Integrations → GitHub → Your GitHub identity**, connect, and choose the
-   repositories OpenGeni may use as that user.
+   repositories Opengeni may use as that user.
 
 Single-user `local` mode recognizes only its exact built-in `dev` human as the
 credential owner and stores a standing grant for that same local workspace.
@@ -44,7 +44,7 @@ authority path. A shared configured/service key by itself is deliberately not a
 personal identity; that deployment must provide verified delegated-human auth
 or managed sign-in before personal OAuth can be enabled.
 
-Device flow is unnecessary because OpenGeni already has a browser UI. OAuth
+Device flow is unnecessary because Opengeni already has a browser UI. OAuth
 authorization code + PKCE keeps the same flow usable in managed, self-hosted,
 and local environments without teaching agents or containers the user's GitHub
 password or provider token.
@@ -57,7 +57,7 @@ Desktop reaches the API through `host.docker.internal`. A Compose service URL
 such as `http://api:8000/v1/workspaces/{workspaceId}/mcp` is accepted; a
 loopback URL is translated to the Docker host gateway, which works only when
 the API listens there. The broker remains the only recipient of the short-lived
-OpenGeni bearer.
+Opengeni bearer.
 
 ## User experience
 
@@ -78,16 +78,16 @@ pickers keep mounted choices visible and locked.
 
 The start route accepts only an exact authenticated human with
 `connections:write`. It uses authorization code + PKCE S256 and signed,
-single-use state bound to the OpenGeni organization, workspace, subject,
+single-use state bound to the Opengeni organization, workspace, subject,
 environment, client marker, return path, and optional reconnect generation.
 The callback consumes the nonce before provider exchange, requires exactly the
 V1 `repo` scope, verifies the immutable numeric GitHub user ID through
-`GET /user`, rechecks live OpenGeni authority, and persists one encrypted
+`GET /user`, rechecks live Opengeni authority, and persists one encrypted
 subject-owned `Connection`. A reconnect is CAS-fenced to the same Connection and
 GitHub user. A different GitHub account never overwrites the existing row.
 
 `repo` is broad GitHub-account authority: it includes public and private
-repositories available to the user and permits repository writes. OpenGeni's
+repositories available to the user and permits repository writes. Opengeni's
 repository picker is an additional allowlist; it does not narrow the OAuth
 grant held by GitHub. Runtime execution must therefore remain behind exact
 selected-repository authority and the normal Ask/Allow/Block action policy.
@@ -151,7 +151,7 @@ generation, canonical URI, ref, and access into the accepted turn or task.
 Credential bindings remain selectors, never grants. Missing, stale, mixed-
 account, or widened authority fails closed.
 
-Managed sandboxes consume this authority through OpenGeni's dedicated personal
+Managed sandboxes consume this authority through Opengeni's dedicated personal
 GitHub smart-HTTP broker. The worker mints a five-minute encrypted bearer bound
 to the exact account, workspace, session/root, turn, active attempt and
 execution generation, connection generation, credential binding, repository
@@ -182,7 +182,7 @@ that same frozen repository authority without exposing the broad OAuth token.
 It revalidates the exact accepted connection/grant generation, selection head,
 repository identity, and current read/write permission before each provider
 request. `github_personal__*` tools are always attributed to the connected user;
-the separate `github_app__*` namespace acts as the OpenGeni bot. Tool arguments
+the separate `github_app__*` namespace acts as the Opengeni bot. Tool arguments
 cannot choose either actor or a repository outside the accepted resource set.
 Writes use the attempt-frozen connector Allow/Ask/Block policy. When no explicit
 policy exists, the accepted repository write capability is authoritative and

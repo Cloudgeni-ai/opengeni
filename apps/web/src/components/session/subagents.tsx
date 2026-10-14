@@ -15,6 +15,11 @@
 // Copy doctrine: human language only. Internal status slugs (requires_action,
 // active, …) never leak into a rendered string.
 import { formatRelativeTime } from "@opengeni/react";
+import {
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  type SessionDisplayStatus,
+} from "@opengeni/react/timeline-model";
 import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import { BotIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
@@ -30,6 +35,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { sessionControlPaused } from "@/lib/session-rail";
 
 /** Children (depth 0) plus one level of grandchildren (depth 1) — the tree goes
     exactly one level deeper, so a depth-1 row never draws its own expander. */
@@ -42,11 +48,19 @@ const MAX_DEPTH = 1;
  * links straight to where the human answers. Null for calm rows.
  */
 export function subagentAttentionHint(
-  session: Pick<SessionSummary, "status" | "requiresActionSince">,
+  session: Pick<SessionSummary, "status" | "requiresActionSince" | "admissionBlock">,
   paused: boolean,
   now: Date = new Date(),
 ): { word: string; waitingFor: string; title?: string } | null {
   if (session.status === "failed") return { word: "Failed", waitingFor: "" };
+  // The runtime could not start its next step: loud, but not a request of you.
+  if (sessionAdmissionBlocked(session)) {
+    return {
+      word: "Stuck",
+      waitingFor: "",
+      title: "Could not start its next step",
+    };
+  }
   if (session.status === "requires_action") {
     const since = session.requiresActionSince ?? null;
     const waitingFor = since ? formatWaitingSince(since, now) : "";
@@ -63,10 +77,12 @@ export function subagentAttentionHint(
 }
 
 /** Map a session lifecycle status onto the six-tone status language. */
-export function sessionStatusTone(status: SessionStatus): StatusTone {
+export function sessionStatusTone(status: SessionDisplayStatus): StatusTone {
   switch (status) {
     case "requires_action":
       return "waiting";
+    case "blocked":
+      return "failed";
     case "running":
       return "running";
     case "queued":
@@ -129,8 +145,8 @@ function SubagentRow({
 }) {
   const [open, setOpen] = useState(false);
   const title = sessionDisplayTitle(node.session);
-  const paused = node.session.effectiveControl.state === "paused";
-  const tone = paused ? "waiting" : sessionStatusTone(node.session.status);
+  const paused = sessionControlPaused(node.session);
+  const tone = paused ? "waiting" : sessionStatusTone(sessionDisplayStatus(node.session));
   const live = !paused && isLiveStatus(node.session.status);
   const canExpand = depth < MAX_DEPTH && node.children.length > 0;
 

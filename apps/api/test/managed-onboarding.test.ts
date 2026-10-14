@@ -493,6 +493,51 @@ describe("managed organization onboarding", () => {
     expect(await unavailable.json()).toEqual({ state: "unavailable" });
   }, 120_000);
 
+  test("disabled email verification admits a new password user directly into setup", async () => {
+    if (!shared || !client) return;
+    const sent: string[] = [];
+    const app = createApp({
+      settings: { ...settings, managedAuthRequireEmailVerification: false },
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+      managedEmailTransport: {
+        sender: "Auth <auth@example.test>",
+        idempotency: { scope: "test-provider-v1:verification-disabled", retentionSeconds: 86_400 },
+        send: async (message) => {
+          sent.push(message.kind);
+          return { status: "sent", providerMessageId: `test-${sent.length}` };
+        },
+      },
+    });
+    const email = `verification-disabled-${crypto.randomUUID()}@example.test`;
+    const signup = await app.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Example Tester", email, password: "password1234" }),
+    });
+    expect(signup.status).toBe(200);
+    expect(sent).not.toContain("email_verification");
+    const cookie = signup.headers
+      .getSetCookie()
+      .find((value) => value.includes("better-auth.session_token="));
+    expect(cookie).toBeTruthy();
+    const onboarding = await app.request("/v1/auth/organization-onboarding", {
+      headers: { cookie: cookie!.split(";", 1)[0]! },
+    });
+    expect(onboarding.status).toBe(200);
+    expect(await onboarding.json()).toEqual({ state: "required" });
+    const signin = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "password1234" }),
+    });
+    expect(signin.status).toBe(200);
+    expect(
+      signin.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
+    ).toBe(true);
+  }, 120_000);
+
   test("the first verification click signs the new user in once, straight into setup", async () => {
     if (!shared || !client) return;
     const sent: Array<{ kind: string; to: string; text: string }> = [];
@@ -502,7 +547,7 @@ describe("managed organization onboarding", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
       managedEmailTransport: {
-        sender: "OpenGeni <auth@mail.opengeni.ai>",
+        sender: "Opengeni <auth@mail.opengeni.ai>",
         idempotency: { scope: "test-provider-v1:verify-sign-in", retentionSeconds: 86_400 },
         send: async (message) => {
           sent.push({ kind: message.kind, to: message.to, text: message.text });
@@ -575,7 +620,7 @@ describe("managed organization onboarding", () => {
     // be told not to use it.
     const sent: Array<{ kind: string; to: string; text: string; html?: string }> = [];
     const auth = createManagedAuth(settings, {} as never, {
-      sender: "OpenGeni <auth@mail.opengeni.ai>",
+      sender: "Opengeni <auth@mail.opengeni.ai>",
       idempotency: { scope: "test-provider-v1:verify-ignore", retentionSeconds: 86_400 },
       send: async (message) => {
         sent.push(message);
@@ -601,7 +646,7 @@ describe("managed organization onboarding", () => {
       "email_verification",
       "email_verification",
     ]);
-    const ignore = "If you did not create an OpenGeni account, ignore this email.";
+    const ignore = "If you did not create an Opengeni account, ignore this email.";
     for (const message of sent) {
       expect(message.to).toBe(user.email);
       expect(message.text).toContain(ignore);

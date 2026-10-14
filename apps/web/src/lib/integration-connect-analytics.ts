@@ -56,6 +56,7 @@ export const MODEL_CONNECTION_CLASSES = [
   "openrouter",
   "anthropic",
   "claude_subscription",
+  "opper",
 ] as const satisfies readonly ModelClass[];
 
 export type IntegrationClass = ConnectionClass | ModelClass;
@@ -142,6 +143,7 @@ export function modelConnectionClass(provider: string): ModelClass | null {
     case "codex":
     case "supergrok":
     case "openrouter":
+    case "opper":
     case "anthropic":
     case "claude_subscription":
       return provider;
@@ -336,6 +338,8 @@ export function integrationConnectReturnOutcome(
   value: IntegrationConnectReturn,
 ): IntegrationConnectOutcome {
   if (["success", "connected", "complete"].includes(value.status)) return "connected";
+  // A GitHub install request waits on an organization owner; nothing failed yet.
+  if (value.parameter === "github" && value.status === "requested") return "outcome_unknown";
   const reason = value.reason ?? "";
   if (/denied/i.test(reason)) return "denied";
   if (/cancel/i.test(reason)) return "cancelled";

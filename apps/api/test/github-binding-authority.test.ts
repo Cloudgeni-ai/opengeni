@@ -212,8 +212,11 @@ async function startOAuth(app: Hono): Promise<{ state: string; browserHeader: st
   return { state: oauthState!, browserHeader: oauthCookie! };
 }
 
-async function startInstall(app: Hono): Promise<{ state: string; browserHeader: string }> {
-  const state = managerState();
+async function startInstall(
+  app: Hono,
+  patch: Record<string, unknown> = {},
+): Promise<{ state: string; browserHeader: string }> {
+  const state = managerState(patch);
   const connect = await app.request(
     `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
   );
@@ -550,7 +553,8 @@ describe("GitHub owner-authority binding routes", () => {
       },
     };
     const app = appWithProvider(provider, calls);
-    const install = await startInstall(app);
+    const returnPath = `/workspaces/${workspaceId}/sessions/00000000-0000-4000-8000-000000000001`;
+    const install = await startInstall(app, { returnPath });
     // Only discovery needs the policy DB; a pending owner approval remains a
     // no-effect response and must not consult it at all.
     const pendingApp = appWithProvider(provider, calls, databaseMustNotBeConsulted());
@@ -559,7 +563,52 @@ describe("GitHub owner-authority binding routes", () => {
       { headers: { cookie: install.browserHeader } },
     );
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain("has not created a workspace binding");
+    const html = await response.text();
+    expect(html).toContain("Request sent to your organization owners");
+    expect(html).toContain("Nothing is connected until an owner finishes");
+    // Back to the same chat, which then shows the waiting state.
+    expect(html).toMatch(
+      new RegExp(`href="https?://[^"/]+${returnPath}\\?github=requested">Back to Opengeni<`),
+    );
+    expect(calls.provider).toBe(0);
+  });
+
+  test("an owner approving a request without Opengeni state connects nothing", async () => {
+    const calls = { provider: 0 };
+    const app = appWithProvider(
+      {
+        discoverInstallationBindingCandidates: async () => {
+          calls.provider += 1;
+          return [];
+        },
+        authorizeInstallationBinding: async () => {
+          calls.provider += 1;
+          throw new Error("provider must not be called");
+        },
+      },
+      calls,
+      databaseMustNotBeConsulted(),
+    );
+    for (const path of ["/v1/github/setup", "/v1/github/install/callback"]) {
+      const response = await app.request(
+        `http://test${path}?installation_id=42&setup_action=install`,
+      );
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("Opengeni is installed on GitHub");
+      expect(html).toContain("an owner of the GitHub organization connects it from Opengeni");
+      expect(response.headers.get("set-cookie")).toBeNull();
+    }
+    // Anything else without state is still a stale link, not a success page.
+    const update = await app.request(
+      "http://test/v1/github/setup?installation_id=42&setup_action=update",
+    );
+    expect(update.status).toBe(400);
+    expect(await update.text()).toContain("This GitHub link expired");
+    const missingInstallation = await app.request(
+      "http://test/v1/github/setup?setup_action=install",
+    );
+    expect(missingInstallation.status).toBe(400);
     expect(calls.provider).toBe(0);
   });
 
@@ -659,7 +708,7 @@ describe("GitHub owner-authority binding routes", () => {
       expect(response.headers.get("content-type")).toContain("text/html");
       const html = await response.text();
       expect(html).toContain(title);
-      expect(html).toContain("Back to OpenGeni");
+      expect(html).toContain("Back to Opengeni");
       expect(html).not.toContain('{"error"');
       return html;
     };

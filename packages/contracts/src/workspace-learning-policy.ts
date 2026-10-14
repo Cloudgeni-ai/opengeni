@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 export const WORKSPACE_LEARNING_POLICY_MAX_SOURCE_OVERRIDES = 256;
@@ -7,59 +8,73 @@ export const WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS = 4_096;
 export const WORKSPACE_LEARNING_POLICY_DEFAULT_SUGGEST_REVISION_ID =
   "workspace-learning-policy:default-suggest:v1";
 
-export const WorkspaceLearningMode = z.enum(["off", "suggest", "automatic"]);
+export const WorkspaceLearningMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["off", "suggest", "automatic"]),
+);
 export type WorkspaceLearningMode = z.infer<typeof WorkspaceLearningMode>;
 
-export const WorkspaceLearningOverrideMode = z.enum(["inherit", "off", "suggest", "automatic"]);
+export const WorkspaceLearningOverrideMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["inherit", "off", "suggest", "automatic"]),
+);
 export type WorkspaceLearningOverrideMode = z.infer<typeof WorkspaceLearningOverrideMode>;
 
 export function normalizeWorkspaceLearningSourceKind(value: string): string {
   return value.normalize("NFKC").trim().toLowerCase().replace(/\s+/gu, "-").replace(/-+/g, "-");
 }
 
-export const WorkspaceLearningSourceKind = z
-  .string()
-  .transform(normalizeWorkspaceLearningSourceKind)
-  .pipe(
-    z
-      .string()
-      .min(1)
-      .max(WORKSPACE_LEARNING_POLICY_SOURCE_KIND_MAX_CHARS)
-      .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
-  );
+export const WorkspaceLearningSourceKind = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .transform(normalizeWorkspaceLearningSourceKind)
+    .pipe(
+      z
+        .string()
+        .min(1)
+        .max(WORKSPACE_LEARNING_POLICY_SOURCE_KIND_MAX_CHARS)
+        .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
+    ),
+);
 export type WorkspaceLearningSourceKind = z.infer<typeof WorkspaceLearningSourceKind>;
 
-export const WorkspaceLearningSourceId = z
-  .string()
-  .min(1)
-  .max(WORKSPACE_LEARNING_POLICY_SOURCE_ID_MAX_CHARS)
-  .refine(
-    (value) => value.trim() === value,
-    "learning source ids must not contain edge whitespace",
-  );
+export const WorkspaceLearningSourceId = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(WORKSPACE_LEARNING_POLICY_SOURCE_ID_MAX_CHARS)
+    .refine(
+      (value) => value.trim() === value,
+      "learning source ids must not contain edge whitespace",
+    ),
+);
 export type WorkspaceLearningSourceId = z.infer<typeof WorkspaceLearningSourceId>;
 
-export const WorkspaceLearningSourceRef = z.object({
-  kind: WorkspaceLearningSourceKind,
-  id: WorkspaceLearningSourceId,
-});
+export const WorkspaceLearningSourceRef = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: WorkspaceLearningSourceKind,
+    id: WorkspaceLearningSourceId,
+  }),
+);
 export type WorkspaceLearningSourceRef = z.infer<typeof WorkspaceLearningSourceRef>;
 
-export const WorkspaceLearningSourceOverrideInput = WorkspaceLearningSourceRef.extend({
-  mode: WorkspaceLearningOverrideMode,
-});
+export const WorkspaceLearningSourceOverrideInput = /* @__PURE__ */ defineSchema(() =>
+  WorkspaceLearningSourceRef.extend({
+    mode: WorkspaceLearningOverrideMode,
+  }),
+);
 export type WorkspaceLearningSourceOverrideInput = z.infer<
   typeof WorkspaceLearningSourceOverrideInput
 >;
 
-export const WorkspaceLearningSourceOverride = WorkspaceLearningSourceRef.extend({
-  mode: WorkspaceLearningMode,
-});
+export const WorkspaceLearningSourceOverride = /* @__PURE__ */ defineSchema(() =>
+  WorkspaceLearningSourceRef.extend({
+    mode: WorkspaceLearningMode,
+  }),
+);
 export type WorkspaceLearningSourceOverride = z.infer<typeof WorkspaceLearningSourceOverride>;
 
-export const WorkspaceLearningSourceOverrides = z
-  .array(WorkspaceLearningSourceOverride)
-  .max(WORKSPACE_LEARNING_POLICY_MAX_SOURCE_OVERRIDES);
+export const WorkspaceLearningSourceOverrides = /* @__PURE__ */ defineSchema(() =>
+  z.array(WorkspaceLearningSourceOverride).max(WORKSPACE_LEARNING_POLICY_MAX_SOURCE_OVERRIDES),
+);
 export type WorkspaceLearningSourceOverrides = z.infer<typeof WorkspaceLearningSourceOverrides>;
 
 export function workspaceLearningSourceKey(source: WorkspaceLearningSourceRef): string {
@@ -114,91 +129,107 @@ const revisionIdentityShape = {
   policyHash: z.string().regex(/^[0-9a-f]{64}$/),
 };
 
-export const WorkspaceLearningPolicyRevisionIdentity = z.object(revisionIdentityShape);
+export const WorkspaceLearningPolicyRevisionIdentity = /* @__PURE__ */ defineSchema(() =>
+  z.object(revisionIdentityShape),
+);
 export type WorkspaceLearningPolicyRevisionIdentity = z.infer<
   typeof WorkspaceLearningPolicyRevisionIdentity
 >;
 
-export const WorkspaceLearningPolicyRevision = z.object({
-  ...revisionIdentityShape,
-  operationId: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  workspaceMode: WorkspaceLearningMode,
-  sourceOverrides: WorkspaceLearningSourceOverrides,
-  supersedesRevisionId: z.string().uuid().nullable(),
-  createdBySubjectId: z.string().min(1),
-  createdAt: z.string().datetime(),
-});
+export const WorkspaceLearningPolicyRevision = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ...revisionIdentityShape,
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    workspaceMode: WorkspaceLearningMode,
+    sourceOverrides: WorkspaceLearningSourceOverrides,
+    supersedesRevisionId: z.string().uuid().nullable(),
+    createdBySubjectId: z.string().min(1),
+    createdAt: z.string().datetime(),
+  }),
+);
 export type WorkspaceLearningPolicyRevision = z.infer<typeof WorkspaceLearningPolicyRevision>;
 
-export const WorkspaceLearningPolicyHead = z.object({
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  revisionId: z.string().uuid(),
-  revision: z.number().int().positive(),
-  policyHash: z.string().regex(/^[0-9a-f]{64}$/),
-  activationVersion: z.number().int().positive(),
-  activatedAt: z.string().datetime(),
-});
+export const WorkspaceLearningPolicyHead = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    revisionId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    policyHash: z.string().regex(/^[0-9a-f]{64}$/),
+    activationVersion: z.number().int().positive(),
+    activatedAt: z.string().datetime(),
+  }),
+);
 export type WorkspaceLearningPolicyHead = z.infer<typeof WorkspaceLearningPolicyHead>;
 
-export const WorkspaceLearningPolicyActivationType = z.enum(["activate", "rollback"]);
+export const WorkspaceLearningPolicyActivationType = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["activate", "rollback"]),
+);
 export type WorkspaceLearningPolicyActivationType = z.infer<
   typeof WorkspaceLearningPolicyActivationType
 >;
 
-export const WorkspaceLearningPolicyActivationEvent = z.object({
-  id: z.string().uuid(),
-  operationId: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  type: WorkspaceLearningPolicyActivationType,
-  activationVersion: z.number().int().positive(),
-  oldRevision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
-  newRevision: WorkspaceLearningPolicyRevisionIdentity,
-  actorSubjectId: z.string().min(1),
-  reason: z.string().min(1).max(WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS),
-  createdAt: z.string().datetime(),
-});
+export const WorkspaceLearningPolicyActivationEvent = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    type: WorkspaceLearningPolicyActivationType,
+    activationVersion: z.number().int().positive(),
+    oldRevision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
+    newRevision: WorkspaceLearningPolicyRevisionIdentity,
+    actorSubjectId: z.string().min(1),
+    reason: z.string().min(1).max(WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS),
+    createdAt: z.string().datetime(),
+  }),
+);
 export type WorkspaceLearningPolicyActivationEvent = z.infer<
   typeof WorkspaceLearningPolicyActivationEvent
 >;
 
-export const WorkspaceLearningPolicySnapshot = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  turnId: z.string().uuid(),
-  attemptId: z.string().uuid(),
-  executionGeneration: z.number().int().positive(),
-  revision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
-  activationVersion: z.number().int().nonnegative(),
-  activatedAt: z.string().datetime().nullable(),
-  workspaceMode: WorkspaceLearningMode,
-  sourceOverrides: WorkspaceLearningSourceOverrides,
-  snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
-  createdAt: z.string().datetime(),
-});
+export const WorkspaceLearningPolicySnapshot = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
+    revision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
+    activationVersion: z.number().int().nonnegative(),
+    activatedAt: z.string().datetime().nullable(),
+    workspaceMode: WorkspaceLearningMode,
+    sourceOverrides: WorkspaceLearningSourceOverrides,
+    snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
+    createdAt: z.string().datetime(),
+  }),
+);
 export type WorkspaceLearningPolicySnapshot = z.infer<typeof WorkspaceLearningPolicySnapshot>;
 
-export const WorkspaceLearningPolicyRouterContext = z.object({
-  mode: WorkspaceLearningMode,
-  snapshotId: z.string().uuid(),
-  revisionId: z.string().min(1).max(512),
-});
+export const WorkspaceLearningPolicyRouterContext = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    mode: WorkspaceLearningMode,
+    snapshotId: z.string().uuid(),
+    revisionId: z.string().min(1).max(512),
+  }),
+);
 export type WorkspaceLearningPolicyRouterContext = z.infer<
   typeof WorkspaceLearningPolicyRouterContext
 >;
 
-export const WorkspaceLearningPolicyEffectiveMode = WorkspaceLearningPolicyRouterContext.extend({
-  inherited: z.boolean(),
-  source: WorkspaceLearningSourceRef,
-  policyRevision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
-  activationVersion: z.number().int().nonnegative(),
-  snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
-});
+export const WorkspaceLearningPolicyEffectiveMode = /* @__PURE__ */ defineSchema(() =>
+  WorkspaceLearningPolicyRouterContext.extend({
+    inherited: z.boolean(),
+    source: WorkspaceLearningSourceRef,
+    policyRevision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
+    activationVersion: z.number().int().nonnegative(),
+    snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
+  }),
+);
 export type WorkspaceLearningPolicyEffectiveMode = z.infer<
   typeof WorkspaceLearningPolicyEffectiveMode
 >;

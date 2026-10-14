@@ -7,6 +7,7 @@ import { sessionEventCursors } from "../src/schema";
 import {
   MEANINGFUL_SESSION_EVENT_TYPES,
   childLifecycleEvidenceCandidatesSql,
+  commentaryExclusiveMeaningfulSessionEventSql,
   commentaryInclusiveMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
   meaningfulSessionSequenceSql,
@@ -70,7 +71,9 @@ describe("meaningful event frontier contract", () => {
       new URL("../drizzle/0527_session_attention_excludes_commentary.sql", import.meta.url),
       "utf8",
     );
-    const predicate = new PgDialect().sqlToQuery(meaningfulSessionEventSql("meaningful")).sql;
+    const predicate = new PgDialect().sqlToQuery(
+      commentaryExclusiveMeaningfulSessionEventSql("meaningful"),
+    ).sql;
     expect(indexPredicate(migration)).toBe(normalizePredicate(predicate));
     expect(predicate).toContain(`payload ->> 'phase', '') <> 'commentary'`);
     expect(
@@ -101,6 +104,45 @@ describe("meaningful event frontier contract", () => {
           `and ${resultBearing}`,
         ),
     ).toBe(inclusive);
+  });
+  test("0774 rolling index and 0775 cursor trigger count exactly a task usage-limit stop", async () => {
+    const migration = await readFile(
+      new URL("../drizzle/0774_session_usage_limit_attention_index.sql", import.meta.url),
+      "utf8",
+    );
+    const predicate = new PgDialect().sqlToQuery(meaningfulSessionEventSql("meaningful")).sql;
+    expect(indexPredicate(migration)).toBe(normalizePredicate(predicate));
+    expect(
+      migration.startsWith(
+        "-- deployment-mode: rolling\n-- opengeni:concurrent-index lock-timeout=5s\n",
+      ),
+    ).toBe(true);
+    // The runtime predicate is the 0527 one with exactly one change, so
+    // pre-0774 API processes keep their own index during the rollout.
+    const previous = normalizePredicate(
+      new PgDialect().sqlToQuery(commentaryExclusiveMeaningfulSessionEventSql("meaningful")).sql,
+    );
+    const usageLimitStop = "(payload ->> 'segmentlimit') = 'session_usage_limit' or ";
+    expect(normalizePredicate(predicate)).toContain(
+      `(type <> 'turn.completed' or ${usageLimitStop}(not (payload ?| array['maintenance', 'segmentlimit'])`,
+    );
+    expect(normalizePredicate(predicate).replace(usageLimitStop, "")).toBe(previous);
+    // The trigger computes the cursor frontier with the same predicate.
+    const trigger = await readFile(
+      new URL("../drizzle/0775_session_usage_limit_attention_cursor.sql", import.meta.url),
+      "utf8",
+    );
+    expect(trigger.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    const triggerPredicate = normalizePredicate(
+      trigger
+        .split("MAX(sequence) FILTER (WHERE ")[1]!
+        .split(")::integer AS last_meaningful_sequence")[0]!
+        .replaceAll('"event".', ""),
+    );
+    expect(triggerPredicate).toBe(normalizePredicate(predicate));
+    expect(trigger).not.toContain(
+      "UPDATE session_event_cursors cursor SET last_meaningful_sequence",
+    );
   });
   test("lifecycle evidence bounds indexed candidates before inspecting oversized payloads", () => {
     const query = new PgDialect().sqlToQuery(

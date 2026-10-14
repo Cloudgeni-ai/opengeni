@@ -5,6 +5,8 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { excludedWorkspaceDirectories } from "./publishable-workspaces";
+
 const root = resolve(import.meta.dir, "..");
 const exactCiSource =
   "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
@@ -34,9 +36,12 @@ async function action(name: string): Promise<string> {
 
 async function workspaceManifestPaths(): Promise<Map<string, string>> {
   const manifests = new Map<string, string>();
+  const excluded = excludedWorkspaceDirectories(root);
   for (const scope of ["apps", "examples", "packages"] as const) {
     for (const entry of await readdir(resolve(root, scope), { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
+      // A `!dir` workspace entry keeps its own install outside the root lockfile.
+      if (excluded.has(`${scope}/${entry.name}`)) continue;
       const manifestPath = `${scope}/${entry.name}/package.json`;
       // Bun's `scope/*` workspace globs skip directories without a manifest
       // (for example an example whose app lives in a subdirectory).

@@ -13,6 +13,7 @@ const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 const MODELS: readonly SessionRealtimeModel[] = [
+  "opengeni-azure/gpt-live-1",
   "gpt-live-1-boulder-alpha",
   "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
@@ -36,14 +37,20 @@ describe("@opengeni/sdk/realtime", () => {
   test("selects the exact transport and owner namespace for every public model", () => {
     for (const model of MODELS) {
       const expected =
-        model === "gpt-live-1-boulder-alpha"
-          ? "codex"
-          : model === "supergrok/grok-voice-think-fast-2.0"
-            ? "xai-subscription"
-            : "gateway";
+        model === "opengeni-azure/gpt-live-1"
+          ? "azure-live"
+          : model === "gpt-live-1-boulder-alpha"
+            ? "codex"
+            : model === "supergrok/grok-voice-think-fast-2.0"
+              ? "xai-subscription"
+              : "gateway";
       expect(sessionRealtimeTransportKind(model)).toBe(expected);
       const namespace =
-        expected === "xai-subscription" ? "xai-realtime-owner" : `${expected}-realtime-owner`;
+        expected === "azure-live"
+          ? "azure-live-owner"
+          : expected === "xai-subscription"
+            ? "xai-realtime-owner"
+            : `${expected}-realtime-owner`;
       expect(sessionRealtimeOwnerStorageNamespace(model)).toBe(namespace);
       expect(sessionRealtimeOwnerStorageKey(WORKSPACE_ID, SESSION_ID, model)).toBe(
         `opengeni:${namespace}:${WORKSPACE_ID}:${SESSION_ID}`,

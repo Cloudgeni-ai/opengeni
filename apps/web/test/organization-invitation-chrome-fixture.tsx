@@ -199,7 +199,7 @@ function OrganizationInvitationChromeFixture() {
               aria-label="Session sidebar"
             >
               <div className="border-b border-border px-3 py-3 text-sm font-medium text-fg">
-                {collapsed ? "OG" : "OpenGeni"}
+                {collapsed ? "OG" : "Opengeni"}
               </div>
               <div className="flex-1 px-3 py-3 text-xs text-fg-muted">
                 {collapsed ? null : "Sessions"}

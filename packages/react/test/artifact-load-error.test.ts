@@ -12,8 +12,8 @@ describe("artifact load errors", () => {
         const view = mapArtifactRouteError(new OpenGeniApiError(status, ""), kind);
         expect(view.retryable).toBe(false);
         expect(view.title).toContain("isn't available");
-        expect(view.message).not.toMatch(/OpenGeni API/i);
-        expect(artifactRouteErrorMessage(view)).not.toMatch(/OpenGeni API/i);
+        expect(view.message).not.toMatch(/Opengeni API/i);
+        expect(artifactRouteErrorMessage(view)).not.toMatch(/Opengeni API/i);
       });
     }
 
@@ -21,7 +21,7 @@ describe("artifact load errors", () => {
       const view = mapArtifactRouteError(new OpenGeniApiError(422, ""), kind);
       expect(view.retryable).toBe(false);
       expect(view.title).toContain("isn't valid");
-      expect(view.message).not.toMatch(/OpenGeni API/i);
+      expect(view.message).not.toMatch(/Opengeni API/i);
     });
 
     test(`${kind} 503 is retryable by default and keeps a support reference`, () => {
@@ -32,7 +32,7 @@ describe("artifact load errors", () => {
       expect(view.retryable).toBe(true);
       expect(view.correlationId).toBe("req_abc-1");
       expect(artifactRouteErrorMessage(view)).toContain("Reference: req_abc-1");
-      expect(artifactRouteErrorMessage(view)).not.toMatch(/OpenGeni API/i);
+      expect(artifactRouteErrorMessage(view)).not.toMatch(/Opengeni API/i);
     });
 
     test(`${kind} network TypeError is retryable`, () => {

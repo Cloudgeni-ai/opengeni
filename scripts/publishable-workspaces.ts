@@ -52,8 +52,23 @@ export function changesetIgnoreSet(root = repoRoot): Set<string> {
   return new Set(config.ignore ?? []);
 }
 
+/**
+ * Directories the root manifest excludes from its workspace globs with an
+ * exact `!dir` entry, such as a native app that keeps its own install.
+ */
+export function excludedWorkspaceDirectories(root = repoRoot): Set<string> {
+  const manifest = readPackage(join(root, "package.json"));
+  const workspaces = Array.isArray(manifest?.workspaces) ? manifest.workspaces : [];
+  return new Set(
+    workspaces
+      .filter((entry): entry is string => typeof entry === "string" && entry.startsWith("!"))
+      .map((entry) => entry.slice(1).replace(/\/+$/u, "")),
+  );
+}
+
 export function workspacePackages(root = repoRoot): WorkspacePackage[] {
   const packages: WorkspacePackage[] = [];
+  const excluded = excludedWorkspaceDirectories(root);
   for (const group of ["apps", "packages"]) {
     const groupDir = join(root, group);
     let entries: string[];
@@ -63,6 +78,7 @@ export function workspacePackages(root = repoRoot): WorkspacePackage[] {
       continue;
     }
     for (const entry of entries.sort()) {
+      if (excluded.has(`${group}/${entry}`)) continue;
       const packagePath = join(groupDir, entry, "package.json");
       const packageJson = readPackage(packagePath);
       if (!packageJson?.name || !packageJson.version) {

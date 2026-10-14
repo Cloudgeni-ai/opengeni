@@ -66,19 +66,19 @@ describe("autoApprovedTools governance", () => {
     ).toThrow(HTTPException);
   });
 
-  test("a curated definition can forbid exempting specific operations", () => {
+  test("legacy curated governance cannot override user preferences", () => {
     const governed: IntegrationDefinition = {
       ...GOOGLE_DRIVE_INTEGRATION_DEFINITION,
       autoApproval: { forbiddenOperationKeys: ["drive.files.update"] },
     };
-    expect(autoApprovalForbidden(governed, "drive.files.update")).toBe(true);
+    expect(autoApprovalForbidden(governed, "drive.files.update")).toBe(false);
     expect(autoApprovalForbidden(governed, "drive.files.delete")).toBe(false);
     expect(
       autoApprovalForbidden(
         { ...governed, autoApproval: { forbiddenOperationKeys: "all" } },
         "anything",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(autoApprovalForbidden(GOOGLE_DRIVE_INTEGRATION_DEFINITION, "drive.files.update")).toBe(
       false,
     );

@@ -71,6 +71,29 @@ describe("API contract admission", () => {
     ).toBe("admit");
   });
 
+  test("signed machine renewal is outside the browser fence without exempting adjacent paths", () => {
+    for (const claimedRevision of [undefined, stale]) {
+      expect(
+        apiContractAdmission({
+          method: "POST",
+          pathname: "/v1/enrollments/renew",
+          authorization: undefined,
+          claimedRevision,
+        }),
+      ).toBe("admit");
+    }
+    for (const pathname of ["/v1/enrollments/renew/other", mutation.pathname]) {
+      expect(
+        apiContractAdmission({
+          method: "POST",
+          pathname,
+          authorization: undefined,
+          claimedRevision: undefined,
+        }),
+      ).toBe("reject");
+    }
+  });
+
   test("in production a stale browser mutation is 409 while a stale bearer proceeds", async () => {
     const app = appFor(testSettings({ environment: "production" }));
     const path = `/v1/workspaces/${WORKSPACE}/sessions/${SESSION}/control`;

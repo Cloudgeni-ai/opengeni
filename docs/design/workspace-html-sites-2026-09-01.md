@@ -8,19 +8,19 @@
 
 ## Purpose
 
-OpenGeni should let an agent build a normal interactive web application, publish
-it as a Workspace HTML artifact, and let that application use OpenGeni's typed
+Opengeni should let an agent build a normal interactive web application, publish
+it as a Workspace HTML artifact, and let that application use Opengeni's typed
 frontend SDK, React components, and tool system.
 
 This is not a second application platform. The intended product is a normal
-web application embedded in the existing OpenGeni application.
+web application embedded in the existing Opengeni application.
 
 ## Settled product model
 
 ### The Site is a normal Bun web application
 
 The authoring agent writes an ordinary Bun, TypeScript, and React project. Bun
-owns development serving and the final browser bundle. OpenGeni does not need a
+owns development serving and the final browser bundle. Opengeni does not need a
 special Site build service, bespoke build command, user-facing Site CLI, or
 separate deployment format.
 
@@ -28,17 +28,17 @@ The Site-building Skill should teach the agent to:
 
 1. create an ordinary Bun + React application;
 2. run it from the sandbox with Bun's normal development workflow;
-3. open the sandbox-local URL with OpenGeni's existing Codemode browser tools;
+3. open the sandbox-local URL with Opengeni's existing Codemode browser tools;
 4. inspect, interact with, screenshot, and improve the application;
 5. use Bun's normal HTML build to produce one self-contained HTML file; and
 6. publish that file with the existing Workspace Artifact tools.
 
-The exact Bun command is authoring guidance in the Skill, not an OpenGeni
+The exact Bun command is authoring guidance in the Skill, not an Opengeni
 runtime abstraction.
 
 ### Existing Workspace HTML artifacts remain the publish format
 
-OpenGeni already stores immutable, versioned HTML artifact content in object
+Opengeni already stores immutable, versioned HTML artifact content in object
 storage and renders exact HTML in an opaque-origin sandboxed iframe. Sites
 should build on that existing artifact and renderer instead of introducing a
 second host, wildcard domain, container deployment, or Site-specific storage
@@ -47,7 +47,7 @@ model.
 Artifact HTML is publisher-controlled active content. The opaque origin blocks
 parent DOM, cookie, and storage access, but the current renderer deliberately
 allows scripts, external resources, forms, popups, and outbound network
-requests. Opening an artifact therefore must not disclose an OpenGeni
+requests. Opening an artifact therefore must not disclose an Opengeni
 credential or grant broader API authority. Publishing an immutable Site version
 with requested tool identities explicitly authorizes that active version to
 invoke those identities without per-call prompts, subject to the current
@@ -58,15 +58,15 @@ version retains its complete traversal-free source bundle and exact requested
 tool identities beside that HTML, so `Edit with Geni` can restore the ordinary
 Bun project without changing the runtime format.
 
-### The agent should use the typed OpenGeni SDK
+### The agent should use the typed Opengeni SDK
 
-The Site-building Skill should prefer OpenGeni's typed SDK over handwritten
+The Site-building Skill should prefer Opengeni's typed SDK over handwritten
 REST calls. Typed methods, request contracts, event streaming, reconnect,
 replay, and error handling are easier for an agent to use correctly than raw
 URLs and ad hoc response types.
 
 The `browser` in `@opengeni/sdk/browser` means **browser-compatible package
-entrypoint**. It does not mean OpenGeni Browser/Computer automation and does not
+entrypoint**. It does not mean Opengeni Browser/Computer automation and does not
 imply that the Site is controlling a browser. Its purpose is to keep Node-only,
 operator-only, or otherwise inappropriate package surfaces out of the browser
 bundle.
@@ -89,10 +89,10 @@ navigation creates a new document and revokes the old bootstrap plus every
 derived tool-call port. The same lazy `client.tools` proxy is available to
 ordinary SDK/browser consumers through a workspace-bound HTTP adapter.
 
-### The agent should use OpenGeni's styled React UI by default
+### The agent should use Opengeni's styled React UI by default
 
-When a Site contains an OpenGeni agent experience, the Skill should default to
-the packaged OpenGeni React components rather than asking the agent to rebuild a
+When a Site contains an Opengeni agent experience, the Skill should default to
+the packaged Opengeni React components rather than asking the agent to rebuild a
 chat UI from raw hooks.
 
 The default composition should use the existing provider, timeline, composer,
@@ -229,7 +229,7 @@ credential exists.
 - A Site-specific AI API such as `site.ai.start` or `site.ai.send`.
 - A second session/event model.
 - A Site-specific tool registry or provider wrappers.
-- A bespoke Site build service or required OpenGeni build command.
+- A bespoke Site build service or required Opengeni build command.
 - A user-facing Site deployment CLI.
 - A second React component system for agent sessions.
 - A general-purpose authenticated `fetch` bridge. The parent exposes only the
@@ -280,7 +280,7 @@ extraction and an additional public adapter, not a replacement tool platform.
   versioning, rollback, and exact `srcDoc` rendering in an opaque-origin iframe.
   The current HTML limit is 4 MiB of UTF-8. Scripts and network requests work,
   so opaque-origin isolation is not credential containment; the current artifact
-  runtime contract correctly gives artifact code no OpenGeni credentials.
+  runtime contract correctly gives artifact code no Opengeni credentials.
 - Runtime MCP preparation already discovers configured capability and API
   integration servers, resolves credentials, freezes tool definitions, applies
   allowlists, and creates `PrefixedMcpServer` instances.
@@ -297,7 +297,7 @@ extraction and an additional public adapter, not a replacement tool platform.
   one agent attempt.
 - The API already permits cross-origin bearer requests with `Authorization`
   through public CORS. It also has a standard authenticated MCP-over-HTTP route,
-  but that route currently registers OpenGeni's first-party tools rather than
+  but that route currently registers Opengeni's first-party tools rather than
   the complete set of configured external integrations.
 
 ### Implemented additions
@@ -311,7 +311,7 @@ extraction and an additional public adapter, not a replacement tool platform.
    path to an opaque canonical `{serverId, toolName}` identity; the path is never
    authority.
 3. Add one authenticated backend surface that lists and calls the same prepared
-   tools OpenGeni already gives an agent. It must assemble configured external
+   tools Opengeni already gives an agent. It must assemble configured external
    integrations as well as first-party tools and call the existing executor,
    not duplicate provider implementations.
 4. Add an explicit immutable requested-tool allowlist plus parent mediation.

@@ -101,7 +101,7 @@ const FALLBACK_REALTIME_PROVIDER_CONFIG: CodexRealtimeProviderConfig = {
 
 /**
  * Resolve the provider-controlled Codex voice model without changing the
- * stable OpenGeni model id. ChatGPT rotates this config independently of Codex
+ * stable Opengeni model id. ChatGPT rotates this config independently of Codex
  * releases; pinning the old value caused deterministic call-creation failures.
  */
 export async function fetchCodexRealtimeProviderConfig(
@@ -134,7 +134,7 @@ export async function fetchCodexRealtimeProviderConfig(
         build_flavor: "stable",
         locale: "en-US",
         stable_id: auth.chatgptAccountId ?? "opengeni-server",
-        system_name: "OpenGeni",
+        system_name: "Opengeni",
         system_version: "server",
         window_type: "local",
       }),

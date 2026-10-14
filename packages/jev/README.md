@@ -1,6 +1,6 @@
 # `@opengeni/jev`
 
-`@opengeni/jev` holds OpenGeni's client for TypeSafe Jev, a fast judge model, and the Jev-ranked
+`@opengeni/jev` holds Opengeni's client for TypeSafe Jev, a fast judge model, and the Jev-ranked
 `code_search` engine behind the worker's `code_search` agent tool. The package has no runtime
 dependencies. It uses global `fetch`, runs under Node 18+ and Bun, and makes no filesystem or process
 calls of its own.

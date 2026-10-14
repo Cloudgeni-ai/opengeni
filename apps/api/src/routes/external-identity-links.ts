@@ -37,7 +37,7 @@ function nativeConfirmation(authorization: AccessGrantAuthorization) {
     authorization.authenticatedSubjectId !== authorization.grant.subjectId ||
     !authorization.grant.subjectId.startsWith("user:")
   )
-    throw new HTTPException(403, { message: "Confirm using your authenticated OpenGeni account" });
+    throw new HTTPException(403, { message: "Confirm using your authenticated Opengeni account" });
 }
 
 /** Both products address the link through a workspace they already own. The

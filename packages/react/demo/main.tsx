@@ -204,7 +204,7 @@ function Harness() {
       <div className="mx-auto flex h-full max-w-7xl flex-col pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:pl-[max(1.25rem,env(safe-area-inset-left))] sm:pr-[max(1.25rem,env(safe-area-inset-right))] lg:pl-[max(1.5rem,env(safe-area-inset-left))] lg:pr-[max(1.5rem,env(safe-area-inset-right))]">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-og-border py-2.5 sm:py-3.5">
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-og-fg">OpenGeni React demo</h1>
+            <h1 className="truncate text-sm font-semibold text-og-fg">Opengeni React demo</h1>
             <p className="truncate text-[11px] text-og-fg-subtle sm:text-xs">
               Public React UI · scripted data
             </p>

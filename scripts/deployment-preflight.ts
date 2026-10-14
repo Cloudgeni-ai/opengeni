@@ -91,7 +91,7 @@ if (args.json) {
   process.exit(0);
 }
 
-console.log(`OpenGeni deployment preflight: ${contract.profile}`);
+console.log(`Opengeni deployment preflight: ${contract.profile}`);
 console.log("");
 console.log("Runtime");
 console.log(`  platform: ${contract.runtime.platform}`);

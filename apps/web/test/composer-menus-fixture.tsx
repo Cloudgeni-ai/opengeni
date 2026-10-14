@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
 import {
@@ -7,11 +7,21 @@ import {
 } from "../src/components/repository-picker";
 import { FollowUpRepositoryMenuBody } from "../src/components/follow-up-repository-menu-body";
 import { TooltipProvider } from "../src/components/ui/tooltip";
-import { NewSessionVariableSetPicker } from "../src/components/session/new-session-variable-set-picker";
+import {
+  SessionSecretsMenuBody,
+  draftSecretsRows,
+  sessionSecretsSummary,
+} from "../src/components/secrets/session-secrets-panel";
 import type { GitHubRepository } from "../src/types";
 import type { SessionToolSelection } from "../src/components/pickers";
-import type { AgentLearningOverrides } from "@opengeni/sdk";
+import type { AgentLearningOverrides, VaultPolicy, VaultSummary } from "@opengeni/sdk";
 import "../src/styles.css";
+
+const AgentLearningSettingsEditor = lazy(() =>
+  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+    default: module.AgentLearningSettingsEditor,
+  })),
+);
 
 const repositories: GitHubRepository[] = Array.from({ length: 20 }, (_, index) => ({
   id: index + 1,
@@ -37,6 +47,32 @@ const servers = [
     }),
   ),
 ];
+const fixtureVaults: VaultSummary[] = Array.from({ length: 20 }, (_, index) => ({
+  id: `vault-${index + 1}`,
+  workspaceId: "fixture",
+  ownerKind: "workspace",
+  ownerLabel: "This workspace",
+  rootSessionId: null,
+  name: `Vault ${index + 1}`,
+  description: null,
+  source: "opengeni",
+  mode: "read_write",
+  syncStatus: "ok",
+  syncErrorCode: null,
+  syncErrorMessage: null,
+  lastSyncedAt: null,
+  rateLimitedUntil: null,
+  providerConnectionId: null,
+  availability: null,
+  isDefault: index === 0,
+  itemCount: index,
+  canWrite: true,
+  canManage: true,
+  generation: 1,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+}));
+
 function Fixture() {
   const isNew = new URLSearchParams(location.search).has("new");
   const [selection, setSelection] = useState<SessionToolSelection>({
@@ -47,12 +83,14 @@ function Fixture() {
   const [selected, setSelected] = useState(new Set([1]));
   const [refs, setRefs] = useState<Record<number, string>>({});
   const [settings, setSettings] = useState<AgentLearningOverrides>({});
+  const [agentTabOpen, setAgentTabOpen] = useState(false);
   const [refreshes, setRefreshes] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualAdded, setManualAdded] = useState(false);
   const [fileCount, setFileCount] = useState(0);
-  const [runtimeIds, setRuntimeIds] = useState(["set-2", "set-1"]);
+  const [vaultPolicy, setVaultPolicy] = useState<VaultPolicy>({ mode: "all" });
+  const vaultRows = draftSecretsRows(fixtureVaults, vaultPolicy);
   const props: RepositoryContextPickerProps = {
     configured: true,
     status: "bound",
@@ -121,20 +159,15 @@ function Fixture() {
           onToolSelectionChange={setSelection}
           menuSide="bottom"
           repositories={{ selectedCount: selected.size, panel: <RepositoryBody {...props} /> }}
-          variableSets={{
-            selectedCount: runtimeIds.length,
+          secrets={{
+            summary: sessionSecretsSummary(vaultPolicy, vaultRows),
             panel: (
-              <NewSessionVariableSetPicker
-                workspaceId="fixture"
-                canAttach
-                canUse
-                runtimeIds={runtimeIds}
-                variableSets={Array.from({ length: 20 }, (_, index) => ({
-                  id: `set-${index + 1}`,
-                  name: `Environment ${index + 1}`,
-                }))}
-                disabled={false}
-                onChange={setRuntimeIds}
+              <SessionSecretsMenuBody
+                vaults={vaultRows}
+                policy={vaultPolicy}
+                narrowedByParent={false}
+                canEdit
+                onPolicyChange={setVaultPolicy}
               />
             ),
           }}
@@ -150,10 +183,30 @@ function Fixture() {
           }
           chatSettings={
             !isNew
-              ? { workspaceId: "fixture", sessionId: "chat", scope: "workspace", canEdit: true }
+              ? {
+                  workspaceId: "fixture",
+                  sessionId: "chat",
+                  scope: "workspace",
+                  canEdit: true,
+                  onOpen: () => setAgentTabOpen(true),
+                }
               : undefined
           }
         />
+        {agentTabOpen ? (
+          // Host navigation is the fixture boundary; settings use the real
+          // production editor rather than restoring an obsolete second popover.
+          <section aria-label="Agent tab">
+            <Suspense fallback={<p role="status">Loading chat settings</p>}>
+              <AgentLearningSettingsEditor
+                workspaceId="fixture"
+                scope="workspace"
+                source={{ kind: "chat", id: "chat" }}
+                canEdit
+              />
+            </Suspense>
+          </section>
+        ) : null}
         <div className="sr-only" data-testid="fixture-state">
           {JSON.stringify({
             selected: [...selected],
@@ -162,7 +215,7 @@ function Fixture() {
             manualAdded,
             fileCount,
             settings,
-            runtimeIds,
+            vaultPolicy,
           })}
         </div>
       </main>

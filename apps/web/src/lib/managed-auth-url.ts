@@ -1,10 +1,15 @@
 import type { ManagedAuthMode } from "./managed-auth-form";
 
 /**
- * `?mode=signup` deep link (marketing "Get started" CTAs) opens the Sign up
- * tab. Anything else keeps the default Sign in tab.
+ * `?mode=signup` deep links (marketing "Get started" CTAs) and the `/sign-up`
+ * or `/signup` paths open the Sign up tab. Anything else keeps the default
+ * Sign in tab.
  */
-export function managedAuthModeFromSearch(search: string): ManagedAuthMode | undefined {
+export function managedAuthModeFromSearch(
+  search: string,
+  pathname: string = typeof window === "undefined" ? "/" : window.location.pathname,
+): ManagedAuthMode | undefined {
+  if (/^\/sign-?up\/?$/i.test(pathname)) return "signup";
   const modes = new URLSearchParams(search).getAll("mode");
   return modes.length === 1 && modes[0]?.toLowerCase() === "signup" ? "signup" : undefined;
 }

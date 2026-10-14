@@ -16,7 +16,7 @@ import {
   verifyPrReviewWebhook,
 } from "../src/domain/pr-review";
 
-describe("OpenGeni Review Bot provider boundary", () => {
+describe("Opengeni Review Bot provider boundary", () => {
   test("provides independent provider-neutral review setup and its reviewed Skill", () => {
     expect(PR_REVIEW_AUTOMATION_SETUP).toMatchObject({
       adapterId: "source-control.pull-request.v1",
@@ -283,7 +283,7 @@ describe("OpenGeni Review Bot provider boundary", () => {
 
   test("requires a dedicated GitHub App key and provider tokens elsewhere", () => {
     const common = {
-      name: "OpenGeni Review Bot",
+      name: "Opengeni Review Bot",
       webhookSecret: "webhook-secret-value",
     };
     expect(

@@ -6,29 +6,19 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // swap is exercised inside a session (the dock), where the active-sandbox pointer
 // + the synthetic Modal group box are in scope. Here at the workspace level the
 // fleet is the read-first overview + the zero-click enroll-token entry (with a
-// manual device-flow approve kept as a secondary option).
+// manual code pairing kept as a secondary option inside the same dialog).
 import {
-  EnrollmentDeviceFlow,
   MachineDetail,
   MachinesDashboard,
   connectionStatusForState,
   MACHINES_DASHBOARD_POLL_MS,
-  type DeviceFlowPhase,
   type MetricSample,
   type MetricWindow,
 } from "@opengeni/react/machines";
 import { copyTextToClipboard } from "@opengeni/react/clipboard";
 import { usePageLiveActivity } from "@opengeni/react";
-import {
-  ArrowLeftIcon,
-  CheckIcon,
-  CopyIcon,
-  LaptopIcon,
-  Loader2Icon,
-  MonitorIcon,
-  TerminalIcon,
-} from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { LaptopIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -38,27 +28,20 @@ import {
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
-import { Button } from "@/components/ui/button";
+import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
+import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
 import { TechnicalDetails } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
 import { PageHeader } from "@/components/ui/page-header";
-import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
-import {
-  apiErrorTechnicalFacts,
-  userErrorText,
-  userErrorTextWithoutReference,
-} from "@/lib/api-error";
+import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import type { MachineView } from "@opengeni/react/machines";
+
+/** While the connect dialog waits for the new machine, look for it sooner. */
+const CONNECT_WATCH_POLL_MS = 3_000;
 
 /** Copy to the clipboard and toast the outcome. The shared helper falls back to
  *  a temporary textarea when private HTTP origins cannot use navigator.clipboard. */
@@ -72,16 +55,22 @@ export async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
-  const { client } = useAppContext();
-  const machines = useWorkspaceMachines({ pollIntervalMs: MACHINES_DASHBOARD_POLL_MS });
-  const pageLive = usePageLiveActivity();
+  const { client, workspaces, accessContext } = useAppContext();
   const [enrollOpen, setEnrollOpen] = useState(false);
+  const machines = useWorkspaceMachines({
+    pollIntervalMs: enrollOpen ? CONNECT_WATCH_POLL_MS : MACHINES_DASHBOARD_POLL_MS,
+  });
+  const pageLive = usePageLiveActivity();
+  const personalWorkspace =
+    workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
   const [removeBlocked, setRemoveBlocked] = useState<RemoveEnrollmentResponse | null>(null);
   const [removeMoveError, setRemoveMoveError] = useState<Error | null>(null);
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
   const [detailId, setDetailId] = useState<string | null>(null);
+  // "Who can use it?" for the open machine.
+  const [audienceOpen, setAudienceOpen] = useState(false);
   const [detailWindow, setDetailWindow] = useState<MetricWindow>("1h");
   const [detailSeries, setDetailSeries] = useState<MetricSample[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -100,6 +89,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
     ? (machines.machines.find((m) => m.sandboxId === detailId) ?? null)
     : null;
   const selectedEnrollmentId = selectedMachine?.enrollmentId ?? null;
+  const subjectId = accessContext?.subjectId ?? null;
+  const workspaceAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
+  const audienceMachine =
+    audienceOpen && selectedMachine?.enrollmentId && selectedMachine.scope !== "organization"
+      ? { ...selectedMachine, enrollmentId: selectedMachine.enrollmentId }
+      : null;
 
   // Fetch the compact card sparkline history for every enrolled machine. Keyed on
   // the SET of enrollment ids (not the 5s-polled array identity) + a 30s refresh,
@@ -175,6 +170,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   // first loaded list seeds the baseline silently so existing machines don't
   // announce; the empty placeholder before that load is not a baseline.
   const onlineSeenRef = useRef<Set<string> | null>(null);
+  const enrollOpenRef = useRef(enrollOpen);
+  enrollOpenRef.current = enrollOpen;
   useEffect(() => {
     if (onlineSeenRef.current === null && (machines.loading || machines.error)) return;
     const online = new Set(
@@ -191,7 +188,9 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         if (
           !machine.isSessionGroup &&
           connectionStatusForState(machine.state) === "online" &&
-          !previous.has(machine.sandboxId)
+          !previous.has(machine.sandboxId) &&
+          // The connect dialog shows its own success for the machine it connected.
+          !enrollOpenRef.current
         ) {
           toast.success(`${machine.name} connected`, {
             description: "It's ready to run sessions.",
@@ -212,6 +211,18 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   // composer's handling in sessions-index).
   const featureUnavailable =
     machines.error instanceof OpenGeniApiError && machines.error.status === 404;
+
+  const requestAgentUpdate = (machine: MachineView) => {
+    if (!machine.enrollmentId) return;
+    void machines.updateAgent(machine.enrollmentId).then((result) => {
+      if (result?.accepted) {
+        toast.success(`Updating ${machine.name} to v${result.targetVersion}`, {
+          description:
+            "The agent installs it once the machine is idle. If work is running, the update is postponed and you can start it again later.",
+        });
+      }
+    });
+  };
 
   return (
     <ContentPage width="standard">
@@ -239,7 +250,21 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             window={detailWindow}
             onWindowChange={setDetailWindow}
             loadingSeries={detailLoading}
-            onBack={() => setDetailId(null)}
+            onBack={() => {
+              setAudienceOpen(false);
+              setDetailId(null);
+            }}
+            {...(machines.canManage && subjectId
+              ? { onChangeAudience: () => setAudienceOpen(true) }
+              : {})}
+            {...(machines.canUpdateAgent
+              ? {
+                  onUpdateAgent: requestAgentUpdate,
+                  updatingAgent:
+                    selectedMachine.enrollmentId !== null &&
+                    machines.updatingEnrollmentId === selectedMachine.enrollmentId,
+                }
+              : {})}
             {...(machines.canRemove
               ? {
                   onRemove: (machine: MachineView) => {
@@ -281,16 +306,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onEnroll={machines.canManage ? () => setEnrollOpen(true) : undefined}
             {...(machines.canUpdateAgent
               ? {
-                  onUpdateAgent: (machine: MachineView) => {
-                    if (!machine.enrollmentId) return;
-                    void machines.updateAgent(machine.enrollmentId).then((result) => {
-                      if (result?.accepted) {
-                        toast.success(`Update requested for ${machine.name}`, {
-                          description: `Installing v${result.targetVersion} requires an idle machine. If it is busy, retry after its work finishes.`,
-                        });
-                      }
-                    });
-                  },
+                  onUpdateAgent: requestAgentUpdate,
                   updatingEnrollmentId: machines.updatingEnrollmentId,
                 }
               : {})}
@@ -310,23 +326,18 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         </Notice>
       ) : null}
 
-      <Dialog open={enrollOpen && machines.canManage} onOpenChange={setEnrollOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Connect a machine</DialogTitle>
-            <DialogDescription>
-              Run one command to install or update the agent and add this workspace. Existing
-              Opengeni connections stay intact.
-            </DialogDescription>
-          </DialogHeader>
-          {/* Gated on `enrollOpen` so the body mounts (and mints a fresh token)
-              each time the dialog is opened, and unmounts on close — Radix already
-              unmounts closed content, this just makes the mint-on-open explicit. */}
-          {enrollOpen && machines.canManage ? (
-            <EnrollDialogBody workspaceId={workspaceId} origin={origin} />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      {machines.canManage ? (
+        <ConnectMachineDialog
+          open={enrollOpen}
+          onOpenChange={setEnrollOpen}
+          workspaceId={workspaceId}
+          origin={origin}
+          machines={machines.machines}
+          machinesLoading={machines.loading}
+          machinesError={machines.error}
+          personalWorkspace={personalWorkspace}
+        />
+      ) : null}
 
       <ConfirmDialog
         open={removeTarget !== null && machines.canManage}
@@ -423,6 +434,20 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           </div>
         ) : null}
       </ConfirmDialog>
+      {audienceMachine && subjectId ? (
+        <MachineAudienceDialog
+          key={audienceMachine.enrollmentId}
+          client={client}
+          workspaceId={workspaceId}
+          machine={audienceMachine}
+          subjectId={subjectId}
+          workspaceAdmin={workspaceAdmin}
+          personalWorkspace={personalWorkspace}
+          open
+          onOpenChange={setAudienceOpen}
+          onChanged={() => void machines.refresh()}
+        />
+      ) : null}
     </ContentPage>
   );
 }
@@ -500,224 +525,4 @@ export function MachineRemovalBlockNotice({
       <p className="mt-2">{result.action}</p>
     </Notice>
   );
-}
-
-type EnrollToken = { value: string; expiresAt: string; expiresInSeconds: number };
-
-/**
- * The enroll dialog body. The PRIMARY path is zero-click: it mints a short-lived
- * enroll token (the `oget_` SECRET) on open and renders the install one-liner
- * that bakes it in — running that command enrolls the machine with no approval
- * step. An "Allow screen control" checkbox bakes the screen-control consent into
- * the minted token (toggling re-mints). The interactive device-flow approve is
- * kept as a SECONDARY "Approve manually instead" option (it is not required to
- * grant screen control — the checkbox above already covers that).
- */
-function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin: string }) {
-  const { client } = useAppContext();
-  const [mode, setMode] = useState<"token" | "manual">("token");
-  const [allowScreenControl, setAllowScreenControl] = useState(false);
-  const [token, setToken] = useState<EnrollToken | null>(null);
-  const [minting, setMinting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  // Only the latest mint may apply its result — guards against an out-of-order
-  // resolve when the user toggles screen control faster than the round-trip.
-  const mintSeq = useRef(0);
-
-  const mint = useCallback(
-    async (screenControl: boolean) => {
-      const seq = ++mintSeq.current;
-      setMinting(true);
-      setError(null);
-      try {
-        const result = await client.mintEnrollToken(workspaceId, {
-          allowScreenControl: screenControl,
-        });
-        if (seq !== mintSeq.current) {
-          return;
-        }
-        setToken({
-          value: result.token,
-          expiresAt: result.expiresAt,
-          expiresInSeconds: result.expiresInSeconds,
-        });
-        setCopied(false);
-      } catch (err) {
-        if (seq !== mintSeq.current) {
-          return;
-        }
-        const message = userErrorText(err);
-        setError(message);
-        setToken(null);
-        toast.error("Could not create a connect command", { description: message });
-      } finally {
-        if (seq === mintSeq.current) {
-          setMinting(false);
-        }
-      }
-    },
-    [client, workspaceId],
-  );
-
-  // Mint on open and re-mint whenever the screen-control consent flips so the
-  // baked-in token always matches the checkbox.
-  useEffect(() => {
-    void mint(allowScreenControl);
-  }, [mint, allowScreenControl]);
-
-  const command = token ? installOneLiner(origin, { enrollToken: token.value }) : "";
-
-  function copyCommand() {
-    if (!command) {
-      return;
-    }
-    void copyToClipboard(command, "Connect command copied").then((ok) => {
-      if (ok) {
-        setCopied(true);
-      }
-    });
-  }
-
-  if (mode === "manual") {
-    const installCommand = installOneLiner(origin, { workspaceId });
-    const verificationUri = deviceVerificationUri(origin);
-    return (
-      <div className="flex flex-col gap-3">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="-ml-1 w-fit text-fg-muted"
-          onClick={() => setMode("token")}
-        >
-          <ArrowLeftIcon className="size-4" />
-          Back to one-command setup
-        </Button>
-        <EnrollmentDeviceFlow
-          // The agent mints the real code via the device-flow start; until the
-          // user runs the one-liner this panel shows the install step + where to
-          // approve. (A live code arrives once the agent calls /enrollments/start.)
-          userCode="——————"
-          verificationUri={verificationUri}
-          installCommand={installCommand}
-          phase={"pending" satisfies DeviceFlowPhase}
-          onCopyInstall={() => void copyToClipboard(installCommand, "Connect command copied")}
-          className="border-0 shadow-none"
-        />
-        <p className="text-center text-2xs text-fg-muted">
-          Screen control is granted on the approval page when you confirm the code.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs leading-4 text-fg-muted">
-        Run this once on the machine. It securely installs or updates the agent, adds this workspace
-        without removing any others, and keeps the machine online in the background.
-      </p>
-
-      <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-xs leading-4 text-fg">
-        <input
-          type="checkbox"
-          className="mt-0.5"
-          checked={allowScreenControl}
-          disabled={minting}
-          onChange={(event) => setAllowScreenControl(event.target.checked)}
-        />
-        <span className="flex flex-col gap-0.5">
-          <span className="flex items-center gap-1.5 font-medium">
-            <MonitorIcon className="size-3.5 text-fg-muted" />
-            Allow screen control
-          </span>
-          <span className="text-2xs text-fg-muted">
-            Let agents view and control this machine&apos;s screen (mouse + keyboard). Leave off for
-            a headless sandbox.
-          </span>
-        </span>
-      </label>
-
-      <Notice tone="waiting" title="Secret — copy it now">
-        This command embeds a one-time token that can connect a machine to this workspace until it
-        expires. Anyone who has it can connect a machine here.
-      </Notice>
-
-      {minting ? (
-        <Notice tone="muted" icon={<Loader2Icon className="size-4 animate-spin" />}>
-          Preparing secure connect command…
-        </Notice>
-      ) : error ? (
-        <Notice
-          tone="failed"
-          title="Could not create a connect command"
-          action={
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void mint(allowScreenControl)}
-            >
-              <TerminalIcon className="size-4" />
-              Try again
-            </Button>
-          }
-        >
-          {error}
-        </Notice>
-      ) : token ? (
-        <>
-          <div className="flex items-center justify-between rounded-md border border-border bg-surface-2/60 px-2.5 py-1.5 text-2xs text-fg-muted">
-            <span>Expires {formatExpiry(token.expiresAt, token.expiresInSeconds)}</span>
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              onClick={() => void mint(allowScreenControl)}
-              disabled={minting}
-            >
-              Regenerate
-            </Button>
-          </div>
-          <div className="rounded-md border border-border bg-bg p-2.5">
-            <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-2xs text-fg">
-              {command}
-            </pre>
-          </div>
-          <Button type="button" size="sm" className="w-full" onClick={copyCommand}>
-            {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
-            {copied ? "Copied" : "Copy connect command"}
-          </Button>
-        </>
-      ) : null}
-
-      <div className="mt-1 border-t border-border pt-3">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="w-full justify-between text-fg-muted"
-          onClick={() => setMode("manual")}
-        >
-          <span className="flex items-center gap-2">
-            <TerminalIcon className="size-4" />
-            Approve manually instead
-          </span>
-          <span className="text-2xs">device flow</span>
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-/** Human-readable expiry from the mint response. Prefers the absolute time and
- * falls back to a relative "in N minutes" when the timestamp is unparseable. */
-function formatExpiry(expiresAt: string, expiresInSeconds: number): string {
-  const at = new Date(expiresAt);
-  if (!Number.isNaN(at.getTime())) {
-    return `at ${at.toLocaleString()}`;
-  }
-  const minutes = Math.max(1, Math.round(expiresInSeconds / 60));
-  return `in ~${minutes} min`;
 }

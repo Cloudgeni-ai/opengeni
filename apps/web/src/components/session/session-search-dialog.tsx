@@ -25,6 +25,7 @@ export default function SessionSearchDialog(props: {
   workspaceId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  returnFocus?: RefObject<HTMLElement | null>;
 }) {
   const { onOpenChange } = props;
   const { client, accessContext } = useAppContext();
@@ -35,6 +36,12 @@ export default function SessionSearchDialog(props: {
   const [mobilePreview, setMobilePreview] = useState(false);
   const [titleCursor, setTitleCursor] = useState<string | undefined>();
   const [previewIndex, setPreviewIndex] = useState(0);
+  const openRef = useRef(props.open);
+  openRef.current = props.open;
+  const restoreFocusOnClose = useRef(true);
+  useEffect(() => {
+    if (props.open) restoreFocusOnClose.current = true;
+  }, [props.open]);
   const resultScroll = useRef(0);
   const previewScroll = useRef(0);
   const scope = JSON.stringify([accessContext.subjectId, props.workspaceId, archiveStatus]);
@@ -165,6 +172,9 @@ export default function SessionSearchDialog(props: {
   const onOpen = useCallback(
     (match?: ConversationSearchMatch) => {
       if (!previewSelection || accessDenied) return;
+      // Result navigation owns the next focus target. Dismissal returns to
+      // the opener; opening a conversation must not steal focus back later.
+      restoreFocusOnClose.current = false;
       onOpenChange(false);
       void navigate({
         to: "/workspaces/$workspaceId/sessions/$sessionId",
@@ -189,6 +199,15 @@ export default function SessionSearchDialog(props: {
       <DialogContent
         className="flex h-[min(760px,85dvh)] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl sm:p-0"
         aria-describedby="session-search-description"
+        onCloseAutoFocus={(event) => {
+          // This controlled dialog is mounted separately from its rail opener,
+          // so Radix has no DialogTrigger ref to restore. A reopened dialog or
+          // a result navigation owns focus independently of this retiring scope.
+          event.preventDefault();
+          if (openRef.current || !restoreFocusOnClose.current) return;
+          const target = props.returnFocus?.current;
+          if (target?.isConnected) target.focus({ preventScroll: true });
+        }}
       >
         <div className="shrink-0 border-b border-border px-4 pb-3 pt-4 pr-12">
           <DialogTitle className="mb-3 text-base">Search sessions</DialogTitle>

@@ -1087,7 +1087,9 @@ export function assembleTranscriptionSegments(
           ).trim(),
     )
     .filter(Boolean)
-    .join("\n\n");
+    // Segments are fixed-length time cuts, not paragraphs: a boundary usually
+    // falls mid-sentence, so a long dictation must read as one continuous text.
+    .join(" ");
   const seen = new Set<string>();
   const combinedLanguages: string[] = [];
   for (const segment of ordered) {

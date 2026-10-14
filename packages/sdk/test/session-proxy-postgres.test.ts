@@ -10,7 +10,12 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../../../apps/api/src/app";
-import { artifactViewerCapability, createSessionProxyHandler, OpenGeniClient } from "../src/index";
+import {
+  artifactViewerCapability,
+  createSessionProxyHandler,
+  OpenGeniClient,
+  type ClientConfig,
+} from "../src/index";
 import { getSessionProxyWorkspaceGrant } from "../src/session-proxy";
 
 // Explicit native opt-in runs the same full-migration/FORCE-RLS fixture as CI.
@@ -22,6 +27,12 @@ const postgresTests =
     ? describe
     : describe.skip;
 const SOURCE = "proxy-postgres:host";
+
+/** The artifact-viewer capability a proxy with `artifacts` enabled reports. */
+function viewerCapability(config: ClientConfig) {
+  if (!config.artifacts) throw new Error("artifacts capability missing");
+  return config.artifacts;
+}
 const PRODUCT = "https://product.example.test/api/opengeni";
 const API = "http://127.0.0.1:8000";
 const VIEWER_PERMISSIONS: Permission[] = [
@@ -164,7 +175,7 @@ describe("session proxy real PostgreSQL", () => {
 
     test("the same proxy refreshes permission epochs and refuses a revoked workspace grant", async () => {
       const f = await fixture();
-      const initial = (await f.browser.getClientConfig()).artifacts!;
+      const initial = viewerCapability(await f.browser.getClientConfig());
       expect((await f.browser.getClientConfig()).artifacts).toEqual(initial);
       const reducedPermissions = VIEWER_PERMISSIONS.filter(
         (permission) => permission !== "artifacts:publish",
@@ -176,7 +187,7 @@ describe("session proxy real PostgreSQL", () => {
         { permissions: reducedPermissions, operationId: crypto.randomUUID() },
       );
       expect(update).toMatchObject({ narrowed: true, replay: false });
-      const refreshed = (await f.browser.getClientConfig()).artifacts!;
+      const refreshed = viewerCapability(await f.browser.getClientConfig());
       expect(refreshed.cachePartition.principalId).toBe(initial.cachePartition.principalId);
       expect(refreshed.cachePartition.authorizationEpoch).not.toBe(
         initial.cachePartition.authorizationEpoch,
@@ -210,7 +221,7 @@ describe("session proxy real PostgreSQL", () => {
 
     test("live organization-key ceiling changes and revocation invalidate a warmed proxy", async () => {
       const f = await fixture();
-      const initial = (await f.browser.getClientConfig()).artifacts!;
+      const initial = viewerCapability(await f.browser.getClientConfig());
       // Key administration is fixture-only SQL; every asserted read still
       // authenticates the real hashed key and resolves the external membership.
       await shared.admin`
@@ -221,7 +232,7 @@ describe("session proxy real PostgreSQL", () => {
         ])}::jsonb where id = ${f.key.id}`;
       const reducedGrant = await getSessionProxyWorkspaceGrant(f.actor, f.workspace.id);
       expect(reducedGrant.permissions).not.toContain("artifacts:publish");
-      const reduced = (await f.browser.getClientConfig()).artifacts!;
+      const reduced = viewerCapability(await f.browser.getClientConfig());
       expect(reduced.cachePartition.authorizationEpoch).not.toBe(
         initial.cachePartition.authorizationEpoch,
       );

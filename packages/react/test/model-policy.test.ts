@@ -5,6 +5,7 @@ import {
   advancedSourceSummary,
   billingClassForModel,
   coerceReasoningEffortForModel,
+  compactModelPill,
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
   payerSummaryForModel,
@@ -37,6 +38,16 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("shows promotional coverage and general credit requirements in model rows", () => {
+    const models = (["promotional", "general", "unavailable"] as const).map((creditFunding) =>
+      catalogModel({ id: creditFunding, label: creditFunding, cost: "credits", creditFunding }),
+    );
+    expect(projectPickerRows(models).map((row) => row.fundingHint)).toEqual([
+      "Free credits",
+      "Uses credits",
+      "Needs credits",
+    ]);
+  });
   test.each([
     {
       name: "free-only with blocked paid",
@@ -63,7 +74,7 @@ describe("model-policy", () => {
       first: "Models",
     },
     {
-      name: "no selectable OpenGeni",
+      name: "no selectable Opengeni",
       paid: false,
       codex: true,
       free: false,
@@ -116,7 +127,7 @@ describe("model-policy", () => {
     ]);
   });
 
-  test("credit notices follow cost policy rather than the OpenGeni group", () => {
+  test("credit notices follow cost policy rather than the Opengeni group", () => {
     for (const cost of ["free", "credits", "workspace", "organization", "subscription"] as const) {
       const model = catalogModel({
         id: "model",
@@ -260,7 +271,48 @@ describe("model-policy", () => {
     expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
   });
 
-  test("groups an anonymous deployment route under OpenGeni without assuming free access", () => {
+  test("keeps workspace and organization Opper billing separate from deployment Opper", () => {
+    const workspaceModel = catalogModel({
+      id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+      label: "Claude Sonnet 4.6 (EU)",
+      provider: "workspace-opper",
+      providerLabel: "Your Opper",
+      cost: "workspace",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+    });
+    const organizationModel = catalogModel({
+      id: "organization-opper/aws/claude-sonnet-4-6-eu",
+      label: "Claude Sonnet 4.6 (EU)",
+      provider: "organization-opper",
+      providerLabel: "Organization Opper",
+      credentialSource: { kind: "organization_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "organization", metering: "external" },
+      cost: "organization",
+    });
+    const deploymentModel = catalogModel({
+      id: "opper/vertexai/gemini-3.8-flash-eu",
+      label: "Gemini 3.8 Flash (EU)",
+      provider: "opper",
+      providerLabel: "Opper",
+      cost: "credits",
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    });
+
+    expect(billingClassForModel(workspaceModel)).toBe("byok");
+    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace Opper account");
+    expect(advancedSourceSummary(workspaceModel)).toBe("Workspace Opper connection");
+    expect(billingClassForModel({ ...workspaceModel, cost: undefined })).toBe("byok");
+    expect(billingClassForModel(organizationModel)).toBe("organization_byok");
+    expect(billingClassForModel({ ...organizationModel, cost: undefined })).toBe(
+      "organization_byok",
+    );
+    expect(payerSummaryForModel(organizationModel)).toBe(
+      "Billed to the organization Opper account",
+    );
+    expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
+  });
+
+  test("groups an anonymous deployment route under Opengeni without assuming free access", () => {
     const model = catalogModel({
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
@@ -407,6 +459,21 @@ describe("model-policy", () => {
     expect(effortOptionsForModel(model)).toEqual(["low", "high", "max"]);
     expect(coerceReasoningEffortForModel(model, "xhigh")).toBe("low");
     expect(billingClassForModel(model)).toBe("opengeni_credits");
+    // The composer pill: compact name, effort only when effort is a choice.
+    expect(compactModelPill([{ ...model, shortLabel: "5.6 Sol" }], model.id, "high")).toEqual({
+      name: "5.6 Sol",
+      effort: "High",
+    });
+    expect(compactModelPill([model], model.id, "low")).toEqual({ name: "Sol", effort: "Low" });
+    const single = {
+      ...model,
+      capabilities: {
+        ...model.capabilities!,
+        reasoning: { ...model.capabilities!.reasoning, efforts: ["low" as const] },
+      },
+    };
+    expect(compactModelPill([single], model.id, "low")).toEqual({ name: "Sol", effort: null });
+    expect(compactModelPill([], "codex/gpt-6-luna", "low").effort).toBeNull();
   });
 
   test("marks blocked models non-selectable in picker rows", () => {
@@ -424,6 +491,24 @@ describe("model-policy", () => {
     ]);
     expect(rows[0]?.selectable).toBe(false);
     expect(rows[0]?.unavailableReason).toBe("Blocked by workspace policy");
+  });
+
+  test("names the credit switch when it is the only reason a model is blocked", () => {
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "paid",
+        label: "Paid",
+        cost: "credits",
+        availability: {
+          status: "unavailable",
+          selectable: false,
+          reason: "credits_disabled",
+          checkedAt: null,
+        },
+      }),
+    ]);
+    expect(rows[0]?.selectable).toBe(false);
+    expect(rows[0]?.unavailableReason).toBe("Opengeni credits off");
   });
 });
 
@@ -450,7 +535,7 @@ describe("model display across connection scopes", () => {
       claude("organization", "claude-opus-4-8"),
       anthropic("workspace", "claude-haiku-4-5-20251001"),
     ]);
-    expect(rows.map((row) => row.label)).toEqual(["Claude Opus 4.8", "Claude Haiku 4.5"]);
+    expect(rows.map((row) => row.label)).toEqual(["Opus 4.8", "Haiku 4.5"]);
   });
 
   test("org- and workspace-connected copies collapse to one row, keeping the selection", () => {
@@ -467,12 +552,37 @@ describe("model display across connection scopes", () => {
     expect(groups[0]!.rows.map((row) => row.id)).toEqual([
       "workspace-claude-subscription/claude-opus-5-5",
     ]);
-    expect(groups[1]!.rows.map((row) => row.label)).toEqual(["Claude Sonnet 4.6"]);
+    expect(groups[1]!.rows.map((row) => row.label)).toEqual(["Sonnet 4.6"]);
   });
 
-  test("Claude rows get a compact family-free label for narrow triggers", () => {
+  test("Claude rows already show the family-free name, with no extra compact label", () => {
     const rows = projectPickerRows([claude("organization", "claude-opus-5-5", "Claude Opus 5.5")]);
-    expect(rows[0]?.shortLabel).toBe("Opus 5.5");
+    expect(rows[0]?.label).toBe("Opus 5.5");
+    expect(rows[0]?.shortLabel).toBeUndefined();
+  });
+
+  test("uncurated long names drop trailing access and stage qualifiers for narrow triggers", () => {
+    const rows = projectPickerRows([
+      catalogModel({
+        id: "opencode/muse-spark-1.3-contributor-free",
+        label: "Muse Spark 1.3 Contributor Free",
+      }),
+      catalogModel({ id: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (Preview)" }),
+      catalogModel({ id: "plain/model", label: "Plain Model 2" }),
+      catalogModel({ id: "only/free", label: "Free" }),
+    ]);
+    const short = (id: string) => rows.find((row) => row.id === id)?.shortLabel;
+    expect(short("opencode/muse-spark-1.3-contributor-free")).toBe("Muse Spark 1.3");
+    expect(short("google/gemini-3.1-pro-preview")).toBe("Gemini 3.1 Pro");
+    expect(short("plain/model")).toBeUndefined();
+    expect(short("only/free")).toBeUndefined();
+    expect(
+      compactModelPill(
+        [catalogModel({ id: "opencode/muse", label: "Muse Spark 1.3 Contributor Free" })],
+        "opencode/muse",
+        null,
+      ).name,
+    ).toBe("Muse Spark 1.3");
   });
 
   test("deployment models with the same name stay separate choices", () => {

@@ -24,6 +24,35 @@ const status = (state: "pending" | "granted", checkout: "open" | "complete" | "e
 });
 
 describe("credit checkout", () => {
+  test("leaving the account during checkout creation closes the blank tab without navigating", async () => {
+    const controller = new AbortController();
+    let finish!: (value: { checkoutSessionId: string; url: string }) => void;
+    const tab = { location: { href: "" }, close: mock(() => undefined) };
+    const navigate = mock(() => undefined);
+    const pending = startCreditCheckout(
+      {
+        createBillingCheckout: () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      } as never,
+      {
+        accountId: "account-a",
+        workspaceId: "workspace-a",
+        promotionCode: "LAUNCH100",
+        tab: tab as unknown as Window,
+        origin: "https://app.test",
+        signal: controller.signal,
+        navigate,
+      },
+    );
+    controller.abort(new Error("account changed"));
+    finish({ checkoutSessionId: "cs_test_1", url: "https://checkout.stripe.test/credits" });
+    await expect(pending).rejects.toThrow("account changed");
+    expect(tab.location.href).toBe("");
+    expect(tab.close).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+  });
   test("a same-tab return keeps Stripe's session placeholder unencoded", () => {
     expect(billingCheckoutReturnUrl("https://app.test", "ws 1", "success")).toBe(
       "https://app.test/workspaces/ws%201/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}",

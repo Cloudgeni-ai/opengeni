@@ -84,13 +84,13 @@ const createDemoSessionInput = z.object({
   runId: z.string().uuid(),
 });
 
-// The browser's only OpenGeni route: the packaged session proxy. It acts as the
+// The browser's only Opengeni route: the packaged session proxy. It acts as the
 // demo user through asUser, pins the configured workspace, and serves only the
 // routes <OpenGeniProvider> and <SessionConversation> use.
 const openGeniProxy = createSessionProxyHandler(openGeni, {
   resolve: async () => {
     if (!apiKey || !workspaceId) {
-      return json({ error: "OpenGeni credentials are not configured." }, 503);
+      return json({ error: "Opengeni credentials are not configured." }, 503);
     }
     await ensureDemoMembership();
     return { workspaceId, user: DEMO_USER.externalId, source: DEMO_USER.source };
@@ -829,7 +829,7 @@ function buildMcpServer(): McpServer {
         ? `Updated ${changes.join(", ")}`
         : "Reviewed ticket; no field changes";
       if (changes.length > 0) {
-        addActivity(ticket, "OpenGeni agent", `${summary}. Reason: ${reason}`);
+        addActivity(ticket, "Opengeni agent", `${summary}. Reason: ${reason}`);
         emit("ticket.updated", summary, ticket.id);
       }
       return toolResult({ ok: true, summary, ticket });
@@ -862,13 +862,13 @@ function buildMcpServer(): McpServer {
       }
       const note = {
         id: crypto.randomUUID(),
-        author: "OpenGeni agent",
+        author: "Opengeni agent",
         authorKind: "agent" as const,
         body,
         createdAt: new Date().toISOString(),
       };
       ticket.notes.unshift(note);
-      addActivity(ticket, "OpenGeni agent", "Added an internal investigation note");
+      addActivity(ticket, "Opengeni agent", "Added an internal investigation note");
       emit("ticket.note_added", "Agent added an internal note", ticket.id);
       return toolResult({ ok: true, note });
     },
@@ -914,6 +914,6 @@ if (import.meta.main) {
   console.log(`Northstar product API  http://127.0.0.1:${productServer.port}/api/demo/health`);
   console.log(`Northstar MCP server   http://127.0.0.1:${mcpServer.port}/mcp`);
   console.log("MCP auth               ", mcpToken ? "configured" : "MISSING");
-  console.log("OpenGeni auth          ", apiKey ? "configured" : "MISSING");
-  console.log("OpenGeni workspace     ", workspaceId || "MISSING");
+  console.log("Opengeni auth          ", apiKey ? "configured" : "MISSING");
+  console.log("Opengeni workspace     ", workspaceId || "MISSING");
 }

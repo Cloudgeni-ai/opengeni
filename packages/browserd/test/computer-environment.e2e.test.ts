@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserActionCommand,
@@ -32,8 +32,8 @@ test.skipIf(!enabled)(
     const firstId = "11111111-1111-4111-8111-111111111111";
     const secondId = "22222222-2222-4222-8222-222222222222";
     const fixtureTitles = new Map([
-      [firstId, "OpenGeni isolated fixture A"],
-      [secondId, "OpenGeni isolated fixture B"],
+      [firstId, "Opengeni isolated fixture A"],
+      [secondId, "Opengeni isolated fixture B"],
     ]);
     const runtimeDirectories = new Map<string, string>();
     const allocator = fixtureAllocator(fixtureTitles, runtimeDirectories);
@@ -191,6 +191,137 @@ test.skipIf(!enabled)(
 );
 
 test.skipIf(!enabled)(
+  "types non-Latin text and passwords into a live Linux GTK entry through native keys",
+  async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-unicode-typing-");
+    const reference = {
+      computerSessionId: "55555555-5555-4555-8555-555555555555",
+      controllerGeneration: "controller-unicode",
+    };
+    const title = "Opengeni Unicode typing fixture";
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      nativeBinaryPath: process.env.OPENGENI_COMPUTER_NATIVE_BINARY!,
+      environmentAllocator: fixtureAllocator(
+        new Map([[reference.computerSessionId, title]]),
+        new Map(),
+      ),
+      maxSessions: 1,
+    });
+    try {
+      await supervisor.createSession(reference);
+      const target = await waitForTarget(supervisor, reference, title);
+      const observation = await supervisor.observe(reference, target.id);
+      const focused = await supervisor.action(
+        semanticCommand(observation, findNode(observation, "Fixture input").ref, "focus"),
+      );
+      expect(focused.state).toBe("completed");
+
+      // Exact-window keyboard delivery. The seat's US layout has none of these
+      // glyphs; the native helper binds them to spare keycodes for the batch.
+      const text = "ÆØÅ–π密";
+      const typed = await supervisor.action({
+        ...screenCommand(reference, focused.observation!.target, {
+          type: "keyboard",
+          action: "type",
+          value: text,
+        }),
+        expectedObservationId: focused.observation!.observationId,
+      });
+      expect(typed).toMatchObject({ state: "completed" });
+      await waitForValue(supervisor, reference, target.id, text);
+      // Native keys leave the seat clipboard untouched.
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: null });
+
+      // Whole-screen keyboard delivery replaces it with a mixed password.
+      const screen = (await supervisor.listTargets(reference)).find(
+        (candidate) => candidate.kind === "screen",
+      );
+      if (!screen) throw new Error("isolated Linux screen target is missing");
+      const password = "pÆss–wørd密π!";
+      for (const action of [
+        { type: "keyboard", action: "press", value: "Control+a" },
+        { type: "keyboard", action: "type", value: password },
+      ] as const) {
+        expect(await supervisor.action(screenCommand(reference, screen, action))).toMatchObject({
+          state: "completed",
+        });
+      }
+      await waitForValue(supervisor, reference, target.id, password);
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: null });
+
+      // More distinct glyphs than the keymap has spare keycodes: the helper
+      // refuses before any key and the driver pastes the text instead, through
+      // the exact window and through the whole screen.
+      const glyphs = Array.from({ length: 248 }, (_, index) =>
+        String.fromCodePoint(0x4e00 + index),
+      ).join("");
+      const screenGlyphs = [...glyphs].reverse().join("");
+      expect(
+        await supervisor.action(
+          screenCommand(reference, screen, {
+            type: "keyboard",
+            action: "press",
+            value: "Control+a",
+          }),
+        ),
+      ).toMatchObject({ state: "completed" });
+      const current = await supervisor.observe(reference, target.id);
+      expect(
+        await supervisor.action({
+          ...screenCommand(reference, current.target, {
+            type: "keyboard",
+            action: "type",
+            value: glyphs,
+          }),
+          expectedObservationId: current.observationId,
+        }),
+      ).toMatchObject({ state: "completed" });
+      await waitForValue(supervisor, reference, target.id, glyphs);
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: glyphs });
+      for (const action of [
+        { type: "keyboard", action: "press", value: "Control+a" },
+        { type: "keyboard", action: "type", value: screenGlyphs },
+      ] as const) {
+        expect(await supervisor.action(screenCommand(reference, screen, action))).toMatchObject({
+          state: "completed",
+        });
+      }
+      await waitForValue(supervisor, reference, target.id, screenGlyphs);
+      expect(await supervisor.clipboard(reference)).toMatchObject({ text: screenGlyphs });
+
+      // Leave the acceptance text visible for the screenshot.
+      expect(
+        await supervisor.action(
+          screenCommand(reference, screen, {
+            type: "keyboard",
+            action: "press",
+            value: "Control+a",
+          }),
+        ),
+      ).toMatchObject({ state: "completed" });
+      expect(
+        await supervisor.action(
+          screenCommand(reference, screen, { type: "keyboard", action: "type", value: text }),
+        ),
+      ).toMatchObject({ state: "completed" });
+      await waitForValue(supervisor, reference, target.id, text);
+
+      const evidence = process.env.OPENGENI_COMPUTER_TYPING_EVIDENCE_DIR;
+      if (evidence) {
+        const frame = await supervisor.capture(reference, target.id);
+        const extension = frame.mediaType === "image/png" ? "png" : "jpg";
+        await writeFile(join(evidence, `computer-session-gtk-entry.${extension}`), frame.data);
+      }
+    } finally {
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!enabled)(
   "shares one live Linux seat clipboard across independent native helpers",
   async () => {
     const allocator = new LinuxVirtualComputerEnvironmentAllocator();
@@ -309,7 +440,7 @@ test.skipIf(!enabled)(
       const nativeBefore = await waitForTargetContaining(
         computer,
         computerReference,
-        "OpenGeni linked Chromium proof",
+        "Opengeni linked Chromium proof",
       );
       expect(nativeBefore.kind).toBe("window");
       expect(nativeBefore.processId).not.toBeNull();
@@ -322,7 +453,7 @@ test.skipIf(!enabled)(
       const nativeAfter = await waitForTargetContaining(
         computer,
         computerReference,
-        "OpenGeni linked Chromium proof changed",
+        "Opengeni linked Chromium proof changed",
       );
       expect(nativeAfter.id).toBe(nativeBefore.id);
       const frameAfter = await computer.capture(computerReference, nativeAfter.id);
@@ -336,7 +467,7 @@ test.skipIf(!enabled)(
       ).toBe(false);
       expect(
         semanticNames(nativeObservation).some((name) =>
-          name.includes("OpenGeni linked Chromium proof changed"),
+          name.includes("Opengeni linked Chromium proof changed"),
         ),
       ).toBe(true);
       const nativePage = await waitForNativeNode(computer, computerReference, "Linked input");
@@ -519,8 +650,8 @@ async function waitForNativeNode(
 
 function browserFixture(): string {
   return `data:text/html,${encodeURIComponent(`<!doctype html>
-    <html><head><title>OpenGeni linked Chromium proof</title></head><body>
-      <button onclick="document.title='OpenGeni linked Chromium proof changed'; document.body.style.background='#36c'; this.textContent='Changed through BrowserSession'">Change page</button>
+    <html><head><title>Opengeni linked Chromium proof</title></head><body>
+      <button onclick="document.title='Opengeni linked Chromium proof changed'; document.body.style.background='#36c'; this.textContent='Changed through BrowserSession'">Change page</button>
       <label>Linked input <input aria-label="Linked input" /></label>
       <button aria-label="Native change" onclick="this.textContent='Changed through ComputerSession'; this.setAttribute('aria-label', 'Changed through ComputerSession')">Native change</button>
     </body></html>`)}`;

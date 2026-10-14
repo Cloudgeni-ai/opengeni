@@ -72,7 +72,8 @@ describe("migration 0344 private visibility transition gate", () => {
       organizationId: accountId,
       actorSubjectId: subjectId,
     });
-    expect(settings).toMatchObject({ enabled: false, available: true, version: 0 });
+    // Only me defaults to enabled since 0611; an explicit enable records it.
+    expect(settings).toMatchObject({ enabled: true, available: true, version: 0 });
     const enabled = await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: accountId,
       actorSubjectId: subjectId,

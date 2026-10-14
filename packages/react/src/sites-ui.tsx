@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type {
   OpenGeniClient,
   WorkspaceArtifact,
-  WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
 } from "@opengeni/sdk";
+import { loadSiteSnapshot, type SiteDisplayContent } from "./site-snapshot";
 import {
   PublishedHtmlArtifactFrame,
   type PublishedHtmlArtifactToolBridge,
@@ -21,62 +21,8 @@ export type SiteClient = Pick<
   | "rollbackWorkspaceArtifact"
   | "setWorkspaceArtifactStatus"
 >;
-type SiteDisplayContent = Pick<
-  WorkspaceArtifactContentResponse,
-  "artifactId" | "versionId" | "html" | "requestedTools"
->;
 type SiteScope = { client: SiteClient; workspaceId: string; className?: string };
-/** Shared native/embedded read boundary: pin content to the observed version,
- * and never accept a response belonging to another workspace or Site. */
-export async function loadSiteSnapshot(
-  client: Pick<SiteClient, "getWorkspaceArtifact" | "getWorkspaceArtifactHtml"> &
-    Partial<Pick<OpenGeniClient, "getWorkspaceArtifactContent">>,
-  workspaceId: string,
-  siteId: string,
-  options: { signal?: AbortSignal; includeArchivedContent?: boolean; versionId?: string } = {},
-): Promise<{
-  detail: WorkspaceArtifactDetailResponse;
-  content: SiteDisplayContent | null;
-}> {
-  const requestOptions = options.signal ? { signal: options.signal } : {};
-  const detail = await client.getWorkspaceArtifact(workspaceId, siteId, requestOptions);
-  options.signal?.throwIfAborted();
-  if (detail.artifact.id !== siteId || detail.artifact.workspaceId !== workspaceId)
-    throw new Error("Site scope mismatch");
-  const selectedVersion = options.versionId
-    ? detail.versions.find((version) => version.id === options.versionId)
-    : detail.artifact.currentVersion;
-  const versionId = options.versionId ?? selectedVersion?.id;
-  let content: SiteDisplayContent | null =
-    selectedVersion &&
-    versionId &&
-    (detail.artifact.status === "active" || options.includeArchivedContent)
-      ? {
-          artifactId: siteId,
-          versionId,
-          requestedTools: selectedVersion!.requestedTools,
-          html: await client.getWorkspaceArtifactHtml(workspaceId, siteId, {
-            ...requestOptions,
-            versionId,
-          }),
-        }
-      : null;
-  if (
-    versionId &&
-    !selectedVersion &&
-    (detail.artifact.status === "active" || options.includeArchivedContent)
-  ) {
-    if (!client.getWorkspaceArtifactContent) throw new Error("Site version unavailable");
-    content = await client.getWorkspaceArtifactContent(workspaceId, siteId, {
-      ...requestOptions,
-      versionId,
-    });
-  }
-  options.signal?.throwIfAborted();
-  if (content && (content.artifactId !== siteId || content.versionId !== versionId))
-    throw new Error("Site content mismatch");
-  return { detail: structuredClone(detail), content: content ? structuredClone(content) : null };
-}
+export { loadSiteSnapshot };
 export type SiteListProps = SiteScope & {
   status?: "active" | "archived";
   onOpen: (site: WorkspaceArtifact) => void;

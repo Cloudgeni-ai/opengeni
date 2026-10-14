@@ -12,6 +12,7 @@ import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { useAppContext } from "@/context";
 import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
+import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
   apiErrorAdvice,
@@ -218,6 +219,15 @@ function BillingOverview({
     void refresh();
   }, [workspaceId, refresh]);
 
+  useEffect(() => {
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ accountId: string }>).detail.accountId === accountId)
+        void refreshBilling();
+    };
+    window.addEventListener(CREDIT_BALANCE_CHANGED, changed);
+    return () => window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
+  }, [accountId, refreshBilling]);
+
   async function startCheckout(amountUsd: number) {
     const operation = claimBillingOperation("billing", "mutation");
     setBusyOwnerKey(identityKey);
@@ -301,7 +311,7 @@ function BillingOverview({
               <SettingRowGroup>
                 <SettingRow
                   label="Add credits"
-                  description="Minimum $5.00. You can also enter a promotion code in Stripe Checkout."
+                  description="For models and platform usage. Minimum $5."
                   controlWidth="auto"
                   control={
                     <div className="flex items-center gap-2">
@@ -339,8 +349,8 @@ function BillingOverview({
                 />
                 {accountId ? (
                   <SettingRow
-                    label="Redeem a coupon"
-                    description="A fixed-amount code adds exactly its value. Stripe opens in a new tab with the code applied."
+                    label="Promo code"
+                    description="Opens Stripe to confirm your code."
                     controlWidth="auto"
                     control={
                       <CouponRedeem
@@ -351,7 +361,6 @@ function BillingOverview({
                         disabled={visibleBusy}
                         onGranted={(status) => {
                           setRedeemed(status);
-                          void refreshBilling();
                         }}
                       />
                     }

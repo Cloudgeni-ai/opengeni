@@ -10,7 +10,7 @@ function status(installationIds: number[]): GitHubAppInfo {
     setupMode: "platform",
     status: installationIds.length > 0 ? "bound" : "unbound",
     appSlug: "opengeni",
-    appName: "OpenGeni",
+    appName: "Opengeni",
     installUrl: null,
     linkUrl: null,
     installations: installationIds.map((installationId) => ({

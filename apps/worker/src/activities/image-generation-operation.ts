@@ -36,7 +36,7 @@ export class ImageGenerationRetentionFailedError extends Error {
     cause?: unknown,
   ) {
     super(
-      "The image was generated, but OpenGeni could not save it. The paid provider request was not repeated.",
+      "The image was generated, but Opengeni could not save it. The paid provider request was not repeated.",
       cause === undefined ? undefined : { cause },
     );
     this.name = "ImageGenerationRetentionFailedError";

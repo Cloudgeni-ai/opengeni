@@ -1,16 +1,16 @@
 import type { SVGProps } from "react";
-import { OpenRouterMark } from "@opengeni/react";
+import { OpenRouterMark, OpperMark } from "@opengeni/react";
 
 import { ChatGptMark } from "@/components/chatgpt-mark";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 
 /* ----------------------------------------------------------------------------
    Provider marks for the Models page preview. The ChatGPT mark is the app's
-   own; Vercel is the plain triangle; OpenRouter uses its brand mark.
+   own; Vercel is the plain triangle; OpenRouter and Opper use their brand marks.
    All draw in currentColor, so they follow the theme.
    -------------------------------------------------------------------------- */
 
-export type ProviderId = "codex" | "vercel" | "openrouter";
+export type ProviderId = "codex" | "vercel" | "openrouter" | "opper";
 
 function VercelMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -29,6 +29,7 @@ export function ProviderMark({
 }) {
   if (provider === "codex") return <ChatGptMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
+  if (provider === "opper") return <OpperMark className={className} />;
   return <OpenRouterMark className={className} />;
 }
 

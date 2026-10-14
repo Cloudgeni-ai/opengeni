@@ -5,7 +5,7 @@ import { atlassianKnowledgeSourceIdentity, inventoryAtlassianSource } from "../s
 const source: AtlassianSelectedSource = {
   id: "confluence_space:cloud-1:20000",
   cloudId: "cloud-1",
-  siteName: "OpenGeni Lab",
+  siteName: "Opengeni Lab",
   siteUrl: "https://opengeni-lab.atlassian.net",
   resourceId: "20000",
   key: "SD",

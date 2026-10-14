@@ -29,20 +29,24 @@ describe("completed turn physical finalization", () => {
   for (const [mode, stage] of [
     ["writers", "tool_writers"],
     ["snapshot", "workspace_snapshot"],
+    ["claude-observations", "provider_leases"],
+    ["claude-observations-cancelled", "provider_leases"],
   ]) {
-    test(`drains before host exit when a completed turn stays stuck in ${stage}`, async () => {
+    test(`drains before host exit for ${mode} stuck in ${stage}`, async () => {
       const result = await finalize(mode!);
       expect(result.stderr).toBe("");
       expect(result.code).toBe(1);
       expect(result.stdout).toContain('"phase":"finalizing"');
       expect(result.stdout).toContain('"opAcks":{"settled_op":"42"}');
       expect(result.stdout).toContain(`"reason":"${stage}"`);
+      expect(result.stdout).toMatch(/"correlationId":"turn_[0-9a-f]{32}"/);
       expect(result.stdout).toContain("graceful_drain_requested");
       expect(result.stdout).toContain("host_exit_backstop");
       expect(result.stdout.indexOf("graceful_drain_requested")).toBeLessThan(
         result.stdout.indexOf("host_exit_backstop"),
       );
       expect(result.stdout).not.toContain("finalizer_returned");
+      expect(result.stdout).not.toContain("claude_lease_released");
       expect(result.stdout).not.toContain("worker_activity");
     }, 30_000);
   }

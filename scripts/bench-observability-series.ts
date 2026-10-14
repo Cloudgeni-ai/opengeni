@@ -27,7 +27,7 @@ export const AUTOMATIC_SCRAPE_METRICS = new Set([
   "scrape_series_added",
 ]);
 
-// The matching target exists for one OpenGeni alert: logical turn-queue age.
+// The matching target exists for one Opengeni alert: logical turn-queue age.
 // Count is retained alongside age for diagnosis; the generic Temporal server
 // telemetry is intentionally outside this narrowly owned ServiceMonitor.
 export const TEMPORAL_MATCHING_METRICS = new Set([

@@ -1,4 +1,4 @@
 interface:
-  display_name: "OpenGeni Client"
-  short_description: "Developer guide for tenant-safe OpenGeni SDK and UI integration; not runtime instructions."
-  default_prompt: "Integrate my product with OpenGeni, defaulting to the full SessionConversation embed behind the packaged SDK session proxy. Keep standing credentials server-side, choose organization vs workspace key vs delegated token explicitly, map each external tenant to an organization workspace without Personal-workspace fallback, and pass product-owned Skills inline per session."
+  display_name: "Opengeni Client"
+  short_description: "Developer guide for adding Opengeni agents to a product; not runtime instructions."
+  default_prompt: "Add Opengeni agents to my product: OpenGeniChat behind one createSessionProxyHandler route, with the API key kept on the server, workspaces per tenant, and the product's own tools acting as the signed-in user."

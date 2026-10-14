@@ -20,7 +20,11 @@ import {
 import { buildTimeline, type TimelineItem } from "../src/timeline";
 import { timelineQuestionPlacement } from "../src/timeline/projection";
 import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
-import { SESSION_EVENT_TYPES } from "@opengeni/sdk";
+import {
+  SESSION_EVENT_TYPES,
+  streamSessionEvents,
+  type SessionEventStreamTransport,
+} from "@opengeni/sdk";
 import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
@@ -1061,7 +1065,202 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
-  test("a second older page survives the stream reconnect caused by the first", async () => {
+  test("paginating older history never reopens the live stream and keeps live events exact", async () => {
+    const store = Array.from({ length: 4_000 }, (_, i) => event(i + 1));
+    const live: SessionEvent[] = [];
+    let wakeLive: (() => void) | null = null;
+    const push = (item: SessionEvent) => {
+      store.push(item);
+      live.push(item);
+      wakeLive?.();
+    };
+    let releaseOlder: (() => void) | null = null;
+    const streamCalls: number[] = [];
+    const streamSignals: AbortSignal[] = [];
+    const states: string[] = [];
+    const client = fakeClient({
+      listEvents: async (_workspaceId, _sessionId, options = {}) => {
+        const page = listPage(store, options);
+        if (options.before !== undefined && options.before !== Number.MAX_SAFE_INTEGER) {
+          await new Promise<void>((resolve) => {
+            releaseOlder = resolve;
+          });
+        }
+        return page;
+      },
+      streamEvents: (_workspaceId, _sessionId, options = {}) => {
+        streamCalls.push(options.after ?? 0);
+        const signal = options.signal!;
+        streamSignals.push(signal);
+        let cursor = options.after ?? 0;
+        return (async function* () {
+          options.onStateChange?.("connecting");
+          options.onOpen?.();
+          options.onStateChange?.("live");
+          while (!signal.aborted) {
+            const next = live.find((item) => item.sequence > cursor);
+            if (next) {
+              cursor = next.sequence;
+              yield next;
+              continue;
+            }
+            await new Promise<void>((resolve) => {
+              wakeLive = resolve;
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          }
+        })();
+      },
+    });
+    const hook = await renderHook(() => {
+      const result = useSessionEvents(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
+      states.push(result.connectionState);
+      return result;
+    }, undefined);
+    await flush(20);
+    expect(streamCalls).toEqual([4_000]);
+    expect(hook.result.current.connectionState).toBe("live");
+    const statesAfterOpen = states.length;
+
+    for (let page = 0; page < 2; page += 1) {
+      let receipt!: ReturnType<typeof hook.result.current.loadOlder>;
+      await actRun(async () => {
+        receipt = hook.result.current.loadOlder();
+      });
+      await flush(5);
+      // A live event lands while the older page is in flight, and another
+      // after it is published: both must render once, in order.
+      const base = store.length;
+      await actRun(async () => push(event(base + 1)));
+      await flush(5);
+      await actRun(async () => {
+        releaseOlder?.();
+        await receipt;
+      });
+      await flush(5);
+      await actRun(async () => push(event(base + 2)));
+      await flush(20);
+      expect(receipt.committed).toBe(true);
+    }
+
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(sequences.at(-1)).toBe(4_004);
+    expect(sequences[0]).toBeLessThan(3_001);
+    for (let index = 1; index < sequences.length; index += 1) {
+      expect(sequences[index]).toBe(sequences[index - 1]! + 1);
+    }
+    expect(streamCalls).toEqual([4_000]);
+    expect(streamSignals[0]!.aborted).toBe(false);
+    expect(states.slice(statesAfterOpen).every((state) => state === "live")).toBe(true);
+    expect(hook.result.current.hasNewer).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a real SSE reconnect resumes from the last sequence without clearing, duplicating, or skipping rows", async () => {
+    const store = Array.from({ length: 1_500 }, (_, i) => event(i + 1));
+    const encoder = new TextEncoder();
+    const sse = (items: SessionEvent[]) =>
+      items
+        .map(
+          (item) => `id: ${item.sequence}\nevent: ${item.type}\ndata: ${JSON.stringify(item)}\n\n`,
+        )
+        .join("");
+    const opened: number[] = [];
+    let pushLive: ((items: SessionEvent[]) => void) | null = null;
+    const transport: SessionEventStreamTransport = {
+      openStream: async (after, signal) => {
+        opened.push(after);
+        if (opened.length === 1) {
+          // The first connection delivers two rows, then the server drops it.
+          const rows = [event(1_501), event(1_502)];
+          store.push(...rows);
+          let sent = false;
+          return new ReadableStream<Uint8Array>({
+            pull: (controller) => {
+              if (sent) {
+                controller.close();
+                return;
+              }
+              sent = true;
+              controller.enqueue(encoder.encode(sse(rows)));
+            },
+          });
+        }
+        // The replacement replays an overlap (already-seen rows) before new
+        // rows, then stays open for live delivery.
+        let controllerRef!: ReadableStreamDefaultController<Uint8Array>;
+        return new ReadableStream<Uint8Array>({
+          start: (controller) => {
+            controllerRef = controller;
+            controller.enqueue(encoder.encode(sse(store.filter((item) => item.sequence > 1_500))));
+            pushLive = (items) => {
+              store.push(...items);
+              controllerRef.enqueue(encoder.encode(sse(items)));
+            };
+            signal?.addEventListener(
+              "abort",
+              () => controllerRef.error(new DOMException("aborted", "AbortError")),
+              {
+                once: true,
+              },
+            );
+          },
+        });
+      },
+      listEvents: async (after, limit) =>
+        store.filter((item) => item.sequence > after).slice(0, limit),
+    };
+    const client = fakeClient({
+      listEvents: async (_workspaceId, _sessionId, options = {}) => listPage(store, options),
+      streamEvents: (_workspaceId, _sessionId, options = {}) =>
+        streamSessionEvents(transport, {
+          ...options,
+          reconnectDelayMs: 1,
+          maxReconnectDelayMs: 2,
+          reconnectJitterRatio: 0,
+        }),
+    });
+    const states: string[] = [];
+    const renderedCounts: number[] = [];
+    const hook = await renderHook(() => {
+      const result = useSessionEvents(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
+      states.push(result.connectionState);
+      if (!result.initialLoading) renderedCounts.push(result.events.length);
+      return result;
+    }, undefined);
+    await flush(40);
+    expect(opened).toEqual([1_500, 1_502]);
+    expect(hook.result.current.connectionState).toBe("live");
+
+    await actRun(async () => pushLive?.([event(1_503), event(1_504)]));
+    await flush(20);
+
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(sequences.at(-1)).toBe(1_504);
+    for (let index = 1; index < sequences.length; index += 1) {
+      expect(sequences[index]).toBe(sequences[index - 1]! + 1);
+    }
+    expect(hook.result.current.lastSequence).toBe(1_504);
+    // Rendered content never shrinks (no clear/flash back to an empty or
+    // shorter timeline) across the reconnect.
+    for (let index = 1; index < renderedCounts.length; index += 1) {
+      expect(renderedCounts[index]!).toBeGreaterThanOrEqual(renderedCounts[index - 1]!);
+    }
+    expect(renderedCounts.every((count) => count > 0)).toBe(true);
+    // The reconnect (opened twice above) never reports a fresh connect or idle.
+    const firstLive = states.indexOf("live");
+    expect(states.slice(firstLive)).not.toContain("connecting");
+    expect(states.slice(firstLive)).not.toContain("idle");
+    await hook.unmount();
+  });
+
+  test("a second older page loads while the first page's live stream stays open", async () => {
     const store = Array.from({ length: 4000 }, (_, i) => event(i + 1));
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -1088,7 +1287,7 @@ describe("useSessionEvents", () => {
       second = hook.result.current.loadOlder();
     });
     await flush(20);
-    expect(streamCalls.length).toBeGreaterThan(initialStreams);
+    expect(streamCalls.length).toBe(initialStreams);
     expect(hook.result.current.loadingOlder).toBe(true);
     const previousOldest = hook.result.current.events[0]!.sequence;
     release();
@@ -2352,6 +2551,7 @@ describe("useSessionEvents", () => {
     const throughLive = [...historical, event(SESSION_EVENT_BROWSER_MAX_COUNT + 52)];
     const listCalls: ListOptions[] = [];
     const streamCalls: number[] = [];
+    const streamSignals: AbortSignal[] = [];
     let connection = 0;
     const client = fakeClient({
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
@@ -2361,6 +2561,7 @@ describe("useSessionEvents", () => {
       streamEvents: (_workspaceId, _sessionId, options = {}) => {
         const after = options.after ?? 0;
         streamCalls.push(after);
+        streamSignals.push(options.signal!);
         connection += 1;
         const source = connection === 1 ? historical : throughLive;
         return (async function* () {
@@ -2430,6 +2631,9 @@ describe("useSessionEvents", () => {
     // The backward page keeps the nearest 32 complete groups. Reopening live
     // SSE here would newest-bound the browser window and evict them again.
     expect(streamCalls).toEqual([0]);
+    // Leaving the live tip is the one prepend that closes the live iterator.
+    expect(streamSignals[0]!.aborted).toBe(true);
+    expect(hook.result.current.connectionState).toBe("idle");
     expect(hook.result.current.events[0]?.sequence).toBe(20);
     expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 19);
     expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);

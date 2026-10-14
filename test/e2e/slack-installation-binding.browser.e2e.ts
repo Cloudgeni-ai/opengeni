@@ -156,6 +156,8 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
         headers: { "x-opengeni-api-contract": apiContractRevision },
         body: JSON.stringify(body),
       });
+    if (url.pathname === "/v1/inbox" && request.method() === "GET")
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
     if (url.pathname.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
     if (url.pathname === "/v1/config/client") {
       return json({
@@ -324,7 +326,7 @@ function slackConnection(status: ConnectionStatus) {
       slackTeamName: "Slack Binding Team",
       botId: "B_BINDING_BROWSER",
       botUserId: "U_BINDING_BROWSER",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "binding-browser-subject",
@@ -348,7 +350,7 @@ function slackBinding(state: "active" | "quarantined") {
     slackTeamName: "Slack Binding Team",
     botId: "B_BINDING_BROWSER",
     botUserId: "U_BINDING_BROWSER",
-    botDisplayName: "OpenGeni",
+    botDisplayName: "Opengeni",
     state,
     quarantineReason: state === "quarantined" ? "legacy_conflicting_installations" : null,
     version: 3,

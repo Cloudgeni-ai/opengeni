@@ -175,6 +175,25 @@ describe("handleAuthorizationRequest", () => {
     expect(res.error).toMatch(/missing/i);
   });
 
+  test("every connect decision is counted by outcome and closed reason", async () => {
+    const counted: Array<Record<string, string>> = [];
+    const observed = {
+      ...deps(),
+      observability: {
+        warn: () => undefined,
+        incrementCounter: (input: { name: string; labels: Record<string, string> }) => {
+          if (input.name === "opengeni_machine_connect_total") counted.push(input.labels);
+        },
+      } as never,
+    };
+    await handleAuthorizationRequest(observed, authRequest(undefined));
+    await handleAuthorizationRequest(observed, authRequest("oge_garbage.sig"));
+    expect(counted).toEqual([
+      { outcome: "denied", reason: "missing_bearer" },
+      { outcome: "denied", reason: "invalid_bearer" },
+    ]);
+  });
+
   test("an INVALID bearer (bad signature) is denied", async () => {
     const out = await handleAuthorizationRequest(deps(), authRequest("oge_garbage.sig"));
     const res = readResponse(out);

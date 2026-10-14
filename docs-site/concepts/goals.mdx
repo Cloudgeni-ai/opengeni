@@ -1,55 +1,32 @@
 ---
 title: "Goals"
-description: "Keep a session working until the job is actually done."
+description: "Keep a session working until the job is done."
 icon: "bullseye"
 ---
 
-Agents stop early. A **goal** flips the default: while a session's goal is active, finishing a turn does not end the work. OpenGeni records a durable obligation to continue, and the agent's next turn starts from "your goal is not done: keep working, or explicitly complete or pause it."
+Agents tend to stop early. While a session has an active **goal**, finishing a turn doesn't end the work: the next turn starts with "your goal is not done; keep working, or complete or pause it."
 
 ## Lifecycle
 
 A goal is `active`, `paused`, or `completed`.
 
-- **Set** it when creating a session, from a scheduled task, or from inside the run with the agent's `goal_set` tool. A goal carries an objective and success criteria.
-- **Complete** is explicit: the agent calls `goal_complete` with evidence.
-- **Pause** holds the goal with a rationale: the agent's `goal_pause`, a user pause, an API call, or a budget or admission limit. Any pause is resumable with `goal_resume`. The agent resumes a paused goal when you ask it to continue, or when the blocker it paused for clears; a question gets an answer, not a resume.
-- **Clear** removes the goal. The session stays usable as an ordinary session.
+- **Set** it when creating a session, from a scheduled task, or from inside the run with the agent's `goal_set` tool. A goal has an objective and success criteria.
+- **Complete** it explicitly: the agent calls `goal_complete` with evidence.
+- **Pause** it with a reason, from the agent (`goal_pause`), a user, the API, or a budget limit. Resume with `goal_resume`, or ask the agent to continue.
+- **Clear** it to turn the session back into an ordinary one.
 
-Pausing the session (the workstream) is separate from pausing the goal: it holds inference without changing goal state.
+Pausing the session is separate from pausing its goal.
 
-Continuation keeps the session's effective model, reasoning effort, and speed.
-If that model is retired, unavailable, or disallowed, the goal pauses with an
-explanation; choose an available model before resuming. Failed sessions keep
-their goal for explicit recovery before work continues.
+Continuations keep the session's model, reasoning effort, and speed. If that model becomes unavailable, the goal pauses until you pick another.
 
 ## Reports
 
-The agent answers in chat by default, including summaries and reports. It
-creates a native document Artifact when you ask for a document or file, or when
-the result is large or clearly meant to be kept or shared, such as a Knowledge
-organization audit you want to keep. It then replies with a short summary and
-the link. Inside a goal, the agent declares the document before authoring,
-creates it through the Documents Skill, inspects the relevant content after its
-final edit, and provides the artifact reference in its handoff.
+When a goal promises a report, the agent must deliver it as a document Artifact before the goal can complete. Ordinary answers and progress updates stay in chat.
 
-Declared report requirements must have verified artifact delivery evidence before
-the goal can complete. A sandbox link or a claim that the document was inspected
-does not satisfy that requirement. If artifact tooling or access fails, delivery
-remains incomplete and the agent explains the blocker.
+## How long runs are bounded
 
-Ordinary chat answers, progress updates, internal worker findings, source-code
-links, and explicitly requested local-file work do not require report artifacts.
-
-## No run-length caps by design
-
-OpenGeni runs agents that legitimately work for days. There is no default cap on model calls per turn or on continuation count. What bounds a run is policy and intent: budget and admission limits, explicit goal completion or pause, and human interrupts.
-
-Consecutive continuations that consumed no new input are paced with a growing delay (seconds to minutes) rather than a cap. Any new external input, such as a human message, a child result, or a scheduled occurrence, resumes a pacing pause immediately.
-
-## What the agent sees
-
-The exact goal snapshot accepted for a turn is attached to that turn's newest user-facing input, never to a mutable instruction prefix. Recovery replays the same authority, and later goal edits apply from the next turn.
+Agents can work for days, so there is no default cap on model calls or continuations. Runs end when the goal completes or pauses, a budget limit is hit, or a person interrupts. Continuations that receive no new input are spaced out with a growing delay; any new input, such as a message or a child result, resumes immediately.
 
 ## Controlling goals
 
-Humans and API clients read, pause, resume, and clear a session's goal through the session goal routes and the SDK. See the repository's [goals document](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/goals.md) for the full contract.
+Read, pause, resume, and clear a session's goal through the session goal routes and the SDK. See the [goals document](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/goals.md) for the full contract.

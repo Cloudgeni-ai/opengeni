@@ -8,7 +8,10 @@ const client = new OpenGeniClient({
 });
 const source = required("HOST_IDENTITY_SOURCE");
 const { workspace } = await client.ensureWorkspace({
-  accountId: required("OPENGENI_ORGANIZATION_ID"),
+  // An organization API key implies its organization; set this only for other keys.
+  ...(process.env.OPENGENI_ORGANIZATION_ID?.trim()
+    ? { accountId: process.env.OPENGENI_ORGANIZATION_ID.trim() }
+    : {}),
   externalSource: source,
   externalId: required("HOST_TENANT_ID"),
   name: "Harbor hotel",

@@ -7,6 +7,9 @@ import {
   isOpenGeniSiteBridgeConnectMessage,
   isOpenGeniSiteBridgeRequestMessage,
   sanitizeOpenGeniSiteToolCallRequest,
+  sanitizeOpenGeniSiteToolInvokeRequest,
+  type OpenGeniSiteBridgeReadyMessage,
+  type OpenGeniSiteBridgeRequestMessage,
   isSiteHttpRequest,
   serveSiteHttp,
   type SiteHttpRequest,
@@ -17,6 +20,10 @@ import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
   ToolGatewayDeclarationsResponse,
+  ToolGatewayResolveRequest,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
 } from "@opengeni/sdk";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
@@ -44,7 +51,17 @@ export type PublishedHtmlArtifactFrameProps = {
 };
 
 export type PublishedHtmlArtifactToolBridge = {
+  resolve?: (
+    request: ToolGatewayResolveRequest,
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewayResolvedTool>;
+  invoke?: (
+    request: ToolGatewayInvokeRequest,
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewayInvokeResponse>;
   fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
+  /** Advertise Site Data: `fetch` forwards `published-artifacts/current` routes to the pinned Site. */
+  siteData?: boolean;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -52,6 +69,18 @@ export type PublishedHtmlArtifactToolBridge = {
   ) => Promise<ToolGatewayCallResponse>;
   declarations?: (options: { signal: AbortSignal }) => Promise<ToolGatewayDeclarationsResponse>;
 };
+
+/** Capabilities the host advertises when a Site connects; Sites never ask for more. */
+export function siteBridgeReadyMessage(
+  bridge: PublishedHtmlArtifactToolBridge | undefined,
+): OpenGeniSiteBridgeReadyMessage {
+  return {
+    type: OPENGENI_SITE_BRIDGE_READY,
+    version: OPENGENI_SITE_BRIDGE_VERSION,
+    ...(bridge?.resolve && bridge?.invoke ? { targetTools: 1 as const } : {}),
+    ...(bridge?.fetch && bridge.siteData ? { siteData: 1 as const } : {}),
+  };
+}
 
 const SITE_BRIDGE_BOOTSTRAP_SCRIPT = `<script>(()=>{const key=${JSON.stringify(
   OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
@@ -186,7 +215,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
                 version: OPENGENI_SITE_BRIDGE_VERSION,
                 requestId: message.requestId,
                 ok: false,
-                error: siteBridgeError(error),
+                error: siteBridgeError(error, message.method === "call"),
               } satisfies OpenGeniSiteBridgeResponseMessage);
             }
           })
@@ -194,10 +223,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       });
       port.addEventListener("messageerror", () => requests.closePort(port));
       port.start();
-      port.postMessage({
-        type: OPENGENI_SITE_BRIDGE_READY,
-        version: OPENGENI_SITE_BRIDGE_VERSION,
-      });
+      port.postMessage(siteBridgeReadyMessage(bridgeRef.current));
     };
     const documentLease = new SiteBridgeDocumentLease(attachToolPort, () => requests.closeAll());
     const onFrameLoad = () => {
@@ -331,16 +357,26 @@ export function openGeniSiteBridgePortFromBootstrap(
   return ports.length === 1 ? ports[0]! : null;
 }
 
-async function handleSiteBridgeRequest(
+export async function handleSiteBridgeRequest(
   bridge: PublishedHtmlArtifactToolBridge | undefined,
-  message: Parameters<typeof isOpenGeniSiteBridgeRequestMessage>[0] & {
-    method: "catalog" | "call" | "declarations";
-    requestId: string;
-    payload?: ToolGatewayCallRequest;
-  },
+  message: OpenGeniSiteBridgeRequestMessage,
   signal: AbortSignal,
-): Promise<OpenGeniSiteToolCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse> {
+): Promise<
+  | OpenGeniSiteToolCatalog
+  | ToolGatewayCallResponse
+  | ToolGatewayDeclarationsResponse
+  | ToolGatewayResolvedTool
+  | ToolGatewayInvokeResponse
+> {
   if (!bridge) throw new Error("Site tool bridge is unavailable");
+  if (message.method === "resolve") {
+    if (!bridge.resolve) throw new Error("Targeted Site tools are unavailable");
+    return await bridge.resolve({ target: message.payload.target }, { signal });
+  }
+  if (message.method === "invoke") {
+    if (!bridge.invoke) throw new Error("Targeted Site tools are unavailable");
+    return await bridge.invoke(sanitizeOpenGeniSiteToolInvokeRequest(message.payload), { signal });
+  }
   if (message.method === "catalog") return await bridge.catalog({ signal });
   if (message.method === "declarations") {
     if (!bridge.declarations) throw new Error("Site tool declarations are unavailable");
@@ -349,7 +385,10 @@ async function handleSiteBridgeRequest(
   return await bridge.call(sanitizeOpenGeniSiteToolCallRequest(message.payload!), { signal });
 }
 
-export function siteBridgeError(error: unknown): {
+export function siteBridgeError(
+  error: unknown,
+  legacyCall = false,
+): {
   code: string;
   message: string;
   retryable: boolean;
@@ -360,11 +399,29 @@ export function siteBridgeError(error: unknown): {
     message?: unknown;
     retryable?: unknown;
     outcomeUnknown?: unknown;
+    details?: { code?: unknown };
   };
+  const nestedCode = candidate?.details?.code;
+  const knownPreexecution = candidate?.retryable === true && candidate?.outcomeUnknown === false;
+  const stale =
+    knownPreexecution && (nestedCode === "tool_definition_stale" || nestedCode === "catalog_stale");
+  // Historical saved bundles inspect code alone. A stale-named transport error
+  // without known pre-execution proof must remain an error, not invite replay.
+  const unsafeControl =
+    legacyCall &&
+    !knownPreexecution &&
+    (candidate?.code === "catalog_stale" || candidate?.code === "tool_definition_stale");
+  const message =
+    typeof candidate?.message === "string" ? candidate.message : "Site tool request failed";
   return {
-    code: typeof candidate?.code === "string" ? candidate.code : "site_tool_call_failed",
-    message:
-      typeof candidate?.message === "string" ? candidate.message : "Site tool request failed",
+    code: stale
+      ? nestedCode
+      : unsafeControl
+        ? "site_tool_call_failed"
+        : typeof candidate?.code === "string"
+          ? candidate.code
+          : "site_tool_call_failed",
+    message: unsafeControl ? `[${candidate.code}] ${message}` : message,
     retryable: candidate?.retryable === true,
     outcomeUnknown: candidate?.outcomeUnknown === true,
   };

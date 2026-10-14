@@ -29,6 +29,8 @@ export type ExtensionDevice = {
   platform: ExtensionPlatform;
   architecture: ExtensionArchitecture;
   connectionGeneration: string;
+  /** Stable for this extension worker's lifetime, across native reconnects. */
+  stateGeneration: string;
   inventoryRevision: number;
   capabilities: {
     tabInventory: true;
@@ -55,6 +57,7 @@ export type ExtensionInventory = {
   deviceId: string;
   connectionGeneration: string;
   inventoryRevision: number;
+  profile?: { profileLabel: string | null };
   tabs: AttachedTab[];
 };
 
@@ -112,6 +115,26 @@ export type ExtensionCommandResult = {
     retryable: boolean;
   };
 };
+
+const DEBUGGER_DOMAINS = new Set([
+  "Accessibility",
+  "DOM",
+  "Input",
+  "Log",
+  "Network",
+  "Page",
+  "Runtime",
+]);
+
+// Single methods admitted outside the driver's domains. Focus emulation keeps
+// a background tab rendering and acknowledging input without activating it or
+// raising Chrome; without it Chrome holds every mouse event sent to a hidden
+// tab for about five seconds. Chrome clears it when the debugger detaches.
+const DEBUGGER_METHODS = new Set(["Emulation.setFocusEmulationEnabled"]);
+
+export function isAllowedDebuggerMethod(method: string): boolean {
+  return DEBUGGER_METHODS.has(method) || DEBUGGER_DOMAINS.has(method.slice(0, method.indexOf(".")));
+}
 
 export function parseExtensionCommand(value: unknown): ExtensionCommandEnvelope {
   const envelope = requireRecord(value, "bridge command envelope");

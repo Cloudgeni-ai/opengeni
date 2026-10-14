@@ -110,6 +110,14 @@ describe("managed auth form", () => {
     expect(managedAuthModeFromSearch("?mode=signup&mode=signin")).toBeUndefined();
   });
 
+  test("the /sign-up and /signup paths open Sign up", () => {
+    expect(managedAuthModeFromSearch("", "/sign-up")).toBe("signup");
+    expect(managedAuthModeFromSearch("", "/signup/")).toBe("signup");
+    expect(managedAuthModeFromSearch("?utm_source=producthunt", "/Sign-Up")).toBe("signup");
+    expect(managedAuthModeFromSearch("", "/sign-in")).toBeUndefined();
+    expect(managedAuthModeFromSearch("", "/")).toBeUndefined();
+  });
+
   test("recognizes only Better Auth's verification-link failure codes", () => {
     expect(verificationLinkErrorFromSearch("?error=TOKEN_EXPIRED")).toBe("expired");
     expect(verificationLinkErrorFromSearch("?error=INVALID_TOKEN")).toBe("invalid");

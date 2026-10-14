@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { hostedSearchFixture } from "./fixtures/hosted-search";
 
 import {
   chmodSync,
@@ -38,6 +39,7 @@ import {
 } from "@openai/agents-core";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -51,6 +53,7 @@ import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
   skillReviewHumanInput,
+  type McpAccountRouteLabel,
   type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
@@ -94,6 +97,7 @@ import {
   elideSupersededViewImagePairs,
   generateSessionTitle,
   materializeSandboxFileDownloads,
+  sandboxFileDownloadFailureNote,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
   SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
@@ -109,6 +113,7 @@ import {
   normalizeToolOutputForEvent,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
   OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
+  mcpResultModelContent,
   PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
@@ -142,12 +147,18 @@ import {
   withSandboxFileDownloads,
   withSandboxSessionReady,
   withSandboxLifecycleHooks,
+  sessionMcpApprovalConnectionId,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
+  type PrepareToolsOptions,
   type RuntimeMetricsHooks,
 } from "../src/index";
 import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
+import {
+  spilledModelToolResult,
+  type SpillOversizedModelToolResult,
+} from "../src/tool-result-spill";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
@@ -180,6 +191,7 @@ import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
   CODEX_APPS_MCP_URL,
+  CodexAppsCredentialUnavailable,
   type CodexTokenSnapshot,
 } from "@opengeni/codex";
 import { hostShellSession } from "./isolated-git-home-fixture";
@@ -534,6 +546,35 @@ describe("structured human-input runtime boundary", () => {
   });
 
   test("serializes an ordinary question with an explicit null skill review", () => {
+    // A model filling the strict schema sends Other/options on a secret
+    // question; that must never fail the turn, and the stored card drops them.
+    const secret = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "secret-with-other",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [
+              {
+                id: "password",
+                kind: "secret",
+                prompt: "Password for the dashboard",
+                options: [],
+                allowOther: true,
+                secret: { item: "Dashboard", saveTo: "user" },
+              },
+            ],
+          }),
+        },
+      },
+    ]);
+    expect(secret[0]?.input.questions[0]).toMatchObject({
+      kind: "secret",
+      options: [],
+      allowOther: false,
+    });
+
     const serialized = serializeHumanInputRequests([
       {
         name: HUMAN_INPUT_TOOL_NAME,
@@ -2107,6 +2148,123 @@ describe("runtime event normalization", () => {
   });
 
   describe("failed MCP tool calls carry an isError flag", () => {
+    test.each(["browser", "computer"] as const)(
+      "connected-machine %s timeout preserves uncertainty and correlation for the model",
+      (surface) => {
+        const failure = new OpenGeniApiError(
+          504,
+          JSON.stringify({
+            error: {
+              code: "upstream_unavailable",
+              message: "The connected machine did not respond in time.",
+              retryable: true,
+              outcomeUnknown: true,
+              requestId: "api-request-42",
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: surface,
+                controlFailureCode: "timeout",
+                controlRequestId: "control-request-42",
+                providerOutput: "synthetic-private-provider-output",
+              },
+            },
+          }),
+          { mutation: true },
+        );
+        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+        const render = (agent as any).mcpConfig.errorFunction;
+        const result = render({ context: {}, error: failure });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent.error).toMatchObject({
+          code: "upstream_unavailable",
+          retryable: true,
+          outcomeUnknown: true,
+          requestId: "api-request-42",
+          details: {
+            interactionLayer: "connected_machine",
+            interactionSurface: surface,
+            controlFailureCode: "timeout",
+            controlRequestId: "control-request-42",
+          },
+        });
+        expect(result.structuredContent.error.guidance).toContain("Do not repeat actions");
+        expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+        expect(result.content[0].text).not.toContain("Please try again");
+        expect(result.content[0].text).not.toContain("synthetic-private-provider-output");
+      },
+    );
+
+    test("connected-machine refusal retains its known outcome and non-retryable ruling", () => {
+      const failure = new OpenGeniApiError(
+        403,
+        JSON.stringify({
+          error: {
+            code: "forbidden",
+            message: "Screen access is not enabled.",
+            retryable: false,
+            outcomeUnknown: false,
+            details: {
+              interactionLayer: "connected_machine",
+              interactionSurface: "computer",
+              controlFailureCode: "consent_required",
+            },
+          },
+        }),
+        { mutation: false },
+      );
+      const result = mcpToolErrorOutput(failure);
+      expect(result.structuredContent?.error).toMatchObject({
+        retryable: false,
+        outcomeUnknown: false,
+        guidance: expect.stringContaining("not marked retryable"),
+      });
+      expect(result.content[0].text).not.toContain("Please try again");
+    });
+
+    test("an uncertain API failure without control details still forbids automatic retries", () => {
+      const failure = new OpenGeniApiError(504, "Synthetic request timed out.", {
+        outcomeUnknown: true,
+        correlationId: "api-request-43",
+      });
+      const result = mcpToolErrorOutput(failure);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error).toMatchObject({
+        outcomeUnknown: true,
+        requestId: "api-request-43",
+        guidance: expect.stringContaining("Do not repeat actions"),
+      });
+      expect(result.structuredContent?.error).not.toHaveProperty("details");
+      expect(result.content[0].text).not.toContain("Please try again");
+    });
+
+    test("connected-machine model errors never forward unbounded ids or arbitrary details", () => {
+      const failure = new OpenGeniApiError(
+        504,
+        JSON.stringify({
+          error: {
+            message: "Synthetic failure.",
+            outcomeUnknown: true,
+            details: {
+              interactionLayer: "connected_machine",
+              interactionSurface: "browser",
+              controlFailureCode: "timeout",
+              controlRequestId: "https://example.invalid/private-token",
+              arbitrary: "synthetic-secret",
+            },
+          },
+        }),
+      );
+      const result = mcpToolErrorOutput(failure);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error.details).toEqual({
+        interactionLayer: "connected_machine",
+        interactionSurface: "browser",
+        controlFailureCode: "timeout",
+      });
+      expect(result.content[0].text).not.toContain("private-token");
+      expect(result.content[0].text).not.toContain("synthetic-secret");
+    });
+
     test("mcpToolErrorOutput shapes a thrown error as an MCP isError result", () => {
       const out = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
       expect(out.isError).toBe(true);
@@ -2537,16 +2695,24 @@ describe("runtime event normalization", () => {
 
     async function connectorPolicyFixture(input: {
       connectorDecision: "allow" | "ask" | "block";
+      toolResultIsError?: boolean;
+      alreadyApproved?: boolean;
+      previewReview?: boolean;
       serverId?: string;
-      accountLabel?: string;
+      accountLabel?: McpAccountRouteLabel;
       lazyToolTransport?: "codex_native" | "generic_dispatch";
       legacyApproval?: boolean;
       withoutConnection?: boolean;
       begin?: ConnectorActionPolicyHooks["begin"];
       complete?: ConnectorActionPolicyHooks["complete"];
       sandboxBackend?: "none" | "modal";
+      toolResultBytes?: number;
+      spillOversizedModelToolResult?: SpillOversizedModelToolResult;
     }) {
-      const mcp = startTestMcpServer();
+      const mcp = startTestMcpServer({
+        toolResultIsError: input.toolResultIsError,
+        ...(input.toolResultBytes ? { toolResultBytes: input.toolResultBytes } : {}),
+      });
       const baseConfig = {
         id: input.serverId ?? (input.withoutConnection ? "remote" : "docs"),
         name: "Document Search",
@@ -2556,9 +2722,16 @@ describe("runtime event normalization", () => {
       };
       const calls: string[] = [];
       const hooks: ConnectorActionPolicyHooks = {
+        ...(input.previewReview
+          ? { preview: async () => ({ managed: true as const, decision: input.connectorDecision }) }
+          : {}),
         prepare: async (call) => {
           calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
-          return { managed: true, decision: input.connectorDecision };
+          return {
+            managed: true,
+            decision: input.connectorDecision,
+            ...(input.alreadyApproved ? { approvalStatus: "approved" as const } : {}),
+          };
         },
         begin:
           input.begin ??
@@ -2619,6 +2792,9 @@ describe("runtime event normalization", () => {
           headers: { authorization: "Bearer connector-token" },
         }),
         connectorActionPolicy: hooks,
+        ...(input.spillOversizedModelToolResult
+          ? { spillOversizedModelToolResult: input.spillOversizedModelToolResult }
+          : {}),
       });
       const agent = buildOpenGeniAgent(settings, [], {
         lazyToolTransport: input.lazyToolTransport,
@@ -2752,7 +2928,12 @@ describe("runtime event normalization", () => {
 
     test("prepared account display facts enrich event copies without changing catalog authority", async () => {
       const serverId = `account-${"a".repeat(64)}`;
-      const accountLabel = "Documents — Personal: alice@example.test";
+      const accountLabel: McpAccountRouteLabel = {
+        model: "Documents — Personal: alice@example.test",
+        connector: "Documents",
+        providerDomain: "docs.example.test",
+        account: "alice@example.test",
+      };
       const fixture = await connectorPolicyFixture({
         connectorDecision: "ask",
         serverId,
@@ -2762,7 +2943,13 @@ describe("runtime event normalization", () => {
         const name = prefixedMcpToolName(serverId, "search_documents");
         const requestsBefore = fixture.mcp.requests.length;
         const call = { id: "display-call", name, arguments: { query: "example" } };
-        const display = { toolName: "search_documents", accountLabel };
+        // People get the connector and the short account; the model keeps the full one.
+        const display = {
+          toolName: "search_documents",
+          connector: "Documents",
+          providerDomain: "docs.example.test",
+          accountLabel: "alice@example.test",
+        };
         expect(withMcpToolDisplayMetadata(fixture.prepared.mcpServers, call)).toMatchObject({
           ...call,
           display,
@@ -2787,7 +2974,36 @@ describe("runtime event normalization", () => {
       }
     });
 
-    test("connector Allow executes once and preserves an existing Ask requirement", async () => {
+    test("review metadata is read only for a new Ask", async () => {
+      for (const connectorDecision of ["allow", "ask", "block"] as const) {
+        const fixture = await connectorPolicyFixture({ connectorDecision, previewReview: true });
+        let reads = 0;
+        for (const server of fixture.prepared.mcpServers) {
+          (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
+            async () => {
+              reads++;
+              return {};
+            };
+        }
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          expect(
+            await tool.needsApproval(new RunContext(), { query: "synthetic" }, "metadata-fixture"),
+          ).toBe(connectorDecision === "ask");
+          expect(reads).toBe(connectorDecision === "ask" ? 1 : 0);
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("connector Allow executes once and overrides an Ask recommendation", async () => {
       const fixture = await connectorPolicyFixture({
         connectorDecision: "allow",
         legacyApproval: true,
@@ -2799,7 +3015,7 @@ describe("runtime event normalization", () => {
         );
         if (!tool || tool.type !== "function") throw new Error("connector tool missing");
         expect(await tool.needsApproval(new RunContext(), { query: "needle" }, "call-allow")).toBe(
-          true,
+          false,
         );
         const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "needle" }), {
           toolCall: { callId: "call-allow" },
@@ -2818,6 +3034,194 @@ describe("runtime event normalization", () => {
         fixture.mcp.close();
       }
     });
+
+    test("host session MCP rules override requireApproval under the shared identity", async () => {
+      const mcp = startTestMcpServer();
+      const serverId = "cloudgeni";
+      // Host-saved rules: Allow a recommended-Ask tool, Ask a recommended-Allow tool.
+      const rules: Record<string, "allow" | "ask"> = {
+        search_documents: "allow",
+        fetch_document: "ask",
+      };
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: serverId,
+            name: "CloudGeni",
+            url: mcp.url,
+            cacheToolsList: false,
+            requireApproval: ["search_documents"],
+          },
+        ],
+      });
+      const seen: Array<{ toolName: string; connectionId?: string; defaultDecision?: string }> = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          seen.push({
+            toolName: call.toolName,
+            connectionId: call.connectionId ?? undefined,
+            defaultDecision: call.defaultDecision,
+          });
+          return { managed: true, decision: rules[call.toolName] ?? "allow" };
+        },
+        begin: async () => ({ allowed: true, managed: true, requestId: "session-mcp-request" }),
+        complete: async () => undefined,
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        connectorActionPolicy: hooks,
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const tools = await agent.getMcpTools(new RunContext());
+        const byName = (name: string) => {
+          const tool = tools.find(
+            (candidate) => candidate.type === "function" && candidate.name === name,
+          );
+          if (!tool || tool.type !== "function") throw new Error(`${name} missing`);
+          return tool;
+        };
+        const search = byName(`${serverId}__search_documents`);
+        const fetch = byName(`${serverId}__fetch_document`);
+
+        // Allow beats the Ask recommendation, and the tool executes.
+        expect(await search.needsApproval(new RunContext(), { query: "n" }, "call-search")).toBe(
+          false,
+        );
+        await search.invoke(new RunContext(), JSON.stringify({ query: "n" }), {
+          toolCall: { callId: "call-search" },
+        } as any);
+        expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "n" } }]);
+
+        // Ask on a tool the session recommended as Allow still pauses for approval.
+        expect(await fetch.needsApproval(new RunContext(), { id: "doc-1" }, "call-fetch")).toBe(
+          true,
+        );
+
+        const expectedId = sessionMcpApprovalConnectionId(serverId, mcp.url);
+        expect(seen.find((entry) => entry.toolName === "search_documents")).toMatchObject({
+          connectionId: expectedId,
+          defaultDecision: "ask",
+        });
+        expect(seen.find((entry) => entry.toolName === "fetch_document")).toMatchObject({
+          connectionId: expectedId,
+          defaultDecision: "allow",
+        });
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
+    test.each(["model", "codemode"] as const)(
+      "an approved connector read above 1 MiB reaches the %s caller and settles completed",
+      async (caller) => {
+        const spills: number[] = [];
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          alreadyApproved: true,
+          toolResultBytes: MCP_MAX_TOOL_RESULT_BYTES + 256 * 1024,
+          spillOversizedModelToolResult: async ({ operationId, serializedBytes }) => {
+            spills.push(serializedBytes);
+            return spilledModelToolResult({
+              type: "tool_result_spilled",
+              fileId: "66666666-6666-4666-8666-666666666666",
+              sandboxPath: `/workspace/tool-results/${operationId}.json`,
+              byteSize: serializedBytes,
+              mediaType: "application/json",
+            });
+          },
+        });
+        try {
+          const environment = fixture.prepared.attemptToolEnvironment!;
+          const result = await environment.call({
+            catalogDigest: environment.catalog.digest,
+            operationId: crypto.randomUUID(),
+            identity: { serverId: "docs", toolName: "search_documents" },
+            arguments: { query: "wiki" },
+            caller: { kind: caller, subjectId: "worker:test" },
+          });
+          expect(result.isError).not.toBe(true);
+          if (caller === "model") {
+            // The model gets the bounded spill receipt instead of a size failure.
+            expect(spills).toHaveLength(1);
+            expect(spills[0]!).toBeGreaterThan(MCP_MAX_TOOL_RESULT_BYTES);
+            expect(result.structuredContent).toMatchObject({ type: "tool_result_spilled" });
+          } else {
+            expect(spills).toHaveLength(0);
+            expect((result.content[0] as { text: string }).text).toHaveLength(
+              MCP_MAX_TOOL_RESULT_BYTES + 256 * 1024,
+            );
+          }
+          expect(fixture.calls.filter((entry) => entry.startsWith("complete:"))).toEqual([
+            "complete:request-1:completed",
+          ]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
+
+    test.each(["model", "codemode"] as const)(
+      "connector provider-declared errors keep their text and settle the ledger uncertain through %s",
+      async (transport) => {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: transport === "model" ? "allow" : "ask",
+          alreadyApproved: true,
+          toolResultIsError: true,
+        });
+        try {
+          if (transport === "model") {
+            const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+              (candidate) => candidate.name === "docs__search_documents",
+            );
+            if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+            const result = await tool.invoke(
+              new RunContext(),
+              JSON.stringify({ query: "needle" }),
+              { toolCall: { callId: "call-provider-error" } } as any,
+            );
+            expect(result).toContainEqual({ type: "text", text: "The tool reported an error." });
+            // The model receives the provider's exact error, never a replacement.
+            expect(JSON.stringify(result)).toContain("found document for needle");
+            expect(JSON.stringify(result)).not.toContain("outcome is uncertain");
+            expect(JSON.stringify(result)).not.toContain("Please try again");
+          } else {
+            const environment = fixture.prepared.attemptToolEnvironment!;
+            const result = await environment.call({
+              catalogDigest: environment.catalog.digest,
+              operationId: crypto.randomUUID(),
+              identity: { serverId: "docs", toolName: "search_documents" },
+              arguments: { query: "needle" },
+              caller: { kind: "codemode", subjectId: "worker:test" },
+            });
+            expect(result).toMatchObject({
+              isError: true,
+              content: [{ type: "text", text: "found document for needle" }],
+            });
+          }
+          expect(fixture.mcp.calls).toEqual([
+            { tool: "search_documents", args: { query: "needle" } },
+          ]);
+          expect(fixture.calls.filter((call) => call.startsWith("complete:"))).toEqual([
+            "complete:request-1:uncertain",
+          ]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
 
     test("connector Ask pauses and Block/reject paths never invoke the provider", async () => {
       for (const connectorDecision of ["ask", "block"] as const) {
@@ -3302,7 +3706,9 @@ describe("runtime event normalization", () => {
               toolCall: { callId: "call-not-executed" },
             } as any,
           ),
-        ).toMatchObject({ isError: true });
+          // The provider's own not-executed result reaches the model unchanged;
+          // only the connector ledger records the not_executed outcome.
+        ).toMatchObject({ text: "provider was not called" });
         expect(completed).toEqual(["not_executed"]);
       } finally {
         await prepared.close();
@@ -3322,7 +3728,13 @@ describe("runtime event normalization", () => {
           },
           prepare: async (call) => {
             events.push(`prepare:${call.approvalId}`);
-            return { managed: true, decision };
+            return {
+              managed: true,
+              decision,
+              requestId: "77777777-7777-4777-8777-777777777777",
+              actionFingerprint: "a".repeat(64),
+              approvalStatus: "pending",
+            };
           },
           begin: async (call) => {
             events.push(`begin:${call.approvalId}`);
@@ -3408,6 +3820,22 @@ describe("runtime event normalization", () => {
         } finally {
           await fixture.prepared.close();
         }
+      }
+
+      const waiting = await prepareFixture("ask");
+      try {
+        const operationId = "66666666-6666-4666-8666-666666666660";
+        const prepared = await waiting.prepared.attemptToolEnvironment!.prepareCall(
+          waiting.call(operationId, "completed"),
+          { transportMeta: { durableApproval: true } },
+        );
+        expect(prepared.waitingForApproval).toMatchObject({
+          requestId: "77777777-7777-4777-8777-777777777777",
+        });
+        await expect(prepared.execute()).rejects.toThrow("approval");
+        expect(waiting.events).toEqual([`prepare:${operationId}`]);
+      } finally {
+        await waiting.prepared.close();
       }
 
       const unavailable = await prepareFixture("allow", false);
@@ -4517,7 +4945,7 @@ describe("runtime event normalization", () => {
   // guidance, update this pin as the new canonical default rather than
   // weakening the absent-memory/per-session no-op assertions below.
   const HISTORICAL_DEFAULT_INSTRUCTIONS = [
-    "You are an OpenGeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
+    "You are an Opengeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
     "Follow the user's task and the applicable Skill instructions for the current role.",
     "When a task needs files or commands, work inside the sandbox workspace with the filesystem and shell tools.",
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
@@ -4530,9 +4958,13 @@ describe("runtime event normalization", () => {
     "Answer questions directly and briefly; after making changes, say what changed, how you checked it, and anything still blocked.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
     "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
-    'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
-    "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
-    "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
+    "Choose durable storage by purpose: Knowledge for reusable facts and decisions, Instructions for short workspace rules, Skills for procedures and behavioral preferences, task_note_save for temporary coordination. Do not save behavioral preferences as Knowledge or widen personal guidance to the workspace. A Skill description should say when it applies. Do not promise future behavior from a Knowledge save.",
+    "Use knowledge_search and knowledge_get before work that depends on prior decisions or requirements; skip unrelated searches. Ground internal answers in authorized published Knowledge and sources, leaving missing facts unknown. Pending entries (view=needs_review) are unapproved, not accepted facts or instructions.",
+    "Save useful lasting findings with knowledge_save during ordinary work; the user need not say remember. Learn from user corrections, adopted choices, constraints and their reasons, not unaccepted assistant proposals as adopted decisions or tweaks only for the current task. Respect requests not to remember. Follow applicable learning Skills. Prefer settled incident lessons and one updated conclusion per experiment over chatter, live status and interim rounds.",
+    "Before saving, use knowledge_prepare_save, or search published and pending entries and browse collections. Skip unchanged duplicates; read and update the same entryId and current version, preserving uncertainty, evidence and relationships. Reuse collections. Retain supporting user messages with knowledge_retain_message and cite the source revision.",
+    "Read referenced files before drawing conclusions; inspect images visually. Use knowledge_retain_file for useful supporting evidence or a reusable reference. Uploads alone do not warrant Knowledge. Save a separate finding only when it adds meaning beyond the source.",
+    "Follow the accepted learning modes and scope: Automatic publishes, Review first saves pending without interrupting work, Off prevents authoring but allows retrieval. Do not bypass limits, review or authority through another destination. Report active, pending review or not saved; reuse operationId only for an exact retry.",
+    "For instruction changes, use instruction_policy_get then instruction_policy_save: preserve unrelated rules, append or use a localized exact anchored edit. Agents cannot replace the complete instruction. Whole-policy rewrites use the manual editor.",
   ].join(" ");
   const defaultSkillIndex = [
     "## Skills",
@@ -4541,7 +4973,7 @@ describe("runtime event normalization", () => {
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
     `- ${JSON.stringify(composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"))}`,
-    '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
+    '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about Opengeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
     '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
@@ -4791,7 +5223,14 @@ describe("runtime event normalization", () => {
     expect(result.usage?.responseId).toBe("resp-title-1");
     expect(requests).toHaveLength(1);
     expect(requests[0].systemInstructions).toBe(SESSION_TITLE_GENERATION_INSTRUCTIONS);
-    expect(requests[0].input).toHaveLength(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS);
+    expect(requests[0].input).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS) },
+        ],
+      },
+    ]);
     expect(requests[0].tools).toEqual([]);
     expect(requests[0].toolsExplicitlyProvided).toBe(true);
     expect(requests[0].signal).toBeUndefined();
@@ -5283,6 +5722,86 @@ describe("runtime event normalization", () => {
     expect(JSON.stringify(events)).not.toContain("sig=secret");
   });
 
+  test("explains a filesystem-root Connected Machine working directory on a failed staging command", async () => {
+    const workdirs: string[] = [];
+    const events: Array<{ type: string; payload: any }> = [];
+    // Localized (German) macOS diagnostic: the explanation must not depend on
+    // English command output.
+    const localized = "mkdir: .opengeni: Schreibgeschütztes Dateisystem";
+    const result = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/" }) },
+        exec: async ({ workdir }: { workdir?: string }) => {
+          workdirs.push(workdir ?? "");
+          return { output: localized, exitCode: 1 };
+        },
+      } as any,
+      [
+        {
+          fileId: "file-1",
+          mountPath: ".opengeni/files/file-1",
+          filename: "Invoice.pdf",
+          url: "https://storage.example/invoice.pdf?sig=secret",
+          sizeBytes: 5,
+        },
+      ],
+      {
+        sandboxBackend: "selfhosted",
+        onRuntimeEvent: (event) => events.push(event as any),
+      },
+    );
+
+    expect(workdirs).toEqual(["/"]);
+    expect(result.failures).toHaveLength(1);
+    const failure = result.failures[0]!;
+    expect(failure.path).toBe("/.opengeni/files/file-1/Invoice.pdf");
+    expect(failure.exitCode).toBe(1);
+    expect(failure.output).toBe(localized);
+    expect(failure.reason).toContain("working directory is the filesystem root (/)");
+    expect(failure.reason).toContain("may have failed for that reason");
+    expect(failure.reason).toContain(".opengeni/files/file-1/Invoice.pdf");
+    expect(failure.reason).toContain("start a new session on this machine");
+    expect(failure.reason).toContain("Underlying error: Sandbox file resource download file-1");
+    expect(failure.reason).toContain("Schreibgeschütztes Dateisystem");
+    expect(sandboxFileDownloadFailureNote(result.failures)).toContain(
+      "working directory is the filesystem root (/)",
+    );
+    expect(events[1]?.payload.error).toBe(failure.reason);
+    expect(events[1]?.payload.exitCode).toBe(1);
+    expect(events[1]?.payload.output).toBe(localized);
+    expect(JSON.stringify(events)).not.toContain("sig=secret");
+  });
+
+  test("keeps the raw staging failure for managed root workspaces and non-root machine folders", async () => {
+    const download = {
+      fileId: "file-1",
+      mountPath: ".opengeni/files/file-1",
+      filename: "input.txt",
+      url: "https://storage.example/input.txt",
+    };
+    const refusing = (root: string) =>
+      ({
+        state: { manifest: new Manifest({ root }) },
+        exec: async () => ({ output: "mkdir: .opengeni: Read-only file system", exitCode: 1 }),
+      }) as any;
+
+    for (const sandboxBackend of ["modal", "docker", undefined] as const) {
+      const managed = await materializeSandboxFileDownloads(refusing("/"), [download], {
+        ...(sandboxBackend ? { sandboxBackend } : {}),
+      });
+      expect(managed.failures).toHaveLength(1);
+      expect(managed.failures[0]?.reason).toContain("Read-only file system");
+      expect(managed.failures[0]?.reason).not.toContain("filesystem root");
+    }
+
+    const nested = await materializeSandboxFileDownloads(refusing("/Users/me"), [download], {
+      sandboxBackend: "selfhosted",
+    });
+    expect(nested.failures).toHaveLength(1);
+    expect(nested.failures[0]?.reason).toContain("Read-only file system");
+    expect(nested.failures[0]?.reason).not.toContain("filesystem root");
+  });
+
   test("propagates turn cancellation instead of downgrading it to a file-download failure", async () => {
     const events: string[] = [];
     await expect(
@@ -5571,7 +6090,7 @@ describe("runtime event normalization", () => {
     );
     expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true');
     expect(command).toContain(
-      'if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+      'if [ "$repository_empty" -eq 0 ] && ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
     );
     expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
     expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
@@ -5874,7 +6393,7 @@ describe("runtime event normalization", () => {
     expect(calls.length).toBeGreaterThan(1);
     expect(calls[0]?.runAs).toBe("sandbox");
     expect(calls[0]?.workdir).toBe("/workspace");
-    expect(capturedRepositorySetupCommand(calls)).toContain("git init");
+    expect(capturedRepositorySetupCommand(calls)).toContain("-c init.defaultBranch=main init");
     expect(capturedRepositorySetupCommand(calls)).not.toContain("secret-token");
     // Exercise the installed SDK path as well as the runtime provider path:
     // both wrappers expand their input before Modal applies its argv limit.
@@ -6367,12 +6886,10 @@ describe("runtime event normalization", () => {
     expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
-  test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
-    // OWNED-resume refresh is a FEATURE (a workspace-env edit reaching a
-    // long-lived owned local/docker box) — owned applyManifest merges env with
-    // no guard. The drift EVENT is the durable trace; the provided-session
-    // guard fix lives in pinProvidedSessionManifestEnvironment (tested below),
-    // NOT here.
+  test("refreshes manifest environment on OWNED resumed sessions without drift reporting", async () => {
+    // OWNED-resume refresh carries constant/pointer changes to a long-lived
+    // owned box (owned applyManifest merges env with no guard). Since W1 there
+    // is no drift event: the manifest holds constants only.
     const current = new Manifest({
       root: "/workspace",
       entries: {
@@ -6418,14 +6935,7 @@ describe("runtime event normalization", () => {
     ).toMatchObject({
       GH_TOKEN: { value: "new-token" },
     });
-    // Drift rides a durable event as key names only — values are secrets.
-    expect(events).toEqual([
-      {
-        type: "sandbox.env.drift",
-        payload: { added: ["NEW_KEY"], removed: [], changed: ["GH_TOKEN"] },
-      },
-    ]);
-    expect(JSON.stringify(events)).not.toContain("token");
+    expect(events).toEqual([]);
   });
 
   test("pins provided-session agent manifests to the live box environment", async () => {
@@ -6467,12 +6977,23 @@ describe("runtime event normalization", () => {
       "NEW_KEY",
     );
     expect(Object.keys(agent.defaultManifest.entries)).toEqual(["repos/acme/one"]);
-    expect(events).toEqual([
-      {
-        type: "sandbox.env.drift",
-        payload: { added: ["NEW_KEY"], removed: [], changed: [] },
-      },
-    ]);
+    // W1/RM-3: no drift machinery, so no event.
+    expect(events).toEqual([]);
+  });
+
+  test("RM-3: buildManifest keeps deployment constants only", () => {
+    const settings = testSettings();
+    const manifest = buildManifest(settings, [], {
+      HOME: "/workspace",
+      PATH: "/usr/bin",
+      GIT_AUTHOR_NAME: "Bot",
+      OPENGENI_CODEMODE_URL: "http://example.invalid/codemode",
+      STRIPE_KEY: "sk_live_should_never_ride",
+      API_TOKEN: "user-secret",
+    });
+    const names = Object.keys(JSON.parse(JSON.stringify(manifest.environment)));
+    expect(names.sort()).toEqual(["GIT_AUTHOR_NAME", "HOME", "OPENGENI_CODEMODE_URL", "PATH"]);
+    expect(JSON.stringify(manifest)).not.toContain("user-secret");
   });
 
   test("provided-session env pin is a no-op without drift", async () => {
@@ -6750,7 +7271,7 @@ describe("runtime event normalization", () => {
       (event) =>
         event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
     );
-    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "inner-1" },
@@ -6768,11 +7289,83 @@ describe("runtime event normalization", () => {
     const [durable] = normalizeSdkEvent(outputEvent);
     expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
 
+    // The model sees the content and structured result; `_meta` and
+    // non-standard envelope fields stay in the retained audit result.
     const secondRequest = JSON.stringify(model.requests[1]?.input);
     expect(secondRequest).toContain("model-visible content");
     expect(secondRequest).toContain("structuredOnly");
-    expect(secondRequest).toContain("providerTrace");
-    expect(secondRequest).toContain("vendor-receipt-1");
+    expect(secondRequest).not.toContain("providerTrace");
+    expect(secondRequest).not.toContain("vendor-receipt-1");
+  });
+
+  test("the Agents SDK sends a structuredContent duplicate text block to the model once while retaining the exact audit result", async () => {
+    const structuredContent = { issues: [{ number: 7, title: 'Fix "quoted" title' }], total: 1 };
+    const fullResult = {
+      content: [
+        { type: "text" as const, text: JSON.stringify(structuredContent, null, 2) },
+        { type: "text" as const, text: "Showing the first page." },
+      ],
+      structuredContent,
+      _meta: { providerTrace: "trace-dup" },
+    };
+    const inner: MCPServer = {
+      name: "dup-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "search",
+            description: "Search issues.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    // A prefixed wrapper around another prefixed wrapper must still recover
+    // the exact inner result rather than the outer model projection.
+    const wrapped = new PrefixedMcpServer(new PrefixedMcpServer(inner, "dup"), "outer");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("outer__dup__search", {}, "dup-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Search", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+    });
+    const [durable] = normalizeSdkEvent(outputEvent);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+
+    const toolOutput = ((model.requests[1]?.input ?? []) as any[]).find(
+      (item) => item.type === "function_call_result",
+    )?.output;
+    expect(toolOutput).toEqual([
+      { type: "input_text", text: "Showing the first page." },
+      { type: "input_text", text: `Structured result: ${JSON.stringify(structuredContent)}` },
+    ]);
   });
 
   test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {
@@ -6937,7 +7530,7 @@ describe("runtime event normalization", () => {
         (event) =>
           event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
       );
-      expect(outputEvent?.item.output).toEqual(fullResult);
+      expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
       expect(outputEvent?.item.customData).toEqual({
         [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
         [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { baseReceipt: "base-1" },
@@ -6957,7 +7550,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("an ordinary inner extractor may own OpenGeni-looking custom-data keys", async () => {
+  test("an ordinary inner extractor may own Opengeni-looking custom-data keys", async () => {
     const fullResult = {
       content: [{ type: "text" as const, text: "caller-owned marker content" }],
       isError: false,
@@ -7097,7 +7690,7 @@ describe("runtime event normalization", () => {
       (event) =>
         event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
     );
-    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
     });
@@ -7162,7 +7755,7 @@ describe("runtime event normalization", () => {
 
     const secondRequest = JSON.stringify(model.requests[1]?.input);
     expect(secondRequest).toContain("structuredOnly");
-    expect(secondRequest).toContain("structured-only-trace");
+    expect(secondRequest).not.toContain("structured-only-trace");
   });
 
   test("a prefixed server forwards the inner SDK structured-content projection to its extractor", async () => {
@@ -7292,7 +7885,7 @@ describe("runtime event normalization", () => {
       (event) =>
         event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
     );
-    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.output).toEqual(mcpResultModelContent(fullResult));
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
@@ -7519,7 +8112,9 @@ describe("runtime event normalization", () => {
     expect(compacted).not.toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
     expect(compacted).toContain(OPENGENI_INNER_MCP_CUSTOM_DATA_KEY);
     expect(compacted).toContain("keep-me");
-    expect(compacted).toContain("large-trace-1");
+    // The model never saw `_meta`, so the resumable state does not carry it;
+    // the durable tool-output event keeps the exact result.
+    expect(compacted).not.toContain("large-trace-1");
     expect(Buffer.byteLength(compacted, "utf8")).toBeLessThan(3 * 1024 * 1024);
 
     const resumed = await RunState.fromString(agent, compacted);
@@ -7623,21 +8218,24 @@ describe("runtime event normalization", () => {
         (event) =>
           event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
       );
-      expect(outputEvent?.item.output).toMatchObject({
+      expect(outputEvent?.item.output).toEqual([
+        { type: "text", text: "The tool reported an error." },
+        { type: "text", text: providerOnlyErrorMarker },
+      ]);
+      const [durable] = normalizeSdkEvent(outputEvent);
+      expect((durable!.payload as { output?: unknown }).output).toMatchObject({
         isError: true,
         content: [{ type: "text", text: providerOnlyErrorMarker }],
       });
-      const [durable] = normalizeSdkEvent(outputEvent);
-      expect((durable!.payload as { output?: unknown }).output).toEqual(outputEvent.item.output);
       const nextModelInput = model.requests[1]?.input;
       expect(Array.isArray(nextModelInput)).toBe(true);
       const nextModelToolResult = (nextModelInput as any[]).find(
         (item) => item.type === "function_call_result" && item.callId === "http-error-call",
       );
-      expect(JSON.parse(nextModelToolResult.output.text)).toMatchObject({
-        isError: true,
-        content: [{ type: "text", text: providerOnlyErrorMarker }],
-      });
+      expect(nextModelToolResult.output).toEqual([
+        { type: "input_text", text: "The tool reported an error." },
+        { type: "input_text", text: providerOnlyErrorMarker },
+      ]);
 
       const scriptedResults: unknown[] = [
         { content: [{ type: "text", text: "ok" }] },
@@ -8362,7 +8960,7 @@ describe("runtime event normalization", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: mcp.url,
             allowedTools: ["search_documents"],
             cacheToolsList: false,
@@ -8425,7 +9023,7 @@ describe("runtime event normalization", () => {
           mcpServers: [
             {
               id: "opengeni",
-              name: "OpenGeni",
+              name: "Opengeni",
               url: `${mcp.url}?ws={workspaceId}`,
               cacheToolsList: false,
             },
@@ -8491,7 +9089,7 @@ describe("runtime event normalization", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `${mcp.url}?ws={workspaceId}`,
             cacheToolsList: false,
           },
@@ -8535,7 +9133,7 @@ describe("runtime event normalization", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `${mcp.url}?ws={workspaceId}`,
             cacheToolsList: false,
           },
@@ -8577,7 +9175,7 @@ describe("runtime event normalization", () => {
             mcpServers: [
               {
                 id: "opengeni",
-                name: "OpenGeni",
+                name: "Opengeni",
                 url: `${mcp.url}?ws={workspaceId}`,
                 cacheToolsList: false,
               },
@@ -9674,10 +10272,17 @@ describe("runtime event normalization", () => {
       tokenResolutions += 1;
       return await authorize(use);
     };
+    const legacyFetch = codexAppsTestFetch(mcp.url);
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
-      { codexAppsAuth: auth, mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          expect(init?.redirect).toBe("manual");
+          return await legacyFetch(input, init);
+        },
+      },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
@@ -9689,6 +10294,242 @@ describe("runtime event normalization", () => {
       expect(JSON.stringify(result)).toContain("found document for gmail");
       expect(tokenResolutions).toBeGreaterThanOrEqual(2);
     } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: core admission owns each physical fetch and fences calls after disconnect", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123", "chatgpt-account-id": "acct-9" },
+    });
+    let disconnected = false;
+    let admissions = 0;
+    let dispatches = 0;
+    let availablePermits = 0;
+    let legacyAuthorizations = 0;
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      clientVersion: "0.0.0-test",
+      withAuthorization: async () => {
+        legacyAuthorizations += 1;
+        throw new Error("core must not extract a bearer outside physical admission");
+      },
+      withRequest: async (use) => {
+        if (disconnected) throw new CodexAppsCredentialUnavailable();
+        admissions += 1;
+        availablePermits += 1;
+        return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          expect(availablePermits).toBeGreaterThan(0);
+          expect(init?.redirect).toBe("error");
+          availablePermits -= 1;
+          dispatches += 1;
+          return await fetchImpl(input, init);
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
+        query: "admitted",
+      });
+      expect(JSON.stringify(result)).toContain("found document for admitted");
+      expect(dispatches).toBe(admissions);
+      expect(availablePermits).toBe(0);
+      expect(legacyAuthorizations).toBe(0);
+      const sent = dispatches;
+      disconnected = true;
+      const refused = await prepared.mcpServers[0]!.callToolResult!(
+        "codex_apps__search_documents",
+        { query: "must-not-send" },
+      );
+      expect(refused).toMatchObject({ isError: true });
+      expect(dispatches).toBe(sent);
+      expect(mcp.calls).toHaveLength(1);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: core refuses a native redirect without another physical request or tool replay", async () => {
+    const mcp = startTestMcpServer();
+    let redirectRequests = 0;
+    let destinationRequests = 0;
+    const redirectServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname === "/redirect") {
+          redirectRequests += 1;
+          return new Response(null, { status: 307, headers: { location: "/destination" } });
+        }
+        destinationRequests += 1;
+        return new Response("must not reach redirected destination");
+      },
+    });
+    let unknownRequests = 0;
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      ...makeCodexAppsAuth(),
+      withRequest: async (use) => {
+        try {
+          return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+        } catch (error) {
+          unknownRequests += 1;
+          throw error;
+        }
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          expect(init?.redirect).toBe("error");
+          const method =
+            typeof init?.body === "string" ? String(JSON.parse(init.body).method) : null;
+          return method === "tools/call"
+            ? await fetch(new URL("/redirect", redirectServer.url), init)
+            : await fetchImpl(input, init);
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "must-not-follow",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(redirectRequests).toBe(1);
+      expect(destinationRequests).toBe(0);
+      expect(unknownRequests).toBe(1);
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+      await redirectServer.stop(true);
+    }
+  });
+
+  test("codex_apps: a pending native admission cannot dispatch and receives the transport signal", async () => {
+    const mcp = startTestMcpServer();
+    let beginAdmission!: () => void;
+    const admissionStarted = new Promise<void>((resolve) => (beginAdmission = resolve));
+    let releaseAdmission!: () => void;
+    const admissionGate = new Promise<void>((resolve) => (releaseAdmission = resolve));
+    let gate = false;
+    let dispatches = 0;
+    let admittedSignal: AbortSignal | null | undefined;
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      ...makeCodexAppsAuth(),
+      withRequest: async (use, options) => {
+        if (gate) {
+          admittedSignal = options?.signal;
+          beginAdmission();
+          await admissionGate;
+          throw new CodexAppsCredentialUnavailable();
+        }
+        return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          dispatches += 1;
+          return await fetchImpl(input, init);
+        },
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      const before = dispatches;
+      gate = true;
+      const pending = prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "waiting-for-commit",
+      });
+      await admissionStarted;
+      expect(dispatches).toBe(before);
+      expect(admittedSignal).toBeInstanceOf(AbortSignal);
+      releaseAdmission();
+      expect(await pending).toMatchObject({ isError: true });
+      expect(dispatches).toBe(before);
+      expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]?.reason).toBe("designated_credential_unavailable");
+    } finally {
+      releaseAdmission();
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: admitted transport failure is not replayed or reported as a refresh failure", async () => {
+    const mcp = startTestMcpServer();
+    let failTransport = false;
+    let failedDispatches = 0;
+    const failedMethods: string[] = [];
+    let unknownRequests = 0;
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const auth: NonNullable<PrepareToolsOptions["codexAppsAuth"]> = {
+      ...makeCodexAppsAuth(),
+      withRequest: async (use) => {
+        try {
+          return await use({ accessToken: "tok-123", chatgptAccountId: "acct-9" });
+        } catch (error) {
+          unknownRequests += 1;
+          throw error;
+        }
+      },
+    };
+    const fetchImpl = codexAppsTestFetch(mcp.url);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: async (input, init) => {
+          const method =
+            typeof init?.body === "string" ? String(JSON.parse(init.body).method) : null;
+          if (failTransport && method === "tools/call") {
+            failedDispatches += 1;
+            failedMethods.push(method);
+            throw new Error("provider accepted request but response was lost");
+          }
+          return await fetchImpl(input, init);
+        },
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      failTransport = true;
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "ambiguous",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(failedMethods).toEqual(["tools/call"]);
+      expect(failedDispatches).toBe(1);
+      expect(unknownRequests).toBe(1);
+      expect(authNeeded).toEqual([]);
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      failTransport = false;
       await prepared.close();
       mcp.close();
     }
@@ -9793,7 +10634,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: no explicit Apps auth => graceful best-effort drop", async () => {
+  test("codex_apps: no explicit Apps auth => graceful best-effort drop without a setup card (SUB-APPS-01)", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
@@ -9810,44 +10651,71 @@ describe("runtime event normalization", () => {
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
-      expect(authNeeded).toContainEqual(
-        expect.objectContaining({
-          serverId: "codex_apps",
-          providerDomain: "chatgpt.com",
-          reason: "missing_connection",
-          toolName: null,
-        }),
-      );
+      // Plain setup (initialize/tools/list) never publishes an Apps card.
+      expect(authNeeded).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();
     }
   });
 
-  test("codex_apps: provider 401 publishes an actionable expired-auth signal", async () => {
-    const mcp = startTestMcpServer({
+  test("codex_apps: provider 401 on setup is silent; on tool calls it publishes one expired-auth card (SUB-APPS-01)", async () => {
+    const rejectedAtSetup = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer provider-rejected" },
     });
-    const authNeeded: ToolAuthNeededPayload[] = [];
-    const prepared = await prepareAgentTools(
+    const setupAuthNeeded: ToolAuthNeededPayload[] = [];
+    const preparedRejected = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
       {
         codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(rejectedAtSetup.url),
+        onAuthNeeded: (payload) => setupAuthNeeded.push(payload),
+      },
+    );
+    try {
+      expect(preparedRejected.mcpServers).toHaveLength(0);
+      expect(setupAuthNeeded).toEqual([]);
+    } finally {
+      await preparedRejected.close();
+      rejectedAtSetup.close();
+    }
+
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    let accessToken = "tok-123";
+    const auth = makeCodexAppsAuth();
+    auth.withAuthorization = async (use) =>
+      await use({ accessToken, chatgptAccountId: "acct-9", isFedramp: false });
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
         mcpFetchImpl: codexAppsTestFetch(mcp.url),
         onAuthNeeded: (payload) => authNeeded.push(payload),
       },
     );
     try {
-      expect(prepared.mcpServers).toHaveLength(0);
-      expect(authNeeded).toContainEqual(
-        expect.objectContaining({
-          serverId: "codex_apps",
-          providerDomain: "chatgpt.com",
-          reason: "expired",
-          toolName: null,
-        }),
-      );
+      expect(prepared.mcpServers).toHaveLength(1);
+      await prepared.mcpServers[0]!.listTools();
+      accessToken = "provider-rejected";
+      for (const query of ["first", "second"]) {
+        const result = await prepared.mcpServers[0]!.callToolResult!(
+          "codex_apps__search_documents",
+          { query },
+        );
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]).toMatchObject({
+        serverId: "codex_apps",
+        providerDomain: "chatgpt.com",
+        reason: "expired",
+      });
+      expect(authNeeded[0]!.toolName).toEqual(expect.any(String));
     } finally {
       await prepared.close();
       mcp.close();
@@ -9913,7 +10781,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("codex_apps: getToken rejection (needs_relogin) => graceful best-effort drop", async () => {
+  test("codex_apps: getToken rejection (needs_relogin) => graceful best-effort drop without a setup card (SUB-APPS-01)", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
@@ -9932,14 +10800,142 @@ describe("runtime event normalization", () => {
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
-      expect(authNeeded).toContainEqual(
-        expect.objectContaining({
-          serverId: "codex_apps",
-          providerDomain: "chatgpt.com",
-          reason: "refresh_failed",
-          toolName: null,
-        }),
-      );
+      expect(authNeeded).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: an unavailable designated credential publishes one correctly classified card per turn, only for a tool call (SUB-APPS-01)", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    let failure: Error | null = null;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (failure) throw failure;
+      return await authorize(use);
+    };
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      await prepared.mcpServers[0]!.listTools();
+      expect(authNeeded).toEqual([]);
+
+      // Setup traffic after the designation becomes unusable stays silent
+      // (listing may degrade or fail; either way no card is published).
+      failure = new CodexAppsCredentialUnavailable();
+      await prepared.mcpServers[0]!.listTools().catch(() => []);
+      expect(authNeeded).toEqual([]);
+
+      for (const query of ["first", "second", "third"]) {
+        const result = await prepared.mcpServers[0]!.callToolResult!(
+          "codex_apps__search_documents",
+          { query },
+        );
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]).toMatchObject({
+        serverId: "codex_apps",
+        providerDomain: "chatgpt.com",
+        provider: "codex_apps",
+        reason: "designated_credential_unavailable",
+      });
+      expect(authNeeded[0]!.toolName).toEqual(expect.any(String));
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: a failed card publish does not use up the turn's one Apps card (SUB-APPS-01)", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    let failure: Error | null = null;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (failure) throw failure;
+      return await authorize(use);
+    };
+    const delivered: ToolAuthNeededPayload[] = [];
+    let publishAttempts = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => {
+          publishAttempts += 1;
+          if (publishAttempts === 1) throw new Error("event bus unavailable");
+          delivered.push(payload);
+        },
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      failure = new CodexAppsCredentialUnavailable();
+      for (const query of ["first", "second", "third"]) {
+        const result = await prepared.mcpServers[0]!.callToolResult!(
+          "codex_apps__search_documents",
+          { query },
+        );
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(publishAttempts).toBe(2);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatchObject({ reason: "designated_credential_unavailable" });
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: a genuine token refresh failure on a tool call stays refresh_failed (SUB-APPS-01)", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
+    let failure: Error | null = null;
+    const auth = makeCodexAppsAuth();
+    const authorize = auth.withAuthorization;
+    auth.withAuthorization = async (use) => {
+      if (failure) throw failure;
+      return await authorize(use);
+    };
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: auth,
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      failure = new Error("Codex token refresh timed out");
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
+        query: "refresh",
+      });
+      expect(result).toMatchObject({ isError: true });
+      expect(authNeeded).toHaveLength(1);
+      expect(authNeeded[0]).toMatchObject({ serverId: "codex_apps", reason: "refresh_failed" });
     } finally {
       await prepared.close();
       mcp.close();
@@ -10978,7 +11974,7 @@ describe("runtime event normalization", () => {
             mcpServers: [
               {
                 id: "opengeni",
-                name: "OpenGeni",
+                name: "Opengeni",
                 url,
                 cacheToolsList: false,
               },
@@ -12604,6 +13600,36 @@ describe("portable skill artifact validation", () => {
 });
 
 describe("provider item id stripping", () => {
+  test("composed model filter keeps search evidence and append-only prefix identity before detaching ids", async () => {
+    const search = hostedSearchFixture();
+    const input = [
+      search,
+      {
+        type: "function_call",
+        id: "fc_fixture",
+        callId: "checkpoint",
+        name: "checkpoint",
+        arguments: "{}",
+      },
+    ];
+    const before = structuredClone(input);
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const run = (items: unknown[]) =>
+      filter({ modelData: { input: items as never }, agent: {} as never, context: undefined });
+    const first = await run(input);
+    const next = await run([
+      ...input,
+      { type: "function_call_result", callId: "checkpoint", output: "ACK" },
+    ]);
+    expect(first.input[0]).toMatchObject({ type: "message", role: "assistant" });
+    expect(JSON.stringify(first.input[0])).toContain("exactly seven colors");
+    expect(next.input[0]).toBe(first.input[0]);
+    expect(next.input[1]).toBe(first.input[1]);
+    expect(next.input[1]).toMatchObject({ callId: "checkpoint" });
+    expect(next.input[2]).toMatchObject({ callId: "checkpoint" });
+    expect(JSON.stringify(next.input)).not.toContain("ws_fixture");
+    expect(input).toEqual(before);
+  });
   test("stripProviderItemIdsFilter removes provider ids from every item without touching pairing fields", () => {
     const reasoning = {
       type: "reasoning",

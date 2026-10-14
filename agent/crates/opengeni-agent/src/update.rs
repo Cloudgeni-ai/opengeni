@@ -191,7 +191,7 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let channel = resolve_channel(args.channel.as_deref(), &connections)?;
     // Staged rollout cohorting must be stable for the physical install, not tied
     // to an arbitrary workspace agent id. Every enrollment already shares this
-    // durable keypair, including across independent OpenGeni deployments.
+    // durable keypair, including across independent Opengeni deployments.
     let install_identity = InstallIdentity::load_or_generate(
         &config::config_dir().map_err(|e| format!("could not resolve config dir: {e}"))?,
     )
@@ -546,7 +546,7 @@ mod tests {
             assert_ne!(std::env::current_exe().unwrap(), captured);
             assert_eq!(installed_executable().unwrap(), installed);
             std::fs::write(&marker, b"ready").unwrap();
-            crate::restart_after_verified_update().expect("successor exec");
+            crate::restart_after_verified_update(&None).expect("successor exec");
             panic!("successful Unix exec never returns");
         }
         let directory = tempfile::tempdir().unwrap();

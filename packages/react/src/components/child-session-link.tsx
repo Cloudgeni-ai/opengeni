@@ -1,6 +1,11 @@
+import { isSessionId } from "../timeline/agent-identity";
 import type { MachineInputMember } from "../timeline/types";
 
-/** Source IDs are routing coordinates only for typed child updates, never parsed from prose. */
+/**
+ * Source IDs are routing coordinates only for typed agent updates (child
+ * lifecycle notices, agent messages, and agent directions), never parsed from
+ * prose.
+ */
 export function ChildSessionLink({
   kind,
   sourceId,
@@ -10,8 +15,12 @@ export function ChildSessionLink({
 }) {
   if (
     !onOpenSession ||
-    !kind.startsWith("child_") ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceId)
+    !(
+      kind.startsWith("child_") ||
+      kind === "agent_message" ||
+      kind === "agent_steer_instruction"
+    ) ||
+    !isSessionId(sourceId)
   ) {
     return null;
   }
@@ -19,7 +28,7 @@ export function ChildSessionLink({
     <button
       type="button"
       onClick={() => onOpenSession(sourceId)}
-      className="mt-1 rounded-og-sm text-og-xs font-medium text-og-accent underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent"
+      className="mt-1 rounded-og-sm text-og-xs font-medium og-link focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent"
     >
       View session
     </button>

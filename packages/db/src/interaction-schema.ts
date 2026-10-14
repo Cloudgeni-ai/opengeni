@@ -2,7 +2,6 @@ import type {
   AttachedBrowserDeviceCapabilities,
   AuthRunChoice,
   AuthRunExternalAction,
-  AuthRunPendingField,
   BrowserRevisionMaterialization,
   BrowserSessionCapabilities,
   ComputerSessionCapabilities,
@@ -456,6 +455,26 @@ export const browserRevisionComponents = pgTable(
   }),
 );
 
+/** One ended extension connection generation of an attached browser profile.
+ *  `agent` entries carry the machine bridge's own observation; `server`
+ *  entries are inferred when a generation ended without one (an older agent,
+ *  or an agent restart that lost its in-memory record). */
+export type AttachedBrowserConnectionHistoryEntry = {
+  connectionGeneration: string;
+  reason:
+    | "browser_closed_port"
+    | "browser_message_invalid"
+    | "browser_output_failed"
+    | "native_host_lost"
+    | "agent_rejected"
+    | "agent_restarted"
+    | "unreported";
+  detail: string | null;
+  endedAt: string;
+  connectedMs: number | null;
+  source: "agent" | "server";
+};
+
 export const attachedBrowserDevices = pgTable(
   "attached_browser_devices",
   {
@@ -478,6 +497,10 @@ export const attachedBrowserDevices = pgTable(
     }).notNull(),
     tabCount: integer("tab_count").notNull(),
     capabilities: jsonb("capabilities").$type<AttachedBrowserDeviceCapabilities>().notNull(),
+    connectionHistory: jsonb("connection_history")
+      .$type<AttachedBrowserConnectionHistoryEntry[]>()
+      .notNull()
+      .default([]),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
     disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -520,6 +543,12 @@ export const attachedBrowserDevices = pgTable(
         and ${table.tabCount} between 0 and 100000
         and jsonb_typeof(${table.capabilities}) = 'object'
         and octet_length(${table.capabilities}::text) between 2 and 65536`,
+    ),
+    connectionHistoryValid: check(
+      "attached_browser_devices_connection_history_check",
+      sql`jsonb_typeof(${table.connectionHistory}) = 'array'
+        and jsonb_array_length(${table.connectionHistory}) <= 50
+        and octet_length(${table.connectionHistory}::text) <= 65536`,
     ),
   }),
 );
@@ -636,6 +665,11 @@ export const browserSessions = pgTable(
       table.networkRouteId,
       table.lifecycle,
     ),
+    // Migration 0705: saved browsers still bound to a controller (cleanup
+    // pending), scanned by list_orphaned_idle_browser_checkpoints.
+    suspendedController: index("browser_sessions_suspended_controller_idx")
+      .on(table.updatedAt, table.id)
+      .where(sql`${table.lifecycle} = 'suspended' and ${table.controllerGeneration} is not null`),
     valuesValid: check(
       "browser_sessions_values_check",
       sql`octet_length(${table.name}) between 1 and 200
@@ -1221,7 +1255,6 @@ export const authRuns = pgTable(
       enum: [
         "discovering",
         "awaiting_choice",
-        "awaiting_secret",
         "awaiting_external_action",
         "working",
         "verified",
@@ -1232,7 +1265,6 @@ export const authRuns = pgTable(
       .notNull()
       .default("discovering"),
     choices: jsonb("choices").$type<AuthRunChoice[]>().notNull().default([]),
-    pendingFields: jsonb("pending_fields").$type<AuthRunPendingField[]>().notNull().default([]),
     externalAction: jsonb("external_action").$type<AuthRunExternalAction>(),
     interventionId: uuid("intervention_id"),
     verifiedUrl: text("verified_url"),
@@ -1276,8 +1308,6 @@ export const authRuns = pgTable(
         and (${table.authorityId} is null or octet_length(${table.authorityId}) between 1 and 512)
         and jsonb_typeof(${table.choices}) = 'array'
         and octet_length(${table.choices}::text) between 2 and 65536
-        and jsonb_typeof(${table.pendingFields}) = 'array'
-        and octet_length(${table.pendingFields}::text) between 2 and 65536
         and (${table.externalAction} is null or (
           jsonb_typeof(${table.externalAction}) = 'object'
           and octet_length(${table.externalAction}::text) between 2 and 65536
@@ -1323,7 +1353,6 @@ export const authRuns = pgTable(
     projectionValid: check(
       "auth_runs_projection_check",
       sql`(${table.state} = 'awaiting_choice') = (jsonb_array_length(${table.choices}) > 0)
-        and (${table.state} = 'awaiting_secret') = (jsonb_array_length(${table.pendingFields}) > 0)
         and (${table.state} = 'awaiting_external_action') = (${table.externalAction} is not null)
         and (${table.state} = 'failed') = (${table.failureCode} is not null)`,
     ),
@@ -1446,17 +1475,7 @@ export const interactionResourceOperations = pgTable(
     }).notNull(),
     resourceId: uuid("resource_id").notNull(),
     kind: text("kind", {
-      enum: [
-        "create",
-        "update",
-        "start",
-        "report",
-        "protected_fill",
-        "external_auth",
-        "verify",
-        "resolve",
-        "save",
-      ],
+      enum: ["create", "update", "start", "report", "external_auth", "verify", "resolve", "save"],
     }).notNull(),
     requestDigest: text("request_digest").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

@@ -16,10 +16,14 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 
 - `GET /healthz`
 - `GET /v1/config/client`
-- `POST /v1/client-errors` (public, content-free web client error beacon; see
+- `POST /v1/client-errors` (public web client error beacon with scrubbed,
+  bounded error diagnostics; see
   [`application-observability.md`](application-observability.md#web-client-errors))
 - `POST /v1/analytics-consent` (public, content-free count of analytics banner
   answers; see [`application-observability.md`](application-observability.md#analytics-consent))
+- `POST /v1/workspaces/:workspaceId/chat/completions` and
+  `GET /v1/workspaces/:workspaceId/models` (stateless OpenAI-compatible single
+  model calls without tools; see [`chat-completions.md`](chat-completions.md))
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)
@@ -29,6 +33,9 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   creation, plus explicit invitation revoke
 - `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
 - `GET|PATCH /v1/organizations/:id/retention-policy`
+- `GET|POST /v1/organizations/:id/personal-api-keys` and
+  `DELETE /v1/organizations/:id/personal-api-keys/:apiKeyId` (keys that act as
+  the person who created them; see [`credentials.md`](credentials.md))
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`
@@ -37,8 +44,21 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream` (SSE; backfills from Postgres by event sequence)
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 
+`PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
+`{ "keepLive": true | false }` exempts a session from the idle-session archive
+(`sessions:control`; 409 `SESSION_ARCHIVED_READ_ONLY` once archived). Session
+create accepts `keepLive: true` too. Sessions carry `retention` (`keepLive` and
+the archive state); messages to an archived session return 409
+`SESSION_ARCHIVED_READ_ONLY`. The session list accepts
+`contentArchivedOnly=true` to list only archived sessions, and
+`GET /v1/config/client` reports `sessionArchive: { enabled, idleDays }` when the
+deployment archives idle sessions. See
+[`session-storage-lifecycle.md`](session-storage-lifecycle.md).
+
 Session goals support `GET`, `PATCH`, and idempotent `DELETE` on
-`/v1/workspaces/:workspaceId/sessions/:id/goal`; see [`goals.md`](goals.md).
+`/v1/workspaces/:workspaceId/sessions/:id/goal`; `GET` 404s for a goal-less
+session unless the client opts in with `?absent=null` (200 `null`). See
+[`goals.md`](goals.md).
 
 Scheduled tasks add `GET /v1/workspaces/:workspaceId/scheduled-tasks/attention`
 (failed runs and schedules blocked by an unusable account) and the owner-only
@@ -65,6 +85,17 @@ only the own-usage read; it never forwards allowance mutations or the roster.
 The same suffixes exist beneath
 `/v1/workspaces/external/:workspaceSource/:workspaceExternalId` for exact,
 existing organization-tenant lookups without provisioning or expanded authority.
+
+## Task usage limit endpoints
+
+- `GET /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit`
+- `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit`
+- `usageLimitMicros` on `POST /v1/workspaces/:workspaceId/sessions` (new roots only)
+
+See [task usage limits](session-usage-limits.md) for the API-equivalent basis,
+root scope, compare-and-set writes, person/host-only authority, the
+`session_usage_limit_reached` refusal and rollout. The packaged conversation
+proxy forwards neither the routes nor the create field.
 
 ## GitHub endpoints
 

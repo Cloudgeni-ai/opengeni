@@ -114,7 +114,7 @@ export function sourceHost(value: string): string {
 }
 
 /**
- * A Skill that is a catalog row - the curated reviewed library OpenGeni ships,
+ * A Skill that is a catalog row - the curated reviewed library Opengeni ships,
  * and any other directly owned Skill the catalog projects. It keeps the catalog
  * detail sheet: that sheet already owns install/update/remove under the
  * reviewed library identity plus the immutable provenance panel, and

@@ -5,13 +5,15 @@ import {
   upsertCapabilityCatalogItem,
   enableCapabilityInstallation,
   listConnectorToolPermissionPolicies,
-  clearCodexAppsCredential,
   createDb,
   deleteWorkspace,
-  designateCodexAppsCredential,
   encryptEnvironmentValue,
-  upsertCodexSubscriptionCredential,
   type DbClient,
+} from "@opengeni/db";
+import {
+  clearSubscriptionCoreCodexApps,
+  designateSubscriptionCoreCodexApps,
+  connectSubscriptionCoreCodexConnection,
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -32,6 +34,7 @@ let app: Hono | null = null;
 let workspaceId = "";
 let accountId = "";
 let subjectId = "";
+let designationVersion = 0;
 let available = true;
 const settings = testSettings({
   codexConnectedAppsEnabled: true,
@@ -59,6 +62,13 @@ beforeAll(async () => {
   const grant = access.workspaceGrants[0]!;
   workspaceId = grant.workspaceId;
   accountId = grant.accountId;
+  // Retain the seeded core gate: the capability projection uses core Apps.
+  const [personal] = await shared.admin`insert into workspaces(account_id, name)
+    values (${accountId}, 'Fixture owner Personal') returning id`;
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, role, status, personal_workspace_id)
+    values (${accountId}, ${subjectId}, 'owner', 'active', ${personal!.id})
+    on conflict (account_id, subject_id) do nothing`;
   await shared.admin`
     update workspace_memberships
     set permissions = '["workspace:read", "workspace:admin", "connections:write", "capabilities:manage"]'::jsonb
@@ -90,30 +100,34 @@ async function request(): Promise<Response> {
 describe("Codex Apps capability catalog API", () => {
   test("projects designated Apps as an enabled selectable MCP server", async () => {
     if (!available || !client) return;
-    const credential = await upsertCodexSubscriptionCredential(client.db, {
+    const credential = await connectSubscriptionCoreCodexConnection(client.db, {
       accountId,
       workspaceId,
       credentialEncrypted: encryptEnvironmentValue(
         encryptionKey,
         JSON.stringify({ access_token: "access", refresh_token: "refresh", id_token: "id" }),
       ),
-      chatgptAccountId: `codex-apps-${crypto.randomUUID()}`,
-      scopes: null,
+      providerAccountId: `codex-apps-${crypto.randomUUID()}`,
+      providerSubjectId: subjectId,
+      accountEmail: null,
+      label: null,
       planType: "pro",
       isFedramp: false,
       expiresAt: new Date(Date.now() + 60 * 60_000),
       lastRefreshAt: new Date(),
-      connectedBySubjectId: subjectId,
+      subjectId,
     });
-    expect(
-      await designateCodexAppsCredential(client.db, {
-        accountId,
-        workspaceId,
-        credentialId: credential.id,
-        subjectId,
-        expectedVersion: 0,
-      }),
-    ).toMatchObject({ kind: "updated" });
+    if (credential.kind !== "connected") throw new Error(`fixture refused: ${credential.reason}`);
+    const designation = await designateSubscriptionCoreCodexApps(client.db, {
+      accountId,
+      workspaceId,
+      connectionId: credential.id,
+      subjectId,
+      expectedVersion: 0,
+    });
+    expect(designation).toMatchObject({ kind: "updated" });
+    if (designation.kind !== "updated") throw new Error("fixture designation refused");
+    designationVersion = designation.version;
 
     const response = await request();
     expect(response.status).toBe(200);
@@ -131,11 +145,11 @@ describe("Codex Apps capability catalog API", () => {
   test("keeps the Apps item visible but unavailable after designation is cleared", async () => {
     if (!available || !client) return;
     expect(
-      await clearCodexAppsCredential(client.db, {
+      await clearSubscriptionCoreCodexApps(client.db, {
         accountId,
         workspaceId,
         subjectId,
-        expectedVersion: 1,
+        expectedVersion: designationVersion,
       }),
     ).toMatchObject({ kind: "updated", credentialId: null });
 

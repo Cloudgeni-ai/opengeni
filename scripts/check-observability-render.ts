@@ -328,7 +328,7 @@ for (const filename of dashboardFiles) {
   assert(configMap, `rendered manifest is missing dashboard ${filename}`);
   assert(configMap.data?.[filename] === source, `${filename} rendered bytes differ from source`);
   assert(
-    configMap.metadata?.annotations?.grafana_folder === "/tmp/dashboards/OpenGeni",
+    configMap.metadata?.annotations?.grafana_folder === "/tmp/dashboards/Opengeni",
     `${filename} has the wrong Grafana folder annotation`,
   );
   assert(

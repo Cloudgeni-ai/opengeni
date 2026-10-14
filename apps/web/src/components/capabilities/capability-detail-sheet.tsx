@@ -25,6 +25,7 @@ import {
 } from "./connector-tool-permissions";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
+import { OnePasswordCatalogLink } from "./onepassword-catalog-link";
 import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
   capabilityPresentation,
@@ -58,7 +59,12 @@ import {
 import { focusCapabilitySuccessor } from "@/lib/capability-focus";
 import { analyticsAction, type AnalyticsAction } from "@/lib/analytics-actions";
 import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  ConnectionOwnership,
+  SocialConnection,
+} from "@/types";
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
@@ -113,6 +119,20 @@ export type ConnectAction =
       item: CapabilityCatalogItem;
       connectionId: string | null;
       ownership: ConnectionOwnership;
+      /** The account's own workspace when it was connected in another one. */
+      connectionWorkspaceId?: string;
+    }
+  // Sign in a further account; never refreshes or replaces an existing one.
+  | {
+      type: "add_oauth_account";
+      item: CapabilityCatalogItem;
+      ownership: ConnectionOwnership;
+    }
+  // Disconnect exactly one account; the connector itself stays as it is.
+  | {
+      type: "remove_connection";
+      item: CapabilityCatalogItem;
+      connection: Pick<ConnectionMetadata, "id" | "workspaceId">;
     }
   | {
       type: "reconnect_api_key";
@@ -399,7 +419,7 @@ export function DetailBody({
         ) : (
           <CuratedSkillProvenanceSection item={item} />
         )}
-        {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
+        {workspaceId && !setupOnly && hasConnectorToolPermissionTarget(item, health) ? (
           <ConnectorToolPermissions
             key={`${workspaceId}:${item.id}`}
             workspaceId={workspaceId}
@@ -432,6 +452,18 @@ export function DetailBody({
                   ? "Select Codex Apps from a session's Tools picker, or leave the policy at the workspace default."
                   : "This surface cannot be enabled from the capability catalog; its authorization is managed by the workspace Codex subscription."}
               </p>
+            </div>
+          ) : item.surfaceType === "first_party_onepassword" && workspaceId ? (
+            <div className="space-y-3">
+              <p className="text-sm text-fg-muted">
+                {setupOnly ? "Opens Secrets in a new tab. " : ""}
+                Connect a service account and choose which vaults agents can use.
+              </p>
+              <OnePasswordCatalogLink
+                workspaceId={workspaceId}
+                connected={item.enabled}
+                preserveChat={setupOnly}
+              />
             </div>
           ) : item.kind === "skill" ? (
             <SkillControls
@@ -985,7 +1017,7 @@ export function FikenConnectorControls({
   const tokenFallbackToggle = (
     <button
       type="button"
-      className="mx-auto block text-xs font-medium text-brand hover:underline"
+      className="mx-auto block text-xs font-medium og-link"
       onClick={() => setUsingToken(true)}
     >
       Use an API token instead
@@ -1208,7 +1240,7 @@ export function CredentialForm({
           href={keyPageUrl}
           target="_blank"
           rel="noreferrer noopener"
-          className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+          className="inline-flex items-center gap-1 text-xs font-medium og-link"
         >
           {compact
             ? `Where do I find my ${fields[0]?.label ?? "credentials"}?`
@@ -1308,7 +1340,7 @@ function ExternalMetaLink({ href }: { href: string }) {
       href={href}
       target="_blank"
       rel="noreferrer noopener"
-      className="inline-flex min-w-0 items-center gap-1 truncate font-medium text-brand hover:underline"
+      className="inline-flex min-w-0 items-center gap-1 truncate font-medium og-link"
     >
       <span className="truncate">{label}</span>
       <ExternalLinkIcon className="size-3 shrink-0" />

@@ -23,7 +23,7 @@ COPY --from=xx / /
 # selects the requested OCI target and configures clang/lld for its glibc ABI;
 # `xx-verify` fails closed if the copied helper is not actually target-native.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends clang lld \
+    && apt-get install -y --no-install-recommends clang lld bash-builtins \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/agent
@@ -62,6 +62,14 @@ RUN set -eux; \
       native/command-supervisor/supervisor.c -o /out/opengeni-command-supervisor; \
     xx-verify /out/opengeni-command-supervisor
 
+# Bash 5.2's loadable ABI is compiled against its packaged headers. Both target
+# architectures must additionally pass the final-runtime PTY smoke below.
+RUN set -eux; \
+    xx-clang -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -Wl,-z,noexecstack \
+      -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins \
+      native/terminal-ready/terminal-ready.c -o /out/opengeni-terminal-ready.so; \
+    xx-verify /out/opengeni-terminal-ready.so
+
 FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
 FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
@@ -93,6 +101,7 @@ WORKDIR /src
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/desktop/package.json apps/desktop/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
@@ -115,6 +124,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
@@ -123,12 +133,16 @@ COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
+COPY packages/react-native/package.json packages/react-native/package.json
 COPY packages/react/package.json packages/react/package.json
 COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
+COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
+COPY packages/vaults/package.json packages/vaults/package.json
+COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 # The cache mount only holds Bun's download cache; the exact lock-resolved
@@ -229,6 +243,10 @@ RUN set -eux; \
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 COPY --from=computer-native-build /out/opengeni-command-supervisor /out/opengeni-command-supervisor
+COPY --from=computer-native-build /out/opengeni-terminal-ready.so /out/opengeni-terminal-ready.so
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-terminal-ready.so | awk '{print $1}')" \
+      /usr/local/lib/opengeni/opengeni-terminal-ready.so >> /out/SHA256SUMS
 RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-command-supervisor | awk '{print $1}')" \
       /usr/local/bin/opengeni-command-supervisor \
@@ -541,6 +559,11 @@ COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-brow
 COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
+COPY --from=browserd-build /out/opengeni-terminal-ready.so /usr/local/lib/opengeni/opengeni-terminal-ready.so
+COPY docker/desktop/opengeni-terminal-ready.sh /etc/profile.d/00-opengeni-terminal-ready.sh
+COPY agent/native/terminal-ready/tests/test_ready.py /tmp/opengeni-terminal-ready-test.py
+RUN python3 /tmp/opengeni-terminal-ready-test.py /usr/local/lib/opengeni/opengeni-terminal-ready.so --installed \
+    && rm /tmp/opengeni-terminal-ready-test.py
 COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS

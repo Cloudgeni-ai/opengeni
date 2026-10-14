@@ -14,6 +14,21 @@ classes still collapse and unknown codes/messages are omitted. Caller-supplied
 `errorMessage`, provider bodies, SQL and customer content remain excluded;
 protected diagnostics below are the separate cause-investigation boundary.
 
+### Temporal SDK logs
+
+The worker process installs the Temporal Runtime with
+`createTemporalSdkLogger`, and forwards Rust core records to it, so SDK worker,
+activity and workflow records and `workflow.log` calls are written as ordinary
+structured lines (one JSON object per line). Records below INFO are dropped, the
+SDK default. Each record keeps only `sdkComponent`, the code-registered
+`activity` and `workflowType` names, `attempt` and `durationMs`. Task tokens,
+namespaces, task queues, workflow/run/activity identifiers, core fields and the
+raw error never cross the boundary. A record that carries an error becomes
+`TemporalSdkOperationError` / `temporal_sdk_failure_logged`. The message is kept
+only when it is one of the SDK's reviewed constant messages or comes from
+Opengeni workflow code. Anything else, including SDK messages that interpolate
+exception text and core messages, is published as `Temporal SDK log record`.
+
 ## Context and timing
 
 `withTraceContext` scopes identity through asynchronous calls. `startSpan`
@@ -107,10 +122,91 @@ duration as the unlabeled
 physical histogram name, because one metric name has exactly one label set in a
 process registry.
 
+`opengeni_workspace_capture_skipped_total{backend,reason}` counts warm
+checkpoint attempts that could not start, by a closed reason (the capture-claim
+refusal such as `holder_in_progress` or `mutation_in_progress`, `lease_not_warm`,
+`capture_policy`, `no_persist_primitive`). A blocked checkpoint is retried on
+every turn heartbeat, so a sustained blocker increments it repeatedly. An attempt
+that is not due yet or whose archive already covers the current generation is not
+counted.
+
+`opengeni_sandbox_checkpoint_staleness{kind}` (`dirty`, `stale_4h`,
+`stale_12h`) and `opengeni_sandbox_checkpoint_age_max_seconds` are a fresh,
+content-free reaper inventory (`opengeni_private.sandbox_checkpoint_staleness()`,
+migrations 0672 and 0683) of live Modal sandboxes with a write their last
+checkpoint did not capture: a mutation admission on that exact box newer than
+the archive generation, any captured write that is still open or settled
+after the checkpoint (a background command the checkpoint ran around), or a
+viewer or interaction (a desktop or terminal tab, a browser or computer
+controller) attached now or since the last capture that did not run around one
+(`untracked_writer_since`), which can write without an admission. A generation
+bump with no write behind it, such as a fresh or restored box or a capture that
+published one generation behind, does not count on its own. Age runs from the
+first uncaptured write, or for a writer from the later of the checkpoint and its
+first attach, clamped to the box's creation. `OpenGeniSandboxCheckpointStale` warns when any box has held such a
+write for more than 12 hours, half the default provider lifetime: an unplanned
+provider loss would lose it. Boxes kept warm between turns by a tab, a
+controller or a background command (supervised or not, migration 0685) are
+checkpointed by the idle checkpoint sweep (migration 0680).
+
+To find the leases behind the alert, run this as a role that bypasses row-level
+security (a superuser or a `BYPASSRLS` role); under forced row-level security an
+ordinary role silently sees no rows. It ages boxes the way the inventory does,
+checking every captured write for a settlement after the checkpoint:
+
+```sql
+with live as (
+  select lease.id, lease.workspace_id, lease.sandbox_group_id, lease.liveness,
+    lease.instance_id,
+    coalesce(lease.archive_generation, 0) as archived_generation,
+    coalesce(lease.provider_created_at, lease.created_at) as box_created_at,
+    opengeni_private.sandbox_checkpoint_staleness_at(
+      lease.resume_state #>> '{sessionState,workspaceArchiveAt}') as checkpoint_at,
+    (select min(holder.created_at) from sandbox_lease_holders holder
+      where holder.lease_id = lease.id
+        and holder.kind in ('viewer', 'interaction')) as writer_attached_at,
+    lease.untracked_writer_since
+  from sandbox_leases lease
+  where lease.backend = 'modal' and lease.liveness in ('warm', 'draining')
+    and lease.instance_id is not null
+), evidence as (
+  select live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at,
+    least(live.untracked_writer_since, live.writer_attached_at) as writer_since,
+    min(admission.admitted_at) filter (
+      where admission.workspace_generation > live.archived_generation
+    ) as newer_write_at,
+    bool_or(admission.workspace_generation <= live.archived_generation
+      and (admission.settled_at is null
+        or admission.settled_at > live.checkpoint_at)) as spanning_write
+  from live
+  left join sandbox_workspace_mutation_admissions admission
+    on admission.lease_id = live.id
+   and admission.provider_instance_id = live.instance_id
+  group by live.id, live.workspace_id, live.sandbox_group_id, live.liveness,
+    live.box_created_at, live.checkpoint_at, live.untracked_writer_since,
+    live.writer_attached_at
+)
+select id, workspace_id, sandbox_group_id, liveness,
+  greatest(
+    least(newer_write_at,
+      case when spanning_write then coalesce(checkpoint_at, box_created_at) end,
+      case when writer_since is not null then greatest(writer_since,
+        coalesce(checkpoint_at, box_created_at)) end),
+    box_created_at) as unsaved_since
+from evidence
+where newer_write_at is not null or spanning_write or writer_since is not null
+order by unsaved_since
+limit 20;
+```
+
 Consistent workspace capture intentionally fences new writing operations; a
 shell command is conservatively a potential writer even when its text looks
 read-only. Capture waits must not be removed by bypassing that fence or by
-disabling recovery snapshots. Compare gate wait and physical capture duration
+disabling recovery snapshots. The one deliberate exception is an already-running
+retained background command under a point-in-time (Modal native) capture: warm
+checkpoints run around it and record the archive one generation behind the
+workspace (see `docs/run-lifecycle.md`). Compare gate wait and physical capture duration
 before changing capture strategy; filesystem and directory-only persistence
 have different recovery semantics.
 
@@ -172,12 +268,14 @@ at zero on API start. `reason` is `invalid`, `too_large`, `origin` or
 `rate_limited`. A `rate_limited` refusal keeps the report's `kind`, so accepted
 plus rate-limited is the true per-kind arrival rate while a bucket is empty; the
 other reasons use `kind="unknown"` because the report was not read or not valid.
-The strict body is the kind, a route pattern and a bundle revision, under 512
-bytes; the limit is enforced on the streamed body, so a chunked request is
-refused after 512 bytes instead of being buffered, and the generic request-body
-ceiling does not apply to this exact route. The wire grammar is shared by the
-browser, the route and the log projection through
-`@opengeni/contracts/client-error-report`.
+The strict body is the kind, a route pattern, a bundle revision and optional
+error diagnostics (`error.name`, `error.message`, `error.stack`,
+`error.componentStack`), under 20 KiB; the limit is enforced on the streamed
+body, so a chunked request is refused at 20 KiB instead of being buffered, and
+the generic request-body ceiling does not apply to this exact route. The wire
+grammar, the scrubbing and the per-field bounds (name 128 bytes, message 1 KiB,
+stack and component stack 4 KiB) are shared by the browser, the route and the
+log projection through `@opengeni/contracts/client-error-report`.
 
 A request whose `Origin` header is present but is not one of the deployment's
 own web origins (the CORS allowlist, `OPENGENI_PUBLIC_BASE_URL` or
@@ -187,7 +285,24 @@ in each API process (burst 30, then one every two seconds), so a hostile or
 looping client cannot inflate the counter or the log without bound. Each
 accepted report writes one `Web client error reported` warning whose public
 fields are `surface`, `reason` (the kind), and the grammar-validated opaque
-`clientRoute` and `clientRevision`. No message, stack or URL is accepted.
+`clientRoute` and `clientRevision`, plus the error diagnostics as
+`clientErrorName`, `clientErrorMessage`, `clientErrorStack` and
+`clientComponentStack`.
+
+The diagnostics are the one deliberate free-text exception to the public log
+projection, so that a crash report says why a page failed and not only where.
+They are error text, which can occasionally quote user content. The route
+re-applies the shared projection to every report: URL query strings and
+fragments are removed (except on React's error-decoder links, whose query holds
+only the error's arguments), authorization values, JWTs, well-known API token
+formats, `token=`/`password:`-style assignment values and long opaque
+letter-and-digit strings become `[redacted]`, control characters are removed,
+and each field is cut to its bound. The log projection then admits these four
+names only when the value is already exactly what that projection produces, so
+raw text passed under them by any other caller is omitted. Structured stdout
+logs carry each field in full; OTLP log export cuts every string attribute to
+512 bytes, as for all attributes. The route is anonymous, so treat the text as
+untrusted input when reading it.
 
 The route is anonymous and a non-browser client can omit or forge `Origin`, so
 the counter can be spoofed up to the admission ceiling (about 43,000 reports per
@@ -203,11 +318,11 @@ The same route admits closed operational signals, discriminated by a `signal`
 field. A body without `signal` is an error report as above; an older API refuses
 a signal body as `invalid`, so the extension is backward compatible.
 
-| `signal` | Series | Labels (closed values) |
-| --- | --- | --- |
-| `request_failure` | `opengeni_client_request_failures_total` (counter) | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
-| `stream` | `opengeni_client_stream_events_total` (counter) | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect` |
-| `web_vital` | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...) |
+| `signal`          | Series                                                               | Labels (closed values)                                                                                                                                                                                                               |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `request_failure` | `opengeni_client_request_failures_total` (counter)                   | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
+| `stream`          | `opengeni_client_stream_events_total` (counter)                      | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect`                                                                                                                                     |
+| `web_vital`       | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...)                                                                                           |
 
 Both counters are published at zero for every label pair on API start, and a
 rate-limited signal is counted in

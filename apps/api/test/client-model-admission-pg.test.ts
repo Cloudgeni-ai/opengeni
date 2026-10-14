@@ -11,13 +11,9 @@ import {
   createDb,
   createWorkspaceProviderCustomModel,
   getModelConnectionAccess,
-  getCodexCredentialStatus,
   getBillingBalance,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
-  updateCodexRotationSettings,
   updateModelConnectionAccess,
-  upsertCodexSubscriptionCredential,
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
@@ -91,7 +87,7 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
     path: string,
     body?: unknown,
     actor: AccessGrant = grant,
-    method?: "GET" | "POST" | "PUT",
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   ): Promise<Response> {
     return app.request(path, {
       method: method ?? (body === undefined ? "GET" : "POST"),
@@ -154,6 +150,34 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
     return current;
   }
   return { grant, request, config, parity };
+}
+
+/**
+ * A connected Codex subscription after the drained cutover (0680 seeds every
+ * organization enabled on the shared core): an organization-scoped shared
+ * core connection. The legacy Codex tables are frozen and never read.
+ */
+async function connectCoreCodex(
+  grant: AccessGrant,
+  options: {
+    credentialEncrypted?: string;
+    expiresAt?: Date | null;
+    allowedModelIds?: string[] | null;
+  } = {},
+): Promise<string> {
+  const [row] = await shared!.admin<{ id: string }[]>`
+    insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      provider_account_id, plan_type, provider_state, expires_at, last_refresh_at,
+      allowed_model_ids
+    ) values (
+      ${grant.accountId}::uuid, 'codex', 'subscription',
+      ${options.credentialEncrypted ?? "metadata-only-fake-secret"}, 'shared', 'organization',
+      ${crypto.randomUUID()}, 'pro', ${shared!.admin.json({ isFedramp: false })}::jsonb,
+      ${options.expiresAt?.toISOString() ?? null}::timestamptz, now(),
+      ${options.allowedModelIds ?? null}::text[]
+    ) returning id::text as id`;
+  return row!.id;
 }
 
 test("PG: disconnected Codex is never advertised or freshly creatable", async () => {
@@ -256,28 +280,8 @@ test("PG: fallback reasoning comes from the admitted model, not the blocked depl
 test("PG: ready Codex model permissions and workspace policy affect list and create identically", async () => {
   if (!client || !shared) return;
   const f = await fixture();
-  const credential = await upsertCodexSubscriptionCredential(client.db, {
-    accountId: f.grant.accountId,
-    workspaceId: f.grant.workspaceId,
-    credentialEncrypted: "metadata-only-fake-secret",
-    chatgptAccountId: crypto.randomUUID(),
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
-    expiresAt: null,
-    lastRefreshAt: null,
-  });
-  await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
-  await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
-  const codexTarget = { ...f.grant, kind: "codex" as const, connectionId: credential.id };
-  const codexAccess = await getModelConnectionAccess(client.db, codexTarget);
-  expect(codexAccess).not.toBeNull();
-  expect(
-    await updateModelConnectionAccess(client.db, codexTarget, {
-      ...codexAccess!,
-      allowedModels: ["codex/gpt-6-sol"],
-    }),
-  ).not.toBeNull();
+  // The connection's model allowlist (the core has no access-policy writer yet).
+  await connectCoreCodex(f.grant, { allowedModelIds: ["codex/gpt-6-sol"] });
   expect((await f.parity(["codex/gpt-6-astra", "codex/invented-model"])).allowedModels).toContain(
     "codex/gpt-6-sol",
   );
@@ -300,9 +304,7 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
     environmentsEncryptionKey: encryptionKey.toString("base64"),
   });
   expect((await getBillingBalance(client.db, f.grant.accountId)).balanceMicros).toBe(0);
-  await upsertCodexSubscriptionCredential(client.db, {
-    accountId: f.grant.accountId,
-    workspaceId: f.grant.workspaceId,
+  const connectionId = await connectCoreCodex(f.grant, {
     credentialEncrypted: encryptEnvironmentValue(
       encryptionKey,
       JSON.stringify({
@@ -311,15 +313,8 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
         id_token: "synthetic-id-token",
       }),
     ),
-    chatgptAccountId: crypto.randomUUID(),
-    scopes: null,
-    planType: "pro",
-    isFedramp: false,
     expiresAt: new Date(Date.now() + 60_000),
-    lastRefreshAt: new Date(),
   });
-  await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
-  await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
   const refresh = spyOn(codex, "refreshCodexToken").mockRejectedValue(
     new codex.CodexReloginRequired("Synthetic refresh tokens are not provider credentials"),
   );
@@ -331,7 +326,7 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
   try {
     const draft = {
       expectedRevision: 0,
-      text: "Use the chosen subscription without OpenGeni credits",
+      text: "Use the chosen subscription without Opengeni credits",
       resources: [],
       tools: [],
       toolsProvided: true,
@@ -367,10 +362,10 @@ test("PG: an explicit Codex draft creates with zero credits without refreshing i
     });
     expect(refresh).not.toHaveBeenCalled();
     expect(models).not.toHaveBeenCalled();
-    expect(await getCodexCredentialStatus(client.db, f.grant.workspaceId)).toMatchObject({
-      connected: true,
-      status: "active",
-    });
+    const [connection] = await shared.admin<{ status: string; refresh_generation: string }[]>`
+      select status, refresh_generation::text as refresh_generation
+      from subscription_connections where id = ${connectionId}::uuid`;
+    expect(connection).toEqual({ status: "active", refresh_generation: "1" });
   } finally {
     refresh.mockRestore();
     models.mockRestore();
@@ -464,19 +459,7 @@ test("PG: database catalog changes and retired Codex definitions apply to both l
       on conflict (singleton) do update set document = excluded.document, version = deployment_model_catalog.version + 1`;
     const f = await fixture({ modelCatalogSource: "database" });
     await f.parity(["codex/fixture-hot-model", "codex/gpt-6-sol", "gpt-5.6-luna"]);
-    await upsertCodexSubscriptionCredential(client.db, {
-      accountId: f.grant.accountId,
-      workspaceId: f.grant.workspaceId,
-      credentialEncrypted: "metadata-only-fake-secret",
-      chatgptAccountId: crypto.randomUUID(),
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: null,
-      lastRefreshAt: null,
-    });
-    await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
-    await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
+    await connectCoreCodex(f.grant);
     expect((await f.parity(["codex/gpt-6-sol"])).allowedModels).toContain(
       "codex/fixture-hot-model",
     );
@@ -545,4 +528,103 @@ test("PG: provider_unhealthy xAI model remains listed and creatable with unavail
     reason: "provider_unhealthy",
     checkedAt: null,
   });
+}, 180_000);
+
+test("PG: turning Opengeni credits off blocks every credit model but keeps subscriptions and workspace keys", async () => {
+  if (!client || !shared) return;
+  const f = await fixture();
+  await connectCoreCodex(f.grant);
+  await createConnection(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    subjectId: null,
+    providerDomain: "api.anthropic.com",
+    kind: "api_key",
+    credentialEncrypted: "metadata-only-fake-secret",
+    metadata: { credentialRole: "anthropic" },
+    createdBySubjectId: f.grant.subjectId,
+  });
+  await createWorkspaceProviderCustomModel(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    providerKind: "anthropic",
+    upstreamModelId: "claude-fixture-model",
+    label: "Fixture Claude",
+    operationId: crypto.randomUUID(),
+    requestHash: "b".repeat(64),
+    createdBySubjectId: f.grant.subjectId,
+  });
+  const before = await f.config();
+  const creditModels = before.models
+    .filter((model) => model.cost === "credits")
+    .map((model) => model.id);
+  expect(creditModels.length).toBeGreaterThan(0);
+
+  const policyPath = `/v1/workspaces/${f.grant.workspaceId}/model-policy`;
+  const settingsPath = `/v1/workspaces/${f.grant.workspaceId}/settings`;
+  const off = await f.request(settingsPath, { allowCreditModels: false }, f.grant, "PATCH");
+  expect(off.status).toBe(200);
+  expect((await off.json()).settings.allowCreditModels).toBe(false);
+  // A workspace setting: the workspace keeps following (no) allowlist of its own.
+  expect(await (await f.request(policyPath)).json()).toEqual({
+    allowedProviders: null,
+    allowedModels: null,
+    source: "none",
+    organization: null,
+    allowCreditModels: false,
+  });
+
+  // Every credit model is gone from the list and refused at create (422, with
+  // a reason that names credits); subscription and workspace-key models stay.
+  const after = await f.parity(creditModels);
+  expect(after.allowedModels).toContain("codex/gpt-6-sol");
+  expect(after.allowedModels).toContain("workspace-anthropic/claude-fixture-model");
+  expect(after.models.some((model) => model.cost === "credits")).toBe(false);
+  const refused = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    model: creditModels[0],
+    initialMessage: "Spend credits",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(refused.status).toBe(422);
+  expect((await refused.json()).message).toContain("Opengeni credits");
+
+  // An omitted model never falls back to a credit model.
+  const implicit = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    initialMessage: "Use whatever the workspace allows",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(implicit.status).toBe(202);
+  expect(creditModels).not.toContain((await implicit.json()).model);
+
+  // Saving or removing an allowlist never turns credits back on, even one
+  // that lists credit models or sends the field (PUT ignores it).
+  const allowlistOnly = await f.request(
+    policyPath,
+    {
+      allowedProviders: null,
+      allowedModels: [...creditModels, "codex/gpt-6-sol"],
+      allowCreditModels: true,
+    },
+    f.grant,
+    "PUT",
+  );
+  expect(allowlistOnly.status).toBe(200);
+  expect((await allowlistOnly.json()).allowCreditModels).toBe(false);
+  await f.parity(creditModels);
+  const removed = await f.request(policyPath, undefined, f.grant, "DELETE");
+  expect(removed.status).toBe(200);
+  expect((await removed.json()).allowCreditModels).toBe(false);
+  await f.parity(creditModels);
+
+  // A non-boolean value is refused rather than stored.
+  const malformed = await f.request(settingsPath, { allowCreditModels: "no" }, f.grant, "PATCH");
+  expect(malformed.status).toBe(400);
+  expect((await (await f.request(policyPath)).json()).allowCreditModels).toBe(false);
+
+  const on = await f.request(settingsPath, { allowCreditModels: true }, f.grant, "PATCH");
+  expect(on.status).toBe(200);
+  expect((await (await f.request(policyPath)).json()).allowCreditModels).toBe(true);
+  expect((await f.config()).allowedModels).toEqual(expect.arrayContaining(creditModels));
 }, 180_000);

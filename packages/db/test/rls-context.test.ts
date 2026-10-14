@@ -65,5 +65,7 @@ describe("setRlsContext query budget", () => {
     expect(queryText).toContain("set_config('opengeni.sandbox_recovery_protocol_v2'");
     expect(queryText).toContain("set_config('opengeni.pending_tool_event_output_v1'");
     expect(queryText).toContain("set_config('opengeni.session_variable_set_attachments_v1'");
+    // Request transactions must not pay for JIT compilation (RLS inflates cost estimates).
+    expect(queryText).toContain("set_config('jit', 'off', true)");
   });
 });

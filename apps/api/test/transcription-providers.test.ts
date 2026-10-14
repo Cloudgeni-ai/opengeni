@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
+import { TranscriptionServiceError } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 import {
   createTranscriptionService,
@@ -237,37 +238,156 @@ describe("transcription providers", () => {
     expect(sends).toBe(0);
   });
 
-  test("prefers Codex when subscription is attached even if OpenAI is configured", async () => {
-    const accounts = spyOn(dbModule, "listCodexAccountStatuses").mockResolvedValue([
-      {
-        id: "cred-1",
-        isActive: true,
-        status: "active",
-      },
-    ] as never);
-    const resolver = spyOn(dbModule, "buildCodexTokenResolver").mockReturnValue({
-      getToken: async () => ({
-        accessToken: "access",
-        chatgptAccountId: "acct",
-      }),
-      refresh: async () => ({
-        accessToken: "access",
-        chatgptAccountId: "acct",
-      }),
+  test.each([200, 429])(
+    "SUB-FAIL-10 prefers Codex and never switches providers after its response %i",
+    async (status) => {
+      // An enabled cutover with a shared connection selects the core path.
+      const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
+      const candidates = spyOn(
+        dbModule,
+        "listSubscriptionCoreCodexOperationCandidates",
+      ).mockResolvedValue([{ connectionId: "connection-1" }] as never);
+      const acquired = spyOn(
+        dbModule,
+        "acquireSubscriptionCoreCodexOperationLease",
+      ).mockResolvedValue({ kind: "acquired" } as never);
+      const renewed = spyOn(dbModule, "renewSubscriptionCoreCodexOperationLease").mockResolvedValue(
+        true as never,
+      );
+      const released = spyOn(
+        dbModule,
+        "releaseSubscriptionCoreCodexOperationLease",
+      ).mockResolvedValue(true as never);
+      const resolver = spyOn(
+        dbModule,
+        "buildSubscriptionCoreCodexConnectionTokenResolver",
+      ).mockReturnValue({
+        getToken: async () => ({
+          accessToken: "access",
+          chatgptAccountId: "acct",
+        }),
+        refresh: async () => ({
+          accessToken: "access",
+          chatgptAccountId: "acct",
+        }),
+      } as never);
+      const operationFetch = spyOn(
+        dbModule,
+        "buildSubscriptionCoreCodexOperationFetch",
+      ).mockImplementation(
+        ((_db: unknown, _scope: unknown, _ref: unknown, _id: unknown, base: unknown) =>
+          base) as never,
+      );
+      try {
+        let url: string | undefined;
+        let otherProviderCalls = 0;
+        const service = createTranscriptionService({
+          settings: testSettings({
+            codexSubscriptionEnabled: true,
+            voiceInputProviderOrder: "codex-subscription,openai,azure-openai",
+          }),
+          db: {} as never,
+          codexFetch: async (input) => {
+            url = String(input);
+            return Response.json({ text: "from-codex", language: "en" }, { status });
+          },
+          fetch: async () => {
+            otherProviderCalls++;
+            return Response.json({ text: "from-openai", language: "en" });
+          },
+        });
+        const pending = service.transcribe({
+          workspaceId: "workspace",
+          accountId: "account",
+          audio,
+          mimeType: "audio/webm",
+          requestId: "request",
+        });
+        if (status === 200) {
+          const result = await pending;
+          expect(result.text).toBe("from-codex");
+          expect(result.providerId).toBe("codex-subscription");
+        } else await expect(pending).rejects.toMatchObject({ fallbackSafe: false });
+        expect(otherProviderCalls).toBe(0);
+        expect(url).toContain("/backend-api/transcribe");
+      } finally {
+        for (const spy of [
+          disposition,
+          candidates,
+          acquired,
+          renewed,
+          released,
+          resolver,
+          operationFetch,
+        ])
+          spy.mockRestore();
+      }
+    },
+  );
+
+  test("a credit refusal before any audio is sent falls back to the connected Codex subscription", async () => {
+    const disposition = spyOn(dbModule, "readCodexCutoverDisposition").mockResolvedValue("core");
+    const candidates = spyOn(
+      dbModule,
+      "listSubscriptionCoreCodexOperationCandidates",
+    ).mockResolvedValue([{ connectionId: "connection-1" }] as never);
+    const acquired = spyOn(
+      dbModule,
+      "acquireSubscriptionCoreCodexOperationLease",
+    ).mockResolvedValue({ kind: "acquired" } as never);
+    const renewed = spyOn(dbModule, "renewSubscriptionCoreCodexOperationLease").mockResolvedValue(
+      true as never,
+    );
+    const released = spyOn(
+      dbModule,
+      "releaseSubscriptionCoreCodexOperationLease",
+    ).mockResolvedValue(true as never);
+    const resolver = spyOn(
+      dbModule,
+      "buildSubscriptionCoreCodexConnectionTokenResolver",
+    ).mockReturnValue({
+      getToken: async () => ({ accessToken: "access", chatgptAccountId: "acct" }),
+      refresh: async () => ({ accessToken: "access", chatgptAccountId: "acct" }),
     } as never);
+    const operationFetch = spyOn(
+      dbModule,
+      "buildSubscriptionCoreCodexOperationFetch",
+    ).mockImplementation(
+      ((_db: unknown, _scope: unknown, _ref: unknown, _id: unknown, base: unknown) =>
+        base) as never,
+    );
     try {
-      let url: string | undefined;
+      let openAiSends = 0;
+      let admits = 0;
       const service = createTranscriptionService({
         settings: testSettings({
+          billingMode: "stripe",
           codexSubscriptionEnabled: true,
-          voiceInputProviderOrder: "codex-subscription,openai,azure-openai",
+          // The deployment-paid provider comes first, as a workspace may prefer it.
+          voiceInputProviderOrder: "openai,codex-subscription",
         }),
         db: {} as never,
-        codexFetch: async (input) => {
-          url = String(input);
-          return Response.json({ text: "from-codex", language: "en" });
+        normalizeAudio: async () => ({ bytes: audio, durationSeconds: 1 }),
+        billing: {
+          admit: async () => {
+            admits++;
+            // Opengeni credits are turned off in this workspace.
+            throw new TranscriptionServiceError({
+              code: "policy_blocked",
+              status: 403,
+              fallbackSafe: true,
+              message: "Opengeni credits are turned off in this workspace.",
+            });
+          },
+          settle: async () => {
+            throw new Error("a subscription transcript is never settled in credits");
+          },
         },
-        fetch: async () => Response.json({ text: "from-openai", language: "en" }),
+        codexFetch: async () => Response.json({ text: "from-codex", language: "en" }),
+        fetch: async () => {
+          openAiSends++;
+          return Response.json({ text: "from-openai", language: "en" });
+        },
       });
       const result = await service.transcribe({
         workspaceId: "workspace",
@@ -275,99 +395,36 @@ describe("transcription providers", () => {
         audio,
         mimeType: "audio/webm",
         requestId: "request",
+        billing: { sourceId: "unit", attribution: { kind: "service" } },
       });
-      expect(result.text).toBe("from-codex");
       expect(result.providerId).toBe("codex-subscription");
-      expect(url).toContain("/backend-api/transcribe");
-    } finally {
-      accounts.mockRestore();
-      resolver.mockRestore();
-    }
-  });
-
-  test("uses the connected SuperGrok account for xAI speech-to-text", async () => {
-    const active = spyOn(dbModule, "workspaceXaiSubscriptionActive").mockResolvedValue(true);
-    const authority = spyOn(
-      dbModule,
-      "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
-    ).mockResolvedValue({ version: 1, scope: "workspace" });
-    const selected = spyOn(dbModule, "selectXaiCredentialForUse").mockResolvedValue({
-      credentialId: "xai-credential",
-      rotationEnabled: true,
-      accounts: [],
-    });
-    const materialized = spyOn(dbModule, "materializeXaiCredentialForRun").mockResolvedValue({
-      id: "xai-credential",
-      scope: "workspace",
-      providerAccountId: "xai-user",
-      label: "Alex Morgan",
-      accountEmail: "alex@example.com",
-      planType: "SuperGrok",
-      status: "active",
-      allocatorEnabled: true,
-      version: 1,
-      allocatorVersion: 1,
-      allocatorUpdatedAt: null,
-      expiresAt: null,
-      lastRefreshAt: null,
-      lastError: null,
-      quotaUsedPercent: null,
-      quotaResetAt: null,
-      quotaCheckedAt: null,
-      exhaustedUntil: null,
-      selectionCount: 0,
-      lastSelectedAt: null,
-      connectedBySubjectId: "user:human",
-      secret: {
-        version: 1,
-        accessToken: "xai-access",
-        refreshToken: "xai-refresh",
-      },
-      authoritySnapshot: { version: 1, scope: "workspace" },
-    });
-    try {
-      let request: Request | undefined;
-      const service = createTranscriptionService({
-        settings: testSettings({
-          supergrokSubscriptionEnabled: true,
-          environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
-          voiceInputProviderOrder: "supergrok-subscription,openai",
+      expect(result.text).toBe("from-codex");
+      expect(admits).toBe(1);
+      expect(openAiSends).toBe(0);
+      // An exact provider choice is never swapped for another one.
+      await expect(
+        service.transcribe({
+          workspaceId: "workspace",
+          accountId: "account",
+          audio,
+          mimeType: "audio/webm",
+          requestId: "request-exact",
+          providerId: "openai",
+          billing: { sourceId: "unit-exact", attribution: { kind: "service" } },
         }),
-        db: {} as never,
-        fetch: async (input, init) => {
-          request = new Request(input, init);
-          return Response.json({ text: "fra SuperGrok", language: "no" });
-        },
-      });
-      const result = await service.transcribe({
-        workspaceId: "workspace",
-        accountId: "account",
-        subjectId: "user:human",
-        audio,
-        mimeType: "audio/webm",
-        requestId: "stt-request",
-      });
-
-      expect(result).toMatchObject({
-        text: "fra SuperGrok",
-        languages: ["no"],
-        providerId: "supergrok-subscription",
-      });
-      expect(request?.url).toBe("https://api.x.ai/v1/stt");
-      expect(request?.headers.get("authorization")).toBe("Bearer xai-access");
-      expect(request?.headers.get("x-grok-session-id")).toBe("stt-request");
-      if (!request) throw new Error("SuperGrok transcription request missing");
-      const form = await request.formData();
-      expect((form.get("file") as File).name).toBe("audio.webm");
-      expect(selected).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ shardKey: "stt-request" }),
-      );
+      ).rejects.toMatchObject({ code: "policy_blocked" });
+      expect(openAiSends).toBe(0);
     } finally {
-      active.mockRestore();
-      authority.mockRestore();
-      selected.mockRestore();
-      materialized.mockRestore();
+      for (const spy of [
+        disposition,
+        candidates,
+        acquired,
+        renewed,
+        released,
+        resolver,
+        operationFetch,
+      ])
+        spy.mockRestore();
     }
   });
 
@@ -480,219 +537,4 @@ describe("transcription preference and fallback", () => {
     );
     expect(orderedProviders(providers, { afterProvider: "codex-subscription" })).toEqual([]);
   });
-});
-
-test("refreshes an expired SuperGrok token before sending audio", async () => {
-  const active = spyOn(dbModule, "workspaceXaiSubscriptionActive").mockResolvedValue(true);
-  const authority = spyOn(
-    dbModule,
-    "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
-  ).mockResolvedValue({ version: 1, scope: "workspace" });
-  const selected = spyOn(dbModule, "selectXaiCredentialForUse").mockResolvedValue({
-    credentialId: "xai-credential",
-    rotationEnabled: true,
-    accounts: [],
-  });
-  const materialized = spyOn(dbModule, "materializeXaiCredentialForRun").mockResolvedValue({
-    id: "xai-credential",
-    scope: "workspace",
-    providerAccountId: "xai-user",
-    label: "Alex Morgan",
-    accountEmail: "alex@example.com",
-    planType: "SuperGrok",
-    status: "active",
-    allocatorEnabled: true,
-    version: 1,
-    allocatorVersion: 1,
-    allocatorUpdatedAt: null,
-    expiresAt: null,
-    lastRefreshAt: null,
-    lastError: null,
-    quotaUsedPercent: null,
-    quotaResetAt: null,
-    quotaCheckedAt: null,
-    exhaustedUntil: null,
-    selectionCount: 0,
-    lastSelectedAt: null,
-    connectedBySubjectId: "user:human",
-    secret: {
-      version: 1,
-      accessToken:
-        "header." + Buffer.from(JSON.stringify({ exp: 1 })).toString("base64url") + ".signature",
-      refreshToken: "xai-refresh",
-    },
-    authoritySnapshot: { version: 1, scope: "workspace" },
-  });
-  const refresh = spyOn(dbModule, "refreshXaiSubscriptionCredentialSerialized").mockImplementation(
-    async (_db, input) => {
-      const tokens = await input.refresh((await materialized.mock.results[0]!.value) as never);
-      return {
-        credential: { ...(await materialized.mock.results[0]!.value), secret: tokens.secret },
-      } as never;
-    },
-  );
-  try {
-    let request: Request | undefined;
-    const service = createTranscriptionService({
-      settings: testSettings({
-        supergrokSubscriptionEnabled: true,
-        environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
-        voiceInputProviderOrder: "supergrok-subscription,openai",
-      }),
-      db: {} as never,
-      fetch: async (input, init) => {
-        if (String(input).includes("/token"))
-          return Response.json({
-            access_token: "xai-access",
-            refresh_token: "new-refresh",
-            token_type: "Bearer",
-            expires_in: 3600,
-          });
-        request = new Request(input, init);
-        return Response.json({ text: "fra SuperGrok", language: "no" });
-      },
-    });
-    const result = await service.transcribe({
-      workspaceId: "workspace",
-      accountId: "account",
-      subjectId: "user:human",
-      audio,
-      mimeType: "audio/webm",
-      requestId: "stt-request",
-    });
-
-    expect(refresh).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({
-      text: "fra SuperGrok",
-      languages: ["no"],
-      providerId: "supergrok-subscription",
-    });
-    expect(request?.url).toBe("https://api.x.ai/v1/stt");
-    expect(request?.headers.get("authorization")).toBe("Bearer xai-access");
-    expect(request?.headers.get("x-grok-session-id")).toBe("stt-request");
-    if (!request) throw new Error("SuperGrok transcription request missing");
-    const form = await request.formData();
-    expect((form.get("file") as File).name).toBe("audio.webm");
-    expect(selected).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ shardKey: "stt-request" }),
-    );
-  } finally {
-    refresh.mockRestore();
-    active.mockRestore();
-    authority.mockRestore();
-    selected.mockRestore();
-    materialized.mockRestore();
-  }
-});
-
-test("refreshes once for xAI 403 bad-credentials", async () => {
-  const active = spyOn(dbModule, "workspaceXaiSubscriptionActive").mockResolvedValue(true);
-  const authority = spyOn(
-    dbModule,
-    "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
-  ).mockResolvedValue({ version: 1, scope: "workspace" });
-  const selected = spyOn(dbModule, "selectXaiCredentialForUse").mockResolvedValue({
-    credentialId: "xai-credential",
-    rotationEnabled: true,
-    accounts: [],
-  });
-  const materialized = spyOn(dbModule, "materializeXaiCredentialForRun").mockResolvedValue({
-    id: "xai-credential",
-    scope: "workspace",
-    providerAccountId: "xai-user",
-    label: "Alex Morgan",
-    accountEmail: "alex@example.com",
-    planType: "SuperGrok",
-    status: "active",
-    allocatorEnabled: true,
-    version: 1,
-    allocatorVersion: 1,
-    allocatorUpdatedAt: null,
-    expiresAt: null,
-    lastRefreshAt: null,
-    lastError: null,
-    quotaUsedPercent: null,
-    quotaResetAt: null,
-    quotaCheckedAt: null,
-    exhaustedUntil: null,
-    selectionCount: 0,
-    lastSelectedAt: null,
-    connectedBySubjectId: "user:human",
-    secret: {
-      version: 1,
-      accessToken: "old-access",
-      refreshToken: "xai-refresh",
-    },
-    authoritySnapshot: { version: 1, scope: "workspace" },
-  });
-  const refresh = spyOn(dbModule, "refreshXaiSubscriptionCredentialSerialized").mockImplementation(
-    async (_db, input) => {
-      const tokens = await input.refresh((await materialized.mock.results[0]!.value) as never);
-      return {
-        credential: { ...(await materialized.mock.results[0]!.value), secret: tokens.secret },
-      } as never;
-    },
-  );
-  try {
-    let request: Request | undefined;
-    const service = createTranscriptionService({
-      settings: testSettings({
-        supergrokSubscriptionEnabled: true,
-        environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
-        voiceInputProviderOrder: "supergrok-subscription,openai",
-      }),
-      db: {} as never,
-      fetch: async (input, init) => {
-        if (String(input).includes("/token"))
-          return Response.json({
-            access_token: "xai-access",
-            refresh_token: "new-refresh",
-            token_type: "Bearer",
-            expires_in: 3600,
-          });
-        if (new Headers(init?.headers).get("authorization") === "Bearer old-access")
-          return Response.json(
-            {
-              error:
-                "The OAuth2 access token could not be validated. [WKE=unauthenticated:bad-credentials]",
-            },
-            { status: 403 },
-          );
-        request = new Request(input, init);
-        return Response.json({ text: "fra SuperGrok", language: "no" });
-      },
-    });
-    const result = await service.transcribe({
-      workspaceId: "workspace",
-      accountId: "account",
-      subjectId: "user:human",
-      audio,
-      mimeType: "audio/webm",
-      requestId: "stt-request",
-    });
-
-    expect(refresh).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({
-      text: "fra SuperGrok",
-      languages: ["no"],
-      providerId: "supergrok-subscription",
-    });
-    expect(request?.url).toBe("https://api.x.ai/v1/stt");
-    expect(request?.headers.get("authorization")).toBe("Bearer xai-access");
-    expect(request?.headers.get("x-grok-session-id")).toBe("stt-request");
-    if (!request) throw new Error("SuperGrok transcription request missing");
-    const form = await request.formData();
-    expect((form.get("file") as File).name).toBe("audio.webm");
-    expect(selected).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ shardKey: "stt-request" }),
-    );
-  } finally {
-    refresh.mockRestore();
-    active.mockRestore();
-    authority.mockRestore();
-    selected.mockRestore();
-    materialized.mockRestore();
-  }
 });

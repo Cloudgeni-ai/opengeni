@@ -281,7 +281,7 @@ export function validateLogoContentType(
  * Defense in depth only: the serving route already sends
  * `X-Content-Type-Options: nosniff` plus `default-src 'none'; sandbox`, and the
  * UI renders logos through `<img>`, so an SVG cannot execute against an
- * OpenGeni origin today. Rejecting at vendoring and import time keeps a
+ * Opengeni origin today. Rejecting at vendoring and import time keeps a
  * scripted mark out of the repository and out of object storage regardless of
  * how the bytes are consumed later.
  */

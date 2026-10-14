@@ -116,6 +116,8 @@ export function canonicalHello(): Hello {
       operationResourcePolicy: false,
       operationCpuQuota: false,
       transactionalFsWrite: false,
+      credentialRenew: false,
+      macPermissions: undefined,
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",

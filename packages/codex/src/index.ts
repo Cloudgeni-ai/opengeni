@@ -2,6 +2,7 @@ export * from "./constants";
 export * from "./billing";
 export * from "./device-code";
 export * from "./refresh";
+export * from "./apps-credential";
 export * from "./normalize";
 export * from "./usage-normalize";
 export * from "./reset-credits";

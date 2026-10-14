@@ -30,10 +30,14 @@ export type ShardWeightResolution = {
 };
 
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
+  "apps/worker/test/skill-checkout-synchronous-live.e2e.ts":
+    "is retained for explicitly pinned sandbox Skill checkout, execution, and publish acceptance using a deterministic adapter or existing Codex credentials",
   "apps/api/test/native-report-delivery.test.ts":
     "requires a verified native runtime and real PostgreSQL and is owned by the required package-contracts gate",
   "test/integration/workspace-capture.integration.ts":
     "requires an already-running real dev stack and is owned by the live workspace-capture gate",
+  "test/e2e/secrets-gate.e2e.ts":
+    "requires an already-running localstack (and Gateway credits for real-model scenarios) and is owned by the secrets full-stack gate",
   "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts":
     "requires cross-browser artifact evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts":
@@ -187,6 +191,7 @@ export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
     "scripts/public-api",
     "scripts/release",
     "scripts/agent-behavior-eval",
+    "scripts/verify",
   ].filter((directory) => existsSync(join(directory, "tsconfig.json")));
   for (const pkg of graph.packages) {
     if (existsSync(join(pkg.dir, "tsconfig.json"))) projects.push(normalizePath(pkg.dir));

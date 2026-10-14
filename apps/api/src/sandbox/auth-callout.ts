@@ -93,6 +93,35 @@ function warnDenial(
   });
 }
 
+/** Closed reasons a Connected Machine agent's NATS connect is refused. */
+type MachineConnectDenialReason =
+  | "undecodable"
+  | "missing_bearer"
+  | "plane_disabled"
+  | "invalid_bearer"
+  | "inactive_enrollment"
+  | "identity_mismatch"
+  | "generation_mismatch"
+  | "invalid_instance"
+  | "duplicate_runner";
+
+/** Count every machine connect decision; identifiers never become labels. */
+function recordMachineConnect(
+  deps: AuthCalloutDeps,
+  outcome: "granted" | "denied",
+  reason: MachineConnectDenialReason | "none",
+): void {
+  try {
+    deps.observability?.incrementCounter({
+      name: "opengeni_machine_connect_total",
+      help: "Connected Machine agent NATS connect decisions (auth callout) by outcome and closed denial reason.",
+      labels: { outcome, reason },
+    });
+  } catch {
+    // Telemetry never changes the signed connect decision.
+  }
+}
+
 /** A process-local dedupe key for a rejected bearer. The digest is never
  * logged, and the bearer value never leaves this function. */
 function rejectedBearerKey(bearer: string): string {
@@ -118,10 +147,12 @@ export async function handleAuthorizationRequest(
     // is nothing to scope a response to. Leave it for the server's timeout by
     // throwing (the transport leaves it unanswered, fail-closed).
     deps.observability?.warn?.("auth-callout: undecodable authorization request", {});
+    recordMachineConnect(deps, "denied", "undecodable");
     throw new Error("undecodable authorization request");
   }
 
-  const deny = (reason: string): Uint8Array => {
+  const deny = (code: MachineConnectDenialReason, reason: string): Uint8Array => {
+    recordMachineConnect(deps, "denied", code);
     // A SIGNED denial: the server reads `nats.error` and refuses the connection.
     const response = mintAuthResponse({
       userPublicKey: decoded.userNkey,
@@ -134,7 +165,7 @@ export async function handleAuthorizationRequest(
 
   const bearer = decoded.authToken;
   if (!bearer) {
-    return deny("missing enrollment bearer");
+    return deny("missing_bearer", "missing enrollment bearer");
   }
 
   const secret = resolveEnrollmentSigningSecret(deps.settings);
@@ -142,7 +173,7 @@ export async function handleAuthorizationRequest(
     // The credential plane is off for this deployment — deny rather than mint an
     // unscoped credential. (The responder should not even be running in this case,
     // but fail-closed regardless.)
-    return deny("enrollment credential plane disabled");
+    return deny("plane_disabled", "enrollment credential plane disabled");
   }
 
   const claims = await verifyEnrollmentBearer(secret, bearer);
@@ -154,7 +185,7 @@ export async function handleAuthorizationRequest(
       "invalid_bearer",
       "auth-callout: rejected an invalid enrollment bearer",
     );
-    return deny("invalid or expired enrollment bearer");
+    return deny("invalid_bearer", "invalid or expired enrollment bearer");
   }
 
   // Confirm the enrollment is still ACTIVE — a revoked machine is denied even with a
@@ -168,7 +199,7 @@ export async function handleAuthorizationRequest(
       "auth-callout: denied a revoked or unknown enrollment",
       { workspaceId: claims.workspaceId, agentId: claims.agentId },
     );
-    return deny("enrollment is not active");
+    return deny("inactive_enrollment", "enrollment is not active");
   }
 
   // Belt-and-braces: the bearer's agentId/enrollmentId must match the row we found.
@@ -181,15 +212,15 @@ export async function handleAuthorizationRequest(
     claims.agentId !== claims.enrollmentId ||
     claims.subjectPrefix !== `agent.${claims.workspaceId}.${claims.agentId}`
   ) {
-    return deny("enrollment identity mismatch");
+    return deny("identity_mismatch", "enrollment identity mismatch");
   }
   if (enrollment.credentialGeneration !== claims.credentialGeneration) {
-    return deny("enrollment credential generation mismatch");
+    return deny("generation_mismatch", "enrollment credential generation mismatch");
   }
 
   const connectionInstanceId = parseAgentConnectionName(decoded.name);
   if (!connectionInstanceId) {
-    return deny("missing or invalid agent connection instance");
+    return deny("invalid_instance", "missing or invalid agent connection instance");
   }
   const claim = await claimEnrollmentConnection(deps.db, {
     workspaceId: claims.workspaceId,
@@ -206,7 +237,7 @@ export async function handleAuthorizationRequest(
       "auth-callout: denied a duplicate live runner",
       { workspaceId: claims.workspaceId, agentId: claims.agentId },
     );
-    return deny("another runner instance currently owns this enrollment");
+    return deny("duplicate_runner", "another runner instance currently owns this enrollment");
   }
 
   // GRANT: the operational subject includes the exact claimed process instance.
@@ -238,6 +269,7 @@ export async function handleAuthorizationRequest(
     accountSeed: deps.callout.accountSeed,
     userJwt,
   });
+  recordMachineConnect(deps, "granted", "none");
   deps.observability?.info?.("auth-callout: granted a workspace-scoped NATS credential", {
     workspaceId: claims.workspaceId,
     agentId: claims.agentId,
@@ -268,7 +300,7 @@ export async function startAuthCalloutResponder(
       ...(deps.observability ? observabilityEventBusOptions(deps.observability) : {}),
     },
   );
-  deps.observability?.info?.("OpenGeni NATS auth-callout responder started", {
+  deps.observability?.info?.("Opengeni NATS auth-callout responder started", {
     subject: AUTH_CALLOUT_SUBJECT,
   });
   return connection;

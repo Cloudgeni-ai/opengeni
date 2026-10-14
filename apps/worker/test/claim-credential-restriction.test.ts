@@ -104,6 +104,7 @@ describe("worker accepted-turn credential restriction installation", () => {
       spyOn(capabilities, "settingsWithCodexCredential").mockResolvedValue(settings),
       spyOn(capabilities, "settingsWithWorkspaceGatewayCredential").mockResolvedValue(settings),
       spyOn(capabilities, "settingsWithWorkspaceOpenRouterCredential").mockResolvedValue(settings),
+      spyOn(capabilities, "settingsWithWorkspaceOpperCredential").mockResolvedValue(settings),
       spyOn(capabilities, "settingsWithOrganizationProviderCredentials").mockResolvedValue(
         settings,
       ),
@@ -181,7 +182,6 @@ describe("worker accepted-turn credential restriction installation", () => {
         groupBoxBackend: "selfhosted",
         sandboxCreationBackend: "selfhosted",
         effectiveRunCredentialBackend: "selfhosted",
-        sandboxWorkspaceEnvironmentValues: {},
         connectionScope: scope,
       } as PrepareRunCredentialsDeps);
       try {

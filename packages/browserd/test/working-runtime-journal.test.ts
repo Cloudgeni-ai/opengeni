@@ -8,6 +8,7 @@ import {
   SqliteBrowserWorkingRuntimeJournal,
   assertDirectory,
   assertWorkingRuntimeReceipt,
+  isAbandonedLaunchReceipt,
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 
@@ -108,6 +109,102 @@ describe("existing controller journal read-only inspection", () => {
 });
 
 describe("durable working-runtime launch receipts", () => {
+  test("a launch settled failed records its bounded cause and is never adoptable", async () => {
+    const directory = await mkdtemp("/tmp/ogb-working-journal-failed-");
+    const profile = join(directory, "profile");
+    await mkdir(profile);
+    const journal = await SqliteBrowserWorkingRuntimeJournal.open({
+      sessionDirectory: directory,
+      browserSessionId,
+      controllerGeneration,
+    });
+    try {
+      const launch = journal.begin({
+        browserSessionId,
+        controllerGeneration,
+        intent: "launch",
+        authority,
+        launchDigest,
+        restoreAuthorityDigest: "e".repeat(64),
+        profile: await assertDirectory(profile),
+        process: null,
+        directoryLaunchAllowed: true,
+      });
+      const dispatched = journal.latest()!;
+      expect(dispatched.state).toBe("dispatched");
+      // A dispatched restore launch is abandoned only once its profile is gone.
+      expect(await isAbandonedLaunchReceipt(dispatched, profile)).toBe(false);
+      expect(
+        await isAbandonedLaunchReceipt({ ...dispatched, restoreAuthorityDigest: null }, profile),
+      ).toBe(false);
+      const failed = journal.fail(launch, "Bad Code With Secrets?");
+      expect(failed).toMatchObject({
+        state: "failed",
+        process: null,
+        directoryLaunchAllowed: false,
+        failureCode: "internal",
+      });
+      expect(journal.latest()).toEqual(failed);
+      expect(await isAbandonedLaunchReceipt(failed, profile)).toBe(true);
+      expect(() =>
+        assertWorkingRuntimeReceipt(failed, authority, launchDigest, launch.profile),
+      ).toThrow("preserved");
+      // A failed launch is terminal and cannot be completed afterwards.
+      expect(() => journal.complete(launch, null)).toThrow("invalid browser operation transition");
+      // The next launch never inherits a previous failure cause.
+      const next = journal.begin({ ...failed, intent: "launch", process: null });
+      expect(next.failureCode).toBeUndefined();
+      expect(journal.fail(next, "driver_failed").failureCode).toBe("driver_failed");
+      await rm(profile, { recursive: true });
+      expect(await isAbandonedLaunchReceipt(dispatched, profile)).toBe(true);
+      expect(await isAbandonedLaunchReceipt({ ...dispatched, intent: "suspend" }, profile)).toBe(
+        false,
+      );
+    } finally {
+      journal.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("only completed suspension with exact launch authority permits recovery", async () => {
+    await withJournal(async ({ journal, receipt }) => {
+      const suspended = journal.suspend(receipt);
+      expect(suspended.process).toEqual(receipt.process);
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).toThrow("preserved");
+      const completed = journal.complete(suspended, suspended.process);
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).not.toThrow();
+      for (const changed of [
+        { ...completed, state: "prepared" as const },
+        { ...completed, state: "outcome_unknown" as const },
+        { ...completed, directoryLaunchAllowed: false },
+        { ...completed, process: null },
+        { ...completed, authority: { ...authority, tokenGeneration: 2 } },
+        { ...completed, launchDigest: "e".repeat(64) },
+        { ...completed, profile: { ...receipt.profile, inode: receipt.profile.inode + 1 } },
+      ])
+        expect(() =>
+          assertWorkingRuntimeReceipt(changed, authority, launchDigest, receipt.profile),
+        ).toThrow("preserved");
+      for (const changed of [
+        { ...receipt, state: "dispatched" as const },
+        { ...receipt, directoryLaunchAllowed: false },
+        { ...receipt, process: null },
+        completed,
+      ])
+        expect(() => journal.suspend(changed)).toThrow("preserved");
+      const retired = journal.retire(completed);
+      journal.complete(retired, null);
+      expect(() => journal.suspend(journal.latest()!)).toThrow("preserved");
+      expect(() =>
+        assertWorkingRuntimeReceipt(journal.latest(), authority, launchDigest, receipt.profile),
+      ).toThrow("preserved");
+    });
+  });
+
   test.each(["prepared", "dispatched", "outcome_unknown"] as const)(
     "newer %s launch shadows completed authority and is never replayed",
     async (state) => {

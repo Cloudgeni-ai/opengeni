@@ -58,6 +58,14 @@ and a delayed debit is retained in its actual period even without period facts.
 Cursor timestamps are always UTC with all six PostgreSQL fractional digits,
 independent of the database connection timezone.
 
+Usage reads decode measure columns once before aggregation and deduplicate only
+visible facet metadata. Totals and ingestion watermarks retain every authorized
+source row. The prior and current windows run as separate statements in the same
+actor-scoped transaction, each retaining the 10-second statement timeout; this
+avoids spending one statement's entire allowance across both independent scans.
+It does not accelerate the raw authority functions or guarantee that larger
+periods fit within the bound.
+
 Captured class annotations must conserve the recorded provider estimate. NULL
 telemetry is not zero, including cache-write telemetry. This interim checkpoint
 does not perform historical allocation: eligible fixed-total allocation using

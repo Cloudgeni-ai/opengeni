@@ -3,7 +3,7 @@ import {
   CapabilityCatalogItem,
   type CapabilityCatalogItem as CatalogItem,
 } from "@opengeni/contracts";
-import { searchCapabilityCatalogItems } from "../src";
+import { searchCapabilityCatalogItems, suggestCapabilityCatalogItems } from "../src";
 
 function item(input: Partial<CatalogItem> & Pick<CatalogItem, "id" | "name">): CatalogItem {
   return CapabilityCatalogItem.parse({
@@ -128,5 +128,113 @@ describe("agent capability catalog search", () => {
     expect(results[0]?.item.id).toBe("mcp:catalog-4876");
     expect(results).toHaveLength(1);
     expect(durationMs).toBeLessThan(1_000);
+  });
+
+  describe("near-spelled integration names", () => {
+    // A manually added custom MCP entry whose display name is misspelled
+    // relative to the vendor brand, with no description, providerDomain, or tags.
+    const whisprflow = item({
+      id: "mcp:whisprflow-12vcsia",
+      name: "Whisprflow",
+      endpointUrl: "https://api.wisprflow.ai/connect/mcp",
+    });
+    const unrelated = [
+      item({ id: "mcp:linear", name: "Linear", providerDomain: "linear.app" }),
+      item({ id: "mcp:notion", name: "Notion", providerDomain: "notion.so" }),
+      item({ id: "mcp:whimsical", name: "Whimsical", providerDomain: "whimsical.com" }),
+    ];
+
+    for (const query of ["Wispr", "Wisprflow", "Wispr Flow", "wispr-flow", "Whisprflow"]) {
+      test(`finds the custom MCP for ${JSON.stringify(query)}`, () => {
+        const results = searchCapabilityCatalogItems([...unrelated, whisprflow], query);
+        expect(results[0]?.item.id).toBe("mcp:whisprflow-12vcsia");
+      });
+    }
+
+    test("derives the vendor domain from a custom endpoint host", () => {
+      const results = searchCapabilityCatalogItems([whisprflow], "wisprflow.ai");
+      expect(results[0]?.item.id).toBe("mcp:whisprflow-12vcsia");
+      expect(results[0]?.matchedOn).toContain("provider");
+      expect(results[0]?.approximate).toBe(false);
+    });
+
+    test("flags typo-only matches as approximate", () => {
+      const nameOnly = item({ id: "mcp:whisprflow", name: "Whisprflow" });
+      const [result] = searchCapabilityCatalogItems([nameOnly], "Wisprflow");
+      expect(result?.item.id).toBe("mcp:whisprflow");
+      expect(result?.approximate).toBe(true);
+      expect(result?.matchedOn).toEqual(["name"]);
+    });
+
+    test("keeps exact matches above typo-tolerant ones", () => {
+      const results = searchCapabilityCatalogItems(
+        [item({ id: "mcp:slack", name: "Slack" }), item({ id: "mcp:slick", name: "Slick" })],
+        "slack",
+      );
+      expect(results.map((result) => [result.item.id, result.approximate])).toEqual([
+        ["mcp:slack", false],
+        ["mcp:slick", true],
+      ]);
+      expect(results[0]!.score).toBeGreaterThan(results[1]!.score * 3);
+      const typo = searchCapabilityCatalogItems(
+        [
+          item({ id: "mcp:posthog", name: "PostHog" }),
+          item({ id: "mcp:postman", name: "Postman" }),
+        ],
+        "posthgo",
+      );
+      expect(typo[0]?.item.id).toBe("mcp:posthog");
+      expect(typo[0]?.approximate).toBe(true);
+    });
+
+    test("does not fuzz short tokens", () => {
+      expect(searchCapabilityCatalogItems([item({ id: "mcp:jet", name: "Jet" })], "jex")).toEqual(
+        [],
+      );
+    });
+
+    test("does not derive a vendor domain for registry rows", () => {
+      const hosted = item({
+        id: "mcp:hosted",
+        name: "Hosted Tool",
+        source: "registry",
+        endpointUrl: "https://server.example-host.dev/mcp",
+        authKind: "none",
+        metadata: { mcpProbe: { status: "real" } },
+      });
+      expect(searchCapabilityCatalogItems([hosted], "examplehost")).toEqual([]);
+    });
+
+    test("suggests the closest names when nothing matches", () => {
+      const catalog = [...unrelated, whisprflow];
+      expect(searchCapabilityCatalogItems(catalog, "Wspr Flw")).toEqual([]);
+      const suggestions = suggestCapabilityCatalogItems(catalog, "Wspr Flw", 3);
+      expect(suggestions).toHaveLength(3);
+      expect(suggestions[0]?.item.id).toBe("mcp:whisprflow-12vcsia");
+      expect(suggestions[0]!.similarity).toBeGreaterThan(suggestions[1]!.similarity);
+      expect(suggestCapabilityCatalogItems([...catalog].reverse(), "Wspr Flw", 3)).toEqual(
+        suggestions,
+      );
+    });
+
+    test("suggestions let an empty query browse the catalog and skip untrusted rows", () => {
+      const untrusted = item({
+        id: "mcp:untrusted",
+        name: "Aardvark",
+        source: "registry",
+        authKind: "unknown",
+        metadata: {},
+      });
+      const suggestions = suggestCapabilityCatalogItems(
+        [untrusted, ...unrelated, whisprflow],
+        "  ",
+      );
+      expect(suggestions.map((suggestion) => suggestion.item.name)).toEqual([
+        "Linear",
+        "Notion",
+        "Whimsical",
+        "Whisprflow",
+      ]);
+    });
   });
 });

@@ -404,6 +404,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
         body: JSON.stringify(body),
       });
 
+    if (url.pathname === "/v1/inbox" && request.method() === "GET") {
+      return json({ items: [], needsYouCount: 0, unreadCount: 0 });
+    }
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "slack-access-browser-test",

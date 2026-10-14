@@ -1,7 +1,7 @@
 /**
  * Public API surface inventory and compatibility diff.
  *
- * `docs/design/api-compatibility-policy.md` defines OpenGeni's public surface:
+ * `docs/design/api-compatibility-policy.md` defines Opengeni's public surface:
  * the `/v1` routes reachable through public `@opengeni/sdk` methods, the
  * documented session event envelope and event types, the exported names of
  * `@opengeni/sdk` and `@opengeni/react`, and the automation webhook ingress.
@@ -32,12 +32,16 @@ export const ALLOWLIST_PATH = "scripts/public-api/breaking-changes.json";
 const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
 /**
- * Public ingress formats that no SDK method calls (third parties post to them).
- * Provider callbacks whose format the provider owns (Stripe, GitHub, Slack) are
- * not OpenGeni's surface and stay out.
+ * Public routes that no SDK method calls: ingress formats third parties post
+ * to, and the OpenAI-compatible single-call routes a stock OpenAI client calls
+ * with base URL `/v1/workspaces/{workspaceId}`. Provider callbacks whose format
+ * the provider owns (Stripe, GitHub, Slack) are not Opengeni's surface and stay
+ * out.
  */
 export const PUBLIC_INGRESS_ROUTES: readonly string[] = [
   "POST /v1/webhooks/automations/:endpointId",
+  "GET /v1/workspaces/:workspaceId/models",
+  "POST /v1/workspaces/:workspaceId/chat/completions",
 ];
 
 /** Documented event contracts, by `@opengeni/contracts` export name. */
@@ -1342,7 +1346,23 @@ function shapeFindings(
       push(path, true, "field removed");
       continue;
     }
-    if (old.t !== next.t) {
+    // A one-value enum is emitted as a const by JSON Schema. Expanding it
+    // into same-scalar enum values follows the ordinary enum policy below.
+    const literalPair = [old, next].every(
+      (field) => (field.t === "const" || field.t === "enum") && field.enum?.length,
+    );
+    const literalTypes = new Set(
+      literalPair
+        ? [...(old.enum ?? []), ...(next.enum ?? [])].map((value) => typeof JSON.parse(value))
+        : [],
+    );
+    const sameScalarEnum =
+      literalPair &&
+      literalTypes.size === 1 &&
+      [...literalTypes].every(
+        (type) => type === "string" || type === "number" || type === "boolean",
+      );
+    if (old.t !== next.t && !sameScalarEnum) {
       const widenedInput = input && !output && next.t === "unknown";
       const narrowedOutput = output && !input && old.t === "unknown";
       const oldRef = REF_TYPE.exec(old.t)?.[1];

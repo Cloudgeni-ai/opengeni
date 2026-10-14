@@ -50,6 +50,27 @@ describe("workspace deletion failure responses", () => {
     expect(scheduleDeletes()).toBe(0);
   });
 
+  test("an editable-artifact retention conflict names the retained artifacts", async () => {
+    const { app, scheduleDeletes } = failingDeletion(
+      new Error("query with private values", {
+        cause: {
+          code: "23503",
+          constraint_name: "editable_artifacts_workspace_fk",
+          detail: "private key values",
+        },
+      }),
+    );
+    const response = await app.request("http://x/workspace", { method: "DELETE" });
+    expect(response.status).toBe(409);
+    const body = await response.text();
+    expect(body).toContain("editable documents, spreadsheets, or presentations");
+    expect(body).toContain("version history is retained");
+    expect(body).toContain("revoke access");
+    expect(body).not.toContain("private");
+    expect(body).not.toContain("editable_artifacts_workspace_fk");
+    expect(scheduleDeletes()).toBe(0);
+  });
+
   test.each([
     ["42501", 403],
     ["P0002", 404],

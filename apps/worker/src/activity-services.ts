@@ -1,5 +1,6 @@
 import {
   codeSearchDeploymentPolicy,
+  resolveWebSearchProvider,
   dbSearchPath,
   getSettings,
   resolveNatsControlPlaneAuth,
@@ -17,6 +18,7 @@ import type { ActivityDependencies, SharedActivityServices } from "./activities/
 import { observabilityEventBusOptions } from "./observability-metrics";
 import { buildPersonalGitHubGitCredentials } from "./personal-github-git-credentials";
 import { createStandaloneConnectionCredentialsPort } from "./pr-review-credentials";
+import { loadOnePasswordVaultProvider } from "./onepassword-vault-provider";
 
 /**
  * Build the dependency graph common to both worker roles exactly once.
@@ -52,6 +54,13 @@ export function createSharedActivityServices(
       // Child, scheduled and automation sessions created here freeze their
       // code_search decision from the same deployment policy as the API.
       configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(settings));
+      // A named but unusable web search provider withholds the tools; say why.
+      const webSearchProvider = resolveWebSearchProvider(settings);
+      if (webSearchProvider.status === "invalid") {
+        observability.warn("web search provider is misconfigured; web_search stays off", {
+          reason: webSearchProvider.reason,
+        });
+      }
       return {
         settings: resolvedSettings,
         catalogSourceSettings: settings,
@@ -79,6 +88,10 @@ export function createSharedActivityServices(
           createStandaloneConnectionCredentialsPort(settings, db),
         personalGitHubCredentials:
           dependencies.personalGitHubCredentials ?? buildPersonalGitHubGitCredentials(db, settings),
+        onePasswordVaultProvider:
+          dependencies.onePasswordVaultProvider === undefined
+            ? loadOnePasswordVaultProvider
+            : dependencies.onePasswordVaultProvider,
       };
     })();
     return await servicesPromise;

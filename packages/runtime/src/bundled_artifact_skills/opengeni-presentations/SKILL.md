@@ -1,11 +1,11 @@
 ---
 name: opengeni-presentations
-description: Create, inspect, edit, import, and export durable OpenGeni presentation artifacts and explicit PPTX file boundaries. Use for decks, slides, masters, layouts, rich text, tables, charts, imported media, groups, notes, and visual presentation QA.
+description: Create, inspect, edit, import, and export durable Opengeni presentation artifacts and explicit PPTX file boundaries. Use for decks, slides, masters, layouts, rich text, tables, charts, imported media, groups, notes, and visual presentation QA.
 ---
 
-# OpenGeni presentations
+# Opengeni presentations
 
-The durable OpenGeni artifact is the default working deck. It is the same live
+The durable Opengeni artifact is the default working deck. It is the same live
 object the user sees in the Artifacts dock and slide editor. Never maintain a
 mutable PPTX shadow or publish a sandbox deck over user edits.
 

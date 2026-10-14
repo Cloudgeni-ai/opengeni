@@ -9,12 +9,18 @@ describe("sessionTimelineEmptyStateCopy", () => {
     });
     expect(sessionTimelineEmptyStateCopy("running", false).title).toBe("Starting the agent");
     expect(sessionTimelineEmptyStateCopy("recovering", false).title).toBe("Restoring this session");
-    expect(sessionTimelineEmptyStateCopy("waiting_capacity", false).title).toBe(
-      "Waiting for capacity",
-    );
+    expect(sessionTimelineEmptyStateCopy("waiting_capacity", false)).toEqual({
+      title: "Limit reached",
+      description: "Your work is saved and continues automatically when capacity is available.",
+    });
     expect(sessionTimelineEmptyStateCopy("requires_action", false).title).toBe(
       "Waiting for your response",
     );
+    // The runtime could not start the first step: nothing to answer.
+    expect(sessionTimelineEmptyStateCopy("blocked", false)).toEqual({
+      title: "Could not start",
+      description: "Nothing is needed from you. Your prompt is kept; recheck below to try again.",
+    });
   });
 
   test("effective pause wins over a stale running status", () => {

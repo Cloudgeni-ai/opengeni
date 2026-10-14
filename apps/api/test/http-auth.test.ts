@@ -198,4 +198,40 @@ describe("configured deployment perimeter authentication", () => {
     ).toBe(401);
     expect((await app.request("/v1/webhooks/pr-review/github")).status).toBe(401);
   });
+
+  test("admits only the Connected Machine's self-authenticating protocol routes", async () => {
+    const app = new Hono();
+    app.use(
+      "*",
+      requireAccessKey(
+        testSettings({
+          productAccessMode: "configured",
+          authRequired: true,
+          accessKey,
+        }),
+      ),
+    );
+    app.all("*", (context) => context.json({ ok: true }));
+
+    for (const path of [
+      "/v1/enrollments/token/exchange",
+      "/v1/enrollments/device/start",
+      "/v1/enrollments/device/poll",
+      "/v1/enrollments/renew",
+    ]) {
+      expect((await app.request(path, { method: "POST" })).status).toBe(200);
+      expect((await app.request(path)).status).toBe(401);
+    }
+    // Human approval and code lookup stay behind the key.
+    expect((await app.request("/v1/enrollments/device/lookup", { method: "POST" })).status).toBe(
+      401,
+    );
+    expect(
+      (
+        await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+          method: "POST",
+        })
+      ).status,
+    ).toBe(401);
+  });
 });

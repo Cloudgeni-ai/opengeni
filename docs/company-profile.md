@@ -65,12 +65,19 @@ organization-scoped policy, editable only by an active organization owner,
 controls the result:
 
 - `off` rejects the operation before a proposal revision is created;
-- `suggest` (shown as **Require approval**, and the default for existing and new organizations) creates an
+- `suggest` (shown as **Review first**, and the default for existing and new organizations) creates an
   inactive immutable proposal and requires the bound
   `company_profile_confirm` human-confirmation path;
 - `automatic` creates the same immutable proposal and immediately activates it
   through the existing company-profile compare-and-swap lifecycle, without a
   second human prompt.
+
+In the web app the owner changes this policy on Settings > Agent learning, as
+an owner-only **Organization identity** row beside the workspace modes and in
+the same Off / Review first / Automatic words. Organization settings >
+Organization identity shows the current mode as one row that links there. The
+stored values and the `PATCH /company-profile/agent-policy` contract are
+unchanged.
 
 The policy mode and version are frozen on the proposal receipt. Changing the
 policy afterward does not reinterpret an existing proposal, and every mode
@@ -265,7 +272,7 @@ receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
 The first-party `company_profile_propose` and `company_profile_confirm` tools
 (`apps/api/src/mcp/company-profile-agent-admin.ts`) are the agent-facing path the
-Organization settings → Organization identity "Create with OpenGeni" prompt directs a session to. They register
+Organization settings → Organization identity "Create with Opengeni" prompt directs a session to. They register
 only for exact worker-signed agent attempts with `workspace:read` plus
 `sessions:control`. Proposal input contains only identity and mission; the
 canonical compatibility lists are written empty before the exact profile is

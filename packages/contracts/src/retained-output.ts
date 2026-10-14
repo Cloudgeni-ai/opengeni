@@ -1,3 +1,4 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Hard server-side ceiling for one retained-output response body. */
@@ -29,183 +30,191 @@ const WORKSPACE_RETRIEVAL_PATH =
 const SESSION_RETRIEVAL_PATH =
   /^\/v1\/workspaces\/([0-9a-f-]+)\/sessions\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)\/content$/;
 
-export const RetainedOutputKind = z.enum([
-  "tool_result",
-  "assistant_completion",
-  "internal_update",
-  "event_media",
-  "computer_screenshot",
-  "browser_screenshot",
-  "generated_image",
-  "generated_video",
-  "file",
-]);
+export const RetainedOutputKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "tool_result",
+    "assistant_completion",
+    "internal_update",
+    "event_media",
+    "computer_screenshot",
+    "browser_screenshot",
+    "generated_image",
+    "generated_video",
+    "file",
+  ]),
+);
 export type RetainedOutputKind = z.infer<typeof RetainedOutputKind>;
 
-export const RetainedOutputUnavailableReason = z.enum([
-  "not_retained",
-  "pending",
-  "failed",
-  "expired",
-  "deleted",
-  "missing_storage",
-  "storage_write_failed",
-  "quota_exceeded",
-  "invalid_content",
-  "oversized",
-  "unsupported",
-]);
+export const RetainedOutputUnavailableReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "not_retained",
+    "pending",
+    "failed",
+    "expired",
+    "deleted",
+    "missing_storage",
+    "storage_write_failed",
+    "quota_exceeded",
+    "invalid_content",
+    "oversized",
+    "unsupported",
+  ]),
+);
 export type RetainedOutputUnavailableReason = z.infer<typeof RetainedOutputUnavailableReason>;
 
-const RetainedOutputUnavailableEvidenceSchema = z
-  .object({
-    available: z.literal(false),
-    reason: RetainedOutputUnavailableReason,
-  })
-  .strict();
+const RetainedOutputUnavailableEvidenceSchema = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      available: z.literal(false),
+      reason: RetainedOutputUnavailableReason,
+    })
+    .strict(),
+);
 
-export const RetainedArtifactReferenceSchema = z
-  .object({
-    available: z.literal(true),
-    artifactId: z.string().regex(LOWERCASE_UUID),
-    kind: RetainedOutputKind,
-    contentType: z.string().max(127).regex(CANONICAL_MEDIA_TYPE),
-    originalBytes: z.number().int().nonnegative().safe(),
-    sha256: z.string().regex(LOWERCASE_SHA256),
-    retainedAt: z.string().datetime({ offset: true }),
-    dimensions: z
-      .object({
-        width: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
-        height: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
-      })
-      .strict()
-      .optional(),
-    retention: z.union([
-      z
+export const RetainedArtifactReferenceSchema = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      available: z.literal(true),
+      artifactId: z.string().regex(LOWERCASE_UUID),
+      kind: RetainedOutputKind,
+      contentType: z.string().max(127).regex(CANONICAL_MEDIA_TYPE),
+      originalBytes: z.number().int().nonnegative().safe(),
+      sha256: z.string().regex(LOWERCASE_SHA256),
+      retainedAt: z.string().datetime({ offset: true }),
+      dimensions: z
         .object({
-          policy: z.literal("workspace_file"),
-          expiresAt: z.null(),
+          width: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
+          height: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
+        })
+        .strict()
+        .optional(),
+      retention: z.union([
+        z
+          .object({
+            policy: z.literal("workspace_file"),
+            expiresAt: z.null(),
+          })
+          .strict(),
+        z
+          .object({
+            policy: z.literal("session_screenshot"),
+            expiresAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+      ]),
+      retrieval: z
+        .object({
+          method: z.literal("GET"),
+          path: z.string().max(256),
+          acceptRanges: z.literal("bytes"),
+          maxRangeBytes: z.number().int().positive().max(RETAINED_OUTPUT_MAX_PAGE_BYTES),
         })
         .strict(),
-      z
-        .object({
-          policy: z.literal("session_screenshot"),
-          expiresAt: z.string().datetime({ offset: true }),
-        })
-        .strict(),
-    ]),
-    retrieval: z
-      .object({
-        method: z.literal("GET"),
-        path: z.string().max(256),
-        acceptRanges: z.literal("bytes"),
-        maxRangeBytes: z.number().int().positive().max(RETAINED_OUTPUT_MAX_PAGE_BYTES),
-      })
-      .strict(),
-  })
-  .strict()
-  .superRefine((value, ctx) => {
-    const workspaceMatch = WORKSPACE_RETRIEVAL_PATH.exec(value.retrieval.path);
-    const sessionMatch = SESSION_RETRIEVAL_PATH.exec(value.retrieval.path);
-    const workspaceId = workspaceMatch?.[1] ?? sessionMatch?.[1];
-    const sessionId = sessionMatch?.[2];
-    const artifactId = workspaceMatch?.[2] ?? sessionMatch?.[3];
-    if (
-      !workspaceId ||
-      !LOWERCASE_UUID.test(workspaceId) ||
-      (sessionId !== undefined && !LOWERCASE_UUID.test(sessionId)) ||
-      artifactId !== value.artifactId
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["retrieval", "path"],
-        message: "retrieval path must be a workspace/session API content path for this artifact",
-      });
-    }
-
-    if (
-      value.kind === "computer_screenshot" ||
-      value.kind === "browser_screenshot" ||
-      value.kind === "generated_image" ||
-      value.kind === "generated_video"
-    ) {
-      if (!value.dimensions) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["dimensions"],
-          message: `${value.kind} receipts require exact dimensions`,
-        });
-      } else if (
-        value.dimensions.width * value.dimensions.height >
-        COMPUTER_SCREENSHOT_MAX_PIXELS
-      ) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["dimensions"],
-          message: `${value.kind} dimensions exceed the pixel limit`,
-        });
-      }
-    }
-
-    if (value.kind === "generated_image") {
-      if (value.retention.policy !== "workspace_file" || !workspaceMatch || sessionMatch) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["retention"],
-          message: "generated images require permanent workspace-file retrieval",
-        });
-      }
+    })
+    .strict()
+    .superRefine((value, ctx) => {
+      const workspaceMatch = WORKSPACE_RETRIEVAL_PATH.exec(value.retrieval.path);
+      const sessionMatch = SESSION_RETRIEVAL_PATH.exec(value.retrieval.path);
+      const workspaceId = workspaceMatch?.[1] ?? sessionMatch?.[1];
+      const sessionId = sessionMatch?.[2];
+      const artifactId = workspaceMatch?.[2] ?? sessionMatch?.[3];
       if (
-        !["image/png", "image/jpeg", "image/webp"].includes(value.contentType) ||
-        value.originalBytes <= 0 ||
-        value.originalBytes > GENERATED_IMAGE_MAX_BYTES
+        !workspaceId ||
+        !LOWERCASE_UUID.test(workspaceId) ||
+        (sessionId !== undefined && !LOWERCASE_UUID.test(sessionId)) ||
+        artifactId !== value.artifactId
       ) {
         ctx.addIssue({
           code: "custom",
-          path: ["contentType"],
-          message: "generated image media metadata is invalid",
+          path: ["retrieval", "path"],
+          message: "retrieval path must be a workspace/session API content path for this artifact",
         });
       }
-    }
 
-    if (value.kind === "generated_video") {
-      if (value.retention.policy !== "workspace_file" || !workspaceMatch || sessionMatch) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["retention"],
-          message: "generated videos require permanent workspace-file retrieval",
-        });
-      }
       if (
-        value.contentType !== "video/mp4" ||
-        value.originalBytes <= 0 ||
-        value.originalBytes > GENERATED_VIDEO_MAX_BYTES
+        value.kind === "computer_screenshot" ||
+        value.kind === "browser_screenshot" ||
+        value.kind === "generated_image" ||
+        value.kind === "generated_video"
       ) {
+        if (!value.dimensions) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["dimensions"],
+            message: `${value.kind} receipts require exact dimensions`,
+          });
+        } else if (
+          value.dimensions.width * value.dimensions.height >
+          COMPUTER_SCREENSHOT_MAX_PIXELS
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["dimensions"],
+            message: `${value.kind} dimensions exceed the pixel limit`,
+          });
+        }
+      }
+
+      if (value.kind === "generated_image") {
+        if (value.retention.policy !== "workspace_file" || !workspaceMatch || sessionMatch) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["retention"],
+            message: "generated images require permanent workspace-file retrieval",
+          });
+        }
+        if (
+          !["image/png", "image/jpeg", "image/webp"].includes(value.contentType) ||
+          value.originalBytes <= 0 ||
+          value.originalBytes > GENERATED_IMAGE_MAX_BYTES
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["contentType"],
+            message: "generated image media metadata is invalid",
+          });
+        }
+      }
+
+      if (value.kind === "generated_video") {
+        if (value.retention.policy !== "workspace_file" || !workspaceMatch || sessionMatch) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["retention"],
+            message: "generated videos require permanent workspace-file retrieval",
+          });
+        }
+        if (
+          value.contentType !== "video/mp4" ||
+          value.originalBytes <= 0 ||
+          value.originalBytes > GENERATED_VIDEO_MAX_BYTES
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["contentType"],
+            message: "generated video media metadata is invalid",
+          });
+        }
+      }
+
+      if (value.kind === "computer_screenshot" || value.kind === "browser_screenshot") {
+        if (value.retention.policy !== "session_screenshot" || !sessionMatch) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["retention"],
+            message: "session screenshots require session-scoped expiring retrieval",
+          });
+        }
+      }
+
+      if (encoder.encode(JSON.stringify(value)).byteLength > RETAINED_OUTPUT_RECEIPT_MAX_BYTES) {
         ctx.addIssue({
           code: "custom",
-          path: ["contentType"],
-          message: "generated video media metadata is invalid",
+          message: "retained-output receipt exceeds its byte envelope",
         });
       }
-    }
-
-    if (value.kind === "computer_screenshot" || value.kind === "browser_screenshot") {
-      if (value.retention.policy !== "session_screenshot" || !sessionMatch) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["retention"],
-          message: "session screenshots require session-scoped expiring retrieval",
-        });
-      }
-    }
-
-    if (encoder.encode(JSON.stringify(value)).byteLength > RETAINED_OUTPUT_RECEIPT_MAX_BYTES) {
-      ctx.addIssue({
-        code: "custom",
-        message: "retained-output receipt exceeds its byte envelope",
-      });
-    }
-  });
+    }),
+);
 
 /**
  * Canonical evidence fact carried by bounded audit/NATS/SSE/UI previews.
@@ -214,29 +223,32 @@ export const RetainedArtifactReferenceSchema = z
  * object key, signed URL, arbitrary metadata, or producer-controlled labels can
  * cross this boundary.
  */
-export const RetainedOutputEvidenceSchema = z.discriminatedUnion("available", [
-  RetainedOutputUnavailableEvidenceSchema,
-  RetainedArtifactReferenceSchema,
-]);
+export const RetainedOutputEvidenceSchema = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("available", [
+    RetainedOutputUnavailableEvidenceSchema,
+    RetainedArtifactReferenceSchema,
+  ]),
+);
 export type RetainedOutputEvidence = z.infer<typeof RetainedOutputEvidenceSchema>;
 export type RetainedArtifactReference = z.infer<typeof RetainedArtifactReferenceSchema>;
 /** @deprecated use RetainedArtifactReference. */
 export type RetainedOutputAvailableEvidence = RetainedArtifactReference;
 
-export const RetainedArtifactUnavailableSchema = z
-  .object({
-    available: z.literal(false),
-    artifactId: z.string().regex(LOWERCASE_UUID),
-    reason: RetainedOutputUnavailableReason,
-  })
-  .strict();
+export const RetainedArtifactUnavailableSchema = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      available: z.literal(false),
+      artifactId: z.string().regex(LOWERCASE_UUID),
+      reason: RetainedOutputUnavailableReason,
+    })
+    .strict(),
+);
 export type RetainedArtifactUnavailable = z.infer<typeof RetainedArtifactUnavailableSchema>;
 
 /** Authenticated metadata result for one opaque workspace file identity. */
-export const RetainedArtifactMetadataSchema = z.union([
-  RetainedArtifactReferenceSchema,
-  RetainedArtifactUnavailableSchema,
-]);
+export const RetainedArtifactMetadataSchema = /* @__PURE__ */ defineSchema(() =>
+  z.union([RetainedArtifactReferenceSchema, RetainedArtifactUnavailableSchema]),
+);
 export type RetainedArtifactMetadata = z.infer<typeof RetainedArtifactMetadataSchema>;
 
 export type RetainedArtifactFileInput = {

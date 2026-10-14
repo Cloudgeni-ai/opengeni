@@ -2,28 +2,13 @@ import type { ObjectStorageSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import {
-  BlobSASPermissions,
-  BlobServiceClient,
-  generateBlobSASQueryParameters,
+import type {
   StorageSharedKeyCredential,
-  type BlobDownloadResponseParsed,
-  type BlobGetPropertiesResponse,
+  BlobDownloadResponseParsed,
+  BlobGetPropertiesResponse,
 } from "@azure/storage-blob";
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-  S3Client,
-  type S3ClientConfig,
-} from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import {
-  Storage as GcsClient,
-  type GetSignedUrlConfig,
-  type StorageOptions,
-} from "@google-cloud/storage";
+import type { S3ClientConfig } from "@aws-sdk/client-s3";
+import type { GetSignedUrlConfig, StorageOptions } from "@google-cloud/storage";
 
 export * from "./bounded-object-read";
 export * from "./bounded-object-write";
@@ -48,6 +33,10 @@ export {
   uploadWorkspaceArchiveSpool,
   downloadWorkspaceArchiveSpool,
   WorkspaceArchiveStorageError,
+} from "./workspace-archive-spool";
+export type {
+  DownloadWorkspaceArchiveSpoolOptions,
+  WorkspaceArchiveTemporaryDirectory,
 } from "./workspace-archive-spool";
 
 export type ObjectStorage = {
@@ -159,6 +148,37 @@ export type ObjectStorage = {
   deleteObject: (key: string) => Promise<void>;
 };
 
+// Literal synchronous requires remain bundle-visible, but do not initialize an
+// unselected provider. Keep imports out of request methods: service startup
+// prepares its selected SDK, and client construction remains synchronous.
+function s3Sdk(): typeof import("./provider-sdk-s3") {
+  return require("./provider-sdk-s3.js");
+}
+
+function azureSdk(): typeof import("./provider-sdk-azure") {
+  return require("./provider-sdk-azure.js");
+}
+
+function gcsSdk(): typeof import("./provider-sdk-gcs") {
+  return require("./provider-sdk-gcs.js");
+}
+
+/** Load only the selected SDK before readiness, without constructing a client. */
+export function prepareObjectStorageProvider(settings: ObjectStorageSettings): void {
+  if (settings.objectStorageBackend === "azure-blob") {
+    azureSdk();
+  } else if (settings.objectStorageBackend === "gcs") {
+    gcsSdk();
+  } else if (
+    settings.objectStorageBackend === "aws-s3" ||
+    (settings.objectStorageEndpoint &&
+      settings.objectStorageAccessKeyId &&
+      settings.objectStorageSecretAccessKey)
+  ) {
+    s3Sdk();
+  }
+}
+
 export function createObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   if (settings.objectStorageBackend === "azure-blob") {
     return createAzureBlobObjectStorage(settings);
@@ -178,6 +198,14 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
   ) {
     return null;
   }
+  const {
+    S3Client,
+    PutObjectCommand,
+    GetObjectCommand,
+    HeadObjectCommand,
+    DeleteObjectCommand,
+    getSignedUrl,
+  } = s3Sdk();
   const sharedClientConfig: S3ClientConfig = {
     region: settings.objectStorageRegion,
     forcePathStyle: settings.objectStorageForcePathStyle,
@@ -361,6 +389,7 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
         contentLength: head.ContentLength,
         contentType: head.ContentType,
         metadata: head.Metadata,
+        versionToken: head.ETag,
       });
     },
     async fileExists(file) {
@@ -534,6 +563,7 @@ function isS3VersionMismatch(error: unknown): boolean {
 }
 
 function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage {
+  const { Storage: GcsClient } = gcsSdk();
   const client = new GcsClient(gcsClientOptions(settings));
   const bucket = client.bucket(settings.objectStorageBucket);
   return {
@@ -638,6 +668,7 @@ function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage 
         contentLength: parseContentLength(metadata.size),
         contentType: metadata.contentType,
         metadata: stringMetadata(metadata.metadata),
+        versionToken: gcsGenerationToken(metadata.generation),
       });
     },
     async fileExists(file) {
@@ -672,7 +703,7 @@ function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage 
           contentLength: parseContentLength(metadata.size),
           contentType: metadata.contentType,
           metadata: stringMetadata(metadata.metadata),
-          versionToken: metadata.generation === undefined ? undefined : String(metadata.generation),
+          versionToken: gcsGenerationToken(metadata.generation),
         });
       } catch (error) {
         if (isGcsNotFound(error)) return null;
@@ -721,6 +752,7 @@ function isGcsVersionMismatch(error: unknown): boolean {
 }
 
 function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
+  const { BlobServiceClient, BlobSASPermissions, generateBlobSASQueryParameters } = azureSdk();
   const sharedKey = azureSharedKeyCredential(settings);
   const requestServiceClient = settings.objectStorageAzureConnectionString
     ? BlobServiceClient.fromConnectionString(settings.objectStorageAzureConnectionString)
@@ -890,13 +922,9 @@ function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectSt
     },
     async headObject(key) {
       try {
-        const properties = await requestContainerClient.getBlobClient(key).getProperties();
-        return objectHead({
-          contentLength: properties.contentLength,
-          contentType: properties.contentType,
-          metadata: properties.metadata,
-          versionToken: properties.etag,
-        });
+        return azureHeadToObjectHead(
+          await requestContainerClient.getBlobClient(key).getProperties(),
+        );
       } catch (error) {
         if (isAzureNotFound(error)) return null;
         throw error;
@@ -954,6 +982,7 @@ function isAzureVersionMismatch(error: unknown): boolean {
 }
 
 function azureSharedKeyCredential(settings: ObjectStorageSettings): StorageSharedKeyCredential {
+  const { StorageSharedKeyCredential } = azureSdk();
   if (settings.objectStorageAzureConnectionString) {
     const parsed = parseConnectionString(settings.objectStorageAzureConnectionString);
     if (parsed.AccountName && parsed.AccountKey) {
@@ -1050,7 +1079,12 @@ function azureHeadToObjectHead(head: BlobGetPropertiesResponse): ObjectHead {
     contentLength: head.contentLength,
     contentType: head.contentType,
     metadata: head.metadata,
+    versionToken: head.etag,
   });
+}
+
+function gcsGenerationToken(generation: unknown): string | undefined {
+  return generation === undefined || generation === null ? undefined : String(generation);
 }
 
 async function azureDownloadToBytes(download: BlobDownloadResponseParsed): Promise<Uint8Array> {

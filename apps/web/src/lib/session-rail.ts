@@ -1,14 +1,17 @@
+import { sessionDisplayStatus, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { RailSession as Session } from "./session-list-entry";
 
 export const DEFAULT_VISIBLE_TREE_LEVELS = 3;
 export const MAX_VISUAL_TREE_DEPTH = 3;
 
-export function sessionStatusLabel(status: Session["status"]): string {
+export function sessionStatusLabel(status: SessionDisplayStatus): string {
   switch (status) {
+    case "blocked":
+      return "Stuck";
     case "requires_action":
       return "Needs you";
     case "waiting_capacity":
-      return "Waiting for capacity";
+      return "Limit reached";
     case "recovering":
       return "Recovering";
     case "running":
@@ -24,13 +27,9 @@ export function sessionStatusLabel(status: Session["status"]): string {
   }
 }
 
-export function sessionInputWait(
-  session: Pick<Session, "status" | "effectiveControl" | "inputWait">,
-) {
-  return session.status === "idle" && session.effectiveControl?.state === "active"
-    ? (session.inputWait ?? null)
-    : null;
-}
+import { sessionInputWait } from "@opengeni/react/session-list-model";
+
+export { sessionInputWait };
 
 export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact = false): string {
   const deadline = new Date(deadlineAt);
@@ -73,7 +72,7 @@ export function sessionStateLabel(session: Session): string {
   const waiting = sessionInputWait(session);
   const lifecycle = waiting
     ? sessionWaitLabel(waiting.deadlineAt, Date.now(), true)
-    : sessionStatusLabel(session.status);
+    : sessionStatusLabel(sessionDisplayStatus(session));
   const attentionOrTerminal =
     session.status === "requires_action" ||
     session.status === "failed" ||
@@ -125,4 +124,15 @@ export function defaultExpandedAncestors(
 
 export function visualTreeDepth(depth: number): number {
   return Math.min(MAX_VISUAL_TREE_DEPTH, Math.max(0, depth));
+}
+
+/**
+ * Whether a session is held by a pause for display. Cancel is implemented as a terminal
+ * status plus a pause fence, so a cancelled session must read "Cancelled", never "Paused".
+ */
+export function sessionControlPaused(session: {
+  status: string;
+  effectiveControl?: { state: string } | null;
+}): boolean {
+  return session.status !== "cancelled" && session.effectiveControl?.state !== "active";
 }

@@ -104,7 +104,7 @@ describe("embedded dedicated-schema isolation", () => {
         WHERE table_schema = 'public' AND table_name <> 'schema_migrations'
         ORDER BY table_name`;
 
-      // Every OpenGeni table landed in the dedicated schema, none in public.
+      // Every Opengeni table landed in the dedicated schema, none in public.
       expect(tablesInOpengeni[0]!.count).toBeGreaterThan(30);
       expect(tablesInPublic.map((r) => r.name)).toEqual([]);
 
@@ -157,7 +157,6 @@ describe("embedded dedicated-schema isolation", () => {
           expectedRole: "opengeni_app",
           targetSchema: "opengeni",
           rlsStrategy: "force" as const,
-          organizationTenancyCanonicalActivationEnabled: true,
         };
         const posture = await inspectRuntimeDatabasePosture(sessionClient.db, postureOptions);
         expect(evaluateRuntimeDatabasePosture(posture, postureOptions)).toEqual([]);

@@ -17,7 +17,6 @@ import {
   type BrowserSupervisorDriver,
   type BrowserSupervisorDriverContext,
   type BrowserDownloadStore,
-  type SqliteBrowserProtectedAuthJournal,
   type SqliteBrowserStateTransferJournal,
 } from "../src";
 import {
@@ -25,8 +24,71 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
+import { UnsettledCleanupError } from "../src/cleanup-error";
 
 describe("BrowserSupervisor", () => {
+  test("propagates failed process cleanup during controller shutdown", async () => {
+    await withSupervisor(
+      async ({ supervisor }) => {
+        await supervisor.createSession({ ...reference(1), headed: false });
+        await expect(supervisor.close()).rejects.toThrow("browser supervisor shutdown failed");
+        expect(supervisor.isIdle()).toBe(false);
+      },
+      {
+        expectShutdownFailure: true,
+        driverHooks: {
+          close: () => {
+            throw new Error("owned process cleanup failed");
+          },
+        },
+      },
+    );
+  });
+
+  test.each([false, true])(
+    "retains failed creation cleanup only when unconfirmed (%s)",
+    async (failed) => {
+      await withSupervisor(
+        async ({ supervisor }) => {
+          await expect(
+            supervisor.createSession({ ...reference(3), headed: false }),
+          ).rejects.toThrow();
+          expect(supervisor.listSessions()).toEqual([]);
+          expect(supervisor.isIdle()).toBe(!failed);
+        },
+        {
+          expectShutdownFailure: failed,
+          driverHooks: {
+            start: () => {
+              throw new Error("fixture launch failed");
+            },
+            close: () => {
+              if (failed) throw new Error("fixture process stop failed");
+            },
+          },
+        },
+      );
+    },
+  );
+
+  test("retains cleanup failure from a factory which never returned a driver", async () => {
+    await withSupervisor(
+      async ({ supervisor }) => {
+        await expect(supervisor.createSession({ ...reference(4), headed: false })).rejects.toThrow(
+          "fixture factory cleanup failed",
+        );
+        expect(supervisor.listSessions()).toEqual([]);
+        expect(supervisor.isIdle()).toBe(false);
+      },
+      {
+        expectShutdownFailure: true,
+        onFactory: () => {
+          throw new UnsettledCleanupError([], "fixture factory cleanup failed");
+        },
+      },
+    );
+  });
+
   test("protects creation and pending shutdown even when active inventory is empty", async () => {
     const directory = await mkdtemp("/tmp/ogb-update-idle-");
     const started = deferred(),
@@ -551,6 +613,44 @@ describe("BrowserSupervisor", () => {
           isTerminal: (i) => i === 1 && terminal,
           close: (i) => {
             if (i === 1 && !permitClose) throw new Error("owned process cleanup failed");
+          },
+        },
+      },
+    );
+  });
+
+  test("a quiescent attached Chrome session does not hold back an update", async () => {
+    const gate = deferred();
+    const dispatched = deferred();
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(2);
+        const created = await supervisor.createSession({
+          ...session,
+          headed: true,
+          transport: {
+            kind: "attached_chrome" as const,
+            deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            connectionGeneration: "chrome-state-1",
+            browserName: "Chrome",
+            browserVersion: "151.0.0.0",
+          },
+        });
+        // The user's Chrome keeps its tabs and pages across a controller
+        // restart; an idle attached session has nothing to lose.
+        expect(supervisor.isIdle()).toBe(true);
+        const action = supervisor.action(command(created.observation));
+        await dispatched.promise;
+        expect(supervisor.isIdle()).toBe(false);
+        gate.resolve();
+        await action;
+        expect(supervisor.isIdle()).toBe(true);
+      },
+      {
+        driverHooks: {
+          async dispatch() {
+            dispatched.resolve();
+            await gate.promise;
           },
         },
       },
@@ -1095,12 +1195,242 @@ describe("BrowserSupervisor", () => {
   });
 });
 
+describe("restored launch that fails before completion", () => {
+  // Synthetic sequence: restore a private checkpoint, the launch throws before
+  // its working-runtime receipt completes, creation cleanup closes the driver
+  // and removes the restored profile, then the browser is resumed again.
+  test.each(["settled", "legacy-dispatched"] as const)(
+    "exact cleanup succeeds and a later resume restores again from the checkpoint (%s)",
+    async (mode) => {
+      await withFailedRestoredLaunch(mode, async ({ supervisor, target, restoreInput }) => {
+        const sessionDirectory = join(
+          supervisor.rootDirectory,
+          "sessions",
+          target.browserSessionId,
+        );
+        // Other generations and non-restore launches still cannot use this history.
+        await expect(
+          supervisor.endSession(
+            { browserSessionId: target.browserSessionId, controllerGeneration: "controller-other" },
+            { removeState: true },
+          ),
+        ).rejects.toThrow("preserved");
+        await expect(supervisor.createSession(target)).rejects.toThrow("preserved");
+        expect(await exists(join(sessionDirectory, "working-runtime.sqlite"))).toBe(true);
+
+        // The control plane's cleanup after a definite resume failure.
+        await supervisor.endSession(
+          {
+            browserSessionId: target.browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+          },
+          { removeState: true },
+        );
+        expect(await exists(sessionDirectory)).toBe(false);
+
+        // The next resume binds a new generation and restores the same checkpoint.
+        const resumed = { ...target, controllerGeneration: "controller-resumed" };
+        const restored = await supervisor.createSession({ ...resumed, restore: restoreInput() });
+        expect(restored.observation.target.url).toBe("https://authenticated.test/account");
+        expect(await readFile(join(sessionDirectory, "profile", "Cookies"), "utf8")).toBe(
+          "session=durable",
+        );
+        expect(await latestWorkingReceipt(sessionDirectory, resumed)).toMatchObject({
+          intent: "launch",
+          state: "completed",
+          authority: workingAuthority,
+        });
+        await supervisor.endSession(resumed, { removeState: true });
+      });
+    },
+  );
+
+  test("an exact retry of the same resume generation restores again without cleanup", async () => {
+    await withFailedRestoredLaunch(
+      "settled",
+      async ({ supervisor, target, restoreInput, failed }) => {
+        const sessionDirectory = join(
+          supervisor.rootDirectory,
+          "sessions",
+          target.browserSessionId,
+        );
+        const restored = await supervisor.createSession({ ...target, restore: restoreInput() });
+        expect(restored.observation.target.url).toBe("https://authenticated.test/account");
+        expect(await readFile(join(sessionDirectory, "profile", "Cookies"), "utf8")).toBe(
+          "session=durable",
+        );
+        const completed = await latestWorkingReceipt(sessionDirectory, target);
+        expect(completed).toMatchObject({ intent: "launch", state: "completed" });
+        expect(completed?.operationId).not.toBe(failed.operationId);
+        expect(completed?.restoreAuthorityDigest).toBe(failed.restoreAuthorityDigest);
+        // A mismatched checkpoint authority is still refused for the live binding.
+        await expect(
+          supervisor.createSession({
+            ...target,
+            restore: { ...restoreInput(), dataKey: Buffer.alloc(32, 8) },
+          }),
+        ).rejects.toMatchObject({ code: "operation_conflict" });
+        await supervisor.endSession(target, { removeState: true });
+      },
+    );
+  });
+});
+
+async function withFailedRestoredLaunch(
+  mode: "settled" | "legacy-dispatched",
+  callback: (fixture: {
+    supervisor: BrowserSupervisor;
+    target: Parameters<BrowserSupervisor["createSession"]>[0] & {
+      browserSessionId: string;
+      controllerGeneration: string;
+    };
+    restoreInput: () => NonNullable<Parameters<BrowserSupervisor["createSession"]>[0]["restore"]>;
+    failed: BrowserWorkingRuntimeReceipt;
+  }) => Promise<void>,
+) {
+  const aad = Buffer.from("workspace:identity:private-checkpoint", "utf8");
+  let uploaded: Buffer | null = null;
+  // Only the first restored launch of the target fails, after Chrome started.
+  let failingInstance = 0;
+  let driverInstances = 0;
+  await withSupervisor(
+    async ({ supervisor, contexts }) => {
+      const source = reference(1);
+      await supervisor.createSession({
+        ...source,
+        headed: false,
+        initialUrl: "https://authenticated.test/account",
+      });
+      await writeFile(
+        join(contexts.get(source.browserSessionId)!.profileDirectory, "Cookies"),
+        "session=durable",
+      );
+      const operationId = "44444444-4444-4444-8444-444444444444";
+      const objectKey = `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/revisions/${operationId}/chromium-profile.ogbs`;
+      const captured = await supervisor.captureState({
+        ...source,
+        operationId,
+        objectKey,
+        afterCapture: "restart",
+        dataKey: Buffer.alloc(32, 7),
+        aad,
+        upload: uploadAuthority(),
+      });
+      await supervisor.endSession(source, { removeState: true });
+      const storage = Bun.serve({
+        port: 0,
+        fetch() {
+          return new Response(new Uint8Array(uploaded!), {
+            headers: { "content-length": String(uploaded!.byteLength) },
+          });
+        },
+      });
+      const platformBound = captured.manifest.profileCrypto === "platform_bound";
+      const restoreInput = () => ({
+        objectKey,
+        format: captured.format,
+        artifactDigest: captured.artifactDigest,
+        contentDigest: captured.contentDigest,
+        manifestDigest: canonicalDigest(captured.manifest),
+        sizeBytes: captured.sizeBytes,
+        dataKey: Buffer.alloc(32, 7),
+        aad: Buffer.from(aad),
+        materialization: {
+          portability: platformBound ? ("placement_bound" as const) : ("portable" as const),
+          reason: platformBound ? "Profile encryption depends on this placement." : null,
+          platform: captured.manifest.platform,
+          architecture: captured.manifest.architecture,
+          engine: captured.manifest.engine,
+          engineVersion: captured.manifest.engineVersion,
+          driverId: captured.manifest.driverId,
+          driverSchemaVersion: captured.manifest.driverSchemaVersion,
+          profileCrypto: captured.manifest.profileCrypto,
+          providerId: null,
+          placement: platformBound
+            ? {
+                kind: "sandbox_group" as const,
+                sandboxGroupId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              }
+            : null,
+        },
+        download: {
+          url: `${storage.url}/profile?signature=fixture`,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      });
+      const target = { ...reference(2), headed: false, workingRuntimeAuthority: workingAuthority };
+      const sessionDirectory = join(supervisor.rootDirectory, "sessions", target.browserSessionId);
+      failingInstance = driverInstances + 1;
+      // A build without failed settlement left the receipt dispatched.
+      const legacy =
+        mode === "legacy-dispatched" && "fail" in SqliteBrowserWorkingRuntimeJournal.prototype
+          ? spyOn(SqliteBrowserWorkingRuntimeJournal.prototype, "fail").mockImplementation(
+              (receipt) => receipt,
+            )
+          : null;
+      try {
+        try {
+          await expect(
+            supervisor.createSession({ ...target, restore: restoreInput() }),
+          ).rejects.toThrow("synthetic launch failure after restore");
+        } finally {
+          legacy?.mockRestore();
+        }
+        const failed = (await latestWorkingReceipt(sessionDirectory, target))!;
+        expect(await exists(join(sessionDirectory, "profile"))).toBe(false);
+        expect(failed).toMatchObject({
+          intent: "launch",
+          process: null,
+          ...(mode === "settled"
+            ? { state: "failed", failureCode: "internal", directoryLaunchAllowed: false }
+            : { state: "dispatched" }),
+        });
+        expect(failed.restoreAuthorityDigest).toMatch(/^[0-9a-f]{64}$/u);
+        await callback({ supervisor, target, restoreInput, failed });
+      } finally {
+        storage.stop(true);
+      }
+    },
+    {
+      onFactory: () => {
+        driverInstances++;
+      },
+      driverHooks: {
+        listTargets: (instance) => {
+          if (instance === failingInstance) {
+            throw new Error("synthetic launch failure after restore");
+          }
+        },
+      },
+      uploadArtifact: async (path) => {
+        uploaded = await readFile(path);
+      },
+    },
+  );
+}
+
+async function latestWorkingReceipt(
+  sessionDirectory: string,
+  session: { browserSessionId: string; controllerGeneration: string },
+): Promise<BrowserWorkingRuntimeReceipt | null> {
+  const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+    { ...session, sessionDirectory },
+    true,
+  );
+  try {
+    return journal.latest();
+  } finally {
+    journal.close();
+  }
+}
+
 async function withSupervisor(
   callback: (fixture: {
     supervisor: BrowserSupervisor;
     contexts: Map<string, BrowserSupervisorDriverContext>;
   }) => Promise<void>,
   options: {
+    expectShutdownFailure?: boolean;
     maxSessions?: number;
     ephemeralContextPoolEnabled?: boolean;
     onFactory?: () => void;
@@ -1141,7 +1471,9 @@ async function withSupervisor(
   try {
     await callback({ supervisor, contexts });
   } finally {
-    await supervisor.close();
+    if (options.expectShutdownFailure)
+      await expect(supervisor.close()).rejects.toThrow("browser supervisor shutdown failed");
+    else await supervisor.close();
     await rm(directory, { recursive: true, force: true });
   }
 }
@@ -1266,10 +1598,6 @@ function fakeDriver(
       requireOpen();
       await hooks.dispatch?.(instance);
       return observation();
-    },
-    async protectedFill() {
-      requireOpen();
-      return { target: { ...target }, status: "submitted" };
     },
     async externalAuth(authCommand) {
       requireOpen();
@@ -1483,6 +1811,214 @@ const workingAuthority = {
 };
 
 describe("same-working-directory controller restart", () => {
+  test.each(["failed-close", "failed-detach", "suspend-write", "completion-write"] as const)(
+    "%s during shutdown cannot admit recovery",
+    async (failure) => {
+      await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+        const first = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "live",
+          createDriver: async (context) => ({
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              if (failure === "failed-close") throw new Error("synthetic close failure");
+            },
+            ...(failure === "failed-detach"
+              ? {
+                  detach: async () => {
+                    throw new Error("synthetic detach failure");
+                  },
+                }
+              : {}),
+          }),
+        });
+        await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const journal = (
+          first as unknown as {
+            sessions: Map<
+              string,
+              {
+                workingJournal: SqliteBrowserWorkingRuntimeJournal;
+              }
+            >;
+          }
+        ).sessions.get(options.browserSessionId)!.workingJournal;
+        const spy =
+          failure === "suspend-write"
+            ? spyOn(journal, "suspend").mockImplementation((receipt) => {
+                // Persist uncertainty, then fail before process shutdown.
+                journal.begin({ ...receipt, intent: "suspend" });
+                throw new Error("synthetic suspend persistence failure");
+              })
+            : failure === "completion-write"
+              ? spyOn(journal, "complete").mockImplementation(() => {
+                  throw new Error("synthetic completion failure");
+                })
+              : null;
+        await expect(first.close()).rejects.toThrow("shutdown failed");
+        spy?.mockRestore();
+        let launches = 0;
+        const second = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "exited",
+          createDriver: async (context) => {
+            launches++;
+            return fakeDriver(context);
+          },
+        });
+        try {
+          await expect(
+            second.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+          ).rejects.toThrow("preserved");
+          expect(launches).toBe(0);
+        } finally {
+          await second.close();
+          // Explicit cleanup is still allowed for the retained synthetic holder.
+          if (failure === "failed-close") {
+            const runtime = (
+              first as unknown as { sessions: Map<string, { driver: BrowserSupervisorDriver }> }
+            ).sessions.get(options.browserSessionId)!;
+            runtime.driver.close = async () => {};
+          }
+          await first.endSession(options);
+        }
+      });
+    },
+  );
+
+  test("explicit end racing shutdown never acknowledges recoverable suspension as retirement", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      let beginClose!: () => void, finishClose!: () => void;
+      const closing = new Promise<void>((resolve) => {
+        beginClose = resolve;
+      });
+      const closed = new Promise<void>((resolve) => {
+        finishClose = resolve;
+      });
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          close: async () => {
+            beginClose();
+            await closed;
+          },
+        }),
+      });
+      await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      const shutdown = supervisor.close();
+      await closing;
+      const end = supervisor.endSession(options).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      finishClose();
+      await shutdown;
+      expect(await end).toMatchObject({ code: "resource_unavailable" });
+    });
+  });
+
+  test("update idle proof admits quiescent preserved sessions and blocks in-flight or unrecoverable ones", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const dispatched = deferred(),
+        release = deferred();
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => ({
+          ...fakeDriver(context, {
+            dispatch: async () => {
+              dispatched.resolve();
+              await release.promise;
+            },
+          }),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+        }),
+      });
+      try {
+        const created = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        // A quiescent session whose owned browser shutdown preserves is no
+        // reason to refuse a restart.
+        expect(supervisor.isIdle()).toBe(true);
+        const running = supervisor.action(command(created.observation));
+        await dispatched.promise;
+        expect(supervisor.isIdle()).toBe(false);
+        release.resolve();
+        await running;
+        await Bun.sleep(1);
+        expect(supervisor.isIdle()).toBe(true);
+        // A launch without a durable working runtime cannot be reattached.
+        await supervisor.createSession({ ...reference(46), headed: false });
+        expect(supervisor.isIdle()).toBe(false);
+      } finally {
+        release.resolve();
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("graceful shutdown preserves exact profile recovery without replaying uncertain input", async () => {
+    // Without live detach, recovery relaunches in the exact preserved profile.
+    await withWorkingCrashFixture(
+      async ({ options, action, rootDirectory, socketRootDirectory }) => {
+        let dispatches = 0;
+        const contexts: BrowserSupervisorDriverContext[] = [];
+        const open = () =>
+          BrowserSupervisor.open({
+            rootDirectory,
+            socketRootDirectory,
+            inspectOwnedProcess: async () => "exited",
+            createDriver: async (context) => {
+              contexts.push(context);
+              return {
+                ...fakeDriver(context, {
+                  dispatch: () => {
+                    dispatches++;
+                  },
+                }),
+                ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+              };
+            },
+          });
+        const first = await open();
+        await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const profile = contexts[0]!.profileDirectory;
+        const socketDirectory = contexts[0]!.socketDirectory;
+        const identity = await stat(profile);
+        const socketIdentity = await stat(socketDirectory);
+        await writeFile(join(profile, "synthetic-profile-state"), "retained");
+        await first.close();
+        expect((await stat(socketDirectory)).ino).toBe(socketIdentity.ino);
+        const second = await open();
+        try {
+          const result = await second.createSession({
+            ...options,
+            recoverExistingWorkingDirectory: true,
+          });
+          expect(result.browserSessionId).toBe(options.browserSessionId);
+          expect(result.controllerGeneration).toBe(options.controllerGeneration);
+          expect(contexts[1]!.profileDirectory).toBe(profile);
+          expect((await stat(profile)).ino).toBe(identity.ino);
+          expect(await readFile(join(profile, "synthetic-profile-state"), "utf8")).toBe("retained");
+          expect((await second.action(action)).state).toBe("outcome_unknown");
+          expect(dispatches).toBe(0);
+        } finally {
+          await second.close();
+        }
+      },
+    );
+  });
+
   test.each(["live", "exited"] as const)(
     "completed %s receipt preserves exact directory and never replays an accepted action",
     async (processState) => {
@@ -1769,7 +2305,6 @@ describe("same-working-directory controller restart", () => {
                 workingJournal: SqliteBrowserWorkingRuntimeJournal;
                 workingReceipt: BrowserWorkingRuntimeReceipt;
                 journal: SqliteBrowserOperationJournal;
-                protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
                 stateJournal: SqliteBrowserStateTransferJournal;
                 downloadStore: BrowserDownloadStore;
               }
@@ -1794,7 +2329,6 @@ describe("same-working-directory controller restart", () => {
         });
         const workingClose = spyOn(runtime.workingJournal, "close");
         const actionClose = spyOn(runtime.journal, "close");
-        const authClose = spyOn(runtime.protectedAuthJournal, "close");
         const stateClose = spyOn(runtime.stateJournal, "close");
         const downloadClose = spyOn(runtime.downloadStore, "close");
         const interrupt = spyOn(runtime.downloadStore, "interruptInProgress");
@@ -1806,10 +2340,10 @@ describe("same-working-directory controller restart", () => {
           expect(rejected).toBe(failure);
           expect(closes).toBe(0);
           expect(
-            [workingClose, actionClose, authClose, stateClose, downloadClose, interrupt].map(
+            [workingClose, actionClose, stateClose, downloadClose, interrupt].map(
               (spy) => spy.mock.calls.length,
             ),
-          ).toEqual([0, 0, 0, 0, 0, 0]);
+          ).toEqual([0, 0, 0, 0, 0]);
           expect(sessions.get(options.browserSessionId)).toBe(runtime);
           expect(runtime.lifecycle).toBe("ending");
           expect(runtime.workingReceipt).toBe(originalReceipt);
@@ -1835,7 +2369,6 @@ describe("same-working-directory controller restart", () => {
             write,
             workingClose,
             actionClose,
-            authClose,
             stateClose,
             downloadClose,
             interrupt,
@@ -1873,7 +2406,6 @@ describe("same-working-directory controller restart", () => {
               workingJournal: SqliteBrowserWorkingRuntimeJournal;
               workingReceipt: BrowserWorkingRuntimeReceipt | null;
               journal: SqliteBrowserOperationJournal;
-              protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
               stateJournal: SqliteBrowserStateTransferJournal;
               downloadStore: BrowserDownloadStore | null;
             }
@@ -1889,7 +2421,6 @@ describe("same-working-directory controller restart", () => {
       });
       const workingClose = spyOn(runtime.workingJournal, "close");
       const actionClose = spyOn(runtime.journal, "close");
-      const authClose = spyOn(runtime.protectedAuthJournal, "close");
       const stateClose = spyOn(runtime.stateJournal, "close");
       const downloadClose = spyOn(runtime.downloadStore!, "close");
       try {
@@ -1898,10 +2429,9 @@ describe("same-working-directory controller restart", () => {
           .catch((error) => error);
         expect({
           action: actionClose.mock.calls.length,
-          auth: authClose.mock.calls.length,
           state: stateClose.mock.calls.length,
           download: downloadClose.mock.calls.length,
-        }).toEqual({ action: 1, auth: 1, state: 1, download: 1 });
+        }).toEqual({ action: 1, state: 1, download: 1 });
         expect(rejected).toBeInstanceOf(AggregateError);
         expect((rejected as AggregateError).errors).toEqual([failure]);
         expect(workingClose).not.toHaveBeenCalled();
@@ -1928,14 +2458,7 @@ describe("same-working-directory controller restart", () => {
         expect(supervisor.isIdle()).toBe(true);
         expect(await exists(runtime.sessionDirectory)).toBe(false);
       } finally {
-        for (const spy of [
-          complete,
-          workingClose,
-          actionClose,
-          authClose,
-          stateClose,
-          downloadClose,
-        ])
+        for (const spy of [complete, workingClose, actionClose, stateClose, downloadClose])
           spy.mockRestore();
         await supervisor.close();
       }
@@ -1992,6 +2515,64 @@ describe("same-working-directory controller restart", () => {
         await supervisor.close();
       }
     });
+  });
+
+  test("graceful shutdown keeps the live browser running and the successor adopts it", async () => {
+    await withWorkingCrashFixture(
+      async ({ options, action, rootDirectory, socketRootDirectory }) => {
+        let closes = 0,
+          detaches = 0,
+          dispatches = 0;
+        const contexts: BrowserSupervisorDriverContext[] = [];
+        const open = () =>
+          BrowserSupervisor.open({
+            rootDirectory,
+            socketRootDirectory,
+            inspectOwnedProcess: async () => "live",
+            createDriver: async (context) => {
+              contexts.push(context);
+              return {
+                ...fakeDriver(context, {
+                  dispatch: () => {
+                    dispatches++;
+                  },
+                }),
+                ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+                close: async () => {
+                  closes++;
+                },
+                detach: async () => {
+                  detaches++;
+                },
+              };
+            },
+          });
+        const first = await open();
+        await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        await first.close();
+        expect({ closes, detaches }).toEqual({ closes: 0, detaches: 1 });
+        const second = await open();
+        try {
+          const result = await second.createSession({
+            ...options,
+            recoverExistingWorkingDirectory: true,
+          });
+          expect(result.browserSessionId).toBe(options.browserSessionId);
+          expect(contexts).toHaveLength(2);
+          expect(contexts[1]!.recoverOwnedProcess?.profileDirectory).toBe(
+            contexts[0]!.profileDirectory,
+          );
+          expect(contexts[1]!.restoredProfile).toBe(false);
+          // An action the old controller never confirmed is not replayed.
+          expect((await second.action(action)).state).toBe("outcome_unknown");
+          expect(dispatches).toBe(0);
+        } finally {
+          await second.close();
+        }
+        // The successor also shut down gracefully, so it kept the browser too.
+        expect({ closes, detaches }).toEqual({ closes: 0, detaches: 2 });
+      },
+    );
   });
 });
 

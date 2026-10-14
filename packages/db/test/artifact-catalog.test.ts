@@ -5,6 +5,7 @@ import type { SQL } from "drizzle-orm";
 import {
   listArtifactCatalogCandidates,
   recordSandboxFilePublication,
+  updateArtifactPin,
 } from "../src/artifact-catalog";
 import type { Database } from "../src/database";
 
@@ -42,6 +43,7 @@ test("catalog query adapts only existing output domains and parameterizes litera
     await listArtifactCatalogCandidates(db, scope, {
       query,
       kinds: ["site", "document", "image", "file"],
+      siteViewer: { subjectId: null },
       snapshotAt,
       limit: 101,
     }),
@@ -83,6 +85,7 @@ test("catalog keysets retain microseconds and stable domain/native-ID ties for e
     await listArtifactCatalogCandidates(db, scope, {
       query: ArtifactCatalogListQuery.parse({ sort }),
       kinds: ["site"],
+      siteViewer: { subjectId: null },
       snapshotAt,
       after,
       limit: 100,
@@ -91,9 +94,39 @@ test("catalog keysets retain microseconds and stable domain/native-ID ties for e
     expect(statement.params).toContain(after.key);
     expect(statement.params).toContain(after.id);
     expect(statement.sql).toContain('kind COLLATE "C", id COLLATE "C"');
+    expect(statement.sql).toContain("ORDER BY pinned DESC");
+    expect(statement.sql).toContain("pinned <");
+    expect(statement.params).toContain(false);
     expect(statement.sql).toContain(sort === "title" ? "ASC" : "DESC");
     if (sort !== "title") expect(statement.sql).toContain("HH24:MI:SS.US");
   }
+});
+
+test("pins use a scoped capability and both candidate limits carry the pin frontier", async () => {
+  const { db, queries } = databaseFixture();
+  await updateArtifactPin(db, scope, { kind: "file", artifactId: "native", pinned: true });
+  expect(queries.at(-1)!.sql).toContain("opengeni_private.update_artifact_pin(");
+  expect(queries.at(-1)!.params).toContain("file");
+  const after = { kind: "image" as const, id: "native", key: "report", pinned: true };
+  await listArtifactCatalogCandidates(db, scope, {
+    query: ArtifactCatalogListQuery.parse({ sort: "title" }),
+    kinds: ["file", "image", "site"],
+    siteViewer: { subjectId: null },
+    snapshotAt,
+    after,
+    limit: 100,
+  });
+  const statement = queries.at(-1)!;
+  expect(statement.sql).toContain("list_sandbox_file_publications_pinned");
+  expect(statement.sql).toContain(
+    "pins.kind = candidates.kind AND pins.artifact_id = candidates.id",
+  );
+  expect(statement.sql).toContain("ORDER BY pinned DESC");
+  const input = statement.params.find(
+    (param) => typeof param === "string" && param.startsWith("{"),
+  );
+  expect(JSON.parse(input as string).after).toEqual(after);
+  expect(statement.params).toContain(true);
 });
 
 test("Images filter includes explicit sandbox publications with origin independent from public kind", async () => {
@@ -101,6 +134,7 @@ test("Images filter includes explicit sandbox publications with origin independe
   await listArtifactCatalogCandidates(db, scope, {
     query: ArtifactCatalogListQuery.parse({ kind: "image" }),
     kinds: ["image"],
+    siteViewer: { subjectId: null },
     snapshotAt,
     limit: 100,
   });
@@ -121,6 +155,7 @@ test("empty authority does not query and publication records only via the scoped
     await listArtifactCatalogCandidates(db, scope, {
       query: ArtifactCatalogListQuery.parse({}),
       kinds: [],
+      siteViewer: { subjectId: null },
       snapshotAt,
       limit: 1,
     }),

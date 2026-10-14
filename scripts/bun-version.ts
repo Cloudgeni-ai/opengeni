@@ -74,7 +74,11 @@ export async function verifyBunVersionContract(
     if (
       bunBases.length === 0 ||
       bunBases.some(
-        (line) => !/^FROM\s+(?:--platform=\S+\s+)?oven\/bun:\$\{BUN_VERSION\}(?:\s|$)/u.test(line),
+        // An official variant (`-slim`, `-alpine`, ...) still derives from BUN_VERSION.
+        (line) =>
+          !/^FROM\s+(?:--platform=\S+\s+)?oven\/bun:\$\{BUN_VERSION\}(?:-[a-z]+)?(?:\s|$)/u.test(
+            line,
+          ),
       )
     ) {
       throw new Error(`${path} must derive every Bun base from BUN_VERSION`);

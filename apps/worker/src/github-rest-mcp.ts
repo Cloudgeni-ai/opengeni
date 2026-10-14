@@ -113,7 +113,7 @@ export async function buildGitHubRestMcpForTurn(input: {
         resolveAuthority: appResolver,
       }),
     });
-    configs.push(internalMcpConfig(GITHUB_REST_MCP_APP_SERVER_ID, "GitHub — OpenGeni bot"));
+    configs.push(internalMcpConfig(GITHUB_REST_MCP_APP_SERVER_ID, "GitHub — Opengeni bot"));
     toolRefs.push({ kind: "mcp", id: GITHUB_REST_MCP_APP_SERVER_ID });
     connectorBindings.push(
       ...githubConnectorBindings(GITHUB_REST_MCP_APP_SERVER_ID, appRepositories),

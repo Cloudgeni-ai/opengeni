@@ -56,6 +56,7 @@ const places = {
     organization: "Shared",
     everyone: "Everyone",
     selected: "Selected workspaces",
+    none: "No workspaces",
     workspace: "This workspace",
     user: "Only you",
   },
@@ -64,6 +65,60 @@ const places = {
   openAccess: () => {},
   backToList: () => {},
 };
+
+test("Enable account shows Enabled or Disabled and still maps to the allocator", async () => {
+  let enabled = true;
+  const calls: unknown[] = [];
+  const list = async () => ({
+    accounts: [{ ...account, allocatorEnabled: enabled, allocatorVersion: enabled ? 1 : 2 }],
+    activeAccountId: id,
+    source: "workspace",
+    settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: id },
+  });
+  const client = {
+    listClaudeSubscriptionAccounts: list,
+    getClaudeSubscriptionAccountUsage: async () => baseUsage,
+    getModelConnectionAccess: async () => null,
+    setClaudeSubscriptionAccountAllocator: async (...args: unknown[]) => {
+      calls.push(args);
+      enabled = false;
+    },
+  };
+  function Harness({ canManage }: { canManage: boolean }) {
+    pool = useClaude({
+      client: client as unknown as OpenGeniBrowserClient,
+      canManage,
+      workspaceId,
+    });
+    return createElement(ClaudeAccountPage, { claude: pool, accountId: id, places });
+  }
+  await act(async () => root.render(createElement(Harness, { canManage: true })));
+  const toggle = container.querySelector<HTMLButtonElement>(
+    'button[role="switch"][aria-label="Enable account@example.test"]',
+  )!;
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  const text = () => container.textContent ?? "";
+  expect(text()).toContain("Enable account");
+  expect(text()).toContain(
+    "Allow this account to be used for new work. Turning it off won’t interrupt running work.",
+  );
+  expect(text()).toContain("Enabled");
+  expect(text()).not.toContain("Use for new work");
+  const badge = () =>
+    container.querySelector('[data-slot="detail-page-header"] [data-slot="status-badge"]');
+  // A healthy, enabled account carries no header status.
+  expect(badge()).toBeNull();
+  await act(async () => toggle.click());
+  expect(calls).toEqual([[workspaceId, id, { enabled: false, expectedVersion: 1 }]]);
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  expect(badge()?.textContent).toBe("Disabled");
+  expect(text()).not.toContain("Paused");
+  // People who can't manage the account read the same words as a fact.
+  await act(async () => root.render(createElement(Harness, { canManage: false })));
+  expect(container.querySelector('button[role="switch"]')).toBeNull();
+  expect(text()).toContain("AccountDisabled");
+  expect(text()).not.toContain("Paused");
+});
 for (const [organization, poll] of [
   [false, false],
   [true, false],

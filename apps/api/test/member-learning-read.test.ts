@@ -242,8 +242,10 @@ test("settings reads deny foreign workspaces, foreign sources, absent sources an
     accountId: f.accountId,
     name: "Not admitted",
   });
-  await expect(f.actor.getAgentLearningSettings(unadmitted.id, "workspace")).rejects.toMatchObject({
-    status: 403,
+  // A same-organization shared workspace admits the user on first use
+  // (the organization key holds members:manage); a foreign one never does.
+  expect(await f.actor.getAgentLearningSettings(unadmitted.id, "workspace")).toMatchObject({
+    version: 0,
   });
   for (const source of [
     { kind: "chat" as const, id: foreignChat.id },
@@ -279,6 +281,7 @@ test("existing document-reader access is preserved, but membership reductions an
     status: 403,
   });
   await f.service.removeWorkspaceMember(f.workspaceId, f.identity.subjectId);
+  // An SDK per-user workspace never admits anyone on first use, so removal sticks.
   await expect(f.actor.getAgentLearningSettings(f.workspaceId, "workspace")).rejects.toMatchObject({
     status: 403,
   });

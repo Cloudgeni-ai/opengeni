@@ -6,6 +6,8 @@ import { defineConfig } from "vite";
 const demoApiTarget = process.env.OPENGENI_REACT_DEMO_API_TARGET ?? "http://127.0.0.1:8000";
 const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD === "1";
 const demoInputs = {
+  agentRows: resolve(__dirname, "agent-rows.html"),
+  approvalReview: resolve(__dirname, "approval-review.html"),
   genieLoading: resolve(__dirname, "genie-loading.html"),
   exchangeFold: resolve(__dirname, "exchange-fold.html"),
   main: resolve(__dirname, "index.html"),
@@ -31,6 +33,14 @@ const demoInputs = {
 
 export default defineConfig({
   base: process.env.OPENGENI_REACT_DEMO_BASE ?? "/",
+  // Demo-only: the permission state board renders the web app's real settings
+  // component with a synthetic client in place of the app context.
+  resolve: {
+    alias: [
+      { find: /^@\/context$/, replacement: resolve(__dirname, "web-context-stub.ts") },
+      { find: /^@\//, replacement: `${resolve(__dirname, "../../../apps/web/src")}/` },
+    ],
+  },
   plugins: [viteReact(), tailwindcss()],
   server: {
     // Same-origin HTTP + WebSocket path used by the live reference consumers.

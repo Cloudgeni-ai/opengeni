@@ -4,130 +4,63 @@ description: "How agents retain useful information, organize it, and review chan
 icon: "brain"
 ---
 
-Knowledge is the shared system for information agents retain and retrieve. It
-replaces the former Memory system and separate reviewed Knowledge lane. Personal
-and workspace Knowledge use the same structure and tools, with different access.
+**Knowledge** is where agents keep information they learn and search for later. Personal and workspace Knowledge work the same way; only access differs.
 
-## Remembering facts versus behavior
+## Facts versus behavior
 
-Knowledge keeps information the agent can search when needed. A request to
-"keep replies concise in future sessions" instead changes how the agent should
-behave. It belongs in **workspace instructions** for a short always-on rule, or
-an applicable **Skill** for a context-specific or personal preference, not a
-Knowledge fact saying that you prefer concise replies.
+Knowledge holds facts. A request like "keep replies concise from now on" changes behavior instead, so it belongs in:
 
-Active workspace instructions are included in applicable prompts. Skills have
-short descriptions in the prompt index; their full instructions are read when
-relevant. Personal preferences must keep their intended scope rather than
-silently becoming rules for everyone in a shared workspace. If the appropriate
-destination is unavailable, the agent should explain that limitation.
+- **Workspace instructions** for short rules that apply to every session. These are added to every prompt, so keep them brief.
+- A **Skill** for a procedure or a preference that applies only in some contexts. Only its description is in the prompt; the agent reads the rest when relevant.
 
-Agents and the manual editor use the same instruction size limit of 262,144
-characters. Agents append new rules or make exact localized edits, preserving
-unrelated instructions rather than rewriting the whole policy. Keep new rules
-concise: active instructions are included in applicable prompts.
+The agent tells you whether a change is active, waiting for review, or not saved.
 
-Each destination still follows its Agent learning setting. The agent should tell
-you whether the instruction or Skill is active, awaiting review, or not saved.
-Saving Knowledge does not guarantee that a behavior will apply in future chats.
+## What Knowledge contains
 
-## Files, sources and findings
+The agent saves things worth keeping, such as a decision, a requirement, or the cause and fix of an incident. Uploads and screenshots are not saved automatically.
 
-Uploading a file in a chat keeps the original available to that conversation.
-The agent saves lasting Knowledge when it finds useful information, such as a
-decision, requirement or the cause and fix of an incident. Uploads, screenshots
-and routine approvals do not automatically become Knowledge. These records
-serve different purposes:
+With learning enabled, you do not need to say "remember." Adopted decisions,
+lasting product feedback and corrections can update existing entries. A tweak
+requested only for the current task stays in that task. The agent retrieves
+relevant published Knowledge when later work depends on those decisions.
 
-- **File:** the original PDF you can open or download.
-- **Source:** a deliberately retained reference document, or supporting evidence
-  linked from a finding. Supporting chat excerpts and screenshots stay out of
-  ordinary Knowledge browsing and search; **Include supporting evidence** makes
-  them discoverable when needed.
-- **Finding:** useful information, such as a renewal date, with evidence pointing
-  to the source revision that supports it. A finding can cite an existing source;
-  it does not require another duplicate excerpt.
-- **Collection:** related entries about a customer, product or system. One Acme
-  collection can contain contract terms, Slack decisions and technical incidents.
+New Slack chats follow the same learning settings. Older Slack chats can retain
+their earlier explicit-save restriction. A referenced file's name alone does not
+give the agent its contents; it must read the file before retaining its details.
 
-Original bytes live in object storage. Source text, findings, collections,
-relationships and revision history live in Postgres. Search indexes are
-rebuildable. The **Knowledge** page brings these together with Library,
-Instructions and Review tabs (Review appears while proposals wait). Files are a
-Type filter in the Library and open their preview, extracted text and related
-entries. The Library shows a flat list or a **By collection** layout, where
-collections can nest: each top-level collection lists its sub-collections, then
-its entries. Click an entry or collection to open its page, which shows the
-collections it sits in, such as "Runbooks › Payments". An entry can appear in
-several collections without being copied. Before saving, the agent can fetch
-the collection structure and descriptions together with related published and
-pending entries. It reuses unchanged knowledge and updates existing entries
-instead of appending duplicates. File sources open their original preview with
-extracted text available below it. Search finds entries across collections.
+- **File:** an original document, such as a PDF.
+- **Source:** a reference document, or evidence behind a finding.
+- **Finding:** a piece of information, such as a renewal date, linked to its source.
+- **Collection:** related entries about one customer, product, or system. Collections can nest, and an entry can sit in several.
 
-A scheduled task reads its configured source through an agent, just as ordinary
-chat work does. It saves through the same Knowledge service and uses its own
-learning override when one is configured. Regular runs should find and update
-existing entries instead of appending duplicates.
+The **Knowledge** page has Library, Instructions, and Review tabs. The agent checks existing entries before saving and updates them rather than adding duplicates. Scheduled tasks save Knowledge the same way chats do.
+
+To find new knowledge, open **Library → Filter → Added** and choose **Last 24 hours**, **Last 7 days**, or **Last 30 days**. The filter uses each entry's original creation date, not its latest edit. It works with search and the other filters; remove the **Added** chip to show entries of any age.
 
 ## Personal and shared Knowledge
 
-A private chat saves to its verified user's personal Knowledge. It may also read
-shared Knowledge that user is allowed to access, but it cannot change shared
-entries through its personal authoring scope. Shared chats save to the workspace.
-Relationships do not grant access, and a shared finding cannot expose private
-evidence. A human can explicitly copy text into a new workspace entry.
+A private chat saves to its user's personal Knowledge and can read shared Knowledge that user has access to. A shared chat saves to the workspace.
 
-The SDK retains the compatibility names `memory` and `memoryScope` for selecting
-this scope. The chat facade accepts `memory: "workspace" | "user" | false`.
-Omitted `memory` follows `chats`: `"user"` for private chats (the default) and
-`"workspace"` for shared chats. `false` initializes Knowledge authoring
-to Off; it does not erase history or disable authorized Knowledge retrieval.
-Personal ownership requires the server-verified user, not an opaque label.
-See [Users, tenants & privacy](/integrate/users-and-tenants#choose-who-shares-chats).
+In the SDK, the chat option `memory: "workspace" | "user" | false` picks the scope. It defaults to `"user"` for private chats and `"workspace"` for shared chats. `false` turns off saving; the agent can still read Knowledge. Personal Knowledge requires a server-verified user. See [Users, tenants & privacy](/integrate/users-and-tenants#choose-who-shares-chats).
 
 ## Agent learning and review
 
-**Knowledge → Learning** puts these categories in one place:
+**Settings → Agent learning** (also in Knowledge's **⋯** menu) controls what agents can add or change:
 
-| Category               | Default   | What changes                               |
-| ---------------------- | --------- | ------------------------------------------ |
-| Knowledge              | Automatic | Retained sources, findings and collections |
-| Workspace instructions | Automatic | Short rules composed into agent prompts    |
-| Skills                 | Automatic | Reusable procedures loaded when relevant   |
+| Category               | Default   | What changes                       |
+| ---------------------- | --------- | ---------------------------------- |
+| Knowledge              | Automatic | Sources, findings, and collections |
+| Workspace instructions | Automatic | Short rules added to agent prompts |
+| Skills                 | Automatic | Procedures loaded when relevant    |
 
-These initial defaults do not overwrite saved workspace or personal choices,
-chat or scheduled-task overrides, or policies already accepted by a running turn.
+Each category can be:
 
-Each category supports **Automatic**, **Review first** and **Off**. Workspace or
-personal defaults apply unless a chat or scheduled task overrides that category.
-Chat options and the Advanced section of a schedule's form set overrides;
-existing schedule edits apply with Save and Cancel discards them.
+- **Automatic**: changes publish immediately.
+- **Review first**: changes wait in the Review tab. The agent keeps working without asking in chat. You approve, edit, or reject each change, grouped by chat turn or scheduled run.
+- **Off**: agents make no new changes. Existing Knowledge, Skills, and human edits are unaffected.
 
-In **+ → Chat settings**, each category offers **Automatic**, **Review first** and
-**Off**. The closed control shows the effective mode; choose **Default** in its menu
-to remove a chat-specific override.
-These controls govern what agents can add or update, not what they can read or use.
-
-Automatic publishes a change immediately. Review first stores a pending revision
-and lets the agent continue, without an approval prompt in the chat. The previous
-published version stays available. Agents can explicitly read pending proposals
-as unapproved context, reuse them and correct them, but ordinary retrieval uses
-published information. Review opens one proposed change at a time, showing what
-changed from the published version. Sources and collection placement sit under
-Details. Back returns you to the proposal after opening a source. Approve or reject moves to
-the next change; linked proposals are reviewed before findings that need them.
-A human reviews changes grouped by chat turn or scheduled run and can approve,
-edit, reject or later restore an entry.
-
-Off stops new agent changes in that category. It does not hide existing Knowledge,
-disable installed Skills, prevent human edits or block a human plugin install.
-These settings do not replace external action permissions or tool approvals.
-Organization identity retains its separate organization-owner policy.
+Workspace and personal defaults apply unless a chat (**+ → Chat settings**) or a scheduled task overrides them. These settings control what agents write, not what they read, and they don't replace tool approvals.
 
 ## Conversation history and task notes
 
-Conversation history preserves the session transcript. Temporary task notes help
-agents coordinate within one session tree. Neither is a second durable Knowledge
-system. Save a useful incident and its outcome in Knowledge; keep its general
-investigation procedure in a Skill and an unconditional rule in Instructions.
+Conversation history is the session transcript. Task notes help agents coordinate within one session tree. Neither is Knowledge: save lasting facts in Knowledge, procedures in a Skill, and rules in Instructions.

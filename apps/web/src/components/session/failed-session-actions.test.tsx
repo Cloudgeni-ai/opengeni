@@ -232,9 +232,39 @@ test("the free model keeps ordinary wording for failures other than its daily li
   );
   const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   expect(row.querySelector("span")!.textContent).toBe(
-    "The model provider is rate limiting requests. Try again in a minute.",
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
   );
   expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
+});
+
+test("throttling points at the chat bar's model picker and keeps only Retry", async () => {
+  const banner = (modelChanged: boolean) => (
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      canChooseModel
+      modelChanged={modelChanged}
+    />
+  );
+  const container = await render(banner(false));
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
+  );
+  expect([...row.querySelectorAll("button")].map((node) => node.textContent)).toEqual(["Retry"]);
+
+  await act(async () => root!.render(banner(true)));
+  const changedRow = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(changedRow.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Try again in a few minutes.",
+  );
+  expect([...changedRow.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+    "Retry",
+  ]);
 });
 
 test("double clicks and accepted submissions never duplicate recovery", async () => {
@@ -318,7 +348,6 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
     "upload",
     "repository",
     "policy",
-    "variable_sets",
     "personal_decision",
     "personal_loading",
   ] as const) {
@@ -486,7 +515,7 @@ test.each(["restored", "connected_machine", "automatic", "fresh_workspace"] as c
     }
     if (route === "fresh_workspace")
       expect(container.textContent).toContain(
-        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+        "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
       );
     expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
     expect(container.textContent).not.toContain("Choose another model");
@@ -616,6 +645,31 @@ test("definitive unsafe retry rejection removes the action", async () => {
   );
 });
 
+test("a permanently unknown tool outcome says what to do instead of still settling", async () => {
+  let sends = 0;
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={async () => {
+        sends += 1;
+        throw new OpenGeniApiError(409, "Unknown tool outcome", {
+          code: "RETRY_TOOL_OUTCOME_UNKNOWN",
+        });
+      }}
+    />,
+  );
+  await act(async () => container.querySelector("button")!.click());
+  expect(sends).toBe(1);
+  // Permanent: the action is removed rather than inviting a retry that can
+  // never succeed, and the copy names the person's next step.
+  expect(container.querySelector("button")).toBeNull();
+  const alert = container.querySelector('[role="alert"]')!.textContent!;
+  expect(alert).not.toContain("settling");
+  expect(alert).toBe(
+    "A tool may already have run, so Retry could repeat it. Check its result, then send a message to continue.",
+  );
+});
+
 for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
   test(`${code} allows explicit retry after the same failure's transient blocker clears`, async () => {
     let sends = 0;
@@ -628,7 +682,9 @@ for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
     );
     await act(async () => container.querySelector("button")!.click());
     expect(container.querySelector('[role="alert"]')!.textContent).toBe(
-      code === "RETRY_PAUSED" ? "This session is paused." : "Earlier work is still settling.",
+      code === "RETRY_PAUSED"
+        ? "This session is paused."
+        : "Earlier work is still settling. Try again in a moment.",
     );
     await act(async () =>
       root!.render(
@@ -741,4 +797,64 @@ test("unavailable recovery chunk preserves error and composer draft", async () =
   );
   expect(container.querySelector('[role="alert"]')!.textContent).toBe("Connection failed.");
   expect(container.querySelector("textarea")!.value).toBe("My draft");
+});
+
+test("a compaction failure the timeline already shows keeps only its recovery action", async () => {
+  const recorded =
+    "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+  const compaction = {
+    ...failure,
+    reason: recorded,
+    recordedDetail: recorded,
+    failureCode: "context_compaction_failed",
+  };
+  const shown = await render(
+    <FailedSessionBanner failure={compaction} actions={actions} shownInTimeline />,
+  );
+  // No second headline or Details: the timeline landmark owns both.
+  expect(shown.querySelector('[data-testid="failed-session-banner"]')).toBeNull();
+  expect(shown.querySelector("details")).toBeNull();
+  expect(shown.textContent).not.toContain("Couldn’t compact");
+  expect(shown.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Nothing to offer: nothing renders.
+  const empty = await render(<FailedSessionBanner failure={compaction} shownInTimeline />);
+  expect(empty.innerHTML).toBe("");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Absent from the visible timeline (e.g. a cleared view), the banner keeps it.
+  const absent = await render(<FailedSessionBanner failure={compaction} actions={actions} />);
+  expect(absent.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "Couldn’t compact conversation history. If the next message fails too, start a new session.",
+  );
+  expect(absent.querySelector("details p")!.textContent).toBe(recorded);
+});
+
+test("the timeline flag never hides a failure the timeline cannot own", async () => {
+  // Another failure kind keeps its banner even if the caller claims ownership.
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} shownInTimeline />,
+  );
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+  // A compaction failure on an exhausted quota keeps its limit headline.
+  const quota = await render(
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "compaction summarization failed: 429",
+        failureCode: "context_compaction_failed",
+        quotaScope: "daily",
+      }}
+      shownInTimeline
+    />,
+  );
+  expect(quota.querySelector('[data-testid="failed-session-banner"]')).not.toBeNull();
+  expect(quota.textContent).toContain("daily limit");
 });

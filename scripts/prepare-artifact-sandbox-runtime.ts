@@ -750,10 +750,10 @@ async function smokeArtifactFacade(entrypoint: string): Promise<void> {
   );
 
   const document = module.Document.create();
-  document.blocks.addParagraph("OpenGeni artifact runtime smoke");
+  document.blocks.addParagraph("Opengeni artifact runtime smoke");
   const docx = await module.DocumentFile.exportDocx(document);
   const importedDocument = await module.DocumentFile.importDocx(docx);
-  if (!JSON.stringify(importedDocument.toJSON()).includes("OpenGeni artifact runtime smoke")) {
+  if (!JSON.stringify(importedDocument.toJSON()).includes("Opengeni artifact runtime smoke")) {
     throw new ArtifactRuntimeError(
       "ARTIFACT_RUNTIME_INCOMPATIBLE",
       "Sandbox runtime DOCX round-trip smoke returned the wrong text",
@@ -771,14 +771,14 @@ async function smokeArtifactFacade(entrypoint: string): Promise<void> {
   const slide = presentation.slides.add();
   slide.shapes.add({
     geometry: "textbox",
-    text: "OpenGeni artifact runtime smoke",
+    text: "Opengeni artifact runtime smoke",
     position: { left: 80, top: 70, width: 800, height: 90 },
   });
   const pptx = await module.PresentationFile.exportPptx(presentation);
   const importedPresentation = await module.PresentationFile.importPptx(pptx);
   if (
     importedPresentation.slides.items[0]?.shapes.items[0]?.text.toString() !==
-    "OpenGeni artifact runtime smoke"
+    "Opengeni artifact runtime smoke"
   ) {
     throw new ArtifactRuntimeError(
       "ARTIFACT_RUNTIME_INCOMPATIBLE",

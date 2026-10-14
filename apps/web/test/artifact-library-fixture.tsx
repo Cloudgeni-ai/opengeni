@@ -1,4 +1,5 @@
 import { createRoot } from "react-dom/client";
+import { useState } from "react";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -11,7 +12,14 @@ import { ArtifactsRoute } from "../src/routes/artifacts";
 import { RetainedArtifactRoute } from "../src/routes/retained-artifact";
 import { SessionEditableArtifactsWorkspace } from "../src/components/session/editable-artifacts-workspace";
 import { artifactReturnSearch } from "../src/lib/routes";
-import { workspaceId, sessionId, items } from "./artifact-library-context";
+import { invalidateArtifactCatalog } from "../src/lib/use-artifact-catalog";
+import {
+  workspaceId,
+  sessionId,
+  items,
+  updateFixtureArtifactPin,
+  client,
+} from "./artifact-library-context";
 import "../src/styles.css";
 
 const root = createRootRoute({
@@ -24,7 +32,8 @@ const root = createRootRoute({
 const library = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/artifacts",
-  component: () => <ArtifactsRoute workspaceId={workspaceId} />,
+  validateSearch: artifactReturnSearch,
+  component: () => <ArtifactsRoute workspaceId={workspaceId} {...library.useSearch()} />,
 });
 const file = createRoute({
   getParentRoute: () => root,
@@ -35,20 +44,27 @@ const file = createRoute({
 const session = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/sessions/$sessionId",
-  component: () => (
-    <SessionEditableArtifactsWorkspace
-      workspaceId={workspaceId}
-      sessionId={sessionId}
-      artifacts={items.map((item) => ({
-        id: item.id,
-        title: item.title,
-        modality: item.kind,
-        catalogItem: item,
-      }))}
-      status="ready"
-      onRetry={() => {}}
-    />
-  ),
+  component: function SessionFixture() {
+    const [, setPinRevision] = useState(0);
+    return (
+      <SessionEditableArtifactsWorkspace
+        workspaceId={workspaceId}
+        sessionId={sessionId}
+        artifacts={items.map((item) => ({
+          id: item.id,
+          title: item.title,
+          modality: item.kind,
+          catalogItem: item,
+        }))}
+        status="ready"
+        onRetry={() => {}}
+        onPin={async (item, pinned) => {
+          await updateFixtureArtifactPin(item, pinned);
+          setPinRevision((revision) => revision + 1);
+        }}
+      />
+    );
+  },
 });
 const start = new URLSearchParams(location.search).get("session")
   ? `/workspaces/${workspaceId}/sessions/${sessionId}`
@@ -57,4 +73,8 @@ const router = createRouter({
   routeTree: root.addChildren([library, file, session]),
   history: createMemoryHistory({ initialEntries: [start] }),
 });
+Reflect.set(window, "artifactLibraryRouter", router);
+Reflect.set(window, "resetArtifactLibraryCatalog", () =>
+  invalidateArtifactCatalog(client, workspaceId),
+);
 createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

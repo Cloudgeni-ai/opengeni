@@ -1,4 +1,4 @@
-//! WebAssembly byte-envelope adapter for the OpenGeni artifact kernel.
+//! WebAssembly byte-envelope adapter for the Opengeni artifact kernel.
 //!
 //! This crate intentionally contains no artifact semantics. Native and browser
 //! runtimes both call the same shared binding-protocol crate, keeping command

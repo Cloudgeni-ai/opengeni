@@ -271,7 +271,7 @@ async function claimedParentBatch(grant: Grant, parent: Started, childSessionId:
     .find(
       (content): content is string =>
         typeof content === "string" &&
-        content.startsWith("[OpenGeni internal updates]") &&
+        content.startsWith("[Opengeni internal updates]") &&
         content.includes(childSessionId),
     );
   if (!batch) throw new Error("claimed child result missing from parent history");

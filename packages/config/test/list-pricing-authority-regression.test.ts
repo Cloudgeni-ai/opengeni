@@ -51,7 +51,11 @@ describe("comparison pricing preserves base debit and accepted-policy authority"
     expect(() =>
       assertTurnExecutionPolicyMatchesConfigV1(settings, acceptedAtBase, input),
     ).not.toThrow();
-    expect(current.definitionVersion).toBe(BASE_BARE_SOL_DEFINITION);
+    // The automatic-compaction trigger later left the definition digest; the
+    // base-accepted digest above remains runnable through that compatibility.
+    expect(current.definitionVersion).toBe(
+      "sha256:5c83bddb19dfe37edd10a5a3464739b3ff7ee8239513f5c498a62a547ee657a6",
+    );
     expect(configuredModels(settings)[0]?.pricing).toBeUndefined();
     expect(() =>
       calculateModelUsageCostBreakdown(settings, "gpt-6.1-sol", {

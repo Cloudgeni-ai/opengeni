@@ -27,7 +27,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
-import type { Session } from "@opengeni/contracts";
+import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
@@ -56,7 +56,6 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
-import { loadSessionAttachVariableSetValues } from "./session-attach-variable-sets";
 import type { ObjectStorage } from "@opengeni/storage";
 
 import {
@@ -69,6 +68,7 @@ import {
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
   RoutingActiveRouteChangedError,
+  RoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
   SelfhostedWorkspaceRootChangedError,
   ChannelAConflictError,
@@ -76,6 +76,7 @@ import {
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
+  SynchronousCommandOutcomeUnknownError,
   ChannelAValidationError,
   BrowserControlRequestError,
   BrowserControlTransportError,
@@ -149,6 +150,9 @@ export type ChannelAContext = {
   session: Session;
   // The principal that drives the op (for emit attribution + pty opened_by).
   subjectId: string;
+  /** The authenticated route grant, when one drives the op. It resolves the
+   *  session's Sandbox Environment for an agent attempt as its initiating human. */
+  grant?: AccessGrant | undefined;
   /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
   waitSignal?: AbortSignal | undefined;
   /** Bounded route identity for metrics and safe operator diagnostics. */
@@ -560,22 +564,13 @@ async function withChannelAOperation<T>(
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
 
   // The STABLE run-environment used by both a cloud home and a machine home.
-  // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironmentValues = await loadSessionAttachVariableSetValues(db, settings, {
-    accountId,
-    workspaceId,
-    session,
-    subjectId: ctx.subjectId,
-  });
+  // It also carries the per-session Codemode pointer selected below. Constants
+  // only: user secrets are resolved per command (W1), never seeded here.
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
       : settings;
-  const environment = stableSandboxEnvironmentForRun(
-    settingsForSession,
-    workspaceEnvironmentValues,
-    { workspaceId },
-  );
+  const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
     applyGitAuthPointerEnvironment(
       environment,
@@ -779,7 +774,12 @@ async function withChannelAOperation<T>(
   // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
 
   // deployment image for the same durable sandbox group.
-  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+  const sandboxRuntime = await resolveSessionSandboxRuntime(
+    db,
+    settings,
+    session,
+    ctx.grant ? { grant: ctx.grant } : { subjectId: ctx.subjectId },
+  );
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -1214,6 +1214,20 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     error instanceof SandboxResumeIdentityUnavailableError
   )
     return new HTTPException(409, { message: error.message });
+  if (error instanceof RoutingMutationOutputRejectedError) {
+    const revoked = error.reasonCode === "authority_revoked";
+    return new ApiHttpError(revoked ? 403 : 409, {
+      code: revoked ? "forbidden" : "conflict",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        code: error.code,
+        reasonCode: error.reasonCode,
+        physicalOutcome: "resolved",
+      },
+    });
+  }
   if (
     error instanceof RoutingActiveRouteChangedError ||
     error instanceof RoutingWorkspaceRootChangedError ||
@@ -1254,6 +1268,8 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   }
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
+  if (error instanceof SynchronousCommandOutcomeUnknownError)
+    return new HTTPException(409, { message: error.message });
   if (error instanceof ChannelAValidationError)
     return new HTTPException(400, { message: error.message });
   if (error instanceof ChannelANotFoundError)
@@ -1307,6 +1323,13 @@ export function channelAOperationFailureDiagnostic(
       reason: "request_cancelled",
       status: 499,
       errorCode: "sandbox_channel_a_cancelled",
+    };
+  }
+  if (error instanceof RoutingMutationOutputRejectedError) {
+    return {
+      reason: "request_rejected",
+      status: error.reasonCode === "authority_revoked" ? 403 : 409,
+      errorCode: "sandbox_channel_a_operation_failed",
     };
   }
   if (error instanceof SandboxProviderReadLockUnavailableError) {

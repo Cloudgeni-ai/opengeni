@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { RetainedArtifactReference } from "@opengeni/sdk";
+import type { RetainedArtifactMetadata, RetainedArtifactReference } from "@opengeni/sdk";
 
 GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -34,7 +34,7 @@ const artifact: RetainedArtifactReference = {
     maxRangeBytes: 1048576,
   },
 };
-let metadata = deferred<RetainedArtifactReference>();
+let metadata = deferred<RetainedArtifactMetadata>();
 let bytes = deferred<{ artifact: RetainedArtifactReference; bytes: Uint8Array }>();
 let metadataCalls = 0;
 let byteCalls = 0;
@@ -55,7 +55,13 @@ const client = {
     return bytes.promise;
   },
 };
-mock.module("@opengeni/react", () => ({ useLightboxOptional: () => ({ open }) }));
+// The real workspace loader, read straight from source: only the lightbox is faked.
+const { createWorkspaceRetainedArtifactLoader } =
+  await import("../../../../../packages/react/src/timeline/retained-loaders");
+mock.module("@opengeni/react", () => ({
+  createWorkspaceRetainedArtifactLoader,
+  useLightboxOptional: () => ({ open }),
+}));
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children, className }: { children: ReactNode; className?: string }) => (
     <a href="#artifact" className={className}>
@@ -64,11 +70,13 @@ mock.module("@tanstack/react-router", () => ({
   ),
 }));
 const { InlineChatImage } = await import("./inline-chat-image");
+const { resetRetainedImageCaches } = await import("./retained-image-cache");
 
 let notify: IntersectionObserverCallback | undefined;
 let container: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
+  resetRetainedImageCaches();
   metadata = deferred();
   bytes = deferred();
   metadataCalls = 0;
@@ -225,4 +233,46 @@ test("the optional artifact link stays inside the original reserved slot", async
   await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
   expect(slot()).toBe(reserved);
   expect(reserved.querySelector("img")).not.toBeNull();
+});
+
+test("a remounted thumbnail reuses the fetched metadata and bytes", async () => {
+  await render(true);
+  await act(async () => metadata.resolve(artifact));
+  await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
+  expect(container.querySelector("img")).not.toBeNull();
+  // Switching tabs unmounts the card; coming back mounts a fresh one.
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await render(true);
+  expect(container.querySelector("img")).not.toBeNull();
+  expect(metadataCalls).toBe(1);
+  expect(byteCalls).toBe(1);
+});
+
+test("retry after a failure fetches again instead of reusing the cache", async () => {
+  await render();
+  await enterViewport();
+  await act(async () => metadata.resolve(artifact));
+  await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
+  await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+  bytes = deferred();
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+  expect(metadataCalls).toBe(2);
+  expect(byteCalls).toBe(2);
+});
+
+test("a not-yet-available thumbnail asks again on its next mount", async () => {
+  await render(true);
+  await act(async () =>
+    metadata.resolve({ available: false, artifactId: "image", reason: "pending" }),
+  );
+  expect(container.textContent).toContain("unavailable");
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  metadata = deferred();
+  await render(true);
+  await act(async () => metadata.resolve(artifact));
+  await act(async () => bytes.resolve({ artifact, bytes: new Uint8Array([0]) }));
+  expect(container.querySelector("img")).not.toBeNull();
+  expect(metadataCalls).toBe(2);
 });

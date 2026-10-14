@@ -2,6 +2,10 @@
 export const SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE =
   "This task's model is no longer available. Edit the task and choose another model.";
 
+/** Run-history copy when the target task's usage limit refused an occurrence. */
+export const SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE =
+  "Skipped: the task reached its usage limit. A person can raise or remove the limit; later runs then start normally.";
+
 /**
  * Plain run-history text for a recorded scheduled-run error. A refusal for an
  * unavailable model (the durable `scheduled_model_unavailable` reason or the
@@ -10,6 +14,7 @@ export const SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE =
  */
 export function scheduledRunErrorText(error: string): string {
   const trimmed = error.trim();
+  if (trimmed === "session_usage_limit") return SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE;
   if (
     trimmed === "scheduled_model_unavailable" ||
     /^model is not available: /.test(trimmed) ||

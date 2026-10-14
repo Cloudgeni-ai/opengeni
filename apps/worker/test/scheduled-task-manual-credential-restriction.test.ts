@@ -9,6 +9,7 @@ import {
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
 import * as admission from "../src/activities/agent-run-admission";
 import {
   createScheduledTaskActivities,
@@ -23,6 +24,10 @@ import {
   scheduledTaskDispatchInput,
   type ScheduledTaskFireWorkflowInput,
 } from "../src/workflows/scheduled-tasks";
+
+// The existing-session occurrence path reads the target task's usage limit;
+// this fixture's fake database has no usage-limit state (no limit).
+useNoSessionUsageLimitForFakeDatabases();
 
 const scope = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -229,6 +234,8 @@ async function acceptanceFixture(
       version: 1,
       scope: "workspace",
     } as Awaited<ReturnType<typeof db.getScheduledTaskClaudeProviderAccountAuthoritySnapshot>>),
+    // Codex v2 (M3 PR 3b): before the cutover a task carries none.
+    spyOn(db, "getScheduledTaskSubscriptionAuthority").mockResolvedValue(null),
     spyOn(db, "getScheduledTaskRunPersonalResourceAuthority").mockResolvedValue(null),
     spyOn(db, "recordUsageEvent").mockResolvedValue(undefined),
     spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({ settings } as Awaited<

@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { useConnectionAccounts } from "./use-connection-accounts";
 
 let container: HTMLDivElement;
@@ -32,6 +33,7 @@ function Harness({
   selectedIds = selectedMailIds,
   canReadConnections = true,
   items = catalog,
+  transientRetry,
 }: {
   client: OpenGeniBrowserClient;
   id?: string;
@@ -39,12 +41,15 @@ function Harness({
   selectedIds?: string[];
   canReadConnections?: boolean | null;
   items?: CapabilityCatalogItem[];
+  transientRetry?: { delaysMs?: readonly number[]; reconnectIntervalMs?: number };
 }) {
   state = useConnectionAccounts(
     client,
     { id, workspaceId, selectedIds },
     items,
     canReadConnections,
+    {},
+    transientRetry,
   );
   return null;
 }
@@ -152,7 +157,7 @@ test("failed inventory blocks sending and retry recovers without forgetting excl
   const client = clientFor(async () => {
     if (fail) {
       throw Object.assign(
-        new Error("OpenGeni API 500: accounts store down Reference: req-accounts."),
+        new Error("Opengeni API 500: accounts store down Reference: req-accounts."),
         {
           status: 500,
         },
@@ -331,4 +336,64 @@ test("a refreshed catalog keeps the last accounts on screen while it reloads, ne
     await Bun.sleep(0);
   });
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "one" }]);
+});
+
+function serviceUnavailable(): OpenGeniApiError {
+  return new OpenGeniApiError(
+    503,
+    JSON.stringify({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "Opengeni is temporarily unavailable. Retry shortly.",
+        retryable: true,
+        requestId: "ce622307-55da-476b-ac96-785cc499b044",
+        details: { code: "DATABASE_UNAVAILABLE" },
+      },
+    }),
+    { mutation: false },
+  );
+}
+
+const FAST_RETRY = { delaysMs: [5, 5], reconnectIntervalMs: 20 };
+
+async function wait(ms: number) {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  });
+}
+
+test("a brief outage is retried quietly and never surfaces as an error", async () => {
+  let reads = 0;
+  const client = clientFor(async () => {
+    reads++;
+    if (reads < 3) throw serviceUnavailable();
+    return accounts;
+  });
+  await act(async () => root.render(<Harness client={client} transientRetry={FAST_RETRY} />));
+  await wait(40);
+  expect(reads).toBe(3);
+  expect(state.error).toBeNull();
+  expect(state.unavailable).toBe(false);
+  expect(state.selections).toHaveLength(2);
+});
+
+test("a longer outage marks the inventory unavailable, blocks Send, and reconnects on its own", async () => {
+  let down = true;
+  const client = clientFor(async () => {
+    if (down) throw serviceUnavailable();
+    return accounts;
+  });
+  await act(async () => root.render(<Harness client={client} transientRetry={FAST_RETRY} />));
+  await wait(40);
+  expect(state.unavailable).toBe(true);
+  expect(state.error).not.toBeNull();
+  expect(state.accessDenied).toBe(false);
+  expect(state.selections).toEqual([]);
+
+  down = false;
+  await wait(80);
+  expect(state.unavailable).toBe(false);
+  expect(state.error).toBeNull();
+  expect(state.selections).toHaveLength(2);
 });

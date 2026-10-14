@@ -43,7 +43,7 @@ function ModalityIcon({ modality }: { modality: ArtifactModality }) {
 /**
  * Modality-neutral artifact chrome. It deliberately owns no file, session, or
  * persistence state: hosts can use the same surface for a local draft, a
- * durable OpenGeni artifact, or a collaborative projection.
+ * durable Opengeni artifact, or a collaborative projection.
  */
 export function ArtifactSurface({
   modality,

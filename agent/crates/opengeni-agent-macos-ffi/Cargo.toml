@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-macos-ffi"
-description = "macOS-only leaf FFI crate: ScreenCaptureKit capture + CGEvent input + TCC preflight for the OpenGeni agent's desktop backend, wrapped behind a safe API."
+description = "macOS-only leaf FFI crate: ScreenCaptureKit capture + CGEvent input + TCC preflight for the Opengeni agent's desktop backend, wrapped behind a safe API."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

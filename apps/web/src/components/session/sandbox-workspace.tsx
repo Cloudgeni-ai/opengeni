@@ -17,6 +17,7 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { useAppContext } from "@/context";
 import {
   readSessionDockCollapsed,
   readSessionDockNavigation,
@@ -24,6 +25,7 @@ import {
   updateSessionDockNavigation,
   writeSessionDockCollapsed,
 } from "@/lib/session-dock-preferences";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import type { SessionEvent } from "@/types";
 
 const useClientLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -63,6 +65,13 @@ export function SessionWorkspace(props: {
     requestId: number;
   } | null;
 }) {
+  const { accessContext } = useAppContext();
+  // Viewer/Member roles lack enrollments:read; never poll a fleet they cannot read.
+  const machinesEnabled = hasWorkspacePermission(
+    accessContext,
+    props.workspaceId,
+    "enrollments:read",
+  );
   const layoutStorageId = sessionDockLayoutStorageId(props.preferenceOwnerId, props.sessionId);
   const navigation = useMemo(() => readSessionDockNavigation(layoutStorageId), [layoutStorageId]);
   const initialTab = navigation.activeTab ?? props.initialTab;
@@ -118,6 +127,7 @@ export function SessionWorkspace(props: {
       sessionId={props.sessionId}
       events={props.events}
       primary={props.primary}
+      machinesEnabled={machinesEnabled}
       {...(props.leadingTabs ? { leadingTabs: props.leadingTabs } : {})}
       {...(props.trailingTabs ? { trailingTabs: props.trailingTabs } : {})}
       {...(initialTab ? { initialTab } : {})}

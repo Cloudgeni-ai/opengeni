@@ -16,6 +16,7 @@ const siteId = "dc24100a-e408-4713-9c12-ef41e3964f6a";
 const versionId = "11111111-1111-4111-8111-111111111111";
 
 let loadError: unknown = null;
+let withoutContent = false;
 
 const snapshot = {
   detail: {
@@ -25,6 +26,8 @@ const snapshot = {
       title: "Café menu",
       description: "An interactive workspace Site.",
       status: "active" as const,
+      visibility: "private" as const,
+      ownerSubjectId: "user:owner",
       currentVersion: { id: versionId, revision: 1, requestedTools: [] },
     },
     versions: [
@@ -47,8 +50,10 @@ const snapshot = {
 
 const siteClient = {
   tools: { forWorkspace: () => ({}) },
+  getSessionTenancyCreateCapabilities: async () => ({ canCreatePrivate: true }),
 };
 const accessContext = {
+  subjectId: "user:owner",
   workspaceGrants: [{ workspaceId, permissions: ["artifacts:read", "artifacts:publish"] }],
 };
 
@@ -56,6 +61,8 @@ mock.module("@/context", () => ({
   useAppContext: () => ({
     accessContext,
     client: siteClient,
+    workspaces: [{ id: workspaceId, name: "Kitchen", kind: "shared" }],
+    managedSelfContext: null,
     startSession: async () => null,
     busy: false,
     authSession: { user: { name: "Dev" } },
@@ -65,7 +72,7 @@ mock.module("@/context", () => ({
 mock.module("@opengeni/react/sites", () => ({
   loadSiteSnapshot: async () => {
     if (loadError) throw loadError;
-    return snapshot;
+    return withoutContent ? { ...snapshot, content: null } : snapshot;
   },
 }));
 
@@ -86,6 +93,8 @@ mock.module("@opengeni/react/artifacts", () => ({
 
 mock.module("@/components/ui/confirm-dialog", () => ({
   ConfirmDialog: () => null,
+  // The shared destructive confirmation imports this helper from the same module.
+  destructiveActionFocusTarget: () => null,
 }));
 
 beforeAll(() => {
@@ -141,6 +150,9 @@ test("loaded Site keeps Archive and Edit with Opengeni behind permission checks"
     expect(hasArchive(container)).toBe(true);
     expect(hasAction(container, "Edit with Opengeni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
+    // Its owner sees that it is Only me and can share it.
+    expect(container.textContent).toContain("Only me");
+    expect(hasAction(container, "Share with workspace")).toBe(true);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -155,7 +167,7 @@ test("missing Site hides Archive and Edit with Opengeni", async () => {
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This Site isn't available");
     expect(container.textContent).toContain("Reference: corr-missing-site");
-    expect(container.textContent).not.toContain("OpenGeni API 404");
+    expect(container.textContent).not.toContain("Opengeni API 404");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -170,6 +182,7 @@ test("read-only Site hides mutation actions but keeps its preview", async () => 
   try {
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
+    expect(hasAction(container, "Share with workspace")).toBe(false);
     expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;
@@ -229,5 +242,23 @@ test("Site read refusal explains missing artifact access instead of removal", as
       await act(async () => root.unmount());
       container.remove();
     }
+  }
+});
+
+test("Site without an openable version shows a final state instead of loading forever", async () => {
+  loadError = null;
+  withoutContent = true;
+  const { container, root } = await renderDetail();
+  try {
+    expect(container.textContent).toContain("Café menu");
+    expect(container.textContent).toContain("There's nothing to show for this Site");
+    expect(container.textContent).not.toContain("Loading Site");
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
+    expect(hasAction(container, "Retry")).toBe(true);
+  } finally {
+    withoutContent = false;
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

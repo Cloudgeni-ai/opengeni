@@ -288,7 +288,7 @@ test("save errors stay accessible inside the page without dropping the folder", 
     async saveWorkspaceSkill() {
       throw Object.assign(
         new Error(
-          "OpenGeni API 403: missing permission: workspace:admin Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
+          "Opengeni API 403: missing permission: workspace:admin Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
         ),
         { status: 403 },
       );
@@ -303,7 +303,7 @@ test("save errors stay accessible inside the page without dropping the folder", 
     expect(page.querySelector('[role="alert"]')?.textContent).toBe(
       "Couldn't save this skill. You don't have permission to do this. Ask an admin for access. Reference: 0f0e0d0c-0b0a-4908-8706-050403020100.",
     );
-    expect(page.textContent).not.toContain("OpenGeni API");
+    expect(page.textContent).not.toContain("Opengeni API");
     expect(view.container.querySelector("section > [role='alert']")).toBeNull();
     expect(page.querySelector("textarea")?.value).toBe("changed");
   } finally {
@@ -470,7 +470,7 @@ test("a failed skills list says what to do, keeps the reference behind Technical
     async listWorkspaceSkills() {
       if (fail) {
         throw Object.assign(
-          new Error("OpenGeni API 500: database unavailable Reference: req-skills-list."),
+          new Error("Opengeni API 500: database unavailable Reference: req-skills-list."),
           { status: 500, correlationId: "req-skills-list" },
         );
       }
@@ -485,7 +485,7 @@ test("a failed skills list says what to do, keeps the reference behind Technical
       "Opengeni couldn't finish the request. Try again in a moment.",
     );
     expect(alert.textContent).toContain("Technical details");
-    expect(view.container.textContent).not.toContain("OpenGeni API 500");
+    expect(view.container.textContent).not.toContain("Opengeni API 500");
     expect(view.container.textContent).not.toContain("No skills yet");
     fail = false;
     await view.click("Try again");
@@ -498,7 +498,7 @@ test("a failed skills list says what to do, keeps the reference behind Technical
 test("a refused skills list is a calm line without Try again", async () => {
   const { context } = fixture({
     async listWorkspaceSkills() {
-      throw Object.assign(new Error("OpenGeni API 403: missing permission: workspace:read"), {
+      throw Object.assign(new Error("Opengeni API 403: missing permission: workspace:read"), {
         status: 403,
       });
     },

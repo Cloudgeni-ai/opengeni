@@ -3,6 +3,11 @@ import {
   canonicalSpreadsheetDateFromMilliseconds,
   canonicalSpreadsheetDateMilliseconds,
 } from "./spreadsheet-artifact-date";
+import {
+  SPREADSHEET_DEFAULT_ROW_HEIGHT,
+  SPREADSHEET_DEFAULT_COLUMN_WIDTH,
+  SPREADSHEET_MAX_DIMENSION_PIXELS,
+} from "./spreadsheet-artifact-commands";
 
 /** Canonical private kernel query/projection ABI shared by browser and native bindings. */
 export const SPREADSHEET_ARTIFACT_QUERY_VERSION = 1 as const;
@@ -24,6 +29,21 @@ const VIEWPORT_QUERY_PAYLOAD_BYTES = 32;
 const VIEWPORT_PROJECTION_PREFIX_BYTES = 48;
 const METADATA_PROJECTION_PREFIX_BYTES = 4;
 const GENERATIONS_FLAG = 1;
+const DIMENSIONS_FLAG = 2;
+const DIMENSION_KEYS = [
+  "defaultRowHeight",
+  "defaultColumnWidth",
+  "rowHeights",
+  "columnWidths",
+] as const;
+
+/** Sparse absolute zero-based indices; omitted only in pre-dimension private projections. */
+export type SpreadsheetArtifactDimensions = Readonly<{
+  defaultRowHeight?: number;
+  defaultColumnWidth?: number;
+  rowHeights?: readonly (readonly [number, number])[];
+  columnWidths?: readonly (readonly [number, number])[];
+}>;
 const UINT32_MAX = 0xffff_ffff;
 const UINT64_MAX = 0xffff_ffff_ffff_ffffn;
 const FNV_OFFSET = 0xcbf29ce484222325n;
@@ -85,16 +105,17 @@ export type SpreadsheetArtifactProjectedCell = Readonly<{
 }>;
 
 /** Complete and non-truncated. A limit breach is an error, never a partial response. */
-export type SpreadsheetArtifactViewportProjection = Readonly<{
-  revision: bigint;
-  sheetId: EditableArtifactStableId;
-  generationId: EditableArtifactStableId | null;
-  startRow: number;
-  startColumn: number;
-  rowCount: number;
-  columnCount: number;
-  cells: readonly SpreadsheetArtifactProjectedCell[];
-}>;
+export type SpreadsheetArtifactViewportProjection = SpreadsheetArtifactDimensions &
+  Readonly<{
+    revision: bigint;
+    sheetId: EditableArtifactStableId;
+    generationId: EditableArtifactStableId | null;
+    startRow: number;
+    startColumn: number;
+    rowCount: number;
+    columnCount: number;
+    cells: readonly SpreadsheetArtifactProjectedCell[];
+  }>;
 
 export type SpreadsheetArtifactUsedBounds = Readonly<{
   startRow: number;
@@ -103,20 +124,21 @@ export type SpreadsheetArtifactUsedBounds = Readonly<{
   endColumn: number;
 }>;
 
-export type SpreadsheetArtifactSheetMetadata = Readonly<{
-  sheetId: EditableArtifactStableId;
-  generationId: EditableArtifactStableId | null;
-  name: string;
-  usedBounds: SpreadsheetArtifactUsedBounds | null;
-}>;
+export type SpreadsheetArtifactSheetMetadata = SpreadsheetArtifactDimensions &
+  Readonly<{
+    sheetId: EditableArtifactStableId;
+    generationId: EditableArtifactStableId | null;
+    name: string;
+    usedBounds: SpreadsheetArtifactUsedBounds | null;
+  }>;
 
 /**
- * Version 1 deliberately models no row/column dimensions, hidden state, or
- * merges. It also carries no style projection. These are false capability
- * facts, not omitted authoritative data.
+ * Dimensions are carried under the explicit dimensions flag. Hidden state,
+ * merges and styles remain unsupported. Pre-dimension private projections
+ * carry dimensions=false and round-trip without inventing geometry.
  */
 export type SpreadsheetArtifactModeledFeatures = Readonly<{
-  dimensions: false;
+  dimensions: boolean;
   hidden: false;
   merges: false;
 }>;
@@ -232,6 +254,8 @@ export function encodeSpreadsheetViewportKernelProjection(
   payload.u32(projection.startColumn);
   payload.u32(projection.rowCount);
   payload.u32(projection.columnCount);
+  const hasDimensions = projection.defaultRowHeight !== undefined;
+  if (hasDimensions) writeDimensions(payload, projection);
   for (const cell of projection.cells) {
     payload.u32(cell.row - projection.startRow);
     payload.u32(cell.column - projection.startColumn);
@@ -240,7 +264,8 @@ export function encodeSpreadsheetViewportKernelProjection(
   return encodeProjectionFrame(
     0,
     projection.revision,
-    projection.generationId === null ? 0 : GENERATIONS_FLAG,
+    (projection.generationId === null ? 0 : GENERATIONS_FLAG) |
+      (hasDimensions ? DIMENSIONS_FLAG : 0),
     projection.cells.length,
     payload.finish(),
     maximum,
@@ -257,7 +282,7 @@ export function encodeSpreadsheetMetadataKernelProjection(
     SPREADSHEET_ARTIFACT_METADATA_MIN_RESPONSE_BYTES,
   );
   const payload = new DynamicWriter(maximum - PROJECTION_HEADER_BYTES - CHECKSUM_BYTES);
-  payload.u32(0);
+  payload.u32(projection.modeledFeatures.dimensions ? 1 : 0);
   for (const sheet of projection.sheets) {
     payload.stableId(sheet.sheetId);
     payload.optionalStableId(sheet.generationId);
@@ -271,12 +296,14 @@ export function encodeSpreadsheetMetadataKernelProjection(
       payload.u32(sheet.usedBounds.endRow);
       payload.u32(sheet.usedBounds.endColumn);
     }
+    if (projection.modeledFeatures.dimensions) writeDimensions(payload, sheet);
   }
   const generations = projection.sheets.length > 0 && projection.sheets[0]!.generationId !== null;
   return encodeProjectionFrame(
     1,
     projection.revision,
-    generations ? GENERATIONS_FLAG : 0,
+    (generations ? GENERATIONS_FLAG : 0) |
+      (projection.modeledFeatures.dimensions ? DIMENSIONS_FLAG : 0),
     projection.sheets.length,
     payload.finish(),
     maximum,
@@ -498,7 +525,7 @@ function decodeProjectionFrame(bytes: Uint8Array): ProjectionFrame {
     throw projectionError(`unsupported spreadsheet projection version: ${version}`);
   }
   const flags = reader.u16();
-  if ((flags & ~GENERATIONS_FLAG) !== 0) {
+  if ((flags & ~(GENERATIONS_FLAG | DIMENSIONS_FLAG)) !== 0) {
     throw projectionError("spreadsheet projection flags are noncanonical");
   }
   const kindTag = reader.u8();
@@ -549,6 +576,8 @@ function decodeViewportPayload(frame: ProjectionFrame): SpreadsheetArtifactViewp
   const rowCount = reader.u32();
   const columnCount = reader.u32();
   validateViewportGeometry(startRow, startColumn, rowCount, columnCount);
+  const dimensions = (frame.flags & DIMENSIONS_FLAG) !== 0 ? readDimensions(reader) : {};
+  validateDimensionExtent(dimensions, startRow, rowCount, startColumn, columnCount);
   const cells: SpreadsheetArtifactProjectedCell[] = [];
   let previousOrdinal = -1;
   for (let index = 0; index < frame.itemCount; index += 1) {
@@ -579,6 +608,7 @@ function decodeViewportPayload(frame: ProjectionFrame): SpreadsheetArtifactViewp
   reader.done("viewport projection payload contains trailing bytes");
   return Object.freeze({
     revision: frame.revision,
+    ...dimensions,
     sheetId,
     generationId,
     startRow,
@@ -597,7 +627,8 @@ function decodeMetadataPayload(frame: ProjectionFrame): SpreadsheetArtifactMetad
     throw projectionError("metadata projection payload is truncated");
   }
   const reader = new Reader(frame.payload);
-  if (reader.u32() !== 0) {
+  const features = reader.u32();
+  if ((features & ~1) !== 0 || (features === 1) !== ((frame.flags & DIMENSIONS_FLAG) !== 0)) {
     throw projectionError("metadata projection contains unknown modeled feature bits");
   }
   const hasGenerations = (frame.flags & GENERATIONS_FLAG) !== 0;
@@ -631,12 +662,13 @@ function decodeMetadataPayload(frame: ProjectionFrame): SpreadsheetArtifactMetad
       }
       usedBounds = Object.freeze({ startRow, startColumn, endRow, endColumn });
     }
-    sheets.push(Object.freeze({ sheetId, generationId, name, usedBounds }));
+    const dimensions = (frame.flags & DIMENSIONS_FLAG) !== 0 ? readDimensions(reader) : {};
+    sheets.push(Object.freeze({ sheetId, generationId, name, usedBounds, ...dimensions }));
   }
   reader.done("metadata projection payload contains trailing bytes");
   return Object.freeze({
     revision: frame.revision,
-    modeledFeatures: MODELED_FEATURES_NONE,
+    modeledFeatures: Object.freeze({ dimensions: features === 1, hidden: false, merges: false }),
     sheets: Object.freeze(sheets),
   });
 }
@@ -694,7 +726,8 @@ function normalizeViewportProjection(input: unknown): SpreadsheetArtifactViewpor
       "sheetId",
       "startColumn",
       "startRow",
-    ],
+      ...(projection.defaultRowHeight === undefined ? [] : DIMENSION_KEYS),
+    ].sort(),
     "spreadsheet viewport projection",
   );
   const revision = uint64(projection.revision, "viewport revision");
@@ -705,6 +738,9 @@ function normalizeViewportProjection(input: unknown): SpreadsheetArtifactViewpor
   const rowCount = positiveUint32(projection.rowCount, "viewport rowCount");
   const columnCount = positiveUint32(projection.columnCount, "viewport columnCount");
   validateViewportGeometry(startRow, startColumn, rowCount, columnCount);
+  const dimensions =
+    projection.defaultRowHeight === undefined ? {} : normalizeDimensions(projection);
+  validateDimensionExtent(dimensions, startRow, rowCount, startColumn, columnCount);
   if (!Array.isArray(projection.cells)) throw projectionError("viewport cells must be an array");
   if (projection.cells.length > SPREADSHEET_ARTIFACT_VIEWPORT_MAX_CELLS) {
     throw projectionError("viewport projection exceeds its hard cell limit");
@@ -733,6 +769,7 @@ function normalizeViewportProjection(input: unknown): SpreadsheetArtifactViewpor
   }
   return Object.freeze({
     revision,
+    ...dimensions,
     sheetId,
     generationId,
     startRow,
@@ -753,8 +790,12 @@ function normalizeMetadataProjection(input: unknown): SpreadsheetArtifactMetadat
   const revision = uint64(projection.revision, "metadata revision");
   const features = exactRecord(projection.modeledFeatures, "metadata modeledFeatures");
   exactKeys(features, ["dimensions", "hidden", "merges"], "metadata modeledFeatures");
-  if (features.dimensions !== false || features.hidden !== false || features.merges !== false) {
-    throw projectionError("version 1 metadata modeled features must all be false");
+  if (
+    typeof features.dimensions !== "boolean" ||
+    features.hidden !== false ||
+    features.merges !== false
+  ) {
+    throw projectionError("metadata modeled features are invalid");
   }
   if (!Array.isArray(projection.sheets)) throw projectionError("metadata sheets must be an array");
   if (projection.sheets.length > SPREADSHEET_ARTIFACT_METADATA_MAX_SHEETS) {
@@ -769,7 +810,17 @@ function normalizeMetadataProjection(input: unknown): SpreadsheetArtifactMetadat
       ownArrayElement(projection.sheets, index, "metadata sheets"),
       "metadata sheet",
     );
-    exactKeys(value, ["generationId", "name", "sheetId", "usedBounds"], "metadata sheet");
+    exactKeys(
+      value,
+      [
+        "generationId",
+        "name",
+        "sheetId",
+        "usedBounds",
+        ...(features.dimensions ? DIMENSION_KEYS : []),
+      ].sort(),
+      "metadata sheet",
+    );
     const sheetId = spreadsheetSheetId(requireString(value.sheetId, "metadata sheetId"));
     if (ids.has(sheetId)) throw projectionError("metadata projection contains duplicate sheet ids");
     ids.add(sheetId);
@@ -789,13 +840,116 @@ function normalizeMetadataProjection(input: unknown): SpreadsheetArtifactMetadat
     }
     names.add(foldedName);
     const usedBounds = value.usedBounds === null ? null : normalizeUsedBounds(value.usedBounds);
-    sheets.push(Object.freeze({ sheetId, generationId, name, usedBounds }));
+    sheets.push(
+      Object.freeze({
+        sheetId,
+        generationId,
+        name,
+        usedBounds,
+        ...(features.dimensions ? normalizeDimensions(value) : {}),
+      }),
+    );
   }
   return Object.freeze({
     revision,
-    modeledFeatures: MODELED_FEATURES_NONE,
+    modeledFeatures: Object.freeze({
+      dimensions: features.dimensions,
+      hidden: false,
+      merges: false,
+    }),
     sheets: Object.freeze(sheets),
   });
+}
+
+function normalizeDimensions(input: Record<string, unknown>): SpreadsheetArtifactDimensions {
+  if (
+    input.defaultRowHeight !== SPREADSHEET_DEFAULT_ROW_HEIGHT ||
+    input.defaultColumnWidth !== SPREADSHEET_DEFAULT_COLUMN_WIDTH
+  ) {
+    throw projectionError("dimension defaults are invalid");
+  }
+  const normalizeEntries = (
+    value: unknown,
+    defaultPixels: number,
+  ): readonly (readonly [number, number])[] => {
+    if (!Array.isArray(value) || value.length > SPREADSHEET_ARTIFACT_PROJECTION_MAX_BYTES / 8)
+      throw projectionError("dimension entries exceed limits");
+    let previous = -1;
+    const entries: (readonly [number, number])[] = [];
+    for (let offset = 0; offset < value.length; offset += 1) {
+      const entry = ownArrayElement(value, offset, "dimension entries");
+      if (!Array.isArray(entry) || entry.length !== 2)
+        throw projectionError("dimension entry must be an index/pixels pair");
+      const index = uint32(ownArrayElement(entry, 0, "dimension index"), `dimension ${offset}`);
+      const pixels = positiveUint32(
+        ownArrayElement(entry, 1, "dimension pixels"),
+        "dimension pixels",
+      );
+      if (
+        index <= previous ||
+        pixels > SPREADSHEET_MAX_DIMENSION_PIXELS ||
+        pixels === defaultPixels
+      )
+        throw projectionError("dimensions must be sorted unique non-default entries within bounds");
+      previous = index;
+      entries.push(Object.freeze([index, pixels] as const));
+    }
+    return Object.freeze(entries);
+  };
+  return Object.freeze({
+    defaultRowHeight: SPREADSHEET_DEFAULT_ROW_HEIGHT,
+    defaultColumnWidth: SPREADSHEET_DEFAULT_COLUMN_WIDTH,
+    rowHeights: normalizeEntries(input.rowHeights, SPREADSHEET_DEFAULT_ROW_HEIGHT),
+    columnWidths: normalizeEntries(input.columnWidths, SPREADSHEET_DEFAULT_COLUMN_WIDTH),
+  });
+}
+
+function writeDimensions(writer: DynamicWriter, dimensions: SpreadsheetArtifactDimensions): void {
+  writer.u32(dimensions.defaultRowHeight!);
+  writer.u32(dimensions.defaultColumnWidth!);
+  for (const entries of [dimensions.rowHeights!, dimensions.columnWidths!]) {
+    writer.u32(entries.length);
+    for (const [index, pixels] of entries) {
+      writer.u32(index);
+      writer.u32(pixels);
+    }
+  }
+}
+
+function readDimensions(reader: Reader): SpreadsheetArtifactDimensions {
+  const defaultRowHeight = reader.u32();
+  const defaultColumnWidth = reader.u32();
+  const axes: (readonly [number, number])[][] = [];
+  for (let axis = 0; axis < 2; axis += 1) {
+    const count = reader.u32();
+    if (count > SPREADSHEET_ARTIFACT_PROJECTION_MAX_BYTES / 8)
+      throw projectionError("dimension entries exceed limits");
+    const entries: (readonly [number, number])[] = [];
+    for (let index = 0; index < count; index += 1) entries.push([reader.u32(), reader.u32()]);
+    axes.push(entries);
+  }
+  return normalizeDimensions({
+    defaultRowHeight,
+    defaultColumnWidth,
+    rowHeights: axes[0],
+    columnWidths: axes[1],
+  });
+}
+
+function validateDimensionExtent(
+  dimensions: SpreadsheetArtifactDimensions,
+  startRow: number,
+  rowCount: number,
+  startColumn: number,
+  columnCount: number,
+): void {
+  if (
+    dimensions.rowHeights?.some(([index]) => index < startRow || index - startRow >= rowCount) ||
+    dimensions.columnWidths?.some(
+      ([index]) => index < startColumn || index - startColumn >= columnCount,
+    )
+  )
+    throw projectionError("dimensions lie outside viewport");
 }
 
 function normalizeProjectedCell(input: unknown): SpreadsheetArtifactProjectedCell {
@@ -1052,12 +1206,6 @@ function queryError(message: string): TypeError {
 function projectionError(message: string): TypeError {
   return new TypeError(message);
 }
-
-const MODELED_FEATURES_NONE: SpreadsheetArtifactModeledFeatures = Object.freeze({
-  dimensions: false,
-  hidden: false,
-  merges: false,
-});
 
 const EMPTY_VALUE: SpreadsheetArtifactProjectedCellValue = Object.freeze({
   kind: "empty",

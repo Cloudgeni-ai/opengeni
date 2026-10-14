@@ -322,6 +322,34 @@
   --og-component-line-height: var(--og-line-height-composer-wide);
 }
 
+/* The one text-link style. The default palette is neutral grey, so colour
+   alone cannot tell a link from body text: a resting underline carries the
+   affordance (WCAG 1.4.1). The underline is tinted from the link's own colour
+   so it stays quiet in dense rows and follows a call site's colour (muted
+   meta links); hover strengthens it to the full ink. A host that rebrands the
+   accent gets coloured links for free. Call-site utilities (text colour, focus
+   ring, outline-none) override these declarations. */
+@utility og-link {
+  color: var(--og-color-accent-strong);
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in oklch, currentColor 45%, transparent);
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: auto;
+  transition: text-decoration-color var(--og-duration-fast) var(--og-ease-out);
+  @media (hover: hover) {
+    &:hover {
+      text-decoration-color: currentColor;
+    }
+  }
+  &:focus-visible {
+    text-decoration-color: currentColor;
+    outline: 2px solid color-mix(in oklch, var(--og-color-accent) 70%, transparent);
+    outline-offset: 2px;
+    border-radius: var(--og-radius-xs);
+  }
+}
+
 /* Radix Collapsible disclosure: height auto-animates via the content var. Used
    by the timeline tool rows so an expand glides open instead of snapping.
 
@@ -600,6 +628,55 @@
 
   .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
     display: none;
+  }
+
+  /* A saved recording or voice error needs its explanation to be readable:
+     give it the controls row (Send stays) instead of an ellipsis. */
+  .og-composer-footer:has([data-transcription-attention])
+    .og-composer-controls
+    > :not([data-transcription-attention]) {
+    display: none;
+  }
+
+  /* Host extras (live voice, custom actions) step aside too; Pause/Stop/Send stay. */
+  .og-composer-footer:has([data-transcription-attention])
+    .og-composer-actions
+    > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
+
+  .og-composer-footer
+    [data-transcription-attention]
+    :is(.og-transcription-recovered-label, .og-transcription-error-label) {
+    max-width: min(15rem, 52vw);
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-height: 1.2;
+  }
+
+  /* A failed live-voice start explains itself in the row until dismissed. */
+  .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+    display: none;
+  }
+
+  .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,
+  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),
+  .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .og-composer-footer:has([data-realtime-attention])
+    .og-composer-actions
+    > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+
+  .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
   }
 }
 

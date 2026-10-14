@@ -1,9 +1,7 @@
 import {
   CORE_INTEGRATION_DEFINITIONS,
   INTEGRATION_DEFINITION_PRESENTATIONS,
-  autoApprovalForbidden,
   createPinnedIntegrationTransport,
-  integrationDefinitionById,
   integrationFacetDefinitions,
   type IntegrationCredentialResolver,
 } from "@opengeni/capabilities";
@@ -100,21 +98,6 @@ export function validatedIntegrationInstallInput(
       throw new HTTPException(422, {
         message: `autoApprovedTools must name selected Integration tools: ${outside.slice(0, 200)}`,
       });
-    // Curated and custom Integrations share one rule (capabilities:manage plus
-    // the organization acquisition recheck in the installer); only a curated
-    // definition's reviewed governance can forbid an exemption.
-    if (resolved.preview.definitionProvenance === "curated") {
-      const definition = integrationDefinitionById(resolved.preview.definitionId);
-      const forbidden = resolved.preview.tools.find(
-        (tool) =>
-          payload.autoApprovedTools!.includes(tool.id) &&
-          autoApprovalForbidden(definition, tool.operationKey),
-      );
-      if (forbidden)
-        throw new HTTPException(422, {
-          message: `This Integration requires human approval for ${forbidden.id.slice(0, 200)}; it cannot be auto-approved.`,
-        });
-    }
   }
   return {
     accountId: grant.accountId,

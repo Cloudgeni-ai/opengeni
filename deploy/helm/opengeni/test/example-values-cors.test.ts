@@ -6,7 +6,7 @@ const chart = resolve(import.meta.dir, "..");
 
 // OPENGENI_CORS_ALLOW_ORIGIN_REGEX lists the origins that may send browser
 // cookies to the API cross-origin. A self-hoster copies these example files,
-// so none may name an origin OpenGeni operates (or localhost): that would
+// so none may name an origin Opengeni operates (or localhost): that would
 // grant it credentialed CORS to their deployment.
 test("shipped values grant credentialed CORS only to placeholder origins", async () => {
   const files = (await readdir(chart)).filter((name) => /^values(\..+)?\.ya?ml$/u.test(name));

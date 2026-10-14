@@ -7,17 +7,37 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SessionCapabilityFrame } from "./session-capability-frame";
+import { PreparedMcpSetupCard } from "./prepared-mcp-setup-card";
 
 type Props = {
   item: AuthNeededItem;
   workspaceId: string;
+  sessionId: string;
+  onConfigured?: (() => Promise<void>) | undefined;
   onRegistered: (id: string, restoreFocus: boolean) => void;
 };
 
 /** A proposed URL is untrusted display data until the human submits this form.
  * Creation uses the ordinary human-only Capabilities endpoint; the existing
  * capability card then handles authentication, enabling, and session selection. */
-export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props) {
+export function SessionCustomMcpCard(props: Props) {
+  const context = useAppContext();
+  if (props.item.setupRequest?.mcpSetup)
+    return (
+      <PreparedMcpSetupCard
+        {...props}
+        client={context.client}
+        actorId={context.accessContext?.subjectId ?? ""}
+        canConfigure={
+          hasWorkspacePermission(context.accessContext, props.workspaceId, "connections:write") &&
+          hasWorkspacePermission(context.accessContext, props.workspaceId, "capabilities:manage")
+        }
+      />
+    );
+  return <LegacyCustomMcpCard {...props} />;
+}
+
+function LegacyCustomMcpCard({ item, workspaceId, onRegistered }: Props) {
   const context = useAppContext();
   const proposal = item.setupRequest!;
   const [expanded, setExpanded] = useState(false);

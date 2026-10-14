@@ -201,6 +201,33 @@ describe("Docker sandbox route forwarder", () => {
     expect(seen).toHaveLength(0);
   });
 
+  test("answers the launcher health probe from a peer outside the sandbox network", async () => {
+    // Hosts that source-NAT their own loopback-routed traffic make the
+    // launcher's probe arrive from outside the Docker subnet.
+    const { base, port, seen } = await startBridge("172.18.0.0/16");
+    const health = await fetch(`${base}${SANDBOX_BRIDGE_HEALTH_PATH}`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ ok: true });
+
+    // Every other route, including ones that only normalize to the health
+    // path's neighbours, stays refused for such a peer.
+    for (const path of [
+      "/v1/workspaces/ws-1/mcp",
+      "/v1/workspaces/ws-1/codemode/run",
+      "/v1/workspaces/ws-1/sessions",
+      `${SANDBOX_BRIDGE_HEALTH_PATH}/extra`,
+    ]) {
+      const response = await fetch(`${base}${path}`, { method: "POST", body: "{}" });
+      expect(response.status).toBe(403);
+    }
+    const traversal = await rawRequest(
+      port,
+      `${SANDBOX_BRIDGE_HEALTH_PATH}/../v1/workspaces/ws-1/mcp`,
+    );
+    expect(traversal).toStartWith("HTTP/1.1 403");
+    expect(seen).toHaveLength(0);
+  });
+
   // Bun 1.3's node:http could stall or drop bytes relaying bodies this large;
   // the pinned runtime (.bun-version) relays them intact.
   test("streams multi-megabyte Git broker uploads through intact", async () => {

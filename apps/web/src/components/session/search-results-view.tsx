@@ -306,7 +306,7 @@ export function SearchPreviewView(props: {
                       offset={message.offset}
                     />
                   ) : (
-                    <MarkdownText text={message.text} compact suppressImages />
+                    <MarkdownText text={message.text} compact softLineBreaks suppressImages />
                   )}
                 </div>
               ) : (

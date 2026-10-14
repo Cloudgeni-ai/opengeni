@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { AttachedBrowserBridgeError } from "../src/attached-bridge";
+import { CdpCommandTimeoutError, CdpTransportError } from "../src/cdp";
 import {
   AttachedChromeCdpConnection,
   type AttachedBrowserBridgeTransport,
@@ -8,6 +10,7 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Record<string, unknown>> = [];
   closed = false;
   pollCount = 0;
+  eventSent = false;
 
   async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
     this.commands.push({ ...payload });
@@ -17,7 +20,7 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
           tabs: [
             {
               id: "7",
-              title: "OpenGeni",
+              title: "Opengeni",
               url: "https://opengeni.ai/",
               active: true,
               controllable: true,
@@ -33,7 +36,10 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
       case "debugger.poll": {
         this.pollCount += 1;
         if (this.pollCount === 1) return { events: [], cursor: 5, truncated: false } as T;
-        if (this.pollCount === 2) {
+        if (!this.commands.some((command) => command.type === "debugger.attach"))
+          return { events: [], cursor: 5, truncated: false } as T;
+        if (!this.eventSent) {
+          this.eventSent = true;
           return {
             events: [
               {
@@ -61,6 +67,42 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
 }
 
 describe("AttachedChromeCdpConnection", () => {
+  test("keeps target command timeouts distinct from lost bridge transport", async () => {
+    const bridge = new FakeBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    try {
+      const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: "7",
+        flatten: true,
+      });
+      const request = bridge.request.bind(bridge);
+      let code: "timeout" | "transport_failed" = "timeout";
+      bridge.request = async (payload) => {
+        if (payload.type === "debugger.command")
+          throw new AttachedBrowserBridgeError(code, "synthetic bridge failure", true);
+        return request(payload);
+      };
+      await expect(connection.send("Runtime.evaluate", {}, { sessionId })).rejects.toBeInstanceOf(
+        CdpCommandTimeoutError,
+      );
+      await expect(connection.send("Page.getFrameTree", {}, { sessionId })).rejects.toMatchObject({
+        method: "Page.getFrameTree",
+        sessionId,
+      });
+      code = "transport_failed";
+      const lost = await connection
+        .send("Page.getFrameTree", {}, { sessionId })
+        .catch((error: unknown) => error);
+      expect(lost).toBeInstanceOf(CdpTransportError);
+      expect(lost).not.toBeInstanceOf(CdpCommandTimeoutError);
+    } finally {
+      connection.close();
+    }
+  });
+
   test.each([
     ["darwin", "Macintosh"],
     ["win32", "Windows NT"],
@@ -95,7 +137,7 @@ describe("AttachedChromeCdpConnection", () => {
         expect.objectContaining({
           targetId: "7",
           type: "page",
-          title: "OpenGeni",
+          title: "Opengeni",
           url: "https://opengeni.ai/",
         }),
       ],
@@ -104,21 +146,21 @@ describe("AttachedChromeCdpConnection", () => {
       targetId: "7",
       flatten: true,
     });
-    expect(attached.sessionId).toBe("attached:7");
+    expect(attached.sessionId).toStartWith("attached:7:");
 
     const navigated = new Promise<void>((resolveEvent) => {
       connection.on(
         "Page.frameNavigated",
         (event) => {
-          expect(event.sessionId).toBe("attached:7");
+          expect(event.sessionId).toBe(attached.sessionId);
           expect(event.params).toEqual({ frame: { id: "main" } });
           resolveEvent();
         },
-        "attached:7",
+        attached.sessionId,
       );
     });
     await expect(
-      connection.send("Page.getFrameTree", {}, { sessionId: "attached:7" }),
+      connection.send("Page.getFrameTree", {}, { sessionId: attached.sessionId }),
     ).resolves.toEqual({ frameTree: { frame: { id: "main" } } });
     await navigated;
     expect(bridge.commands).toContainEqual(

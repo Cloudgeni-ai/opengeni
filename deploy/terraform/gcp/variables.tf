@@ -71,7 +71,7 @@ variable "gke" {
 }
 
 variable "artifact_registry_writer_members" {
-  description = "IAM members allowed to push OpenGeni workload images to the Artifact Registry repository."
+  description = "IAM members allowed to push Opengeni workload images to the Artifact Registry repository."
   type        = list(string)
   default     = []
 }

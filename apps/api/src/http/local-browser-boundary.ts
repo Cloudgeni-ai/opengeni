@@ -103,14 +103,14 @@ const MAX_REPORTED_REJECTIONS = 32;
 const MAX_REPORTED_VALUE_LENGTH = 200;
 
 const HOST_NOT_ALLOWED_MESSAGE =
-  "The local OpenGeni API only answers requests addressed to this computer. " +
+  "The local Opengeni API only answers requests addressed to this computer. " +
   "To use another address, set it in OPENGENI_WEB_BASE_URL, OPENGENI_PUBLIC_BASE_URL, " +
   "or OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 const ORIGIN_NOT_ALLOWED_MESSAGE =
-  "The local OpenGeni API has no authentication, so browser requests are accepted only " +
+  "The local Opengeni API has no authentication, so browser requests are accepted only " +
   "from this stack's web app. Add other trusted origins to OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 const SANDBOX_ROUTE_ONLY_MESSAGE =
-  "This address is the local OpenGeni API's sandbox route. It serves only sandbox calls " +
+  "This address is the local Opengeni API's sandbox route. It serves only sandbox calls " +
   "(Codemode, first-party MCP, and the Git broker), never browsers. Open the web app at " +
   "its own address, or list this address in OPENGENI_LOCAL_ALLOWED_ORIGINS.";
 

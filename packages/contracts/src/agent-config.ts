@@ -1,5 +1,6 @@
+import { defineSchema } from "./define-schema";
 /**
- * Agent configuration: one `agent` object that describes what an OpenGeni
+ * Agent configuration: one `agent` object that describes what an Opengeni
  * agent is (identity), how it answers (renderer, instructions alias) and what
  * it can do (capabilities). Capabilities are product words; this module owns
  * the single registry that maps every first-party tool to exactly one of them
@@ -19,6 +20,8 @@
  * re-exports it); only types cross that edge.
  */
 import { z } from "zod";
+import { CUA_DESKTOP_TOOLS, isCuaDesktopModelTool } from "./cua-desktop-tools";
+import { VaultPolicy } from "./vaults";
 import type { FirstPartyMcpToolName, SessionToolPolicy, ToolRef } from "./index";
 
 export const AGENT_CAPABILITY_IDS = [
@@ -31,12 +34,13 @@ export const AGENT_CAPABILITY_IDS = [
   "schedules",
   "artifacts",
   "browser",
+  "secrets",
   "media",
   "workspaceFiles",
   "workspaceConnectors",
   "workspaceAdmin",
 ] as const;
-export const AgentCapabilityId = z.enum(AGENT_CAPABILITY_IDS);
+export const AgentCapabilityId = /* @__PURE__ */ defineSchema(() => z.enum(AGENT_CAPABILITY_IDS));
 export type AgentCapabilityId = z.infer<typeof AgentCapabilityId>;
 
 /** Boolean capabilities: every capability except the three-state `skills`. */
@@ -46,33 +50,36 @@ export const AGENT_BOOLEAN_CAPABILITY_IDS = AGENT_CAPABILITY_IDS.filter(
 );
 
 /** `read` reads installed Skills; `manage` also saves/installs/publishes/removes. */
-export const AgentSkillsCapability = z.union([
-  z.literal("read"),
-  z.literal("manage"),
-  z.literal(false),
-]);
+export const AgentSkillsCapability = /* @__PURE__ */ defineSchema(() =>
+  z.union([z.literal("read"), z.literal("manage"), z.literal(false)]),
+);
 export type AgentSkillsCapability = z.infer<typeof AgentSkillsCapability>;
 
-export const AgentCapabilityStartingPoint = z.enum(["all", "none"]);
+export const AgentCapabilityStartingPoint = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["all", "none"]),
+);
 export type AgentCapabilityStartingPoint = z.infer<typeof AgentCapabilityStartingPoint>;
 
-export const AgentCapabilityToggles = z
-  .object({
-    webSearch: z.boolean().optional(),
-    humanInput: z.boolean().optional(),
-    skills: AgentSkillsCapability.optional(),
-    goals: z.boolean().optional(),
-    subagents: z.boolean().optional(),
-    knowledge: z.boolean().optional(),
-    schedules: z.boolean().optional(),
-    artifacts: z.boolean().optional(),
-    browser: z.boolean().optional(),
-    media: z.boolean().optional(),
-    workspaceFiles: z.boolean().optional(),
-    workspaceConnectors: z.boolean().optional(),
-    workspaceAdmin: z.boolean().optional(),
-  })
-  .strict();
+export const AgentCapabilityToggles = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      webSearch: z.boolean().optional(),
+      humanInput: z.boolean().optional(),
+      skills: AgentSkillsCapability.optional(),
+      goals: z.boolean().optional(),
+      subagents: z.boolean().optional(),
+      knowledge: z.boolean().optional(),
+      schedules: z.boolean().optional(),
+      artifacts: z.boolean().optional(),
+      browser: z.boolean().optional(),
+      secrets: z.boolean().optional(),
+      media: z.boolean().optional(),
+      workspaceFiles: z.boolean().optional(),
+      workspaceConnectors: z.boolean().optional(),
+      workspaceAdmin: z.boolean().optional(),
+    })
+    .strict(),
+);
 export type AgentCapabilityToggles = z.infer<typeof AgentCapabilityToggles>;
 
 /**
@@ -80,72 +87,84 @@ export type AgentCapabilityToggles = z.infer<typeof AgentCapabilityToggles>;
  * session's own tools plus essentials (human input and reading Skills). An
  * object starts from one of them and switches individual capabilities.
  */
-export const AgentCapabilities = z.union([
-  z.literal("all"),
-  z.literal("none"),
-  AgentCapabilityToggles.extend({ from: AgentCapabilityStartingPoint }).strict(),
-]);
+export const AgentCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    z.literal("all"),
+    z.literal("none"),
+    AgentCapabilityToggles.extend({ from: AgentCapabilityStartingPoint }).strict(),
+  ]),
+);
 export type AgentCapabilities = z.infer<typeof AgentCapabilities>;
 
 /** `opengeni` emits `sandbox:`/`artifact:` links and inline visuals; `markdown` does not. */
-export const AgentRenderer = z.enum(["opengeni", "markdown"]);
+export const AgentRenderer = /* @__PURE__ */ defineSchema(() => z.enum(["opengeni", "markdown"]));
 export type AgentRenderer = z.infer<typeof AgentRenderer>;
 
 export const AGENT_IDENTITY_MAX_CHARACTERS = 8_000;
 /** Same bound as `SESSION_INSTRUCTIONS_MAX_CHARACTERS` (asserted by test). */
 export const AGENT_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
-export const AgentIdentity = z.string().trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS);
+export const AgentIdentity = /* @__PURE__ */ defineSchema(() =>
+  z.string().trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS),
+);
 
 /** The request-side agent object. Every field is optional. */
-export const AgentConfigRequest = z
-  .object({
-    capabilities: AgentCapabilities.optional(),
-    /** Replaces only OpenGeni's identity lines; null selects the default identity. */
-    identity: AgentIdentity.nullable().optional(),
-    /** Alias of the session `instructions` field (same column, same bound). */
-    instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-    renderer: AgentRenderer.optional(),
-  })
-  .strict();
+export const AgentConfigRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilities: AgentCapabilities.optional(),
+      /** Replaces only Opengeni's identity lines; null selects the default identity. */
+      identity: AgentIdentity.nullable().optional(),
+      /** Alias of the session `instructions` field (same column, same bound). */
+      instructions: z.string().trim().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      renderer: AgentRenderer.optional(),
+      /**
+       * Vaults this session may use (input only, Q-08). Intersected with the
+       * parent's policy and any session-level `vaultPolicy`.
+       */
+      vaultPolicy: VaultPolicy.optional(),
+    })
+    .strict(),
+);
 export type AgentConfigRequest = z.infer<typeof AgentConfigRequest>;
 
 /** Workspace "Defaults for new sessions" agent part (no instructions alias). */
-export const WorkspaceAgentDefaults = z
-  .object({
-    capabilities: AgentCapabilities.optional(),
-    identity: AgentIdentity.nullable().optional(),
-    renderer: AgentRenderer.optional(),
-  })
-  .strict();
+export const WorkspaceAgentDefaults = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilities: AgentCapabilities.optional(),
+      identity: AgentIdentity.nullable().optional(),
+      renderer: AgentRenderer.optional(),
+    })
+    .strict(),
+);
 export type WorkspaceAgentDefaults = z.infer<typeof WorkspaceAgentDefaults>;
 
-export const ResolvedAgentCapabilities = z
-  .object({
-    webSearch: z.boolean(),
-    humanInput: z.boolean(),
-    skills: AgentSkillsCapability,
-    goals: z.boolean(),
-    subagents: z.boolean(),
-    knowledge: z.boolean(),
-    schedules: z.boolean(),
-    artifacts: z.boolean(),
-    browser: z.boolean(),
-    media: z.boolean(),
-    workspaceFiles: z.boolean(),
-    workspaceConnectors: z.boolean(),
-    workspaceAdmin: z.boolean(),
-  })
-  .strict();
+export const ResolvedAgentCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      webSearch: z.boolean(),
+      humanInput: z.boolean(),
+      skills: AgentSkillsCapability,
+      goals: z.boolean(),
+      subagents: z.boolean(),
+      knowledge: z.boolean(),
+      schedules: z.boolean(),
+      artifacts: z.boolean(),
+      browser: z.boolean(),
+      secrets: z.boolean(),
+      media: z.boolean(),
+      workspaceFiles: z.boolean(),
+      workspaceConnectors: z.boolean(),
+      workspaceAdmin: z.boolean(),
+    })
+    .strict(),
+);
 export type ResolvedAgentCapabilities = z.infer<typeof ResolvedAgentCapabilities>;
 
-export const ResolvedAgentConfigSource = z.enum([
-  "request",
-  "workspace_default",
-  "deployment_default",
-  "inherited",
-  "legacy_conversion",
-]);
+export const ResolvedAgentConfigSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["request", "workspace_default", "deployment_default", "inherited", "legacy_conversion"]),
+);
 export type ResolvedAgentConfigSource = z.infer<typeof ResolvedAgentConfigSource>;
 
 /**
@@ -154,54 +173,100 @@ export type ResolvedAgentConfigSource = z.infer<typeof ResolvedAgentConfigSource
  * wanted on but this deployment does not offer (reported off, never widened
  * later without a new resolution).
  */
-export const ResolvedAgentConfig = z
-  .object({
-    version: z.literal(1),
-    from: AgentCapabilityStartingPoint,
-    capabilities: ResolvedAgentCapabilities,
-    unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
-    identity: AgentIdentity.nullable(),
-    renderer: AgentRenderer,
-    source: ResolvedAgentConfigSource,
-  })
-  .strict();
+/**
+ * Configurations frozen before the `secrets` capability existed lack it.
+ * They read as `from === "all"` (Q-17); stored rows are never rewritten.
+ */
+function withStoredSecretsCapability(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const config = value as { from?: unknown; capabilities?: unknown };
+  const capabilities = config.capabilities;
+  if (
+    capabilities === null ||
+    typeof capabilities !== "object" ||
+    Array.isArray(capabilities) ||
+    Object.hasOwn(capabilities, "secrets")
+  ) {
+    return value;
+  }
+  return { ...config, capabilities: { ...capabilities, secrets: config.from === "all" } };
+}
+
+export const ResolvedAgentConfig = /* @__PURE__ */ defineSchema(() =>
+  z.preprocess(
+    withStoredSecretsCapability,
+    z
+      .object({
+        version: z.literal(1),
+        from: AgentCapabilityStartingPoint,
+        capabilities: ResolvedAgentCapabilities,
+        unavailable: z.array(AgentCapabilityId).max(AGENT_CAPABILITY_IDS.length).default([]),
+        /**
+         * Why each `unavailable` capability is off, keyed by capability. Present
+         * whenever `unavailable` is non-empty; absent on historical configurations.
+         */
+        unavailableReasons: z.partialRecord(AgentCapabilityId, z.string()).optional(),
+        identity: AgentIdentity.nullable(),
+        renderer: AgentRenderer,
+        source: ResolvedAgentConfigSource,
+      })
+      .strict(),
+  ),
+);
 export type ResolvedAgentConfig = z.infer<typeof ResolvedAgentConfig>;
 
 /** `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/agent`. Omitted fields keep current values. */
-export const UpdateSessionAgentRequest = z
-  .object({
-    agent: AgentConfigRequest,
-    expectedVersion: z.number().int().positive(),
-  })
-  .strict();
+export const UpdateSessionAgentRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      agent: AgentConfigRequest,
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+);
 export type UpdateSessionAgentRequest = z.infer<typeof UpdateSessionAgentRequest>;
 
 /** Client-safe agent-configuration projection. */
-export const ClientAgentConfig = z
-  .object({
-    /** @deprecated Agent configuration is always on; servers always report `true`. */
-    enabled: z.boolean(),
-    /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
-    defaultForNewSessions: z.boolean(),
-    capabilities: z.array(
-      z
-        .object({
-          id: AgentCapabilityId,
-          available: z.boolean(),
-          reason: z.string().max(200).optional(),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+export const ClientAgentConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** @deprecated Agent configuration is always on; servers always report `true`. */
+      enabled: z.boolean(),
+      /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
+      defaultForNewSessions: z.boolean(),
+      capabilities: z.array(
+        z
+          .object({
+            id: AgentCapabilityId,
+            available: z.boolean(),
+            reason: z.string().max(200).optional(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+);
 export type ClientAgentConfig = z.infer<typeof ClientAgentConfig>;
 
 // ---------------------------------------------------------------------------
 // Capability registry
 // ---------------------------------------------------------------------------
 
-/** A first-party tool's owner: a capability, or pure runtime mechanics. */
+/** A built-in MCP server's owner: a capability, or pure runtime mechanics. */
 export type AgentToolCapability = AgentCapabilityId | "runtime";
+
+/**
+ * A first-party tool's owner: a capability, pure runtime mechanics, or the
+ * attached compute (a managed sandbox or Connected Machine).
+ */
+export type AgentFirstPartyToolOwner = AgentToolCapability | "sandbox";
+
+/** Owners no capability toggles: the runtime or the attached compute derives them. */
+export function isDerivedAgentToolOwner(
+  owner: AgentFirstPartyToolOwner,
+): owner is "runtime" | "sandbox" {
+  return owner === "runtime" || owner === "sandbox";
+}
 
 /**
  * Exhaustive map from every `FIRST_PARTY_MCP_TOOL_NAMES` entry to exactly one
@@ -210,15 +275,22 @@ export type AgentToolCapability = AgentCapabilityId | "runtime";
  *
  * `runtime` tools are mechanics every agent needs regardless of what it may do:
  * - `wait_for_input`: ends the turn and waits for the next input.
- * - `command_read` / `command_wait`: read/await the session's own background
- *   sandbox commands (the shell already exists whenever a sandbox is attached).
  * - `set_session_title`: session titling.
+ *
+ * `sandbox` tools are derived from attached compute and never toggled:
+ * - `command_read` / `command_wait`: read/await the session's own background
+ *   commands. A command can only exist on a managed sandbox or Connected
+ *   Machine, so a turn with neither attached never receives them.
  */
 export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
   wait_for_input: "runtime",
-  command_wait: "runtime",
-  command_read: "runtime",
+  // Reaching the person: a push to the phones of whoever started the session.
+  notify_user: "humanInput",
+  notification_withdraw: "humanInput",
+  inbox_tidy: "humanInput",
+  command_wait: "sandbox",
+  command_read: "sandbox",
 
   goal_set: "goals",
   goal_update: "goals",
@@ -267,6 +339,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   sandbox_provision: "workspaceAdmin",
   connected_machine_remove: "workspaceAdmin",
   connected_machine_enroll_token: "workspaceAdmin",
+  connected_machine_enable_screen_control: "workspaceAdmin",
   project_list: "workspaceAdmin",
   project_get: "workspaceAdmin",
   project_create: "workspaceAdmin",
@@ -274,16 +347,26 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   project_reorder: "workspaceAdmin",
   project_delete: "workspaceAdmin",
   session_set_project: "workspaceAdmin",
+  // Present only while a person has given the session admin access.
+  admin_actions_search: "workspaceAdmin",
+  admin_action_describe: "workspaceAdmin",
+  admin_action_call: "workspaceAdmin",
   rig_list: "workspaceAdmin",
   rig_get: "workspaceAdmin",
   rig_propose_change: "workspaceAdmin",
   rig_verify: "workspaceAdmin",
   rig_promote: "workspaceAdmin",
-  variable_set_list: "workspaceAdmin",
-  environment_list: "workspaceAdmin",
-  variable_set_get_variable: "workspaceAdmin",
-  variable_set_set_variable: "workspaceAdmin",
-  environment_set_variable: "workspaceAdmin",
+  secret_search: "secrets",
+  secret_save: "secrets",
+  secret_get: "secrets",
+  secret_move: "secrets",
+  secret_delete: "secrets",
+  // Retired variable-set names select their secret_* successors.
+  variable_set_list: "secrets",
+  environment_list: "secrets",
+  variable_set_get_variable: "secrets",
+  variable_set_set_variable: "secrets",
+  environment_set_variable: "secrets",
   capability_catalog_search: "workspaceAdmin",
   capability_authorization_request: "workspaceAdmin",
   custom_mcp_setup_request: "workspaceAdmin",
@@ -294,6 +377,9 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   session_wait: "subagents",
   session_create: "subagents",
   session_send_message: "subagents",
+  session_message_status: "subagents",
+  session_target_get: "subagents",
+  session_target_set: "subagents",
   session_pause: "subagents",
   session_resume: "subagents",
   session_steer: "subagents",
@@ -391,6 +477,16 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   artifacts_rollback: "artifacts",
   artifacts_archive: "artifacts",
   artifacts_restore: "artifacts",
+  site_data_describe: "artifacts",
+  site_data_define_collection: "artifacts",
+  site_data_query: "artifacts",
+  site_data_write: "artifacts",
+  site_data_import: "artifacts",
+  site_data_export: "artifacts",
+  site_data_reset: "artifacts",
+  site_files_list: "artifacts",
+  site_files_upload: "artifacts",
+  site_files_delete: "artifacts",
   sandbox_file_publish: "artifacts",
   editable_artifact_list: "artifacts",
   editable_artifact_create: "artifacts",
@@ -400,15 +496,18 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   editable_artifact_apply: "artifacts",
   editable_artifact_export: "artifacts",
   editable_artifact_export_status: "artifacts",
-} as const satisfies Record<FirstPartyMcpToolName, AgentToolCapability>;
+} as const satisfies Record<FirstPartyMcpToolName, AgentFirstPartyToolOwner>;
 
 /** Owner of a non-MCP tool: a capability, runtime mechanics, or the sandbox. */
 export type AgentFunctionToolClass = AgentCapabilityId | "runtime" | "sandbox";
 
 /** Tools served outside the first-party MCP catalog, by the name the model sees. */
 export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
-  // Hosted provider tools.
+  // Web search: the provider-hosted `web_search`/`x_search` tools, or
+  // Opengeni's provider-agnostic `web_search` and `web_fetch` function tools
+  // (one transport per turn; the capability is the same).
   web_search: "webSearch",
+  web_fetch: "webSearch",
   x_search: "webSearch",
   image_generation: "media",
   // Runtime function tools.
@@ -493,7 +592,7 @@ export const AGENT_BUILTIN_MCP_SERVER_CAPABILITIES = {
   "google-drive-publishing": "workspaceConnectors",
 } as const satisfies Record<string, AgentToolCapability>;
 
-export function firstPartyMcpToolCapability(tool: FirstPartyMcpToolName): AgentToolCapability {
+export function firstPartyMcpToolCapability(tool: FirstPartyMcpToolName): AgentFirstPartyToolOwner {
   return FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
 }
 
@@ -508,10 +607,21 @@ export type AgentToolEnvironment = {
   media?: boolean | undefined;
   hasDeferredTools?: boolean;
   routerInHistory?: boolean;
+  /**
+   * Whether the turn has a managed sandbox or Connected Machine attached.
+   * `false` withholds the `sandbox`-owned first-party tools, which could never
+   * find a command; undefined means not yet known and keeps them.
+   */
+  sandboxAttached?: boolean;
 };
 
+/** Runtime mechanics every configured agent receives. */
 export const AGENT_RUNTIME_MECHANIC_TOOL_NAMES = [
   "wait_for_input",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+/** First-party tools a configured agent receives whenever compute is attached. */
+export const AGENT_SANDBOX_MECHANIC_TOOL_NAMES = [
   "command_read",
   "command_wait",
 ] as const satisfies readonly FirstPartyMcpToolName[];
@@ -519,7 +629,9 @@ export const AGENT_RUNTIME_MECHANIC_TOOL_NAMES = [
 /**
  * The one turn-time capability gate. Null means the historical attachment
  * rules, including unconditional Skill tools and router. Resource-derived
- * sandbox tools, product MCPs and runtime mechanics are never toggled.
+ * sandbox tools, product MCPs and runtime mechanics are never toggled; the
+ * `sandbox`-owned first-party tools follow `environment.sandboxAttached` for
+ * every session, configured or not.
  */
 export function resolveAgentToolFamilies(
   config: ResolvedAgentConfig | null | undefined,
@@ -534,8 +646,10 @@ export function resolveAgentToolFamilies(
   const humanInput = enabled("humanInput") && environment.humanInput !== false;
   const media = enabled("media") && environment.media !== false;
   const skills = !config ? "manage" : enabled("skills") ? config.capabilities.skills : false;
+  const sandboxTools = environment.sandboxAttached !== false;
   const allowsFirstPartyTool = (name: FirstPartyMcpToolName): boolean => {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
+    if (owner === "sandbox") return sandboxTools;
     return owner === "runtime" || enabled(owner);
   };
   return {
@@ -543,21 +657,28 @@ export function resolveAgentToolFamilies(
     humanInput,
     media,
     subagents: enabled("subagents"),
+    /** Secret references resolve, the secret_* tools and the ask-card secret kind exist. */
+    secrets: enabled("secrets"),
     skills,
     router:
       !config || environment.hasDeferredTools === true || environment.routerInHistory === true,
     allowsFirstPartyTool,
     firstPartyTools(names: readonly FirstPartyMcpToolName[]): FirstPartyMcpToolName[] {
       return !config
-        ? [...names]
+        ? names.filter(
+            (name) => sandboxTools || FIRST_PARTY_MCP_TOOL_CAPABILITIES[name] !== "sandbox",
+          )
         : [
             ...new Set([
               ...names.filter(allowsFirstPartyTool),
               ...AGENT_RUNTIME_MECHANIC_TOOL_NAMES,
+              ...(sandboxTools ? AGENT_SANDBOX_MECHANIC_TOOL_NAMES : []),
             ]),
           ];
     },
     allowsFunctionTool(name: string): boolean {
+      if (isCuaDesktopModelTool(name))
+        return !environment.unavailable?.includes("browser") && enabled("browser");
       if (!config) return true;
       const owner = (AGENT_FUNCTION_TOOL_CAPABILITIES as Record<string, AgentFunctionToolClass>)[
         name
@@ -601,7 +722,7 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   webSearch: { label: "Web search", description: "Search the public web for current information." },
   humanInput: {
     label: "Ask questions",
-    description: "Pause and ask the person for a decision or missing detail.",
+    description: "Ask the person for a decision or missing detail, and notify their phone.",
   },
   skills: {
     label: "Skills",
@@ -622,6 +743,10 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
     description: "Publish files, documents, and Sites people can open.",
   },
   browser: { label: "Browser and computer", description: "Use a browser or desktop computer." },
+  secrets: {
+    label: "Secrets",
+    description: "Use saved passwords, keys, and codes by reference, and save new ones.",
+  },
   media: { label: "Images and video", description: "Generate images and videos." },
   workspaceFiles: {
     label: "Workspace files",
@@ -633,7 +758,7 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
   },
   workspaceAdmin: {
     label: "Workspace admin",
-    description: "Manage variable sets, projects, rigs, machines, and connector setup.",
+    description: "Manage projects, rigs, machines, and connector setup.",
   },
 };
 
@@ -663,10 +788,13 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "subagents",
   "knowledge",
   "skills",
+  "secrets",
   "admin",
   "attachments",
 ] as const;
-export const AgentPromptModuleId = z.enum(AGENT_PROMPT_MODULE_IDS);
+export const AgentPromptModuleId = /* @__PURE__ */ defineSchema(() =>
+  z.enum(AGENT_PROMPT_MODULE_IDS),
+);
 export type AgentPromptModuleId = z.infer<typeof AgentPromptModuleId>;
 
 export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, string>> = {
@@ -684,6 +812,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   subagents: "Session coordination",
   knowledge: "Knowledge",
   skills: "Skills",
+  secrets: "Secrets",
   admin: "Integration setup",
   attachments: "Attached files",
 };
@@ -698,6 +827,7 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
   subagents: ["subagents"],
   knowledge: ["knowledge"],
   skills: ["skills"],
+  secrets: ["secrets"],
   workspaceAdmin: ["admin"],
 };
 
@@ -705,11 +835,9 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
 // Resolution
 // ---------------------------------------------------------------------------
 
-export const AgentConfigErrorCode = z.enum([
-  "agent_capability_unavailable",
-  "agent_config_conflict",
-  "agent_config_widening",
-]);
+export const AgentConfigErrorCode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["agent_capability_unavailable", "agent_config_conflict", "agent_config_widening"]),
+);
 export type AgentConfigErrorCode = z.infer<typeof AgentConfigErrorCode>;
 
 /** Typed resolution failure. Transports render it as 422 with `details.code`. */
@@ -745,6 +873,7 @@ export function allAgentCapabilities(): ResolvedAgentCapabilities {
     schedules: true,
     artifacts: true,
     browser: true,
+    secrets: true,
     media: true,
     workspaceFiles: true,
     workspaceConnectors: true,
@@ -764,6 +893,7 @@ export function noneAgentCapabilities(): ResolvedAgentCapabilities {
     schedules: false,
     artifacts: false,
     browser: false,
+    secrets: false,
     media: false,
     workspaceFiles: false,
     workspaceConnectors: false,
@@ -888,9 +1018,11 @@ function agentConfigFromCapabilities(input: {
   renderer: AgentRenderer;
   source: ResolvedAgentConfigSource;
   inheritedUnavailable?: readonly AgentCapabilityId[] | undefined;
+  inheritedUnavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
 }): ResolvedAgentConfig {
   const capabilities = { ...input.wanted };
   const unavailable = new Set<AgentCapabilityId>(input.inheritedUnavailable ?? []);
+  const unavailableReasons: Partial<Record<AgentCapabilityId, string>> = {};
   for (const id of AGENT_CAPABILITY_IDS) {
     const reason = input.deployment.unavailable[id];
     if (reason === undefined || !agentCapabilityEnabled(capabilities, id)) continue;
@@ -906,6 +1038,10 @@ function agentConfigFromCapabilities(input: {
     else capabilities[id] = false;
   }
   for (const id of unavailable) {
+    unavailableReasons[id] =
+      input.deployment.unavailable[id] ??
+      input.inheritedUnavailableReasons?.[id] ??
+      "not available in the inherited configuration";
     if (id === "skills") capabilities.skills = false;
     else capabilities[id] = false;
   }
@@ -914,6 +1050,7 @@ function agentConfigFromCapabilities(input: {
     from: input.from,
     capabilities,
     unavailable: AGENT_CAPABILITY_IDS.filter((id) => unavailable.has(id)),
+    ...(unavailable.size > 0 ? { unavailableReasons } : {}),
     identity: input.identity,
     renderer: input.renderer,
     source: input.source,
@@ -1040,6 +1177,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
     renderer: request.renderer ?? parentConfig?.renderer ?? defaultRenderer(input.creator),
     source: "request",
     inheritedUnavailable: parentConfig?.unavailable,
+    inheritedUnavailableReasons: parentConfig?.unavailableReasons,
   });
   return {
     config: withGoalImplication(config, input.goal, requested.toggles.goals === false, ceiling),
@@ -1173,6 +1311,7 @@ export function resolveAgentConfigUpdate(input: {
     inheritedUnavailable: current.unavailable.filter(
       (id) => input.deployment.unavailable[id] !== undefined,
     ),
+    inheritedUnavailableReasons: current.unavailableReasons,
   });
   return withGoalImplication(
     config,
@@ -1203,8 +1342,8 @@ export function agentConfigFirstPartyMcpTools(
   explicit?: readonly FirstPartyMcpToolName[],
 ): FirstPartyMcpToolName[] {
   for (const tool of explicit ?? []) {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-    if (owner !== "runtime" && capabilityFilteredOut(config, owner)) {
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+    if (!isDerivedAgentToolOwner(owner) && capabilityFilteredOut(config, owner)) {
       throw new AgentConfigError(
         "agent_config_conflict",
         `firstPartyMcpTools lists ${tool}, but agent capability ${owner} is off`,
@@ -1213,8 +1352,8 @@ export function agentConfigFirstPartyMcpTools(
     }
   }
   return baseline.filter((tool) => {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-    return owner === "runtime" || !capabilityFilteredOut(config, owner);
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+    return isDerivedAgentToolOwner(owner) || !capabilityFilteredOut(config, owner);
   });
 }
 
@@ -1229,9 +1368,9 @@ export function agentConfigAddedFirstPartyMcpTools(
   defaults: readonly FirstPartyMcpToolName[],
 ): FirstPartyMcpToolName[] {
   return defaults.filter((tool) => {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
     return (
-      owner !== "runtime" &&
+      !isDerivedAgentToolOwner(owner) &&
       !agentCapabilityEnabled(previous, owner) &&
       agentCapabilityEnabled(next.capabilities, owner)
     );
@@ -1325,7 +1464,7 @@ export function legacyEffectiveAgentCapabilities(input: {
    */
   defaultServerIds?: Iterable<string> | undefined;
 }): ResolvedAgentCapabilities {
-  const selected = new Set<AgentToolCapability>(
+  const selected = new Set<AgentFirstPartyToolOwner>(
     input.firstPartyMcpTools.map((tool) => FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool]),
   );
   const ids = new Set(input.tools.map((tool) => tool.id));
@@ -1351,6 +1490,8 @@ export function legacyEffectiveAgentCapabilities(input: {
     schedules: selected.has("schedules"),
     artifacts: selected.has("artifacts"),
     browser: selected.has("browser"),
+    // Legacy sessions keep reference resolution on (D25, Q-17).
+    secrets: true,
     media: true,
     workspaceFiles: serverOn("files"),
     workspaceConnectors:
@@ -1375,7 +1516,7 @@ export function agentConfigDeploymentLimitsFromAllowlist(
   for (const id of AGENT_CAPABILITY_IDS) {
     const tools = firstPartyMcpToolsForCapability(id);
     if (tools.length > 0 && !tools.some((tool) => allowedSet.has(tool))) {
-      unavailable[id] = "its tools are not allowed on this server";
+      unavailable[id] = `its tools are not allowed on this server: ${tools.join(", ")}`;
     }
   }
   return { unavailable: { ...unavailable, ...extra } };
@@ -1394,42 +1535,44 @@ export type AgentEffectiveMcpServerEntry = {
   toolsKnown: boolean;
 };
 
-export const AgentEffectiveTools = z
-  .object({
-    capabilities: ResolvedAgentCapabilities,
-    unavailable: z.array(AgentCapabilityId),
-    /** False means media adapters await exact turn/credential attachment; tools does not guess them. */
-    mediaToolsKnown: z.boolean().optional(),
-    tools: z
-      .array(
-        z
-          .object({
-            name: z.string().min(1).max(512),
-            capability: z.union([
-              AgentCapabilityId,
-              z.literal("runtime"),
-              z.literal("sandbox"),
-              z.literal("product"),
-            ]),
-            source: z.enum(["first_party", "runtime", "hosted", "sandbox", "mcp"]),
-            visibility: z.enum(["upfront", "search"]).optional(),
-          })
-          .strict(),
-      )
-      .max(512),
-    mcpServers: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1).max(200),
-            capability: z.union([AgentCapabilityId, z.literal("runtime"), z.literal("product")]),
-            toolsKnown: z.boolean(),
-          })
-          .strict(),
-      )
-      .max(256),
-  })
-  .strict();
+export const AgentEffectiveTools = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilities: ResolvedAgentCapabilities,
+      unavailable: z.array(AgentCapabilityId),
+      /** False means media adapters await exact turn/credential attachment; tools does not guess them. */
+      mediaToolsKnown: z.boolean().optional(),
+      tools: z
+        .array(
+          z
+            .object({
+              name: z.string().min(1).max(512),
+              capability: z.union([
+                AgentCapabilityId,
+                z.literal("runtime"),
+                z.literal("sandbox"),
+                z.literal("product"),
+              ]),
+              source: z.enum(["first_party", "runtime", "hosted", "sandbox", "mcp"]),
+              visibility: z.enum(["upfront", "search"]).optional(),
+            })
+            .strict(),
+        )
+        .max(512),
+      mcpServers: z
+        .array(
+          z
+            .object({
+              id: z.string().min(1).max(200),
+              capability: z.union([AgentCapabilityId, z.literal("runtime"), z.literal("product")]),
+              toolsKnown: z.boolean(),
+            })
+            .strict(),
+        )
+        .max(256),
+    })
+    .strict(),
+);
 export type AgentEffectiveTools = z.infer<typeof AgentEffectiveTools>;
 
 /**
@@ -1450,6 +1593,8 @@ export function projectAgentEffectiveTools(input: {
   /** Raw first-party names; other entries use model-facing names. */
   upfrontToolNames?: ReadonlySet<string>;
   firstPartyModelNames?: ReadonlyMap<FirstPartyMcpToolName, string>;
+  /** Native tools are attached only after selection and control-authority checks. */
+  nativeComputerTools?: boolean;
   mediaAttachment?: AgentMediaAttachment | undefined;
 }): AgentEffectiveTools {
   const { capabilities } = input.config;
@@ -1468,6 +1613,18 @@ export function projectAgentEffectiveTools(input: {
       source: "first_party",
       visibility: input.upfrontToolNames?.has(tool) ? "upfront" : "search",
     }));
+  if (input.nativeComputerTools) {
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      const name = `interaction__cua_${tool.name}`;
+      if (!families.allowsFunctionTool(name)) continue;
+      tools.push({
+        name,
+        capability: "browser",
+        source: "first_party",
+        visibility: input.upfrontToolNames?.has(name) ? "upfront" : "search",
+      });
+    }
+  }
   const functionTool = (name: AgentFunctionToolName, source: AgentEffectiveToolEntry["source"]) => {
     const owner = AGENT_FUNCTION_TOOL_CAPABILITIES[name];
     if (owner === "media" && !mediaNames.has(name)) return;

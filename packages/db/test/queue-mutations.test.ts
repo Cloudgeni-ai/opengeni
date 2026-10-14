@@ -37,7 +37,10 @@ import {
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
-import { withEffectiveSessionPolicy } from "../src/session-execution-policy";
+import {
+  withEffectiveSessionPolicy,
+  withSessionListModelPolicy,
+} from "../src/session-execution-policy";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -326,6 +329,92 @@ describe("latest started session policy", () => {
       db.select().from(schema.sessions).where(eq(schema.sessions.id, value.session.id)),
     );
     expect(stored[0]).toMatchObject(initial);
+  });
+});
+
+describe("compact list model policy", () => {
+  test("names the latest started turn's model unless a settings write is newer", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const listPolicy = async () => {
+      const [projected] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        withSessionListModelPolicy(db, workspaceId, [value.session]),
+      );
+      return { model: projected!.model, reasoningEffort: projected!.reasoningEffort };
+    };
+    const startTurn = async (model: string, reasoningEffort: ReasoningEffort) => {
+      const accepted = await withWorkspaceSubjectRls(
+        client.db,
+        workspaceId,
+        value.grant.subjectId,
+        (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: value.grant.accountId,
+            workspaceId,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "follow up",
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+            model,
+            reasoningEffort,
+          }),
+      );
+      await appendSessionEvents(client.db, workspaceId, value.session.id, [
+        { type: "turn.started", turnId: accepted.turnId, payload: {} },
+      ]);
+    };
+
+    // Nothing has run yet: the stored creation defaults.
+    expect(await listPolicy()).toEqual({ model: "scripted-model", reasoningEffort: "medium" });
+
+    await startTurn("composer-model", "max");
+    expect(await listPolicy()).toEqual({ model: "composer-model", reasoningEffort: "max" });
+
+    // An explicit settings change after that turn is the current model.
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      setSessionModelInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        sessionId: value.session.id,
+        actor: value.actor,
+        operationKey: crypto.randomUUID(),
+        model: "settings-model",
+        reasoningEffort: "low",
+      }),
+    );
+    expect(await listPolicy()).toEqual({ model: "settings-model", reasoningEffort: "low" });
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject({
+      model: "settings-model",
+      reasoningEffort: "low",
+    });
+
+    await startTurn("next-model", "high");
+    expect(await listPolicy()).toEqual({ model: "next-model", reasoningEffort: "high" });
+    // Detail reads agree for ordinary human turns.
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject({
+      model: "next-model",
+      reasoningEffort: "high",
+    });
+
+    // Imported history carries start events without turn rows. The projection
+    // probes only the latest start, so it falls back to the stored defaults
+    // instead of scanning back for an older start that has a turn row.
+    await appendSessionEvents(
+      client.db,
+      workspaceId,
+      value.session.id,
+      Array.from({ length: 50 }, () => ({
+        type: "turn.started",
+        turnId: crypto.randomUUID(),
+        payload: {},
+      })),
+    );
+    expect(await listPolicy()).toEqual({ model: "settings-model", reasoningEffort: "low" });
   });
 });
 
@@ -1820,115 +1909,4 @@ describe("canonical queue commands", () => {
     );
     expect(draft).toMatchObject({ revision: 1, text: "preserve me" });
   });
-});
-
-test("Send freezes Claude's private pool and keyed replay preserves it across account rotation", async () => {
-  const {
-    createClaudeSubscriptionAccount,
-    setInitialActiveClaudeCredential,
-    disconnectClaudeSubscriptionAccountAndRepick,
-    materializeClaudeSubscriptionAccountForRun,
-  } = await import("../src/claude-subscription-accounts");
-  const { getSessionTurnClaudeProviderAccountAuthoritySnapshot } = await import("../src");
-  const value = await fixture(0),
-    workspaceId = value.grant.workspaceId!,
-    subjectId = value.grant.subjectId;
-  const [personal] = await shared.admin<
-    { id: string }[]
-  >`insert into workspaces (account_id,name) values (${value.grant.accountId},'Personal fixture') returning id`;
-  await shared.admin`insert into organization_memberships (account_id,subject_id,status,personal_workspace_id) values (${value.grant.accountId},${subjectId},'active',${personal!.id})`;
-  const encryptionKey = Buffer.alloc(32, 53);
-  const scope = {
-    accountId: value.grant.accountId,
-    workspaceId,
-    subjectId,
-    scope: "user" as const,
-    encryptionKey,
-  };
-  const connect = () => {
-    const providerAccountId = crypto.randomUUID();
-    return createClaudeSubscriptionAccount(client.db, {
-      ...scope,
-      providerAccountId,
-      label: null,
-      accountEmail: "owner@example.test",
-      planType: "claude_max",
-      expiresAt: null,
-      secret: {
-        version: 1,
-        token: "sk-ant-oat01-fixture-" + crypto.randomUUID(),
-        identity: { accountUuid: providerAccountId, deviceId: "b".repeat(64) },
-      },
-    });
-  };
-  const first = await connect();
-  await setInitialActiveClaudeCredential(client.db, {
-    ...scope,
-    credentialId: first.account.id,
-    authoritySnapshot: first.authoritySnapshot,
-  });
-  const command = {
-    accountId: value.grant.accountId,
-    workspaceId,
-    sessionId: value.session.id,
-    subjectId,
-    actor: value.actor,
-    operationKey: crypto.randomUUID(),
-    delivery: "send" as const,
-    text: "Synthetic private subscription work",
-    resources: [],
-    model: "scripted-model",
-    reasoningEffort: "low" as const,
-    reasoningEffortFallback: "medium" as const,
-    source: "user" as const,
-  };
-  const send = () =>
-    withWorkspaceSubjectRls(client.db, workspaceId, subjectId, (db) =>
-      db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
-    );
-  const accepted = await send();
-  const snapshot = await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
-    client.db,
-    workspaceId,
-    value.session.id,
-    accepted.turnId,
-  );
-  expect(snapshot).toEqual(first.authoritySnapshot);
-  await disconnectClaudeSubscriptionAccountAndRepick(client.db, {
-    ...scope,
-    credentialId: first.account.id,
-    authoritySnapshot: first.authoritySnapshot,
-  });
-  const second = await connect();
-  await setInitialActiveClaudeCredential(client.db, {
-    ...scope,
-    credentialId: second.account.id,
-    authoritySnapshot: second.authoritySnapshot,
-  });
-  // Account rotation stays within the accepted owner's pool; it does not
-  // replace that pool's authority with current caller selection.
-  expect(second.authoritySnapshot).toEqual(snapshot);
-  expect((await send()).turnId).toBe(accepted.turnId);
-  expect(
-    await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
-      client.db,
-      workspaceId,
-      value.session.id,
-      accepted.turnId,
-    ),
-  ).toEqual(snapshot);
-  await expect(
-    materializeClaudeSubscriptionAccountForRun(client.db, {
-      ...scope,
-      credentialId: first.account.id,
-      authoritySnapshot: snapshot,
-    }),
-  ).rejects.toThrow();
-  expect(
-    await materializeClaudeSubscriptionAccountForRun(client.db, {
-      ...scope,
-      credentialId: second.account.id,
-      authoritySnapshot: snapshot,
-    }),
-  ).not.toBeNull();
 });

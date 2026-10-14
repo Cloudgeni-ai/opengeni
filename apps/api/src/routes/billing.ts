@@ -8,12 +8,16 @@ import {
   OrganizationUsageWorkspacePageQuery,
   type AccessContext,
   type Permission,
+  type PromotionalCreditScope,
 } from "@opengeni/contracts";
 import { OrganizationModelUsageQuery } from "@opengeni/contracts/organization-model-usage";
-import { configuredEntitlements } from "@opengeni/config";
+import { configuredEntitlements, promotionalCreditScope } from "@opengeni/config";
+import { creditScopeMetadata, creditScopeFromMetadata } from "../credit-promotion-snapshot";
 import {
   applyCreditLedgerEntry,
+  applyCreditLedgerEntryOnce,
   getBillingBalance,
+  readCreditPromotionPolicy,
   getBillingCustomer,
   getCreditLedgerEntry,
   hasCreditLedgerEntry,
@@ -23,6 +27,7 @@ import {
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   withSessionRlsActorContext,
+  withRlsContext,
   getManagedAccount,
   markStripeWebhookProcessed,
   recordStripeWebhookEvent,
@@ -134,6 +139,15 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     const promotion = body.promotionCode
       ? await resolveCheckoutPromotionCode(stripe, body.promotionCode)
       : null;
+    const promotionalScope = promotion
+      ? promotionalCreditScope(
+          {
+            creditPromotionPolicy:
+              (await readCreditPromotionPolicy(deps.db)) ?? deps.settings.creditPromotionPolicy,
+          },
+          promotion.couponId,
+        )
+      : undefined;
     const amountCents =
       body.amountUsd !== undefined
         ? usdToCents(body.amountUsd)
@@ -148,6 +162,15 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (amountCents < 500 || amountCents > 1_000_000) {
       throw new HTTPException(422, {
         message: "Credits must be between $5 and $10,000.",
+      });
+    }
+    if (
+      promotionalScope &&
+      (!promotion?.amountOffCents || amountCents !== promotion.amountOffCents)
+    ) {
+      throw new HTTPException(422, {
+        message:
+          "Redeem this offer for its exact credit amount. Buy additional credits separately.",
       });
     }
     const amountMicros = centsToMicros(amountCents);
@@ -167,9 +190,11 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
           successUrl: body.successUrl,
           cancelUrl: body.cancelUrl,
           idempotencyKey,
+          promotionalScope,
           ...(promotion
             ? {
                 promotionCodeId: promotion.id,
+                couponId: promotion.couponId,
                 fullyDiscounted:
                   promotion.percentOff === 100 || (promotion.amountOffCents ?? 0) >= amountCents,
               }
@@ -193,6 +218,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         checkoutSessionId: session.id,
         url: session.url,
         amountUsd: amountCents / 100,
+        promotionalScope,
       }),
     );
   });
@@ -241,6 +267,7 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
           state: entry ? "granted" : "pending",
           amountMicros: entry?.amountMicros ?? credit.amountMicros,
           currency: "usd",
+          promotionalScope: creditScopeFromMetadata(session.metadata),
           free: entry
             ? entry.sourceType === "stripe_checkout_coupon"
             : isFreeCouponCheckout(session),
@@ -340,6 +367,8 @@ export function stripeCheckoutSessionCreateParams(input: {
   idempotencyKey: string;
   /** Apply this promotion code up front instead of letting Stripe ask for one. */
   promotionCodeId?: string | undefined;
+  couponId?: string | undefined;
+  promotionalScope?: PromotionalCreditScope | undefined;
   /**
    * The applied code covers the whole package, so the total is $0. Nothing is
    * taxable, so Checkout skips tax and with it the billing address: the
@@ -366,7 +395,7 @@ export function stripeCheckoutSessionCreateParams(input: {
     // Stripe takes either a code field on its page or one discount up front.
     ...(input.promotionCodeId
       ? { discounts: [{ promotion_code: input.promotionCodeId }] }
-      : { allow_promotion_codes: true }),
+      : { allow_promotion_codes: false }),
     customer: input.customerId,
     customer_update: {
       address: "auto",
@@ -386,7 +415,7 @@ export function stripeCheckoutSessionCreateParams(input: {
             ? { product: input.creditsProductId }
             : {
                 product_data: {
-                  name: "OpenGeni credits",
+                  name: "Opengeni credits",
                   metadata: {
                     app: "opengeni",
                     billing_model: "prepaid_credits",
@@ -397,6 +426,8 @@ export function stripeCheckoutSessionCreateParams(input: {
       },
     ],
     metadata: {
+      ...creditScopeMetadata(input.promotionalScope),
+      ...(input.couponId ? { opengeni_credit_offer_id: input.couponId } : {}),
       opengeni_account_id: input.accountId,
       opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
       opengeni_credit_micros: String(input.amountMicros),
@@ -466,7 +497,7 @@ function checkoutReturnUrl(
   const allowedOrigins = new Set([new URL(publicBaseUrl).origin, base.origin]);
   if (!allowedOrigins.has(parsed.origin)) {
     throw new HTTPException(400, {
-      message: `${field} must use the OpenGeni public${allowedOrigins.size > 1 ? " or web" : ""} origin`,
+      message: `${field} must use the Opengeni public${allowedOrigins.size > 1 ? " or web" : ""} origin`,
     });
   }
   return parsed.toString();
@@ -525,10 +556,10 @@ export type StripeCheckoutCreditDecision =
   | { action: "ignore"; reason: "foreign_checkout" | "not_payment_mode" | "payment_not_paid" };
 
 /**
- * Decides whether a Checkout Session webhook grants OpenGeni credits.
+ * Decides whether a Checkout Session webhook grants Opengeni credits.
  *
- * Sessions created outside OpenGeni on the same Stripe account carry no
- * `opengeni_` metadata and are acknowledged without effect. An OpenGeni
+ * Sessions created outside Opengeni on the same Stripe account carry no
+ * `opengeni_` metadata and are acknowledged without effect. An Opengeni
  * session with malformed credit metadata still throws so the failure stays
  * visible. Credits are granted once Stripe reports the payment `paid` or a
  * completed checkout fully covered by a coupon:
@@ -586,7 +617,7 @@ async function handleCheckoutSessionPayment(
 }
 
 /**
- * Grants a paid (or fully coupon-covered) OpenGeni checkout's credits once.
+ * Grants a paid (or fully coupon-covered) Opengeni checkout's credits once.
  * The webhook calls this with its event; the checkout status read calls it
  * with the session it retrieved from Stripe when the webhook is late.
  */
@@ -598,7 +629,7 @@ async function grantCheckoutSessionCredits(
   const decision = stripeCheckoutCreditDecision(session);
   if (decision.action === "ignore") {
     if (decision.reason === "foreign_checkout") {
-      console.info("[api] stripe webhook ignored a checkout session not created by OpenGeni", {
+      console.info("[api] stripe webhook ignored a checkout session not created by Opengeni", {
         stripeEventType: source.stripeEventType ?? null,
         livemode: source.livemode,
       });
@@ -607,8 +638,12 @@ async function grantCheckoutSessionCredits(
   }
   const credit = decision.credit;
   const freeCouponCheckout = isFreeCouponCheckout(session);
+  const promotionalScope = creditScopeFromMetadata(session.metadata);
+  if (promotionalScope && !freeCouponCheckout) {
+    throw new Error("Scoped promotional credits require a fully discounted checkout");
+  }
   if (!(await getManagedAccount(deps.db, credit.accountId))) {
-    // Another OpenGeni deployment sharing the Stripe account (or an account
+    // Another Opengeni deployment sharing the Stripe account (or an account
     // removed before a delayed payment settled). Retrying cannot succeed, so
     // acknowledge instead of failing the delivery for days.
     console.info(
@@ -632,14 +667,17 @@ async function grantCheckoutSessionCredits(
   if (await hasCreditLedgerEntry(deps.db, credit.accountId, credit.idempotencyKey)) {
     return;
   }
-  await applyCreditLedgerEntry(deps.db, {
+  const { inserted } = await applyCreditLedgerEntryOnce(deps.db, {
     accountId: credit.accountId,
     type: freeCouponCheckout ? "grant" : "credit_topup",
     amountMicros: credit.amountMicros,
+    eligibleModelIds: promotionalScope?.eligibleModelIds,
     sourceType: freeCouponCheckout ? "stripe_checkout_coupon" : "stripe_checkout_session",
     sourceId: session.id,
     idempotencyKey: credit.idempotencyKey,
     metadata: {
+      ...(promotionalScope ? { creditOfferLabel: promotionalScope.label } : {}),
+      creditOfferId: session.metadata?.opengeni_credit_offer_id ?? null,
       stripeEventId: source.stripeEventId,
       stripePaymentIntentId:
         typeof session.payment_intent === "string"
@@ -655,7 +693,66 @@ async function grantCheckoutSessionCredits(
         : {}),
     },
   });
+  // Two deliveries (webhook and the late-webhook status read) may race past
+  // the existence check; only the call that inserted the row counts.
+  if (!inserted) return;
   recordCreditMicrosMetric(deps, freeCouponCheckout ? "grant" : "topup", credit.amountMicros);
+  if (!freeCouponCheckout) {
+    recordCreditPurchaseMetrics(deps.observability, {
+      livemode: source.livemode,
+      creditMicros: credit.amountMicros,
+      currency: session.currency,
+      amountTotal: session.amount_total,
+    });
+  }
+}
+
+/**
+ * One paid credit purchase (a `credit_topup` ledger row from a Stripe
+ * checkout). Fully discounted coupon checkouts are grants, not purchases, and
+ * are counted by `opengeni_credit_granted_micros_total{grant_class="coupon"}`.
+ * Labels are the closed `mode` (live | test) only; never an account or
+ * customer identifier.
+ */
+export function recordCreditPurchaseMetrics(
+  observability: ApiRouteDeps["observability"],
+  input: {
+    livemode: boolean;
+    creditMicros: number;
+    currency: string | null | undefined;
+    amountTotal: number | null | undefined;
+  },
+): void {
+  if (!observability || !Number.isSafeInteger(input.creditMicros) || input.creditMicros <= 0) {
+    return;
+  }
+  const labels = { mode: input.livemode ? "live" : "test" };
+  observability.incrementCounter({
+    name: "opengeni_credit_purchases_total",
+    help: "Paid credit purchases (Stripe checkout credit top-ups) by mode.",
+    labels,
+  });
+  observability.incrementCounter({
+    name: "opengeni_credit_purchased_micros_total",
+    help: "Credit micros added by paid credit purchases, by mode.",
+    labels,
+    amount: input.creditMicros,
+  });
+  // Stripe amounts are in the currency's minor unit; credit checkouts are USD,
+  // where one cent is 10,000 micros. Other currencies are not converted.
+  if (
+    input.currency === "usd" &&
+    typeof input.amountTotal === "number" &&
+    Number.isSafeInteger(input.amountTotal) &&
+    input.amountTotal > 0
+  ) {
+    observability.incrementCounter({
+      name: "opengeni_credit_purchase_paid_usd_micros_total",
+      help: "USD micros customers paid for credit purchases (after discounts), by mode.",
+      labels,
+      amount: input.amountTotal * 10_000,
+    });
+  }
 }
 
 /**
@@ -665,7 +762,12 @@ async function grantCheckoutSessionCredits(
 async function resolveCheckoutPromotionCode(
   stripe: Stripe,
   code: string,
-): Promise<{ id: string; amountOffCents: number | null; percentOff: number | null }> {
+): Promise<{
+  id: string;
+  couponId: string;
+  amountOffCents: number | null;
+  percentOff: number | null;
+}> {
   const listed = await stripe.promotionCodes.list({
     code,
     active: true,
@@ -684,7 +786,12 @@ async function resolveCheckoutPromotionCode(
     coupon.amount_off && coupon.currency === "usd"
       ? coupon.amount_off
       : (coupon.currency_options?.usd?.amount_off ?? null);
-  return { id: promotionCode.id, amountOffCents, percentOff: coupon.percent_off ?? null };
+  return {
+    id: promotionCode.id,
+    couponId: coupon.id,
+    amountOffCents,
+    percentOff: coupon.percent_off ?? null,
+  };
 }
 
 async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Event): Promise<void> {
@@ -792,18 +899,28 @@ async function releaseDisputedCredits(
     return;
   }
   const holdIdempotencyKey = `stripe:dispute_hold:${dispute.id}`;
-  if (!(await hasCreditLedgerEntry(deps.db, accountId, holdIdempotencyKey))) {
-    return;
-  }
   const debitMicros = await creditAdjustmentMicros(deps, metadata, dispute.amount);
-  await applyCreditLedgerEntry(deps.db, {
-    accountId,
-    type: "credit_dispute_release",
-    amountMicros: debitMicros,
-    sourceType: "stripe_dispute",
-    sourceId: dispute.id,
-    idempotencyKey: `stripe:dispute_release:${dispute.id}`,
-    metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+  await withRlsContext(deps.db, { accountId }, async (tx) => {
+    // Stripe can deliver the resolution before the hold. Materialize both
+    // receipts atomically so a late hold cannot withhold restored credits.
+    await applyCreditLedgerEntry(tx, {
+      accountId,
+      type: "credit_dispute_hold",
+      amountMicros: -debitMicros,
+      sourceType: "stripe_dispute",
+      sourceId: dispute.id,
+      idempotencyKey: holdIdempotencyKey,
+      metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+    });
+    await applyCreditLedgerEntry(tx, {
+      accountId,
+      type: "credit_dispute_release",
+      amountMicros: debitMicros,
+      sourceType: "stripe_dispute",
+      sourceId: dispute.id,
+      idempotencyKey: `stripe:dispute_release:${dispute.id}`,
+      metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+    });
   });
 }
 
@@ -922,7 +1039,7 @@ function creditMetadata(
   const amountMicros = Number(metadata?.opengeni_credit_micros);
   const idempotencyKey = metadata?.opengeni_credit_idempotency_key;
   if (!accountId || !Number.isSafeInteger(amountMicros) || amountMicros <= 0 || !idempotencyKey) {
-    throw new Error(`${label} is missing OpenGeni credit metadata`);
+    throw new Error(`${label} is missing Opengeni credit metadata`);
   }
   return {
     accountId,

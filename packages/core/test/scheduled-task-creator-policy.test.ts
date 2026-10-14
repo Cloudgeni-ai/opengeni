@@ -128,12 +128,23 @@ function origin(restricted: "turn" | "session" | "neither") {
     id: actor.sessionId,
     firstPartyMcpTools: ["set_session_title"],
     firstPartyMcpPermissions: ["sessions:read", "scheduled_tasks:manage", "connections:read"],
+    // Every stored session has a tool policy; this one keeps its explicit selection.
+    toolPolicy: { mode: "explicit", inheritedFromSessionId: null, firstPartyMode: "explicit" },
     agentAccess: "session",
     scopeSubjectId: "user:fixture",
     memoryScope: "user",
     metadata: metadata(restricted === "session"),
   };
   track(spyOn(db, "getSession").mockResolvedValue(session as never));
+  // The frozen policy resolves first-party tool defaults from workspace settings.
+  track(
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      id: workspaceId,
+      accountId,
+      kind: "shared",
+      settings: {},
+    } as never),
+  );
   const turn = track(
     spyOn(db, "getSessionTurnForAttempt").mockResolvedValue({
       id: actor.turnId,

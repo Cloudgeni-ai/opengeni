@@ -35,6 +35,76 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  test.each(["exact", "session", "controller", "target", "extra", "legacy", "unknown"] as const)(
+    "metadata-only tab opening validates binding and never replays (%s)",
+    async (scenario) => {
+      const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+      const target = browserTarget(reference.browserSessionId, reference.controllerGeneration);
+      const routes: string[] = [];
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          routes.push(`${request.method} ${new URL(request.url).pathname}`);
+          expect(request.headers.get("authorization")).toBe(`Bearer ${controlToken}`);
+          expect(await request.json()).toEqual({ url: "https://new.example.test/" });
+          if (scenario === "legacy" || scenario === "unknown")
+            return Response.json(
+              {
+                protocolVersion: 1,
+                ok: false,
+                error: {
+                  code: scenario === "legacy" ? "resource_not_found" : "outcome_unknown",
+                  message: scenario === "legacy" ? "route not found" : "synthetic uncertain open",
+                  retryable: false,
+                },
+              },
+              { status: scenario === "legacy" ? 404 : 409 },
+            );
+          return success({
+            browserSessionId: scenario === "session" ? randomUUID() : reference.browserSessionId,
+            controllerGeneration:
+              scenario === "controller" ? "other-controller" : reference.controllerGeneration,
+            targets: [
+              {
+                ...target,
+                controllerGeneration:
+                  scenario === "target" ? "other-controller" : target.controllerGeneration,
+              },
+            ],
+            ...(scenario === "extra" ? { observation: {} } : {}),
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const browser = client.sessionClient({ reference, controlToken, viewToken });
+        const pending = browser.openTargetWithInventory("https://new.example.test/");
+        if (scenario === "exact")
+          expect(await pending).toEqual({ ...reference, targets: [target] });
+        else if (scenario === "legacy")
+          await expect(pending).rejects.toMatchObject({
+            status: 409,
+            error: { code: "unsupported", retryable: false },
+          });
+        else if (scenario === "unknown")
+          await expect(pending).rejects.toMatchObject({
+            status: 409,
+            error: { code: "outcome_unknown", retryable: false },
+          });
+        else await expect(pending).rejects.toThrow();
+        expect(routes).toEqual([
+          `POST /v1/browser-sessions/${reference.browserSessionId}/targets/open-with-inventory`,
+        ]);
+      } finally {
+        await server.stop(true);
+      }
+    },
+  );
+
   test.each([undefined, false, true, "true"])(
     "negotiates explicit server-enforced RFB scope capability (%p)",
     async (capability) => {
@@ -405,6 +475,73 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("asks the controller for resolved targets and accepts receipts with or without them", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const requests: string[] = [];
+    let includeTargets = true;
+    const resolved = {
+      actionIndex: 0,
+      ref: "e1",
+      role: "button",
+      name: "Close",
+      container: { role: "banner", name: null },
+    };
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${request.method} ${url.pathname}${url.search}`);
+        const body = (await request.json()) as { operationId: string };
+        return success({
+          protocolVersion: 1,
+          operationId: body.operationId,
+          ...reference,
+          targetId: "target-1",
+          state: "completed",
+          dispatchedAt: "2026-08-10T12:00:00.000Z",
+          settledAt: "2026-08-10T12:00:01.000Z",
+          observation: null,
+          error: null,
+          ...(includeTargets ? { targets: [resolved] } : {}),
+        });
+      },
+    });
+    const browser = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+      },
+      { adminToken },
+    ).sessionClient({ reference, controlToken, viewToken });
+    const command = () => ({
+      protocolVersion: 1 as const,
+      operationId: randomUUID(),
+      ...reference,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+      actor: { kind: "system" as const, subjectId: "test" },
+      observationMode: "none" as const,
+      action: {
+        type: "click" as const,
+        locator: { kind: "role" as const, role: "button", name: "Close", exact: true },
+      },
+    });
+    try {
+      expect((await browser.action(command())).targets).toEqual([resolved]);
+      // A controller that predates resolved targets ignores the parameter.
+      includeTargets = false;
+      expect(await browser.action(command())).not.toHaveProperty("targets");
+      expect(requests).toEqual(
+        Array(2).fill(
+          `POST /v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1`,
+        ),
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("reports legacy controller schema and DOM routes without replaying or restarting", async () => {
     const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
     const requests: string[] = [];
@@ -466,7 +603,7 @@ describe("BrowserControlClient", () => {
       for (const error of [
         { status: 404, code: "target_not_found", message: "browser target not found" },
         { status: 404, code: "resource_not_found", message: "browser session not found" },
-        { status: 403, code: "permission_denied", message: "protected authentication is active" },
+        { status: 403, code: "permission_denied", message: "browser action denied" },
       ]) {
         rejected = error;
         await expect(browser.readDom(command.targetId, read)).rejects.toMatchObject({
@@ -582,8 +719,7 @@ describe("BrowserControlClient", () => {
         routes.push(`${httpRequest.method} ${url.pathname}`);
         if (url.pathname.endsWith("/state")) return success(responseState);
         expect(await httpRequest.json()).toEqual(request);
-        if (denyRead)
-          return failure(403, "permission_denied", "protected authentication is active");
+        if (denyRead) return failure(403, "permission_denied", "browser action denied");
         return success({
           ...responseState,
           kind: "element",
@@ -1045,7 +1181,6 @@ describe("BrowserControlClient", () => {
     const stateOperationId = randomUUID();
     const workspaceFileOperationId = randomUUID();
     const workspaceFileId = randomUUID();
-    const protectedAuthOperationId = randomUUID();
     const externalAuthOperationId = randomUUID();
     const authRunId = randomUUID();
     const controllerGeneration = "controller-1";
@@ -1120,21 +1255,6 @@ describe("BrowserControlClient", () => {
             updatedAt: "2026-08-10T12:00:00.000Z",
           });
         }
-        if (url.pathname.endsWith("/protected-auth-fills") && request.method === "POST") {
-          const body = (await request.json()) as { operationId: string };
-          return success({
-            protocolVersion: 1,
-            operationId: body.operationId,
-            browserSessionId,
-            controllerGeneration,
-            targetId: target.id,
-            state: "completed",
-            dispatchedAt: "2026-08-10T12:00:00.000Z",
-            settledAt: "2026-08-10T12:00:01.000Z",
-            observation: { target, status: "submitted" },
-            error: null,
-          });
-        }
         if (url.pathname.endsWith("/external-auth") && request.method === "POST") {
           const body = (await request.json()) as {
             operationId: string;
@@ -1165,23 +1285,6 @@ describe("BrowserControlClient", () => {
             operationId: body.operationId,
             fileIds: body.files.map((file) => file.fileId),
             replayed: false,
-          });
-        }
-        if (
-          url.pathname.endsWith(`/protected-auth-operations/${protectedAuthOperationId}`) &&
-          request.method === "GET"
-        ) {
-          return success({
-            protocolVersion: 1,
-            operationId: protectedAuthOperationId,
-            browserSessionId,
-            controllerGeneration,
-            targetId: target.id,
-            state: "completed",
-            dispatchedAt: "2026-08-10T12:00:00.000Z",
-            settledAt: "2026-08-10T12:00:01.000Z",
-            observation: { target, status: "submitted" },
-            error: null,
           });
         }
         if (url.pathname === "/v1/failure") {
@@ -1350,37 +1453,6 @@ describe("BrowserControlClient", () => {
         fileIds: [workspaceFileId],
         replayed: false,
       });
-      const protectedAuthCommand = {
-        protocolVersion: 1 as const,
-        operationId: protectedAuthOperationId,
-        browserSessionId,
-        controllerGeneration,
-        targetId: target.id,
-        expectedTargetGeneration: target.targetGeneration,
-        expectedDocumentGeneration: target.documentGeneration!,
-        expectedFrameId: observation.frameId!,
-        actor: { kind: "system" as const, subjectId: "credential-broker" },
-        authorityId: "password-authority",
-        credentialVersion: 1,
-        allowedOrigins: ["https://example.test"],
-        fields: [
-          {
-            fieldId: "password",
-            locator: { kind: "css" as const, selector: "#password" },
-            purpose: "password" as const,
-            value: "placement-private-password",
-          },
-        ],
-        submit: { type: "press" as const, key: "Enter" },
-      };
-      expect(await browserSession.protectedAuthFill(protectedAuthCommand)).toMatchObject({
-        operationId: protectedAuthOperationId,
-        state: "completed",
-      });
-      expect(await browserSession.protectedAuthReceipt(protectedAuthOperationId)).toMatchObject({
-        operationId: protectedAuthOperationId,
-        state: "completed",
-      });
       expect(
         await browserSession.externalAuth({
           browserSessionId,
@@ -1437,9 +1509,6 @@ describe("BrowserControlClient", () => {
       expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
       expect(placement.commands.every((command) => !command.includes(controlToken))).toBe(true);
       expect(placement.commands.every((command) => !command.includes(viewToken))).toBe(true);
-      expect(
-        placement.commands.every((command) => !command.includes("placement-private-password")),
-      ).toBe(true);
       expect(placement.commands.every((command) => !command.includes("route-password"))).toBe(true);
       expect(
         placement.commands.every((command) => !command.includes(restoreKey.toString("base64"))),

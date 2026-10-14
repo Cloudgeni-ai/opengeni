@@ -21,6 +21,31 @@ const ATTACHED_DEVICE_LIVE_LIFECYCLES = ["starting", "active", "suspending", "re
 // teardown (`stopCapture` + helper exit) after Chrome reconnects.
 
 const CONTROLLER_TRANSITION_EXPIRED = "controller_transition_expired";
+const CONNECTION_HISTORY_LIMIT = 50;
+
+type ConnectionHistoryEntry = schema.AttachedBrowserConnectionHistoryEntry;
+
+/** Merge newly observed connection ends into a profile's bounded history.
+ *  One entry per generation: the machine bridge's own observation replaces a
+ *  server inference, never the reverse. Returns null when nothing changed,
+ *  including an addition too old to survive the bound. */
+export function mergeAttachedBrowserConnectionHistory(
+  history: readonly ConnectionHistoryEntry[],
+  additions: readonly ConnectionHistoryEntry[],
+): ConnectionHistoryEntry[] | null {
+  const byGeneration = new Map(history.map((entry) => [entry.connectionGeneration, entry]));
+  for (const entry of additions) {
+    const existing = byGeneration.get(entry.connectionGeneration);
+    if (existing && (existing.source === "agent" || entry.source === "server")) continue;
+    byGeneration.set(entry.connectionGeneration, entry);
+  }
+  const merged = [...byGeneration.values()]
+    .sort((left, right) => left.endedAt.localeCompare(right.endedAt))
+    .slice(-CONNECTION_HISTORY_LIMIT);
+  const unchanged =
+    merged.length === history.length && merged.every((entry, index) => entry === history[index]);
+  return unchanged ? null : merged;
+}
 
 type DeviceRow = typeof schema.attachedBrowserDevices.$inferSelect;
 
@@ -163,6 +188,7 @@ export async function reconcileAttachedBrowserInventory(
           .for("update");
         const byId = new Map(rows.map((row) => [row.id, row]));
         const generationChangedDeviceIds = new Set<string>();
+        const insertedDeviceIds = new Set<string>();
         let changed = false;
         for (const device of snapshot.devices) {
           const existing = byId.get(device.id);
@@ -208,6 +234,7 @@ export async function reconcileAttachedBrowserInventory(
               createdAt: now,
               updatedAt: now,
             });
+            insertedDeviceIds.add(device.id);
             changed = true;
             continue;
           }
@@ -277,6 +304,18 @@ export async function reconcileAttachedBrowserInventory(
           changed = true;
         }
 
+        await recordAttachedBrowserConnectionEnds(tx, {
+          workspaceId: input.workspaceId,
+          enrollmentId: input.enrollmentId,
+          snapshot,
+          rows,
+          insertedDeviceIds,
+          disconnectedIds,
+          bridgeRestarted:
+            cursor !== undefined && cursor.bridgeGeneration !== snapshot.bridgeGeneration,
+          now,
+        });
+
         if (cursor) {
           await tx
             .update(schema.attachedBrowserInventories)
@@ -309,6 +348,85 @@ export async function reconcileAttachedBrowserInventory(
         return { accepted: true, changed, revision };
       }),
   );
+}
+
+/** Persist why profile connection generations ended. The bridge's own
+ *  report wins; a generation that ended without one is still recorded, as
+ *  `agent_restarted` when the whole bridge was replaced, otherwise
+ *  `unreported` (an agent too old to report). History is diagnostic only: it
+ *  never changes device state, `updatedAt`, or the interaction revision. */
+async function recordAttachedBrowserConnectionEnds(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    enrollmentId: string;
+    snapshot: AttachedBrowserInventorySnapshotValue;
+    rows: readonly DeviceRow[];
+    insertedDeviceIds: ReadonlySet<string>;
+    disconnectedIds: readonly string[];
+    bridgeRestarted: boolean;
+    now: Date;
+  },
+): Promise<void> {
+  const announced = new Map(input.snapshot.devices.map((device) => [device.id, device]));
+  const histories = new Map<string, readonly ConnectionHistoryEntry[]>();
+  for (const row of input.rows) {
+    if (row.enrollmentId === input.enrollmentId || announced.has(row.id)) {
+      histories.set(row.id, row.connectionHistory);
+    }
+  }
+  for (const deviceId of input.insertedDeviceIds) histories.set(deviceId, []);
+
+  const additions = new Map<string, ConnectionHistoryEntry[]>();
+  const add = (deviceId: string, entry: ConnectionHistoryEntry) => {
+    if (!histories.has(deviceId)) return;
+    const list = additions.get(deviceId) ?? [];
+    list.push(entry);
+    additions.set(deviceId, list);
+  };
+  for (const end of input.snapshot.connectionEnds ?? []) {
+    add(end.deviceId, {
+      connectionGeneration: end.connectionGeneration,
+      reason: end.reason,
+      detail: end.detail,
+      endedAt: end.endedAt,
+      connectedMs: end.connectedMs,
+      source: "agent",
+    });
+  }
+  const inferredReason = input.bridgeRestarted ? "agent_restarted" : "unreported";
+  const inferred = (row: DeviceRow, endedAt: Date): ConnectionHistoryEntry => ({
+    connectionGeneration: row.connectionGeneration,
+    reason: inferredReason,
+    detail: null,
+    endedAt: endedAt.toISOString(),
+    connectedMs: null,
+    source: "server",
+  });
+  const disconnected = new Set(input.disconnectedIds);
+  for (const row of input.rows) {
+    const device = announced.get(row.id);
+    if (device && device.connectionGeneration !== row.connectionGeneration) {
+      add(row.id, inferred(row, row.disconnectedAt ?? input.now));
+    } else if (disconnected.has(row.id)) {
+      add(row.id, inferred(row, input.now));
+    }
+  }
+
+  for (const [deviceId, entries] of additions) {
+    const merged = mergeAttachedBrowserConnectionHistory(histories.get(deviceId) ?? [], entries);
+    if (!merged) continue;
+    await tx
+      .update(schema.attachedBrowserDevices)
+      .set({ connectionHistory: merged })
+      .where(
+        and(
+          eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
+          eq(schema.attachedBrowserDevices.id, deviceId),
+          eq(schema.attachedBrowserDevices.enrollmentId, input.enrollmentId),
+        ),
+      );
+  }
 }
 
 /** A new physical Chrome generation cannot inherit a prior controller token.

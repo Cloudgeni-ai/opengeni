@@ -14,7 +14,7 @@ import {
   WorkspaceWebhookEvent,
 } from "../src/index";
 
-describe("OpenGeni signatures", () => {
+describe("Opengeni signatures", () => {
   const secret = "whsec_test";
   const body = JSON.stringify({ id: "event", type: "turn.completed" });
 

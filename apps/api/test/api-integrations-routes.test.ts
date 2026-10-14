@@ -1186,10 +1186,18 @@ describe("API Integration routes", () => {
     const updated = await exempted.json();
     expect((await listed())?.approvalRequiredToolCount).toBe(0);
 
-    // Declarative: omitting the field restores approval for every write tool.
-    const restored = await install({
+    // Omission preserves the exact saved choice; resetting is explicit.
+    const preserved = await install({
       instanceKey: installed.instanceKey,
       expectedInstanceVersion: updated.instanceVersion,
+    });
+    expect(preserved.status).toBe(200);
+    const unchanged = await preserved.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(0);
+    const restored = await install({
+      instanceKey: installed.instanceKey,
+      expectedInstanceVersion: unchanged.instanceVersion,
+      autoApprovedTools: [],
     });
     expect(restored.status).toBe(200);
     const final = await restored.json();

@@ -15,6 +15,7 @@ import {
   normalizeMimeType,
   requireAccessGrant,
   TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
+  TranscriptionBillingRefusedError,
   TranscriptionServiceError,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -45,10 +46,13 @@ import {
   TranscriptionRecordingStateError,
   isSessionEventPersistenceError,
 } from "@opengeni/db";
-import { getWorkspace } from "@opengeni/db";
+import { getWorkspace, type CreditDebitAttribution } from "@opengeni/db";
 import type { Context, Hono } from "hono";
+import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
+import { wavDurationSeconds } from "../transcription/wav-duration";
 import { TranscriptionSegmenterError } from "../transcription/segmenter";
+import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 
 const CHUNK_SHA256_HEADER = "x-opengeni-chunk-sha256";
 const CHUNK_START_HEADER = "x-opengeni-chunk-start-milliseconds";
@@ -60,6 +64,8 @@ type RecordingAuthority = {
   workspaceId: string;
   subjectId: string;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
+  /** Trusted payer for deployment-funded segments. */
+  attribution: CreditDebitAttribution;
 };
 
 class RecordingProcessingError extends Error {
@@ -370,6 +376,8 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           !(await service.available({
             workspaceId: authority.workspaceId,
             subjectId: authority.subjectId,
+            preferredProvider: authority.voiceInput?.preferredProvider,
+            fallbackEnabled: authority.voiceInput?.fallbackEnabled,
           }))
         ) {
           return c.json({ code: "unavailable" }, 503);
@@ -420,6 +428,37 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
             false,
           );
         }
+        const segmentProviderId =
+          claim.segment.providerId && claim.segment.providerId !== "host"
+            ? claim.segment.providerId
+            : null;
+        // Credit admission for the exact pinned provider, before the durable
+        // provider-start fence. A refusal releases the claim untouched (no
+        // audio sent) and surfaces 402 so the client stops retrying.
+        if (segmentProviderId && service.admit) {
+          try {
+            await service.admit({
+              providerId: segmentProviderId,
+              accountId: authority.accountId,
+              workspaceId: authority.workspaceId,
+              attribution: authority.attribution,
+            });
+          } catch (error) {
+            if (!(error instanceof TranscriptionBillingRefusedError)) throw error;
+            await failTranscriptionRecordingSegment(deps.db, {
+              workspaceId: authority.workspaceId,
+              subjectId: authority.subjectId,
+              recordingId: uuidParam(c, "recordingId"),
+              segmentNumber,
+              attemptId,
+              fallbackProviderId: null,
+              // The real refusal, so a reloaded recording still explains it.
+              errorCode: error.code,
+              retryable: true,
+            }).catch(() => null);
+            return transcriptionBillingRefusal(c, error);
+          }
+        }
         const providerStartedAt = new Date();
         const providerDeadlineAt = new Date(
           providerStartedAt.getTime() + TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
@@ -442,10 +481,22 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           durationSeconds: claim.segment.durationMilliseconds / 1_000,
           requestId: attemptId,
           providerDeadlineAt,
-          ...(claim.segment.providerId && claim.segment.providerId !== "host"
-            ? { providerId: claim.segment.providerId }
-            : {}),
+          deferBillingSettlement: true,
+          ...(segmentProviderId ? { providerId: segmentProviderId } : {}),
+          billing: {
+            // One settlement per prepared segment of this exact recording,
+            // however many provider attempts it takes. The recording id is
+            // client-chosen, so the unit id also binds its server creation
+            // time and the server-produced segment bytes.
+            sourceId: `${claim.recording.recording.id}:${Date.parse(claim.recording.recording.createdAt)}:${segmentNumber}:${claim.segment.sha256}`,
+            attribution: authority.attribution,
+            trustedDurationSeconds: wavDurationSeconds(stored.bytes) ?? undefined,
+          },
         });
+        // The transcript commits first and on its own: a billing failure can
+        // never roll back text the user already waited for. Only the attempt
+        // that durably completed the segment settles it (a stale attempt is
+        // refused here and never charges); settlement itself never throws.
         const completed = await completeTranscriptionRecordingSegment(deps.db, {
           workspaceId: authority.workspaceId,
           subjectId: authority.subjectId,
@@ -456,6 +507,9 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           languages: result.languages,
           providerId: claim.segment.providerId ?? result.providerId,
         });
+        // Never rejects for the built-in service (it logs and retries); a
+        // custom service's failure must not turn a durable transcript into an error.
+        await result.settleBilling?.().catch(() => undefined);
         return c.json(await cleanupTerminalObjects(deps, authority, completed));
       } catch (error) {
         if (authority && attemptId && segmentNumber !== null) {
@@ -489,6 +543,11 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
             errorCode: failure.code,
             retryable: failure.retryable,
           }).catch(() => null);
+          // A credit refusal sent no audio; the released segment stays
+          // retryable, but the client must see the definitive refusal.
+          if (error instanceof TranscriptionBillingRefusedError) {
+            return transcriptionBillingRefusal(c, error);
+          }
           if (persisted) return c.json(persisted);
         }
         return routeError(c, error);
@@ -545,6 +604,7 @@ async function requireRecordingAuthority(
     accountId: grant.accountId,
     workspaceId,
     subjectId: grant.subjectId,
+    attribution: creditDebitAttributionForGrant(grant),
   };
 }
 
@@ -641,6 +701,10 @@ function processingFailure(error: unknown): {
   if (error instanceof TranscriptionSegmenterError) {
     return { code: error.code, retryable: error.retryable };
   }
+  if (error instanceof TranscriptionBillingRefusedError) {
+    // Refused before any audio was sent; retryable once the payer is funded.
+    return { code: error.code, retryable: true };
+  }
   if (error instanceof TranscriptionServiceError) {
     return {
       code: error.code,
@@ -662,6 +726,9 @@ function processingFailure(error: unknown): {
 function routeError(c: Context, error: unknown): Response | Promise<Response> {
   if (error instanceof TranscriptionRecordingNotFoundError) {
     return c.json({ code: "not_found" }, 404);
+  }
+  if (error instanceof TranscriptionBillingRefusedError) {
+    return transcriptionBillingRefusal(c, error);
   }
   if (error instanceof TranscriptionRecordingConflictError) {
     return c.json({ code: "conflict" }, 409);

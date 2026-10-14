@@ -2,7 +2,7 @@ import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ErrorDetail } from "@/components/ui/error-message";
 
 /*
- * Errors from the Opengeni API arrive as "OpenGeni API 403: missing permission:
+ * Errors from the Opengeni API arrive as "Opengeni API 403: missing permission:
  * workspace:admin Reference: <uuid>." That string is for logs and support, not
  * for people (DESIGN.md section 6): the UI says what happened, then what to
  * do, and keeps the status, server message and reference behind "Technical
@@ -133,6 +133,14 @@ export function userErrorText(error: unknown, fallback?: string): string {
   if (!isApiError(error)) return text;
   const { reference } = apiErrorFacts(error);
   return reference ? `${text} Reference: ${reference}.` : text;
+}
+
+/**
+ * A user-facing error for a form or dialog, keeping the original as its cause.
+ * An API error becomes what to do next, never its raw "Opengeni API ..." text.
+ */
+export function userFacingError(error: unknown, message = userErrorText(error)): Error {
+  return new Error(message, { cause: error });
 }
 
 /**

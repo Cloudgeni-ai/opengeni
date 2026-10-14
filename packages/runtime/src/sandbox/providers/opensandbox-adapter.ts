@@ -58,9 +58,24 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile as readLocalFile, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
-import { nextDurableOpId } from "../op-correlation";
+import {
+  nextDurableOpId,
+  notifyRemoteOperationNotDispatched,
+  notifyRemoteOperationTransportSelected,
+  type RemoteOperationObservation,
+} from "../op-correlation";
 import { parseOpenSandboxSignedUriPath, redactOpenSandboxSignedUriPath } from "../stream-port";
 import type { RuntimeMetricsHooks } from "../../metrics";
+import {
+  SynchronousCommandOutcomeUnknownError,
+  type SynchronousCommandPage,
+} from "../synchronous-command";
+import {
+  OpenSandboxCommandStreamError,
+  OpenSandboxCommandDispatchError,
+  withOpenSandboxCommandDispatchProof,
+  withOpenSandboxCommandStreamProof,
+} from "./opensandbox-command-stream";
 
 const WORKSPACE_ROOT = "/workspace";
 const PRIVATE_ROOT = "/tmp/opengeni-private";
@@ -132,7 +147,7 @@ export interface OpenSandboxSessionState extends SandboxSessionState {
   expiresAt: string | null;
 }
 
-type ProcessEvent = { stream: "stdout" | "stderr"; text: string };
+type ProcessEvent = { stream: "stdout" | "stderr"; text: string; commandOutput?: false };
 type ProcessOutcome = {
   exitCode: number | null;
   error?: unknown;
@@ -140,6 +155,13 @@ type ProcessOutcome = {
 };
 type RetainedProcess = {
   opId: string;
+  sessionId: number | null;
+  /** The launch client, never a later reconnect or active route. */
+  provider: ProviderSandbox | null;
+  /** Physical terminal proof survives native alias retirement. It neither
+   * consumes output nor proves that the event stream was complete. */
+  physicalOutcome: { exitCode: number; error?: unknown } | null;
+  failureCause?: unknown;
   startedAt: number;
   events: ProcessEvent[];
   cursor: number;
@@ -149,6 +171,9 @@ type RetainedProcess = {
   completed: Promise<ProcessOutcome>;
   settled: boolean;
   transportUncertain: boolean;
+  /** Status can prove physical exit, never reconstruct a lost event stream. */
+  outputUnavailable: boolean;
+  outputCursor: { stdout: number; stderr: number };
 };
 
 function canonicalBaseUrl(value: string): string {
@@ -215,7 +240,7 @@ function normalizeConfiguredPorts(ports: readonly number[] | undefined): number[
 function assertNoSnapshot(args: ReturnType<typeof normalizeSandboxClientCreateArgs>): void {
   if (args.snapshot && (args.snapshot as { type?: unknown }).type !== "noop") {
     throw new SandboxUnsupportedFeatureError(
-      "OpenSandbox v1 uses OpenGeni portable workspace archives and does not accept SDK snapshot specs.",
+      "OpenSandbox v1 uses Opengeni portable workspace archives and does not accept SDK snapshot specs.",
     );
   }
 }
@@ -341,9 +366,26 @@ function consumeProcessOutput(process: RetainedProcess): {
   output: string;
   stdout: string;
   stderr: string;
+  commandStdout: string;
+  commandStderr: string;
+  outputCursor: {
+    expected: { stdout: number; stderr: number };
+    next: { stdout: number; stderr: number };
+  };
 } {
   const events = process.events.slice(process.cursor);
   process.cursor = process.events.length;
+  const commandStdout = events
+    .filter((entry) => entry.stream === "stdout" && entry.commandOutput !== false)
+    .map((entry) => entry.text)
+    .join("");
+  const commandStderr = events
+    .filter((entry) => entry.stream === "stderr" && entry.commandOutput !== false)
+    .map((entry) => entry.text)
+    .join("");
+  const expected = { ...process.outputCursor };
+  process.outputCursor.stdout += Buffer.byteLength(commandStdout);
+  process.outputCursor.stderr += Buffer.byteLength(commandStderr);
   return {
     output: events.map((entry) => entry.text).join(""),
     stdout: events
@@ -354,6 +396,9 @@ function consumeProcessOutput(process: RetainedProcess): {
       .filter((entry) => entry.stream === "stderr")
       .map((entry) => entry.text)
       .join(""),
+    commandStdout,
+    commandStderr,
+    outputCursor: { expected, next: { ...process.outputCursor } },
   };
 }
 
@@ -496,6 +541,9 @@ export class OpenSandboxSession {
   private nextSessionId = 1;
   private readonly processesBySession = new Map<number, RetainedProcess>();
   private readonly processesByOpId = new Map<string, RetainedProcess>();
+  private readonly synchronousResults = new WeakMap<object, SynchronousCommandPage>();
+  private readonly commandFailureCauses = new WeakMap<object, unknown>();
+  private readonly synchronousBanners = new Map<string, SynchronousCommandPage>();
 
   constructor(args: {
     state: OpenSandboxSessionState;
@@ -519,7 +567,9 @@ export class OpenSandboxSession {
         connectionConfig: connectionOptions(this.options),
         sandboxId: this.state.sandboxId,
         readyTimeoutSeconds: this.options.readyTimeoutSeconds,
-        ...(this.options.adapterFactory ? { adapterFactory: this.options.adapterFactory } : {}),
+        adapterFactory: withOpenSandboxCommandStreamProof(
+          this.options.adapterFactory ?? createDefaultAdapterFactory(),
+        ),
       })
         .then(async (provider) => {
           const info = await provider.getInfo();
@@ -626,6 +676,54 @@ export class OpenSandboxSession {
     return "remote_operation";
   }
 
+  /** Adapter-owned event pages, never projections of the presentation banner.
+   * Reading a receipt does not acknowledge or release its output custody. */
+  getSynchronousCommandOutput(result: unknown): SynchronousCommandPage | null {
+    return typeof result === "string"
+      ? (this.synchronousBanners.get(result) ?? null)
+      : result && typeof result === "object"
+        ? (this.synchronousResults.get(result) ?? null)
+        : null;
+  }
+
+  async acknowledgeCommandOutput(result: string): Promise<void> {
+    const page = this.synchronousBanners.get(result);
+    if (page && !page.collectionUnavailable) this.synchronousBanners.delete(result);
+  }
+
+  private commandResult(
+    process: RetainedProcess,
+    consumed: ReturnType<typeof consumeProcessOutput>,
+    result: SandboxExecResult,
+  ): SandboxExecResult {
+    if ("failureCause" in process) this.commandFailureCauses.set(result, process.failureCause);
+    this.synchronousResults.set(result, {
+      stdout: consumed.commandStdout,
+      stderr: consumed.commandStderr,
+      exitCode: Number.isSafeInteger(result.exitCode) ? result.exitCode! : null,
+      ...(result.sessionId !== undefined ? { sessionId: result.sessionId } : {}),
+      wallTimeSeconds: result.wallTimeSeconds,
+      ...(process.outputUnavailable ? { collectionUnavailable: true } : {}),
+      outputCursor: {
+        identity: JSON.stringify([this.state.sandboxId, process.opId]),
+        ...consumed.outputCursor,
+      },
+    });
+    return result;
+  }
+
+  private commandBanner(result: SandboxExecResult): string {
+    let banner = formatExecResponse(result);
+    const page = this.synchronousResults.get(result);
+    if (page) {
+      // The SDK chooses the opaque Chunk ID. Do not rebind a still-owned
+      // receipt on a collision; formatting again performs no provider action.
+      while (this.synchronousBanners.has(banner)) banner = formatExecResponse(result);
+      this.synchronousBanners.set(banner, page);
+    }
+    return banner;
+  }
+
   private async ensureInitialManifestMaterialized(): Promise<void> {
     const provider = await this.ensureStarted();
     if (this.state.workspaceReady) return;
@@ -643,6 +741,9 @@ export class OpenSandboxSession {
     });
     const process: RetainedProcess = {
       opId,
+      sessionId: null,
+      provider: null,
+      physicalOutcome: null,
       startedAt: Date.now(),
       events: [],
       cursor: 0,
@@ -652,52 +753,98 @@ export class OpenSandboxSession {
       completed: Promise.resolve({ exitCode: 1 }),
       settled: false,
       transportUncertain: false,
+      outputUnavailable: false,
+      outputCursor: { stdout: 0, stderr: 0 },
     };
+    let commandInvoked = false;
     this.processesByOpId.set(opId, process);
+    // Joined turn cleanup outlives provider/routing alias retirement. Capture
+    // this exact process and its launch transport, not a mutable map lookup.
+    notifyRemoteOperationTransportSelected({
+      cancelExecCommand: async (requestedOpId) => {
+        this.assertOperationIdentity(process, requestedOpId);
+        return await this.cancelRetainedProcess(process);
+      },
+      observeExecCommand: async (requestedOpId) => {
+        this.assertOperationIdentity(process, requestedOpId);
+        return await this.observeRetainedProcess(process);
+      },
+    });
     process.completed = this.ensureInitialManifestMaterialized()
       .then(async () => {
         const provider = await this.ensureStarted();
-        const execution = await provider.commands.run(
-          commandForArgs(args),
-          {
-            workingDirectory: args.workdir ? workspacePath(args.workdir) : WORKSPACE_ROOT,
-            envs: this.state.environment,
-          },
-          {
-            onInit: (init) => {
-              process.executionId = init.id;
-              process.resolveExecutionId(init.id);
+        process.provider = provider;
+        commandInvoked = true;
+        const execution = await withOpenSandboxCommandDispatchProof(provider.commands, () =>
+          provider.commands.run(
+            commandForArgs(args),
+            {
+              workingDirectory: args.workdir ? workspacePath(args.workdir) : WORKSPACE_ROOT,
+              envs: this.state.environment,
             },
-            onStdout: (message) => {
-              process.events.push({ stream: "stdout", text: message.text });
+            {
+              onInit: (init) => {
+                this.bindExecutionIdentity(process, init.id);
+              },
+              onEvent: (event) => {
+                if (!event || typeof event !== "object") return;
+                const fields = event as Record<string, unknown>;
+                if (fields.type === "init") this.bindExecutionIdentity(process, fields.text);
+                for (const field of ["id", "execution_id", "executionId"] as const) {
+                  if (fields[field] !== undefined && fields[field] !== process.executionId)
+                    throw new SandboxProviderError("OpenSandbox command event identity mismatch");
+                }
+              },
+              onStdout: (message) => {
+                process.events.push({ stream: "stdout", text: message.text });
+              },
+              onStderr: (message) => {
+                process.events.push({ stream: "stderr", text: message.text });
+              },
             },
-            onStderr: (message) => {
-              process.events.push({ stream: "stderr", text: message.text });
-            },
-          },
+          ),
         );
-        if (!process.executionId) {
-          process.executionId = execution.id ?? null;
-          process.resolveExecutionId(process.executionId);
+        this.bindExecutionIdentity(process, execution.id);
+        const exitCode = execution.exitCode;
+        if (!execution.complete || !Number.isSafeInteger(exitCode)) {
+          // A resolved transport without its completion envelope is not stream
+          // EOF or exit proof. Keep the original execution for status/control.
+          process.outputUnavailable = true;
+          process.transportUncertain = true;
+          return { exitCode: null, uncertain: true };
         }
-        const exitCode =
-          typeof execution.exitCode === "number" ? execution.exitCode : execution.error ? 1 : 0;
-        return {
-          exitCode,
+        const outcome = {
+          exitCode: exitCode!,
           ...(execution.error ? { error: execution.error } : {}),
         };
+        process.physicalOutcome = outcome;
+        return outcome;
       })
       .catch((error) => {
+        const notDispatched =
+          error instanceof OpenSandboxCommandDispatchError && error.notDispatched;
+        const cause = error instanceof OpenSandboxCommandDispatchError ? error.cause : error;
+        process.failureCause = cause;
         process.events.push({
           stream: "stderr",
-          text: `${error instanceof Error ? error.message : String(error)}\n`,
+          text: `${cause instanceof Error ? cause.message : String(cause)}\n`,
+          commandOutput: false,
         });
-        if (process.executionId) {
+        if (
+          process.executionId ||
+          cause instanceof OpenSandboxCommandStreamError ||
+          (commandInvoked && !notDispatched)
+        ) {
           process.transportUncertain = true;
-          return { exitCode: null, error, uncertain: true };
+          process.outputUnavailable = true;
+          process.resolveExecutionId(process.executionId);
+          // Keep the genuine original transport/SDK cause with the retained
+          // invocation. No first authenticated ID means control stays unknown.
+          return { exitCode: null, error: cause, uncertain: true };
         }
+        if (notDispatched) notifyRemoteOperationNotDispatched(opId);
         process.resolveExecutionId(null);
-        return { exitCode: 1, error };
+        return { exitCode: 1, error: cause };
       })
       .finally(() => {
         if (!process.transportUncertain) {
@@ -708,6 +855,74 @@ export class OpenSandboxSession {
     return process;
   }
 
+  private bindExecutionIdentity(process: RetainedProcess, id: unknown): void {
+    if (typeof id !== "string" || !id.trim())
+      throw new OpenSandboxCommandStreamError("command execution identity is missing");
+    if (process.executionId !== null && process.executionId !== id)
+      throw new OpenSandboxCommandStreamError("command execution identity mismatch");
+    if (process.executionId === null) {
+      process.executionId = id;
+      process.resolveExecutionId(id);
+    }
+  }
+
+  private assertStatusIdentity(statusId: unknown, executionId: string): void {
+    if (statusId !== executionId)
+      throw new SandboxProviderError("OpenSandbox command status identity mismatch");
+  }
+
+  private assertOperationIdentity(process: RetainedProcess, opId: string): void {
+    if (opId !== process.opId)
+      throw new SandboxProviderError("OpenSandbox operation identity mismatch");
+  }
+
+  private launchProvider(process: RetainedProcess): ProviderSandbox {
+    if (!process.provider)
+      throw new SandboxProviderError("OpenSandbox command launch transport is unavailable");
+    return process.provider;
+  }
+
+  private async cancelRetainedProcess(process: RetainedProcess): Promise<boolean> {
+    if (process.physicalOutcome) return true;
+    const executionId = process.executionId ?? (await process.executionIdReady);
+    if (!executionId) return process.settled;
+    await this.launchProvider(process).commands.interrupt(executionId);
+    // Request delivery is advisory; only observeRetainedProcess proves exit.
+    return true;
+  }
+
+  private async observeRetainedProcess(
+    process: RetainedProcess,
+  ): Promise<RemoteOperationObservation> {
+    if (!process.physicalOutcome) {
+      const executionId = process.executionId;
+      if (!executionId) return { status: "running" };
+      const status = await this.launchProvider(process).commands.getCommandStatus(executionId);
+      this.assertStatusIdentity(status.id, executionId);
+      if (status.running !== false || !Number.isSafeInteger(status.exitCode))
+        return { status: "running" };
+      process.physicalOutcome = { exitCode: status.exitCode! };
+    }
+    return {
+      status: "completed",
+      result: { exitCode: process.physicalOutcome.exitCode },
+      // This control-only observer deliberately cannot recover command output.
+      // Never substitute its proof for a lossless FS/model result, acknowledge
+      // a receipt, advance cursors, or remove the native/routed output holder.
+      failure: new SynchronousCommandOutcomeUnknownError(
+        process.sessionId,
+        { stdout: "", stderr: "" },
+        new Error("Physical completion observed without consuming retained command output"),
+      ),
+    };
+  }
+
+  async observeExecCommand(opId: string): Promise<RemoteOperationObservation> {
+    const process = this.processesByOpId.get(opId);
+    if (!process) throw new SandboxProviderError("OpenSandbox operation is not retained");
+    return await this.observeRetainedProcess(process);
+  }
+
   private async settleTransportUncertainProcess(process: RetainedProcess): Promise<ProcessOutcome> {
     const executionId = process.executionId ?? (await process.executionIdReady);
     if (!executionId) {
@@ -715,21 +930,27 @@ export class OpenSandboxSession {
         "OpenSandbox internal command lost its provider execution identity",
       );
     }
-    const provider = await this.ensureStarted();
+    const provider = this.launchProvider(process);
     while (true) {
       try {
         const status = await provider.commands.getCommandStatus(executionId);
-        if (status.running === false) {
+        this.assertStatusIdentity(status.id, executionId);
+        if (status.running === false && Number.isSafeInteger(status.exitCode)) {
           if (status.error) {
-            process.events.push({ stream: "stderr", text: `${status.error}\n` });
+            process.events.push({
+              stream: "stderr",
+              text: `${status.error}\n`,
+              commandOutput: false,
+            });
           }
           process.settled = true;
           process.transportUncertain = false;
-          this.processesByOpId.delete(process.opId);
-          return {
-            exitCode: status.exitCode ?? 1,
+          process.physicalOutcome = {
+            exitCode: status.exitCode!,
             ...(status.error ? { error: status.error } : {}),
           };
+          this.processesByOpId.delete(process.opId);
+          return process.physicalOutcome;
         }
       } catch {
         // The provider accepted this exact execution before transport loss. Keep
@@ -756,7 +977,7 @@ export class OpenSandboxSession {
     const consumed = consumeProcessOutput(process);
     const output = truncateOutput(consumed.output, args.maxOutputTokens);
     if (outcome.error && !process.executionId) throw outcome.error;
-    return {
+    return this.commandResult(process, consumed, {
       output: output.text,
       stdout: consumed.stdout,
       stderr: consumed.stderr,
@@ -765,7 +986,7 @@ export class OpenSandboxSession {
       ...(output.originalTokenCount !== undefined
         ? { originalTokenCount: output.originalTokenCount }
         : {}),
-    };
+    });
   }
 
   async exec(args: ExecCommandArgs): Promise<SandboxExecResult> {
@@ -791,8 +1012,9 @@ export class OpenSandboxSession {
     if (outcome.done) {
       if (outcome.value.uncertain) {
         const sessionId = this.nextSessionId++;
+        process.sessionId = sessionId;
         this.processesBySession.set(sessionId, process);
-        return {
+        return this.commandResult(process, consumed, {
           output: output.text,
           stdout: consumed.stdout,
           stderr: consumed.stderr,
@@ -801,10 +1023,10 @@ export class OpenSandboxSession {
           ...(output.originalTokenCount !== undefined
             ? { originalTokenCount: output.originalTokenCount }
             : {}),
-        };
+        });
       }
       if (outcome.value.error && !process.executionId) throw outcome.value.error;
-      return {
+      return this.commandResult(process, consumed, {
         output: output.text,
         stdout: consumed.stdout,
         stderr: consumed.stderr,
@@ -813,11 +1035,12 @@ export class OpenSandboxSession {
         ...(output.originalTokenCount !== undefined
           ? { originalTokenCount: output.originalTokenCount }
           : {}),
-      };
+      });
     }
     const sessionId = this.nextSessionId++;
+    process.sessionId = sessionId;
     this.processesBySession.set(sessionId, process);
-    return {
+    return this.commandResult(process, consumed, {
       output: output.text,
       stdout: consumed.stdout,
       stderr: consumed.stderr,
@@ -826,11 +1049,11 @@ export class OpenSandboxSession {
       ...(output.originalTokenCount !== undefined
         ? { originalTokenCount: output.originalTokenCount }
         : {}),
-    };
+    });
   }
 
   async execCommand(args: ExecCommandArgs): Promise<string> {
-    return formatExecResponse(await this.exec(args));
+    return this.commandBanner(await this.exec(args));
   }
 
   hasRetainedProcess(providerSessionId: number): boolean {
@@ -840,11 +1063,7 @@ export class OpenSandboxSession {
   async cancelExecCommand(opId: string): Promise<boolean> {
     const process = this.processesByOpId.get(opId);
     if (!process) return false;
-    const executionId = process.executionId ?? (await process.executionIdReady);
-    if (!executionId) return process.settled;
-    const provider = await this.ensureStarted();
-    await provider.commands.interrupt(executionId);
-    return true;
+    return await this.cancelRetainedProcess(process);
   }
 
   async writeStdin(args: WriteStdinArgs): Promise<string> {
@@ -867,7 +1086,7 @@ export class OpenSandboxSession {
     if (chars.includes("\u0003")) {
       const executionId = process.executionId ?? (await process.executionIdReady);
       if (executionId) {
-        const provider = await this.ensureStarted();
+        const provider = this.launchProvider(process);
         await provider.commands.interrupt(executionId);
       }
     }
@@ -878,34 +1097,44 @@ export class OpenSandboxSession {
           "OpenSandbox retained command lost its provider execution identity",
         );
       }
-      const provider = await this.ensureStarted();
+      const provider = this.launchProvider(process);
       const status = await provider.commands.getCommandStatus(executionId);
+      this.assertStatusIdentity(status.id, executionId);
       if (status.error) {
-        process.events.push({ stream: "stderr", text: `${status.error}\n` });
+        process.events.push({ stream: "stderr", text: `${status.error}\n`, commandOutput: false });
       }
       const consumed = consumeProcessOutput(process);
       const output = truncateOutput(consumed.output, args.maxOutputTokens);
-      if (status.running !== false) {
-        return formatExecResponse({
+      if (status.running !== false || !Number.isSafeInteger(status.exitCode)) {
+        return this.commandBanner(
+          this.commandResult(process, consumed, {
+            output: output.text,
+            stdout: consumed.stdout,
+            stderr: consumed.stderr,
+            wallTimeSeconds: elapsedSeconds(startedAt),
+            sessionId: args.sessionId,
+            ...(output.originalTokenCount !== undefined
+              ? { originalTokenCount: output.originalTokenCount }
+              : {}),
+          }),
+        );
+      }
+      process.settled = true;
+      process.physicalOutcome = { exitCode: status.exitCode! };
+      this.processesBySession.delete(args.sessionId);
+      this.processesByOpId.delete(process.opId);
+      return this.commandBanner(
+        this.commandResult(process, consumed, {
           output: output.text,
+          stdout: consumed.stdout,
+          stderr: consumed.stderr,
           wallTimeSeconds: elapsedSeconds(startedAt),
-          sessionId: args.sessionId,
+          exitCode: status.exitCode!,
           ...(output.originalTokenCount !== undefined
             ? { originalTokenCount: output.originalTokenCount }
             : {}),
-        });
-      }
-      process.settled = true;
-      this.processesBySession.delete(args.sessionId);
-      this.processesByOpId.delete(process.opId);
-      return formatExecResponse({
-        output: output.text,
-        wallTimeSeconds: elapsedSeconds(startedAt),
-        exitCode: status.exitCode ?? 1,
-        ...(output.originalTokenCount !== undefined
-          ? { originalTokenCount: output.originalTokenCount }
-          : {}),
-      });
+        }),
+      );
     }
     const outcome = await Promise.race([
       process.completed.then((value) => ({ done: true as const, value })),
@@ -916,24 +1145,36 @@ export class OpenSandboxSession {
     const consumed = consumeProcessOutput(process);
     const output = truncateOutput(consumed.output, args.maxOutputTokens);
     if (outcome.done) {
-      this.processesBySession.delete(args.sessionId);
-      return formatExecResponse({
+      // Loss can arrive while this read awaits completion, not only before it.
+      // The same alias remains available for exact status/control observation.
+      if (!outcome.value.uncertain) this.processesBySession.delete(args.sessionId);
+      return this.commandBanner(
+        this.commandResult(process, consumed, {
+          output: output.text,
+          stdout: consumed.stdout,
+          stderr: consumed.stderr,
+          wallTimeSeconds: elapsedSeconds(startedAt),
+          ...(outcome.value.uncertain
+            ? { sessionId: args.sessionId }
+            : { exitCode: outcome.value.exitCode }),
+          ...(output.originalTokenCount !== undefined
+            ? { originalTokenCount: output.originalTokenCount }
+            : {}),
+        }),
+      );
+    }
+    return this.commandBanner(
+      this.commandResult(process, consumed, {
         output: output.text,
+        stdout: consumed.stdout,
+        stderr: consumed.stderr,
         wallTimeSeconds: elapsedSeconds(startedAt),
-        exitCode: outcome.value.exitCode,
+        sessionId: args.sessionId,
         ...(output.originalTokenCount !== undefined
           ? { originalTokenCount: output.originalTokenCount }
           : {}),
-      });
-    }
-    return formatExecResponse({
-      output: output.text,
-      wallTimeSeconds: elapsedSeconds(startedAt),
-      sessionId: args.sessionId,
-      ...(output.originalTokenCount !== undefined
-        ? { originalTokenCount: output.originalTokenCount }
-        : {}),
-    });
+      }),
+    );
   }
 
   async writeStdinForProcessControl(args: WriteStdinArgs): Promise<string> {
@@ -966,7 +1207,12 @@ export class OpenSandboxSession {
       result.sessionId === undefined && result.exitCode === 0
         ? parseConfinedFileRead(result.stdout, maxBytes)
         : null;
-    if (!bytes) throw new SandboxProviderError("OpenSandbox confined file read unavailable");
+    if (!bytes) {
+      // Preserve the native cause without treating it as terminal/no-dispatch
+      // proof. The original uncertain command and output remain retained.
+      if (this.commandFailureCauses.has(result)) throw this.commandFailureCauses.get(result);
+      throw new SandboxProviderError("OpenSandbox confined file read unavailable");
+    }
     return bytes;
   }
 

@@ -5,20 +5,14 @@ import postgres from "postgres";
 import {
   bootstrapWorkspace,
   createConnection,
-  createClaudeSubscriptionAccount,
   createDb,
   getOrganizationModelProviderCatalogForWorkspace,
   getWorkspaceProviderApiKeyConnectionMetadata,
   listConnectionsMetadata,
-  listClaudeSubscriptionAccountsMetadata,
   listOrganizationModelProviderCustomModelsForWorkspace,
   listWorkspaceProviderCustomModels,
   listWorkspaceProviderCustomModelsByKind,
   organizationModelProviderConnectionActiveForWorkspace,
-  setInitialActiveClaudeCredential,
-  updateModelConnectionAccess,
-  upsertOrganizationClaudeSubscription,
-  workspaceClaudeSubscriptionActiveForAuthority,
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   workspaceProviderApiKeyConnectionSpec,
   type DbClient,
@@ -41,13 +35,6 @@ let siblingId: string;
 let personalId: string;
 const actor = "user:provider-catalog-fixture";
 const hash = "a".repeat(64);
-const claudePools = new Map<string, { workspace: string; organization: string }>();
-const encryptionKey = Buffer.alloc(32, 7);
-const claudeSecret = () => ({
-  version: 1 as const,
-  token: "sk-ant-oat01-provider-catalog-fixture",
-  identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-});
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("provider-catalog-reads");
@@ -85,57 +72,9 @@ beforeAll(async () => {
     values (${otherScope.accountId}, ${actor}, 'owner', 'active', ${otherPersonal!.id})`;
   for (const target of [scope, otherScope]) {
     for (const providerKind of providerKinds) {
-      if (providerKind === "claude_subscription") {
-        // 0598 rejects both legacy credential stores. Seed real, separate
-        // workspace/organization pools without changing custom-model storage.
-        const secret = claudeSecret();
-        const connected = await createClaudeSubscriptionAccount(client.db, {
-          ...target,
-          subjectId: actor,
-          encryptionKey,
-          secret,
-          providerAccountId: secret.identity.accountUuid,
-        });
-        await setInitialActiveClaudeCredential(client.db, {
-          ...target,
-          subjectId: actor,
-          credentialId: connected.account.id,
-          authoritySnapshot: connected.authoritySnapshot,
-        });
-        const organizationSecret = claudeSecret();
-        const organization = await upsertOrganizationClaudeSubscription(client.db, {
-          organizationId: target.accountId,
-          actorSubjectId: actor,
-          encryptionKey,
-          secret: organizationSecret,
-          providerAccountId: organizationSecret.identity.accountUuid,
-          label: null,
-          accountEmail: null,
-          expiresAt: null,
-        });
-        expect(
-          await updateModelConnectionAccess(
-            client.db,
-            {
-              accountId: target.accountId,
-              workspaceId: null,
-              subjectId: actor,
-              kind: "claude_subscription",
-              connectionId: organization.account.id,
-            },
-            {
-              allowedModels: null,
-              allowedWorkspaces: [target.workspaceId],
-              allowPersonalWorkspaces: false,
-              version: 1,
-            },
-          ),
-        ).toMatchObject({ version: 2, allowedWorkspaces: [target.workspaceId] });
-        claudePools.set(target.workspaceId, {
-          workspace: connected.account.id,
-          organization: organization.account.id,
-        });
-      } else {
+      // Claude subscription connections live in the shared core (design 5.3,
+      // C3/C4); only its custom-model catalog rows are seeded here.
+      if (providerKind !== "claude_subscription") {
         const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
         await createConnection(client.db, {
           ...target,
@@ -245,68 +184,6 @@ test("batch reads retain per-provider results, scopes and metadata-only queries"
   }
 });
 
-test("canonical Claude pools are ready and their batched metadata never reads secrets", async () => {
-  const sqlClient = postgres(shared!.appUrl, { max: 1, prepare: false });
-  const queries: string[] = [];
-  const db = drizzle(sqlClient, { schema, logger: { logQuery: (query) => queries.push(query) } });
-  let transactions = 0;
-  try {
-    const accounts = await withDatabaseTimingObserver(
-      (event) => {
-        if (event.stage === "transaction_admission") transactions++;
-      },
-      () =>
-        listClaudeSubscriptionAccountsMetadata(db, {
-          workspaceId: scope.workspaceId,
-          subjectId: actor,
-        }),
-    );
-    expect(transactions).toBe(1);
-    expect(
-      queries.filter((query) => query.includes('from "claude_subscription_credentials"')),
-    ).toHaveLength(1);
-    expect(queries.join("\n")).not.toContain("credential_encrypted");
-    const pool = claudePools.get(scope.workspaceId)!;
-    expect(accounts.map((account) => account.id).sort()).toEqual(
-      [pool.workspace, pool.organization].sort(),
-    );
-    for (const authorityScope of ["workspace", "organization"] as const) {
-      expect(accounts.find((account) => account.id === pool[authorityScope])).toMatchObject({
-        scope: authorityScope,
-        status: "active",
-      });
-      expect(
-        await workspaceClaudeSubscriptionActiveForAuthority(
-          client.db,
-          { claudeSubscriptionEnabled: true },
-          {
-            workspaceId: scope.workspaceId,
-            subjectId: actor,
-            authoritySnapshot: { version: 1, scope: authorityScope },
-          },
-        ),
-      ).toBe(true);
-    }
-    expect(JSON.stringify(accounts)).not.toContain("sk-ant-oat01");
-    expect(JSON.stringify(accounts)).not.toContain("credentialEncrypted");
-    expect(
-      await getWorkspaceProviderApiKeyConnectionMetadata(
-        client.db,
-        scope.workspaceId,
-        "claude_subscription",
-      ),
-    ).toBeNull();
-    expect(
-      await organizationModelProviderConnectionActiveForWorkspace(client.db, {
-        ...scope,
-        providerKind: "claude_subscription",
-      }),
-    ).toBe(false);
-  } finally {
-    await sqlClient.end();
-  }
-});
-
 test("workspace assignment, personal-workspace policy and account isolation still apply", async () => {
   for (const workspaceId of [siblingId, personalId]) {
     const input = { accountId: scope.accountId, workspaceId, providerKinds };
@@ -322,20 +199,6 @@ test("workspace assignment, personal-workspace policy and account isolation stil
     }
     const models = await listWorkspaceProviderCustomModelsByKind(client.db, input);
     expect(Object.values(models).flat()).toEqual([]);
-    expect(
-      await listClaudeSubscriptionAccountsMetadata(client.db, { workspaceId, subjectId: actor }),
-    ).toEqual([]);
-    expect(
-      await workspaceClaudeSubscriptionActiveForAuthority(
-        client.db,
-        { claudeSubscriptionEnabled: true },
-        {
-          workspaceId,
-          subjectId: actor,
-          authoritySnapshot: { version: 1, scope: "organization" },
-        },
-      ),
-    ).toBe(false);
   }
   const organization = await getOrganizationModelProviderCatalogForWorkspace(client.db, {
     ...otherScope,
@@ -350,19 +213,6 @@ test("workspace assignment, personal-workspace policy and account isolation stil
       .flatMap((provider) => provider.models)
       .every((model) => model.accountId === otherScope.accountId),
   ).toBe(true);
-  const otherAccounts = await listClaudeSubscriptionAccountsMetadata(client.db, {
-    workspaceId: otherScope.workspaceId,
-    subjectId: actor,
-  });
-  const otherPool = claudePools.get(otherScope.workspaceId)!;
-  expect(otherAccounts.map((account) => account.id).sort()).toEqual(
-    [otherPool.workspace, otherPool.organization].sort(),
-  );
-  expect(
-    otherAccounts.some((account) =>
-      Object.values(claudePools.get(scope.workspaceId)!).includes(account.id),
-    ),
-  ).toBe(false);
   expect(
     Object.values(workspace)
       .flat()

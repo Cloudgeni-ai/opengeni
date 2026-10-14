@@ -1,9 +1,20 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { workerRowTitleParts } from "./platform-activity-presentation";
+import { AgentRow, AgentRowSection } from "./agent-row";
+import { useAgentIdentity } from "./agent-identity";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { GenieLoading } from "./genie-loading";
+import { StartupDispatchDetails } from "./startup-dispatch-details";
 import { useStartupDetails } from "./startup-preference";
-import { ArrowRightIcon, BotIcon, BrainCircuitIcon, MessageSquareTextIcon } from "lucide-react";
 import {
+  ArrowRightIcon,
+  BotIcon,
+  BrainCircuitIcon,
+  MessageSquareTextIcon,
+  SendIcon,
+} from "lucide-react";
+import {
+  Component,
   createContext,
   lazy,
   Suspense,
@@ -21,13 +32,7 @@ import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
-import {
-  BodyNote,
-  PayloadBlock,
-  ActivityDisclosure,
-  CompactActivityContext,
-  ToolCallTruncationProvider,
-} from "./shared";
+import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, AgentMessageItem, MemoryItem, WorkerItem } from "./types";
 
@@ -94,6 +99,7 @@ export function ActivityRail({
   const reducedMotion = useReducedMotion();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const phases = items.filter((item) => item.kind === "startup-phase");
+  const dispatch = phases.find((item) => item.dispatchWait !== undefined);
   // Empty reasoning envelopes can arrive before any visible model output.
   const hasWork = items.some(
     (item) =>
@@ -118,10 +124,10 @@ export function ActivityRail({
             ? item.status === "failed" || item.status === "cancelled"
             : item.kind !== "reasoning" || item.text.trim().length > 0,
         );
-  const startedAt = phases.reduce(
-    (first, item) => (item.startedAt < first ? item.startedAt : first),
-    phases[0]?.startedAt ?? "",
-  );
+  const startedAt = phases.reduce((first, item) => {
+    const start = item.loadingStartedAt ?? item.startedAt;
+    return start < first ? start : first;
+  }, phases[0]?.startedAt ?? "");
   const enterMounted = useEntranceAnimation();
   // Live gate: rails born during bulk capture enter=false forever; with a
   // seen-id map we still want later live appends to fade (ids gate remounts).
@@ -183,6 +189,11 @@ export function ActivityRail({
           >
             <GenieLoading
               startedAt={startedAt}
+              notice={
+                dispatch?.dispatchWait?.lastError
+                  ? "Unable to start yet. Your messages are saved."
+                  : undefined
+              }
               phase={responsePending ? "waiting" : "preparing"}
               detailsOpen={detailsOpen}
               onShowDetails={() => setDetailsOpen((open) => !open)}
@@ -198,6 +209,9 @@ export function ActivityRail({
         >
           Hide startup details
         </button>
+      ) : null}
+      {dispatch && (detailsOpen || debug) ? (
+        <StartupDispatchDetails wait={dispatch.dispatchWait ?? null} />
       ) : null}
       {visibleItems.map((item, index) => {
         const newFamily = index > 0 && familyOf(item) !== familyOf(visibleItems[index - 1]!);
@@ -254,7 +268,9 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
         {renderText ? (
           renderText(item.text, item)
         ) : (
-          <Markdown streaming={item.streaming}>{item.text}</Markdown>
+          <Markdown softLineBreaks streaming={item.streaming}>
+            {item.text}
+          </Markdown>
         )}
       </div>
     </div>
@@ -295,13 +311,15 @@ export function renderActivity(
     case "tool-call": {
       const Renderer = toolRegistry.resolve(item);
       return (
-        <ToolCallTruncationProvider value={item.truncation ?? null}>
-          <Renderer
-            item={item}
-            loadRetainedScreenshot={loadRetainedScreenshot}
-            loadRetainedArtifact={loadRetainedArtifact}
-          />
-        </ToolCallTruncationProvider>
+        <ToolRowBoundary name={toolDisplayName(item.name)} resetKeys={[item.status, Renderer]}>
+          <ToolCallTruncationProvider value={item.truncation ?? null}>
+            <Renderer
+              item={item}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
+            />
+          </ToolCallTruncationProvider>
+        </ToolRowBoundary>
       );
     }
     case "worker":
@@ -435,7 +453,13 @@ function MemoryRow({
   );
 }
 
-/** Spawned/messaged worker sessions get a first-class card, not a tool row. */
+/**
+ * Spawning or messaging another agent: a named rail step. The title names the
+ * agent, one line previews the brief or message, expanding shows it in full,
+ * and the trailing arrow opens the agent's session once its id is known. A
+ * failed or interrupted call keeps its quiet chip; an interrupted one, or a
+ * spawn that never produced a session, offers no link.
+ */
 function WorkerRow({
   item,
   onOpenSession,
@@ -443,110 +467,82 @@ function WorkerRow({
   item: WorkerItem;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
-  const compact = useContext(CompactActivityContext);
+  const identity = useAgentIdentity();
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
-  const title =
-    item.action === "spawn"
-      ? running
-        ? "Spawning worker"
-        : failed
-          ? "Worker spawn failed"
-          : cancelled
-            ? "Worker interrupted"
-            : "Worker spawned"
-      : running
-        ? "Messaging worker"
-        : failed
-          ? "Worker message failed"
-          : cancelled
-            ? "Worker interrupted"
-            : "Worker messaged";
-  if (compact) {
-    return (
-      <ActivityDisclosure
-        icon={<BotIcon className="size-3.5" />}
-        title={title}
-        preview={item.prompt}
-        running={running}
-      />
-    );
-  }
-  // A worker is a first-class actor but still a STEP on the rail — a borderless
-  // row (no card), aligned to its sibling tool rows: the chevron column is an
-  // empty spacer (a worker doesn't expand), then the bot glyph, then the title
-  // with a quiet prompt beneath, and one right-gutter affordance.
-  //
-  // Once the worker's session id is known, the WHOLE row is a clean, clickable
-  // deep-link into that child session (a trailing arrow brightens on hover) —
-  // the spawn moment itself is the affordance, not a small side button. A
-  // still-in-flight spawn (no id yet) or a failed/cancelled worker is inert, so
-  // there is never a dead click target. The gutter mirrors the worker-completion
-  // card's calm language: red chip on failure, "interrupted" on cancel.
   const sessionId = item.workerSessionId;
-  const deepLink = Boolean(sessionId) && Boolean(onOpenSession) && !failed && !cancelled;
-  const inner = (
-    <>
-      <span className="size-3.5 shrink-0" aria-hidden />
-      <span className={cn("mt-px shrink-0", failed ? "text-og-status-failed" : "text-og-accent")}>
-        <BotIcon className="size-3.5" />
-      </span>
-      <div className="min-w-0 flex-1">
-        {/* In-flight state is carried ONLY by the shimmering title (no detached
-            pulse badge), matching every other running row in the rail. */}
-        <span
-          className={cn(
-            "text-og-base font-medium",
-            running ? "og-shimmer-text" : failed ? "text-og-status-failed" : "text-og-fg",
-          )}
-        >
-          {title}
-        </span>
-        {item.prompt ? (
-          <p className="mt-0.5 truncate text-og-sm text-og-fg-muted">
-            {truncate(item.prompt, 140)}
-          </p>
-        ) : null}
-        {failed && item.failure ? (
-          <div className="mt-1 min-w-0 text-og-sm text-og-status-failed">
-            <p className="font-og-mono text-og-xs">{item.failure.code}</p>
-            <p className="mt-0.5 break-words">{item.failure.message}</p>
-          </div>
-        ) : null}
-      </div>
-      {failed ? (
-        <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">
-          <span className="size-1.5 rounded-full bg-og-status-failed" />
-          failed
-        </span>
-      ) : cancelled ? (
-        <span className="og-cancelled-chip shrink-0 self-center font-og-mono text-og-xs leading-none text-og-fg-subtle">
-          interrupted
-        </span>
-      ) : deepLink ? (
-        <ArrowRightIcon
-          aria-hidden
-          className="mt-0.5 size-3.5 shrink-0 text-og-fg-subtle transition-[transform,color] duration-150 group-hover/worker:translate-x-0.5 group-hover/worker:text-og-fg"
-        />
-      ) : null}
-    </>
+  const name = identity.titleFor(sessionId) ?? (item.action === "spawn" ? item.title : null);
+  const title = workerRowTitleParts(item, name);
+  const prompt = item.prompt?.trim() ? item.prompt.trim() : null;
+  const failure = failed ? item.failure : null;
+  const hasBody = Boolean(prompt) || Boolean(failure);
+  return (
+    <AgentRow
+      icon={item.action === "spawn" ? <BotIcon /> : <SendIcon />}
+      title={title}
+      preview={
+        failure ? failure.message : prompt ? truncate(prompt.replace(/\s+/g, " "), 240) : null
+      }
+      sessionId={cancelled ? null : sessionId}
+      onOpenSession={onOpenSession ?? identity.onOpenSession}
+      running={running}
+      failed={failed}
+      cancelled={cancelled}
+    >
+      {hasBody ? (
+        <>
+          {prompt ? (
+            <AgentRowSection label={item.action === "spawn" ? "Brief" : "Message"}>
+              {prompt}
+            </AgentRowSection>
+          ) : null}
+          {failure ? (
+            <AgentRowSection label={failure.code} muted>
+              {failure.message}
+            </AgentRowSection>
+          ) : null}
+        </>
+      ) : undefined}
+    </AgentRow>
   );
+}
 
-  if (deepLink && sessionId && onOpenSession) {
+/**
+ * One tool row that fails to render shows a one-line note in its place, so the
+ * rest of the work group (and the live preview) keeps reading normally.
+ */
+class ToolRowBoundary extends Component<
+  { name: string; resetKeys: readonly unknown[]; children: ReactNode },
+  { failed: boolean; resetKeys: readonly unknown[] }
+> {
+  state = { failed: false, resetKeys: this.props.resetKeys };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  /** A new status or renderer for the row gets a fresh attempt. */
+  static getDerivedStateFromProps(
+    props: { resetKeys: readonly unknown[] },
+    state: { failed: boolean; resetKeys: readonly unknown[] },
+  ): { failed: boolean; resetKeys: readonly unknown[] } | null {
+    const same =
+      props.resetKeys.length === state.resetKeys.length &&
+      props.resetKeys.every((key, index) => Object.is(key, state.resetKeys[index]));
+    return same ? null : { failed: false, resetKeys: props.resetKeys };
+  }
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children;
     return (
-      <button
-        type="button"
-        onClick={() => onOpenSession(sessionId)}
-        className={cn(
-          "group/worker -mx-1.5 flex w-full items-start gap-2 rounded-og-sm px-1.5 py-1.5 text-left",
-          "outline-hidden transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
-          "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
-        )}
+      <div
+        data-testid="tool-row-render-error"
+        role="status"
+        className="px-1.5 py-1.5 text-og-menu text-og-fg-subtle"
       >
-        {inner}
-      </button>
+        {this.props.name} · couldn't be displayed
+      </div>
     );
   }
-  return <div className="flex items-start gap-2 px-1.5 py-1.5">{inner}</div>;
 }

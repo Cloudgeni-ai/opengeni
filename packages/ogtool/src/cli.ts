@@ -2,12 +2,16 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import {
   CodemodeClient,
+  CodemodeApprovalPendingError,
+  CodemodeOperationError,
   generateCodemodeDeclarations,
   type AttemptToolCatalog,
   type AttemptToolCatalogEntry,
 } from "@opengeni/codemode";
+import { omitStructuredContentTextDuplicates, type AttemptToolResult } from "@opengeni/contracts";
 import packageManifest from "../package.json" with { type: "json" };
 import { compactOutput, parseListOptions } from "./catalog-discovery";
+import { parseToolArguments } from "./tool-arguments";
 
 const PACKAGE_NAME = "@opengeni/ogtool";
 const VERSION = packageManifest.version;
@@ -18,12 +22,15 @@ function usage(exitCode = 1): void {
     "  ogtool list [--full | --json]",
     "              [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
     "  ogtool show <tool-path-or-model-name>",
-    "  ogtool call <tool-path-or-model-name> [json-object]",
+    "  ogtool call <tool-path-or-model-name> [json-object] [--full]",
+    "  ogtool read <operation-id>",
+    "  ogtool resume <operation-id>",
     "  ogtool declarations [output-file]",
     "  ogtool doctor",
     "  ogtool --version",
     "",
     "list returns all authorized tools by default; --limit/--offset are opt-in slices",
+    "call omits a text block that only repeats structuredContent; --full prints the exact result",
     "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
@@ -160,18 +167,14 @@ export function showOutput(catalog: AttemptToolCatalog, name: string): string {
   return `${output}\n`;
 }
 
-export function parseToolArguments(raw: string | undefined): Record<string, unknown> {
-  if (raw === undefined) return {};
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error("tool arguments must be valid JSON");
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("tool arguments must be a JSON object");
-  }
-  return value as Record<string, unknown>;
+/**
+ * `call` prints the payload once by default: a text block that only repeats
+ * `structuredContent` as JSON is omitted. `--full` prints the exact result.
+ * The native client (`codemode call`) applies the same rule.
+ */
+export function callOutput(result: AttemptToolResult, full = false): string {
+  const printed = full ? result : omitStructuredContentTextDuplicates(result);
+  return `${JSON.stringify(printed, null, 2)}\n`;
 }
 
 async function main(): Promise<void> {
@@ -197,6 +200,14 @@ async function main(): Promise<void> {
   }
 
   const client = configuredClient();
+  if (command === "read" || command === "resume") {
+    if (args.length !== 1 || !/^[0-9a-f-]{36}$/iu.test(args[0]!))
+      throw new Error("A valid operation ID is required");
+    const result =
+      command === "read" ? await client.status(args[0]!) : await client.resume(args[0]!);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "list") {
     const catalog = await client.catalog();
     if (listOptions!.full) {
@@ -211,15 +222,16 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "call") {
-    const name = process.argv[3];
+    const full = args.includes("--full");
+    const [name, rawArguments] = args.filter((arg) => arg !== "--full");
     if (!name) throw new Error("tool path or model name is required");
-    const argumentsValue = parseToolArguments(process.argv[4]);
+    const argumentsValue = parseToolArguments(rawArguments);
     const catalog = await client.catalog();
     const entry = resolveTool(catalog, name);
     const result = await client.call(entry.identity, argumentsValue, {
       operationId: randomUUID(),
     });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(callOutput(result, full));
     return;
   }
   if (command === "declarations") {
@@ -240,6 +252,20 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
+  if (error instanceof CodemodeApprovalPendingError) {
+    process.stdout.write(
+      `${JSON.stringify({ operationId: error.operationId, state: error.state, code: error.code, approvalRequestId: error.approvalRequestId, message: error.message })}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (error instanceof CodemodeOperationError) {
+    process.stdout.write(
+      `${JSON.stringify({ operationId: error.operation.operationId, state: error.operation.state, code: error.code, message: error.message })}\n`,
+    );
+    process.exitCode = error.operation.state === "outcome_unknown" ? 3 : 1;
+    return;
+  }
   const code =
     error && typeof error === "object" && "code" in error
       ? String((error as { code: unknown }).code)

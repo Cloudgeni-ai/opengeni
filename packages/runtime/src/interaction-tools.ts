@@ -1,4 +1,12 @@
 import {
+  OPENGENI_BROWSER_EXTENSION_URL,
+  CUA_DESKTOP_TOOLS,
+  cuaDesktopToolVariants,
+  AttemptToolResult,
+  ComputerNativeReceipt,
+} from "@opengeni/contracts";
+import { boundComputerNativeReceipt } from "@opengeni/interaction";
+import {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
   AuthRun,
@@ -41,8 +49,6 @@ import {
   ExternalAuthRunResponse,
   InteractionIntervention,
   InteractionPlacement,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
   ReportAuthRunPayload,
   RequestHumanInteractionToolInput,
@@ -70,7 +76,13 @@ import type {
   AttemptToolExecutionContext,
   AttemptToolScope,
 } from "@opengeni/codemode";
-import { OpenGeniApiError, OpenGeniClient, type InteractionTransport } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  OpenGeniClient,
+  interactionControlFailureFromError,
+  type InteractionControlFailure,
+  type InteractionTransport,
+} from "@opengeni/sdk";
 import { z } from "zod";
 import { browserActionInputJsonSchema } from "./browser-action-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
@@ -399,6 +411,9 @@ const BrowserTabsInput = z.discriminatedUnion("operation", [
     })
     .strict(),
 ]);
+const BrowserTabsOutput = BrowserTargetListResponse.safeExtend({
+  mutationObservation: CompactBrowserObservation.optional(),
+});
 
 const BrowserObserveInput = z
   .object({
@@ -466,14 +481,6 @@ const BrowserAuthInput = z.discriminatedUnion("operation", [
   }),
   z
     .object({
-      operation: z.literal("protected_fill"),
-      browserSessionId: z.string().uuid(),
-      authRunId: z.string().uuid(),
-    })
-    .extend(ProtectedAuthFillRequest.omit({ operationId: true }).shape)
-    .strict(),
-  z
-    .object({
       operation: z.literal("advance_external"),
       browserSessionId: z.string().uuid(),
       authRunId: z.string().uuid(),
@@ -507,7 +514,6 @@ const BrowserAuthOutput = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("get_run"), result: AuthRun }).strict(),
   z.object({ operation: z.literal("start"), result: AuthRunMutationResponse }).strict(),
   z.object({ operation: z.literal("report"), result: AuthRunMutationResponse }).strict(),
-  z.object({ operation: z.literal("protected_fill"), result: ProtectedAuthFillResponse }).strict(),
   z.object({ operation: z.literal("advance_external"), result: ExternalAuthRunResponse }).strict(),
   z.object({ operation: z.literal("verify"), result: AuthRunMutationResponse }).strict(),
 ]);
@@ -716,8 +722,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "interaction_discover",
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
-    description:
-      "Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
+    description: `Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -780,8 +785,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.",
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -795,18 +799,21 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return mutationObservation, the operation's compact page snapshot. Reuse its refs and generations for immediate actions; refresh after later page changes.",
     input: BrowserTabsInput,
-    output: BrowserTargetListResponse,
+    output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
     execute: async (value) => {
+      let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
       if (value.operation === "open") {
-        await input.transport.openBrowserTarget(input.workspaceId, value.browserSessionId, {
-          ...(value.url ? { url: value.url } : {}),
-        });
+        mutationObservation = await input.transport.openBrowserTarget(
+          input.workspaceId,
+          value.browserSessionId,
+          { ...(value.url ? { url: value.url } : {}) },
+        );
       } else if (value.operation === "select") {
-        await input.transport.selectBrowserTarget(
+        mutationObservation = await input.transport.selectBrowserTarget(
           input.workspaceId,
           value.browserSessionId,
           value.targetId,
@@ -818,7 +825,16 @@ export function createInteractionAttemptToolDefinitions(
           value.targetId,
         );
       }
-      return await input.transport.listBrowserTargets(input.workspaceId, value.browserSessionId);
+      const tabs = await input.transport.listBrowserTargets(
+        input.workspaceId,
+        value.browserSessionId,
+      );
+      return mutationObservation
+        ? {
+            ...tabs,
+            mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
+          }
+        : tabs;
     },
   });
 
@@ -833,18 +849,29 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
-      let observation = await input.transport.observeBrowserTarget(
+      const observationRequest = input.transport.observeBrowserTarget(
         input.workspaceId,
         value.browserSessionId,
         value.targetId,
       );
       if (!value.includeScreenshot)
-        return projectBrowserObservation(observation, value.view ?? "compact");
-      const frame = await input.transport.captureBrowserTarget(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-      );
+        return projectBrowserObservation(await observationRequest, value.view ?? "compact");
+      // These are independent reads. Settle both before returning an error so
+      // the tool never leaves an outstanding capture behind after a failed read.
+      const [observed, captured] = await Promise.allSettled([
+        observationRequest,
+        Promise.resolve().then(() =>
+          input.transport.captureBrowserTarget(
+            input.workspaceId,
+            value.browserSessionId,
+            value.targetId,
+          ),
+        ),
+      ]);
+      if (observed.status === "rejected") throw observed.reason;
+      if (captured.status === "rejected") throw captured.reason;
+      let observation = observed.value;
+      const frame = captured.value;
       if (
         observation.target.targetGeneration !== frame.targetGeneration ||
         observation.target.documentGeneration !== frame.documentGeneration
@@ -989,7 +1016,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     output: BrowserAgentActionReceipt,
     readOnly: false,
@@ -1113,7 +1140,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "downloadSave"],
     title: "Save browser download to workspace",
     description:
-      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
+      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Missing folders on that path are created. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
     input: BrowserDownloadSaveInput,
     output: BrowserDownloadSaveResponse,
     readOnly: false,
@@ -1146,7 +1173,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "auth"],
     title: "Authenticate browser session",
     description:
-      "List configured site-auth connections and durable auth runs, or start, report, provider-advance, protected-fill, and verify one exact BrowserSession authentication run. Use advance_external for an external_provider authority. Provider secrets and hosted-login URLs never enter model tool arguments or results. If an operation returns needs_human, call interaction_request_human with the returned intervention id.",
+      "Reuse a saved sign-in, the first rung of the login ladder: list provider-managed (external_provider) site-auth connections and durable auth runs, or start, report, provider-advance with advance_external, and verify one exact BrowserSession authentication run. Provider credentials and hosted-login URLs stay with the provider. When no saved sign-in applies or a run returns needs_human, sign in yourself with browser_act fill or type: type saved credentials as secret references (such as {{secret:Item/password}} and {{secret:Item/otp}}), read email or SMS codes through connected tools, and solve CAPTCHAs yourself. Pass the returned intervention id to interaction_request_human only when a person must physically act, such as a push approval or a hardware key.",
     input: BrowserAuthInput,
     output: BrowserAuthOutput,
     readOnly: false,
@@ -1209,18 +1236,6 @@ export function createInteractionAttemptToolDefinitions(
           ),
         };
       }
-      if (value.operation === "protected_fill") {
-        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
-        return {
-          operation: value.operation,
-          result: await input.transport.protectedBrowserAuthFill(
-            input.workspaceId,
-            browserSessionId,
-            authRunId,
-            { operationId: context.operationId, ...request },
-          ),
-        };
-      }
       if (value.operation === "advance_external") {
         const { operation: _operation, browserSessionId, authRunId, ...request } = value;
         return {
@@ -1251,7 +1266,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "requestHuman"],
     title: "Request human interaction",
     description:
-      "Pause the current agent turn for a person to act in one exact browser tab or computer target. Browser login/MFA handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+      "Pause the current agent turn for a person to physically act in one exact browser tab or computer target: a push approval on their phone, a hardware security key, or another step only a person present can do. Log in yourself first (secret references and TOTP codes such as {{secret:Item/otp}} when secrets are available, email or SMS codes from connected tools) and solve CAPTCHAs yourself; never hand over a CAPTCHA or a step you can do. Handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
     input: RequestHumanInteractionToolInput,
     output: RequestHumanInteractionToolOutput,
     readOnly: false,
@@ -1354,7 +1369,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "publish"],
     title: "Save browser identity version",
     description:
-      "Explicitly quiesce and save the live BrowserSession as an immutable child revision of a reusable BrowserIdentity. Nothing is written back automatically.",
+      "Explicitly quiesce and save the live BrowserSession as an immutable child revision of a reusable BrowserIdentity. Nothing is written back automatically. After you log in with workspace or task credentials, publish so later browsers reuse the signed-in session instead of logging in again; do not publish after logging in with an Only me secret, because browser identities are shared with the whole workspace.",
     input: BrowserPublishInput,
     output: PublishBrowserRevisionResponse,
     readOnly: false,
@@ -1497,7 +1512,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. For pointer actions, set action.frameId from the observed frame and use coordinates in the returned screenshot's pixels; do not scale them to target.bounds. A pixel frame fence applies only to pointer actions; semantic actions use the observation fence even if a frame ID is supplied. Supplying the target generation and relevant action fence preserves the exact observation without refreshing it. Omit fences to use a fresh observation automatically. Keyboard type, set_value and clipboard write text may contain {{secret:…}} references, typed at dispatch and never shown to you. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActionReceipt,
     readOnly: false,
@@ -1550,7 +1565,106 @@ export function createInteractionAttemptToolDefinitions(
       }),
   });
 
+  if (
+    selected.has("computer_act") &&
+    selected.has("computer_open") &&
+    hasToolPermission(permissions, "sessions:control") &&
+    input.transport.callNativeComputerTool
+  ) {
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      const variants = cuaDesktopToolVariants(tool.name);
+      const inputSchema = nativeCuaSchema(
+        variants.map(({ inputSchema: variantInputSchema }) => {
+          const properties = { ...(variantInputSchema.properties as Record<string, unknown>) };
+          delete properties.session;
+          properties.computerSessionId = {
+            type: "string",
+            format: "uuid",
+            description: "CUA ComputerSession from computer_open",
+          };
+          return {
+            ...variantInputSchema,
+            properties,
+            required: [
+              ...((variantInputSchema.required as string[] | undefined) ?? []).filter(
+                (name) => name !== "session",
+              ),
+              "computerSessionId",
+            ],
+          };
+        }),
+      );
+      const outputSchema = variants.every((variant) => variant.outputSchema)
+        ? nativeCuaSchema(variants.map((variant) => variant.outputSchema!))
+        : undefined;
+      definitions.push({
+        identity: { serverId: "interaction", toolName: "cua_" + tool.name },
+        modelName: "interaction__cua_" + tool.name,
+        codemodePath: ["computer", tool.name],
+        title: tool.name,
+        description:
+          "Native CUA computer tool; requires a CUA-backed computer_open session. " +
+          tool.description,
+        inputSchema,
+        ...(outputSchema ? { outputSchema } : {}),
+        // Read-like tools can write screenshots to files; all native calls use
+        // the existing computer control authority, including ordered batches.
+        annotations: { ...tool.annotations, readOnlyHint: false, idempotentHint: false },
+        source: "interaction",
+        approval: "none",
+        execute: async (raw, context) => {
+          const { computerSessionId, ...args } = raw;
+          const id = z.string().uuid().parse(computerSessionId);
+          const receipt = boundComputerNativeReceipt(
+            ComputerNativeReceipt.parse(
+              await input.transport.callNativeComputerTool!(input.workspaceId, id, {
+                operationId: context.operationId,
+                tool: tool.name,
+                arguments: args,
+              }),
+            ),
+          );
+          const evidence = {
+            operationId: receipt.operationId,
+            state: receipt.state,
+            error: receipt.error,
+          };
+          const result = receipt.observation
+            ? AttemptToolResult.parse(receipt.observation.result)
+            : interactionErrorResult(
+                receipt.error?.code ?? "driver_failed",
+                receipt.error?.message ?? "Native CUA result is unavailable",
+              );
+          if (receipt.state !== "completed") {
+            result.isError = true;
+            result.content.push({
+              type: "text",
+              text: JSON.stringify({
+                opengeniOperation: evidence,
+                guidance:
+                  receipt.state === "outcome_unknown"
+                    ? "Do not replay this operation. Observe current state before deciding the next action."
+                    : "Operation failed. Inspect the retained CUA result before deciding the next action.",
+              }),
+            });
+          }
+          return AttemptToolResult.parse({
+            ...result,
+            _meta: { ...result._meta, opengeniOperation: evidence },
+          });
+        },
+      });
+    }
+  }
   return definitions;
+}
+
+/** Preserve exact platform alternatives instead of flattening away constraints. */
+function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
+  const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
+  return (
+    unique.length === 1 ? unique[0] : { type: "object", anyOf: unique }
+  ) as AttemptToolJsonSchema;
 }
 
 function filterDiscoveredSessions<
@@ -1586,7 +1700,7 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
 
 /**
  * Construct the canonical Browser/Computer attempt definitions against the
- * ordinary OpenGeni control plane. MCP/Codemode never receive controller keys,
+ * ordinary Opengeni control plane. MCP/Codemode never receive controller keys,
  * raw CDP, or provider credentials; every call re-signs exact attempt authority.
  */
 export function createFirstPartyInteractionAttemptToolDefinitions(
@@ -1718,8 +1832,27 @@ async function openBrowser(
     !created &&
     !targets.some((target) => sameBrowserUrl(target.url, value.initialUrl!))
   ) {
-    await transport.openBrowserTarget(workspaceId, session.id, { url: value.initialUrl });
-    targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+    if (!transport.openBrowserTargetWithInventory) {
+      throw new Error("browser transport does not support metadata-only tab opening");
+    }
+    const inventory = BrowserTargetListResponse.parse(
+      await transport.openBrowserTargetWithInventory(workspaceId, session.id, {
+        url: value.initialUrl,
+      }),
+    );
+    const controllerGeneration = session.controller?.controllerGeneration;
+    if (
+      inventory.browserSessionId !== session.id ||
+      inventory.controllerGeneration !== controllerGeneration ||
+      inventory.targets.some(
+        (target) =>
+          target.browserSessionId !== session.id ||
+          target.controllerGeneration !== controllerGeneration,
+      )
+    ) {
+      throw new Error("browser transport returned inventory for another session binding");
+    }
+    targets = inventory.targets;
   }
   return { session, targets };
 }
@@ -1921,6 +2054,14 @@ function selectAgentNodes(
 
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
+  view: "compact",
+): z.infer<typeof CompactBrowserObservation>;
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  view: "compact" | "full",
+): z.infer<typeof BrowserAgentObservation>;
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",
 ): z.infer<typeof BrowserAgentObservation> {
   if (view === "full") return observation;
@@ -2046,11 +2187,15 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     }
     // A failed read is still a useful tool result. Preserve the API's public
     // explanation; mutations and uncertain outcomes retain their failure path.
+    const secretReferenceFailure = secretReferenceToolResult(error);
+    if (secretReferenceFailure) return secretReferenceFailure;
     if (
       error instanceof OpenGeniApiError &&
       !error.outcomeUnknown &&
       (error.status < 500 || readOnly)
     ) {
+      const controlFailure = interactionToolErrorOutput(error);
+      if (controlFailure) return controlFailure;
       return interactionErrorResult(
         error.code ?? `http_${error.status}`,
         boundedErrorMessage(error.message),
@@ -2059,6 +2204,74 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
       );
     }
     throw error;
+  }
+}
+
+export type InteractionToolErrorResult = {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+  structuredContent: {
+    error: {
+      code: string;
+      message: string;
+      retryable: boolean;
+      outcomeUnknown: boolean;
+      requestId?: string;
+      details?: {
+        interactionLayer: "connected_machine";
+        interactionSurface: "browser" | "computer";
+        controlFailureCode: InteractionControlFailure["code"];
+        controlRequestId?: string;
+      };
+      guidance: string;
+    };
+  };
+};
+
+/** Preserve the API's closed control-failure projection at the model seam.
+ * Uncertain execution still throws from the tool executor; rendering its error
+ * must not replace that uncertainty with a generic instruction to retry. */
+export function interactionToolErrorOutput(error: unknown): InteractionToolErrorResult | null {
+  try {
+    if (!(error instanceof OpenGeniApiError)) return null;
+    const failure = interactionControlFailureFromError(error);
+    if (!failure && !error.outcomeUnknown) return null;
+    const opaque = (value: unknown): string | undefined =>
+      typeof value === "string" && value.length <= 128 && /^[A-Za-z0-9._:-]+$/u.test(value)
+        ? value
+        : undefined;
+    const requestId = opaque(error.correlationId);
+    const details = failure
+      ? {
+          interactionLayer: failure.layer,
+          interactionSurface: failure.surface,
+          controlFailureCode: failure.code,
+          ...(failure.controlRequestId ? { controlRequestId: failure.controlRequestId } : {}),
+        }
+      : undefined;
+    const projected = {
+      code:
+        typeof error.code === "string" && /^[A-Za-z0-9_]{1,64}$/u.test(error.code)
+          ? error.code
+          : "interaction_request_failed",
+      message: boundedErrorMessage(error.message),
+      retryable: error.retryable,
+      outcomeUnknown: error.outcomeUnknown,
+      ...(requestId ? { requestId } : {}),
+      ...(details ? { details } : {}),
+      guidance: error.outcomeUnknown
+        ? "The request may have completed. Do not repeat actions automatically; inspect the existing session before continuing."
+        : error.retryable
+          ? "Check the existing session before retrying. Keep its identity and do not recreate it to bypass the failure."
+          : "Resolve the reported issue before calling again; this failure is not marked retryable.",
+    };
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({ error: projected }) }],
+      structuredContent: { error: projected },
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -2090,6 +2303,36 @@ function interactionErrorResult(
   };
 }
 
+/** The API refused a Browser or Computer action before dispatch because a
+ * `{{secret:…}}` reference failed. Render it exactly like the in-process
+ * adapters (`SecretReferenceError.toModelOutput()`), including the ready-made
+ * ask card for missing secrets. The body never contains values. */
+export function secretReferenceToolResult(error: unknown): AttemptToolResultValue | null {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 422 || !error.body) return null;
+  try {
+    const parsed = JSON.parse(error.body) as {
+      error?: { details?: { reason?: unknown; secretReference?: unknown } };
+    };
+    const details = parsed.error?.details;
+    const output = details?.secretReference;
+    if (
+      details?.reason !== "secret_reference_error" ||
+      typeof output !== "object" ||
+      output === null ||
+      Array.isArray(output)
+    ) {
+      return null;
+    }
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: JSON.stringify(output) }],
+      structuredContent: output as NonNullable<AttemptToolResultValue["structuredContent"]>,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function jsonSchema(schema: z.ZodType): AttemptToolJsonSchema {
   return z.toJSONSchema(schema, { target: "draft-2020-12" }) as AttemptToolJsonSchema;
 }
@@ -2110,7 +2353,7 @@ function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {
   const url = new URL(firstPartyMcpInternalWorkspaceUrl(settings, workspaceId));
   const suffix = `/v1/workspaces/${workspaceId}/mcp`;
   if (!url.pathname.endsWith(suffix)) {
-    throw new Error("First-party MCP URL cannot be projected to the OpenGeni API base URL");
+    throw new Error("First-party MCP URL cannot be projected to the Opengeni API base URL");
   }
   url.pathname = url.pathname.slice(0, -suffix.length) || "/";
   url.search = "";

@@ -131,7 +131,7 @@ describe("race-safe confined file reads", () => {
           const result = spawnSync("bash", ["--noprofile", "--norc", "-c", cmd], {
             encoding: "utf8",
           });
-          return { stdout: result.stdout, exitCode: result.status };
+          return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status };
         },
       },
     });

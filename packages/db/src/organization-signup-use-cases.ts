@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 
-/** How a new organization owner said they want to use OpenGeni at signup. */
+/** How a new organization owner said they want to use Opengeni at signup. */
 export const ORGANIZATION_SIGNUP_USE_CASES = ["embed", "cloud"] as const;
 export type OrganizationSignupUseCase = (typeof ORGANIZATION_SIGNUP_USE_CASES)[number];
 

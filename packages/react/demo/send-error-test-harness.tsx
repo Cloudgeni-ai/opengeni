@@ -130,7 +130,7 @@ function SendErrorHarness() {
       data-og-theme="light"
     >
       <header className="border-b border-og-border px-5 py-4 text-og-sm font-medium">
-        Daily OpenGeni new users
+        Daily Opengeni new users
       </header>
       <section className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-4 py-5">
         <MessageTimeline

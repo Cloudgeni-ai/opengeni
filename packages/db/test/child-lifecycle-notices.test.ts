@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
@@ -8,15 +8,12 @@ import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
-  armCodexCapacityWait,
-  armXaiCapacityWait,
+  armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
   childWaitingCapacityDedupeKey,
   claimPendingSessionSystemUpdateOutbox,
-  ensureCodexRotationSettings,
   failSessionWorkBeforeAttemptClaim,
   getSessionGoal,
-  updateCodexRotationSettings,
   childPausedDedupeKey,
   childProgressDedupeKey,
   childRequiresActionDedupeKey,
@@ -41,6 +38,11 @@ import {
   withWorkspaceSessionActivityRls,
   type SessionSystemUpdateOutboxDelivery,
 } from "../src/index";
+import {
+  armCodexCapacityWait,
+  ensureCodexRotationSettings,
+  updateCodexRotationSettings,
+} from "./fixtures/legacy-codex";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -241,9 +243,9 @@ test.each([false, true])(
       sourceId: crypto.randomUUID(),
       dedupeKey: crypto.randomUUID(),
       summary: "Actionable peer result",
-      xaiProviderAccountAuthoritySnapshot: incompatible
+      claudeProviderAccountAuthoritySnapshot: incompatible
         ? { version: 1, scope: "organization" }
-        : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+        : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
       payload: {
         type: "agent_message",
         text: "Actionable peer result",
@@ -1075,31 +1077,30 @@ describe("child lifecycle notices", () => {
       },
     });
 
-    const xaiChild = await startSession(grant, { parent, message: "xai work" });
-    const xai = await armXaiCapacityWait(client.db, {
+    // Claude uses the same provider-neutral waiter and child notice writer.
+    const claudeChild = await startSession(grant, { parent, message: "claude work" });
+    const claude = await armSubscriptionCoreCapacityWait(client.db, "claude", {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      sessionId: xaiChild.session.id,
-      turnId: xaiChild.turn.id,
-      attemptId: xaiChild.attemptId,
-      workflowId: `session-${xaiChild.session.id}`,
-      authoritySnapshot: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+      sessionId: claudeChild.session.id,
+      turnId: claudeChild.turn.id,
+      attemptId: claudeChild.attemptId,
+      waitReason: "capacity",
       earliestResetAt: null,
-      failurePayload: { error: "all connected SuperGrok subscriptions are unavailable" },
+      failurePayload: { error: "all connected Claude subscriptions are unavailable" },
     });
-    if (xai.action !== "waiting") throw new Error(`xai wait not armed: ${xai.action}`);
+    if (claude.action !== "waiting") throw new Error(`claude wait not armed: ${claude.action}`);
     expect(
       await outbox(
         grant,
         childWaitingCapacityDedupeKey({
-          childSessionId: xaiChild.session.id,
-          waiterId: xai.waiter.id,
+          childSessionId: claudeChild.session.id,
+          waiterId: claude.waiter.waiterId,
         }),
       ),
     ).toMatchObject({
       kind: "child_waiting_capacity",
-      payload: { provider: "xai", childTurnId: xaiChild.turn.id },
+      payload: { provider: "claude", childTurnId: claudeChild.turn.id },
     });
   });
 

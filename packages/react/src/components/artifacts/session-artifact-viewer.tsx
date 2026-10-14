@@ -203,7 +203,7 @@ function EditableBody({
     workspaceId: string;
     sessionId: string;
     result:
-      | { kind: "ready"; config: NonNullable<ClientConfig["artifacts"]> }
+      | { kind: "ready"; config: Exclude<NonNullable<ClientConfig["artifacts"]>, false> }
       | { kind: "unavailable" }
       | { kind: "error"; error: unknown };
   } | null>(null);
@@ -359,7 +359,9 @@ function EditableBody({
   );
 }
 
-function artifactCapabilityKey(config: NonNullable<ClientConfig["artifacts"]>): string {
+function artifactCapabilityKey(
+  config: Exclude<NonNullable<ClientConfig["artifacts"]>, false>,
+): string {
   return JSON.stringify([
     config.editableLiveUrl,
     config.cachePartition.accountId,

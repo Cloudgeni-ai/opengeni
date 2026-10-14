@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { DatabaseTransactionError } from "../src/persistence-errors";
 import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -347,10 +348,16 @@ describe("pending tool registration rollback retries", () => {
         return Reflect.get(target, key, receiver);
       },
     });
-    await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
+    const error = await registerPendingSessionToolCall(unavailable, input).catch(
+      (caughtError: unknown) => caughtError,
+    );
+    expect(error).toMatchObject({
       details: { attempts: 2, retryOutcome: "not_retryable", sqlState: null },
-      cause: failure,
     });
+    const transaction = (error as Error).cause;
+    expect(transaction).toBeInstanceOf(DatabaseTransactionError);
+    expect(transaction).toMatchObject({ stage: "admission" });
+    expect((transaction as Error).cause).toBe(failure);
     expect(attempts).toBe(2);
     expect(await receipts(input)).toHaveLength(0);
   });

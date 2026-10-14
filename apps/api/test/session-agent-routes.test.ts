@@ -43,7 +43,16 @@ const AGENT_PERMISSIONS: Permission[] = [
   "goals:manage",
   "workspace:read",
 ];
-const RUNTIME_TOOLS = ["command_read", "command_wait", "set_session_title", "wait_for_input"];
+// What "none" keeps: runtime mechanics plus reaching the person (humanInput).
+const RUNTIME_TOOLS = [
+  "command_read",
+  "command_wait",
+  "inbox_tidy",
+  "notification_withdraw",
+  "notify_user",
+  "set_session_title",
+  "wait_for_input",
+];
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -194,7 +203,7 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
     const grant = await fixture();
     const config = await request(app(), await humanBearer(grant), "GET", "/v1/config/client");
     expect(config.json.agentConfig).toMatchObject({ enabled: true, defaultForNewSessions: true });
-    expect(config.json.agentConfig.capabilities).toHaveLength(13);
+    expect(config.json.agentConfig.capabilities).toHaveLength(14);
   });
 
   test("MCP session_create exposes optional agent selection", async () => {

@@ -11,7 +11,6 @@ import {
   getEnrollment,
   getRig,
   getSandbox,
-  getVariableSet,
   NewSessionDraftAccessError,
   newSessionDraftModelProvided,
   newSessionDraftSelectedProjectChannelId,
@@ -32,11 +31,7 @@ import {
   validateGitHubRepositorySelection,
   validateToolRefs,
 } from "../domain/resources";
-import {
-  hasPermission,
-  hasVerifiedOwningUserAuthorization,
-  type AccessGrantAuthorization,
-} from "../access";
+import { hasVerifiedOwningUserAuthorization, type AccessGrantAuthorization } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
 import { resolveDefaultSessionModel } from "../default-session-model";
 import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
@@ -174,35 +169,11 @@ async function hydrateNewSessionDraft(
   }
 
   const options = { ...mapped.options };
-  const variableSetIds = options.variableSetIds ?? [];
-  if (variableSetIds.length > 0) {
-    const selectionsAuthorized =
-      hasPermission(grant.permissions, "variable-sets:attach") &&
-      hasPermission(grant.permissions, "variable-sets:use") &&
-      (
-        await Promise.all(
-          variableSetIds.map((variableSetId) =>
-            getVariableSet(
-              deps.db,
-              { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-              variableSetId,
-            ),
-          ),
-        )
-      ).every(Boolean);
-    if (selectionsAuthorized) {
-      options.variableSetIds = variableSetIds;
-      options.variableSetId = variableSetIds[variableSetIds.length - 1];
-    } else {
-      delete options.variableSetIds;
-      delete options.variableSetId;
-    }
-  } else {
-    delete options.variableSetIds;
-    delete options.variableSetId;
-  }
+  // Variable Sets were replaced by vaults: stale draft selections are dropped.
+  delete options.variableSetIds;
+  delete options.variableSetId;
   if (options.rigId) {
-    const rig = await getRig(deps.db, workspaceId, options.rigId);
+    const rig = await getRig(deps.db, { ...grant, workspaceId }, options.rigId);
     if (!rig?.activeVersion) delete options.rigId;
   }
   if (options.targetSandboxId) {

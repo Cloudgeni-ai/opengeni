@@ -14,6 +14,11 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { userErrorText } from "@/lib/api-error";
+import {
+  feedbackDialogCopy,
+  feedbackSentimentLabel,
+  feedbackSubmission,
+} from "@opengeni/react/session-feedback-model";
 
 type FeedbackClient = Pick<OpenGeniClient, "createFeedback" | "listOwnFeedback">;
 
@@ -33,24 +38,19 @@ export function FeedbackDialog(props: {
   const pending = useRef<CreateFeedbackRequest | null>(null);
   const submitting = useRef(false);
   const fieldId = useId();
+  const copy = feedbackDialogCopy(props);
   async function submit() {
     if (submitting.current) return;
-    const payload = {
-      sessionId: props.sessionId,
-      turnId: props.turnId,
-      sentiment: props.sentiment,
-      comment: comment || undefined,
-    };
-    const previous = pending.current;
-    if (
-      !previous ||
-      previous.sessionId !== payload.sessionId ||
-      previous.turnId !== payload.turnId ||
-      previous.sentiment !== payload.sentiment ||
-      previous.comment !== payload.comment
-    ) {
-      pending.current = { ...payload, idempotencyKey: crypto.randomUUID() };
-    }
+    pending.current = feedbackSubmission(
+      {
+        sessionId: props.sessionId,
+        turnId: props.turnId,
+        sentiment: props.sentiment,
+        comment: comment || undefined,
+      },
+      pending.current,
+      () => crypto.randomUUID(),
+    );
     submitting.current = true;
     setBusy(true);
     setError(null);
@@ -76,21 +76,11 @@ export function FeedbackDialog(props: {
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
-            {props.turnId
-              ? "Rate this reply"
-              : props.sessionId
-                ? "Rate this session"
-                : "Send feedback"}
-          </DialogTitle>
-          <DialogDescription>
-            {props.sessionId
-              ? "Share what worked or what could be better."
-              : "Tell us what could make Opengeni better."}
-          </DialogDescription>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.description}</DialogDescription>
         </DialogHeader>
         {props.sentiment ? (
-          <p className="text-sm">{props.sentiment === "positive" ? "Thumbs up" : "Thumbs down"}</p>
+          <p className="text-sm">{feedbackSentimentLabel(props.sentiment)}</p>
         ) : null}
         <div className="grid gap-2">
           <Label htmlFor={fieldId}>

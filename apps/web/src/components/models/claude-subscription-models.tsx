@@ -19,6 +19,7 @@ import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { organizationReachLabel } from "./models-ui";
 import {
   ProviderCustomModels,
   type ProviderConnection,
@@ -33,6 +34,23 @@ export function claudePlan(account: ClaudeSubscriptionAccount) {
   const words = account.plan.replace(/^claude_/, "").replaceAll("_", " ");
   return "Claude " + words.charAt(0).toUpperCase() + words.slice(1);
 }
+/** The usage cell of a Claude account row, from the usage its listing carries. */
+export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.ReactNode {
+  if (account.status !== "active") return null;
+  if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
+  return (
+    <ClaudeUsageReadout
+      state={{
+        value: account.usage ?? null,
+        loading: false,
+        refreshing: false,
+        error: false,
+        canRefresh: false,
+        refresh: async () => {},
+      }}
+    />
+  );
+}
 export function ClaudeRow({
   claude,
   account,
@@ -46,37 +64,32 @@ export function ClaudeRow({
   onOpen: () => void;
   scopeLabel?: string;
 }) {
-  const usage = {
-    value: account.usage ?? null,
-    loading: false,
-    refreshing: false,
-    error: false,
-    canRefresh: false,
-    refresh: async () => {},
-  };
+  // An organization's own account says where it's available, like Codex and SuperGrok.
+  const access = useConnectionAccess({
+    client: claude.client,
+    organizationId: claude.organizationId,
+    kind: "claude_subscription",
+    connectionId: account.id,
+    enabled: Boolean(claude.organizationId) && scopeLabel === undefined,
+  });
   return (
     <SubscriptionAccountRow
       provider="claude_subscription"
       title={subscriptionAccountName(account)}
       email={account.email}
-      primary={account.id === claude.activeAccountId}
+      primary={claude.accounts.length > 1 && account.id === claude.activeAccountId}
       meta={[
         scopeLabel ??
-          (claude.organizationId || claude.inherited
-            ? places.scope.organization
-            : account.scope === "user"
-              ? places.scope.user
-              : places.scope.workspace),
+          (claude.organizationId
+            ? organizationReachLabel(places.scope, access.data)
+            : claude.inherited
+              ? places.scope.organization
+              : account.scope === "user"
+                ? places.scope.user
+                : places.scope.workspace),
         claudePlan(account),
       ]}
-      cells={{
-        usage:
-          account.status !== "active" ? null : !account.allocatorEnabled ? (
-            <StatusBadge status="paused" variant="dot" />
-          ) : (
-            <ClaudeUsageReadout state={usage} />
-          ),
-      }}
+      cells={{ usage: claudeUsageCell(account) }}
       indicator={
         account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
       }

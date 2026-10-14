@@ -549,7 +549,7 @@ async function fetchLiveGitHubJson(
       headers: {
         accept: "application/vnd.github+json",
         authorization,
-        "user-agent": "OpenGeni",
+        "user-agent": "Opengeni",
         "x-github-api-version": GITHUB_API_VERSION,
       },
       signal: AbortSignal.timeout(10_000),
@@ -776,7 +776,7 @@ function brokerError(status: 401 | 403 | 404 | 502, message: string): Response {
     "x-content-type-options": "nosniff",
   });
   if (status === 401) {
-    headers.set("www-authenticate", 'Basic realm="OpenGeni Git broker", charset="UTF-8"');
+    headers.set("www-authenticate", 'Basic realm="Opengeni Git broker", charset="UTF-8"');
   }
   return new Response(`${message}\n`, {
     status,

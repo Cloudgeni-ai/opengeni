@@ -1,7 +1,7 @@
 # Workbench production acceptance
 
 This document defines both the executable release gate and the broader product
-readiness program for the generic OpenGeni workbench: the
+readiness program for the generic Opengeni workbench: the
 Changes, Files, editor, Terminal, Desktop, capture-backed cold path, and live
 sandbox reconciliation exposed by `@opengeni/react` and consumed by the
 first-party web app. It applies equally to the standalone product and embedded
@@ -33,7 +33,7 @@ true at the same time:
 7. The evidence bundle is complete, machine-readable, sanitized, and retained
    with the release. Missing evidence fails closed.
 
-It is impossible to prove that unknown defects do not exist. OpenGeni therefore
+It is impossible to prove that unknown defects do not exist. Opengeni therefore
 uses the strongest executable equivalent for each candidate: zero known
 defects, deterministic release gates, the complete authenticated live harness,
 100 capture/navigation/cancellation observations, and a failure-free live
@@ -46,7 +46,7 @@ reviewers failed to notice a problem.
 
 Every live evidence bundle MUST bind:
 
-- full 40-character OpenGeni source SHA;
+- full 40-character Opengeni source SHA;
 - the canonical release-candidate workflow run and its unexpired immutable
   Actions artifact identity/digest (the release workflow derives the download
   URL from the validated artifact ID; dispatchers cannot choose a URL or hash);
@@ -109,7 +109,7 @@ run's artifact. The workflow takes an operator run ID—not an evidence URL or
 hash—then verifies the successful main-branch workflow identity, current-main
 ancestry, exact source-named artifact ownership, expiry, and provider digest.
 It imports only the sanitized bundle and sidecar, replaces candidate and public
-producer authority with independently verified OpenGeni metadata, and validates
+producer authority with independently verified Opengeni metadata, and validates
 the complete schema-v2 bundle before it can emit the canonical
 `release-acceptance-<sourceSha>` artifact. The pre-publication release workflow
 accepts only the candidate and acceptance workflow run IDs, resolves their

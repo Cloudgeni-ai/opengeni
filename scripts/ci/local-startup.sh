@@ -33,7 +33,7 @@ start_launcher() {
   setsid bun run dev >"$log" 2>&1 < /dev/null &
   echo "$!" > "$pid_file"
   deadline=$((SECONDS + 2700))
-  until grep -q "OpenGeni dev stack ready:" "$log"; do
+  until grep -q "Opengeni dev stack ready:" "$log"; do
     if ! kill -0 "$(cat "$pid_file")" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
       tail -100 "$log"
       return 1

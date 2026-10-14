@@ -42,6 +42,8 @@ export type CdpAccessibilitySnapshot = {
   entries: CdpAccessibilityEntry[];
   entriesByRef: Map<string, CdpAccessibilityEntry>;
   entriesByNodeId: Map<string, CdpAccessibilityEntry>;
+  /** Raw parent links, including ignored nodes that have no entry. */
+  rawParentByNodeId?: ReadonlyMap<string, string>;
 };
 
 /** AX ids and their relationships are scoped to one frame tree. Prefix them
@@ -108,6 +110,21 @@ export function normalizeCdpAccessibilityTree(options: {
       nameSources: nameSourceTokens(node.name?.sources),
     });
   }
+  // The spin buttons of a native date/time input edit one part each and do
+  // not take text. Fill belongs to the input, which accepts a whole value.
+  for (const entry of entriesByNodeId.values()) {
+    if (entry.role !== "spinbutton" || !entry.actions.includes("fill")) continue;
+    let parentId = entry.parentNodeId;
+    for (let depth = 0; depth < 4 && parentId; depth++) {
+      const parent = rawById.get(parentId);
+      if (!parent) break;
+      if (NATIVE_DATE_TIME_ROLES.has(roleValue(parent))) {
+        entry.actions = entry.actions.filter((action) => action !== "fill");
+        break;
+      }
+      parentId = typeof parent.parentId === "string" ? parent.parentId : null;
+    }
+  }
 
   const roots: InteractionSemanticNodeValue[] = [];
   let focusedRef: string | null = null;
@@ -173,7 +190,48 @@ export function normalizeCdpAccessibilityTree(options: {
     entries,
     entriesByRef: new Map(entries.map((entry) => [entry.ref, entry])),
     entriesByNodeId: new Map(entries.map((entry) => [entry.nodeId, entry])),
+    rawParentByNodeId: new Map(
+      [...rawById].flatMap(([nodeId, node]) =>
+        typeof node.parentId === "string" ? [[nodeId, node.parentId] as const] : [],
+      ),
+    ),
   };
+}
+
+/** Accessibility roles that frame where an element sits on the page. */
+const CONTAINER_ROLES = new Set([
+  "alertdialog",
+  "banner",
+  "complementary",
+  "contentinfo",
+  "dialog",
+  "form",
+  "main",
+  "menu",
+  "menubar",
+  "navigation",
+  "region",
+  "search",
+  "toolbar",
+]);
+
+/** Nearest dialog, landmark, menu or toolbar ancestor of an entry. */
+export function accessibilityContainer(
+  snapshot: Pick<CdpAccessibilitySnapshot, "entriesByNodeId" | "rawParentByNodeId">,
+  nodeId: string,
+): CdpAccessibilityEntry | null {
+  const visited = new Set<string>([nodeId]);
+  let parentId =
+    snapshot.entriesByNodeId.get(nodeId)?.parentNodeId ??
+    snapshot.rawParentByNodeId?.get(nodeId) ??
+    null;
+  while (parentId !== null && !visited.has(parentId)) {
+    visited.add(parentId);
+    const ancestor = snapshot.entriesByNodeId.get(parentId);
+    if (ancestor && CONTAINER_ROLES.has(ancestor.role)) return ancestor;
+    parentId = ancestor?.parentNodeId ?? snapshot.rawParentByNodeId?.get(parentId) ?? null;
+  }
+  return null;
 }
 
 function safeValue(
@@ -189,6 +247,9 @@ function safeValue(
 function isEditableControlRole(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "spinbutton"].includes(role);
 }
+
+/** Chromium's roles for native date, time, month, week and datetime-local inputs. */
+const NATIVE_DATE_TIME_ROLES: ReadonlySet<string> = new Set(["Date", "DateTime", "InputTime"]);
 
 function semanticRef(options: {
   controllerGeneration: string;
@@ -254,6 +315,7 @@ function actionsForRole(
   if (["textbox", "searchbox", "spinbutton"].includes(role)) {
     return ["focus", "fill", "type", "press"];
   }
+  if (NATIVE_DATE_TIME_ROLES.has(role)) return ["focus", "fill"];
   if (["checkbox", "radio", "switch"].includes(role)) return ["click", "check"];
   if (["combobox", "listbox"].includes(role)) return ["click", "select"];
   return [];

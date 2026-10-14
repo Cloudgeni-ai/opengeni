@@ -32,6 +32,22 @@ export class InputWaitYield {
   // Recognize our SDK boundary exit by identity, not a provider/tool error's text.
   private readonly boundaryExit = new MaxTurnsExceededError("Runtime input wait yield");
 
+  constructor(private readonly replyGuard?: () => Promise<string | null>) {}
+
+  /** Why a requested wait must not be registered yet, or null to proceed. The
+   * caller returns the reason to the model as a tool error without admission.
+   */
+  async replyRefusal(): Promise<string | null> {
+    if (!this.replyGuard || this.terminal || this.accepted) return null;
+    try {
+      return await this.replyGuard();
+    } catch {
+      // The guard is a reply-quality check, never an availability gate: when
+      // it cannot decide (for example a failed read), the wait proceeds.
+      return null;
+    }
+  }
+
   get requested(): boolean {
     return this.accepted;
   }
@@ -300,3 +316,28 @@ export class InputWaitYield {
 }
 
 export type InputWaitYieldStream = ReturnType<InputWaitYield["beginStream"]>;
+
+/**
+ * Whether the model response that asked for tools contains assistant text.
+ * Tools run after the SDK records that response, so this sees text streamed
+ * alongside the wait call even before its completion event is persisted.
+ */
+export function modelResponseHasVisibleText(response: unknown): boolean {
+  const output = (response as { output?: unknown } | null | undefined)?.output;
+  if (!Array.isArray(output)) return false;
+  return output.some((item) => {
+    const message = item as { type?: unknown; role?: unknown; content?: unknown } | null;
+    if (message?.type !== "message" || message.role !== "assistant") return false;
+    if (typeof message.content === "string") return message.content.trim().length > 0;
+    return (
+      Array.isArray(message.content) &&
+      message.content.some((part: { type?: unknown; text?: unknown } | null) => {
+        return (
+          part?.type === "output_text" &&
+          typeof part.text === "string" &&
+          part.text.trim().length > 0
+        );
+      })
+    );
+  });
+}

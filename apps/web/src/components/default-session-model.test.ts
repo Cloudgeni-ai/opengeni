@@ -10,7 +10,7 @@ function catalogModel(
 ): WorkspaceModelCatalogModel {
   return {
     provider: "opengeni",
-    providerLabel: "OpenGeni",
+    providerLabel: "Opengeni",
     api: "responses",
     cost: "credits",
     credentialReadiness: { status: "ready", reason: null, basis: "configuration", checkedAt: null },

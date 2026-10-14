@@ -7,8 +7,16 @@ import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/
 import {
   UsageMeterGroup,
   UsageReadout,
+  usageResets,
   type UsageWindowReading,
 } from "@/components/ui/usage-meter";
+import {
+  invalidateSharedQueries,
+  isSharedQueryAccessRefusal,
+  peekSharedQuery,
+  sharedQueryWriter,
+  type SharedQueryKey,
+} from "@/lib/shared-query";
 
 export type ClaudeUsageState = {
   value: ClaudeSubscriptionUsage | null;
@@ -18,6 +26,38 @@ export type ClaudeUsageState = {
   canRefresh: boolean;
   refresh(): Promise<void>;
 };
+
+// The last successful reading per exact scope + reading kind + credential +
+// version, retained per client so a revisit renders it at once while the page
+// re-reads it. Only a reading whose credential id and version are both known is
+// retained: without them (people who can't manage the connection) a replaced
+// credential could not be told apart, so those readers always start cold.
+function claudeUsageQueryKey(input: {
+  scope: "workspace" | "organization";
+  scopeId: string;
+  accountPool: boolean;
+  credentialId?: string | null | undefined;
+  credentialVersion?: number | null | undefined;
+}): SharedQueryKey | null {
+  if (!input.credentialId || input.credentialVersion === undefined) return null;
+  if (input.credentialVersion === null) return null;
+  return [
+    "claude-usage",
+    input.scope,
+    input.scopeId,
+    input.accountPool ? "pool-account" : "connection",
+    input.credentialId,
+    input.credentialVersion,
+  ];
+}
+function retainedClaudeUsage(
+  client: object,
+  queryKey: SharedQueryKey | null,
+  readable: boolean,
+): ClaudeSubscriptionUsage | null {
+  if (!readable || !queryKey) return null;
+  return peekSharedQuery<ClaudeSubscriptionUsage>(client, queryKey)?.data ?? null;
+}
 
 export function useClaudeUsage({
   client,
@@ -42,7 +82,15 @@ export function useClaudeUsage({
   accountPool?: boolean;
   onCredentialChanged?: () => Promise<unknown>;
 }): ClaudeUsageState {
-  const key = `${scope}:${scopeId}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
+  const key = `${scope}:${scopeId}:${accountPool ? "pool-account" : "connection"}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
+  const queryKey = claudeUsageQueryKey({
+    scope,
+    scopeId,
+    accountPool,
+    credentialId,
+    credentialVersion,
+  });
+  const queryKeyId = queryKey ? JSON.stringify(queryKey) : null;
   const currentKey = useRef(key);
   currentKey.current = key;
   const credentialChanged = useRef(onCredentialChanged);
@@ -56,7 +104,16 @@ export function useClaudeUsage({
     error: boolean;
     loading: boolean;
     refreshing: boolean;
-  }>({ key, value: null, error: false, loading: enabled && connected, refreshing: false });
+  }>(() => {
+    const retained = retainedClaudeUsage(client, queryKey, enabled && connected);
+    return {
+      key,
+      value: retained,
+      error: false,
+      loading: enabled && connected && !retained,
+      refreshing: false,
+    };
+  });
   const load = useCallback(
     async (refresh: boolean) => {
       if (!enabled || !connected || (refresh && !canManage)) return;
@@ -66,6 +123,9 @@ export function useClaudeUsage({
         refreshingKey.current = { key, request };
         setState((previous) => ({ ...previous, key, refreshing: true }));
       }
+      const retainedKey = queryKeyId ? (JSON.parse(queryKeyId) as SharedQueryKey) : null;
+      // Created before the read: a clear (identity change) meanwhile refuses it.
+      const write = sharedQueryWriter(client);
       try {
         const result =
           accountPool && credentialId
@@ -91,21 +151,27 @@ export function useClaudeUsage({
             result.credentialVersion !== credentialVersion)
         ) {
           setState({ key, value: null, error: true, loading: false, refreshing: false });
+          if (retainedKey) void invalidateSharedQueries(client, retainedKey);
           await credentialChanged.current?.();
           return;
         }
         setState({ key, value: result, error: false, loading: false, refreshing: false });
+        if (retainedKey) write(retainedKey, result);
         if (result.refreshStatus === "reconnect") {
           if (reconnectNotified.current !== key) {
             reconnectNotified.current = key;
             await credentialChanged.current?.();
           }
         } else if (reconnectNotified.current === key) reconnectNotified.current = null;
-      } catch {
+      } catch (error) {
         if (currentKey.current !== key || generation.current !== request) return;
+        // A refusal means this person can no longer see the reading at all:
+        // drop the retained one instead of showing it beside the error.
+        const refused = isSharedQueryAccessRefusal(error);
+        if (refused && retainedKey) void invalidateSharedQueries(client, retainedKey);
         setState((previous) => ({
           key,
-          value: previous.key === key ? previous.value : null,
+          value: !refused && previous.key === key ? previous.value : null,
           error: true,
           loading: false,
           refreshing: false,
@@ -125,10 +191,22 @@ export function useClaudeUsage({
       credentialVersion,
       credentialId,
       accountPool,
+      queryKeyId,
     ],
   );
   useEffect(() => {
-    setState({ key, value: null, error: false, loading: enabled && connected, refreshing: false });
+    const retained = retainedClaudeUsage(
+      client,
+      queryKeyId ? (JSON.parse(queryKeyId) as SharedQueryKey) : null,
+      enabled && connected,
+    );
+    setState({
+      key,
+      value: retained,
+      error: false,
+      loading: enabled && connected && !retained,
+      refreshing: false,
+    });
     void load(false);
     const poll = () => {
       if (document.visibilityState !== "hidden") void load(false);
@@ -141,7 +219,7 @@ export function useClaudeUsage({
       if (timer) clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [key, load, enabled, connected]);
+  }, [client, key, queryKeyId, load, enabled, connected]);
   return {
     value: state.key === key ? state.value : null,
     error: state.key === key && state.error,
@@ -190,7 +268,9 @@ export function claudeUsageReadings(
       window.usedPercent === null
         ? { valueLabel: "Unavailable" }
         : {}),
-      ...(reset !== null && !expired ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
+      ...(reset !== null && !expired
+        ? { resetsLabel: formatAbsoluteTime(reset, { now }), resetsAt: reset }
+        : {}),
     };
   });
 }
@@ -222,12 +302,20 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
     planReadings.find((item) => item.limitReached || item.percent === 0) ??
     planReadings.find((item) => item.percent !== null) ??
     readings[0]!;
+  // The shown window's reset, then the plan's other main limit.
+  const resetWindows = [
+    reading,
+    ...readings.filter(
+      (item) =>
+        item !== reading && (item.label === labels.five_hour || item.label === labels.seven_day),
+    ),
+  ];
   return (
     <UsageReadout
       window={reading.label.replace(/^Weekly/, "this week").replace(/^5-hour$/, "this period")}
       percent={reading.percent}
       limitReached={reading.limitReached}
-      resetsLabel={reading.resetsLabel}
+      resets={usageResets(resetWindows, reading.label)}
       loading={state.loading}
     />
   );
@@ -262,7 +350,7 @@ export function ClaudeUsage({
   return (
     <DetailSection
       title="Usage"
-      description="Limits apply to the connected Claude plan, including usage outside OpenGeni."
+      description="Limits apply to the connected Claude plan, including usage outside Opengeni."
     >
       <UsageMeterGroup
         windows={readings}

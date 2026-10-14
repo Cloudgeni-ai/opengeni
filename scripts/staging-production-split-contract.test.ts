@@ -31,7 +31,7 @@ describe("staging / production split workflows", () => {
     expect(source).toContain("PRs into production must use head main (promote) or hotfix/*.");
   });
 
-  test("canary npm publish does not consume changesets or move latest", () => {
+  test("canary publication uses the exact workflow source and cannot move latest", () => {
     const source = workflow("publish-canary.yml");
     const admission = source.indexOf("name: Admit protected main source");
     const checkout = source.indexOf("name: Check out source");
@@ -42,9 +42,7 @@ describe("staging / production split workflows", () => {
     expect(checkout).toBeLessThan(install);
     expect(install).toBeLessThan(publish);
     expect(source).toContain('[[ "$GITHUB_REF" == "refs/heads/main" ]]');
-    expect(source).not.toContain('[[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]');
-    expect(source).toContain('git merge-base --is-ancestor "$SOURCE_SHA" HEAD');
-    expect(source).toContain('git checkout --quiet --detach "$SOURCE_SHA"');
+    expect(source).toContain('[[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]');
     expect(source).not.toContain("export GITHUB_SHA=");
     expect(source).toContain('[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]');
     expect(source).toContain('ref: "${{ github.sha }}"');
@@ -52,9 +50,9 @@ describe("staging / production split workflows", () => {
     expect(source).not.toContain("inputs.source_sha || github.sha");
     expect(source).toContain("bun scripts/publish-canary.ts");
     expect(source).toContain("group: publish-canary");
-    expect(source).toContain('NPM_CONFIG_PROVENANCE: "true"');
+    expect(source).toContain("id-token: write");
     expect(source).toContain('OPENGENI_RELEASE: "1"');
-    expect(source).toContain("registry-url: https://registry.npmjs.org");
+    expect(source).not.toContain("npm publish");
     expect(source).not.toContain("changeset publish");
     expect(source).not.toContain("--tag latest");
   });

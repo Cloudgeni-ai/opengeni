@@ -22,7 +22,6 @@ import type {
   SessionMcpServerMetadata,
   SessionTurn,
   SteerMessageResult,
-  WorkspaceEnvironment,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -31,7 +30,6 @@ import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
-import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
 
@@ -105,7 +103,7 @@ function gatewayError(status = 502): OpenGeniApiError {
     retryable: true,
     correlationId: `edge-${status}-safe`,
     outcomeUnknown: true,
-    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+    displayMessage: "Opengeni is temporarily unavailable — retry.",
   });
 }
 
@@ -116,7 +114,7 @@ function paymentRequiredError(): OpenGeniApiError {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient OpenGeni credits",
+        message: "insufficient Opengeni credits",
         retryable: false,
       },
     }),
@@ -1687,6 +1685,187 @@ describe("useGoal", () => {
 
     expect(reads).toBe(2);
     expect(hook.result.current.goal?.continuation?.state).toBe("scheduled");
+    await hook.unmount();
+  });
+
+  test("a goal-less session refetches only on goal events, never on turn traffic", async () => {
+    let reads = 0;
+    let hasGoal = false;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        if (!hasGoal) throw new OpenGeniApiError(404, "session goal not found");
+        return fakeGoal();
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    const turnTraffic = [
+      makeEvent(1, "user.message"),
+      makeEvent(2, "turn.started"),
+      makeEvent(3, "session.status.changed"),
+      makeEvent(4, "turn.completed"),
+    ];
+    await hook.rerender(turnTraffic);
+    await flush(250);
+    expect(reads).toBe(1);
+    expect(hook.result.current.goal).toBeNull();
+
+    hasGoal = true;
+    await hook.rerender([...turnTraffic, makeEvent(5, "goal.set")]);
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.isActive).toBe(true);
+
+    // With a goal, turn traffic refreshes its continuation counters again.
+    await hook.rerender([...turnTraffic, makeEvent(5, "goal.set"), makeEvent(6, "turn.started")]);
+    await flush(250);
+    expect(reads).toBe(3);
+    await hook.unmount();
+  });
+
+  test.each(["findGoal null", "getGoal 404"] as const)(
+    "a fresh goal-less chat reads once, even when the opening burst races that read (%s)",
+    async (mode) => {
+      let reads = 0;
+      let getGoalReads = 0;
+      let hasGoal = false;
+      let releaseFirstRead: (() => void) | null = null;
+      const firstReadReleased = new Promise<void>((resolve) => {
+        releaseFirstRead = resolve;
+      });
+      const read = async () => {
+        reads += 1;
+        if (reads === 1) await firstReadReleased;
+        return hasGoal ? fakeGoal() : null;
+      };
+      const client =
+        mode === "findGoal null"
+          ? fakeClient({
+              getGoal: async () => {
+                getGoalReads += 1;
+                throw new Error("findGoal must replace getGoal");
+              },
+              findGoal: read,
+            })
+          : fakeClient({
+              getGoal: async () => {
+                const goal = await read();
+                if (!goal) throw new OpenGeniApiError(404, "session goal not found");
+                return goal;
+              },
+            });
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        [] as SessionEvent[],
+      );
+      await flush();
+      expect(reads).toBe(1);
+
+      // The stream's opening tail lands while the mount read is still in flight.
+      const openingBurst = [
+        makeEvent(1, "session.created"),
+        makeEvent(2, "user.message"),
+        makeEvent(3, "turn.started"),
+      ];
+      await hook.rerender(openingBurst);
+      await flush(250);
+      expect(reads).toBe(1);
+
+      await flushing(async () => {
+        releaseFirstRead!();
+      });
+      await flush(250);
+      expect(reads).toBe(1);
+      expect(getGoalReads).toBe(0);
+      expect(hook.result.current.goal).toBeNull();
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.loading).toBe(false);
+
+      // Later turn traffic still never re-reads a goal-less session.
+      const turnDone = [...openingBurst, makeEvent(4, "turn.completed")];
+      await hook.rerender(turnDone);
+      await flush(250);
+      expect(reads).toBe(1);
+
+      // A goal set later arrives as a goal.* event and is fetched.
+      hasGoal = true;
+      await hook.rerender([...turnDone, makeEvent(5, "goal.set")]);
+      await flush(250);
+      expect(reads).toBe(2);
+      expect(hook.result.current.isActive).toBe(true);
+      await hook.unmount();
+    },
+  );
+
+  test("a goal.set behind newer turn traffic in the opening burst is still fetched", async () => {
+    let reads = 0;
+    let releaseFirstRead: (() => void) | null = null;
+    const firstReadReleased = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    const client = fakeClient({
+      // The mount read observed the session just before the agent set a goal.
+      findGoal: async () => {
+        reads += 1;
+        if (reads === 1) {
+          await firstReadReleased;
+          return null;
+        }
+        return fakeGoal();
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    // The shared feed's first batch reports only its latest match (turn.started).
+    await hook.rerender([
+      makeEvent(1, "user.message"),
+      makeEvent(2, "goal.set"),
+      makeEvent(3, "turn.started"),
+    ]);
+    await flushing(async () => {
+      releaseFirstRead!();
+    });
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.isActive).toBe(true);
+    await hook.unmount();
+  });
+
+  test("an older session's goal outside the loaded event window is shown", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      findGoal: async () => {
+        reads += 1;
+        return fakeGoal({ status: "paused", pausedReason: "api" });
+      },
+    });
+    // Only recent turn traffic is paged in; the goal.set is long gone from it.
+    const recentWindow = [makeEvent(900, "turn.started"), makeEvent(901, "turn.completed")];
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      recentWindow,
+    );
+    await flush(250);
+    expect(reads).toBe(1);
+    expect(hook.result.current.isPaused).toBe(true);
+
+    // With a goal, turn traffic keeps refreshing its continuation truth.
+    await hook.rerender([...recentWindow, makeEvent(902, "turn.started")]);
+    await flush(250);
+    expect(reads).toBe(2);
     await hook.unmount();
   });
 
@@ -4393,7 +4572,7 @@ describe("useComposer durable draft and control binding", () => {
       outcomeUnknown: true,
     });
     expect(hook.result.current.error?.message).toBe(
-      "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
+      "Opengeni is temporarily unavailable — retry. Reference: edge-503-safe.",
     );
     await hook.unmount();
   });
@@ -5625,97 +5804,6 @@ describe("useComposer file-only send", () => {
     expect(sent).toHaveLength(1);
     expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
     expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    await hook.unmount();
-  });
-});
-
-describe("useEnvironments", () => {
-  test("lists environments and refreshes after each mutation", async () => {
-    const log: string[] = [];
-    let environments: WorkspaceEnvironment[] = [];
-    const client = fakeClient({
-      listEnvironments: async () => {
-        log.push("list");
-        return environments;
-      },
-      createEnvironment: async (_ws, request) => {
-        log.push(`create:${request.name}`);
-        const created: WorkspaceEnvironment = {
-          id: "env-1",
-          accountId: "acc",
-          workspaceId: WORKSPACE_ID,
-          scope: "workspace",
-          generation: 1,
-          status: "active",
-          name: request.name,
-          description: null,
-          variables: [],
-          createdAt: "",
-          updatedAt: "",
-        };
-        environments = [created];
-        return created;
-      },
-      setEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`set:${environmentId}:${name}`);
-        return { name, version: 1, createdAt: "", updatedAt: "" };
-      },
-      getVariableSetVariable: async (_ws, environmentId, name) => {
-        log.push(`read:${environmentId}:${name}`);
-        return {
-          variableSetId: environmentId,
-          name,
-          version: 1,
-          value: `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`,
-        };
-      },
-      deleteEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`unset:${environmentId}:${name}`);
-      },
-      deleteEnvironment: async (_ws, environmentId) => {
-        log.push(`delete:${environmentId}`);
-        environments = [];
-      },
-    });
-    const hook = await renderHook(
-      () => useEnvironments({ client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    await flush();
-    expect(hook.result.current.environments).toEqual([]);
-    await flushing(async () => {
-      await hook.result.current.create({
-        name: "staging",
-        variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
-      });
-    });
-    expect(hook.result.current.environments.map((environment) => environment.name)).toEqual([
-      "staging",
-    ]);
-    await flushing(async () => {
-      const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
-      expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
-    });
-    // Plaintext is returned directly to the caller and never triggers a
-    // metadata-cache refresh that could retain it.
-    expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");
-    await flushing(async () => {
-      await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
-      await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
-      await hook.result.current.remove("env-1");
-    });
-    expect(log).toEqual([
-      "list",
-      "create:staging",
-      "list",
-      "read:env-1:EXAMPLE_TOKEN",
-      "set:env-1:EXAMPLE_TOKEN",
-      "list",
-      "unset:env-1:EXAMPLE_TOKEN",
-      "list",
-      "delete:env-1",
-      "list",
-    ]);
     await hook.unmount();
   });
 });

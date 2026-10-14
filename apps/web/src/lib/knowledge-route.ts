@@ -9,6 +9,7 @@ export type KnowledgeTab = "library" | "instructions" | "review";
 export type KnowledgeSubpage =
   | "add"
   | "edit"
+  /** Old links: Agent learning is Settings > Agent learning now, and redirects there. */
   | "learning"
   | "instructions"
   | "identity"
@@ -31,6 +32,16 @@ export interface KnowledgeSearch {
   proposal?: string;
   /** Old rail links: the Review tab. */
   review?: boolean;
+  /** Opens the Library filtered to one scope (old Documents links, Organization documents). */
+  scope?: KnowledgeScopeFilter;
+}
+
+export type KnowledgeScopeFilter = "organization" | "workspace" | "personal";
+
+function scopeFilter(value: unknown): KnowledgeScopeFilter | undefined {
+  return value === "organization" || value === "workspace" || value === "personal"
+    ? value
+    : undefined;
 }
 
 const SUBPAGES: readonly KnowledgeSubpage[] = [
@@ -48,6 +59,20 @@ const PROPOSAL = /^(?:knowledge|instruction|skill):[A-Za-z0-9_-]{1,128}$/u;
 
 function id(value: unknown): string | undefined {
   return typeof value === "string" && ID.test(value) ? value : undefined;
+}
+
+/**
+ * Where an old Documents link (/documents) opens on the Knowledge page: a
+ * `?memory=` bookmark opens its entry, `?authority=` opens the Library filtered
+ * to that scope, and anything else the Library's files.
+ */
+export function documentsRedirectSearch(search: {
+  memory?: string | undefined;
+  authority?: string | undefined;
+}): KnowledgeSearch {
+  if (search.memory) return parseKnowledgeSearch({ entry: search.memory });
+  const scope = scopeFilter(search.authority);
+  return scope ? { scope } : { view: "files" };
 }
 
 /** Parses the /state search. Unknown values are dropped. */
@@ -68,6 +93,7 @@ export function parseKnowledgeSearch(search: Record<string, unknown>): Knowledge
     typeof search.proposal === "string" && PROPOSAL.test(search.proposal)
       ? search.proposal
       : undefined;
+  const scope = scopeFilter(search.scope);
   return {
     ...(view ? { view } : {}),
     ...(entry ? { entry } : {}),
@@ -77,5 +103,6 @@ export function parseKnowledgeSearch(search: Record<string, unknown>): Knowledge
     ...(file ? { file } : {}),
     ...(proposal ? { proposal } : {}),
     ...(search.review === true ? { review: true } : {}),
+    ...(scope ? { scope } : {}),
   };
 }

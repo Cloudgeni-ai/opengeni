@@ -415,6 +415,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(row.siteOrigin).toEqual({ siteId, title: "Example Site" });
     expect(row.scheduledTaskId).toBe("generated-task");
     expect(row.createdBy.label).toBe("Example member");
+    // The row names its model for the sidebar hover without execution config.
+    expect(row.model).toBe(full.pinned[0]!.model);
+    expect(row.reasoningEffort).toBe(full.pinned[0]!.reasoningEffort);
     expect(row).not.toHaveProperty("metadata");
     expect(row).not.toHaveProperty("initialMessage");
     expect(row).not.toHaveProperty("tools");
@@ -814,6 +817,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         update sessions
         set
           status = case
+            when id = ${root.id} then 'queued'
             when id = ${pausedChild.id} then 'queued'
             when id = ${inheritedGrandchild.id} then 'running'
             when id = ${resumedGreatGrandchild.id} then 'queued'
@@ -838,6 +842,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
           end,
           updated_at = now()
         where id in (
+          ${root.id},
           ${pausedChild.id},
           ${inheritedGrandchild.id},
           ${resumedGreatGrandchild.id}
@@ -1076,6 +1081,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       message: "cycle grandchild",
       parentSessionId: child.id,
     });
+    // Creation reserves idle shells (#4330); these legacy sessions had queued work.
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set status = 'queued' where id in (${root.id}, ${child.id}, ${grandchild.id})`,
+    );
     // This is a legacy graph from before 0114 made lineage snapshots immutable.
     // Model that historical write only inside one admin transaction; the named
     // production trigger is re-enabled before the transaction can commit.

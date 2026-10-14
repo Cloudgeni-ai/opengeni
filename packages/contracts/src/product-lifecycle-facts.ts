@@ -60,6 +60,7 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
     "openrouter",
     "anthropic",
     "claude_subscription",
+    "opper",
   ],
   /** A credit top-up payment was granted. */
   "credits.purchased": [],
@@ -75,7 +76,7 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
   "scheduled_task.created": [],
   /** A catalog Skill was installed into a workspace. */
   "skill.installed": [],
-  /** A Slack user was linked to an OpenGeni user. */
+  /** A Slack user was linked to an Opengeni user. */
   "slack.user_linked": [],
   /** A new Connected Machine was enrolled. */
   "machine.enrolled": [],

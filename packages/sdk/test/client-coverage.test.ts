@@ -326,6 +326,40 @@ describe("OpenGeniClient goals", () => {
     );
   });
 
+  test("findGoal opts in to a successful null for a goal-less session", async () => {
+    const { client, requests } = makeClient(() => jsonResponse(null));
+    expect(await client.findGoal(WORKSPACE_ID, SESSION_ID)).toBeNull();
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal?absent=null`,
+    );
+  });
+
+  test("findGoal returns an existing goal and keeps 404s (older servers) as errors", async () => {
+    const goalClient = makeClient(() => jsonResponse({ id: "goal-1", status: "active" }));
+    expect((await goalClient.client.findGoal(WORKSPACE_ID, SESSION_ID))?.status).toBe("active");
+
+    const legacy = makeClient(() => jsonResponse({ message: "session goal not found" }, 404));
+    const error = await legacy.client.findGoal(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(404);
+  });
+
+  test("findGoal and getGoal never share one in-flight read", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: "goal-1", status: "active" }));
+    await Promise.all([
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+      client.findGoal(WORKSPACE_ID, SESSION_ID),
+    ]);
+    expect(requests.map((request) => new URL(request.url).search).sort()).toEqual([
+      "",
+      "?absent=null",
+    ]);
+  });
+
   test("pauseGoal and resumeGoal PATCH the documented status transitions", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: "goal-1", status: "paused" }));
     await client.pauseGoal(WORKSPACE_ID, SESSION_ID, {
@@ -1067,88 +1101,45 @@ describe("OpenGeniClient scheduled tasks", () => {
   });
 });
 
-describe("OpenGeniClient variable sets", () => {
-  test("resolves only caller-supplied attachment ids through the narrow endpoint", async () => {
-    const { client, requests } = makeClient(() =>
-      jsonResponse({
-        variableSets: [{ id: ENVIRONMENT_ID, scope: "user" }],
-      }),
-    );
-
+describe("OpenGeniClient vaults", () => {
+  test("vault, item, field and session-policy routes", async () => {
+    const vaultId = "00000000-0000-4000-8000-0000000000a1";
+    const itemId = "00000000-0000-4000-8000-0000000000a2";
+    const fieldId = "00000000-0000-4000-8000-0000000000a3";
+    const { client, requests } = makeClient((request) => {
+      const path = new URL(request.url).pathname;
+      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      if (path.endsWith("/vaults")) return jsonResponse({ vaults: [] });
+      if (path.endsWith("/versions")) return jsonResponse({ versions: [] });
+      return jsonResponse({ id: vaultId });
+    });
+    const vaults = client.vaults(WORKSPACE_ID);
+    expect(await vaults.listVaults()).toEqual([]);
+    await vaults.createVault({ name: "Deploy", ownerKind: "workspace" });
+    await vaults.listItems(vaultId, { q: "github", includeArchived: true });
+    await vaults.revealField(vaultId, itemId, fieldId, 2);
+    expect(await vaults.listFieldVersions(vaultId, itemId, fieldId)).toEqual([]);
+    await vaults.deleteItem(vaultId, itemId, true);
+    await vaults.setSessionVaultPolicy(SESSION_ID, { mode: "selected", vaultIds: [vaultId] });
+    const base = `/v1/workspaces/${WORKSPACE_ID}`;
     expect(
-      await client.resolveVariableSetAttachments(WORKSPACE_ID, {
-        variableSetIds: [ENVIRONMENT_ID],
+      requests.map((request) => {
+        const url = new URL(request.url);
+        return `${request.method} ${url.pathname}${url.search}`;
       }),
-    ).toEqual({ variableSets: [{ id: ENVIRONMENT_ID, scope: "user" }] });
-    expect(requests).toHaveLength(1);
-    expect(`${requests[0]!.method} ${new URL(requests[0]!.url).pathname}`).toBe(
-      `POST /v1/workspaces/${WORKSPACE_ID}/variable-sets/resolve-attachments`,
-    );
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ variableSetIds: [ENVIRONMENT_ID] });
-  });
-
-  test("variable set CRUD + dedicated value read/PUT/DELETE", async () => {
-    const exactValue = `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`;
-    const { client, requests } = makeClient((request) =>
-      new URL(request.url).pathname.endsWith("/variables/EXAMPLE_TOKEN") && request.method === "GET"
-        ? jsonResponse({
-            variableSetId: ENVIRONMENT_ID,
-            name: "EXAMPLE_TOKEN",
-            value: exactValue,
-            version: 2,
-          })
-        : jsonResponse({ id: ENVIRONMENT_ID, variables: [] }),
-    );
-    await client.listVariableSets(WORKSPACE_ID);
-    await client.createVariableSet(WORKSPACE_ID, {
-      name: "staging",
-      variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
+    ).toEqual([
+      `GET ${base}/vaults`,
+      `POST ${base}/vaults`,
+      `GET ${base}/vaults/${vaultId}/items?q=github&includeArchived=true`,
+      `POST ${base}/vaults/${vaultId}/items/${itemId}/fields/${fieldId}/reveal`,
+      `GET ${base}/vaults/${vaultId}/items/${itemId}/fields/${fieldId}/versions`,
+      `DELETE ${base}/vaults/${vaultId}/items/${itemId}?permanent=true`,
+      `PUT ${base}/sessions/${SESSION_ID}/vault-policy`,
+    ]);
+    expect(JSON.parse(requests[3]!.body!)).toEqual({ version: 2 });
+    expect(JSON.parse(requests[6]!.body!)).toEqual({
+      policy: { mode: "selected", vaultIds: [vaultId] },
     });
-    await client.getVariableSet(WORKSPACE_ID, ENVIRONMENT_ID);
-    expect(
-      await client.getVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN"),
-    ).toEqual({
-      variableSetId: ENVIRONMENT_ID,
-      name: "EXAMPLE_TOKEN",
-      value: exactValue,
-      version: 2,
-    });
-    await client.updateVariableSet(WORKSPACE_ID, ENVIRONMENT_ID, {
-      description: "staging vars",
-    });
-    await client.setVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN", "v2");
-    await client.deleteVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN");
-    await client.deleteVariableSet(WORKSPACE_ID, ENVIRONMENT_ID);
-    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
-      [
-        `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
-        `PATCH /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
-        `PUT /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
-      ],
-    );
-    // The variable PUT sends only the value; nothing else carries the secret.
-    expect(JSON.parse(requests[5]!.body!)).toEqual({ value: "v2" });
-  });
-
-  test("deprecated environment method names delegate to the canonical variable-set paths", async () => {
-    const { client, requests } = makeClient(() =>
-      jsonResponse({ id: ENVIRONMENT_ID, variables: [] }),
-    );
-    await client.listEnvironments(WORKSPACE_ID);
-    await client.setEnvironmentVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN", "v2");
-    await client.deleteEnvironment(WORKSPACE_ID, ENVIRONMENT_ID);
-    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
-      [
-        `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
-        `PUT /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
-      ],
-    );
   });
 });
 
@@ -1182,7 +1173,7 @@ describe("OpenGeniClient files", () => {
         reason: "insecure_context",
         retryable: false,
       });
-      expect((error as Error).message).toContain("OpenGeni is open over HTTP");
+      expect((error as Error).message).toContain("Opengeni is open over HTTP");
       expect(requests).toHaveLength(0);
     } finally {
       if (windowDescriptor) {
@@ -1561,7 +1552,7 @@ describe("OpenGeniClient files", () => {
       correlationId,
       outcomeUnknown: true,
       body: "",
-      message: `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+      message: `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
     });
     expect(requests).toHaveLength(2);
     expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
@@ -2783,7 +2774,7 @@ describe("OpenGeniClient connections", () => {
       slackTeamName: "Example Slack",
       botId: "B_EXAMPLE",
       botUserId: "U_EXAMPLE",
-      botDisplayName: "OpenGeni" as const,
+      botDisplayName: "Opengeni" as const,
       state: "active" as const,
       quarantineReason: null,
       version: 2,

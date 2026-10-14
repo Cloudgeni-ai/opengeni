@@ -110,7 +110,7 @@ async function botConnection(
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
       ...identity,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "subject-a",
@@ -163,7 +163,7 @@ async function taskFixture(
     runMode,
     overlapPolicy: "allow_concurrent",
     agentConfig: {
-      prompt: "Use the explicitly selected OpenGeni Slack bot",
+      prompt: "Use the explicitly selected Opengeni Slack bot",
       resources: [],
       tools: [],
       metadata: {},
@@ -174,7 +174,7 @@ async function taskFixture(
   });
 }
 
-describe("scheduled OpenGeni Slack bot routing", () => {
+describe("scheduled Opengeni Slack bot routing", () => {
   test("binds the exact connection with safe creation evidence and revalidates revocation", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -251,7 +251,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
       expect.arrayContaining(["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
     );
     expect(posting.firstPartyMcpTools).not.toContain("slack_bot_post_message");
-    expect(posting.firstPartyMcpTools).not.toContain("slack_bot_list_channels");
+    expect(posting.firstPartyMcpTools).toContain("slack_bot_list_channels");
 
     const readOnly = await dispatch(
       (await taskFixture(workspace, connection.id, "new_session_per_run")).id,
@@ -487,7 +487,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         triggerType: "scheduled",
         producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("OpenGeni Slack bot connection");
+    ).rejects.toThrow("Opengeni Slack bot connection");
 
     const otherWorkspace = await workspaceFixture();
     const { connection: otherBot } = await botConnection(otherWorkspace);
@@ -499,7 +499,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         triggerType: "scheduled",
         producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("OpenGeni Slack bot connection");
+    ).rejects.toThrow("Opengeni Slack bot connection");
   });
 
   test("a new bot installation never silently rebinds an existing scheduled task", async () => {

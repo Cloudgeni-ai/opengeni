@@ -3,7 +3,7 @@
 // `acquireSharedTestDatabase` hands out the container superuser, for whom
 // `FORCE ROW LEVEL SECURITY` never engages, so every existing 0340 test drives
 // the classify -> backfill -> activate chain through a principal that cannot
-// observe this defect class at all. OpenGeni migrates and runs its SECURITY
+// observe this defect class at all. Opengeni migrates and runs its SECURITY
 // DEFINER routines as a NON-superuser owner without `BYPASSRLS`
 // (`docs/force-rls-migration-backfills.md`), where the owner is policy-bound
 // like everybody else - and a `SELECT ... FOR SHARE` additionally needs the
@@ -40,8 +40,8 @@ import { migrate } from "../src/migrate";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-/** Byte-identical to `scripts/activate-session-tenancy.ts` and to the SQL
- *  `opengeni_private.tenancy_activation_canonical_json`. */
+/** Byte-identical to the retired operator activation command (removed with
+ *  migration 0611) and to the SQL `opengeni_private.tenancy_activation_canonical_json`. */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {

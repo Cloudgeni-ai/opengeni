@@ -192,6 +192,9 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           sessionId: session.id,
+          // The same human who started the work steers it, as the HTTP route
+          // does; their agent messages join that request's context.
+          actor: grant.subjectId,
           text: "urgent correction",
           resources: [],
           tools: [],
@@ -1570,7 +1573,7 @@ function internalUpdatesFromModelRequest(input: unknown): unknown[] {
       item.role === "system" &&
       "content" in item &&
       typeof item.content === "string" &&
-      item.content.startsWith("[OpenGeni internal updates]\n"),
+      item.content.startsWith("[Opengeni internal updates]\n"),
   );
   if (message === undefined || !("content" in message) || typeof message.content !== "string") {
     throw new Error("internal update model input has no system update message");

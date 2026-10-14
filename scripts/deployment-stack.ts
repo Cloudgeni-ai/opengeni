@@ -30,7 +30,7 @@ if (args.json) {
   process.exit(0);
 }
 
-console.log(`OpenGeni deployment stack plan: ${plan.profile}`);
+console.log(`Opengeni deployment stack plan: ${plan.profile}`);
 console.log("");
 printList("Creates", plan.creates);
 printPlatformDependencies();

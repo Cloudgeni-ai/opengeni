@@ -546,7 +546,7 @@ describe("timeline annotations", () => {
         annotations={[
           {
             ...annotation(""),
-            quote: "OpenGeni stack is working.",
+            quote: "Opengeni stack is working.",
           },
         ]}
         editable
@@ -556,8 +556,8 @@ describe("timeline annotations", () => {
       />,
     );
     expect(rendered.container.textContent).toContain("1 annotation");
-    expect(rendered.container.textContent).not.toContain("OpenGeni stack is working.");
-    expect(document.body.textContent).toContain("OpenGeni stack is working.");
+    expect(rendered.container.textContent).not.toContain("Opengeni stack is working.");
+    expect(document.body.textContent).toContain("Opengeni stack is working.");
     expect(document.body.querySelector("textarea")).not.toBeNull();
     await rendered.unmount();
   });
@@ -627,7 +627,7 @@ describe("timeline annotations", () => {
 
   test("clips a chrome-inclusive highlight back to the assistant sentence", async () => {
     const captured: DraftTimelineAnnotation[] = [];
-    const text = "OpenGeni stack is working.";
+    const text = "Opengeni stack is working.";
     const item = agentItem(SOURCE_EVENT_ID, text, 4);
     const rendered = await renderComponent(
       <MessageTimeline items={[item]} onAnnotate={(next) => captured.push(next)} />,
@@ -652,7 +652,7 @@ describe("timeline annotations", () => {
       "annotation action did not appear for a long highlight",
     );
     const action = addNoteButton();
-    expect(action?.textContent).toContain("OpenGeni stack is working.");
+    expect(action?.textContent).toContain("Opengeni stack is working.");
     await act(async () => action?.click());
     expect(captured[0]?.quote).toBe(text);
     await rendered.unmount();
@@ -783,7 +783,7 @@ describe("timeline annotations", () => {
       id: `00000000-0000-4000-8000-${String(0x502 + index).padStart(12, "0")}`,
       quote:
         index === 0
-          ? "OpenGeni stack is working across a much longer quoted sentence that must stay clamped in the review list."
+          ? "Opengeni stack is working across a much longer quoted sentence that must stay clamped in the review list."
           : `quote-${index + 1}`,
     }));
     const focusId = items[11]!.id;
@@ -812,7 +812,7 @@ describe("timeline annotations", () => {
     expect(notes[0]?.className).toContain("break-words");
     expect(document.activeElement).toBe(notes.item(11));
     const quoteButton = [...document.body.querySelectorAll("button")].find((button) =>
-      button.getAttribute("aria-label")?.includes("OpenGeni stack is working"),
+      button.getAttribute("aria-label")?.includes("Opengeni stack is working"),
     );
     expect(quoteButton?.querySelector("span")?.className).toContain("line-clamp-2");
     await rendered.unmount();

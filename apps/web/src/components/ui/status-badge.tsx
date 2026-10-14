@@ -57,19 +57,24 @@ export const PRODUCT_STATUSES = {
   // Purple: needs you.
   needs_you: { label: "Needs you", tone: "attention" },
   needs_reconnect: { label: "Needs reconnect", tone: "attention" },
+  token_expired: { label: "Token expired", tone: "attention" },
+  expiring: { label: "Expiring", tone: "attention", icon: ClockIcon },
   pending_review: { label: "Pending review", tone: "attention" },
   near_limit: { label: "Near limit", tone: "attention" },
   // Amber: working.
   running: { label: "Running", tone: "progress", live: true },
   syncing: { label: "Syncing", tone: "progress", live: true },
+  rate_limited: { label: "Rate limited", tone: "progress" },
   // Red: failed.
   failed: { label: "Failed", tone: "danger" },
+  sync_failed: { label: "Sync failed", tone: "danger" },
   expired: { label: "Expired", tone: "danger", icon: ClockIcon },
   invite_failed: { label: "Invitation failed", tone: "danger", icon: MailIcon },
   out_of_usage: { label: "Out of usage", tone: "danger" },
   limit_reached: { label: "Limit reached", tone: "danger" },
   // Grey: paused or off.
   paused: { label: "Paused", tone: "neutral", icon: CirclePauseIcon },
+  disabled: { label: "Disabled", tone: "neutral" },
   queued: { label: "Queued", tone: "neutral", icon: CircleDashedIcon },
   invited: { label: "Invited", tone: "neutral", icon: MailIcon },
   not_connected: { label: "Not connected", tone: "neutral" },

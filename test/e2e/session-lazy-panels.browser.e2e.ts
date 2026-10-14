@@ -41,7 +41,6 @@ describe("production session conditional loading", () => {
   let baseUrl: string;
   let panelAsset: string;
   let attachmentAsset: string;
-  let variableSetAsset: string;
   let workspaceFilesAsset: string;
   const evidenceDir = `${repoRoot}/.agent/evidence/session-lazy-panels`;
 
@@ -57,11 +56,11 @@ describe("production session conditional loading", () => {
     const manifest = JSON.parse(
       await readFile(`${repoRoot}/apps/web/dist/.vite/manifest.json`, "utf8"),
     ) as Record<string, { file: string; name?: string; imports?: string[]; isEntry?: boolean }>;
-    panelAsset = Object.values(manifest).find(
-      (entry) => entry.name === "session-conditional-panels",
-    )!.file;
+    const panelKey = Object.keys(manifest).find(
+      (key) => manifest[key]?.name === "session-conditional-panels",
+    )!;
+    panelAsset = manifest[panelKey]!.file;
     attachmentAsset = manifest["src/components/session/message-resource-attachments.tsx"]!.file;
-    variableSetAsset = manifest["src/components/session/session-variable-set-picker.tsx"]!.file;
     const filesKey = "../../packages/react/src/components/sandbox-files.tsx";
     workspaceFilesAsset = manifest[filesKey]!.file;
     const eager = new Set<string>();
@@ -73,6 +72,9 @@ describe("production session conditional loading", () => {
     for (const [key, entry] of Object.entries(manifest))
       if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
     expect(eager.has(filesKey)).toBe(false);
+    // Shared conversation state must not pull the embedded view's optional
+    // question/command implementations into the direct session's static graph.
+    expect(eager.has(panelKey)).toBe(false);
     // The mobile menu is shared with settings; its icon must not bring the
     // lazy payment and organization-identity glyphs into a direct session.
     const eagerSource = (
@@ -91,11 +93,8 @@ describe("production session conditional loading", () => {
     expect(await readFile(`${repoRoot}/apps/web/dist/${sharedGlyphs.file}`, "utf8")).toMatch(
       /["'`]plus["'`]/u,
     );
-    // The Variable Set editor is its own chunk, outside the session's static graph.
-    expect(eager.has("src/components/session/session-variable-set-picker.tsx")).toBe(false);
     expect(panelAsset).toBeTruthy();
     expect(attachmentAsset).toBeTruthy();
-    expect(variableSetAsset).toBeTruthy();
     const port = await freePort();
     baseUrl = `http://127.0.0.1:${port}`;
     web = await startProcess(
@@ -342,101 +341,6 @@ describe("production session conditional loading", () => {
       }, 45_000);
     }
   }
-
-  for (const [width, outcome] of [
-    [320, "loaded"],
-    [1280, "loaded"],
-    [1280, "failed"],
-  ] as const) {
-    test(`the composer Variable Set editor is ${outcome} on demand at ${width}px`, async () => {
-      const context = await browser.newContext({
-        viewport: { width, height: 900 },
-        reducedMotion: "reduce",
-      });
-      const page = await context.newPage();
-      const errors: string[] = [];
-      const assets: string[] = [];
-      page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
-      page.on("request", (request) => {
-        if (request.url().includes("/assets/")) assets.push(request.url());
-      });
-      let release!: () => void;
-      const blocked = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      await page.route(`${baseUrl}/${variableSetAsset}`, async (route) => {
-        if (outcome === "failed") return route.abort("failed");
-        await blocked;
-        await route.continue();
-      });
-      await installApi(page, baseUrl, {
-        mode: "variables",
-        answers: [],
-        stops: 0,
-        commandReads: 0,
-        fileReads: 0,
-      });
-      if (outcome === "failed") {
-        // Preload recovery has already spent its one reload for this build, so
-        // the failed import reaches React instead of reloading the page. Mark it
-        // before the composer's idle preload can fail.
-        await page.addInitScript(() =>
-          document.addEventListener("DOMContentLoaded", () =>
-            sessionStorage.setItem(
-              "opengeni:vite-preload-recovery-build",
-              Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="module"][src]'))
-                .map((script) => script.src)
-                .join("|") || document.baseURI,
-            ),
-          ),
-        );
-      }
-      try {
-        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
-        const transcript = page
-          .locator('[data-testid="timeline-user"]')
-          .getByText("Keep this message visible.", { exact: true });
-        await transcript.waitFor({ timeout: 20_000 });
-        // The editor is outside the session's static graph (checked on the
-        // manifest above). The composer preloads it once idle or when "+" is
-        // hovered, so it may already be requested here; held until release().
-        await page.getByRole("button", { name: "More composer actions", exact: true }).click();
-        await page.getByRole("menuitem", { name: /Variable sets/ }).click();
-        const menu = page.getByRole("menu");
-        if (outcome === "loaded") {
-          // A cold open shows skeleton rows at the final height, never a sentence.
-          await menu.getByRole("status", { name: "Loading variable sets", exact: true }).waitFor();
-          await menu.getByRole("menuitem", { name: "Back", exact: true }).waitFor();
-          await page.screenshot({ path: `${evidenceDir}/variables-${width}-loading.png` });
-          release();
-          await menu.getByRole("button", { name: "Save", exact: true }).waitFor();
-        } else {
-          // The failure stays inside the menu instead of replacing the route.
-          await menu.getByRole("alert").getByText("Variable sets could not be loaded.").waitFor();
-          expect(await menu.getByRole("button", { name: "Reload", exact: true }).isVisible()).toBe(
-            true,
-          );
-        }
-        expect(assets.some((url) => url.endsWith(variableSetAsset))).toBe(true);
-        expect(await transcript.isVisible()).toBe(true);
-        await page.screenshot({ path: `${evidenceDir}/variables-${width}-${outcome}.png` });
-        await menu.getByRole("menuitem", { name: "Back", exact: true }).click();
-        await menu.getByRole("menuitem", { name: /Variable sets/ }).waitFor();
-        expect(
-          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
-        ).toBeLessThanOrEqual(1);
-        expect(errors).toEqual([]);
-      } catch (error) {
-        throw new Error(
-          `variables/${outcome}/${width}: ${JSON.stringify({ errors })}\n${await page.locator("body").innerText()}`,
-          { cause: error },
-        );
-      } finally {
-        release();
-        await context.close();
-      }
-    }, 45_000);
-  }
 });
 
 async function installApi(page: Page, baseUrl: string, state: State) {
@@ -487,9 +391,6 @@ async function installApi(page: Page, baseUrl: string, state: State) {
     activeSandboxId: null,
     activeEpoch: 0,
     workingDir: null,
-    variableSetIds: [],
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     rigVersionId: null,
     channelId: null,

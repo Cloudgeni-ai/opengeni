@@ -1,18 +1,16 @@
 /**
  * "What should the agent do?", shaped like the chat composer: what the runs
- * work with on top (repositories, variable set, environment, tools), the
+ * work with on top (repositories, environment, tools), the
  * instructions, then "+" for tools and the model with who pays for it. The
  * textarea takes the enclosing Field's label, hint and error.
  */
 import { useId, type ReactNode } from "react";
-import { useVariableSets } from "@opengeni/react";
 import {
   ContainerIcon,
   GitBranchIcon,
   PlugIcon,
   PlusIcon,
   RotateCcwIcon,
-  VariableIcon,
   XIcon,
 } from "lucide-react";
 
@@ -159,7 +157,6 @@ export interface ComposerFieldProps {
   defaultModelSelection: DefaultModelSelection | null;
   modelsLoading: boolean;
   modelsError: string | null;
-  canAttachOpenGeniTool: boolean;
   /** The existing tools and attachments stay with the chat a run posts into. */
   existingChat: boolean;
   /** A materialized reusable chat also owns its execution settings. */
@@ -175,7 +172,6 @@ export function ComposerField({
   defaultModelSelection,
   modelsLoading,
   modelsError,
-  canAttachOpenGeniTool,
   existingChat,
   inheritsChatSettings,
 }: ComposerFieldProps) {
@@ -185,9 +181,6 @@ export function ComposerField({
 
   const can = (permission: Parameters<typeof hasWorkspacePermission>[2]) =>
     hasWorkspacePermission(context.accessContext, workspaceId, permission);
-  const canAttachSets = can("variable-sets:attach") && can("variable-sets:use");
-  const canListSets = canAttachSets && can("variable-sets:list");
-  const variableSets = useVariableSets({ enabled: canListSets && !inheritsChatSettings });
   const canUseRigs = can("rigs:use");
   const rigs = useWorkspaceRigs({ enabled: canUseRigs && !inheritsChatSettings });
 
@@ -219,29 +212,6 @@ export function ComposerField({
   const removeRepository = (resource: RepositoryResource) =>
     update({ resources: draft.resources.filter((candidate) => candidate !== resource) });
 
-  /* ----- variable set */
-  const activeSets = variableSets.variableSets.filter((set) => set.status === "active");
-  const selectedSetKnown = activeSets.some((set) => set.id === draft.variableSetId);
-  const setOptions: SelectOption[] = [
-    ...activeSets.map((set) => ({
-      value: set.id,
-      label: set.name,
-      meta: `${set.variables.length} ${set.variables.length === 1 ? "variable" : "variables"}`,
-      description: set.description ?? undefined,
-      leading: <VariableIcon className="size-3.5 text-fg-subtle" />,
-    })),
-    ...(draft.variableSetId && !selectedSetKnown
-      ? [
-          {
-            value: draft.variableSetId,
-            label: variableSets.loading ? "Loading…" : "Attached variable set",
-            leading: <VariableIcon className="size-3.5 text-fg-subtle" />,
-          },
-        ]
-      : []),
-    ...(draft.variableSetId ? [{ value: NONE, label: "No variable set", group: " " }] : []),
-  ];
-
   /* ----- environment */
   const liveRigs = rigs.rigs.filter((rig) => rig.status === "active");
   const selectedRigKnown = liveRigs.some((rig) => rig.id === draft.rigId);
@@ -267,9 +237,8 @@ export function ComposerField({
   ];
 
   /* ----- tools */
-  // With agent settings, built-in tools follow "What the agent can do"; the
-  // menu then only picks connected apps.
-  const agentSettings = context.clientConfig.agentConfig?.enabled === true;
+  // Built-in tools follow "What the agent can do"; the menu only picks
+  // connected apps.
   // The built-in "files" and "docs" servers share names with the Workspace
   // files and Knowledge capabilities. Name them for what they attach, and say
   // which capability they also need.
@@ -280,9 +249,7 @@ export function ComposerField({
         ? {
             ...server,
             name: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].name,
-            detail: agentSettings
-              ? BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].needs
-              : server.detail,
+            detail: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].needs,
           }
         : server,
     );
@@ -302,18 +269,14 @@ export function ComposerField({
   const payer = selectedRow ? modelPayerHint(selectedRow) : null;
   const modelMeta = draft.modelFollowsDefault ? (payer ? `Default · ${payer}` : null) : payer;
 
-  const showSetChip =
-    !inheritsChatSettings && canAttachSets && (setOptions.length > 0 || variableSets.loading);
   const showRigChip =
     !inheritsChatSettings && canUseRigs && (rigOptions.length > 0 || rigs.loading);
   const showContext =
     !existingChat &&
     (repositories.length > 0 ||
       repositoryOptions.length > 0 ||
-      showSetChip ||
       showRigChip ||
-      (!inheritsChatSettings &&
-        ((draft.includeOpenGeniTool && !agentSettings) || selectedTools.length > 0)));
+      (!inheritsChatSettings && selectedTools.length > 0));
   return (
     <div
       className={cn(
@@ -349,18 +312,6 @@ export function ComposerField({
               disabled={disabled}
             />
           ) : null}
-          {showSetChip ? (
-            <ChipSelect
-              label="Variable set"
-              placeholder="Variable set"
-              options={setOptions}
-              value={draft.variableSetId}
-              onChange={(value) => update({ variableSetId: value === NONE ? null : value })}
-              searchPlaceholder="Search variable sets"
-              disabled={disabled}
-              loading={variableSets.loading && activeSets.length === 0}
-            />
-          ) : null}
           {showRigChip ? (
             <ChipSelect
               label="Environment"
@@ -371,14 +322,6 @@ export function ComposerField({
               searchPlaceholder="Search environments"
               disabled={disabled}
               loading={rigs.loading && liveRigs.length === 0}
-            />
-          ) : null}
-          {!inheritsChatSettings && draft.includeOpenGeniTool && !agentSettings ? (
-            <RemovableChip
-              icon={<PlugIcon />}
-              label="Workspace tools"
-              onRemove={() => update({ includeOpenGeniTool: false })}
-              disabled={disabled}
             />
           ) : null}
           {(inheritsChatSettings ? [] : selectedTools).map((id) => {
@@ -434,34 +377,12 @@ export function ComposerField({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-72">
-              <DropdownMenuLabel>
-                {agentSettings
-                  ? "Connected apps this schedule can use"
-                  : "Tools this schedule can use"}
-              </DropdownMenuLabel>
-              {agentSettings && servers.length === 0 ? (
+              <DropdownMenuLabel>Connected apps this schedule can use</DropdownMenuLabel>
+              {servers.length === 0 ? (
                 <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
                   No apps are connected to this workspace yet.
                 </p>
               ) : null}
-              {agentSettings ? null : (
-                <DropdownMenuCheckboxItem
-                  checked={draft.includeOpenGeniTool}
-                  disabled={!canAttachOpenGeniTool}
-                  onCheckedChange={(checked) => update({ includeOpenGeniTool: checked === true })}
-                  onSelect={(event) => event.preventDefault()}
-                >
-                  <PlugIcon />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">Workspace tools</span>
-                    <span className="block text-xs leading-4.5 text-fg-muted">
-                      {canAttachOpenGeniTool
-                        ? "Chats, schedules and other work in this workspace."
-                        : "Not available on this Opengeni server."}
-                    </span>
-                  </span>
-                </DropdownMenuCheckboxItem>
-              )}
               {servers.map((server) => (
                 <DropdownMenuCheckboxItem
                   key={server.id}

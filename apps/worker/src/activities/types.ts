@@ -17,6 +17,8 @@ import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
+import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
+import type { OnePasswordVaultProviderFactory } from "@opengeni/core";
 
 // Signal (start-if-needed) a session's Temporal workflow so a queued turn it
 // cannot otherwise observe gets claimed. Used to wake a PARENT session's
@@ -123,17 +125,22 @@ export type SharedActivityServices = {
   // delegates to the host instead of self-minting from `settings`:
   //   - `gitCredentials` REPLACES `createGitHubAppInstallationToken(settings,…)`
   //     in `sandboxEnvironmentForRun` (the GH_TOKEN / git-extraheader source).
-  //   - `sandboxSecrets` REPLACES the `environmentsEncryptionKeyBytes(settings)`
-  //     decrypt in `loadWorkspaceEnvironmentForRun`.
+  //   - `vaultProvider` links a host-owned secret store as a `source: "host"`
+  //     vault (see `@opengeni/vaults` `VaultConnectionCredentialsPort`).
   // Each leg is independently optional; an unset leg falls through to today's
-  // self-mint for THAT leg. null/undefined (standalone default) → both legs
-  // self-mint byte-for-byte as today.
+  // self-mint for THAT leg. null/undefined (standalone default) → every leg
+  // self-mints byte-for-byte as today.
   //
   // workspace-scope cross-check CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
   // credential to; the consuming activity ASSERTS agreement with the run's
   // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
   // mapping bug returning tenant B's creds for a tenant-A run is caught here.
-  connectionCredentials?: ConnectionCredentialsPort | null;
+  connectionCredentials?: VaultConnectionCredentialsPort | null;
+  /**
+   * Builds 1Password providers for linked vaults (dynamic import of
+   * `@opengeni/vaults-onepassword`); null leaves 1Password vaults unavailable.
+   */
+  onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
   /** Standalone, default-off personal GitHub smart-HTTP broker consumer. */
   personalGitHubCredentials?: ConnectionCredentialsPort["gitCredentials"] | null;
 };
@@ -291,7 +298,7 @@ export type FailSessionAttemptInput = {
 export type FailSessionAttemptResult =
   | { action: "blocked" }
   | { action: "failed" }
-  | { action: "recovering" }
+  | { action: "recovering"; continueDelayMs?: number }
   | { action: "unclaimed" }
   | { action: "terminal" }
   | { action: "stale" };
@@ -323,10 +330,26 @@ export type PostClaimDatabaseRecoveryDetail = {
   providerRecoveryCount?: number;
   /** Safe classified provider cause paired with providerRecoveryCount. */
   providerFailureCode?: string;
+  /** Preserve a confirmed-overload Retry-After through checkpoint DB outages. */
+  providerRecoveryContinueDelayMs?: number;
   /** Persist the no-replay setup marker, not a new provider/setup attempt. */
   sandboxSetupOutcomeUnknown?: true;
   /** Preserve the exhausted budget for a command proven not dispatched. */
   sandboxSetupRecoveryExhausted?: true;
+  /** Content-free task usage receipts whose write failed after their
+   * provider responses were received. The DB-only control lane writes them
+   * with their original identities before any replacement attempt, so known
+   * usage is neither lost nor re-requested. Bounded; omitted when none. */
+  sessionUsageReceipts?: PostClaimSessionUsageReceipt[];
+};
+
+export type PostClaimSessionUsageReceipt = {
+  sessionId: string;
+  sourceId: string;
+  turnId: string | null;
+  amountMicros: number | null;
+  pricingSource: "configured_list_price" | "gateway_reported" | null;
+  model: string | null;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";
@@ -489,6 +512,7 @@ export type DispatchScheduledTaskRunResult =
         | "allowance_exhausted"
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
+        | "session_usage_limit"
         | "malformed_manual_trigger"
         | "scheduled_task_paused"
         | "scheduled_authority_exhausted"
@@ -500,6 +524,7 @@ export type DispatchScheduledTaskRunResult =
         | "machine_enrollment_inactive"
         | "variable_set_unavailable"
         | "rig_version_unavailable"
+        | "scheduled_model_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "atlassian_native_retired"

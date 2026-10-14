@@ -828,6 +828,110 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(after?.last_meter_tick).toBe(before?.last_meter_tick); // cursor untouched
   }, 60_000);
 
+  test("(4b) a re-warmed box never charges the cold gap since the previous epoch's last tick", async () => {
+    if (!available) return;
+    // Staging, 2026-09-09..09-23: every re-warm's first tick charged from the
+    // previous epoch's meter cursor, i.e. the whole cold interval (hours to
+    // days per box, ~1,950 inflated box-hours against Modal's own inventory).
+    const ws = await freshWorkspace();
+    const firstEpoch = await warmGroup(ws, [{ kind: "viewer", holderId: "v1" }]);
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 5);
+    const firstTick = await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: firstEpoch,
+      warmRateMicrosPerSecond: 0,
+    });
+    expect(firstTick.accrued).toBe(true);
+
+    // Drain the box to cold through the real provider-stop path.
+    await releaseLeaseHolder(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      kind: "viewer",
+      holderId: "v1",
+      idleGraceMs: 0,
+    });
+    expect(
+      await markWarmBillingStopCutoff(db, {
+        ...ws,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: firstEpoch,
+      }),
+    ).toBeInstanceOf(Date);
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: firstEpoch,
+      warmRateMicrosPerSecond: 0,
+      finalDrain: true,
+    });
+    expect(
+      await confirmDrainCold(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: firstEpoch,
+        providerStopped: true,
+      }),
+    ).toEqual({ wentCold: true });
+    const meteredBeforeGap = (await warmSecondsEvents(ws.workspaceId, ws.groupId)).reduce(
+      (sum, event) => sum + event.quantity,
+      0,
+    );
+
+    // The box then stays cold for six hours: the cursor still names the old
+    // epoch's last metered instant.
+    const coldGapSeconds = 6 * 3600;
+    await admin`
+      update sandbox_leases set last_meter_at = last_meter_at - (${String(coldGapSeconds)} || ' seconds')::interval
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+
+    // Re-warm a new box on the same group through the real cold->warming->warm path.
+    await acquireLease(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      kind: "turn",
+      holderId: "t2",
+      backend: "modal",
+      leaseTtlMs: 90_000,
+    });
+    const [{ lease_epoch: warmingEpoch } = { lease_epoch: -1 }] = await admin<
+      { lease_epoch: number }[]
+    >`select lease_epoch from sandbox_leases
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    const rewarmed = await commitWarmingToWarm(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: Number(warmingEpoch),
+      instanceId: "box-2",
+      leaseTtlMs: 90_000,
+    });
+    expect(rewarmed.committed).toBe(true);
+    const secondEpoch = rewarmed.lease!.leaseEpoch;
+    expect(secondEpoch).toBeGreaterThan(firstEpoch);
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 5);
+
+    const rewarmTick = await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: secondEpoch,
+      warmRateMicrosPerSecond: 0,
+    });
+    expect(rewarmTick.accrued).toBe(true);
+    // Only the new box's warm time since its transition, never the cold gap.
+    expect(rewarmTick.seconds).toBeGreaterThanOrEqual(5);
+    expect(rewarmTick.seconds).toBeLessThan(60);
+    const events = await warmSecondsEvents(ws.workspaceId, ws.groupId);
+    const meteredTotal = events.reduce((sum, event) => sum + event.quantity, 0);
+    expect(meteredTotal - meteredBeforeGap).toBe(rewarmTick.seconds);
+  }, 60_000);
+
   test("(5) the meter cursor advances one tick per accrual (monotonic last_meter_tick)", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

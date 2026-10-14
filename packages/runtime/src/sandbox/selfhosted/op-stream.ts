@@ -34,6 +34,7 @@
 
 import { blake3 } from "@noble/hashes/blake3";
 import { bytesToHex } from "@noble/hashes/utils";
+import { currentOpToolCallId } from "../op-correlation";
 import {
   ControlRequest,
   ErrorCode,
@@ -170,8 +171,16 @@ export type OpStreamExecResult =
       replyBytes: number;
       /** Terminal proof may race durable adoption. The caller must settle the
        * adopted command but still return only its background receipt. */
-      terminal?: { outcome: OpStreamExecOutcome; exitSeq: string };
+      terminal?: {
+        outcome: OpStreamExecOutcome;
+        exitSeq: string;
+        outputReceipt?: OpStreamOutputReceipt;
+      };
     };
+
+/** Produced only after contiguous replay, byte verification and awaited capture.
+ * The caller must persist this under its exact command before releasing output. */
+export type OpStreamOutputReceipt = { exitSeq: string; attachGeneration: string };
 
 export type OpStreamYieldOptions = {
   yieldMs: number;
@@ -241,11 +250,12 @@ export async function cancelSelfhostedOp(input: ExactSelfhostedOpControlInput): 
   return await exactSelfhostedOpControl(input, "cancel");
 }
 
-/** One op settled but not yet final-acked (awaiting the turn's durable point). */
+/** One op settled but not yet final-acked (awaiting its result's durable point). */
 interface SettledOp {
   opId: string;
   exitSeq: string;
   generation: string;
+  toolCallId: string | null;
 }
 
 const OP_CHANNEL_NAMES: Partial<Record<OpChannel, "stdout" | "stderr">> = {
@@ -255,7 +265,7 @@ const OP_CHANNEL_NAMES: Partial<Record<OpChannel, "stdout" | "stderr">> = {
 
 /**
  * The per-session op-stream exec client. One instance per `SelfhostedSession`;
- * `exec()` runs one op end-to-end; `finalizeSettledOps()` is the turn-end hook
+ * `exec()` runs one op end-to-end; `finalizeSettledOps()` is the durability hook
  * that advances the acked frontier durably (journal) and then on the wire.
  */
 export class OpStreamExecClient {
@@ -263,6 +273,7 @@ export class OpStreamExecClient {
   private readonly settled: SettledOp[] = [];
   private readonly inFlight = new Set<string>();
   private readonly readCheckpoints = new Map<string, OpReadCheckpoint>();
+  private finalization: Promise<void> = Promise.resolve();
   private lastReadGeneration = 0n;
 
   constructor(deps: OpStreamExecClientDeps) {
@@ -360,6 +371,7 @@ export class OpStreamExecClient {
       });
     }
     this.inFlight.add(opId);
+    const toolCallId = currentOpToolCallId();
     try {
       const consumer = new OpConsumer(this.deps, opId, this.generation());
       try {
@@ -369,6 +381,7 @@ export class OpStreamExecClient {
             opId,
             exitSeq: result.exitSeq,
             generation: consumer.generation,
+            toolCallId,
           });
           return { status: "completed", outcome: result.outcome };
         }
@@ -389,7 +402,9 @@ export class OpStreamExecClient {
     opId: string,
     yieldMs: number,
     captureOutput: (frames: OpStreamOutputFrame[]) => Promise<void>,
-  ): Promise<OpStreamExecResult & { replaySequence: string }> {
+  ): Promise<
+    OpStreamExecResult & { replaySequence: string; outputReceipt?: OpStreamOutputReceipt }
+  > {
     if (this.inFlight.has(opId)) throw protocolError("op-stream read: duplicate concurrent op id");
     const consumer = new OpConsumer(
       this.deps,
@@ -421,7 +436,12 @@ export class OpStreamExecClient {
       // frontier only after capture succeeds, never the provider high watermark.
       const replaySequence = consumer.readCheckpoint().lastApplied.toString();
       return result.status === "completed"
-        ? { status: "completed", outcome: result.outcome, replaySequence }
+        ? {
+            status: "completed",
+            outcome: result.outcome,
+            replaySequence,
+            outputReceipt: { exitSeq: result.exitSeq, attachGeneration: consumer.generation },
+          }
         : { ...result, replaySequence };
     } finally {
       consumer.teardown();
@@ -429,25 +449,112 @@ export class OpStreamExecClient {
     }
   }
 
+  /** Release only an independently persisted, fully captured background exit.
+   * Re-attach under a fresh generation before ACK so an intervening reader cannot
+   * strand a stale ACK. Never starts, cancels, replays output or observes a model
+   * result. A publish is not native delivery proof: retry until an exact control
+   * observation establishes that the operation is no longer retained. */
+  async releaseCapturedOutput(
+    opId: string,
+    receipt: OpStreamOutputReceipt,
+  ): Promise<"published" | "not_retained"> {
+    const u64 = (value: string): bigint => {
+      if (!/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > 18446744073709551615n)
+        throw protocolError("op-stream output release: invalid retained frontier");
+      return BigInt(value);
+    };
+    const exitSeq = u64(receipt.exitSeq);
+    const previousGeneration = u64(receipt.attachGeneration);
+    const currentGeneration = u64(this.readGeneration());
+    const generation = (
+      currentGeneration > previousGeneration ? currentGeneration : previousGeneration + 1n
+    ).toString();
+    u64(generation);
+    const requestId = crypto.randomUUID();
+    const response = await this.deps.controlRpc.request(
+      this.deps.rpcSubject,
+      {
+        requestId,
+        epoch: 0,
+        resourcePolicy: undefined,
+        op: {
+          $case: "opAttach",
+          opAttach: {
+            opId,
+            fromSeq: receipt.exitSeq,
+            attachGeneration: generation,
+            windowBytes: "1",
+          },
+        },
+      },
+      { timeoutMs: this.deps.controlTimeoutMs },
+    );
+    if (response.error || !response.result)
+      throw agentErrorToControlError(
+        response.error ?? {
+          code: ErrorCode.ERROR_CODE_PROTOCOL,
+          message: "op-stream output release returned an empty result",
+          retryable: false,
+          detail: {},
+        },
+      );
+    if (response.result.$case !== "opStatus" || response.result.opStatus.opId !== opId)
+      throw protocolError("op-stream output release: status identity mismatch");
+    const status = response.result.opStatus;
+    if (status.state === OpState.OP_STATE_LOST) return "not_retained";
+    if (
+      status.state !== OpState.OP_STATE_COMPLETE ||
+      !status.exit ||
+      !/^[0-9]+$/.test(status.nextSeq) ||
+      BigInt(status.nextSeq) !== exitSeq + 1n
+    )
+      throw protocolError("op-stream output release: durable exit frontier disagrees with runner");
+    await this.deps.transport.publish(
+      opAckSubject(this.deps.workspaceId, this.deps.agentId, this.deps.connectionInstanceId),
+      OpAck.encode({
+        opId,
+        ackedSeq: receipt.exitSeq,
+        creditBytes: "0",
+        final: true,
+        attachGeneration: generation,
+      }).finish(),
+    );
+    return "published";
+  }
+
   /**
-   * The turn-end durability hook (the hard gate's ordering): for every op whose
-   * result the turn has durably consumed — (1) already true when this runs —
+   * The result durability hook (the hard gate's ordering): for every op whose
+   * result the caller has durably consumed — (1) already true when this runs —
    * (2) persist the settled frontier to the journal, then (3) publish the wire
    * final ack (`acked_seq = exit_seq, final = true`), which licenses the runner
    * to GC the op. A kill between (2) and (3) is safe: the re-dispatched turn
    * does not re-execute a durably-recorded call, and the runner's retention TTL
-   * reaps the never-final-acked op — no loss, bounded residue. Publish failures
-   * are swallowed for the same reason.
+   * reaps the never-final-acked op — no loss, bounded residue. A supplied call
+   * list selects only those exact result owners; omitted means the complete
+   * turn/API boundary. Snapshot before I/O so later completions cannot become
+   * eligible accidentally. Failed persistence/publish leaves the op retryable.
    */
-  async finalizeSettledOps(): Promise<void> {
+  async finalizeSettledOps(toolCallIds?: readonly string[]): Promise<void> {
+    const selected = toolCallIds === undefined ? null : new Set(toolCallIds);
+    const eligible = this.settled.filter(
+      (op) => selected === null || (op.toolCallId !== null && selected.has(op.toolCallId)),
+    );
+    const finalization = this.finalization.then(() => this.finalizeOps(eligible));
+    // Serialize overlapping durability hooks without letting one failed
+    // journal poison later attempts to finalize the same retained frontier.
+    this.finalization = finalization.catch(() => undefined);
+    await finalization;
+  }
+
+  private async finalizeOps(eligible: readonly SettledOp[]): Promise<void> {
     const ackSubject = opAckSubject(
       this.deps.workspaceId,
       this.deps.agentId,
       this.deps.connectionInstanceId,
     );
-    while (this.settled.length > 0) {
-      // Non-null: length checked above (single-threaded event loop).
-      const op = this.settled.shift() as SettledOp;
+    for (const op of eligible) {
+      // A preceding queued hook may already have acknowledged this object.
+      if (!this.settled.includes(op)) continue;
       await this.deps.journal?.persistSettled(op.opId, op.exitSeq);
       const ack = OpAck.encode({
         opId: op.opId,
@@ -459,8 +566,10 @@ export class OpStreamExecClient {
       try {
         await this.deps.transport.publish(ackSubject, ack);
       } catch {
-        // Best-effort: the runner's retention TTL owns the fallback.
+        // Retry at a later durability hook; the runner's TTL is the backstop.
+        continue;
       }
+      this.settled.splice(this.settled.indexOf(op), 1);
     }
   }
 }
@@ -689,7 +798,15 @@ class OpConsumer {
         heals: this.heals,
         startRetries,
         replyBytes: outcome.replyBytes,
-        terminal: { outcome, exitSeq: exitSeq.toString() },
+        terminal: {
+          outcome,
+          exitSeq: exitSeq.toString(),
+          ...(yieldOptions?.captureOutput
+            ? {
+                outputReceipt: { exitSeq: exitSeq.toString(), attachGeneration: this.generation },
+              }
+            : {}),
+        },
       };
     }
     return {
@@ -1146,25 +1263,31 @@ class OpConsumer {
     };
     for (const channel of ["stdout", "stderr"] as const) {
       const bytes = assembled[channel];
-      const declaredTotal = exit.totals[channel];
+      // A terminal result can license collection of retained native output.
+      // Both channels, including empty ones, must carry verifiable metadata.
+      const declaredTotal = exit.totals?.[channel];
+      if (typeof declaredTotal !== "string" || !/^[0-9]+$/.test(declaredTotal)) {
+        throw protocolError(`op-stream reassembly: ${channel} total missing or invalid`);
+      }
       const total = this.captureOnly ? this.totals[channel] : BigInt(bytes.byteLength);
-      if (declaredTotal !== undefined && BigInt(declaredTotal) !== total) {
+      if (BigInt(declaredTotal) !== total) {
         throw protocolError(
           `op-stream reassembly: ${channel} total mismatch (got ${total}, ` +
             `runner declared ${declaredTotal})`,
         );
       }
-      const declaredDigest = exit.digests[channel];
-      if (declaredDigest) {
-        const digest = bytesToHex(
-          this.captureOnly ? this.hashes[channel].clone().digest() : blake3(bytes),
+      const declaredDigest = exit.digests?.[channel];
+      if (typeof declaredDigest !== "string" || declaredDigest.length === 0) {
+        throw protocolError(`op-stream reassembly: ${channel} digest missing`);
+      }
+      const digest = bytesToHex(
+        this.captureOnly ? this.hashes[channel].clone().digest() : blake3(bytes),
+      );
+      if (digest !== declaredDigest) {
+        throw protocolError(
+          `op-stream reassembly: ${channel} digest mismatch (got ${digest}, ` +
+            `runner declared ${declaredDigest})`,
         );
-        if (digest !== declaredDigest) {
-          throw protocolError(
-            `op-stream reassembly: ${channel} digest mismatch (got ${digest}, ` +
-              `runner declared ${declaredDigest})`,
-          );
-        }
       }
       this.chunks[channel].length = 0;
     }

@@ -6,7 +6,10 @@ import {
 } from "@opengeni/config";
 import type { CodexAccountStatus, CodexCredentialForRun, Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import { loadWorkspaceCodexModelAvailability } from "../src/codex-model-availability";
+import {
+  loadCodexAccountsLackingModel,
+  loadWorkspaceCodexModelAvailability,
+} from "./fixtures/legacy-codex-model-availability";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
 
 const baseSettings = testSettings({ codexSubscriptionEnabled: true });
@@ -122,7 +125,7 @@ describe("live Codex model availability", () => {
     expect(model(observed, "codex/gpt-6-astra").availability.selectable).toBe(false);
   });
 
-  test("rotation-off probes only the active account; rotating pools require support on every permitted account", async () => {
+  test("rotation-off probes only the active account; a rotating pool offers what any permitted account serves", async () => {
     const a = account();
     const b = account({ isActive: false });
     const slugs = { [a.id]: ["gpt-6-sol"], [b.id]: ["gpt-6-astra"] };
@@ -142,15 +145,58 @@ describe("live Codex model availability", () => {
       crypto.randomUUID(),
       on.deps,
     );
-    expect(model(pool, "codex/gpt-6-astra").availability.selectable).toBe(false);
-    expect(model(pool, "codex/gpt-6-sol").availability.selectable).toBe(false);
-    a.allowedModelIds = ["codex/gpt-6-sol"];
+    expect(model(pool, "codex/gpt-6-astra").availability.selectable).toBe(true);
+    expect(model(pool, "codex/gpt-6-sol").availability.selectable).toBe(true);
+    expect(model(pool, "codex/gpt-6.1-sol").availability.selectable).toBe(false);
+    // Permission still binds to the serving account: Astra's only server may not serve it.
+    b.allowedModelIds = ["codex/gpt-6-sol"];
     expect(
       model(
         await loadWorkspaceCodexModelAvailability(db, settings, crypto.randomUUID(), on.deps),
         "codex/gpt-6-astra",
       ).availability.selectable,
-    ).toBe(true);
+    ).toBe(false);
+  });
+
+  test("a smaller plan in the pool cannot hide models, and the allocator learns to skip it", async () => {
+    const paid = account();
+    const free = account({ isActive: false });
+    const f = fixture([paid, free], {
+      [paid.id]: ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra"],
+      [free.id]: ["gpt-6-astra"],
+    });
+    const ws = crypto.randomUUID();
+    const observed = await loadWorkspaceCodexModelAvailability(db, settings, ws, f.deps);
+    for (const id of ["codex/gpt-6.1-sol", "codex/gpt-6-sol", "codex/gpt-6-astra"]) {
+      expect(model(observed, id).availability).toMatchObject({ selectable: true });
+    }
+    expect(await loadCodexAccountsLackingModel(db, settings, ws, "gpt-6-sol", f.deps)).toEqual(
+      new Set([free.id]),
+    );
+    expect(await loadCodexAccountsLackingModel(db, settings, ws, "gpt-6-astra", f.deps)).toEqual(
+      new Set(),
+    );
+  });
+
+  test("an unreadable account is never reported as lacking a model", async () => {
+    const healthy = account();
+    const revoked = account({ isActive: false });
+    const f = fixture([healthy, revoked], {
+      [healthy.id]: ["gpt-6-sol"],
+      [revoked.id]: null,
+    });
+    expect(
+      await loadCodexAccountsLackingModel(db, settings, crypto.randomUUID(), "gpt-6-sol", f.deps),
+    ).toEqual(new Set());
+    expect(
+      await loadCodexAccountsLackingModel(
+        db,
+        { ...settings, codexSubscriptionEnabled: false },
+        crypto.randomUUID(),
+        "gpt-6-sol",
+        f.deps,
+      ),
+    ).toEqual(new Set());
   });
 
   test("catalog probes use refreshed token snapshots and cache the refreshed revision", async () => {
@@ -185,6 +231,30 @@ describe("live Codex model availability", () => {
     expect(model(observed, "codex/gpt-6-sol").availability).toMatchObject({
       selectable: false,
       reason: "provider_unhealthy",
+    });
+  });
+
+  test("one unreachable pool account cannot hide models the reachable accounts serve", async () => {
+    const healthy = account();
+    const revoked = account({ isActive: false });
+    const f = fixture([healthy, revoked], {
+      [healthy.id]: ["gpt-6-sol", "gpt-6-astra"],
+      [revoked.id]: null,
+    });
+    const observed = await loadWorkspaceCodexModelAvailability(
+      db,
+      settings,
+      crypto.randomUUID(),
+      f.deps,
+    );
+    expect(model(observed, "codex/gpt-6-sol").availability).toMatchObject({
+      selectable: true,
+      status: "available",
+    });
+    // Reachable accounts still decide entitlement: none serves 6.1 Sol.
+    expect(model(observed, "codex/gpt-6.1-sol").availability).toMatchObject({
+      selectable: false,
+      reason: "not_entitled",
     });
   });
 

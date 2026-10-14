@@ -24,7 +24,7 @@
 .og-session-capability-dialog:has(.og-session-capability-setup) { width:min(32rem,calc(100vw - 32px)); }
 .og-session-capability-setup { padding:24px; display:grid; gap:16px; font-size:13px; }
 .og-session-capability-setup > p { margin:0; line-height:1.6; }
-.og-session-capability-setup label { display:flex; align-items:start; gap:8px; line-height:1.6; }
+.og-session-capability-setup label { display:flex; align-items:flex-start; gap:8px; line-height:1.6; }
 .og-session-capability-setup button { font:inherit; padding:9px 12px; border-radius:7px; border:1px solid var(--og-color-border); background:var(--og-color-surface-2); color:inherit; cursor:pointer; }
 .og-session-capability-setup button:disabled { opacity:.55; cursor:not-allowed; }
 .og-session-capability-setup [role=alert] { color:var(--og-color-danger); }

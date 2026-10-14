@@ -33,7 +33,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export interface Revision {
   id: string;
-  /** Who saved it: a person, or "OpenGeni" for an approved agent change. */
+  /** Who saved it: a person, or "Opengeni" for an approved agent change. */
   author: string;
   /** When, as an ISO time. Shown as "3 days ago" with the exact time on hover. */
   createdAt?: string;

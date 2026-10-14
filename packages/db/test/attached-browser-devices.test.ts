@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
   AttachedBrowserInventoryConflictError,
@@ -16,6 +17,7 @@ import {
   getBrowserSession,
   getComputerSessionControlRecord,
   listAttachedBrowserDevices,
+  mergeAttachedBrowserConnectionHistory,
   prepareBrowserSessionCreate,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
@@ -28,6 +30,7 @@ import {
 let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb>;
+let admin: ReturnType<typeof postgres> | null = null;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("attached-browser-devices");
@@ -37,10 +40,12 @@ beforeAll(async () => {
     return;
   }
   client = createDb(shared.appUrl);
+  admin = postgres(shared.adminUrl, { max: 2, prepare: false });
 }, 180_000);
 
 afterAll(async () => {
   await client?.close().catch(() => undefined);
+  await admin?.end().catch(() => undefined);
   await shared?.release();
 });
 
@@ -436,6 +441,117 @@ describe("attached browser endpoint registry", () => {
         },
       }),
     ).rejects.toBeInstanceOf(AttachedBrowserInventoryConflictError);
+  });
+
+  test("records why each connection generation ended", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const deviceId = crypto.randomUUID();
+    const snapshot = (
+      bridgeGeneration: string,
+      revision: number,
+      connectionGeneration: string | null,
+      connectionEnds: Array<{
+        connectionGeneration: string;
+        reason: "browser_closed_port" | "native_host_lost";
+        endedAt: string;
+        connectedMs: number;
+      }> = [],
+    ) => ({
+      ...scope,
+      snapshot: {
+        bridgeGeneration,
+        revision,
+        devices: connectionGeneration
+          ? [device(deviceId, "Primary Chrome", 1, connectionGeneration)]
+          : [],
+        connectionEnds: connectionEnds.map((end) => ({ deviceId, detail: null, ...end })),
+      },
+    });
+    const readHistory = async () => {
+      const [row] = await admin!<{ connection_history: unknown[]; updated_at: Date }[]>`
+        select connection_history, updated_at from attached_browser_devices where id = ${deviceId}
+      `;
+      return row!;
+    };
+
+    await reconcileAttachedBrowserInventory(client.db, snapshot("bridge-1", 1, "extension-1"));
+    expect((await readHistory()).connection_history).toEqual([]);
+
+    const closedPort = {
+      connectionGeneration: "extension-1",
+      reason: "browser_closed_port" as const,
+      endedAt: "2026-01-02T03:04:05.000Z",
+      connectedMs: 1_200,
+    };
+    await reconcileAttachedBrowserInventory(
+      client.db,
+      snapshot("bridge-1", 2, "extension-2", [closedPort]),
+    );
+    const reported = await readHistory();
+    expect(reported.connection_history).toEqual([{ ...closedPort, detail: null, source: "agent" }]);
+
+    // The bridge repeats its recent ends in every snapshot; a repeat is not a change.
+    const repeated = await reconcileAttachedBrowserInventory(
+      client.db,
+      snapshot("bridge-1", 3, "extension-2", [closedPort]),
+    );
+    expect(repeated.changed).toBe(false);
+    expect(await readHistory()).toEqual(reported);
+
+    // An agent too old to report still leaves a server-inferred record.
+    await reconcileAttachedBrowserInventory(client.db, snapshot("bridge-1", 4, null));
+    expect((await readHistory()).connection_history).toMatchObject([
+      { connectionGeneration: "extension-1", source: "agent" },
+      { connectionGeneration: "extension-2", reason: "unreported", source: "server" },
+    ]);
+
+    // The bridge's own observation replaces the inference for that generation.
+    await reconcileAttachedBrowserInventory(
+      client.db,
+      snapshot("bridge-1", 5, "extension-3", [
+        closedPort,
+        {
+          connectionGeneration: "extension-2",
+          reason: "native_host_lost",
+          endedAt: new Date().toISOString(),
+          connectedMs: 5_000,
+        },
+      ]),
+    );
+    expect((await readHistory()).connection_history).toMatchObject([
+      { connectionGeneration: "extension-1", reason: "browser_closed_port" },
+      { connectionGeneration: "extension-2", reason: "native_host_lost", source: "agent" },
+    ]);
+
+    // A replaced bridge forgot its ends; the server attributes them to the restart.
+    await reconcileAttachedBrowserInventory(client.db, snapshot("bridge-2", 0, "extension-4"));
+    expect((await readHistory()).connection_history).toMatchObject([
+      { connectionGeneration: "extension-1" },
+      { connectionGeneration: "extension-2" },
+      { connectionGeneration: "extension-3", reason: "agent_restarted", source: "server" },
+    ]);
+  });
+
+  test("keeps connection history bounded and lets agent reports win", () => {
+    const entry = (generation: number, source: "agent" | "server") => ({
+      connectionGeneration: `extension-${generation}`,
+      reason: source === "agent" ? ("native_host_lost" as const) : ("unreported" as const),
+      detail: null,
+      endedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, generation)).toISOString(),
+      connectedMs: source === "agent" ? 10 : null,
+      source,
+    });
+    const full = Array.from({ length: 50 }, (_, index) => entry(index + 10, "server"));
+    expect(mergeAttachedBrowserConnectionHistory(full, [entry(1, "agent")])).toBeNull();
+    expect(mergeAttachedBrowserConnectionHistory(full, [entry(15, "server")])).toBeNull();
+    const upgraded = mergeAttachedBrowserConnectionHistory(full, [entry(15, "agent")]);
+    expect(upgraded?.[5]).toEqual(entry(15, "agent"));
+    expect(mergeAttachedBrowserConnectionHistory(upgraded!, [entry(15, "server")])).toBeNull();
+    const appended = mergeAttachedBrowserConnectionHistory(full, [entry(99, "server")]);
+    expect(appended).toHaveLength(50);
+    expect(appended?.[0]?.connectionGeneration).toBe("extension-11");
+    expect(appended?.at(-1)?.connectionGeneration).toBe("extension-99");
   });
 
   test("lets a re-enrolled machine reclaim a profile from its revoked enrollment", async () => {

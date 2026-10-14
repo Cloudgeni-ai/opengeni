@@ -14,7 +14,13 @@ function bounded(value: unknown, maxBytes: number): string | undefined {
 export class AnthropicRequestError extends Error {
   readonly request_id: string | null;
   readonly headers: Record<string, string>;
+  /**
+   * Raised by a Claude subscription (OAuth) transport. Subscription limits are
+   * owned by account rotation and capacity waits, never by API-key quota rules.
+   */
+  readonly subscription: boolean;
   #detail: string | undefined;
+  #errorType: string | undefined;
 
   constructor(
     message: string,
@@ -22,14 +28,17 @@ export class AnthropicRequestError extends Error {
     readonly code: string,
     source: unknown,
     headers: Headers,
+    options: { subscription?: boolean } = {},
   ) {
     super(message);
     this.name = "AnthropicRequestError";
+    this.subscription = options.subscription === true;
     const error =
       source && typeof source === "object" && !Array.isArray(source)
         ? (source as Record<string, unknown>)
         : undefined;
     const type = bounded(error?.type, 256);
+    this.#errorType = type;
     const detail = bounded(error?.message, 4096);
     // Select only error.type/message, never the raw body, echoed request fields,
     // cookies, or outgoing content. Keep diagnostics out of generic serialization.
@@ -41,5 +50,10 @@ export class AnthropicRequestError extends Error {
 
   get detail(): string | undefined {
     return this.#detail;
+  }
+
+  /** Structured provider classification, separate from free-text diagnostics. */
+  get errorType(): string | undefined {
+    return this.#errorType;
   }
 }

@@ -3,21 +3,24 @@ import type { GatewayRealtimeInitialItem } from "@opengeni/contracts";
 import {
   getActiveSessionHistoryItems,
   getSessionRealtimeContinuityEntries,
-  getXaiSessionAccountPin,
-  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
-  setXaiSessionAccountPin,
+  readSubscriptionCoreProviderRouteForWorkspace,
+  readSubscriptionCoreSessionOwner,
+  SUBSCRIPTION_CORE_XAI,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
+  subscriptionCoreOperationConnections,
+  subscriptionCoreXaiRequestAuth,
   type Database,
+  type SubscriptionCoreFetch,
 } from "@opengeni/db";
 import {
   XAI_CLIENT_MODE,
   XAI_CLIENT_VERSION,
   XAI_PUBLIC_API_BASE_URL,
-  type XaiFetch,
+  type XaiProxyAuthContext,
 } from "@opengeni/xai-subscription";
 
 import { openGeniRealtimeInstructions } from "./codex-realtime";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
-import { buildXaiSubscriptionAuthorization } from "./xai-subscription-auth";
 
 const UPSTREAM_MODEL_ID = "grok-voice-think-fast-2.0";
 
@@ -61,86 +64,85 @@ export async function createXaiRealtimeConnectionSecret(input: {
       "The selected model is not a connected SuperGrok realtime model",
     );
   }
-  const authoritySnapshot = await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(
-    input.db,
-    { workspaceId: input.workspaceId, subjectId: input.subjectId },
-  );
-  let pin = await getXaiSessionAccountPin(input.db, {
+  const route = await readSubscriptionCoreProviderRouteForWorkspace(input.db, {
+    accountId: input.accountId,
     workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    sessionId: input.sessionId,
-    authoritySnapshot,
+    provider: SUBSCRIPTION_CORE_XAI_PROVIDER,
   });
-  let auth: Awaited<ReturnType<typeof buildXaiSubscriptionAuthorization>>;
-  try {
-    auth = await buildXaiSubscriptionAuthorization({
-      db: input.db,
-      settings: input.settings,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
-      shardKey: input.sessionId,
-      pinnedCredentialId: pin?.pinnedCredentialId ?? null,
-      pinSource: pin?.pinSource === "manual" || pin?.pinSource === "policy" ? pin.pinSource : null,
-      authoritySnapshot,
-      sessionId: input.sessionId,
-      ...(input.fetchImpl ? { fetch: input.fetchImpl as XaiFetch } : {}),
-    });
-    if (
-      auth.rotationEnabled &&
-      pin?.pinSource !== "manual" &&
-      pin?.pinnedCredentialId !== auth.credentialId
-    ) {
-      try {
-        pin = await setXaiSessionAccountPin(input.db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          sessionId: input.sessionId,
-          authoritySnapshot,
-          credentialId: auth.credentialId,
-          pinSource: "policy",
-          expectedVersion: pin?.version ?? null,
-        });
-      } catch {
-        const current = await getXaiSessionAccountPin(input.db, {
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          sessionId: input.sessionId,
-          authoritySnapshot,
-        });
-        if (current?.pinSource === "manual" && current.pinnedCredentialId !== auth.credentialId) {
-          auth = await buildXaiSubscriptionAuthorization({
-            db: input.db,
-            settings: input.settings,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            shardKey: input.sessionId,
-            pinnedCredentialId: current.pinnedCredentialId,
-            pinSource: "manual",
-            authoritySnapshot,
-            sessionId: input.sessionId,
-            ...(input.fetchImpl ? { fetch: input.fetchImpl as XaiFetch } : {}),
-          });
-        }
-      }
-    }
-  } catch {
+  // SuperGrok realtime runs only on the shared core; any other route
+  // (maintenance, or no receipt) has no eligible account.
+  if (route !== "core") {
     throw new XaiRealtimeBrokerError(
       "credential_unavailable",
       "No eligible connected SuperGrok account is available",
     );
   }
+  return await createCoreXaiRealtimeConnectionSecret(input);
+}
 
-  const [history, continuity, minted] = await Promise.all([
-    getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId),
-    getSessionRealtimeContinuityEntries(input.db, input.workspaceId, input.sessionId),
-    mintXaiClientSecret({
-      auth,
+/**
+ * SuperGrok realtime on the shared subscription core (the M3 Codex rule,
+ * EP-N05/N07/S17): the session's recorded owner (never the caller), shared
+ * organization- or workspace-scoped connections only (decision 3), a
+ * `realtime` operation lease held through the client-secret request, with
+ * refresh under the per-connection lock. The session binding is never read
+ * for placement beyond an explicit choice and never written (decision 6).
+ */
+async function createCoreXaiRealtimeConnectionSecret(input: {
+  db: Database;
+  settings: Settings;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<XaiRealtimeConnectionSecret> {
+  const unavailable = () =>
+    new XaiRealtimeBrokerError(
+      "credential_unavailable",
+      "No eligible connected SuperGrok account is available",
+    );
+  // The deployment switch for SuperGrok subscriptions, as the Codex broker checks its own.
+  if (!input.settings.supergrokSubscriptionEnabled) throw unavailable();
+  const context = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  };
+  const owner = await readSubscriptionCoreSessionOwner(input.db, context);
+  if (!owner) throw unavailable();
+  const scope = {
+    kind: "session" as const,
+    ...context,
+    sessionOwnerSubjectId: owner.ownerSubjectId,
+  };
+  const connections = subscriptionCoreOperationConnections(SUBSCRIPTION_CORE_XAI);
+  const candidates = await connections.listSubscriptionCoreOperationCandidates(input.db, scope);
+  const ran = await connections.runSubscriptionCoreOperation(
+    input.db,
+    input.settings,
+    scope,
+    {
+      candidates: candidates.map((candidate) => candidate.connectionId),
+      operationKind: "realtime",
+      holderId: `realtime:${input.sessionId}`,
       fetchImpl: input.fetchImpl ?? fetch,
-    }),
-  ]);
+    },
+    async ({ resolver, fetch: requestFetch, fence }) =>
+      await Promise.all([
+        getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId),
+        getSessionRealtimeContinuityEntries(input.db, input.workspaceId, input.sessionId),
+        mintXaiClientSecret({
+          context: subscriptionCoreXaiRequestAuth(resolver),
+          fetchImpl: async (url, init) => {
+            // Pre-dispatch fence on the exact operation lease.
+            if (!(await fence())) throw unavailable();
+            return await requestFetch(url, init);
+          },
+        }),
+      ]),
+  );
+  if (ran.kind === "unavailable") throw unavailable();
+  const [history, continuity, minted] = ran.value;
   return {
     ...minted,
     upstreamModelId: UPSTREAM_MODEL_ID,
@@ -150,8 +152,8 @@ export async function createXaiRealtimeConnectionSecret(input: {
 }
 
 async function mintXaiClientSecret(input: {
-  auth: Awaited<ReturnType<typeof buildXaiSubscriptionAuthorization>>;
-  fetchImpl: typeof fetch;
+  context: Pick<XaiProxyAuthContext, "getToken" | "refresh">;
+  fetchImpl: SubscriptionCoreFetch;
 }): Promise<{ token: string; url: string; expiresAt: number | null }> {
   const request = async (accessToken: string) =>
     await input.fetchImpl(`${XAI_PUBLIC_API_BASE_URL}/realtime/client_secrets`, {
@@ -168,14 +170,16 @@ async function mintXaiClientSecret(input: {
     });
   let response: Response;
   try {
-    let token = await input.auth.context.getToken();
+    let token = await input.context.getToken();
     response = await request(token.accessToken);
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
-      token = await input.auth.context.refresh();
+      token = await input.context.refresh();
       response = await request(token.accessToken);
     }
-  } catch {
+  } catch (error) {
+    // A core pre-dispatch fence refusal is already typed (legacy never raises one).
+    if (error instanceof XaiRealtimeBrokerError) throw error;
     throw new XaiRealtimeBrokerError("provider_error", "xAI realtime token request failed");
   }
   if (!response.ok) {

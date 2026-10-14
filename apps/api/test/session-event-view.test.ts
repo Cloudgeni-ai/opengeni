@@ -75,12 +75,202 @@ describe("session event content views", () => {
       reader(rows),
     );
     expect(result.events.find((item) => item.kind === "result")?.text).toBe("Created");
-    await expect(
-      readSessionEventView(
-        { sessionId, view: "tools", toolName: "scheduled_tasks_create", includeOutput: true },
+    const named = await readSessionEventView(
+      { sessionId, view: "tools", toolName: "scheduled_tasks_create", includeOutput: true },
+      reader(rows),
+    );
+    expect(named.events.map((item) => [item.kind, item.callId, item.text])).toEqual([
+      ["call", "create", undefined],
+      ["result", "create", "Created"],
+    ]);
+  });
+
+  test("named outputs report a call whose result is not recorded yet", async () => {
+    const page = await readSessionEventView(
+      { sessionId, view: "tools", toolName: "slow", includeOutput: true },
+      reader([event(1, "agent.toolCall.created", { callId: "pending", name: "slow" })]),
+    );
+    expect(page.events).toEqual([
+      {
+        sequence: 1,
+        turnId: "turn-1",
+        callId: "pending",
+        kind: "call",
+        name: "slow",
+        outputFound: false,
+      },
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
+  test("named outputs stop before a result that does not fit and resume there", async () => {
+    const rows = [1, 2, 3].flatMap((n) => [
+      event(n * 10, "agent.toolCall.created", { callId: `c${n}`, name: "report" }),
+      event(n * 10 + 1, "agent.toolCall.output", { id: `c${n}`, output: `${n}`.repeat(5000) }),
+    ]);
+    const read = reader(rows);
+    const seen: string[] = [];
+    let page = await readSessionEventView(
+      { sessionId, view: "tools", toolName: "report", includeOutput: true, limit: 3 },
+      read,
+    );
+    for (let count = 0; ; count += 1) {
+      expect(count).toBeLessThan(10);
+      bounded(page);
+      for (const item of page.events) if (item.kind === "result") seen.push(String(item.callId));
+      if (!page.nextCursor) break;
+      page = await readSessionEventView({ sessionId, cursor: page.nextCursor }, read);
+    }
+    expect(seen.sort()).toEqual(["c1", "c2", "c3"]);
+  });
+
+  // Follow nextCursor to the end, reassembling each call's arguments and result.
+  async function readNamedStream(
+    input: Parameters<typeof readSessionEventView>[0],
+    read: ReturnType<typeof reader>,
+  ) {
+    const args = new Map<string, string>();
+    const results = new Map<string, string>();
+    const readOutput: string[] = [];
+    let page = await readSessionEventView(input, read);
+    for (let count = 0; ; count += 1) {
+      expect(count).toBeLessThan(40);
+      bounded(page);
+      for (const item of page.events) {
+        const into = item.kind === "result" ? results : args;
+        into.set(String(item.callId), (into.get(String(item.callId)) ?? "") + (item.text ?? ""));
+        if (item.readOutput) readOutput.push(String(item.callId));
+      }
+      if (!page.nextCursor) return { args, results, readOutput, last: page };
+      page = await readSessionEventView({ sessionId, cursor: page.nextCursor }, read);
+    }
+  }
+
+  for (const direction of ["before", "after"] as const) {
+    test(`an oversized named result continues and then returns to the named stream (${direction})`, async () => {
+      const big = "z".repeat(30000);
+      const rows = [1, 2, 3].flatMap((n) => [
+        event(n * 10, "agent.toolCall.created", { callId: `c${n}`, name: "report" }),
+        event(n * 10 + 1, "agent.toolCall.output", {
+          id: `c${n}`,
+          output: n === (direction === "before" ? 3 : 1) ? big : `out${n}`,
+        }),
+      ]);
+      const read = reader(rows);
+      const first = await readSessionEventView(
+        { sessionId, view: "tools", toolName: "report", includeOutput: true, limit: 3, direction },
+        read,
+      );
+      expect(first.events[1]).toMatchObject({ kind: "result", fragment: { complete: false } });
+      // The plain position still names the next named call.
+      expect(direction === "before" ? first.nextBefore : first.nextAfter).toBe(
+        direction === "before" ? 30 : 10,
+      );
+      const { results, last } = await readNamedStream(
+        { sessionId, view: "tools", toolName: "report", includeOutput: true, limit: 3, direction },
+        read,
+      );
+      expect(Object.fromEntries(results)).toEqual(
+        direction === "before"
+          ? { c1: "out1", c2: "out2", c3: big }
+          : { c1: big, c2: "out2", c3: "out3" },
+      );
+      expect(last.hasMore).toBe(false);
+    });
+
+    test(`an argument fragment keeps named outputs on later pages (${direction})`, async () => {
+      const body = "y".repeat(30000);
+      const rows = [1, 2].flatMap((n) => [
+        event(n * 10, "agent.toolCall.created", {
+          callId: `w${n}`,
+          name: "write",
+          arguments: { body: n === 2 ? body : "small" },
+        }),
+        event(n * 10 + 1, "agent.toolCall.output", { id: `w${n}`, output: `ok${n}` }),
+      ]);
+      const { args, results, readOutput } = await readNamedStream(
+        {
+          sessionId,
+          view: "tools",
+          toolName: "write",
+          includeArguments: true,
+          includeOutput: true,
+          limit: 3,
+          direction,
+        },
         reader(rows),
-      ),
-    ).rejects.toThrow("callId");
+      );
+      expect(args.get("w2")).toBe(JSON.stringify({ body }));
+      // w1's result is still returned after w2's arguments; w2's result is
+      // one exact read away, named on the fragmented call.
+      expect(results.get("w1")).toBe("ok1");
+      expect(readOutput).toEqual(["w2"]);
+    });
+  }
+
+  test("named outputs budget for a long call identity instead of failing", async () => {
+    const callId = "\u0001".repeat(340);
+    for (let size = 5800; size <= 6400; size += 10) {
+      const rows = [
+        event(10, "agent.toolCall.created", {
+          callId,
+          name: "t",
+          arguments: { a: "q".repeat(size) },
+        }),
+        event(11, "agent.toolCall.output", { id: callId, output: "r".repeat(9000) }),
+      ];
+      const page = await readSessionEventView(
+        { sessionId, view: "tools", toolName: "t", includeArguments: true, includeOutput: true },
+        reader(rows),
+      );
+      bounded(page);
+      const result = page.events.find((item) => item.kind === "result");
+      expect(result ? true : page.events[0]?.readOutput !== undefined).toBe(true);
+    }
+  });
+
+  test("named outputs say why a result cannot be looked up", async () => {
+    const longId = "\u0001".repeat(400);
+    const page = await readSessionEventView(
+      {
+        sessionId,
+        view: "tools",
+        toolName: "t",
+        includeOutput: true,
+        limit: 3,
+        direction: "after",
+      },
+      reader([
+        event(1, "agent.toolCall.created", { name: "t", identityOmitted: true }),
+        event(2, "agent.toolCall.created", { callId: longId, name: "t" }),
+        event(3, "agent.toolCall.output", { id: longId, output: "done" }),
+      ]),
+    );
+    expect(page.events.map((item) => item.outputUnavailable)).toEqual([
+      "call_identity_omitted",
+      "call_id_exceeds_lookup_budget",
+    ]);
+    expect(page.events.some((item) => "outputFound" in item)).toBe(false);
+  });
+
+  test("a retyped cursor refusal recovers its position", async () => {
+    const read = reader([event(1, "user.message", { text: "x".repeat(20000) })]);
+    const page = await readSessionEventView({ sessionId }, read);
+    const decoded = Buffer.from(page.nextCursor!, "base64url").toString();
+    expect(JSON.parse(decoded).sequence).toBe(1);
+    const retyped = Buffer.from(decoded.replace('"sequence"', '"sequeence"')).toString("base64url");
+    const error = await readSessionEventView({ sessionId, cursor: retyped }, read).catch(
+      (caught: Error) => caught,
+    );
+    expect(String(error)).toContain(
+      JSON.stringify({
+        sessionId,
+        view: "conversation",
+        direction: "before",
+        before: 2,
+        limit: 10,
+      }),
+    );
   });
 
   for (const direction of ["after", "before"] as const) {

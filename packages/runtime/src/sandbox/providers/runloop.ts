@@ -8,7 +8,7 @@ export const runloopProvider: ProviderRegistration = {
   exactResumeMode: "custom",
   instanceIdFields: ["devboxId"],
   // The SDK otherwise creates a non-idempotent native disk snapshot whose
-  // provider artifact has no OpenGeni outcome ledger. Lifecycle capture uses
+  // provider artifact has no Opengeni outcome ledger. Lifecycle capture uses
   // the inherited unique-path tar primitive instead.
   workspaceCapturePolicy: () => REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.runloop,
@@ -29,7 +29,7 @@ export const runloopProvider: ProviderRegistration = {
     if (settings.runloopBlueprintName) options.blueprintName = settings.runloopBlueprintName;
     if (settings.runloopBlueprintId) options.blueprintId = settings.runloopBlueprintId;
     // Keep the provider-native snapshot request inside the same immutable
-    // budget as OpenGeni's durable capture claim. The outer lifecycle timeout
+    // budget as Opengeni's durable capture claim. The outer lifecycle timeout
     // remains the final fence; this prevents an abandoned SDK request from
     // needlessly running past it when Runloop supports an exact operation knob.
     // Runloop keep-alive also lives in this bag (ms), not at Modal's top level.

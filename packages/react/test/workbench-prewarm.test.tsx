@@ -242,6 +242,34 @@ describe("workbench surface allowlist", () => {
     await hook.unmount();
   });
 
+  test("machinesEnabled=false keeps the dock but never reads the machine fleet", async () => {
+    const calls = { capabilities: 0, machines: 0 };
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        calls.capabilities += 1;
+        return fakeColdCapabilities();
+      },
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
+      listMachines: async () => {
+        calls.machines += 1;
+        return EMPTY_MACHINES;
+      },
+    } as Partial<SessionClientLike>);
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      machinesEnabled: false,
+    });
+    await flush(30);
+
+    expect(hook.result.current.machine.enabled).toBe(true);
+    expect(hook.result.current.machine.activeMachine).toBeNull();
+    expect(hook.result.current.machine.error).toBeNull();
+    expect(calls.capabilities).toBeGreaterThan(0);
+    expect(calls.machines).toBe(0);
+    await hook.unmount();
+  });
+
   test("omitting Desktop excludes the tab while retaining the requested surfaces", async () => {
     const { client, spy } = coldClient();
     const hook = await renderTabsHook(client, {
@@ -1934,10 +1962,10 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       getStreamCapabilities: async () => fakeCapabilities(),
       getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
       gitStatus: async () => {
-        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+        throw new Error("Opengeni API 503: Workspace files are temporarily unavailable");
       },
       fsList: async () => {
-        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+        throw new Error("Opengeni API 503: Workspace files are temporarily unavailable");
       },
     });
     const rendered = await renderComponent(

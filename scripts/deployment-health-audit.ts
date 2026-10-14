@@ -431,7 +431,7 @@ function evaluateWorkloads(value: unknown): DeploymentHealthCheck {
   if (items.length === 0) {
     return failedCheck(
       "kubernetes-workloads",
-      "No workloads matched the OpenGeni release selector",
+      "No workloads matched the Opengeni release selector",
     );
   }
   const unavailable: string[] = [];
@@ -460,12 +460,12 @@ function evaluateWorkloads(value: unknown): DeploymentHealthCheck {
     if (!ready) unavailable.push(`${kind}/${name}`);
   }
   return unavailable.length > 0
-    ? failedCheck("kubernetes-workloads", "One or more OpenGeni workloads are unavailable", {
+    ? failedCheck("kubernetes-workloads", "One or more Opengeni workloads are unavailable", {
         unavailableWorkloadCount: unavailable.length,
         unavailableWorkloads: unavailable.slice(0, MAX_FACT_ITEMS),
         workloadCount: items.length,
       })
-    : passedCheck("kubernetes-workloads", "All selected OpenGeni workloads are available", {
+    : passedCheck("kubernetes-workloads", "All selected Opengeni workloads are available", {
         workloadCount: items.length,
       });
 }
@@ -477,7 +477,7 @@ function evaluatePods(
 ): DeploymentHealthCheck {
   const items = listItems(value);
   if (items.length === 0) {
-    return failedCheck("kubernetes-pods", "No pods matched the OpenGeni release selector");
+    return failedCheck("kubernetes-pods", "No pods matched the Opengeni release selector");
   }
   const unavailable: string[] = [];
   const recentRestarts: Array<{ pod: string; container: string; restartCount: number }> = [];
@@ -510,7 +510,7 @@ function evaluatePods(
     }
   }
   if (unavailable.length > 0) {
-    return failedCheck("kubernetes-pods", "One or more OpenGeni pods are not ready", {
+    return failedCheck("kubernetes-pods", "One or more Opengeni pods are not ready", {
       unavailablePodCount: unavailable.length,
       unavailablePods: unavailable.slice(0, MAX_FACT_ITEMS),
       podCount: items.length,
@@ -519,13 +519,13 @@ function evaluatePods(
     });
   }
   if (recentRestarts.length > 0) {
-    return degradedCheck("kubernetes-pods", "OpenGeni pods are ready but restarted recently", {
+    return degradedCheck("kubernetes-pods", "Opengeni pods are ready but restarted recently", {
       podCount: items.length,
       recentRestartCount: recentRestarts.length,
       recentRestarts: recentRestarts.slice(0, MAX_FACT_ITEMS),
     });
   }
-  return passedCheck("kubernetes-pods", "All selected OpenGeni pods are ready", {
+  return passedCheck("kubernetes-pods", "All selected Opengeni pods are ready", {
     podCount: items.length,
   });
 }
@@ -533,14 +533,14 @@ function evaluatePods(
 function evaluateHelmRelease(value: unknown, release: string): DeploymentHealthCheck {
   const items = arrayValue(value).map(objectValue);
   const matched = items.find((item) => item.name === release);
-  if (!matched) return failedCheck("helm-release", "The OpenGeni Helm release was not found");
+  if (!matched) return failedCheck("helm-release", "The Opengeni Helm release was not found");
   const status = stringValue(matched.status);
   return status === "deployed"
-    ? passedCheck("helm-release", "The OpenGeni Helm release is deployed", {
+    ? passedCheck("helm-release", "The Opengeni Helm release is deployed", {
         chart: stringValue(matched.chart),
         revision: stringValue(matched.revision),
       })
-    : failedCheck("helm-release", "The OpenGeni Helm release is not deployed", {
+    : failedCheck("helm-release", "The Opengeni Helm release is not deployed", {
         status,
         revision: stringValue(matched.revision),
       });

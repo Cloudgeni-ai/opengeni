@@ -2,7 +2,7 @@ import { useCreditExposure } from "@/lib/use-analytics-exposure";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { CreditCardIcon, Loader2Icon, SparklesIcon } from "lucide-react";
-import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import type { BillingCheckoutStatus, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -110,7 +110,7 @@ export function CreditRequiredPromptView({
           <DialogDescription>
             {purpose === "topup"
               ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
-              : "This chat uses Opengeni credits and none are currently available. Buy credits, or connect a model you already pay for."}
+              : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
@@ -173,14 +173,16 @@ export function EmptyCreditsNotice({
   accountId,
   canBuyCredits,
   canReadBilling,
+  creditFunding,
 }: {
   workspaceId: string;
   accountId: string | null;
   canBuyCredits: boolean;
   canReadBilling: boolean;
+  creditFunding?: WorkspaceModelCatalogModel["creditFunding"];
 }) {
   const client = useAppContext().client;
-  const [empty, setEmpty] = useState(false);
+  const [legacyEmpty, setEmpty] = useState(false);
   const [stripeEnabled, setStripeEnabled] = useState(false);
 
   useEffect(() => {
@@ -205,11 +207,13 @@ export function EmptyCreditsNotice({
     };
   }, [accountId, canReadBilling, client]);
 
+  const empty =
+    stripeEnabled && (creditFunding === undefined ? legacyEmpty : creditFunding === "unavailable");
   useCreditExposure(empty, workspaceId);
   if (!empty) return null;
   return (
     <Notice tone="waiting" title="This model uses Opengeni credits">
-      No credits are available for this model. Buy some or connect a model to continue.
+      No credits are available for this model. Choose another model or add credits.
       <div className="mt-2 flex flex-wrap gap-2">
         {canBuyCredits && stripeEnabled ? (
           <Button asChild type="button" size="sm" variant="outline">

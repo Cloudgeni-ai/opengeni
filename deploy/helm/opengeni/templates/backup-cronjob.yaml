@@ -1,0 +1,79 @@
+{{- if .Values.backup.enabled }}
+{{- $secret := required "backup.existingSecret is required (config.json, pg_service.conf, rclone.conf, age.key)" .Values.backup.existingSecret }}
+{{- $claim := required "backup.existingClaim is required for the persistent backup lock/checkpoint and encrypted scratch" .Values.backup.existingClaim }}
+{{- $_ := required "backup.image.digest must pin an independently published backup image" .Values.backup.image.digest }}
+{{- range $name, $schedule := dict "run" .Values.backup.schedule "check" .Values.backup.checkSchedule }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "opengeni.fullname" $ }}-backup-{{ $name }}
+  labels:
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ $schedule | quote }}
+  timeZone: {{ $.Values.backup.timeZone | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "opengeni.selectorLabels" $ | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          {{- with $.Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: backup
+              image: {{ include "opengeni.image" (dict "root" $ "image" $.Values.backup.image) | quote }}
+              imagePullPolicy: {{ $.Values.backup.image.pullPolicy }}
+              args: [{{ $name | quote }}, "--config", "/etc/opengeni-backup/config.json"]
+              env:
+                - name: PGSERVICEFILE
+                  value: /etc/opengeni-backup/pg_service.conf
+                - name: RCLONE_CONFIG
+                  value: /etc/opengeni-backup/rclone.conf
+                - name: XDG_CACHE_HOME
+                  value: /var/lib/opengeni-backup/cache
+                - name: HOME
+                  value: /var/lib/opengeni-backup
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: credentials
+                  mountPath: /etc/opengeni-backup
+                  readOnly: true
+                - name: state
+                  mountPath: /var/lib/opengeni-backup
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: credentials
+              secret:
+                secretName: {{ $secret }}
+                defaultMode: 0440
+            - name: state
+              persistentVolumeClaim:
+                claimName: {{ $claim }}
+            - name: tmp
+              emptyDir: {}
+{{- end }}
+{{- end }}

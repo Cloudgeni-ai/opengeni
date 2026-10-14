@@ -147,11 +147,6 @@ function writeJson(
 export function createSandboxBridgeServer(options: { subnet: string; apiOrigin: string }): Server {
   const api = new URL(options.apiOrigin);
   const server = createServer((incoming, outgoing) => {
-    const peer = normalizePeerAddress(incoming.socket.remoteAddress);
-    if (!peer || !ipv4InSubnet(peer, options.subnet)) {
-      writeJson(outgoing, 403, { error: "peer is outside this stack's Docker network" });
-      return;
-    }
     let url: URL;
     try {
       // URL parsing resolves dot segments, so the allowlist sees, and the API
@@ -161,8 +156,18 @@ export function createSandboxBridgeServer(options: { subnet: string; apiOrigin: 
       writeJson(outgoing, 400, { error: "invalid request target" });
       return;
     }
+    // The health answer carries no data or authority and only proves the
+    // listener is up, so it precedes the peer filter: hosts that source-NAT
+    // their own loopback-routed traffic (for example k3s or Tailscale) make the
+    // launcher's probe arrive from a LAN address outside the Docker subnet even
+    // though sandboxes on that subnet reach the bridge normally.
     if (url.pathname === SANDBOX_BRIDGE_HEALTH_PATH) {
       writeJson(outgoing, 200, { ok: true });
+      return;
+    }
+    const peer = normalizePeerAddress(incoming.socket.remoteAddress);
+    if (!peer || !ipv4InSubnet(peer, options.subnet)) {
+      writeJson(outgoing, 403, { error: "peer is outside this stack's Docker network" });
       return;
     }
     if (!sandboxBridgeRouteAllowed(url.pathname)) {
@@ -228,7 +233,7 @@ async function serve(): Promise<void> {
     server.listen({ host, port, exclusive: true }, resolve);
   });
   console.log(
-    `OpenGeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker)`,
+    `Opengeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker)`,
   );
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => server.close(() => process.exit(0)));

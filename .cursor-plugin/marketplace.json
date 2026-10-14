@@ -1,12 +1,12 @@
 {
   "name": "opengeni",
-  "owner": { "name": "OpenGeni" },
-  "metadata": { "description": "OpenGeni skills for coding agents." },
+  "owner": { "name": "Opengeni" },
+  "metadata": { "description": "Opengeni skills for coding agents." },
   "plugins": [
     {
       "name": "opengeni",
       "source": "./plugins/opengeni",
-      "description": "Set up SDK access, build products, and learn the OpenGeni offload workflow."
+      "description": "Set up SDK access, build products, and learn the Opengeni offload workflow."
     }
   ]
 }

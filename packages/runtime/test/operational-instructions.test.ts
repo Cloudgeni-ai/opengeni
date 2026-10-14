@@ -17,9 +17,7 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance).toContain("`capability_catalog_search`");
     expect(guidance).toContain("`capability_authorization_request`");
     expect(guidance).toContain("Use available integration tools directly");
-    expect(guidance).toContain(
-      "If access is missing, check `variable_set_list` (see Session coordination), then search `capability_catalog_search`.",
-    );
+    expect(guidance).toContain("If access is missing, search `capability_catalog_search`.");
     expect(guidance).toContain("`setup.nextAction`");
     expect(guidance).toContain("does not need integration-management permission");
     expect(guidance).toContain("authenticated human must authorize");
@@ -35,7 +33,7 @@ describe("provider-neutral operational instructions", () => {
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expect(guidance).toContain("check whether OpenGeni already provides the capability natively");
+    expect(guidance).toContain("check whether Opengeni already provides the capability natively");
     expect(guidance).toContain(
       "a Site reaches the model and workspace tools through the host bridge",
     );
@@ -92,6 +90,16 @@ describe("provider-neutral operational instructions", () => {
     );
   });
 
+  test("limits programmatic coverage to the Codemode catalog, not sandbox built-ins", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).not.toContain("Every tool available to you");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Every tool in the Codemode catalog (what `ogtool list` shows)",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog",
+    );
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");
@@ -103,7 +111,7 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("/abs/path");
   });
 
-  test("teaches OpenGeni sandbox file links with optional line numbers", () => {
+  test("teaches Opengeni sandbox file links with optional line numbers", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Component.ts](<sandbox:/workspace/My Project/My Component.ts:3>)",
@@ -212,12 +220,8 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable.",
     );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "A session cannot gain a Variable Set while it works",
-    );
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "run that step in a child created with those `variableSetIds` instead of asking the user to attach it.",
-    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("variable_set_list");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("variableSetIds");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain('waitFor: "completion"');
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A `goal.completed` event records goal state but is not a terminal child result",

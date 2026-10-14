@@ -23,6 +23,7 @@ test("production process bundles retain every runtime skill asset directory", as
       "bundled_project_skills",
       "bundled_schedule_skills",
       "bundled_site_skills",
+      "bundled_secret_skills",
       "bundled_video_skills",
       "bundled_management_skills",
     ]);
@@ -34,6 +35,7 @@ test("production process bundles retain every runtime skill asset directory", as
       ["bundled_project_skills", "opengeni-projects"],
       ["bundled_schedule_skills", "opengeni-schedules"],
       ["bundled_site_skills", "opengeni-sites"],
+      ["bundled_secret_skills", "opengeni-secrets"],
       ["bundled_video_skills", "opengeni-video-generation"],
       ["bundled_management_skills", "opengeni-skills"],
     ] as const) {

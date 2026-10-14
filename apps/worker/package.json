@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/worker-bundle",
-  "version": "1.0.0",
-  "description": "OpenGeni worker entry and reusable embedded lifecycle, shipped with a release-coherent pre-bundled Temporal workflow artifact.",
+  "version": "2.0.0",
+  "description": "Opengeni worker entry and reusable embedded lifecycle, shipped with a release-coherent pre-bundled Temporal workflow artifact.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -72,7 +72,10 @@
     "@opengeni/runtime": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@opengeni/storage": "workspace:*",
+    "@opengeni/subscriptions": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
+    "@opengeni/vaults": "workspace:*",
+    "@opengeni/vaults-onepassword": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
     "@temporalio/activity": "^1.17.0",
     "@temporalio/client": "^1.17.0",

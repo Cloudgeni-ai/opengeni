@@ -17,6 +17,9 @@ export const SPREADSHEET_ARTIFACT_COMMAND_MAX_COMMANDS = 4_096;
 export const SPREADSHEET_ARTIFACT_COMMAND_MAX_CELLS = 1_000_000;
 export const SPREADSHEET_ARTIFACT_COMMAND_MAX_STRING_BYTES = 1 * 1024 * 1024;
 export const SPREADSHEET_ARTIFACT_SHEET_NAME_MAX_UTF16_UNITS = 31;
+export const SPREADSHEET_DEFAULT_ROW_HEIGHT = 24;
+export const SPREADSHEET_DEFAULT_COLUMN_WIDTH = 96;
+export const SPREADSHEET_MAX_DIMENSION_PIXELS = 4096;
 
 const MAGIC = new TextEncoder().encode("OGASC002");
 const HEADER_BYTES = 8 + 2 + 2 + 4 + 8;
@@ -121,7 +124,19 @@ export type SpreadsheetArtifactCommand =
   | SpreadsheetRenameSheetCommand
   | SpreadsheetDeleteSheetCommand
   | SpreadsheetSetCellsCommand
-  | SpreadsheetClearRangeCommand;
+  | SpreadsheetClearRangeCommand
+  | Readonly<{
+      kind: "row.height.set";
+      sheet: SpreadsheetSheetPrecondition;
+      row: number;
+      height: number | null;
+    }>
+  | Readonly<{
+      kind: "column.width.set";
+      sheet: SpreadsheetSheetPrecondition;
+      column: number;
+      width: number | null;
+    }>;
 
 export type SpreadsheetArtifactCommandBatch = Readonly<{
   version: typeof SPREADSHEET_ARTIFACT_COMMAND_VERSION;
@@ -331,6 +346,27 @@ function encodeCommand(
       writer.u32(range.end.column);
       break;
     }
+    case "row.height.set":
+    case "column.width.set": {
+      const row = command.kind === "row.height.set";
+      const coordinate = row ? "row" : "column";
+      const size = row ? "height" : "width";
+      exactKeys(
+        command,
+        ["kind", "sheet", coordinate, size].sort(),
+        `spreadsheet command ${index}`,
+      );
+      writer.u8(row ? 5 : 6);
+      encodeSheetPrecondition(writer, command.sheet, index, context);
+      writer.u32(nonnegativeU32(command[coordinate], coordinate));
+      writer.u32(
+        dimensionPixels(
+          command[size],
+          row ? SPREADSHEET_DEFAULT_ROW_HEIGHT : SPREADSHEET_DEFAULT_COLUMN_WIDTH,
+        ),
+      );
+      break;
+    }
     default:
       throw commandError(index, "unknown command kind");
   }
@@ -341,7 +377,8 @@ function decodeCommand(
   index: number,
   context: CommandContext,
 ): SpreadsheetArtifactCommand {
-  switch (reader.u8()) {
+  const tag = reader.u8();
+  switch (tag) {
     case 0: {
       const sheetId = reader.sheetObjectId();
       const name = decodedSheetName(
@@ -400,9 +437,43 @@ function decodeCommand(
         range: Object.freeze({ start, end }),
       });
     }
+    case 5:
+    case 6: {
+      const sheet = decodeSheetPrecondition(reader, index, context);
+      const coordinate = reader.u32();
+      const pixels = reader.u32();
+      const defaultPixels =
+        tag === 5 ? SPREADSHEET_DEFAULT_ROW_HEIGHT : SPREADSHEET_DEFAULT_COLUMN_WIDTH;
+      if (pixels === defaultPixels || pixels > SPREADSHEET_MAX_DIMENSION_PIXELS) {
+        throw commandError(index, "dimension pixels are noncanonical or outside bounds");
+      }
+      return tag === 5
+        ? Object.freeze({ kind: "row.height.set", sheet, row: coordinate, height: pixels || null })
+        : Object.freeze({
+            kind: "column.width.set",
+            sheet,
+            column: coordinate,
+            width: pixels || null,
+          });
+    }
     default:
       throw commandError(index, "unknown binary command tag");
   }
+}
+
+function dimensionPixels(value: unknown, defaultPixels: number): number {
+  if (value === null) return 0;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > SPREADSHEET_MAX_DIMENSION_PIXELS
+  ) {
+    throw new RangeError(
+      "dimension pixels must be an integer from 1 through 4096, or null to reset",
+    );
+  }
+  return value === defaultPixels ? 0 : value;
 }
 
 function encodeSheetPrecondition(

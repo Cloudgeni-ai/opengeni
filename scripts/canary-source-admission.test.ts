@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-test("canary checkout admits the frozen main ancestor and rejects an unrelated commit", () => {
+test("canary checkout admits only the exact workflow source", () => {
   const workflow = Bun.YAML.parse(
     readFileSync(new URL("../.github/workflows/publish-canary.yml", import.meta.url), "utf8"),
   ) as { jobs: { publish: { steps: { name?: string; run?: string }[] } } };
@@ -33,11 +33,11 @@ test("canary checkout admits the frozen main ancestor and rejects an unrelated c
       git("checkout", "--detach", controller);
       const result = spawnSync("bash", ["-c", script], {
         cwd,
-        env: { ...process.env, SOURCE_SHA: candidate },
+        env: { ...process.env, SOURCE_SHA: candidate, GITHUB_SHA: controller },
         encoding: "utf8",
       });
-      expect(result.status === 0).toBe(candidate !== unrelated);
-      expect(git("rev-parse", "HEAD")).toBe(candidate === unrelated ? controller : candidate);
+      expect(result.status === 0).toBe(candidate === controller);
+      expect(git("rev-parse", "HEAD")).toBe(controller);
     }
   } finally {
     rmSync(cwd, { recursive: true, force: true });

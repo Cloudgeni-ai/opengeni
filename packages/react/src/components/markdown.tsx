@@ -28,6 +28,10 @@ import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
 import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
+import { remarkSoftLineBreaks } from "./remark-soft-line-breaks";
+import { rehypeSecretRefs } from "./rehype-secret-refs";
+import { mayContainSecretReference, SecretRefChip } from "./secret-ref-chip";
+import { useSecretsUi } from "../secrets-ui";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
@@ -82,6 +86,14 @@ export type MarkdownProps = {
   children: string;
   className?: string | undefined;
   /**
+   * Render a single newline inside prose as a line break (`<br>`), the way chat
+   * apps show messages; CommonMark otherwise folds it into a space. Chat message
+   * bodies enable this. Leave it off for documents and other authored Markdown.
+   * Code (fenced and inline), lists, tables, and blank-line paragraphs are
+   * unaffected either way.
+   */
+  softLineBreaks?: boolean | undefined;
+  /**
    * While true, newly arrived source fades in through tip ink (`.og-stream-ink`):
    * an age window over each append batch — fast streams keep a large soft band,
    * slow streams a tight tip. Paint-only: the DOM always holds the full truthful
@@ -96,7 +108,7 @@ export type MarkdownProps = {
    */
   onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
   /**
-   * Resolve OpenGeni object links (`artifact:`, `sandbox:`, editable
+   * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable
    * artifacts, Sites) to a host URL or action. Asked before any
    * {@link OpenGeniLinkProvider} above this body; `artifactHref` and
    * `onSandboxFile` still win for their own kinds.
@@ -230,7 +242,7 @@ const baseComponents: Components = {
   ),
   td: ({ children, ...props }) => (
     <td
-      className="border-b border-og-border/70 px-0 py-1.5 pr-4 align-top text-og-fg-muted [tr:last-child>&]:border-b-0"
+      className="border-b border-og-border/70 px-0 py-1.5 pr-4 align-top text-og-fg-muted"
       {...props}
     >
       {children}
@@ -239,8 +251,7 @@ const baseComponents: Components = {
   img: MarkdownImage,
 };
 
-const MARKDOWN_LINK_CLASS =
-  "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
+const MARKDOWN_LINK_CLASS = "break-words font-medium og-link";
 
 // Keep renderer component types stable: rebuilding them remounts paragraphs,
 // destroys native selections, and resets embedded media on host updates.
@@ -267,8 +278,27 @@ function linkActionTitle(target: OpenGeniLinkTarget): string {
       : "Open artifact";
 }
 
+/** A `rehypeSecretRefs` placeholder becomes a chip; every other span passes through. */
+function MarkdownSpan({
+  node: _node,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"span"> & ExtraProps) {
+  const raw = (props as Record<string, unknown>)["data-og-secret-ref"];
+  if (typeof raw === "string") return <MarkdownSecretRef raw={raw}>{children}</MarkdownSecretRef>;
+  return <span {...props}>{children}</span>;
+}
+
+function MarkdownSecretRef({ raw, children }: { raw: string; children?: ReactNode }) {
+  const ui = useSecretsUi();
+  const token = ui?.tokenize(raw).find((candidate) => candidate.type === "reference");
+  if (!token || token.type !== "reference") return <>{children}</>;
+  return <SecretRefChip reference={token.reference} />;
+}
+
 const markdownComponents: Components = {
   ...baseComponents,
+  span: MarkdownSpan,
   p: ({ children, node, ...props }) => {
     const containsArtifact = node?.children.some(
       (child) =>
@@ -420,7 +450,7 @@ function isSandboxHref(href: string | undefined): boolean {
 }
 
 /**
- * Parse an OpenGeni `sandbox:` application href (plus the historical bare
+ * Parse an Opengeni `sandbox:` application href (plus the historical bare
  * `/workspace/...` form). The decoded path is intentionally opaque here:
  * target selection, path policy, and filesystem authority belong to the
  * session-aware host and its FileSystem boundary.
@@ -602,8 +632,14 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
     layoutRef.current?.measure();
   }, [children]);
   return (
-    <div ref={wrapperRef} className="group/copy relative mt-3 max-w-full first:mt-0">
-      <div className="pointer-events-none absolute top-0 right-0 z-10">
+    // Touch shows the copy action permanently at full touch size, so it sits
+    // under the table there instead of covering the right-aligned header.
+    <div
+      ref={wrapperRef}
+      data-og-table=""
+      className="group/copy relative mt-3 max-w-full first:mt-0 pointer-coarse:pb-11"
+    >
+      <div className="pointer-events-none absolute top-0 right-0 z-10 pointer-coarse:top-auto pointer-coarse:bottom-0">
         <div className="pointer-events-auto">
           <CopyButton
             text={() => tableElementToTsv(tableRef.current)}
@@ -615,7 +651,12 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
       <div className="overflow-x-auto" tabIndex={0}>
         <table
           ref={tableRef}
-          className={cn("w-full min-w-0 border-collapse text-og-base", className)}
+          className={cn(
+            // Leading `&` only: a trailing one (`tr:last-child>&`) under the scoped
+            // selector list needs `:is()`, which bundlers warn about for older targets.
+            "w-full min-w-0 border-collapse text-og-base [&_tr:last-child>td]:border-b-0",
+            className,
+          )}
           {...props}
         >
           {children}
@@ -625,10 +666,19 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
   );
 }
 
+type RemarkPlugins = NonNullable<Parameters<typeof ReactMarkdown>[0]["remarkPlugins"]>;
+const REMARK_PLUGINS: RemarkPlugins = [remarkGfm];
+// Structural plugin types (see remark-soft-line-breaks.ts) need one cast at the seam.
+const SOFT_LINE_BREAK_REMARK_PLUGINS = [
+  remarkGfm,
+  remarkSoftLineBreaks,
+] as unknown as RemarkPlugins;
+
 function MarkdownImpl({
   children,
   artifactHref,
   className,
+  softLineBreaks = false,
   streaming = false,
   onSandboxFile,
   renderInteractiveBlock,
@@ -667,11 +717,23 @@ function MarkdownImpl({
     hadRevealRef.current = true;
   }
   const revealActive = reveal !== null && (streaming || reveal.hasActive(now));
-  // The plugin walks the standard hast tree; a structural local type keeps the
-  // module dependency-free, at the cost of this narrowing cast at the seam.
+  const secretsUi = useSecretsUi();
+  // Secret references become chip placeholders before the ink split, so a
+  // reference is never cut into ink spans. Without a host tokenizer, or when
+  // the text names no reference, the pipeline is unchanged.
+  const secretRefs =
+    secretsUi && mayContainSecretReference(children)
+      ? [[rehypeSecretRefs, { tokenize: secretsUi.tokenize }]]
+      : [];
+  // The plugins walk the standard hast tree; structural local types keep the
+  // modules dependency-free, at the cost of this narrowing cast at the seam.
+  const rehypePluginList = [
+    ...secretRefs,
+    ...(revealActive && reveal !== null ? [[rehypeStreamReveal, { reveal, now }]] : []),
+  ];
   const rehypePlugins =
-    revealActive && reveal !== null
-      ? ([[rehypeStreamReveal, { reveal, now }]] as unknown as NonNullable<
+    rehypePluginList.length > 0
+      ? (rehypePluginList as unknown as NonNullable<
           Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
         >)
       : undefined;
@@ -755,7 +817,7 @@ function MarkdownImpl({
             )}
           >
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={softLineBreaks ? SOFT_LINE_BREAK_REMARK_PLUGINS : REMARK_PLUGINS}
               rehypePlugins={rehypePlugins}
               components={markdownComponents}
               urlTransform={markdownUrlTransform}

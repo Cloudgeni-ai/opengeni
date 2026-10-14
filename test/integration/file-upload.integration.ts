@@ -11,9 +11,9 @@ import {
   createDb,
   dbSql,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
-  setActiveCodexCredential,
-  upsertCodexSubscriptionCredential,
+  connectSubscriptionCoreCodexConnection,
+  setSubscriptionCoreCodexPrimary,
+  withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -254,7 +254,6 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient OpenGeni credits",
         retryable: false,
       },
     });
@@ -282,26 +281,50 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
     // draft's model. The same durable attachment then admits with zero managed
     // credits and creates exactly one session/message/turn.
     const encryptionKey = environmentsEncryptionKeyBytes(fixture.settings)!;
-    const credential = await upsertCodexSubscriptionCredential(appDb.db, {
-      accountId: fixture.accountId,
-      workspaceId: fixture.workspaceId,
-      credentialEncrypted: encryptEnvironmentValue(
-        encryptionKey,
-        JSON.stringify({
-          access_token: "synthetic-access-token",
-          refresh_token: "synthetic-refresh-token",
-          id_token: "synthetic-id-token",
-        }),
-      ),
-      chatgptAccountId: `synthetic:${crashed.fileId}`,
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: new Date(Date.now() + 60_000),
-      lastRefreshAt: new Date(),
-    });
-    await ensureCodexRotationSettings(appDb.db, fixture.accountId, fixture.workspaceId);
-    expect(await setActiveCodexCredential(appDb.db, fixture.workspaceId, credential.id)).toBe(true);
+    // bootstrapWorkspace grants this synthetic caller workspace access, not
+    // organization membership. The core connect writer requires a real admin.
+    const [personal] = await admin`insert into workspaces (account_id, name)
+      values (${fixture.accountId}, 'Synthetic owner Personal workspace') returning id`;
+    await admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id, role)
+      values (${fixture.accountId}, ${fixture.subjectId}, 'active', ${personal!.id}, 'owner')
+      on conflict (account_id, subject_id) do nothing`;
+    const credential = await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+      connectSubscriptionCoreCodexConnection(appDb.db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        subjectId: fixture.subjectId,
+        credentialEncrypted: encryptEnvironmentValue(
+          encryptionKey,
+          JSON.stringify({
+            access_token: "synthetic-access-token",
+            refresh_token: "synthetic-refresh-token",
+            id_token: "synthetic-id-token",
+          }),
+        ),
+        providerAccountId: `synthetic:${crashed.fileId}`,
+        providerSubjectId: "synthetic-person",
+        accountEmail: null,
+        label: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: new Date(Date.now() + 60_000),
+        lastRefreshAt: new Date(),
+      }),
+    );
+    if (credential.kind !== "connected")
+      throw new Error(`Core fixture refused: ${credential.reason}`);
+    expect(
+      (
+        await withSessionRlsActorContext({ subjectId: fixture.subjectId }, () =>
+          setSubscriptionCoreCodexPrimary(appDb.db, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            subjectId: fixture.subjectId,
+            connectionId: credential.id,
+          }),
+        )
+      ).activated,
+    ).toBe(credential.id);
     const codexDraftResponse = await app.request(
       workspacePath(fixture.workspaceId, "/new-session-draft"),
       {
@@ -709,6 +732,12 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
           await release;
           return { claimed: 0, deleted: 0, failed: 0 };
         },
+        // The reaper workflow runs further sweeps after the upload reaper;
+        // register them as no-ops so each triggered run completes cleanly.
+        maintainRetainedScreenshots: async () => ({}),
+        maintainBrowserStateArtifacts: async () => ({}),
+        recoverVideoGenerationWorkflows: async () => ({}),
+        reconcileRecentModelCallFacts: async () => ({}),
       },
     });
     const run = worker.run();
@@ -794,6 +823,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
 
 type WorkspaceFixture = {
   accountId: string;
+  subjectId: string;
   workspaceId: string;
   headers: Record<string, string>;
   settings: ReturnType<typeof uploadSettings>;
@@ -861,6 +891,7 @@ async function workspaceFixture(
   });
   return {
     accountId,
+    subjectId: access.subjectId,
     workspaceId,
     headers: { authorization: `Bearer ${token}` },
     settings,

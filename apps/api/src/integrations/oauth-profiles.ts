@@ -7,7 +7,11 @@ import { OPENGENI_PERSONAL_SLACK_MCP_URL, type ConnectionOwnership } from "@open
 import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { GMAIL_REST_MCP_TOOLS, gmailToolSupportsScopes } from "@opengeni/runtime/gmail-rest-mcp";
+import {
+  GMAIL_REST_MCP_TOOLS,
+  gmailToolAvailableOnDeployment,
+  gmailToolSupportsScopes,
+} from "@opengeni/runtime/gmail-rest-mcp";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -132,7 +136,10 @@ export type OAuthProviderProfile = {
     /** Distinguish a rejected OAuth grant from a temporary verification failure. */
     isRejectedGrant?: (payload: Record<string, unknown>) => boolean;
     validateIdentity: (payload: Record<string, unknown>) => Record<string, string>;
-    toolsForScopes: (scopes: readonly string[]) => Array<{ name: string; description?: string }>;
+    toolsForScopes: (
+      scopes: readonly string[],
+      deployment: { gmailWatchTopicName?: string | undefined },
+    ) => Array<{ name: string; description?: string }>;
   };
 };
 
@@ -194,7 +201,16 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
       ) {
         throw new Error("Slack account verification failed");
       }
-      return { slackTeamId: payload.team_id, slackUserId: payload.user_id };
+      return {
+        slackTeamId: payload.team_id,
+        slackUserId: payload.user_id,
+        ...(typeof payload.team === "string" && payload.team.trim()
+          ? { slackTeamName: payload.team }
+          : {}),
+        ...(typeof payload.user === "string" && payload.user.trim()
+          ? { slackUserName: payload.user }
+          : {}),
+      };
     },
     toolsForScopes: slackRestMcpToolsForScopes,
   },
@@ -256,10 +272,14 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
       }
       return { gmailEmail: payload.emailAddress };
     },
-    toolsForScopes: (scopes) => {
-      return GMAIL_REST_MCP_TOOLS.filter((tool) => gmailToolSupportsScopes(tool.name, scopes)).map(
-        ({ name, description }) => ({ name, ...(description ? { description } : {}) }),
-      );
+    toolsForScopes: (scopes, deployment) => {
+      return GMAIL_REST_MCP_TOOLS.filter(
+        (tool) =>
+          gmailToolSupportsScopes(tool.name, scopes) &&
+          gmailToolAvailableOnDeployment(tool.name, {
+            watchTopicName: deployment.gmailWatchTopicName,
+          }),
+      ).map(({ name, description }) => ({ name, ...(description ? { description } : {}) }));
     },
   },
 };

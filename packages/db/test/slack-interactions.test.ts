@@ -120,7 +120,7 @@ async function botConnection(
       slackTeamName: "Slack interaction database test",
       botId: principal.botId,
       botUserId: principal.botUserId,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date().toISOString(),
     },
   });
@@ -692,7 +692,7 @@ describe("Slack interaction migration and durable database boundary", () => {
       latencyMode: "standard",
       sandboxBackend: "none",
     });
-    const line = "<https://app.example.test/w/s|OpenGeni started this task> in *Platform*.";
+    const line = "<https://app.example.test/w/s|Opengeni started this task> in *Platform*.";
     expect(
       await bindSlackInteractionSession(db, {
         ...interaction,
@@ -708,7 +708,7 @@ describe("Slack interaction migration and durable database boundary", () => {
         ...interaction,
         owningSubjectId: owner,
         sessionId: session.id,
-        startMessageLine: "<https://elsewhere.test/w/s|OpenGeni started this task>.",
+        startMessageLine: "<https://elsewhere.test/w/s|Opengeni started this task>.",
       }),
     ).toMatchObject({ sessionId: session.id, startMessageLine: line });
     const [row] = await admin<{ start_message_line: string | null }[]>`
@@ -767,7 +767,7 @@ describe("Slack interaction migration and durable database boundary", () => {
       ...reserved,
       owningSubjectId: owner,
       sessionId: session.id,
-      startMessageLine: "<https://app.example.test/w/s|OpenGeni started this task>.",
+      startMessageLine: "<https://app.example.test/w/s|Opengeni started this task>.",
     });
     if (!interaction) throw new Error("start button interaction did not bind");
     const messageOperationId = crypto.randomUUID();

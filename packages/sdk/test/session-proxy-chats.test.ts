@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeni } from "../src/chat";
+import { Opengeni } from "../src/chat";
 import type { Chats } from "../src/chats";
 import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "../src/errors";
@@ -33,7 +33,7 @@ function fakeApi() {
     return Response.json({ session: { id: SESSION_ID } });
   };
   const client = new OpenGeniEmbeddingClient({ baseUrl: API, apiKey: "og_test", fetch });
-  const og = new OpenGeni({
+  const og = new Opengeni({
     organizationId: ORGANIZATION_ID,
     apiKey: "og_test",
     baseUrl: API,
@@ -209,7 +209,7 @@ describe("session proxy chats", () => {
 
   test("the chat facade forwards custom isolated member permissions", async () => {
     const api = fakeApi();
-    const og = new OpenGeni({
+    const og = new Opengeni({
       organizationId: ORGANIZATION_ID,
       apiKey: "og_test",
       baseUrl: API,

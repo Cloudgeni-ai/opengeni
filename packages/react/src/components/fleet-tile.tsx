@@ -2,6 +2,7 @@ import { deriveSessionDisplayTitle, type Session } from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
+import { sessionAdmissionBlocked, sessionDisplayStatus } from "../session-status-model";
 import { SessionStatus } from "./session-status";
 
 const SESSION_METADATA_TITLE_KEYS = ["title", "name"] as const;
@@ -28,7 +29,7 @@ export function sessionDisplayTitle(session: Session): string {
  */
 export function FleetTile({ session, title, subtitle, onOpen, className }: FleetTileProps) {
   const running = session.status === "running" || session.status === "queued";
-  const needsYou = session.status === "requires_action";
+  const needsYou = session.status === "requires_action" && !sessionAdmissionBlocked(session);
   return (
     <button
       type="button"
@@ -60,7 +61,7 @@ export function FleetTile({ session, title, subtitle, onOpen, className }: Fleet
         <span className="line-clamp-2 min-w-0 text-og-base font-medium leading-snug text-og-fg">
           {title ?? sessionDisplayTitle(session)}
         </span>
-        <SessionStatus status={session.status} size="sm" className="mt-px" />
+        <SessionStatus status={sessionDisplayStatus(session)} size="sm" className="mt-px" />
       </span>
       {subtitle ? (
         <span className="line-clamp-1 text-og-sm text-og-fg-muted">{subtitle}</span>

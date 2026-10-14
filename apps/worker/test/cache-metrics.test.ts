@@ -219,22 +219,26 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(availabilityLabels).not.toMatch(/account|session|workspace|model|source/);
 
     const rule = await Bun.file("deploy/helm/opengeni/templates/prometheusrule.yaml").text();
+    const releaseScope =
+      "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
     expect(rule).toContain("OpenGeniCodexPromptCacheTelemetryMissing");
     expect(rule).toContain("opengeni_model_cache_read_telemetry_total");
-    expect(rule).toContain('provider="codex-subscription",status="missing"');
+    expect(rule).toContain(
+      `opengeni_model_cache_read_telemetry_total{${releaseScope},provider="codex-subscription",status="missing"}`,
+    );
     // If a provider/SDK omits the ENTIRE usage object, no availability sample
     // exists. HTTP response traffic remains an independent activity signal,
     // not a denominator: it is recorded before streamed usage is committed.
     expect(rule).toContain(
-      'opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}',
+      `opengeni_model_calls_total{${releaseScope},provider="codex-subscription",outcome="completed"}`,
     );
     const alertBlock = rule.match(
       /- alert: OpenGeniCodexPromptCacheTelemetryMissing[\s\S]*?for: 15m/,
     )?.[0];
     expect(alertBlock).toBeDefined();
     expect(alertBlock?.match(/and on\(\)/g)).toHaveLength(1);
-    expect(alertBlock).toMatch(
-      /sum\(rate\(opengeni_model_cache_read_telemetry_total\{provider="codex-subscription"\}\[30m\]\)\) or vector\(0\)\)\s*== 0/,
+    expect(alertBlock).toContain(
+      `sum(rate(opengeni_model_cache_read_telemetry_total{${releaseScope},provider="codex-subscription"}[30m])) or vector(0)) == 0`,
     );
     expect(alertBlock).not.toContain("<");
   });

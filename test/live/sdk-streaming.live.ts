@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient, type SessionEvent } from "@opengeni/sdk";
 
-// Live SDK streaming smoke against a deployed OpenGeni API.
+// Live SDK streaming smoke against a deployed Opengeni API.
 //
 // Requires:
 //   OPENGENI_ENABLE_LIVE_TESTS=true

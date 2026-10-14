@@ -43,7 +43,7 @@ const server = createServer((incoming, outgoing) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`OpenGeni sandbox development edge listening on 127.0.0.1:${port}`);
+  console.log(`Opengeni sandbox development edge listening on 127.0.0.1:${port}`);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

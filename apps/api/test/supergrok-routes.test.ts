@@ -4,20 +4,8 @@ import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createHash, randomUUID } from "node:crypto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import {
-  bootstrapWorkspace,
-  createDb,
-  deleteWorkspace,
-  ensureManagedAccessForUser,
-  ensureExternalIdentity,
-  createOrganizationApiKey,
-  revokeOrganizationApiKey,
-  grantWorkspaceAccess,
-  withWorkspaceSubjectRls,
-  type DbClient,
-} from "@opengeni/db";
+import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
   acquireOwnerMigratedTestDatabase,
@@ -38,12 +26,9 @@ const externalAppUrl = process.env.OPENGENI_SUPERGROK_POSTGRES_APP_URL?.trim();
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
-let app: Hono | null = null;
-let accountId = "";
-let workspaceId = "";
-let subjectId = "";
 let managedAccountId = "";
 let managedWorkspaceId = "";
+let managedPersonalWorkspaceId = "";
 let managedSubjectId = "";
 let managedApp: Hono | null = null;
 let available = true;
@@ -51,12 +36,6 @@ let deviceSequence = 0;
 let userinfoRequests = 0;
 let providerSubject = "xai-user-1";
 
-const settings = testSettings({
-  productAccessMode: "configured",
-  delegationSecret: DELEGATION_SECRET,
-  environmentsEncryptionKey: encryptionKey.toString("base64"),
-  supergrokSubscriptionEnabled: true,
-});
 const managedSettings = testSettings({
   productAccessMode: "managed",
   delegationSecret: DELEGATION_SECRET,
@@ -164,32 +143,6 @@ beforeAll(async () => {
     return;
   }
   client = createDb(shared.appUrl);
-  subjectId = `user:supergrok-${crypto.randomUUID()}`;
-  const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "test",
-    accountExternalId: `supergrok-account-${crypto.randomUUID()}`,
-    accountName: "SuperGrok route account",
-    workspaceExternalSource: "test",
-    workspaceExternalId: `supergrok-workspace-${crypto.randomUUID()}`,
-    workspaceName: "SuperGrok route workspace",
-    subjectId,
-  });
-  const grant = access.workspaceGrants[0]!;
-  accountId = grant.accountId;
-  workspaceId = grant.workspaceId;
-  await shared.admin`
-    update workspace_memberships
-    set permissions = '["workspace:read", "workspace:admin", "connections:write"]'::jsonb
-    where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
-  app = new Hono();
-  registerSuperGrokRoutes(app, {
-    db: client.db,
-    settings,
-    resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, settings),
-    githubStateSecret: STATE_SECRET,
-    xaiFetch,
-    managedAuth: null,
-  } as ApiRouteDeps);
 
   const managedUserId = `supergrok-managed-${crypto.randomUUID()}`;
   const managedSessionId = `managed-session-${managedUserId}`;
@@ -218,6 +171,17 @@ beforeAll(async () => {
   });
   managedAccountId = managedAccess.defaultAccountId!;
   managedWorkspaceId = managedAccess.defaultWorkspaceId!;
+  // A private SuperGrok account connects only from its owner's Personal
+  // workspace on the shared core.
+  const [membership] = await shared.admin<{ personal_workspace_id: string }[]>`
+    select personal_workspace_id::text from organization_memberships
+    where account_id = ${managedAccountId} and subject_id = ${managedSubjectId}`;
+  managedPersonalWorkspaceId = membership!.personal_workspace_id;
+  await shared.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+    values (${managedAccountId}, ${managedPersonalWorkspaceId}, ${managedSubjectId}, 'owner',
+      '["workspace:read", "workspace:admin", "connections:write"]'::jsonb)
+    on conflict do nothing`;
   const managedAuth = {
     api: {
       getSession: async () => ({
@@ -252,7 +216,6 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  if (client && workspaceId) await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
   if (shared && managedAccountId) {
     await shared.admin`
       delete from managed_accounts where id = ${managedAccountId}`.catch(() => undefined);
@@ -264,17 +227,6 @@ afterAll(async () => {
     await shared?.release();
   }
 }, 60_000);
-
-async function bearer(
-  permissions: Permission[] = ["workspace:read", "workspace:admin"],
-): Promise<string> {
-  return await delegatedBearer({
-    accountId,
-    workspaceId,
-    subjectId,
-    permissions,
-  });
-}
 
 async function delegatedBearer(input: {
   accountId: string;
@@ -292,54 +244,13 @@ async function delegatedBearer(input: {
   });
 }
 
-async function request(
-  path: string,
-  options: { method?: string; body?: unknown; permissions?: Permission[] } = {},
-): Promise<Response> {
-  return await app!.request(`http://x/v1/workspaces/${workspaceId}${path}`, {
-    method: options.method ?? "GET",
-    headers: {
-      authorization: `Bearer ${await bearer(options.permissions)}`,
-      ...(options.body === undefined ? {} : { "content-type": "application/json" }),
-    },
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
-}
-
-async function connectWorkspaceAccount(): Promise<{ accountId: string }> {
-  const start = await request("/supergrok/connect/start", {
-    method: "POST",
-    body: {},
-  });
-  expect(start.status).toBe(200);
-  const started = await start.json();
-  expect(started).toMatchObject({
-    scope: "workspace",
-    intervalSeconds: 1,
-    expiresInSeconds: 600,
-  });
-  expect(started.userCode).toStartWith("XAI-");
-  const poll = await request("/supergrok/connect/poll", {
-    method: "POST",
-    body: { state: started.state },
-  });
-  expect(poll.status).toBe(200);
-  const connected = await poll.json();
-  expect(connected).toMatchObject({
-    status: "connected",
-    scope: "workspace",
-    isActive: true,
-    email: "owner@example.com",
-  });
-  return { accountId: connected.accountId };
-}
-
 async function managedRequest(
   path: string,
-  options: { method?: string; body?: unknown; bearer?: string } = {},
+  options: { method?: string; body?: unknown; bearer?: string; workspaceId?: string } = {},
 ): Promise<Response> {
   const method = options.method ?? "GET";
-  return await managedApp!.request(`${PUBLIC_ORIGIN}/v1/workspaces/${managedWorkspaceId}${path}`, {
+  const workspace = options.workspaceId ?? managedWorkspaceId;
+  return await managedApp!.request(`${PUBLIC_ORIGIN}/v1/workspaces/${workspace}${path}`, {
     method,
     headers: {
       ...(options.bearer
@@ -355,205 +266,10 @@ async function managedRequest(
 }
 
 describe("SuperGrok subscription routes", () => {
-  test("workspace-default connect, health, OCC, reconnect, and disconnect stay metadata-only", async () => {
-    if (!available) return;
-    const connected = await connectWorkspaceAccount();
-
-    const listed = await request("/supergrok/accounts");
-    expect(listed.status).toBe(200);
-    const firstList = await listed.json();
-    expect(firstList).toMatchObject({
-      activeAccountId: connected.accountId,
-      settings: {
-        rotationEnabled: true,
-        rotationStrategy: "sharded",
-        activeCredentialId: connected.accountId,
-      },
-    });
-    expect(firstList.accounts).toHaveLength(1);
-    expect(firstList.accounts[0]).toMatchObject({
-      id: connected.accountId,
-      scope: "workspace",
-      subject: "xai-user-1",
-      email: "owner@example.com",
-      label: "Owner",
-      status: "active",
-      active: true,
-      allocatorEnabled: true,
-      allocatorVersion: 1,
-    });
-    const serialized = JSON.stringify(firstList);
-    expect(serialized).not.toContain("access-");
-    expect(serialized).not.toContain("refresh-");
-    expect(serialized).not.toContain("credentialEncrypted");
-    expect(userinfoRequests).toBe(0);
-
-    const status = await request("/supergrok/status");
-    expect(status.status).toBe(200);
-    const statusBody = (await status.json()) as { models: Array<{ id: string }> };
-    expect(statusBody).toMatchObject({
-      connected: true,
-      valid: true,
-      accountCount: 1,
-      activeAccount: {
-        id: connected.accountId,
-        subject: "xai-user-1",
-        scope: "workspace",
-      },
-      models: [{ id: "supergrok/grok-4.7", provider: "supergrok" }],
-    });
-    expect(statusBody.models.map((model) => model.id)).toEqual(["supergrok/grok-4.7"]);
-
-    const renamed = await request(`/supergrok/accounts/${connected.accountId}`, {
-      method: "PATCH",
-      body: { label: "Primary Grok" },
-    });
-    expect(renamed.status).toBe(200);
-    expect(await renamed.json()).toMatchObject({
-      label: "Primary Grok",
-      active: true,
-    });
-
-    const disabled = await request(`/supergrok/accounts/${connected.accountId}/allocator`, {
-      method: "PATCH",
-      body: { enabled: false, expectedVersion: 1 },
-    });
-    expect(disabled.status).toBe(200);
-    expect(await disabled.json()).toMatchObject({
-      allocatorEnabled: false,
-      allocatorVersion: 2,
-      changed: true,
-    });
-
-    const staleConflict = await request(`/supergrok/accounts/${connected.accountId}/allocator`, {
-      method: "PATCH",
-      body: { enabled: true, expectedVersion: 1 },
-    });
-    expect(staleConflict.status).toBe(409);
-    expect(await staleConflict.json()).toMatchObject({
-      allocatorEnabled: false,
-      allocatorVersion: 2,
-      changed: false,
-    });
-
-    const staleIdempotent = await request(`/supergrok/accounts/${connected.accountId}/allocator`, {
-      method: "PATCH",
-      body: { enabled: false, expectedVersion: 1 },
-    });
-    expect(staleIdempotent.status).toBe(200);
-    expect(await staleIdempotent.json()).toMatchObject({
-      allocatorEnabled: false,
-      allocatorVersion: 2,
-      changed: false,
-    });
-
-    const activated = await request(`/supergrok/accounts/${connected.accountId}/activate`, {
-      method: "POST",
-    });
-    expect(activated.status).toBe(200);
-    expect(await activated.json()).toEqual({
-      activated: true,
-      accountId: connected.accountId,
-    });
-
-    const settingsUpdate = await request("/supergrok/settings", {
-      method: "PATCH",
-      body: { rotationEnabled: false },
-    });
-    expect(settingsUpdate.status).toBe(200);
-    expect(await settingsUpdate.json()).toMatchObject({
-      rotationEnabled: false,
-      rotationStrategy: "sharded",
-      activeCredentialId: connected.accountId,
-    });
-
-    const reconnected = await connectWorkspaceAccount();
-    expect(reconnected.accountId).toBe(connected.accountId);
-    const afterReconnect = await request("/supergrok/accounts");
-    expect((await afterReconnect.json()).accounts).toHaveLength(1);
-
-    const privateStart = await request("/supergrok/connect/start", {
-      method: "POST",
-      body: { scope: "user" },
-      permissions: ["workspace:read", "connections:write"],
-    });
-    expect(privateStart.status).toBe(403);
-
-    const disconnected = await request(`/supergrok/accounts/${connected.accountId}`, {
-      method: "DELETE",
-    });
-    expect(disconnected.status).toBe(200);
-    expect(await disconnected.json()).toEqual({
-      disconnected: true,
-      newActiveId: null,
-    });
-
-    const empty = await request("/supergrok/accounts");
-    expect(await empty.json()).toMatchObject({
-      accounts: [],
-      activeAccountId: null,
-    });
-  });
-
-  test("external owners connect private SuperGrok without cookies and cannot replace a revoked device origin", async () => {
-    if (!client || !managedApp) throw new Error("Real database fixture required");
-    const identity = await ensureExternalIdentity(client.db, {
-      accountId: managedAccountId,
-      externalId: `supergrok-${randomUUID()}`,
-    });
-    await withWorkspaceSubjectRls(client.db, managedWorkspaceId, managedSubjectId, (tx) =>
-      grantWorkspaceAccess(tx, {
-        accountId: managedAccountId,
-        workspaceId: managedWorkspaceId,
-        subjectId: identity.subjectId,
-        permissions: ["workspace:read", "connections:write"],
-      }),
-    );
-    const tokens = [randomUUID(), randomUUID()];
-    const keys = await Promise.all(
-      tokens.map((token) =>
-        createOrganizationApiKey(client!.db, {
-          accountId: managedAccountId,
-          name: "External device fixture",
-          prefix: "test",
-          keyHash: createHash("sha256").update(token).digest("hex"),
-          permissions: ["workspace:read", "connections:write"],
-        }),
-      ),
-    );
-    const deviceRequest = (path: string, body: unknown, index = 0) =>
-      managedApp!.request(`/v1/workspaces/${managedWorkspaceId}/supergrok${path}`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${tokens[index]}`,
-          "content-type": "application/json",
-          "x-opengeni-external-actor": encodeURIComponent(
-            JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
-          ),
-        },
-        body: JSON.stringify(body),
-      });
-    const start = await deviceRequest("/connect/start", { scope: "user" });
-    expect(start.status).toBe(200);
-    const started = await start.json();
-    const connected = await deviceRequest("/connect/poll", { state: started.state });
-    expect({
-      status: connected.status,
-      ...(connected.status !== 200 ? { body: await connected.clone().text() } : {}),
-    }).toEqual({ status: 200 });
-    expect(await connected.json()).toMatchObject({ status: "connected", scope: "user" });
-    const waiting = await deviceRequest("/connect/start", { scope: "user" });
-    expect(waiting.status).toBe(200);
-    const pending = await waiting.json();
-    await revokeOrganizationApiKey(client.db, managedAccountId, keys[0]!.id);
-    const denied = await deviceRequest("/connect/poll", { state: pending.state }, 1);
-    expect(denied.status).toBe(403);
-  });
-
   test("private accounts require the exact same-origin managed browser and never accept bearer borrowing", async () => {
     if (!available) return;
     const crossSite = await managedApp!.request(
-      `${PUBLIC_ORIGIN}/v1/workspaces/${managedWorkspaceId}/supergrok/connect/start`,
+      `${PUBLIC_ORIGIN}/v1/workspaces/${managedPersonalWorkspaceId}/supergrok/connect/start`,
       {
         method: "POST",
         headers: {
@@ -570,24 +286,32 @@ describe("SuperGrok subscription routes", () => {
     const start = await managedRequest("/supergrok/connect/start", {
       method: "POST",
       body: { scope: "user" },
+      workspaceId: managedPersonalWorkspaceId,
     });
-    expect(start.status).toBe(200);
+    expect({
+      status: start.status,
+      ...(start.status !== 200 ? { body: await start.clone().text() } : {}),
+    }).toEqual({ status: 200 });
     const started = await start.json();
     expect(started).toMatchObject({ scope: "user", intervalSeconds: 1 });
 
     const poll = await managedRequest("/supergrok/connect/poll", {
       method: "POST",
       body: { state: started.state },
+      workspaceId: managedPersonalWorkspaceId,
     });
     expect(poll.status).toBe(200);
     const connected = await poll.json();
+    // The shared core leaves the primary unset on a first connect.
     expect(connected).toMatchObject({
       status: "connected",
       scope: "user",
-      isActive: true,
+      isActive: false,
     });
 
-    const listed = await managedRequest("/supergrok/accounts");
+    const listed = await managedRequest("/supergrok/accounts", {
+      workspaceId: managedPersonalWorkspaceId,
+    });
     expect(listed.status).toBe(200);
     const privateList = await listed.json();
     expect(privateList.accounts).toHaveLength(1);
@@ -600,23 +324,26 @@ describe("SuperGrok subscription routes", () => {
 
     const sameHumanBearer = await delegatedBearer({
       accountId: managedAccountId,
-      workspaceId: managedWorkspaceId,
+      workspaceId: managedPersonalWorkspaceId,
       subjectId: managedSubjectId,
       permissions: ["workspace:read", "connections:write"],
     });
     const bearerRead = await managedRequest("/supergrok/accounts", {
       bearer: sameHumanBearer,
+      workspaceId: managedPersonalWorkspaceId,
     });
     expect(bearerRead.status).toBe(403);
     const bearerMutation = await managedRequest(`/supergrok/accounts/${connected.accountId}`, {
       method: "DELETE",
       bearer: sameHumanBearer,
+      workspaceId: managedPersonalWorkspaceId,
     });
     expect(bearerMutation.status).toBe(403);
 
     const disconnected = await managedRequest(`/supergrok/accounts/${connected.accountId}`, {
       method: "DELETE",
       body: {},
+      workspaceId: managedPersonalWorkspaceId,
     });
     expect(disconnected.status).toBe(200);
     expect(await disconnected.json()).toEqual({
@@ -664,7 +391,8 @@ test("organization subscriptions use device login, multiple accounts, inherited 
   const listed = await requestOrganization("/accounts");
   const accounts = await listed.json();
   expect(accounts.accounts).toHaveLength(2);
-  expect(accounts.activeAccountId).toBe(ids[0]);
+  // The shared core leaves the primary unset until one is activated.
+  expect(accounts.activeAccountId).toBeNull();
   expect(JSON.stringify(accounts)).not.toContain("refresh-");
   expect((await requestOrganization(`/accounts/${ids[1]}/activate`, "POST", {})).status).toBe(200);
   expect((await requestOrganization("/settings", "PATCH", { rotationEnabled: true })).status).toBe(

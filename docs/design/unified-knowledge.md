@@ -94,7 +94,12 @@ The settings page lists editable defaults and context overrides. Contextual
 shortcuts edit those same records:
 
 - Scheduled task: collapsed Advanced > Agent learning.
-- Chat: + > Chat settings > Agent learning, with no persistent composer toggle.
+- Chat: the session dock's Agent tab, beside the chat's identity and
+  capabilities; + > Chat settings opens it. A new chat sets its draft choice in
+  + > Chat settings. No persistent composer toggle.
+- Organization identity (owners only): a row on Settings > Agent learning in the
+  same Off / Review first / Automatic words, backed by the separate
+  company-profile agent policy.
 
 Knowledge, Instructions and Skills appear together in the browsing area while
 their content and activation authorities remain distinct. The existing unified

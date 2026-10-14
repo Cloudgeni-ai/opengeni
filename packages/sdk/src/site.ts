@@ -12,6 +12,24 @@ import {
 } from "./tools";
 import { OpenGeniClient } from "./client";
 import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
+import { createOpenGeniSiteData, type OpenGeniSiteData, type OpenGeniSiteFiles } from "./site-data";
+export {
+  OpenGeniSiteDataError,
+  SITE_DATA_PATH_PREFIX,
+  type OpenGeniSiteData,
+  type OpenGeniSiteDataCollection,
+  type OpenGeniSiteDataErrorCode,
+  type OpenGeniSiteDataFilter,
+  type OpenGeniSiteDataListOptions,
+  type OpenGeniSiteDataOperation,
+  type OpenGeniSiteDataPage,
+  type OpenGeniSiteDataRecord,
+  type OpenGeniSiteDataRef,
+  type OpenGeniSiteDataScalar,
+  type OpenGeniSiteDataWriteResult,
+  type OpenGeniSiteFile,
+  type OpenGeniSiteFiles,
+} from "./site-data";
 export {
   isSiteHttpRequest,
   serveSiteHttp,
@@ -23,6 +41,10 @@ import type {
   ToolGatewayCallResponse,
   ToolGatewayCatalog,
   ToolGatewayDeclarationsResponse,
+  ToolGatewayResolveRequest,
+  ToolGatewayResolvedTool,
+  ToolGatewayInvokeRequest,
+  ToolGatewayInvokeResponse,
 } from "./types";
 
 export const OPENGENI_SITE_BRIDGE_VERSION = 2 as const;
@@ -42,6 +64,9 @@ export type OpenGeniSiteBridgeConnectMessage = {
 export type OpenGeniSiteBridgeReadyMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_READY;
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
+  targetTools?: 1;
+  /** The host serves Site Data for this published Site over the Site HTTP channel. */
+  siteData?: 1;
 };
 
 /** Site-originated calls cannot carry host-only approval tokens or Site-version authority. */
@@ -63,6 +88,8 @@ export type OpenGeniSiteBridgeRequestMessage = {
   | { method: "catalog" }
   | { method: "call"; payload: OpenGeniSiteToolCallRequest }
   | { method: "declarations" }
+  | { method: "resolve"; payload: ToolGatewayResolveRequest }
+  | { method: "invoke"; payload: ToolGatewayInvokeRequest }
 );
 
 export type OpenGeniSiteBridgeCancelMessage = {
@@ -78,7 +105,12 @@ export type OpenGeniSiteBridgeResponseMessage = {
 } & (
   | {
       ok: true;
-      value: OpenGeniSiteToolCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse;
+      value:
+        | OpenGeniSiteToolCatalog
+        | ToolGatewayCallResponse
+        | ToolGatewayDeclarationsResponse
+        | ToolGatewayResolvedTool
+        | ToolGatewayInvokeResponse;
     }
   | {
       ok: false;
@@ -98,10 +130,16 @@ export type OpenGeniSiteClient = {
   readonly workspaceId: string;
   /** Workspace-bound typed facade. The parent host owns workspace identity and credentials. */
   readonly tools: OpenGeniSiteWorkspaceTools;
+  /** Persistent collections of JSON records that belong to this published Site. */
+  readonly data: OpenGeniSiteData;
+  /** Files stored with this published Site. */
+  readonly files: OpenGeniSiteFiles;
   close(): void;
 };
 
 export type OpenGeniSiteClientOptions = {
+  /** Explicit compatibility with hosts predating targeted tool calls; never an automatic fallback. */
+  toolGatewayMode?: "catalog" | "target";
   /** Advanced embedding seam; ordinary Sites accept bootstrap only from their exact parent. */
   parentWindow?: MessageEventSource;
   /** Advanced embedding seam for listening to the host's document-bound bootstrap message. */
@@ -140,22 +178,31 @@ export function createOpenGeniSiteClient(
   const transport = shouldUseLocalCodemode(options)
     ? new OpenGeniSiteLocalCodemodeTransport(options)
     : new OpenGeniSiteBridgeTransport(options);
+  const siteData = createOpenGeniSiteData(
+    (path, init) => transport.fetch(`https://site.opengeni.invalid${path}`, init),
+    () => transport.siteDataSupported(),
+  );
   return {
     client: new OpenGeniClient({
       baseUrl: "https://site.opengeni.invalid",
+      toolGatewayMode: options.toolGatewayMode ?? "target",
       fetch: (input, init) => transport.fetch(input, init),
     }),
     workspaceId: SITE_WORKSPACE,
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
+    data: siteData.data,
+    files: siteData.files,
     close: () => transport.close(),
   };
 }
 
 class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
+  readonly toolGatewayMode: "catalog" | "target";
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly basePath: string;
 
   constructor(options: OpenGeniSiteClientOptions) {
+    this.toolGatewayMode = options.toolGatewayMode ?? "target";
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     const configured = options.localCodemodePath;
     this.basePath = (
@@ -164,6 +211,11 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
   }
 
   close(): void {}
+
+  /** Local previews have no published Site, so no Site Data. */
+  async siteDataSupported(): Promise<boolean> {
+    return false;
+  }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const request = new Request(input, init);
@@ -221,6 +273,8 @@ function localCodemodeSuffix(method: string, path: string): string {
   if (method === "GET" && path.endsWith("/tools/catalog")) return "/catalog";
   if (method === "GET" && path.endsWith("/tools/declarations")) return "/declarations";
   if (method === "POST" && path.endsWith("/tools/calls")) return "/calls";
+  if (method === "POST" && path.endsWith("/tools/resolve")) return "/resolve";
+  if (method === "POST" && path.endsWith("/tools/invoke")) return "/invoke";
   throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported Site tool request");
 }
 
@@ -247,7 +301,7 @@ export function isOpenGeniSiteBridgeRequestMessage(
     return false;
   }
   if (value.method === "catalog" || value.method === "declarations") return true;
-  return value.method === "call" && isRecord(value.payload);
+  return ["call", "resolve", "invoke"].includes(String(value.method)) && isRecord(value.payload);
 }
 
 export function isOpenGeniSiteBridgeCancelMessage(
@@ -274,7 +328,23 @@ export function sanitizeOpenGeniSiteToolCallRequest(
   };
 }
 
+export function sanitizeOpenGeniSiteToolInvokeRequest(
+  value: ToolGatewayInvokeRequest,
+): ToolGatewayInvokeRequest {
+  return {
+    target: value.target,
+    operationId: value.operationId,
+    arguments: value.arguments,
+    ...(value.expectedDefinitionDigest === undefined
+      ? {}
+      : { expectedDefinitionDigest: value.expectedDefinitionDigest }),
+  };
+}
+
 class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
+  readonly toolGatewayMode: "catalog" | "target";
+  private targetTools = false;
+  private siteData = false;
   private readonly options: OpenGeniSiteClientOptions;
   private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
@@ -282,12 +352,18 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   private closed = false;
 
   constructor(options: OpenGeniSiteClientOptions) {
+    this.toolGatewayMode = options.toolGatewayMode ?? "target";
     this.options = options;
     this.bootstrap = createSiteBridgeBootstrap(options);
   }
 
   async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     return sitePortFetch(await this.connect(), input, init);
+  }
+
+  async siteDataSupported(): Promise<boolean> {
+    await this.connect();
+    return this.siteData;
   }
 
   async requestJson<T>(
@@ -297,6 +373,22 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
     _query?: Record<string, string>,
     requestOptions: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<T> {
+    if (method === "POST" && (path.endsWith("/tools/resolve") || path.endsWith("/tools/invoke"))) {
+      await this.connect();
+      if (!this.targetTools)
+        throw new OpenGeniSiteBridgeError(
+          "target_tools_unsupported",
+          "Upgrade the Site host to use targeted tools",
+        );
+      if (!isRecord(body)) throw new TypeError("Site target payload is required");
+      const request = body as ToolGatewayInvokeRequest;
+      return (await this.request(
+        path.endsWith("/tools/resolve")
+          ? { method: "resolve", payload: { target: request.target } }
+          : { method: "invoke", payload: sanitizeOpenGeniSiteToolInvokeRequest(request) },
+        requestOptions,
+      )) as T;
+    }
     if (method === "GET" && path.endsWith("/tools/catalog")) {
       return (await this.request({ method: "catalog" }, requestOptions)) as T;
     }
@@ -326,6 +418,14 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
 
   private async request(
     request:
+      | Omit<
+          Extract<OpenGeniSiteBridgeRequestMessage, { method: "resolve" }>,
+          "type" | "version" | "requestId"
+        >
+      | Omit<
+          Extract<OpenGeniSiteBridgeRequestMessage, { method: "invoke" }>,
+          "type" | "version" | "requestId"
+        >
       | { method: "catalog" }
       | { method: "call"; payload: OpenGeniSiteToolCallRequest }
       | { method: "declarations" },
@@ -342,7 +442,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
         cleanup();
         cancel(port, requestId);
         reject(
-          request.method === "call"
+          request.method === "call" || request.method === "invoke"
             ? new OpenGeniSiteBridgeError(
                 "timeout",
                 "Site tool request timed out after execution may have started",
@@ -414,7 +514,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
       const timeout = setTimeout(() => {
         cleanup();
         channel.port1.close();
-        reject(new OpenGeniSiteBridgeError("host_timeout", "OpenGeni Site host did not respond"));
+        reject(new OpenGeniSiteBridgeError("host_timeout", "Opengeni Site host did not respond"));
       }, timeoutMs);
       const onMessage = (event: MessageEvent<unknown>) => {
         const message = event.data;
@@ -426,6 +526,8 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
           return;
         }
         cleanup();
+        this.targetTools = message.targetTools === 1;
+        this.siteData = message.siteData === 1;
         this.port = channel.port1;
         resolve(channel.port1);
       };
@@ -480,7 +582,7 @@ function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBrid
       port: async () => {
         throw new OpenGeniSiteBridgeError(
           "host_unavailable",
-          "OpenGeni Site client must run inside a hosted iframe",
+          "Opengeni Site client must run inside a hosted iframe",
         );
       },
       close: () => undefined,

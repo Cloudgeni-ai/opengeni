@@ -1,7 +1,7 @@
 # `opengeni-agent` — the Connected Machine agent (Rust workspace)
 
 The Rust agent that turns a user's own machine into a **Connected Machine** — a
-first-class, co-equal PRIMARY OpenGeni compute target (the `selfhosted` backend,
+first-class, co-equal PRIMARY Opengeni compute target (the `selfhosted` backend,
 internally). This is a standalone Cargo workspace — it is **not** part of the bun
 monorepo (the bun workspaces glob excludes it, and Cargo build output is gitignored).
 
@@ -9,7 +9,7 @@ monorepo (the bun workspaces glob excludes it, and Cargo build output is gitigno
 [`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):
 a machine-targeted turn runs on this agent **directly** — the control plane
 establishes the session on the machine and does **not** create, lease, or bill a
-cloud box for it. It ships no durable OpenGeni credential or platform Git setup,
+cloud box for it. It ships no durable Opengeni credential or platform Git setup,
 so this agent authenticates Git with the machine's **own** credentials. The sole
 transient exception is a renewable exact-attempt Codemode bearer placed only in
 each authorized child exec; this binary exposes `codemode list|call|doctor` there and
@@ -115,7 +115,7 @@ pages or guarantee graceful completion for a permanently stuck controller.
   (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows
   Authenticode are guarded creds-drop-ins that skip cleanly when absent).
 
-## One agent, many OpenGeni deployments
+## One agent, many Opengeni deployments
 
 Install the binary once, then run the one-liner from every workspace you want
 this machine to serve. `opengeni-agent connect` adds or refreshes only that exact
@@ -179,6 +179,10 @@ deployment/workspace connection with the force flag shown in the agent log:
 ```sh
 opengeni-agent connect --force --api-url https://<deployment> --workspace-id <workspace-uuid>
 ```
+
+An authentication handshake timeout is a transient connection failure, not proof
+that the enrollment bearer was rejected. The agent retries the connection without
+recommending re-enrollment for that timeout.
 
 ## Wire protocol — single source of truth
 

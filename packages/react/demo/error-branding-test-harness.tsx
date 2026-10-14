@@ -32,7 +32,7 @@ function failure(): Error {
       JSON.stringify({
         error: {
           code: "allowance_exhausted",
-          message: "OpenGeni allowance exhausted",
+          message: "Opengeni allowance exhausted",
           details: { scope: "member", resetsAt: null },
         },
       }),
@@ -43,15 +43,15 @@ function failure(): Error {
       retryable: true,
       outcomeUnknown: true,
       correlationId: "acme-preview",
-      displayMessage: "OpenGeni could not confirm delivery",
+      displayMessage: "Opengeni could not confirm delivery",
     });
-  if (mode === "transport") return new TypeError("OpenGeni network diagnostic");
+  if (mode === "transport") return new TypeError("Opengeni network diagnostic");
   return new OpenGeniApiError(
     403,
     JSON.stringify({
       error: {
         code: "permission_denied",
-        message: "OpenGeni denied this request",
+        message: "Opengeni denied this request",
         requestId: "acme-preview",
       },
     }),

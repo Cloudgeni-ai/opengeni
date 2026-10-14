@@ -48,6 +48,12 @@ describe("removeBlockedReason", () => {
     );
     expect(removeBlockedReason(member({ id: "maria" }))).toBeNull();
   });
+
+  test("an organization administrator may remove their own access from above", () => {
+    expect(
+      removeBlockedReason(member({ id: "you", isYou: true, managesOwnAccess: true })),
+    ).toBeNull();
+  });
 });
 
 describe("roles", () => {

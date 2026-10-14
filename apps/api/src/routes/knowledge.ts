@@ -18,6 +18,7 @@ import {
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   searchKnowledgeEntries,
+  KnowledgeVectorCreditsDisabledError,
   KnowledgeVectorFundingError,
   KnowledgeVectorQueryRejectedError,
   hasPermission,
@@ -73,6 +74,12 @@ function knowledgeHttpError(error: unknown): never {
   if (error instanceof KnowledgeVectorFundingError)
     throw new ApiHttpError(402, {
       code: "payment_required",
+      message: error.message,
+      details: { code: error.code, keywordAvailable: true },
+    });
+  if (error instanceof KnowledgeVectorCreditsDisabledError)
+    throw new ApiHttpError(403, {
+      code: "forbidden",
       message: error.message,
       details: { code: error.code, keywordAvailable: true },
     });

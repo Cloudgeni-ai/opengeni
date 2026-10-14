@@ -2350,7 +2350,7 @@ function densityProfileSettings(productionSettings: Settings, densityMcpUrl: str
     mcpServers: [
       {
         id: "opengeni",
-        name: "OpenGeni density profile",
+        name: "Opengeni density profile",
         url: densityMcpUrl,
         cacheToolsList: false,
       },

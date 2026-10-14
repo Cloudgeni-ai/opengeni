@@ -1,3 +1,7 @@
+import {
+  ensureRunAllowedBetweenModelCalls,
+  ensureSessionUsageLimitAllowsBetweenModelCalls,
+} from "./admission";
 import { hasPendingSteerAfterContextCompaction, isSessionCompactionRequested } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -5,10 +9,12 @@ import {
   appendWorkspaceGovernance,
   appendWorkspaceMemory,
   agentPromptResourcesFor,
+  agentPromptExperimentsFor,
   composeAgentInstructions,
   inspectPersistentAgentInstructions,
   requestRemoteCompactionV2,
   preparedCompactionRequest,
+  createAnthropicCompactionSizer,
   queuePreparedCompaction,
   compactionThresholdTokens,
   CompactionNeededError,
@@ -17,9 +23,13 @@ import {
   compactionSummaryOutputTokens,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
-import { type Settings } from "@opengeni/config";
+import { type ModelProviderApi, type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
+import {
+  isContextCompactionInterruption,
+  settleContextCompactionInterruption,
+} from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type {
   TurnActivityServices as ActivityServices,
@@ -46,6 +56,7 @@ import {
   processCompactionModelUsageEvent,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
+import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -57,15 +68,28 @@ import type {
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+import { subscriptionCoreTurnOf } from "./turn-context";
 
 export type RemoteCompactionPrefix = {
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]> | null;
 };
 
+/**
+ * Portable compaction on these wire APIs waits for the ordinary request this
+ * agent prepares (tools, instructions and settings) and summarizes on exactly
+ * that prefix, so the checkpoint call reads the warm prompt cache instead of
+ * rewriting the whole conversation. Chat Completions providers keep the
+ * standalone summary request.
+ */
+export function portableCompactionUsesPreparedPrefix(api: ModelProviderApi | undefined): boolean {
+  return api === "responses" || api === "anthropic-messages";
+}
+
 export type CompactionPrepDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
+  entitlements?: ActivityServices["entitlements"];
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
@@ -178,6 +202,7 @@ export function standaloneCompactionInstructions(input: {
             : (input.workspaceAgentInstructions ?? input.settings.agentInstructionsTemplate),
           undefined,
           input.rig,
+          agentPromptExperimentsFor(input.settings).experiments,
         ),
         input.workspaceGovernance ?? undefined,
       ),
@@ -226,8 +251,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const remotePrefix: RemoteCompactionPrefix = {
     agent: null,
   };
-  const portableResponsesNeedsAgentPrefix =
-    resolvedModel?.provider.api === "responses" &&
+  const portableNeedsAgentPrefix =
+    portableCompactionUsesPreparedPrefix(resolvedModel?.provider.api) &&
     !(billingState.isCodexTurn && session.codexCompactionMode === "remote_v2");
   const preparedPortableRequest = () => {
     if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
@@ -236,9 +261,11 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
+  let compactionCreditPolicyRevision: number | undefined;
   const recordCompactionUsage = async (usage: ModelResponseUsage) => {
     await processCompactionModelUsageEvent({
       usage,
+      creditPolicyRevision: compactionCreditPolicyRevision,
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
       settings,
@@ -258,6 +285,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       turnAttemptId: input.attemptId,
       servingCredentialId: providerTurn.effectiveCodexCredentialId,
       priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+      subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
       emittedSourceKeys: emittedModelUsageSourceKeys,
       renewLease: () => leases.renewServing("model_usage"),
       leaseLost: leases.servingLost,
@@ -266,7 +294,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     });
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
-    const summarize: CompactionSummarizer = resolvedModel
+    const summarizeModel: CompactionSummarizer = resolvedModel
       ? (s: Settings, m: Array<Record<string, unknown>>) =>
           withProviderRequestContext(() =>
             summarizeContextForCompaction(s, m, {
@@ -279,9 +307,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               onUsage: recordCompactionUsage,
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
-              ...(portableResponsesNeedsAgentPrefix
-                ? { preparedRequest: preparedPortableRequest() }
-                : {}),
+              ...(portableNeedsAgentPrefix ? { preparedRequest: preparedPortableRequest() } : {}),
             }),
           )
       : (s: Settings, m: Array<Record<string, unknown>>) =>
@@ -293,16 +319,46 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
+    const summarize: CompactionSummarizer = async (s, m) => {
+      compactionCreditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
+        settings: s,
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        modelId: resolvedModel?.configured.id ?? turn.model,
+        isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        countsTowardTokenCap: billingState.countsTowardTokenCap,
+        initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+        entitlements: deps.entitlements,
+        sessionId: input.sessionId,
+      });
+      return await summarizeModel(s, m);
+    };
     summarize.estimatePrefixTokens = () => {
       if (resolvedModel?.provider.api === "chat") {
         return estimateSerializedValueTokens(systemInstructions ?? "");
       }
-      const prepared = portableResponsesNeedsAgentPrefix ? preparedPortableRequest() : null;
+      const prepared = portableNeedsAgentPrefix ? preparedPortableRequest() : null;
       return (
         estimateSerializedValueTokens(prepared?.systemInstructions ?? systemInstructions ?? "") +
         (prepared ? estimateSerializedValueTokens(prepared.tools) : 0)
       );
     };
+    if (resolvedModel?.provider.api === "anthropic-messages") {
+      const measure = createAnthropicCompactionSizer(
+        resolvedModel.provider,
+        turnExecutionPolicy.upstreamModelId,
+      );
+      summarize.measureInputBytes = (s, items) =>
+        measure(items, {
+          maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
+          ...(systemInstructions ? { systemInstructions } : {}),
+          ...(promptCacheKey ? { promptCacheKey } : {}),
+          ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+          ...(portableNeedsAgentPrefix ? { preparedRequest: preparedPortableRequest() } : {}),
+        });
+    }
     return summarize;
   };
   // Prompt-cache prefix for remote_v2 MUST match ordinary turns:
@@ -311,8 +367,15 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   // first so it does not send empty tools/instructions).
   const remoteCompactionRequester =
     resolvedModel && billingState.isCodexTurn
-      ? (s: Settings, m: Array<Record<string, unknown>>) =>
-          withCodexRemoteCompaction(async () => {
+      ? async (s: Settings, m: Array<Record<string, unknown>>) => {
+          // The remote compaction request is a paid model request: the task
+          // usage limit admits it exactly like the portable summarizer above.
+          await ensureSessionUsageLimitAllowsBetweenModelCalls(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          });
+          return await withCodexRemoteCompaction(async () => {
             if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
             const preparedRequest = preparedCompactionRequest(remotePrefix.agent);
             return requestRemoteCompactionV2(s, m, {
@@ -324,12 +387,28 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               signal: cancellationSignal,
               onUsage: recordCompactionUsage,
             });
-          })
+          });
+        }
       : undefined;
   const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
   };
   const publishCompactionOutcomeEvents = async (events: SessionEvent[]) => {
+    if (events.some((event) => event.type === "session.context.compacted")) {
+      // The summary and recovery reset already committed under the attempt
+      // fence. Skipped compaction does not prove successful model progress.
+      await subscriptionCoreTurnOf(providerTurn)?.requests?.checkpoint();
+      attempt.providerRecoveryCount = 0;
+      if (attempt.providerRecoveryObservation) {
+        recordProviderRecoveryOutcome(observability, {
+          route: attempt.modelMetricRoute,
+          cause: attempt.providerRecoveryObservation.cause,
+          outcome: "recovered",
+          elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt,
+        });
+        attempt.providerRecoveryObservation = undefined;
+      }
+    }
     // `compaction.started` was already fanout via publishCompactionLiveEvents.
     await publishDurableSessionEvents(
       bus,
@@ -347,9 +426,9 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
   } as const;
 
-  // Responses compaction, portable or remote, prepares the ordinary agent
-  // request first so tool schemas and instructions match the warm cache prefix.
-  // Chat providers keep the standalone portable maintenance path.
+  // Responses and Claude compaction prepare the ordinary agent request first so
+  // tool schemas, instructions and settings match the warm cache prefix. Chat
+  // providers keep the standalone portable maintenance path.
   const compactionOnlyTurn = turn.source === "compaction";
   const remoteV2CompactionNeedsAgentPrefix =
     Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
@@ -386,11 +465,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   };
-  if (
-    compactionOnlyTurn &&
-    !remoteV2CompactionNeedsAgentPrefix &&
-    !portableResponsesNeedsAgentPrefix
-  ) {
+  if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix && !portableNeedsAgentPrefix) {
     const compactionInstructions = standaloneCompactionInstructions({
       settings: eventing.modelRunSettings,
       session,
@@ -438,6 +513,24 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         // `compaction.started` may already be live — settle skipped before
         // failing the turn so the timeline cannot stick on Compacting…
         const landmark = await settleFailedContextCompactionLandmark(
@@ -558,7 +651,7 @@ export async function runPostAgentCompaction(
 
   const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
   const preparedPortable =
-    resolvedModel?.provider.api === "responses" &&
+    portableCompactionUsesPreparedPrefix(resolvedModel?.provider.api) &&
     !(remoteCompactionRequester && session.codexCompactionMode === "remote_v2");
   const compactSummarizer = compactionSummarizerFor(
     agentInstructions.trim() ? agentInstructions : undefined,
@@ -621,6 +714,24 @@ export async function runPostAgentCompaction(
         // recovery path re-dispatch this exact maintenance execution.
         if (shouldRecoverCompactionProviderFailure(error)) throw error;
         if (error instanceof TurnAttemptFencedError) throw error;
+        if (isContextCompactionInterruption(error, cancellationSignal)) {
+          // The attempt's own cancellation (worker shutdown, control) ended
+          // this checkpoint, not the provider. Keep the request pending for
+          // the recovered attempt and let the cancellation propagate.
+          await settleContextCompactionInterruption(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            { publishLiveEvents: publishCompactionLiveEvents, observability },
+          );
+          throw error;
+        }
         const landmark = await settleFailedContextCompactionLandmark(
           db,
           {
@@ -792,6 +903,21 @@ export async function runPostAgentCompaction(
     } catch (compactError) {
       if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
       if (compactError instanceof TurnAttemptFencedError) throw compactError;
+      if (isContextCompactionInterruption(compactError, cancellationSignal)) {
+        await settleContextCompactionInterruption(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: attempt.turnId!,
+            executionGeneration: attempt.executionGeneration,
+            attemptId: input.attemptId,
+          },
+          { publishLiveEvents: publishCompactionLiveEvents, observability },
+        );
+        throw compactError;
+      }
       const landmark = await settleFailedContextCompactionLandmark(
         db,
         {

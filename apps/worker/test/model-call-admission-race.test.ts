@@ -10,6 +10,8 @@ import type { LazyToolTransport } from "../../../packages/runtime/src/lazy-tool-
 import { createModelCallAdmission } from "../src/activities/agent-turn/model-call-admission";
 import { BudgetExhaustedError } from "../src/activities/agent-turn/admission";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
+import { createCoreCodexRequests } from "../src/activities/agent-turn/codex-core-requests";
+import { SubscriptionCoreCodexSourceDisconnectedError } from "@opengeni/db";
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -131,6 +133,71 @@ test("consumer settlement failure releases the producer with the original error,
     ctx.barrier.fail(error);
     await expect(ctx.stream.completed).rejects.toBe(error);
     expect(ctx.model.calls).toBe(1);
+  } finally {
+    ctx.barrier.close();
+    void ctx.iterator.return?.().catch(() => undefined);
+  }
+});
+
+test("disconnect after a tool response drains custody and resumes durable history without duplicate effects", async () => {
+  const checkpointStarted = deferred();
+  const commitCheckpoint = deferred();
+  const settled: string[] = [];
+  const requests = createCoreCodexRequests({
+    reserve: async () => ({ operationId: "request-1" }),
+    settle: async ({ outcome }) => {
+      settled.push(outcome);
+    },
+  });
+  let admissions = 0;
+  const disconnected = new SubscriptionCoreCodexSourceDisconnectedError();
+  const ctx = await fixture(async () => {
+    if (++admissions === 1) {
+      await requests.reserve({ requestId: "r", transportAttempt: 1 });
+      return;
+    }
+    checkpointStarted.resolve();
+    await commitCheckpoint.promise;
+    await requests.checkpoint();
+    throw disconnected;
+  });
+  try {
+    await requests.observe({ requestId: "r", transportAttempt: 1, outcome: "response_received" });
+    ctx.barrier.settle(ctx.terminal);
+    await checkpointStarted.promise;
+    expect(ctx.tools()).toBe(1);
+    expect(ctx.model.calls).toBe(1);
+    expect(settled).toEqual([]);
+    // This models the existing sole-consumer history sink's durable commit,
+    // with the real SDK's completed call/result pair, not a fabricated prompt.
+    const durableHistory = structuredClone(ctx.stream.history);
+    commitCheckpoint.resolve();
+    await expect(ctx.stream.completed).rejects.toBe(disconnected);
+    expect(settled).toEqual(["response_received"]);
+    expect(requests.canRecover()).toBe(true);
+    let duplicateEffects = 0;
+    const nextModel = new ScriptedModel([{ output: [assistantMessage("continued")] }]);
+    const nextAgent = new Agent({
+      name: "same-continuation",
+      model: nextModel,
+      tools: [
+        tool({
+          name: "local",
+          description: "Offline fixture",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          strict: false,
+          execute: async () => {
+            duplicateEffects++;
+            return "must not rerun";
+          },
+        }),
+      ],
+    });
+    const result = await new Runner({ tracingDisabled: true }).run(nextAgent, durableHistory);
+    expect(result.finalOutput).toBe("continued");
+    expect(duplicateEffects).toBe(0);
+    expect(ctx.tools()).toBe(1);
+    expect(nextModel.calls).toBe(1);
   } finally {
     ctx.barrier.close();
     void ctx.iterator.return?.().catch(() => undefined);

@@ -76,7 +76,7 @@ export function buildSlackAppHomeBlocks(input: {
     {
       type: "header",
       block_id: "opengeni_home_header",
-      text: { type: "plain_text", text: "Your OpenGeni tasks", emoji: true },
+      text: { type: "plain_text", text: "Your Opengeni tasks", emoji: true },
     },
     {
       type: "context",
@@ -84,7 +84,7 @@ export function buildSlackAppHomeBlocks(input: {
       elements: [
         {
           type: "mrkdwn",
-          text: "Private to you · refreshed from your current OpenGeni access",
+          text: "Private to you · refreshed from your current Opengeni access",
         },
       ],
     },
@@ -115,7 +115,7 @@ export function buildSlackAppHomeBlocks(input: {
         {
           type: "button",
           action_id: "opengeni.home.open_all",
-          text: { type: "plain_text", text: "Open OpenGeni", emoji: true },
+          text: { type: "plain_text", text: "Open Opengeni", emoji: true },
           url: input.workspaceUrl,
           style: "primary",
         },
@@ -135,7 +135,7 @@ export function buildSlackAppHomeAccessBlocks(input: {
     {
       type: "header",
       block_id: "opengeni_home_header",
-      text: { type: "plain_text", text: "OpenGeni", emoji: true },
+      text: { type: "plain_text", text: "Opengeni", emoji: true },
     },
     {
       type: "section",
@@ -156,7 +156,7 @@ export function buildSlackAppHomeAccessBlocks(input: {
           action_id: "opengeni.home.connect",
           text: {
             type: "plain_text",
-            text: input.actionLabel?.slice(0, 75) || "Open OpenGeni",
+            text: input.actionLabel?.slice(0, 75) || "Open Opengeni",
             emoji: true,
           },
           url: input.actionUrl,

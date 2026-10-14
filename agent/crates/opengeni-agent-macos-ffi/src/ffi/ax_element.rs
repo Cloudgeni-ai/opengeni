@@ -1,7 +1,7 @@
 //! Minimal retained wrapper around Apple's AXUIElement C API.
 //!
 //! This intentionally replaces the legacy `accessibility` convenience crate:
-//! OpenGeni needs only a small subset, and owning it keeps the entire unsafe AX
+//! Opengeni needs only a small subset, and owning it keeps the entire unsafe AX
 //! surface in this audited leaf without pulling old Cocoa/Objective-C bindings.
 
 use core::fmt;

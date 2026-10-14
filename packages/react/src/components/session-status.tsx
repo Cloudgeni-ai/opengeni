@@ -1,5 +1,8 @@
-import type { SessionStatus as SessionStatusValue } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
+import { SESSION_STATUS_PRESENTATION, type SessionDisplayStatus } from "../session-status-model";
+
+/** A server status, or the display-only `blocked` (see `sessionDisplayStatus`). */
+type SessionStatusValue = SessionDisplayStatus;
 
 export type SessionStatusMeta = {
   label: string;
@@ -12,52 +15,58 @@ export type SessionStatusMeta = {
 
 export const SESSION_STATUS_META: Record<SessionStatusValue, SessionStatusMeta> = {
   queued: {
-    label: "Queued",
+    label: SESSION_STATUS_PRESENTATION.queued.label,
     dotClassName: "bg-og-status-queued",
     badgeClassName: "text-og-fg-muted border-og-border bg-og-status-queued/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION.queued.pulse,
   },
   running: {
-    label: "Running",
+    label: SESSION_STATUS_PRESENTATION.running.label,
     dotClassName: "bg-og-status-running",
     badgeClassName: "text-og-status-running border-og-status-running/30 bg-og-status-running/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION.running.pulse,
   },
   recovering: {
-    label: "Recovering",
+    label: SESSION_STATUS_PRESENTATION.recovering.label,
     dotClassName: "bg-og-status-running",
     badgeClassName: "text-og-status-running border-og-status-running/30 bg-og-status-running/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION.recovering.pulse,
   },
   waiting_capacity: {
-    label: "Waiting for capacity",
+    label: SESSION_STATUS_PRESENTATION.waiting_capacity.label,
     dotClassName: "bg-og-status-waiting",
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION.waiting_capacity.pulse,
   },
   idle: {
-    label: "Idle",
+    label: SESSION_STATUS_PRESENTATION.idle.label,
     dotClassName: "bg-og-status-idle",
     badgeClassName: "text-og-status-idle border-og-status-idle/30 bg-og-status-idle/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION.idle.pulse,
   },
   requires_action: {
-    label: "Waiting on you",
+    label: SESSION_STATUS_PRESENTATION.requires_action.label,
     dotClassName: "bg-og-status-waiting",
     badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
-    pulse: true,
+    pulse: SESSION_STATUS_PRESENTATION.requires_action.pulse,
   },
-  failed: {
-    label: "Failed",
+  blocked: {
+    label: SESSION_STATUS_PRESENTATION.blocked.label,
     dotClassName: "bg-og-status-failed",
     badgeClassName: "text-og-status-failed border-og-status-failed/35 bg-og-status-failed/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION.blocked.pulse,
+  },
+  failed: {
+    label: SESSION_STATUS_PRESENTATION.failed.label,
+    dotClassName: "bg-og-status-failed",
+    badgeClassName: "text-og-status-failed border-og-status-failed/35 bg-og-status-failed/10",
+    pulse: SESSION_STATUS_PRESENTATION.failed.pulse,
   },
   cancelled: {
-    label: "Cancelled",
+    label: SESSION_STATUS_PRESENTATION.cancelled.label,
     dotClassName: "bg-og-status-cancelled",
     badgeClassName: "text-og-fg-subtle border-og-border bg-og-status-cancelled/10",
-    pulse: false,
+    pulse: SESSION_STATUS_PRESENTATION.cancelled.pulse,
   },
 };
 

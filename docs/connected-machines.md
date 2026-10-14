@@ -18,6 +18,45 @@ generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
 generation and invalidates existing grants.
 
+### Control transport recovery
+
+The API/worker uses its shared NATS connection for control RPC, operation frames,
+and acknowledgements. The native supervisor treats either control- or bulk-lane
+loss, including scheduled five-minute user-JWT expiry, as a transport-generation
+change: it reconnects, authenticates again, resubscribes, and detaches rather than
+restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+it does not carry these NATS control requests. Codemode's NATS dispatch is only
+a wake-up for its PostgreSQL operation journal; clients re-notify the same
+operation, and the worker claims that row before execution.
+
+For control reply recovery, a read-only ping negotiates the NATS response header
+`Opengeni-Control-Replay: 1`. Supporting agents accept an immutable delivery at
+`<exact-process-rpc-subject>.replay.<expiry-unix-ms>.<delivery-uuid>`, with the
+unchanged protobuf request as its payload. One atomic admission owns execution;
+duplicates join its pending reply or retrieve the exact retained bytes. A changed
+payload or expiry under an existing identity is refused. The journal survives
+socket/JWT/credential replacement, including removal and re-addition of the same
+exact origin/connection/process scope, but is not shared across different scopes.
+Receipts are collected after expiry; the expired delivery itself remains
+inadmissible, including after an observed wall-clock rollback. Controller and
+machine clocks must be synchronized, as for absolute command deadlines.
+
+The requester retries transient transport failures within the operation's request
+timeout plus a two-minute recovery allowance, preserving the delivery identity
+and bytes. It never retries a received tool error. A later no-responder cannot
+erase uncertainty from an earlier send. Accepted physical work and any unflushed
+reply retain the existing update-drain reservation until a successful socket
+publication; expiry without that proof remains unsettled. This is transport proof,
+not proof that a caller consumed the reply.
+
+The guarantee requires both the updated server runtime and a native agent with
+the journal. An older agent does not advertise the header and retains the
+existing conservative mutation behavior. Native process replacement, revoked
+authority, genuine tool errors, and outages beyond the recovery deadline are not
+transparent successes: the existing failure/unknown-outcome semantics remain,
+and ambiguous mutations are never automatically reissued as fresh deliveries.
+No model-visible schema, result text, or previously sent history changes.
+
 ### Enrollment maintenance boundary
 
 Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval
@@ -36,7 +75,10 @@ The finalizer rereads exact active organization membership under that fence and
 retains workspace membership `FOR KEY SHARE` to exclude direct runtime DELETEs.
 Direct workspace-removal preparation takes the same early nonblocking fence before
 downstream rows; its command keeps the existing organization/tenancy prefix.
-Legacy token enrollment retains its existing workspace-owned authority contract.
+Workspace token enrollment retains its existing workspace-owned authority
+contract. A personal (`enroll_user`) token takes the same organization membership
+fence and `finalize_scoped_enrollment` path as a personal approval, with the
+token's signed owner as the transaction subject; see the zero-click token section.
 
 Known separate boundary: `scoped_compute_actor_membership` still uses an
 organization-membership `FOR SHARE` that can be blinded by FORCE-RLS under this
@@ -78,11 +120,11 @@ client. The matching UI ships in
 | Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
-"home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
+"home box"**, **no Opengeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them). The authoritative runner Hello
-already reports its absolute launch root; OpenGeni persists it and resolves an
+already reports its absolute launch root; Opengeni persists it and resolves an
 optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
@@ -100,7 +142,7 @@ from a different target. Provider-independent artifact receipts may still use
 their own portable identity where that receipt contract requires it.
 
 The exact model-visible tool catalog remains available through Codemode without
-installing a machine credential. OpenGeni sends no Codemode manifest pointer or
+installing a machine credential. Opengeni sends no Codemode manifest pointer or
 token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
@@ -114,6 +156,17 @@ complete catalog. `show <path>` returns the complete details/schema for one tool
 redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
+
+Vault secrets reach a machine only per command. When an `exec_command` or
+`run_on` command contains `{{secret:…}}` references, Opengeni runs it with
+`/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
+on Windows (an explicit supported `shell` argument is honoured), splices each
+reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
+`ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
+`/tmp/opengeni-private` root and removed when the attempt ends. `cmd.exe`, fish
+and unknown shells return `unsupported_shell`. Commands without references run
+exactly as before, and nothing from a vault is copied into the machine's
+environment. See [`secrets.md`](secrets.md#where-references-resolve).
 
 This authority follows the session's **active** execution path. The fleet
 `run_on` tool is a separate API-side, one-off route to a non-active machine. An
@@ -190,7 +243,7 @@ with bounded backoff; late events from that port cannot invalidate a successor.
 
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
-`placementInstanceId`. When that generation changes, OpenGeni marks the exact
+`placementInstanceId`. When that generation changes, Opengeni marks the exact
 device's still-live sessions `lost` with `controller_transition_expired` and
 never rebinds the old controller token. In-flight `/end` (`ending`) is left
 to finish physical teardown instead of being rewritten to `lost`. Heartbeats
@@ -202,11 +255,55 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+The extension's hello carries two generations. `connectionGeneration` is new
+for every native port and fences that transport: commands, results and
+inventory must name the exact live port. `stateGeneration` is created once per
+extension worker lifetime and reused by every native reconnect in it; Chrome
+keeps the tab ids, pages and debugger attachments that the worker owns for
+exactly that long. The agent reports `stateGeneration` as the profile's
+inventory `connectionGeneration` (the placement instance above), so a
+native-host exit, an agent restart or an agent update reconnects in place and
+the profile's sessions stay live; if the agent restarted, the next action
+re-creates the controller session. A restarted worker, a reloaded or updated
+extension, or a restarted Chrome reports a new `stateGeneration` and ends the
+sessions as above. Extensions that do not send `stateGeneration` keep the
+per-port behavior, and the agent's update gate waits while one of them backs a
+live attached controller, because restarting would end its sessions. A
+quiescent attached session does not otherwise hold back an agent update.
+
+Each ended connection generation is recorded with its reason in
+`attached_browser_devices.connection_history` (the latest 50 per profile).
+The native host sends a final `native_host_closing` frame before it exits,
+naming whether Chrome closed the port (`browser_closed_port`), sent an
+unreadable message (`browser_message_invalid`) or stopped accepting output
+(`browser_output_failed`). A socket end without that frame is
+`native_host_lost`: the native host process itself vanished. A hello or message
+the agent refuses is `agent_rejected`. The agent reports its recent ends in
+every inventory snapshot. The server records `agent_restarted` for generations
+that ended with a replaced bridge and `unreported` for older agents; a later
+agent report for the same generation replaces either inference. Native-host
+diagnostics are written to stderr because stdout carries Chrome frames.
+Oversized tab titles are truncated and oversized tab URLs make only that tab
+uncontrollable; neither ends the profile's connection.
+
+Renaming a Chrome profile is inventory metadata, not a connection transition.
+The extension keeps the same ready native port and sends optional
+`profile: { profileLabel }` metadata with its inventory revision. The agent updates
+the profile name without replacing its generation, debugger attachments or pending
+commands. A null label restores the default name. Older extensions may omit this
+metadata; an older agent ignores it and keeps its last announced name until a real
+reconnect, rather than interrupting the profile's work.
+
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine
 operation, the typed offline/timeout result returns to the model in-band so it
 can explain the outage, choose another available tool or compute target, or help
 recover the machine. The transport failure must not replace the agent loop.
+The same holds for sessions with repository resources, whose repository Skill
+index is built through the sandbox before the first model call: a typed
+offline/timeout control error during that discovery degrades to a short
+"repository skills unavailable" instruction for that run instead of failing the
+turn, and the next run discovers again.
 
 ## Create a session on a machine
 
@@ -310,10 +407,29 @@ durable target authority and commits the active pointer in the same transaction
 as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
-Unattended schedules currently accept workspace- and organization-scoped
-machines only. User-scoped machines require an owning human's explicit personal
-resource attachment, which a future scheduled-execution authority flow must
-freeze durably before those machines can be offered safely.
+Workspace- and organization-scoped machines run any schedule. A user-scoped
+(personal) machine runs only an **Only me** schedule owned by the machine's
+owner:
+
+- Saving is the consent. Create and update accept a personal machine only when
+  the final audience is Only me; widening such a schedule to Workspace, or
+  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
+  personal machine to its owner alone, so nobody else can select it.
+- Each run attaches the machine through the owner's scoped authorization and
+  then issues a `session`-mode `connected_machine.use` grant (context
+  `user_private`) for exactly that run's chat. No standing `always` grant is
+  created, so the owner's other chats keep asking.
+- Every attempt goes through the same database admission as an interactive
+  turn (`admit_session_attempt_personal_machine`): the run's causal human must
+  be the machine's owner and still an active member with access to the
+  workspace, the machine's authority must be current, and the run's grant must
+  be active. Removing the person, revoking the machine or revoking the grant
+  stops the next attempt.
+
+On macOS, the enrollment display offer is independent of Screen Recording
+permission. A detected display keeps the existing screen-control consent option
+available while OS grants are pending. Approval does not grant macOS permissions:
+Screen Recording, Accessibility and Input Monitoring still gate capture/input.
 
 ## Discover machines + metrics
 
@@ -393,17 +509,43 @@ machine is at capacity. Runtime errors preserve its typed cause: `agent_update`
 means a verified self-update is draining accepted work; `queue_breaker` and
 `wait_breaker` identify abnormal admission backlogs. Missing or unrecognized
 detail remains an unspecified admission refusal. The same distinction survives
-retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
-`update_busy_uploads`) and immediately reopens admission. It does not wait for
-long-lived servers, cancel accepted work, or restart the host. Open browser and
-computer controllers also keep the host busy, including pending creation and
-shutdown. The agent checks every owned browserd scope through its private
-admin-only idle proof after fencing new routed work; unavailable, crashed, or
-older incompatible controllers return retryable `update_state_unavailable`.
-An empty controller may remain running without blocking an update. Request an update
-again at a safe idle point. Older runners can remain draining indefinitely;
-inspect their accepted operations and coordinate a safe stop/restart with their
-owners instead of killing useful work or increasing concurrency limits.
+retry exhaustion and structured tool-error rendering. A self-update on a busy
+host is accepted and waits for idle: the agent reports `waiting_for_idle` with
+the current reason (`update_busy_work`, `update_busy_uploads` or a transiently
+unreadable controller as `update_state_unavailable`), keeps admitting new work,
+and every few seconds re-attempts a short fenced idle proof, reopening
+admission whenever it is still busy. It never cancels accepted work, stops
+long-lived servers, or restarts the host early. On Linux and macOS a running
+streamed command (an `OpStart` exec) does not hold the update back: after the
+verified binary is installed, the agent hands each such command to its
+successor and `exec`s the new binary in the same process. The command keeps
+running as the same process with the same pipes, process group and operation
+cgroup; the successor keeps the connection instance, so the server sees a
+short reconnect on the same op subjects (no `GoingOffline`), re-attaches as
+after any reconnect, and the stream continues byte-exact with one digest.
+Every failure is fail-closed: a command that cannot be continued ends as a
+typed failure, and if the successor never starts, the command's anchor ends it
+as for a crashed runner. Other admitted work, such as a request still being
+answered, a git operation or a pending upload, still makes the update wait,
+and Windows keeps waiting for every command. Only lost physical settlement, which can never
+become provable in that process, ends the update with retryable
+`update_state_unavailable`. The agent checks every owned browserd scope through
+its private admin-only idle proof. Open sessions block only when a restart
+would lose something: admitted commands, pending creation or shutdown,
+attached browser sessions, browsers without a durable working runtime, and
+isolated virtual desktops. A quiescent managed browser with a durable working
+runtime does not: graceful browserd shutdown detaches from it without closing
+it, so its tabs and unsaved page state stay live and the restarted controller
+adopts the same process on its next request, even when the old launcher was
+killed with the stopped service or came from an earlier agent release. A
+session whose browser already ended and a computer session on the machine's
+own physical seat do not keep the host busy either. Older agents still end a
+busy update with retryable `update_busy_work`. Nobody has to request updates:
+the control plane asks every live machine behind its channel's promoted build
+to update from its heartbeat, and asks an older busy agent again every 10
+minutes until it applies (see the deployment guide for the full policy and
+`OPENGENI_AGENT_AUTO_UPDATE`). A request for the build a machine already runs
+is refused, whatever happened to an earlier attempt.
 
 Machine liveness is independent of accepted host operations. The supervisor
 answers `ping` and publishes heartbeats outside command execution. Production
@@ -540,7 +682,7 @@ affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
 The session shell capability also preserves an explicit `exec_command.shell`
-selection: OpenGeni sends that shell as direct argv, with the requested login or
+selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
 ambient default shell. Calls that omit `shell` intentionally retain the
 machine-owned `$SHELL`/`ComSpec` default.
@@ -564,11 +706,18 @@ ambiguous and is not replayed. `run_on` uses the deployment's separate
 `OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and no exec
 deadline by default), while preserving the active sandbox pointer and epoch.
 
+Large `write` operations use the existing bounded transactional file transfer
+when the live target advertises `transactional_fs_write`. Each transfer request
+rechecks authority, capability, and the pinned connection; it never falls back
+to a whole-file write after an uncertain result. Older agents keep their legacy
+small-write behavior and report oversized requests without marking the machine
+offline. See [Transactional file edits](#transactional-file-edits).
+
 ### Streaming exec (op-stream)
 
 Connected Machine exec requires a runner that advertises the `op_stream`
 capability and serves the op-stream protocol with
-`OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on). OpenGeni refuses before
+`OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on). Opengeni refuses before
 starting a command when op-stream is unavailable or unsupported; it never
 downgrades exec to request/reply. Output streams as sequenced, credit-flowed
 frames the runner retains
@@ -581,6 +730,36 @@ already-running or completed op instead of re-running the command. The
 oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
+
+Foreground output can be released within a long turn once the exact tool's
+call/result receipt and structural output event are durable. The receipt preserves
+recovery while a parallel SDK call batch is still incomplete. Only completed
+operations owned by that tool are eligible: parallel results and unscoped setup
+work remain retained until their own durability boundary. Each final
+acknowledgement still follows journal persistence; failed persistence or publish
+keeps the frontier available for retry. Turn completion finalizes remaining
+accepted output. Durably adopted background commands keep their separate output
+capture and terminal-settlement lifecycle.
+
+Background output has an independent durable custody receipt containing its
+verified exit sequence and attach generation. It is recorded only after all
+retained bytes have been captured in PostgreSQL. A terminal-only reconciliation
+queue retries the final acknowledgement against the original operation and
+connection, including after worker loss; a newer enrollment route is never
+substituted. Already captured output takes priority over full replay, so older
+uncaptured results cannot delay final acknowledgements for saved results. Publish
+success leaves the obligation pending until an exact runner
+observation establishes that output is no longer retained. Completion input to
+the model remains independent. Legacy rows require full replay before a receipt
+can be recorded; output lost before capture is explicitly marked unavailable
+without manufacturing consumption or an acknowledgement.
+
+The output-release due probe and claim inventory use the same runner predicate.
+A null connection or an expired/offline connection parks output work without
+changing its custody receipt or retry date. Reconnecting the original runner
+makes overdue work eligible again. A revoked enrollment, replacement runner, or
+explicitly stopped/updated/shut-down runner remains eligible for final retirement
+settlement; temporary disconnection alone never proves output loss.
 
 After process exit and pipe drain, the native runner releases both transport-sized
 read buffers before waiting for result collection. Retained output and the terminal
@@ -666,7 +845,7 @@ comes back as `swapped: false` with a `reason` rather than throwing. The next
 turn runs on whatever the pointer resolves to.
 
 An agent turn that started on a Connected Machine does not pre-lease a managed
-group. If that turn explicitly swaps back to `"session"`/`"default"`, OpenGeni
+group. If that turn explicitly swaps back to `"session"`/`"default"`, Opengeni
 preserves the successful pointer change,
 checkpoints completed model/tool truth, and continues the same logical turn in a
 fresh home-primary attempt. The handoff requires no new user message, never
@@ -678,7 +857,7 @@ interrupted/outcome-unknown rather than replayed automatically.
 
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
 The machine agent is multi-connection: installing it once and connecting another
-workspace—even on a different OpenGeni deployment—adds an independent link and
+workspace—even on a different Opengeni deployment—adds an independent link and
 preserves all existing links. There are two enrollment paths. Both require the
 caller to hold `enrollments:manage`.
 
@@ -696,15 +875,90 @@ Windows retains its running-image replacement mechanism. This forward fix does
 not repair an older agent already executing its previous update handoff; those
 installations may require their service manager to start the verified canonical
 executable path after the old process exits.
+
+On macOS, the generated LaunchAgent sets `WorkingDirectory` to the installing
+user's home directory. This makes the reported default workspace root writable
+for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
+continues to use the directory it was launched from, and an explicit session
+`workingDir` still takes precedence.
+
+The agent also never treats a filesystem root as its workspace, so an older
+service definition needs no manual step: when `run` starts with `/` (or a
+Windows drive root) as its working directory and the user's home directory
+exists, it moves into that home directory before connecting and reports it as
+the workspace root. Any other launch directory is kept as chosen.
+
+Regenerating an older service definition with `opengeni-agent service install
+--restart` is still useful to pick up other plist changes (such as the stderr log).
+The installer checks launchd's loaded binary and working directory as well as the
+plist on disk. If an earlier install wrote the plist but failed before reloading,
+a retry still reloads the stale job without requiring `--restart`. Dry-run
+rendering and installation share the `HOME`, then `USERPROFILE`, resolver;
+unsupported control characters and XML-invalid home paths are rejected before a
+plist is written. Existing sessions retain their saved absolute folder; restarting the service does not
+change an already-saved `/`. The existing-session Runs on menu changes the machine,
+not the folder. For a session with `/` saved, start a new session on that machine
+with a writable custom path in the new-session **Runs on** settings (or pass an
+explicit `workingDir` to `createSession`). Historical attachments are not restaged
+automatically; retrieve them explicitly through Files or attach them to a new
+message when needed.
+
+While a session keeps `/`, staging an attachment, spilled tool result or generated
+image into it usually still fails. When the turn's effective backend is a
+Connected Machine and its working directory is `/`, any failed staging command
+gets a reason that says the filesystem root is often not writable (read-only on
+macOS), that this may be why it failed, and how to fix it, followed by the
+underlying error. The model and timeline therefore no longer see only a raw
+`mkdir: .opengeni: Read-only file system`. This condition is structural (backend
+plus root), never a match on the possibly localized command output, so the
+wording stays conditional. The original command output and exit code are kept,
+and managed sandboxes keep their raw reason. Opengeni never redirects those
+files to another host folder, so the cwd-relative `.opengeni/...` paths keep
+their meaning (`packages/runtime/src/index.ts`,
+`explainConnectedMachineRootDownloadFailure`).
+
 `opengeni-agent run` is the explicit foreground alternative.
+
+Self-update requires settled accepted work across every connection. Relay pumps,
+PTY child/IO cleanup, blocking native actions, attached-browser commands and
+their original reply transport retain the opening reservation after a waiter or
+connection generation ends. A timeout or disconnected profile does not prove a
+physical command stopped, and the updater never fabricates a consumer ACK.
+Each counted reply carries its transport receipt in the same publication
+command. Success requires empty internal buffers and a flush of that stream;
+losing the stream fails its attached receipt before reconnect. A replacement
+socket cannot prove that the previous reply was sent.
+Controller admission is fenced atomically during its idle proof; failed or
+deferred updates release only their own fence. Missing settlement makes updates
+unavailable for the running process while ordinary work remains usable. Older
+controller builds without the update-admission transaction cannot authorize
+replacement from an unfenced idle snapshot. A lost fence-release reply retains
+its exact operation owner; ordinary scoped recovery retries only that release
+after host update admission has reopened. Failed helper/factory cleanup and
+forced or nonzero helper termination remain unsettled even after the original
+owner leaves active inventory. Helper EOF joins persistent capture producers;
+missing ScreenCaptureKit stop completion cannot become a successful shutdown.
+The current Windows command-group dependency cannot prove full-job
+exit; commands keep their ordinary results, but accepting a command fences
+subsequent self-update for that process. A positive same-job exit proof is
+required before normal Windows update eligibility can be restored. Unexpected
+controller exit and forced controller termination likewise preserve uncertainty
+after the old controller is removed from the active inventory. They cannot be
+made update-eligible by reconnecting or replacing the controller.
 
 Enrollment approval lasts until it is revoked; it is not a monthly login.
 The command and relay transport credentials last 30 days. The agent renews them
 with seven days remaining, using its existing install key and current enrollment
 generation. A machine returning after a longer offline period uses the same
 renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
-renewal cannot change ownership, scope or screen-control consent. Updated
+renewal itself cannot change ownership, scope or screen-control consent. Who can
+use a machine changes in place through **Who can use it?** (see
+[Change who can use a machine](#change-who-can-use-a-machine)), and screen
+control through its own request below; neither needs a reconnect. Updated
 credentials load into the existing process, preserving host operations.
+The signed `/v1/enrollments/renew` machine protocol is outside the browser API
+contract-revision fence, like device polling and token exchange. Its install-key,
+enrollment-generation and revocation checks still apply in production.
 
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.
@@ -743,6 +997,183 @@ in that workspace until a workspace administrator removes/revokes it. This is
 intentional: possessing the machine credential does not grant workspace-admin
 authority.
 
+### Connect from a chat
+
+Agents connect machines the way they request integrations. When the agent can
+already run commands on the target machine, it installs the agent itself with
+`connected_machine_enroll_token` (below). When the person has to connect their
+own computer, the agent posts the **Connected Machine card**: either
+`capability_catalog_search` (for example "my Mac" or "Chrome") followed by
+`capability_authorization_request` with `api:connected-machine`, or
+`sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
+`tool.auth_needed` event with that capability id; the event carries no token.
+
+The card (`apps/web/src/components/capabilities/session-machine-card.tsx`):
+
+- lists the workspace's enrolled machines with **Use in this chat**, which swaps
+  the session onto that machine and sends `Use the machine “<name>” for this
+  chat.` (the name quoted, on one line, at most 60 characters) so the agent
+  continues there. A chat that cannot take a Send is not moved; a chat waiting
+  on a question is moved and keeps the question;
+- opens the shared **Connect a machine** dialog
+  (`apps/web/src/components/machines/connect-machine-dialog.tsx`, also used by
+  the Machines page). The person chooses **Who can use it?** (**Only me** by
+  default, or **This workspace**) and screen control (off by default); both are
+  baked into a single-use token minted in their browser for exactly that choice.
+  Mac, Linux and Windows tabs (the detected OS selected) show the matching
+  command. A slower response for an earlier choice never replaces the current
+  one, and the dialog checks the server's echo of the scope it granted, so a
+  server that cannot mint a personal token says so instead of silently sharing
+  the machine. Pairing with a code is a secondary disclosure. While the dialog
+  is open the list polls every three seconds; when a new machine, or a known one
+  that was offline, comes online the same dialog shows its name, **Connected**
+  and **Only me** or **Workspace**, with **Done** and, in a chat, **Use in this
+  chat** (the same attach path as the list). Closing the dialog stops the watch;
+- once a machine with a screen is reachable (the chat's own machine first),
+  offers the
+  [Opengeni Browser extension](https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch)
+  for that machine and shows **Connected** when a Chrome profile on that same
+  enrollment links up. It checks once, polls only after **Add to Chrome**, and
+  stops after ten minutes or when the inventory is not readable.
+
+Reading the list needs `enrollments:read`; connecting needs `enrollments:manage`;
+moving the chat needs `sessions:control`. The card says who can act otherwise.
+Like GitHub, the card is posted even when machines are already connected.
+
+### Turn on screen control for a connected machine
+
+Screen-control consent lives on the enrollment row and in the credentials the
+machine holds (its own dispatch gate checks them). Turning it on never needs a
+reconnect, a token or a human click:
+`POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
+(`enrollments:manage`; `account:admin` for organization machines; no body)
+sets `allow_screen_control` on the enrollment in place, with the same id,
+scope, owner and credential generation, so the machine's current credentials
+stay valid. The API then sends the live agent a `credential_renew` control
+request. The agent renews its credentials through the same install-key-signed
+`POST /v1/enrollments/renew` it runs on its own schedule. Renewal re-reads the
+consent from the row, and the agent saves the result over the same connection
+file. The live reconciler adopts it without restarting the process, and the
+next Hello reports `consented_screen_control`.
+
+The response is `status: "active"` once the agent holds the new credentials.
+Otherwise it is `status: "pending"` with a `reason`:
+
+- `offline`: the machine applies it when it next says Hello.
+- `agent_update_required`: the agent predates the `credential_renew`
+  capability. Update it, and the successor's Hello applies it.
+- `renewal_failed`: retry the request.
+- `reconnect_required`: the machine's connection predates in-place renewal
+  (for example a legacy-origin connection file). Run the connect command on it
+  again with screen control on. The chat card's **Connect again** opens the
+  connect dialog with screen control on and the machine's current access
+  chosen (**Only me** for a personal machine, otherwise **This workspace**), so
+  following the defaults reconnects the same machine without changing who can
+  use it. A personal machine reconnects only from the workspace it was first
+  connected from: elsewhere the command (or a code approved for **Only me**)
+  answers `409` and changes nothing. The command cannot carry organization
+  access, so an organization machine reconnected this way connects as a
+  workspace machine; pair it with a code instead to keep organization access.
+
+The Hello-time path is the same request: when a Hello shows the row allows
+screen control but the credentials do not, the API asks that exact process to
+renew. Repeating the request is safe. Once the agent's Hello reports the consent
+the API answers `active` without contacting it. The agent serves renewals one at
+a time and reports consent already on disk without renewing, so several API
+replicas reacting to one Hello cause a single renewal. Each change records a
+`connected_machine.screen_control.allowed` audit event with the acting subject
+(and the session and attempt for an agent).
+
+Agents use the same action through `connected_machine_enable_screen_control`
+(`target` is a `sandboxes_list` id). Personal machines also pass the same
+per-attempt admission `run_on` uses. When computer input is refused because
+screen control is off, the error names that tool.
+
+macOS also needs Screen Recording, Accessibility and Input Monitoring for
+Opengeni. Mac agents report all three without prompting, on Hello and on each
+desktop heartbeat, as `runtime.macPermissions` in the machine list; older agents
+report only a missing Screen Recording grant, as `desktopUnavailableReason`.
+`POST /v1/workspaces/:ws/machines/:enrollmentId/privacy-settings` with
+`pane: screen_recording | accessibility | input_monitoring` opens that System
+Settings pane on the Mac (bounded to 15 seconds). Opening a pane grants
+nothing; the person switches Opengeni on there. The chat card walks the missing
+permissions in that order, from what the Mac reports.
+
+### Change who can use a machine
+
+A connected machine switches between **This workspace** and **Only me** in
+place. The machine keeps its enrollment id, sandbox id, credentials and live
+connection, so its chats, schedules and the installed agent are not registered
+again, and the agent keeps running (with its running commands) without a
+restart or an upgrade. On the Machines page, open the machine and choose
+**Who can use it?**. Organization machines are shared with the whole
+organization and cannot be changed here.
+
+- Narrowing to **Only me** is done by the person who will own the machine, or by
+  a workspace admin who picks that owner. The owner must be an active member who
+  can use the workspace.
+- Widening to **This workspace** needs `workspace:admin`, and is done by the
+  machine's owner, so nobody exposes another person's Only me machine.
+- Both need `enrollments:manage`. An agent cannot change it.
+
+The dialog shows what one confirmation will do, as counts in plain sentences
+with the itemized chats and schedules behind **Chats and schedules affected**.
+Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
+
+- **The owner's chats** stay on the machine and keep their audience. A shared
+  chat stays shared, so the workspace keeps reading it, but only the owner's
+  turns can use the machine (who reads a chat and who uses a machine are
+  separate, as when choosing a personal machine for a shared chat). Each kept
+  chat gets a per-chat `connected_machine.use` grant, and the owner's running
+  attempts are re-authorized in place, so their running turns and commands
+  carry on.
+- **Other people's chats** move off the machine. Their history stays, their
+  files stay on the machine, and their next turn needs another machine. Another
+  member's private chat is listed without its title or owner.
+- **Running turns** that may no longer use the machine stop now and end as
+  cancelled (`authority_changed`): turns in chats that move off, and turns
+  someone other than the owner started in the owner's shared chats. The agent's
+  commands still running in chats that move off are stopped too.
+- **Schedules** that target the machine: the owner's Workspace schedules become
+  Only me schedules when the owner may have Only me schedules, and pause
+  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Notices**: each affected person other than the one switching gets one
+  inbox notification saying what moved, paused or stopped, and that they can
+  choose another machine to continue.
+- **A duplicate connection**: if the same computer is also connected separately
+  under the target audience, remove that copy first; this is the only thing
+  that blocks the switch. A removed copy is retired by the switch.
+
+Undo is switching back to **This workspace**. Moved chats and paused schedules
+are not restored automatically, and the notices say so; people choose another
+machine or resume their schedules. Widening keeps the owner's chats and
+schedules in this workspace where they are; chats and schedules in other
+workspaces move off or pause, since a workspace machine serves only its own
+workspace. The round trip Workspace → Only me → Workspace keeps the same
+machine throughout.
+
+The switch is one transaction. It recomputes the plan under the machine's row
+lock and the session fences of every workspace it touches, applies it,
+advances the machine's generation, moves the owner authority and
+re-authorizes the owner's live attachments. The worker reads the machine's
+current audience on every operation, so live sessions follow the new audience
+without being rebuilt and the agent needs no restart or upgrade. Each change
+records a `connected_machine.audience_changed` audit event with the counts.
+
+The API is the same flow:
+
+- `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
+  `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
+  `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
+  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
+  machine's `generation`.
+- `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
+  plus `expectedGeneration` applies it and returns the counts and the chats it
+  moved off. It answers `409` with `details.reason: "stale"` when the machine
+  changed since the preview (preview again and retry), and
+  `details.reason: "blocked"` with the preview while a duplicate connection
+  remains.
+
 ### Zero-click token (fleet / headless)
 
 Agents with the existing `enrollments:manage` permission can call the first-party
@@ -750,28 +1181,62 @@ Agents with the existing `enrollments:manage` permission can call the first-part
 It returns the same one-hour token and deployment-specific Unix/PowerShell install
 commands. `allowScreenControl` defaults to false. No additional approval flow is
 introduced. The workspace/account come from the caller's grant, not tool input.
+The tool always mints workspace-shared tokens.
 Run the command on the intended machine through an already-authorized execution
 path, then verify readiness with `sandboxes_list`. A token cannot execute the
 installer on a machine for which no access path exists.
 
 The token is returned to the agent in the tool result; never publish it in source
-code or unrelated logs. Missing `enrollments:manage`, an explicit tool selection
-that excludes it, or disabled Connected Machines means the tool is unavailable.
-This addition does not grant the permission to existing sessions. For interactive
-enrollment without this permission, `sandbox_provision` still returns human
-device-flow instructions.
+code, chat, or unrelated logs. Missing `enrollments:manage`, an explicit tool
+selection that excludes it, or disabled Connected Machines means the tool is
+unavailable. This addition does not grant the permission to existing sessions.
+
+Enroll tokens are **single-use**. Each token carries a random `jti`; the exchange
+records it in `enrollment_token_redemptions` (0696) in the same transaction that
+creates the enrollment, so one token connects one machine. The same machine
+(same public key) may repeat the exchange after a lost response or a re-run
+install command, while its enrollment is still active. Any other machine, or a
+machine removed since, receives `401` with "this connect command was already
+used to connect another machine". Mint one token per machine for a
+fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
+expire an hour later. Expired redemptions are pruned per workspace during later
+exchanges.
+
+`scope` chooses who can use the machine: `"workspace"` (the default, shared with
+the workspace) or `"user"` (only the person who minted the token). A personal
+token can be minted only for a verified person: a signed-in human session, or a
+credential acting as that person (a personal API key, or an organization key or
+organization MCP client acting as them), the same canonical-actor rule as
+personal connections. A key acting as itself, a service, an agent attempt or a
+service-initiated grant gets `422`. The owner is always the caller's
+authenticated subject, never a request field, and a personal token always
+carries a `jti`, so it is single-use.
+It is signed with a distinct `typ` (`enroll_user`) carrying that owner, so an
+API replica that predates personal tokens rejects it instead of creating a
+shared machine during a rolling deploy. The exchange re-checks, under the
+organization membership fence, that the owner is still an active member with
+access to the workspace; otherwise it answers `403` and claims nothing. Fence
+contention answers `503`; run the command again. A personal machine stays in the
+workspace it was first connected from, and its credentials belong to that
+workspace: running a personal command for the same machine (same install key)
+from another workspace answers `409`, writes nothing and leaves the command
+unused, and the machine keeps its existing connection. Reconnect it from that
+workspace. The response echoes `scope` and `allowScreenControl`; clients should
+compare them with what they asked for, since an older server omits `scope` and
+always mints a workspace token.
 
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
-is **secret** — surface it once with a copy-now warning; it cannot be re-read.
+is **secret**: anyone holding it can connect one machine until it expires.
 
 ```ts
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
   workspaceId,
   {
+    scope: "user", // only me; "workspace" (the default) shares it
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );
-// Run on the machine (the installer dials OpenGeni and exchanges the token for
+// Run on the machine (the installer dials Opengeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
 //   OPENGENI_API_URL=https://… OPENGENI_ENROLL_TOKEN=<token> \
@@ -818,6 +1283,26 @@ target. The managed consent page always asks for personal, workspace, or
 organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
+
+### Agent logs
+
+The running agent (`opengeni-agent run`, or a bare launch of an enrolled
+machine) keeps its own log in `logs/agent.log` under its config directory
+(`~/.config/opengeni/agent` unless `$OPENGENI_CONFIG_DIR` or
+`$XDG_CONFIG_HOME` says otherwise), whatever service manager runs it. The file
+rotates at 8 MiB and keeps two older generations (`agent.log.1`,
+`agent.log.2`); the directory and files are owner-only. It records browser
+controller diagnostics and exit statuses, and a panic on any thread with its
+backtrace, so a crashed agent can be diagnosed afterwards. One-shot CLI
+commands log only to the terminal.
+
+On Linux the same lines also reach the systemd journal
+(`journalctl --user -u opengeni-agent`). The macOS LaunchAgent sends the
+process's raw stdout and stderr to `logs/agent.stderr.log` and sets
+`OPENGENI_AGENT_STDERR_LOG=off`, so that file keeps only output that bypasses
+the agent log, such as an abort message; the agent bounds it at startup. A Mac
+picks up that LaunchAgent change the next time `opengeni-agent service install`
+runs; the agent log itself needs only the new agent.
 
 ## Transactional file edits
 
@@ -939,6 +1424,17 @@ Chromium profile identities, or a linked ComputerSession. Use Chromium for
 visual/mobile testing and human interaction. Browser authority, per-session
 isolation, and source-placement fences remain identical for both engines.
 
+The agent runs one browser controller (browserd) per scope: workspace,
+placement kind and placement (the machine, or an attached Chrome device). A
+controller that reports holding no session at all (no open, retained or
+recovering browser or computer session and no work in flight), and whose scope
+has not been ensured for ten minutes, is stopped; the next request starts a
+fresh one in about a second. Each controller also holds the write end of a
+stdin lifeline from its agent: however the agent ends, including a crash or
+SIGKILL, the kernel closes it and the controller shuts down gracefully,
+leaving retained browsers running for the next agent to adopt. Controllers no
+longer accumulate across scopes or outlive the agent that started them.
+
 Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
 launched by a shell command remains subject to that command's containment and
 cleanup; repeating its CLI session name does not retain its process. Explicit
@@ -981,6 +1477,19 @@ remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
+
+An attached tab's debugger disconnect invalidates its cached target, document,
+frame and element authority without restarting Chrome or changing other tabs.
+A later read can reattach the same surviving tab with fresh fences. Chrome's
+`canceled_by_user` disconnect requires reconnecting the profile; it is never
+silently overridden. Detachment during pending input or other possible effects preserves an unknown
+outcome and blocks automatic reattachment until the profile reconnects. A late
+reply cannot revive the old attachment, and no input or navigation is replayed.
+Acknowledged partial input followed by a disconnect also remains outcome unknown.
+Queued navigation, DOM changes, emulation and unclassified commands cannot run
+under a replacement debugger attachment.
+Read-only disconnect failures use typed unavailable responses instead of a
+generic internal error.
 
 Native computer protocol version 3 separates `capture_still` (including JPEG and
 size options) from reading an explicitly started live stream. macOS helpers use

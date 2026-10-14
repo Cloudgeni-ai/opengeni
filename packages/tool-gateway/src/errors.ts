@@ -27,6 +27,14 @@ export class ToolGatewayApprovalRequiredError extends Error {
   }
 }
 
+export class ToolGatewayBlockedError extends Error {
+  readonly code = "tool_blocked";
+  constructor() {
+    super("This action is blocked by your tool permissions");
+    this.name = "ToolGatewayBlockedError";
+  }
+}
+
 export class ToolGatewayCatalogIntegrityError extends Error {
   readonly code = "catalog_integrity_failed";
 

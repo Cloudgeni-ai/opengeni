@@ -5,7 +5,6 @@ import { join } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserObservation,
-  BrowserProtectedAuthFillCommand,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
@@ -15,8 +14,9 @@ import {
   BrowserSupervisor,
   imageDimensions,
   resolvePinnedAgentBrowserBinary,
+  restoreTabs,
 } from "../src";
-import { CdpConnection } from "../src/cdp";
+import { CdpConnection, CdpProtocolError, type CdpSendOptions } from "../src/cdp";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
@@ -271,9 +271,13 @@ headedE2e(
   90_000,
 );
 
-headedE2e.each([false, true])(
-  "streams a mobile headed tab continuously while managed input stays in the background (headed=%j)",
-  async (headed) => {
+headedE2e.each([
+  { headed: false, passkeys: false },
+  { headed: true, passkeys: false },
+  { headed: true, passkeys: true },
+])(
+  "streams a mobile headed tab continuously while managed input stays in the background unless passkeys need the front (%j)",
+  async ({ headed, passkeys }) => {
     const directory = await mkdtemp("/tmp/ogb-background-input-");
     const socketDirectory = await mkdtemp("/tmp/ogb-bg-sockets-");
     const reference = {
@@ -283,7 +287,12 @@ headedE2e.each([false, true])(
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(directory, "state"),
       socketRootDirectory: socketDirectory,
+      // A passkey placement brings the acted-on tab to the front (Chromium
+      // refuses WebAuthn in a background tab); without passkeys managed
+      // input never switches the real tab.
+      passkeys,
     });
+    const actedFront = passkeys ? "hidden" : "visible";
     let cdp: CdpConnection | null = null;
     let frames: import("../src").BrowserFrameSubscription | null = null;
     let detachedDriver: AgentBrowserDriver | null = null;
@@ -356,7 +365,7 @@ headedE2e.each([false, true])(
         expect(result.state).toBe("completed");
         expect(result.observation).not.toBeNull();
         observed = result.observation!;
-        expect(await frontVisibility()).toBe("visible");
+        expect(await frontVisibility()).toBe(actedFront);
       };
       await act({ type: "viewport", width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
       const locator = { kind: "role", role: "textbox", name: "Name" } as const;
@@ -392,7 +401,7 @@ headedE2e.each([false, true])(
         { sessionId: attached.sessionId },
       );
       expect(state.result.value).toEqual({ visibility: "visible", value: "Background æøå 🦊" });
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       // Disconnecting one controller restores its override without closing
       // the shared owned browser or touching another controller's tab.
       detachedDriver = new AgentBrowserDriver({
@@ -429,7 +438,7 @@ headedE2e.each([false, true])(
         await Bun.sleep(25);
       }
       expect(await cleanupVisibility()).toBe("hidden");
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       await cdp.send("Target.closeTarget", { targetId: cleanup.target.id });
       frames = await supervisor.subscribeFrames(reference, background.target.id, {
         format: "jpeg",
@@ -440,7 +449,7 @@ headedE2e.each([false, true])(
       expect([...screenshot.data.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
       const next = await frameAfter(iterator, first.sequence, 3_000);
       expect([next.width, next.height]).toEqual([390, 844]);
-      expect(await frontVisibility()).toBe("visible");
+      expect(await frontVisibility()).toBe(actedFront);
       // Explicit activation remains available for a human choosing direct control.
       const activated = await supervisor.action(command(observed, { type: "activate" }));
       expect(activated.state).toBe("completed");
@@ -615,6 +624,136 @@ e2e(
 );
 
 e2e(
+  "covered click preparation preserves scroll effects without pointer input or replay",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-covered-scroll-");
+    const effects = { scroll: 0, pointer: 0, later: 0 };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (request.method === "POST") {
+          if (path === "/scroll") effects.scroll += 1;
+          if (path === "/pointer") effects.pointer += 1;
+          if (path === "/later") effects.later += 1;
+          return new Response(null, { status: 204 });
+        }
+        return new Response(
+          `<!doctype html><title>Covered scroll effects</title>
+          <style>
+            #covered { position: relative; margin-top: 1800px; width: 180px; height: 40px; }
+            #covered button, #cover { position: absolute; inset: 0; }
+            #cover { z-index: 2; background: gray; }
+          </style>
+          <button onclick="fetch('/later', {method:'POST'})">Later target</button>
+          <div id="covered"><button>Covered target</button><div id="cover">Cover</div></div>
+          <script>
+            addEventListener('scroll', () => fetch('/scroll', {method:'POST'}));
+            for (const type of ['pointerdown', 'pointerup', 'click'])
+              document.addEventListener(type, () => fetch('/pointer', {method:'POST'}));
+          </script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `covered_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    const waitForScroll = async (previous: number) => {
+      const deadline = Date.now() + 5_000;
+      while (effects.scroll <= previous && Date.now() < deadline) await Bun.sleep(25);
+      expect(effects.scroll).toBeGreaterThan(previous);
+    };
+    try {
+      const initial = await driver.start(String(server.url));
+      const beforeEffect = await controller.run(
+        command(initial, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Missing target", exact: true },
+        }),
+      );
+      expect(beforeEffect.state).toBe("failed");
+      expect(beforeEffect.error?.code).toBe("locator_not_found");
+      expect(effects).toEqual({ scroll: 0, pointer: 0, later: 0 });
+
+      const operation = command(initial, {
+        type: "batch",
+        actions: [
+          {
+            type: "click",
+            locator: { kind: "role", role: "button", name: "Covered target", exact: true },
+          },
+          {
+            type: "click",
+            locator: { kind: "role", role: "button", name: "Later target", exact: true },
+          },
+        ],
+      });
+      const receipt = await controller.run(operation);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      expect(receipt.error?.message).toContain("invalid_action");
+      await waitForScroll(0);
+      expect(effects.pointer).toBe(0);
+      expect(effects.later).toBe(0);
+
+      // Restore the offscreen condition through the native inspection API. A
+      // redispatched click would scroll again and emit another local request.
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const scrollCount = effects.scroll;
+      await cdp.send(
+        "Runtime.evaluate",
+        { expression: "scrollTo(0, 0)" },
+        { sessionId: attached.sessionId },
+      );
+      await waitForScroll(scrollCount);
+      const settledEffects = { ...effects };
+      expect(await controller.run(operation)).toEqual(receipt);
+      await driver.observe(initial.target.id);
+      const position = await cdp.send<{ result: { value: number } }>(
+        "Runtime.evaluate",
+        { expression: "scrollY", returnByValue: true },
+        { sessionId: attached.sessionId },
+      );
+      expect(position.result.value).toBe(0);
+      expect(effects).toEqual(settledEffects);
+      expect(effects.pointer).toBe(0);
+      expect(effects.later).toBe(0);
+    } finally {
+      cdp?.close();
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+e2e(
   "preserves partial batch uncertainty without claiming controller loss or replaying actions",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-partial-");
@@ -714,7 +853,7 @@ e2e(
       releaseBarrier = resolve;
     });
     let barrierArrivals = 0;
-    let protectedAuthBody = "";
+    let loginBody = "";
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -736,7 +875,7 @@ e2e(
           });
         }
         if (url.pathname === "/logged-in" && request.method === "POST") {
-          protectedAuthBody = await request.text();
+          loginBody = await request.text();
           return new Response("<!doctype html><title>Logged in</title><p>Authenticated</p>", {
             headers: { "content-type": "text/html; charset=utf-8" },
           });
@@ -1081,29 +1220,35 @@ e2e(
           expectedFrameId: authState.frameId!,
         }),
       ).rejects.toMatchObject({ code: "invalid_action" });
-      const protectedResult = await driver.protectedFill(
-        protectedAuthCommand(authPage, parallelOrigin),
-      );
-      expect(protectedResult.status).toBe("submitted");
-      expect(protectedResult.target.url).toBe(`${parallelOrigin}/logged-in`);
-      expect(protectedAuthBody).toContain("username=fixture-user");
-      expect(protectedAuthBody).toContain("password=fixture-password");
-      expect(JSON.stringify(await driver.debug(authPage.target.id))).not.toContain(
-        "fixture-password",
-      );
-      await expect(driver.captureScreenshot(authPage.target.id)).rejects.toMatchObject({
-        code: "permission_denied",
-      });
-      const protectedState = await driver.targetState(authPage.target.id);
-      await expect(
-        driver.readDom(authPage.target.id, {
-          kind: "count",
-          selector: "button",
-          expectedTargetGeneration: protectedState.targetGeneration,
-          expectedDocumentGeneration: protectedState.documentGeneration!,
-          expectedFrameId: protectedState.frameId!,
+      // Logins are ordinary fill and click actions on the page.
+      let loginPage = await driver.dispatch(
+        command(authPage, {
+          type: "fill",
+          locator: { kind: "css", selector: "#username" },
+          value: "fixture-user",
         }),
-      ).rejects.toMatchObject({ code: "permission_denied" });
+      );
+      loginPage = await driver.dispatch(
+        command(loginPage, {
+          type: "fill",
+          locator: { kind: "css", selector: "#password" },
+          value: "fixture-password",
+        }),
+      );
+      loginPage = await driver.dispatch(
+        command(loginPage, { type: "click", locator: { kind: "css", selector: "#login" } }),
+      );
+      // The form post commits after the click receipt; wait for the navigation.
+      const loginDeadline = Date.now() + 10_000;
+      let loginUrl = loginPage.target.url;
+      while (loginUrl !== `${parallelOrigin}/logged-in` && Date.now() < loginDeadline) {
+        await Bun.sleep(50);
+        const targets = await driver.listTargets();
+        loginUrl = targets.find((target) => target.id === loginPage.target.id)?.url ?? loginUrl;
+      }
+      expect(loginUrl).toBe(`${parallelOrigin}/logged-in`);
+      expect(loginBody).toContain("username=fixture-user");
+      expect(loginBody).toContain("password=fixture-password");
 
       const firstParallel = await driver.openTarget("about:blank");
       const secondParallel = await driver.openTarget("about:blank");
@@ -1187,84 +1332,156 @@ e2e(
   60_000,
 );
 
+async function popupCloseTest(closeDuringFrameInspection: boolean) {
+  const directory = await mkdtemp("/tmp/ogb-popup-close-");
+  let closeRequested!: () => void;
+  const closingRequest = new Promise<void>((resolve) => {
+    closeRequested = resolve;
+  });
+  let releaseClose!: () => void;
+  let closingInput = false;
+  let closingInputDispatched = false;
+  let inspectAfterClose = closeDuringFrameInspection;
+  let nativeInvalidSession = false;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      if (new URL(request.url).pathname === "/close") {
+        return new Promise<Response>((resolve) => {
+          releaseClose = () => resolve(new Response("close"));
+          closeRequested();
+        });
+      }
+      return new Response(
+        new URL(request.url).pathname === "/popup"
+          ? closeDuringFrameInspection
+            ? '<title>Popup</title><button onclick="fetch(&quot;/close&quot;).then(() => window.close())">Close popup</button>'
+            : '<title>Popup</title><button onclick="window.close()">Close popup</button>'
+          : '<title>Parent</title><input aria-label="Draft" value="unsaved draft"><button onclick="window.open(&quot;/popup&quot;)">Open popup</button>',
+        { headers: { "content-type": "text/html" } },
+      );
+    },
+  });
+  const runner = await AgentBrowserJsonRunner.create({
+    namespace: `close_${randomUUID().slice(0, 8)}`,
+    sessionName: "s",
+    socketDirectory: join(directory, "s"),
+    profileDirectory: join(directory, "profile"),
+    downloadDirectory: join(directory, "downloads"),
+    screenshotDirectory: join(directory, "screenshots"),
+    headed: false,
+    ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+      ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+      : {}),
+  });
+  const browserSessionId = randomUUID(),
+    controllerGeneration = randomUUID();
+  const driver = new AgentBrowserDriver({
+    browserSessionId,
+    controllerGeneration,
+    runner,
+    ...(closeDuringFrameInspection
+      ? {
+          async connect(endpoint: string) {
+            const connection = await CdpConnection.connect(endpoint);
+            const send = connection.send.bind(connection);
+            connection.send = async <T>(
+              method: string,
+              params?: Readonly<Record<string, unknown>>,
+              options?: CdpSendOptions,
+            ): Promise<T> => {
+              if (closingInputDispatched && inspectAfterClose && method === "Page.getFrameTree") {
+                inspectAfterClose = false;
+                const detached = connection.waitForEvent("Target.detachedFromTarget", {
+                  predicate: (event) => event.sessionId === options?.sessionId,
+                });
+                // The real click requests closure. Release that response only
+                // when its follow-up inspection reaches the native session.
+                await closingRequest;
+                releaseClose();
+                await detached;
+                try {
+                  return await send<T>(method, params, options);
+                } catch (error) {
+                  nativeInvalidSession =
+                    error instanceof CdpProtocolError && error.code === -32_001;
+                  throw error;
+                }
+              }
+              const result = await send<T>(method, params, options);
+              if (
+                closingInput &&
+                method === "Input.dispatchMouseEvent" &&
+                params?.type === "mouseReleased"
+              )
+                closingInputDispatched = true;
+              return result;
+            };
+            return connection;
+          },
+        }
+      : {}),
+  });
+  const controller = new BrowserInteractionController({
+    browserSessionId,
+    controllerGeneration,
+    driver,
+  });
+  try {
+    const parent = await driver.start(String(server.url));
+    await controller.run(
+      command(parent, {
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Open popup", exact: true },
+      }),
+    );
+    let popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+    for (let n = 0; !popup && n < 40; n++) {
+      await Bun.sleep(25);
+      popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+    }
+    expect(popup).toBeDefined();
+    const observed = await driver.observe(popup!.id);
+    const close = command(observed, {
+      type: "click",
+      locator: { kind: "role", role: "button", name: "Close popup", exact: true },
+    });
+    closingInput = true;
+    const receipt = await controller.run(close);
+    if (closeDuringFrameInspection) expect(nativeInvalidSession).toBe(true);
+    expect(receipt.state).toBe("outcome_unknown");
+    expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+    expect(await controller.run(close)).toEqual(receipt);
+    expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
+    const retained = await driver.observe(parent.target.id);
+    expect(retained.target.targetGeneration).toBe(parent.target.targetGeneration);
+    expect(retained.target.documentGeneration).toBe(parent.target.documentGeneration);
+    expect(
+      await driver.readDom(parent.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "input" },
+        expectedTargetGeneration: parent.target.targetGeneration,
+        expectedDocumentGeneration: parent.target.documentGeneration!,
+        expectedFrameId: parent.frameId!,
+      }),
+    ).toMatchObject({ kind: "element", value: "unsaved draft" });
+  } finally {
+    server.stop(true);
+    await driver.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 e2e(
   "a popup closing during a click stays uncertain without losing its parent or replaying input",
-  async () => {
-    const directory = await mkdtemp("/tmp/ogb-popup-close-");
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch(request) {
-        return new Response(
-          new URL(request.url).pathname === "/popup"
-            ? '<title>Popup</title><button onclick="window.close()">Close popup</button>'
-            : '<title>Parent</title><input aria-label="Draft" value="unsaved draft"><button onclick="window.open(&quot;/popup&quot;)">Open popup</button>',
-          { headers: { "content-type": "text/html" } },
-        );
-      },
-    });
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `close_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
-      profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
-      headed: false,
-      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
-        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
-        : {}),
-    });
-    const browserSessionId = randomUUID(),
-      controllerGeneration = randomUUID();
-    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
-    const controller = new BrowserInteractionController({
-      browserSessionId,
-      controllerGeneration,
-      driver,
-    });
-    try {
-      const parent = await driver.start(String(server.url));
-      await controller.run(
-        command(parent, {
-          type: "click",
-          locator: { kind: "role", role: "button", name: "Open popup", exact: true },
-        }),
-      );
-      let popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
-      for (let n = 0; !popup && n < 40; n++) {
-        await Bun.sleep(25);
-        popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
-      }
-      expect(popup).toBeDefined();
-      const observed = await driver.observe(popup!.id);
-      const close = command(observed, {
-        type: "click",
-        locator: { kind: "role", role: "button", name: "Close popup", exact: true },
-      });
-      const receipt = await controller.run(close);
-      expect(receipt.state).toBe("outcome_unknown");
-      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
-      expect(await controller.run(close)).toEqual(receipt);
-      expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
-      const retained = await driver.observe(parent.target.id);
-      expect(retained.target.targetGeneration).toBe(parent.target.targetGeneration);
-      expect(retained.target.documentGeneration).toBe(parent.target.documentGeneration);
-      expect(
-        await driver.readDom(parent.target.id, {
-          kind: "element",
-          locator: { kind: "css", selector: "input" },
-          expectedTargetGeneration: parent.target.targetGeneration,
-          expectedDocumentGeneration: parent.target.documentGeneration!,
-          expectedFrameId: parent.frameId!,
-        }),
-      ).toMatchObject({ kind: "element", value: "unsaved draft" });
-    } finally {
-      server.stop(true);
-      await driver.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  },
+  () => popupCloseTest(false),
+  40_000,
+);
+
+e2e(
+  "popup retirement during post-input frame inspection remains target-scoped and never replays input",
+  () => popupCloseTest(true),
   40_000,
 );
 
@@ -1283,41 +1500,6 @@ function command(
     expectedFrameId: observation.frameId!,
     actor: { kind: "agent", subjectId: "browserd-cdp-e2e" },
     action,
-  };
-}
-
-function protectedAuthCommand(
-  observation: BrowserObservation,
-  origin: string,
-): BrowserProtectedAuthFillCommand {
-  return {
-    protocolVersion: 1,
-    operationId: randomUUID(),
-    browserSessionId: observation.browserSessionId,
-    controllerGeneration: observation.target.controllerGeneration,
-    targetId: observation.target.id,
-    expectedTargetGeneration: observation.target.targetGeneration,
-    expectedDocumentGeneration: observation.target.documentGeneration!,
-    expectedFrameId: observation.frameId!,
-    actor: { kind: "system", subjectId: "protected-auth-e2e" },
-    authorityId: "password-authority",
-    credentialVersion: 1,
-    allowedOrigins: [origin],
-    fields: [
-      {
-        fieldId: "username",
-        locator: { kind: "css", selector: "#username" },
-        purpose: "identifier",
-        value: "fixture-user",
-      },
-      {
-        fieldId: "password",
-        locator: { kind: "css", selector: "#password" },
-        purpose: "password",
-        value: "fixture-password",
-      },
-    ],
-    submit: { type: "click", locator: { kind: "css", selector: "#login" } },
   };
 }
 
@@ -1715,5 +1897,145 @@ for (const mode of [
       }
     },
     30_000,
+  );
+}
+
+chromiumE2e(
+  "a crashed tab fails fast with a non-retryable error and a new tab keeps working",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-crashed-tab-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `crash_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    let cdp: CdpConnection | null = null;
+    try {
+      const initial = await driver.start(dataUrl("<!doctype html><h1>Before the crash</h1>"));
+      expect(names(await driver.observe(initial.target.id))).toContain("Before the crash");
+
+      // Kill the tab's renderer the way a real crash or kill would.
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+
+      // Both the live attachment and a fresh re-attachment report the crash at once.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const started = Date.now();
+        const failure = await driver.observe(initial.target.id).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect(failure).toMatchObject({ code: "tab_crashed", retryable: false });
+        expect(String((failure as Error).message)).toContain("crashed");
+      }
+
+      // The browser itself is fine: a new tab works and the crashed one closes.
+      const fresh = await driver.openTarget(dataUrl("<!doctype html><h1>After the crash</h1>"));
+      expect(names(fresh)).toContain("After the crash");
+      const remaining = await driver.closeTarget(initial.target.id);
+      expect(remaining.map((target) => target.id)).not.toContain(initial.target.id);
+    } finally {
+      cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+for (const mode of ["start", "restore tabs"] as const) {
+  chromiumE2e(
+    `${mode} on a browser whose only restored tab crashed selects a live tab`,
+    async () => {
+      const directory = await mkdtemp("/tmp/ogb-crashed-restore-");
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: `crashrestore_${randomUUID().slice(0, 8)}`,
+        sessionName: "s",
+        socketDirectory: join(directory, "s"),
+        profileDirectory: join(directory, "profile"),
+        downloadDirectory: join(directory, "downloads"),
+        screenshotDirectory: join(directory, "screenshots"),
+        headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+        binary: await resolvePinnedAgentBrowserBinary(
+          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+            : {},
+        ),
+      });
+      const first = new AgentBrowserDriver({
+        browserSessionId: randomUUID(),
+        controllerGeneration: randomUUID(),
+        runner,
+      });
+      let restarted: AgentBrowserDriver | null = null;
+      let cdp: CdpConnection | null = null;
+      try {
+        const restoredUrl = dataUrl("<!doctype html><h1>Restored page</h1>");
+        const initial = await first.start(restoredUrl);
+        const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+        cdp = await CdpConnection.connect(endpoint.cdpUrl);
+        const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId: initial.target.id,
+          flatten: true,
+        });
+        await cdp.send("Page.crash", {}, { sessionId: attached.sessionId }).catch(() => undefined);
+        await first.detach();
+
+        // A new controller generation meets the dead restored tab first, as a
+        // restored profile launch does. The browser is healthy, so startup works.
+        restarted = new AgentBrowserDriver({
+          browserSessionId: randomUUID(),
+          controllerGeneration: randomUUID(),
+          runner,
+        });
+        if (mode === "start") {
+          const started = await restarted.start(dataUrl("<!doctype html><h1>After restore</h1>"));
+          expect(started.target.id).not.toBe(initial.target.id);
+          expect(names(started)).toContain("After restore");
+          const tabs = await restarted.listTargets();
+          expect(tabs.map((target) => target.id)).toContain(initial.target.id);
+        } else {
+          // The checkpoint's selected tab has the same URL as the dead tab. The
+          // restored selection must be the live tab startup navigated there.
+          await restoreTabs(restarted, [{ url: restoredUrl, selected: true }]);
+          const tabs = await restarted.listTargets();
+          const selected = tabs.find((target) => target.selected);
+          expect(selected?.id).toBeDefined();
+          expect(selected?.id).not.toBe(initial.target.id);
+          expect(names(await restarted.observe(selected!.id))).toContain("Restored page");
+        }
+      } finally {
+        cdp?.close();
+        await (restarted ?? first).close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    60_000,
   );
 }

@@ -75,6 +75,7 @@ const control = (page: Page) =>
 try {
   const staticStates: Array<[string, string]> = [
     ["ready", "Connect GitHub App"],
+    ["requested", "Waiting for your GitHub organization owner to approve."],
     ["not-configured", "GitHub isn't available on this deployment right now."],
     ["not-configured-operator", "GitHub isn't set up on this deployment yet."],
     ["cannot-connect", "Only workspace admins can connect GitHub."],
@@ -103,6 +104,21 @@ try {
       await page.close();
     });
   }
+
+  await check("a pending owner request clears once GitHub is connected", async (viewport) => {
+    const { page, errors } = await open(viewport, "requested");
+    await card(page).getByText("Waiting for your GitHub organization owner to approve.").waitFor();
+    await page.evaluate(() =>
+      (window as unknown as { __githubCard: Control }).__githubCard.connectElsewhere(),
+    );
+    await card(page).getByText("Connected to this workspace").waitFor();
+    assert.equal(
+      await page.evaluate(() => window.localStorage.getItem("opengeni.githubInstallRequests.v1")),
+      null,
+    );
+    assert.equal(errors.length, 0);
+    await page.close();
+  });
 
   await check("connect shows a visible, single in-flight state", async (viewport) => {
     const { page, errors } = await open(viewport, "opening");

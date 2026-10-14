@@ -24,6 +24,7 @@ import {
   composerSubmissionErrorMessage,
 } from "../lib/format";
 import { normalizeError, useErrorMessage } from "../lib/error-message";
+import { notifyObserver as notifyComposerObserver } from "../lib/notify-observer";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerPolicy = {
@@ -37,11 +38,19 @@ export type ComposerSendExtras = Omit<
   "text" | "clientEventId" | "annotations" | "model" | "reasoningEffort" | "latencyMode"
 >;
 
+/** Unsent local content handed off from a new-conversation composer. */
+export type InitialComposerDraft = {
+  text: string;
+  resources?: ResourceRef[] | undefined;
+  annotations?: DraftTimelineAnnotation[] | undefined;
+  policy?: ComposerPolicy | undefined;
+};
+
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
-    /** Called synchronously after an ordinary Send is accepted by the local UI. */
+    /** Called synchronously after local submission. Observer errors never change delivery. */
     onSubmitted?: ((text: string, input: SendMessageInput) => void) | undefined;
-    /** Called with the exact accepted wire input after a successful send. */
+    /** Called with the accepted wire input. Observer errors never turn acceptance into failure. */
     onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
     /** Called with the exact wire input after a delivery failure. */
     onDeliveryError?:
@@ -66,6 +75,13 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     draftPersistence?: "durable" | "disabled" | undefined;
     /** Required explicit authority when durable draft persistence is disabled. */
     initialPolicy?: ComposerPolicy | undefined;
+    /**
+     * Seed local unsent content once when this session is mounted/selected.
+     * The real server draft still supplies the revision used for persistence.
+     * A retained uncertain submission takes precedence over this handoff.
+     * An empty seed does not erase an existing server draft.
+     */
+    initialDraft?: InitialComposerDraft | undefined;
   };
 
 type ComposerDraftShadow = {
@@ -74,6 +90,19 @@ type ComposerDraftShadow = {
   annotations: DraftTimelineAnnotation[];
   policy?: ComposerPolicy | undefined;
 };
+
+function initialComposerShadow(
+  seed: InitialComposerDraft | undefined,
+): ComposerDraftShadow | undefined {
+  if (!seed || (!seed.text && !seed.resources?.length && !seed.annotations?.length && !seed.policy))
+    return undefined;
+  return {
+    text: seed.text,
+    resources: [...(seed.resources ?? [])],
+    annotations: cloneAnnotations(seed.annotations ?? []),
+    ...(seed.policy ? { policy: { ...seed.policy } } : {}),
+  };
+}
 
 type PendingComposerOperation = {
   delivery: "send" | "steer";
@@ -692,7 +721,9 @@ export function useComposer(
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
   const initialOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
   const initialShadow =
-    initialPendingOperation?.newerShadow ?? initialOptimisticSends.at(-1)?.newerShadow;
+    initialPendingOperation?.newerShadow ??
+    initialOptimisticSends.at(-1)?.newerShadow ??
+    initialComposerShadow(options.initialDraft);
   const [value, setValue] = useState(() => initialShadow?.text ?? "");
   const [annotations, setAnnotations] = useState<DraftTimelineAnnotation[]>(
     () => initialShadow?.annotations ?? [],
@@ -762,8 +793,18 @@ export function useComposer(
   }>({ targetKey, failures: 0, timer: null });
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
-  const onSent = options.onSent;
-  const onSubmitted = options.onSubmitted;
+  const onSent = useCallback(
+    (text: string, input: SendMessageInput) => {
+      notifyComposerObserver(options.onSent, text, input);
+    },
+    [options.onSent],
+  );
+  const onSubmitted = useCallback(
+    (text: string, input: SendMessageInput) => {
+      notifyComposerObserver(options.onSubmitted, text, input);
+    },
+    [options.onSubmitted],
+  );
   const onDeliveryErrorRef = useRef(options.onDeliveryError);
   onDeliveryErrorRef.current = options.onDeliveryError;
   useLayoutEffect(() => {
@@ -805,7 +846,9 @@ export function useComposer(
     steeringSettlementEventsRef.current = [];
     pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
     const shadow =
-      pendingOperationRef.current?.newerShadow ?? restoredOptimisticSends.at(-1)?.newerShadow;
+      pendingOperationRef.current?.newerShadow ??
+      restoredOptimisticSends.at(-1)?.newerShadow ??
+      initialComposerShadow(options.initialDraft);
     localEditRevision.current = shadow ? 1 : 0;
     valueRef.current = shadow?.text ?? "";
     annotationsRef.current = shadow?.annotations ?? [];
@@ -846,7 +889,14 @@ export function useComposer(
     setDraftSaving(false);
     setDraftConflict(null);
     setRestoredResources(shadow?.resources ?? []);
-  }, [durableDrafts, options.initialPolicy, pendingOperationKey, sessionId, targetKey]);
+  }, [
+    durableDrafts,
+    options.initialPolicy,
+    options.initialDraft,
+    pendingOperationKey,
+    sessionId,
+    targetKey,
+  ]);
   useEffect(
     () => () => {
       if (draftReadRetryRef.current.timer !== null) {
@@ -1605,7 +1655,7 @@ export function useComposer(
           return;
         }
         const problem = asError(cause);
-        onDeliveryErrorRef.current?.(problem, operation.input, "send");
+        notifyComposerObserver(onDeliveryErrorRef.current, problem, operation.input, "send");
         // Only an actual mutation replay can replace prior uncertainty with a
         // definitive response. Local preparation failures remain retry-only.
         const outcomeUnknown =
@@ -1918,7 +1968,12 @@ export function useComposer(
           } catch (cause) {
             const problem = asError(cause);
             const outcomeUnknown = isOutcomeUnknownError(cause);
-            onDeliveryErrorRef.current?.(problem, pending.input, pending.delivery);
+            notifyComposerObserver(
+              onDeliveryErrorRef.current,
+              problem,
+              pending.input,
+              pending.delivery,
+            );
             if (!outcomeUnknown) {
               clearPending();
               keepSteering = false;
@@ -2021,7 +2076,12 @@ export function useComposer(
             });
           }
         } catch (cause) {
-          onDeliveryErrorRef.current?.(asError(cause), operation.input, operation.delivery);
+          notifyComposerObserver(
+            onDeliveryErrorRef.current,
+            asError(cause),
+            operation.input,
+            operation.delivery,
+          );
           if (!isOutcomeUnknownError(cause)) {
             clearPending();
           } else if (delivery === "steer") {

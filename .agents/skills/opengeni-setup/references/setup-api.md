@@ -1,102 +1,94 @@
 # Setup: exact REST and SDK calls
 
-Execute in this order. The coding agent uses ordinary HTTPS and its own
-computer, or the `opengeni` MCP tools when available (`opengeni_action_call`
-runs these same routes as the signed-in user). Requests below are checked
-against `apps/api/src/routes` and `packages/contracts` in this release.
-[setup-sdk.ts](setup-sdk.ts) provides corresponding SDK calls and verification.
+Sections follow the setup skill's order: key, a verified chat, then product
+tools; background work, callbacks and budgets only when requested. The coding
+agent uses ordinary HTTPS and its own computer, or the `opengeni` MCP tools
+when available (`opengeni_action_call` runs these same routes as the signed-in
+user). Requests below are checked against `apps/api/src/routes` and
+`packages/contracts` in this release. [setup-sdk.ts](setup-sdk.ts) provides
+corresponding SDK calls and verification.
 
-## Local secret handling and curl helper
+The canonical product agent, used in every recipe below, is:
 
-Use the product's editor/secret API to write these **server-only** variables in
-its ignored `.env`, preserving unrelated values:
-
-```dotenv
-OPENGENI_API_BASE_URL=https://staging.app.opengeni.ai
-OPENGENI_ORGANIZATION_ID=<verified organization UUID>
-OPENGENI_API_KEY=<once-shown setup token>
+```json
+{"agent":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none"},"sandboxBackend":"none"}
 ```
 
-Load `.env` with the product's existing environment loader. Do not print it or
-source a downloaded/untrusted shell file. Protect `.env` and response files
-with mode `0600`, and ignore `.opengeni-setup/`. Do not put tokens in URLs,
-prompts, screenshots, shell tracing or browser-visible variables. Request and
-response files below are local private setup data, not deliverables.
+`capabilities: "none"` keeps only the session's own tools plus asking the
+user: no Opengeni workspace tools, connectors or bundled Opengeni guides.
+Empty `tools`, `firstPartyMcpTools` or `bundledSkillIds` lists add nothing to
+it. The renderer defaults to `"opengeni"`; send `"renderer":"markdown"` only
+for a UI that renders plain Markdown.
+
+## Environment and curl helper
+
+Put these server-only variables in the product's `.env`, preserving unrelated
+values:
+
+```dotenv
+OPENGENI_API_KEY=<organization API key>
+# Optional: OPENGENI_API_BASE_URL defaults to https://app.opengeni.ai.
+```
 
 ```bash
-set -o pipefail
-set +x
-umask 077
-mkdir -p .opengeni-setup
-ogcurl() {
-  local method="$1" path="$2" body="${3:-}" output="${4:-}"
-  local args=(--silent --show-error --fail-with-body --config -
-    --request "$method" "${OPENGENI_API_BASE_URL:?}${path}")
-  if [ -n "$body" ]; then
-    args+=(--header 'Content-Type: application/json' --data-binary "@$body")
-  fi
-  if [ -n "$output" ]; then args+=(--output "$output"); fi
-  printf 'header = "Authorization: Bearer %s"\n' "${OPENGENI_API_KEY:?}" |
-    curl "${args[@]}"
+OPENGENI_API_BASE_URL="${OPENGENI_API_BASE_URL:-https://app.opengeni.ai}"
+mkdir -p .opengeni-setup # request/response JSON files for the steps below
+ogcurl() { # ogcurl METHOD PATH [JSON_BODY_FILE] [OUTPUT_FILE]
+  curl --silent --show-error --fail-with-body -X "$1" "$OPENGENI_API_BASE_URL$2" \
+    -H "Authorization: Bearer $OPENGENI_API_KEY" \
+    ${3:+-H 'Content-Type: application/json' --data-binary "@$3"} ${4:+-o "$4"}
 }
 ```
 
-For public bootstrap before a key exists:
+Public bootstrap before a key exists:
 
 ```bash
 curl --fail --silent --show-error "$OPENGENI_API_BASE_URL/v1/config/client"
 ```
 
-SDK: `new OpenGeniClient({ baseUrl, apiKey })`, `getClientConfig()`,
-`getAccessContext()`. Never use the SDK's implicit production fallback.
+SDK: `new OpenGeniClient({ apiKey })` (base URL defaults to production),
+`getClientConfig()`, `getAccessContext()`.
 
-## 1. Browser organization bootstrap and scoped key
+## 1. Organization and key
 
-Authenticate at the explicit target app, let the human finish sign-in,
-verification and MFA, then complete its organization-name onboarding or reuse
-the intended organization. Organization settings → Developer holds organization
-keys; workspace settings → API keys creates the wrong scope for provisioning.
-Select **Full access** with a 30-day expiry. Read the current app's
-labels rather than assuming old screen coordinates. Capture its one-time token
-directly to `.env`, not through chat or a screenshot.
+Sign in (or connect the Opengeni MCP tools), then complete the
+organization-name onboarding or reuse the intended organization. Organization
+keys live in Organization settings → Developer; workspace settings → API keys is
+the wrong scope for setup. Create a **Full access** key with a 30-day expiry.
 
-The authenticated organization administrator's browser API equivalent is
-`POST /v1/organizations/:organizationId/api-keys`. Its body is:
+API / MCP equivalent: `POST /v1/organizations/:organizationId/api-keys`
+(MCP action `createOrganizationApiKey`) with
 
 ```json
 {"name":"Product setup","access":"full","expiresAt":"<now + 30 days, ISO 8601>"}
 ```
 
-SDK in that authenticated browser/admin context:
-`createOrganizationApiKey(organizationId, { name, access: "full", expiresAt })`
-with a 30-day `expiresAt`. A full-access key lets the agent finish setup and
-testing without the person opening the UI. Save the one-time `token`
-without logging the response. A lost creation response needs inventory and
-administrator revocation/replacement, not a blind repeated POST.
+SDK: `createOrganizationApiKey(organizationId, { name, access: "full", expiresAt })`.
+The response's `token` is the key; put it in `.env` as `OPENGENI_API_KEY`.
 
-The full-access key uses the explicit 30-day expiry above. In contrast,
-the limited `developer_setup` tier stores exactly `workspace:create`, `workspace:admin` and
-`usage_allowances:manage`, with a 24-hour default expiry. The limited tier does
-not permit key inventory, minting, revocation or credential-management
-delegation despite its workspace-admin scope. Budget writes additionally
-require the canonical same-organization key; do not perform them with an
-`asUser` client or a session/agent-attempt credential.
+The limited `developer_setup` tier holds only `workspace:create`,
+`workspace:admin` and `usage_allowances:manage` (24-hour default expiry); it
+cannot manage keys. Budget writes need the organization key itself, not an
+`asUser` client or a session credential.
 
-Verify the stored key, showing only safe fields:
+Verify: `ogcurl GET /v1/access/me` shows `credential.kind` and the organization;
+`credential.effectiveWorkspacePermissions` is the key's workspace grant, and an
+empty `workspaceGrants` is expected.
 
-```bash
-ogcurl GET /v1/access/me '' .opengeni-setup/access.json
-jq '{credential,accountGrants,workspaceGrants}' .opengeni-setup/access.json
-```
+## 2. The product workspace
 
-Check `credential.kind`/scope and organization in the actual response;
-`credential.effectiveWorkspacePermissions` is the effective organization-key
-workspace grant. Empty `workspaceGrants` is expected. Do not expose the raw
-key-creation response; access metadata contains no token.
+The embedding proxy (`createSessionProxyRoute`, whose `resolve` returns
+`{ user, tenant }` or `{ user }`) creates workspaces and memberships on first
+use, so a chat needs no provisioning. Workspace-level setup (an installed API
+Integration, schedules, webhooks, budgets) needs the id of the same workspace:
+from a server-side script, `await og.workspaceId({ tenant })` (or `{ user }`)
+on the `Opengeni` facade from `@opengeni/sdk/chat` returns it, creating it if
+needed.
 
-## 2. Ensure the product workspace
-
-Write `.opengeni-setup/workspace.json` using the product's stable identity:
+Explicit provisioning is advanced: only when the product manages workspaces
+itself, ensure one by external mapping and return `{ user, workspaceId }` from
+`resolve`. Write `.opengeni-setup/workspace.json` using the product's stable
+identity:
 
 ```json
 {"externalSource":"acme-product","externalId":"tenant-123","name":"Acme product"}
@@ -118,14 +110,16 @@ SDK: `ensureWorkspace(request)` → `{ workspace, created }`,
 Check `workspace.accountId`, `kind === "shared"`, `externalSource`, `externalId`.
 Reusing the exact mapping is safe and does not update existing workspace data.
 
-## 3. Persona, capabilities and admitted product users
+## 3. Workspace agent defaults and admitted users (optional)
 
-Only if the workspace client config has `agentConfig.enabled === true`, PATCH
-the desired settings. Omission preserves other top-level settings; nested
-objects are replacements, so merge desired changes with the read version.
+The proxy's `createSession` hook sets the agent per session, so this is needed
+only when sessions are also created without an `agent` (for example from the
+Opengeni app). PATCH the desired settings. Omission preserves other top-level
+settings; nested objects are replacements, so merge desired changes with the
+read version.
 
 ```json
-{"sessionAgentDefaults":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none","renderer":"opengeni"}}
+{"sessionAgentDefaults":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none"}}
 ```
 
 ```bash
@@ -134,11 +128,11 @@ ogcurl GET "/v1/workspaces/$WORKSPACE_ID"
 ```
 
 SDK: `updateWorkspaceSettings(workspaceId, settings)`, `getWorkspace(workspaceId)`.
-Skip an unchanged desired configuration. Do not PATCH these fields when the
-admission switch is off. Legacy sessions instead use explicit minimal
-`firstPartyMcpTools: []` plus session `instructions`, not a pretend `agent`.
+Skip an unchanged desired configuration.
 
-For an authenticated product user, save a UUID operation id then POST:
+The proxy admits each resolved user on their first request. Only with explicit
+provisioning (advanced), admit an authenticated product user: save a UUID
+operation id then POST:
 
 ```json
 {"identity":{"source":"acme-product","externalId":"user-123"},"permissions":["workspace:read","sessions:create","sessions:read","sessions:control","files:upload","files:read","mcp_servers:attach"],"operationId":"00000000-0000-4000-8000-000000000001"}
@@ -160,10 +154,14 @@ uncertain retry. An existing conflicting/revoked grant is not successful
 onboarding; do not silently revoke or widen it. Follow the embedding skill's
 explicit membership-update contract for an authorized permission change.
 
-## 4. Product OpenAPI tools and approvals
+## 4. Product tools and approvals
 
-Prefer an existing focused OpenAPI 3.0/3.1 description. For a private API, first
-create a workspace Connection. Its body (secret file, do not print) is:
+Wire tools after the chat answers. Prefer what the product already has: an
+existing MCP server (attached per session, below) or an existing focused
+OpenAPI 3.0/3.1 description, installed per workspace. With many tenant
+workspaces, prefer the session-level MCP attachment or the embedding proxy's
+`toolServer`, which need no per-workspace install. For a private OpenAPI API,
+first create a workspace Connection. Its body is:
 
 ```json
 {"providerDomain":"api.acme.example","kind":"api_key","ownership":"workspace","credential":{"headers":{"Authorization":"Bearer <product-scoped token>"}},"grantedScopes":[],"metadata":{},"operationId":"00000000-0000-4000-8000-000000000002"}
@@ -223,13 +221,14 @@ asking on updates. Session MCP policies do not override this install policy.
 ### Existing product MCP instead of OpenAPI
 
 Do not build a new MCP server for this plugin. An existing product server can
-be attached through the session request in step 7:
+be attached through the session request (the proxy's `createSession` hook, or
+the smoke session in step 7):
 
 ```json
 {"mcpServers":[{"id":"acme","url":"https://api.acme.example/mcp","allowedTools":["get_report"],"requireApproval":true}],"tools":[{"kind":"mcp","id":"acme","eager":true}]}
 ```
 
-Add write-only `headers` from a private request file or the supported
+Add write-only `headers` or the supported
 `connectionRef`; never place a secret in the URL. Read the created session's
 `effectiveToolPolicy`/`effectiveTools` and then actually call a safe product
 tool. `requireApproval: true` asks on every call; `false` removes this local
@@ -258,7 +257,7 @@ listing supports pagination. Save the returned id immediately. There is no
 schedule-create idempotency key.
 
 ```json
-{"name":"Acme morning summary","schedule":{"type":"calendar","hour":8,"minute":0,"timeZone":"Europe/Oslo"},"status":"paused","agentConfig":{"prompt":"Summarize the latest report using Acme's tools.","agent":{"capabilities":"none"},"sandboxBackend":"none","tools":[{"kind":"mcp","id":"<installed serverId>"}]},"metadata":{"developerSetupKey":"acme-product:morning-summary"}}
+{"name":"Acme morning summary","schedule":{"type":"calendar","hour":8,"minute":0,"timeZone":"Europe/Oslo"},"status":"paused","agentConfig":{"prompt":"Summarize the latest report using Acme's tools.","agent":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none"},"sandboxBackend":"none","tools":[{"kind":"mcp","id":"<installed serverId>"}]},"metadata":{"developerSetupKey":"acme-product:morning-summary"}}
 ```
 
 ```bash
@@ -269,9 +268,7 @@ ogcurl GET "/v1/workspaces/$WORKSPACE_ID/scheduled-tasks/$TASK_ID"
 
 SDK: `listScheduledTasks`, `createScheduledTask`, `getScheduledTask` (all with
 `workspaceId`). Use the requested time zone, not the example time zone.
-The sample requires agent configuration admission; on a deployment without it,
-report minimal scheduled-agent configuration unavailable rather than silently
-inheriting broader defaults. `agentConfig.agent` carries the product agent.
+`agentConfig.agent` carries the product agent.
 Scheduled tasks accept installed workspace tools, **not inline `mcpServers`**.
 After verification and requested activation: `POST .../:taskId/resume` /
 `resumeScheduledTask`. Verify GET status again. For one verification fire,
@@ -297,13 +294,13 @@ the saved source id/name; creation has no idempotency key. Save the returned
 `webhookPath` rather than inventing an ingress URL. Create a paused trigger:
 
 ```json
-{"sourceId":"00000000-0000-4000-8000-000000000004","name":"Acme report changed","eventTypes":["report.changed"],"status":"paused","configuration":{},"parameters":{},"sessionTemplate":{"prompt":"Summarize the changed report.","instructions":null,"resources":[],"skills":[],"tools":[{"kind":"mcp","id":"<installed serverId>"}],"firstPartyMcpTools":[],"firstPartyMcpPermissions":[],"model":null,"reasoningEffort":null,"sandboxBackend":"none","policyRole":null,"metadata":{}}}
+{"sourceId":"00000000-0000-4000-8000-000000000004","name":"Acme report changed","eventTypes":["report.changed"],"status":"paused","configuration":{},"parameters":{},"sessionTemplate":{"prompt":"Summarize the changed report.","agent":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none"},"sandboxBackend":"none","tools":[{"kind":"mcp","id":"<installed serverId>"}]}}
 ```
 
-Keep `firstPartyMcpTools: []` and `firstPartyMcpPermissions: []` for this
-product-only automation. Automation templates also default omitted arrays to
-`[]`; neither form inherits OpenGeni permissions. Startup skips remote
-OpenGeni-delegated MCP preparation without minting a token or calling its
+Automation templates default omitted `firstPartyMcpTools` and
+`firstPartyMcpPermissions` to `[]`, so a product-only automation inherits no
+Opengeni tools or permissions without listing them. Startup skips remote
+Opengeni-delegated MCP preparation without minting a token or calling its
 endpoint. Requested first-party tools or dedicated `files`/`docs` remain
 unavailable with an `insufficient_scope` advisory. Do not pad the grant with
 `sessions:read`. The installed product server keeps its separately authorized
@@ -329,7 +326,7 @@ with a stable `occurrenceKey` for a safe test, then `listRuns` /
 
 Read/reconcile by saved id plus URL/description before creating a webhook.
 POST is not idempotent; an uncertain response needs inventory, not a blind
-retry. Capture the response to a protected file because it includes `secret`:
+retry. The response includes the signing `secret` (returned once):
 
 ```json
 {"url":"https://api.acme.example/opengeni/events","eventTypes":["turn.completed","session.requiresAction"],"enabled":true,"description":"acme-product developer setup"}
@@ -373,7 +370,7 @@ Verify raw-body signatures with `verifyCredentialProviderRequest`, authorize
 the signed scope and exact targets, and return bounded short-lived credentials.
 See `docs/workspace-integrations.md` for the callback protocol. Store each
 webhook/provider secret in its own server-only variable or secret-manager
-entry; never log the SDK response or use a screenshot to inspect the token.
+entry.
 
 ## 7. Budget, smoke session and embedding handoff
 
@@ -405,17 +402,17 @@ state; do not increment a guessed version. Concurrent/in-flight calls can
 overshoot a ceiling; it is checked before subsequent calls. Never buy credits
 or change a financial commitment merely to make a test pass.
 
-Create an actual session. Read config again for this workspace and choose an
-available model, or omit `model` to use its server-resolved default. Save the
-idempotency key before POST. With agent configuration admitted:
+An optional API smoke session checks the workspace before (or besides) the
+embedded chat. Read config again for this workspace and choose an available
+model, or omit `model` to use its server-resolved default. Save the
+idempotency key before POST:
 
 ```json
-{"initialMessage":"Reply SETUP_OK, then use the selected product read tool if available.","idempotencyKey":"acme-product:setup-smoke:v1","sandboxBackend":"none","tools":[],"bundledSkillIds":[],"agent":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none","renderer":"opengeni"}}
+{"initialMessage":"Reply SETUP_OK, then use the selected product read tool if available.","idempotencyKey":"acme-product:setup-smoke:v1","agent":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none"},"sandboxBackend":"none"}
 ```
 
-Without admission, omit `agent`, send `instructions` with the persona and
-`firstPartyMcpTools: []`. For tools, replace `tools: []` with only the verified
-installed server refs, or add the existing product MCP attachment above.
+Once product tools are wired, add only the verified installed server refs as
+`tools`, or the existing product MCP attachment above.
 
 ```bash
 ogcurl POST "/v1/workspaces/$WORKSPACE_ID/sessions" .opengeni-setup/session.json .opengeni-setup/session-result.json
@@ -427,9 +424,9 @@ SDK: `createSession`, `getSession`, `listEvents` (workspace id and session id).
 Read until the first completed answer or actionable refusal; don't count a
 201 alone. With tools configured, verify a safe tool call and its useful
 result, and an approval-gated call if intended. Never approve an unrequested
-business mutation as a smoke test. Read
-[opengeni-client](../../opengeni-client/SKILL.md) and implement its server-owned
-proxy/session integration using these verified ids. Setup-key expiry is
+business mutation as a smoke test. The embedded chat itself follows
+[opengeni-client](../../opengeni-client/SKILL.md): its server-owned proxy and
+`createSession` hook carry the same agent and tools. Setup-key expiry is
 intentional; shipping needs a separately scoped runtime credential, created
 by the authenticated administrator, without widening this setup key.
 
@@ -437,9 +434,9 @@ by the authenticated administrator, without widening this setup key.
 
 | Result | Recovery |
 | --- | --- |
-| 401 | Check target and local key presence/expiry; authenticate to replace a revoked/expired key. Never echo it. |
+| 401 | Check target and local key presence/expiry; create a new key if it was revoked or expired. |
 | 403 | Read `/v1/access/me` and the exact denied permission; verify the organization and that the key is the full-access setup key. |
-| 404 | Recheck deployment feature availability and workspace ownership; never fall back to Personal or production. |
+| 404 | Recheck deployment feature availability and workspace ownership; don't fall back to a Personal workspace. |
 | 409 | Read current version/digest/grant and compare intended change. Repreview schema drift. Don't reuse an operation id with changed inputs. |
 | 422 `agent_capability_unavailable` | Read advertised capabilities, remove only an optional unsupported capability, otherwise report the missing feature. |
 | 429, 5xx, timeout | Retry reads with bounded backoff. Reconcile writes via mapping/id/operation receipts before any retry; non-idempotent POSTs can have succeeded. |
@@ -447,7 +444,7 @@ by the authenticated administrator, without widening this setup key.
 | `allowance_exhausted`, unavailable model/provider | Read usage/config. Use an already authorized usable model; don't buy credits, widen budgets or borrow another user's provider. |
 | Callback/private URL refusal | The hosted control plane cannot use localhost/private endpoints. Use the product's existing public HTTPS route or an authorized tunnel. |
 
-Cleanup **only disposable staging resources this ledger says this run created**.
+Clean up **only disposable staging resources this run created**.
 Pause/remove schedules, disable automation triggers/sources, delete webhooks and
 provider, uninstall the exact API Integration instance, delete its disposable
 Connection, cancel/remove the smoke session, then delete the throwaway workspace.

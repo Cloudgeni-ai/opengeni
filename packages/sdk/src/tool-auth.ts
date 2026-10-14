@@ -23,7 +23,7 @@ export const TOOL_TOKEN_KEY_LABEL = "opengeni-tool-token:v1";
 /** Default token lifetime: 24 hours, refreshed on every message, approval, and answer. */
 export const TOOL_TOKEN_DEFAULT_TTL_SECONDS = 24 * 60 * 60;
 const MAX_TTL_SECONDS = 7 * 24 * 60 * 60;
-/** OpenGeni's per-value limit for session MCP credential headers. */
+/** Opengeni's per-value limit for session MCP credential headers. */
 const MAX_HEADER_VALUE_LENGTH = 4096;
 /** Default `toolServer.url` and `verifyToolRequest` audience. */
 export const TOOL_SERVER_URL_ENV = "OPENGENI_TOOL_SERVER_URL";
@@ -197,7 +197,7 @@ export async function mintToolToken(input: {
   const token = `${header}.${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
   if (`Bearer ${token}`.length > MAX_HEADER_VALUE_LENGTH) {
     throw new TypeError(
-      `Tool token exceeds OpenGeni's ${MAX_HEADER_VALUE_LENGTH}-character header limit; shorten the user, tenant, or URL.`,
+      `Tool token exceeds Opengeni's ${MAX_HEADER_VALUE_LENGTH}-character header limit; shorten the user, tenant, or URL.`,
     );
   }
   return token;

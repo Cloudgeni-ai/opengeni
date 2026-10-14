@@ -26,7 +26,8 @@ import {
 import "./styles.css";
 
 retainIdentityLinkContinuation(window);
-// Content-free operational error counter; see lib/client-error-reporting.ts.
+// Error counter and diagnostics (scrubbed, bounded error text); see
+// lib/client-error-reporting.ts.
 // An undeliverable report is retried once when the browser is next online.
 const sendBeacon = beaconSender(`${apiBaseUrl}${CLIENT_ERRORS_PATH}`, globalThis.fetch, {
   retryTarget: window,
@@ -76,10 +77,29 @@ if (reportClientSignals) {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <AppearanceProvider>
-      <App />
-    </AppearanceProvider>
-  </React.StrictMode>,
-);
+function renderApp() {
+  createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <AppearanceProvider>
+        <App />
+      </AppearanceProvider>
+    </React.StrictMode>,
+  );
+}
+
+// DEV only: answer the vault routes from fixtures (see dev/secrets-mock).
+if (import.meta.env.DEV && devSecretsMockRequested()) {
+  void import("./dev/secrets-mock")
+    .then(({ installSecretsMock }) => installSecretsMock(window))
+    .finally(renderApp);
+} else {
+  renderApp();
+}
+
+function devSecretsMockRequested(): boolean {
+  try {
+    return window.localStorage.getItem("og-dev-secrets-mock") === "1";
+  } catch {
+    return false;
+  }
+}

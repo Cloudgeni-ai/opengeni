@@ -108,6 +108,86 @@ test("0546 is additive rolling storage without external-identity runtime grants"
   }
 });
 
+test("notification webhooks carry bounded content on both lanes, never arbitrary event fields", async () => {
+  const { scope, session } = await fixture("notification-webhooks");
+  const eventTypes = ["session.notification.posted", "session.notification.withdrawn"];
+  const common = {
+    url: "https://receiver.example/notifications",
+    secretEncrypted: "sealed",
+    enabled: true,
+    description: null,
+    createdBySubjectId: null,
+  };
+  const workspace = await createWorkspaceWebhook(client.db, {
+    ...scope,
+    ...common,
+    eventTypes: [...eventTypes],
+  });
+  const organization = await createOrganizationWebhook(client.db, {
+    accountId: scope.accountId,
+    ...common,
+    eventTypes: [...eventTypes],
+    workspaceFilter: null,
+  });
+  const data = {
+    key: "ready",
+    title: "Checks complete",
+    subtitle: "Release",
+    body: "Ready to review",
+    facts: [{ label: "Tests", value: "12 passed" }],
+    link: { url: "https://example.com/review", label: "Review" },
+    urgency: "normal",
+    replaced: false,
+  };
+  const undelivered = {
+    key: "unattended",
+    title: "Nobody is watching",
+    body: "",
+    urgency: "time_sensitive",
+    replaced: false,
+    undeliveredReason: "no_human_recipient",
+  };
+  await appendSessionEvents(client.db, scope.workspaceId, session.id, [
+    { type: "session.notification.posted", payload: { ...data, privateExtension: "never-copy" } },
+    { type: "session.notification.posted", payload: undelivered },
+    {
+      type: "session.notification.posted",
+      payload: { ...data, key: "unknown-reason", undeliveredReason: "never-copy" },
+    },
+    {
+      type: "session.notification.withdrawn",
+      payload: { key: "ready", privateExtension: "never-copy" },
+    },
+  ]);
+  const lanes = [
+    await listWorkspaceWebhookDeliveries(client.db, { ...scope, webhookId: workspace.id }),
+    await listOrganizationWebhookDeliveries(client.db, {
+      accountId: scope.accountId,
+      webhookId: organization.id,
+    }),
+  ];
+  for (const deliveries of lanes) {
+    expect(deliveries).toHaveLength(4);
+    const byKey = (key: string) =>
+      deliveries.find(
+        (delivery) =>
+          (delivery.payload as { data: { key?: string } }).data.key === key &&
+          delivery.eventType === "session.notification.posted",
+      )!;
+    expect(byKey("ready").payload).toHaveProperty("data", data);
+    expect(byKey("unattended").payload).toHaveProperty("data", undelivered);
+    expect(byKey("unknown-reason").payload).toHaveProperty("data", {
+      ...data,
+      key: "unknown-reason",
+    });
+    expect(
+      deliveries.find((delivery) => delivery.eventType === "session.notification.withdrawn")!
+        .payload,
+    ).toHaveProperty("data", { key: "ready" });
+    expect(JSON.stringify(deliveries)).not.toContain("never-copy");
+  }
+});
+
 test("0546 owner migration and custom runtime preserve FORCE-RLS dispatcher posture", async () => {
   const owner = await acquireOwnerMigratedTestDatabase("migration-0542-owner");
   if (!owner) throw new Error("PostgreSQL test database unavailable");

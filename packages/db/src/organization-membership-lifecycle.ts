@@ -41,6 +41,7 @@ import {
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
+import { revokePersonalApiKeysForOwner } from "./personal-api-keys";
 import {
   rawRows,
   setSubjectRlsContext,
@@ -60,6 +61,7 @@ export async function createManagedOrganization(
     name: string;
     operationId: string;
     trialCreditsEnabled?: boolean;
+    trialCreditModelIds?: string[] | undefined;
   },
 ): Promise<CreateOrganizationResponseType> {
   return await db.transaction(async (tx) => {
@@ -72,6 +74,13 @@ export async function createManagedOrganization(
       sql`select pg_catalog.set_config(
       'opengeni.verified_signup_trial_enabled',
       ${input.trialCreditsEnabled === true ? "on" : "off"}, true
+    )`,
+    );
+    await rawRows(
+      tx,
+      sql`select pg_catalog.set_config(
+      'opengeni.signup_credit_model_ids',
+      ${input.trialCreditModelIds ? JSON.stringify(input.trialCreditModelIds) : ""}, true
     )`,
     );
     const [row] = await rawRows<{ result: unknown }>(
@@ -1081,7 +1090,16 @@ export async function updateOrganizationMember(
         );
         await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
       }
-      return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+      const member = OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+      // A person who leaves loses every key that acts as them here, so
+      // rejoining later never revives one. Suspension keeps keys: they stop
+      // working while suspended because each request rechecks membership.
+      if (transition.kind === "offboard" && member.status === "revoked")
+        await revokePersonalApiKeysForOwner(tx as unknown as Database, {
+          accountId: member.organizationId,
+          ownerSubjectId: member.subjectId,
+        });
+      return member;
     }),
   );
 }

@@ -5,10 +5,11 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   createDb,
+  createRig,
   createRigVersion,
   createSession,
-  createVariableSet,
   getRigChange,
+  initializeSessionStartAtomically,
   listRigVersions,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
@@ -79,14 +80,35 @@ function appWithWorkflow(calls: unknown[]) {
   } as never);
 }
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [account] = await shared!.admin<{ id: string }[]>`
-    insert into managed_accounts (name) values ('acct') returning id`;
+async function freshWorkspace(
+  accountId?: string,
+): Promise<{ accountId: string; workspaceId: string }> {
+  if (!accountId) {
+    const [account] = await shared!.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('acct') returning id`;
+    accountId = account!.id;
+  }
   const [workspace] = await shared!.admin<{ id: string }[]>`
-    insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
+    insert into workspaces (account_id, name) values (${accountId}, 'ws') returning id`;
   await shared!
-    .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
-  return { accountId: account!.id, workspaceId: workspace!.id };
+    .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${accountId})`;
+  return { accountId, workspaceId: workspace!.id };
+}
+
+async function organizationMember(
+  workspaces: { accountId: string; workspaceId: string }[],
+  subjectId: string,
+): Promise<void> {
+  const accountId = workspaces[0]!.accountId;
+  const personal = await freshWorkspace(accountId);
+  await shared!.admin`
+    insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+    values (${accountId}, ${subjectId}, 'active', ${personal.workspaceId})`;
+  for (const workspace of workspaces) {
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${accountId}, ${workspace.workspaceId}, ${subjectId})`;
+  }
 }
 
 async function bearer(
@@ -114,44 +136,16 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
 }
 
 describe("rig route permission matrix", () => {
-  test("default Variable Set references require independent attach and use permissions", async () => {
+  test("default Variable Set references are refused now that vaults replace them", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const variableSet = await createVariableSet(client.db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      name: "rig-default-secret",
-    });
-    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
-    const body = JSON.stringify({
-      name: "secret-rig",
-      defaultVariableSetIds: [variableSet.id],
-    });
-
-    for (const permissions of [
-      ["rigs:manage", "variable-sets:use"],
-      ["rigs:manage", "variable-sets:attach"],
-    ] satisfies Permission[][]) {
-      const denied = await app().request(base, {
-        method: "POST",
-        headers: { authorization: await bearer(ws, "user:m", permissions) },
-        body,
-      });
-      expect(denied.status).toBe(403);
-    }
-
-    const accepted = await app().request(base, {
+    const response = await app().request(`/v1/workspaces/${ws.workspaceId}/rigs`, {
       method: "POST",
-      headers: {
-        authorization: await bearer(ws, "user:m", [
-          "rigs:manage",
-          "variable-sets:attach",
-          "variable-sets:use",
-        ]),
-      },
-      body,
+      headers: { authorization: await bearer(ws, "user:m", ["rigs:manage"]) },
+      body: JSON.stringify({ name: "secret-rig", defaultVariableSetIds: [crypto.randomUUID()] }),
     });
-    expect(accepted.status).toBe(201);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: "variable_sets_removed" });
   });
 
   test("read requires rigs:use; write requires rigs:manage; propose requires rigs:use", async () => {
@@ -299,6 +293,15 @@ describe("rig route permission matrix", () => {
       latencyMode: "standard",
       sandboxBackend: "none",
       rigId: rig.id,
+    });
+    // Creation reserves an idle shell (#4330); admitting its first turn makes it active.
+    await initializeSessionStartAtomically(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
     });
 
     const blocked = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });
@@ -529,6 +532,105 @@ describe("rig route permission matrix", () => {
     });
     expect(cleared.status).toBe(200);
     expect((await cleared.json()).defaultRigId).toBeNull();
+  });
+
+  test.each(["organization", "user"] as const)(
+    "workspace default accepts a visible %s rig from another same-organization workspace",
+    async (scope) => {
+      if (!available) return;
+      const origin = await freshWorkspace();
+      const target = await freshWorkspace(origin.accountId);
+      const subjectId = `user:${crypto.randomUUID()}`;
+      await organizationMember([origin, target], subjectId);
+      const rig = await createRig(client.db, {
+        ...origin,
+        subjectId,
+        scope,
+        allowOrganization: scope === "organization",
+        name: `${scope}-default`,
+      });
+      const headers = {
+        authorization: await bearer(target, subjectId, [
+          "rigs:manage",
+          "rigs:use",
+          "workspace:read",
+        ]),
+      };
+      const base = `/v1/workspaces/${target.workspaceId}`;
+      const http = app();
+      expect((await http.request(`${base}/rigs/${rig.id}`, { headers })).status).toBe(200);
+      const set = await http.request(`${base}/default-rig`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ rigId: rig.id }),
+      });
+      expect(set.status).toBe(200);
+      expect((await set.json()).defaultRigId).toBe(rig.id);
+      const fetched = await http.request(base, { headers });
+      expect(fetched.status).toBe(200);
+      expect((await fetched.json()).defaultRigId).toBe(rig.id);
+
+      if (scope === "user") {
+        const otherSubject = `user:${crypto.randomUUID()}`;
+        await organizationMember([target], otherSubject);
+        const otherHeaders = {
+          authorization: await bearer(target, otherSubject, ["rigs:manage", "rigs:use"]),
+        };
+        expect(
+          (await http.request(`${base}/rigs/${rig.id}`, { headers: otherHeaders })).status,
+        ).toBe(404);
+        const denied = await http.request(`${base}/default-rig`, {
+          method: "PUT",
+          headers: otherHeaders,
+          body: JSON.stringify({ rigId: rig.id }),
+        });
+        expect(denied.status).toBe(422);
+      }
+    },
+  );
+
+  test("workspace default rejects cross-organization, foreign-workspace, and revoked rigs", async () => {
+    if (!available) return;
+    const target = await freshWorkspace();
+    const sameOrganization = await freshWorkspace(target.accountId);
+    const foreign = await freshWorkspace();
+    const subjectId = `user:${crypto.randomUUID()}`;
+    const crossOrganization = await createRig(client.db, {
+      ...foreign,
+      subjectId,
+      scope: "organization",
+      allowOrganization: true,
+      name: "foreign-organization-default",
+    });
+    const foreignWorkspace = await createRig(client.db, {
+      ...sameOrganization,
+      name: "foreign-workspace-default",
+    });
+    const revoked = await createRig(client.db, {
+      ...target,
+      subjectId,
+      scope: "organization",
+      allowOrganization: true,
+      name: "revoked-default",
+    });
+    await shared!.admin`
+      update rigs set status = 'revoked', revoked_at = now() where id = ${revoked.id}`;
+    const headers = {
+      authorization: await bearer(target, subjectId, ["rigs:manage", "rigs:use", "workspace:read"]),
+    };
+    const base = `/v1/workspaces/${target.workspaceId}`;
+    const http = app();
+    for (const rig of [crossOrganization, foreignWorkspace, revoked]) {
+      expect((await http.request(`${base}/rigs/${rig.id}`, { headers })).status).toBe(404);
+      const denied = await http.request(`${base}/default-rig`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ rigId: rig.id }),
+      });
+      expect(denied.status).toBe(422);
+      const fetched = await http.request(base, { headers });
+      expect((await fetched.json()).defaultRigId).toBeNull();
+    }
   });
 
   test("name collision is a 409; unknown defaultVariableSetId is a 422", async () => {

@@ -40,11 +40,16 @@ import {
   readActiveSandbox,
   resolvePersonalMachineConnectionForAttempt,
   SandboxRetainedProcessPromotionFencedError,
+  SandboxRetainedProcessTerminalError,
+  SandboxWorkspaceMutationOutputRejectedError,
   type Database,
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
-import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-background-commands";
+import {
+  observeSessionBackgroundCommandCompletion,
+  recordConnectedCommandOutputConsumption,
+} from "@opengeni/db/session-background-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
@@ -60,6 +65,7 @@ import {
   NatsOpStreamTransport,
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
+  RoutingMutationOutputRejectedError,
   resolveModalCheckpointProviderBindingForSession,
   resolveConnectedMachineWorkspaceRoot,
   sandboxProviderInstanceIdFromEnvelope,
@@ -591,21 +597,37 @@ function afterPersistableHomeMutation(
     }
     if (outcome === "outcome_unknown")
       throw new Error("Outcome-unknown command settlement requires its exact retained invocation");
-    await verifyWorkspaceMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      turnId: fence.turnId,
-      executionGeneration: fence.executionGeneration,
-      attemptId: fence.attemptId,
-      holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
-      sandboxGroupId: home.sandboxGroupId,
-      expectedEpoch: backend.leaseEpoch,
-      expectedInstanceId: backend.providerInstanceId,
-      admission: exactAdmission,
-      operation: op,
-      outcome,
-    });
+    try {
+      await verifyWorkspaceMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        turnId: fence.turnId,
+        executionGeneration: fence.executionGeneration,
+        attemptId: fence.attemptId,
+        holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+        sandboxGroupId: home.sandboxGroupId,
+        expectedEpoch: backend.leaseEpoch,
+        expectedInstanceId: backend.providerInstanceId,
+        admission: exactAdmission,
+        operation: op,
+        outcome,
+      });
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: exactAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
+    }
   };
 }
 
@@ -658,15 +680,42 @@ function afterRetainedProcessMutation(
     ) {
       throw new Error("Retained-process mutation settlement lacked its exact admission");
     }
-    await verifyRetainedProcessMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      processId: process.id,
-      admission: admission as SandboxWorkspaceMutationAdmission,
-      operation: op,
-      outcome,
-    });
+    try {
+      await verifyRetainedProcessMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: process.id,
+        admission: admission as SandboxWorkspaceMutationAdmission,
+        operation: op,
+        outcome,
+      });
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: admission as SandboxWorkspaceMutationAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        if (error.retainedProcessTerminal) {
+          // Another authority (the reaper's exact-proof reconciliation) settled
+          // this retained process terminal between admission and settlement.
+          // The admission is physically settled and its output stays rejected;
+          // surface the durable terminal truth so routing reports completion
+          // instead of failing the turn. Nothing is replayed.
+          throw new SandboxRetainedProcessTerminalError(
+            error.retainedProcessTerminal.state,
+            error.retainedProcessTerminal.exitCode,
+          );
+        }
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
+    }
   };
 }
 
@@ -1505,8 +1554,10 @@ export type SelfhostedTurnSessionArgs = {
   workingDir: string | null;
   /** Effective absolute host-native root frozen for this attempt. */
   workspaceRoot: string;
-  /** Present only for a user-owned machine. Every provider operation rechecks
-   * this frozen accepted-attempt authority immediately before dispatch. */
+  /** Present whenever the turn has an initiating human. A machine can become
+   * Only me during the turn, so every provider operation reads the current
+   * scope and rechecks this frozen accepted-attempt authority immediately
+   * before dispatch while the machine is user-owned. */
   personalMachineAttempt?: NonNullable<RoutingWiringIds["personalMachineAttempt"]> & {
     sessionId: string;
   };
@@ -1570,42 +1621,46 @@ export function connectionBindingFor(
   };
 }
 
-/** Personal-machine discovery is not execution authority. Recheck the frozen
- * initiating human, exact current attempt, immutable authorization snapshot,
- * and current visibility-keyed grant immediately before each routed operation
- * resolves a live control-plane connection. */
+/** Personal-machine discovery is not execution authority. A machine's audience
+ * can change in place while a routed session is cached, so the current scope is
+ * read from the enrollment itself, never from the sandbox snapshot taken when
+ * the session was built. A machine that is Only me now rechecks the frozen
+ * initiating human, exact current attempt, authorization snapshot and current
+ * visibility-keyed grant immediately before each routed operation resolves a
+ * live control-plane connection. */
 async function resolveRoutedMachineConnection(
   db: Database,
   ids: RoutingWiringIds,
   sandbox: RoutableSandbox,
 ): Promise<EnrollmentRecord | null> {
   if (!sandbox.enrollmentId) return null;
-  if (sandbox.scope !== "user") {
-    return await getLiveEnrollmentConnection(
-      db,
-      ids.resourceAccountId && ids.resourceSubjectId
-        ? {
-            accountId: ids.resourceAccountId,
-            workspaceId: ids.workspaceId,
-            subjectId: ids.resourceSubjectId,
-          }
-        : sandbox.workspaceId,
-      sandbox.enrollmentId,
-    );
+  const current = await getLiveEnrollmentConnection(db, sandbox.workspaceId, sandbox.enrollmentId);
+  if (!current) return null;
+  if (current.scope === "user") {
+    const authority = ids.personalMachineAttempt;
+    if (!authority) return null;
+    return await resolvePersonalMachineConnectionForAttempt(db, {
+      accountId: authority.accountId,
+      workspaceId: ids.workspaceId,
+      subjectId: authority.subjectId,
+      sessionId: ids.sessionId,
+      turnId: authority.turnId,
+      attemptId: authority.attemptId,
+      executionGeneration: authority.executionGeneration,
+      enrollmentId: sandbox.enrollmentId,
+      requireActiveSandbox: true,
+    });
   }
-  const authority = ids.personalMachineAttempt;
-  if (!authority) return null;
-  return await resolvePersonalMachineConnectionForAttempt(db, {
-    accountId: authority.accountId,
-    workspaceId: ids.workspaceId,
-    subjectId: authority.subjectId,
-    sessionId: ids.sessionId,
-    turnId: authority.turnId,
-    attemptId: authority.attemptId,
-    executionGeneration: authority.executionGeneration,
-    enrollmentId: sandbox.enrollmentId,
-    requireActiveSandbox: true,
-  });
+  if (!ids.resourceAccountId || !ids.resourceSubjectId) return current;
+  return await getLiveEnrollmentConnection(
+    db,
+    {
+      accountId: ids.resourceAccountId,
+      workspaceId: ids.workspaceId,
+      subjectId: ids.resourceSubjectId,
+    },
+    sandbox.enrollmentId,
+  );
 }
 
 export async function establishSelfhostedTurnSession(
@@ -1639,23 +1694,30 @@ export async function establishSelfhostedTurnSession(
     operationCpuQuotaSupported: args.operationCpuQuotaSupported,
     transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
     resolveOperationAdmission: async () => {
-      const enrollment = args.personalMachineAttempt
-        ? await resolvePersonalMachineConnectionForAttempt(db, {
-            accountId: args.personalMachineAttempt.accountId,
-            workspaceId: args.workspaceId,
-            subjectId: args.personalMachineAttempt.subjectId,
-            sessionId: args.personalMachineAttempt.sessionId,
-            turnId: args.personalMachineAttempt.turnId,
-            attemptId: args.personalMachineAttempt.attemptId,
-            executionGeneration: args.personalMachineAttempt.executionGeneration,
-            enrollmentId: args.agentId,
-            requireActiveSandbox: true,
-          })
-        : await getLiveEnrollmentConnection(
-            db,
-            args.controlWorkspaceId ?? args.workspaceId,
-            args.agentId,
-          );
+      // The machine's audience can change in place during a turn. Read the
+      // current scope on every admitted operation: a machine that is Only me now
+      // needs the frozen accepted-attempt authority, a shared one does not.
+      const current = await getLiveEnrollmentConnection(
+        db,
+        args.controlWorkspaceId ?? args.workspaceId,
+        args.agentId,
+      );
+      const enrollment =
+        current?.scope !== "user"
+          ? current
+          : args.personalMachineAttempt
+            ? await resolvePersonalMachineConnectionForAttempt(db, {
+                accountId: args.personalMachineAttempt.accountId,
+                workspaceId: args.workspaceId,
+                subjectId: args.personalMachineAttempt.subjectId,
+                sessionId: args.personalMachineAttempt.sessionId,
+                turnId: args.personalMachineAttempt.turnId,
+                attemptId: args.personalMachineAttempt.attemptId,
+                executionGeneration: args.personalMachineAttempt.executionGeneration,
+                enrollmentId: args.agentId,
+                requireActiveSandbox: true,
+              })
+            : null;
       const binding = connectionBindingFor(services, enrollment);
       if (!binding) return null;
       if (!binding.workspaceRoot) {
@@ -1714,6 +1776,20 @@ export async function establishSelfhostedTurnSession(
         reason: command.reason,
         ...(command.failure ? { failure: command.failure } : {}),
       });
+      if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {
+        await recordConnectedCommandOutputConsumption(db, {
+          accountId: args.accountId,
+          workspaceId: args.workspaceId,
+          sessionId: args.sessionId,
+          commandId: command.commandId,
+          controlWorkspaceId: command.controlWorkspaceId,
+          enrollmentId: command.enrollmentId,
+          connectionInstanceId: command.connectionInstanceId,
+          opId: command.opId,
+          receipt: command.outputReceipt,
+          exitCode: command.exitCode,
+        });
+      }
       if (settlement && bus) {
         await bus
           .publish(args.workspaceId, args.sessionId, settlement.events)

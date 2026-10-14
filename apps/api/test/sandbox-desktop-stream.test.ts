@@ -959,7 +959,7 @@ describe.if(LIVE)("P4.2 GATED live-Modal — RFB pixels through the real Modal t
 
         // THE PROOF: a WS client connects to the DIRECT Modal tunnel and receives
         // the RFB ProtocolVersion banner (101 upgrade + "RFB 003.00x") — pixels
-        // streaming straight from Modal, no OpenGeni in the pixel path.
+        // streaming straight from Modal, no Opengeni in the pixel path.
         const rfb = await probeRfbBanner(wssUrl, 20_000);
         expect(rfb.ok).toBe(true);
         expect(rfb.banner).toMatch(/^RFB \d{3}\.\d{3}/);

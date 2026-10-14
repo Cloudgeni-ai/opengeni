@@ -19,6 +19,7 @@ import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./u
 import {
   codexRequestStorage,
   type CodexModelRequestEvent,
+  type CodexProviderRequestSettlement,
   type CodexRequestPreparationPhase,
   type CodexRequestContext,
   type CodexResponseTimeoutPolicy,
@@ -247,9 +248,31 @@ type RequestAudit = {
   attemptStartedAtMonotonic: number;
   policy: CodexResponseTimeoutPolicy;
   terminalOutcome: RequestTerminalOutcome | null;
+  admitted: boolean;
+  settlement: Promise<void> | null;
 };
 
 type RequestTerminalOutcome = "completed" | "failed" | "timed_out";
+
+function settleProviderRequest(
+  audit: RequestAudit,
+  outcome: CodexProviderRequestSettlement["outcome"],
+): Promise<void> {
+  if (!audit.admitted) return Promise.resolve();
+  if (!audit.settlement) {
+    audit.settlement = (async () => {
+      await audit.ctx.onProviderRequestSettled?.({
+        requestId: audit.requestId,
+        transportAttempt: audit.transportAttempt,
+        outcome,
+      });
+    })();
+    // Semantic response observation is synchronous, before bytes reach the
+    // SDK. Its observer is joined by the terminal path, independently of audit.
+    void audit.settlement.catch(() => undefined);
+  }
+  return audit.settlement;
+}
 
 type SemanticTerminalState = {
   phase: "completed" | "failed" | null;
@@ -386,12 +409,23 @@ async function emitRequestEvent(
   const terminalOutcome = terminalOutcomeForPhase(event.phase);
   if (terminalOutcome !== null) {
     if (audit.terminalOutcome !== null) {
+      // Another terminal path may own a still-pending custody write. Its
+      // audit is deduplicated, but every consumer must join that same write.
+      await audit.settlement;
       return false;
     }
     // Fence before invoking either observer. The durable observer may reject,
     // but a later transport callback must never turn that one terminal into a
     // contradictory second terminal.
     audit.terminalOutcome = terminalOutcome;
+    await settleProviderRequest(
+      audit,
+      definiteErrorStatus(event.status)
+        ? "refused"
+        : event.phase === "completed"
+          ? "response_received"
+          : "unknown",
+    );
   }
   const observed = requestEventFor(audit, event);
   try {
@@ -401,6 +435,25 @@ async function emitRequestEvent(
   }
   await audit.ctx.onModelRequestEvent?.(observed);
   return true;
+}
+
+/**
+ * An HTTP error status the provider actually returned is a definite answer:
+ * no model response was produced. That covers 4xx and the 5xx answers of the
+ * provider's edge (for example a 503 after an upstream reset), which the OpenAI
+ * SDK retries as a new request. Timeouts (408, 504) and conflicts (409) stay
+ * ambiguous because the provider may still be processing the request; an
+ * absent response is ambiguous too.
+ */
+function definiteErrorStatus(status: number | undefined): boolean {
+  return (
+    status !== undefined &&
+    status >= 400 &&
+    status < 600 &&
+    status !== 408 &&
+    status !== 409 &&
+    status !== 504
+  );
 }
 
 function providerRequestId(headers: Headers): string | undefined {
@@ -427,7 +480,30 @@ async function fetchBeforeHeaders(
   const controller = new AbortController();
   const forwardAbort = () => controller.abort(externalSignal?.reason);
   externalSignal?.addEventListener("abort", forwardAbort, { once: true });
-  const basePromise = base(input, { ...init, signal: controller.signal });
+  // The one-shot admission is the last awaited step before the physical fetch.
+  // Neither a diagnostic `started` nor token loading is dispatch authority.
+  let basePromise: Promise<Response>;
+  try {
+    await audit.ctx.beforeProviderDispatch?.({
+      requestId: audit.requestId,
+      transportAttempt: audit.transportAttempt,
+    });
+    audit.admitted = true;
+    // A cancellation/deadline during DB admission is known pre-dispatch, not
+    // an ambiguous physical request. Do not spend the newly admitted permit.
+    if (
+      controller.signal.aborted ||
+      Date.now() - audit.logicalStartedAt >= audit.policy.wholeRequestTimeoutMs
+    ) {
+      await settleProviderRequest(audit, "refused");
+      controller.signal.throwIfAborted();
+      throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
+    }
+    basePromise = base(input, { ...init, redirect: "error", signal: controller.signal });
+  } catch (error) {
+    externalSignal?.removeEventListener("abort", forwardAbort);
+    throw error;
+  }
   let deadlineError: CodexResponseTimeoutError | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -585,7 +661,12 @@ async function observedResponse(
         armIdle();
         controller.enqueue(chunk.value);
       } catch (error) {
-        if (terminal) return;
+        // EOF sets terminal before awaiting the durable observer. If that
+        // observer rejects, do not leave the consumer waiting on an open body.
+        if (terminal) {
+          controller.error(error);
+          return;
+        }
         terminal = true;
         clearTimers();
         const semanticPhase = semanticTerminal?.phase;
@@ -782,6 +863,8 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         attemptStartedAtMonotonic: performance.now(),
         policy,
         terminalOutcome: null,
+        admitted: false,
+        settlement: null,
       };
       emitRequestPreparationDiagnostic(ctx, "wire_request_ready");
       await emitRequestEvent(audit, {
@@ -792,7 +875,6 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         phase: null,
       };
       try {
-        await ctx.beforeProviderDispatch?.();
         res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
         const upstreamRequestId = providerRequestId(res.headers);
         await emitRequestEvent(audit, {
@@ -877,9 +959,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       if (callerWantsStream) {
         res = validateCodexStream(
           res,
-          (phase, meaningfulOutput) => {
+          (phase, meaningfulOutput, refused) => {
             markSemanticTerminal(semanticTerminal, phase);
             semanticTerminal.meaningfulOutput = meaningfulOutput === true;
+            if (phase === "completed") void settleProviderRequest(audit, "response_received");
+            else if (refused) void settleProviderRequest(audit, "refused");
           },
           async () => {
             const upstreamRequestId = providerRequestId(res.headers);
@@ -1107,6 +1191,14 @@ async function sseToJsonResponse(
   }
   if (terminalError) {
     markSemanticTerminal(semanticTerminal, "failed");
+    // The provider itself terminated this response with a failure event
+    // (response.failed, error, response.incomplete). Before any completed
+    // output that is a definite answer, exactly like an HTTP 5xx status: no
+    // model response was produced, so the request is safe to run again. A
+    // failure after completed output stays unknown.
+    if (!hasMeaningfulCodexOutput(items)) {
+      await settleProviderRequest(audit, "refused");
+    }
     await emitRequestEvent(audit, {
       phase: "failed",
       responseObserved: true,
@@ -1423,7 +1515,11 @@ function codexSseFailureError(
  */
 function validateCodexStream(
   res: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed", meaningfulOutput?: boolean) => void,
+  onSemanticTerminal?: (
+    phase: "completed" | "failed",
+    meaningfulOutput?: boolean,
+    refused?: boolean,
+  ) => void,
   onParsedEof?: () => Promise<void>,
 ): Response {
   if (!res.body) {
@@ -1455,8 +1551,16 @@ function validateCodexStream(
   const observeOutput = (output: unknown) => {
     meaningfulOutput ||= hasMeaningfulCodexOutput(output);
   };
-  const observeTerminal = (phase: "completed" | "failed") =>
-    onSemanticTerminal?.(phase, phase === "completed" && meaningfulOutput);
+  // `providerTerminal` is true only for a failure the provider declared in the
+  // stream (response.failed, error, response.incomplete). Before completed
+  // output that is a definite answer, like an HTTP 5xx status; a stream that
+  // ends without any terminal event stays unknown.
+  const observeTerminal = (phase: "completed" | "failed", providerTerminal = false) =>
+    onSemanticTerminal?.(
+      phase,
+      phase === "completed" && meaningfulOutput,
+      phase === "failed" && !meaningfulOutput && providerTerminal,
+    );
   const emitCompleteBlocks = (
     controller: TransformStreamDefaultController<Uint8Array>,
     final: boolean,
@@ -1472,9 +1576,19 @@ function validateCodexStream(
     }
   };
   const transform = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      emitCompleteBlocks(controller, false);
+    async transform(chunk, controller) {
+      try {
+        buffer += decoder.decode(chunk, { stream: true });
+        emitCompleteBlocks(controller, false);
+      } catch (error) {
+        // Parsing a provider failure throws before pipeThrough cancels its
+        // source. Join request custody here: the worker must not classify
+        // recovery while the refusal/unknown receipt is still being written.
+        // Audit or settlement failure must preserve the provider diagnostic;
+        // an unsuccessful custody write keeps the request's replay fence.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
+      }
     },
     async flush(controller) {
       try {
@@ -1499,12 +1613,17 @@ function validateCodexStream(
             "The Codex response stream ended without a terminal response",
           );
         }
-      } finally {
-        // Raw transport EOF can precede parsing a final block without a blank
-        // separator. Settle only after that parse; the audit fence deduplicates
-        // an earlier terminal already observed from a complete block.
-        await onParsedEof?.();
+      } catch (error) {
+        // A final buffered failure has the same diagnostic and custody rules
+        // as a failure parsed from a complete chunk. Finalization must not
+        // replace that failure with an audit or settlement rejection.
+        await onParsedEof?.().catch(() => undefined);
+        throw error;
       }
+      // Raw transport EOF can precede parsing a final block without a blank
+      // separator. Settle only after that parse; successful parsing still
+      // propagates a failed custody/audit write to the caller.
+      await onParsedEof?.();
     },
   });
   const headers = new Headers(res.headers);
@@ -1563,7 +1682,7 @@ const CODEX_TERMINAL_TYPE_HINTS = [
 function inspectCodexSseBlock(
   block: string,
   source: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed") => void,
+  onSemanticTerminal?: (phase: "completed" | "failed", providerTerminal?: boolean) => void,
   onOutput?: (output: unknown) => void,
 ): boolean {
   const lines = block.split(/\r\n|\r|\n/);
@@ -1589,7 +1708,7 @@ function inspectCodexSseBlock(
   const terminal = classifyCodexSseTerminal(ev);
   if (ev.type === "response.output_item.done") onOutput?.([ev.item]);
   if (terminal?.phase === "failed") {
-    onSemanticTerminal?.("failed");
+    onSemanticTerminal?.("failed", true);
     throw codexSseFailureError(
       source,
       terminal.rawError,

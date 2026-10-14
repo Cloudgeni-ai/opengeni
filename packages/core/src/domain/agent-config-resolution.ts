@@ -1,6 +1,6 @@
 import {
   agentConfigDeploymentPolicy,
-  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -48,7 +48,7 @@ export function legacySessionAgentCapabilities(
   defaultServerIds?: Iterable<string>,
 ): ResolvedAgentCapabilities {
   return legacyEffectiveAgentCapabilities({
-    firstPartyMcpTools: allowedFirstPartyMcpToolsForSession(settings, session.firstPartyMcpTools),
+    firstPartyMcpTools: resolveSessionFirstPartyMcpTools(settings, session, workspaceSettings),
     tools: session.tools,
     toolPolicy: session.toolPolicy,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspaceSettings),

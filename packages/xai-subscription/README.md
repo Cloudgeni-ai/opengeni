@@ -1,6 +1,6 @@
 # `@opengeni/xai-subscription`
 
-Pure protocol helpers for OpenGeni's explicit `workspace | user` SuperGrok/xAI
+Pure protocol helpers for Opengeni's explicit `workspace | user` SuperGrok/xAI
 connected-subscription rail. Workspace scope is the default shared path; tenant
 authority and persistence remain outside this package.
 
@@ -14,7 +14,7 @@ The package owns:
 
 It deliberately has no database dependency. Workspace/user authority,
 encrypted persistence, account selection, allocator state, leases, and durable
-request receipts remain in OpenGeni's DB/worker layers.
+request receipts remain in Opengeni's DB/worker layers.
 
 See [`docs/supergrok-subscription.md`](../../docs/supergrok-subscription.md) for
 the canonical authority, rotation, and durable-capacity contract.

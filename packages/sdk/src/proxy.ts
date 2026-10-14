@@ -5,18 +5,18 @@ import type { SessionEvent } from "./types";
 /**
  * Proxy-through-your-own-API helpers.
  *
- * The intended pattern: a customer's server consumes the OpenGeni event
+ * The intended pattern: a customer's server consumes the Opengeni event
  * stream with its own API key (`client.streamEvents(...)`) and re-emits it to
- * its browser clients over its own authenticated endpoint — the OpenGeni key
+ * its browser clients over its own authenticated endpoint — the Opengeni key
  * never reaches the browser. The re-emitted wire format is identical to
- * OpenGeni's own SSE stream (`id: <sequence>`, `event: <type>`,
+ * Opengeni's own SSE stream (`id: <sequence>`, `event: <type>`,
  * `data: <event JSON>`), so the browser side can consume it with this same
  * SDK's streaming core (or a plain `EventSource`), including resume via
  * `?after=` / `Last-Event-ID`. An ordinary event uses its own sequence as the
  * SSE `id`; a compact event uses the server-owned sequence it covers through.
  */
 
-/** Format one event with the exact OpenGeni data and resume-cursor semantics. */
+/** Format one event with the exact Opengeni data and resume-cursor semantics. */
 export function formatSseEvent(event: SessionEvent): string {
   const streamedCoverage = sessionEventStreamCoveredThrough(event);
   const projectedCoverage = event.coveredThrough;
@@ -38,7 +38,7 @@ export type SseReStreamOptions = {
   heartbeatMs?: number;
   /**
    * Called when the downstream consumer cancels (e.g. the browser
-   * disconnected). Use it to abort the upstream OpenGeni stream — an async
+   * disconnected). Use it to abort the upstream Opengeni stream — an async
    * iterator that is mid-`await` cannot be interrupted by `return()` alone.
    */
   onCancel?: () => void;
@@ -147,12 +147,12 @@ export type ProxySessionEventStreamOptions = Omit<StreamSessionEventsOptions, "a
 };
 
 /**
- * One-call proxy: consume the OpenGeni stream server-side and return an SSE
+ * One-call proxy: consume the Opengeni stream server-side and return an SSE
  * `Response` for your own browser clients. Works anywhere WHATWG `Response`
  * is the handler return type (Hono, Next.js route handlers, Bun.serve,
  * Cloudflare Workers, ...).
  *
- * The upstream OpenGeni connection is torn down when the downstream client
+ * The upstream Opengeni connection is torn down when the downstream client
  * disconnects, and also when `options.signal` (e.g. the incoming request's
  * signal) aborts.
  */

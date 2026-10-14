@@ -1,8 +1,7 @@
 //! Connection-instance-local transactional upload lifecycle. No op frames,
 //! child processes, implicit authority, automatic retries, or restart adoption.
 
-#[path = "update_drain.rs"]
-pub(crate) mod update_drain;
+pub(crate) use opengeni_agent_engine::update_drain;
 use opengeni_agent_platform::{transactional_write::TransactionalWrite, Platform, PlatformError};
 use opengeni_agent_proto::v1::{self, control_request::Op, control_response::Result as ResultBody};
 use std::collections::HashMap;

@@ -1,15 +1,20 @@
-// Minimal first-party web-client error beacon.
+// First-party web-client error beacon.
 //
-// The browser reports only a closed error kind, the matched route PATTERN
-// (never a concrete URL), and its bundle revision. No message, stack, URL,
-// identifier, user content, or credential is accepted, and the route admits
+// The browser reports a closed error kind, the matched route PATTERN (never a
+// concrete URL), its bundle revision, and optional error diagnostics: the
+// error's name, message and stack, and React's component stack for a render
+// failure. The diagnostics are error text, which can occasionally quote user
+// content; the route re-applies the shared scrubbing and per-field bounds of
+// @opengeni/contracts/client-error-report to whatever it receives, so obvious
+// credentials and URL query strings never reach the log. The route admits
 // anonymous callers so a failure before sign-in is still counted. Each
 // accepted report increments one closed-label counter and writes one bounded
-// structured log line. This is an operational lower bound, not exception
-// capture: blocked requests, closed tabs, and the per-process admission bound
-// all drop reports. Because the route is anonymous, any HTTP client that omits
-// or forges `Origin` can still send reports up to the admission ceiling, so
-// alert on rates and ratios, not on absolute counts.
+// structured log line. This is an operational lower bound, not exhaustive
+// exception capture: blocked requests, closed tabs, and the per-process
+// admission bound all drop reports. Because the route is anonymous, any HTTP
+// client that omits or forges `Origin` can still send reports up to the
+// admission ceiling, so alert on rates and ratios, not on absolute counts, and
+// treat the diagnostic text as untrusted.
 //
 // The same route admits closed operational signals discriminated by a
 // `signal` field: key requests that failed before any HTTP response
@@ -33,6 +38,8 @@ import {
   CLIENT_STREAMS,
   CLIENT_WEB_VITAL_MAX_VALUE,
   CLIENT_WEB_VITAL_METRICS,
+  projectClientErrorDetail,
+  type ClientErrorDetail,
   type ClientErrorKind,
   type ClientSignal,
 } from "@opengeni/contracts/client-error-report";
@@ -54,14 +61,35 @@ export {
 const CLIENT_ERROR_REJECTION_REASONS = ["invalid", "too_large", "origin", "rate_limited"] as const;
 type ClientErrorRejectionReason = (typeof CLIENT_ERROR_REJECTION_REASONS)[number];
 
+// Field lengths are bounded by the body limit; the projection below scrubs and
+// cuts each one to its own bound.
+const ClientErrorDetailInput = z
+  .object({
+    name: z.string().optional(),
+    message: z.string().optional(),
+    stack: z.string().optional(),
+    componentStack: z.string().optional(),
+  })
+  .strict();
+
 export const ClientErrorReport = z
   .object({
     kind: z.enum(CLIENT_ERROR_KINDS),
     route: z.string().regex(CLIENT_ERROR_ROUTE_PATTERN),
     revision: z.string().regex(CLIENT_ERROR_REVISION_PATTERN),
+    error: ClientErrorDetailInput.optional(),
   })
-  .strict();
-export type ClientErrorReport = z.infer<typeof ClientErrorReport>;
+  .strict()
+  .transform(({ error, ...report }) => {
+    const detail = projectClientErrorDetail(error);
+    return detail ? { ...report, error: detail } : report;
+  });
+export type ClientErrorReport = {
+  kind: ClientErrorKind;
+  route: string;
+  revision: string;
+  error?: ClientErrorDetail;
+};
 
 const route = z.string().regex(CLIENT_ERROR_ROUTE_PATTERN);
 const revision = z.string().regex(CLIENT_ERROR_REVISION_PATTERN);
@@ -199,7 +227,7 @@ export function isClientSignalReport(report: ClientBeaconReport): report is Clie
 
 /**
  * The exact beacon request. The app-wide request-body limit skips it because
- * the route enforces its own 512-byte limit on the streamed body; the generic
+ * the route enforces its own small limit on the streamed body; the generic
  * ceiling would otherwise buffer a chunked body of many megabytes on an
  * anonymous route before this one could refuse it.
  */
@@ -281,7 +309,7 @@ export function registerClientErrorRoutes(
   app.post(
     CLIENT_ERRORS_PATH,
     // Enforced on the streamed body, so a chunked request without a
-    // Content-Length is refused after 512 bytes rather than buffered.
+    // Content-Length is refused at the limit rather than buffered.
     bodyLimit({
       maxSize: CLIENT_ERROR_REPORT_MAX_BYTES,
       onError: (c) => reject(c, "too_large", 413),
@@ -312,6 +340,10 @@ export function registerClientErrorRoutes(
         reason: report.kind,
         clientRoute: report.route,
         clientRevision: report.revision,
+        clientErrorName: report.error?.name,
+        clientErrorMessage: report.error?.message,
+        clientErrorStack: report.error?.stack,
+        clientComponentStack: report.error?.componentStack,
       });
       return c.body(null, 204);
     },

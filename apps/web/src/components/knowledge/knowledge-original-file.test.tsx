@@ -109,7 +109,7 @@ test("an API failure says what happened and what to do, never the raw API string
   download.mockRejectedValueOnce(
     Object.assign(
       new Error(
-        "OpenGeni API 500: storage backend timed out Reference: 7d8e9f00-1111-2222-3333-444455556666.",
+        "Opengeni API 500: storage backend timed out Reference: 7d8e9f00-1111-2222-3333-444455556666.",
       ),
       { status: 500 },
     ),
@@ -129,7 +129,7 @@ test("an API failure says what happened and what to do, never the raw API string
   const alert = container.querySelector('[role="alert"]')?.textContent ?? "";
   expect(alert).toContain("Couldn't open the original file.");
   expect(alert).toContain("Try again in a moment.");
-  expect(container.textContent).not.toContain("OpenGeni API");
+  expect(container.textContent).not.toContain("Opengeni API");
   expect(container.textContent).not.toContain("storage backend");
   // The request reference stays for support.
   expect(alert).toContain("Reference: 7d8e9f00-1111-2222-3333-444455556666.");

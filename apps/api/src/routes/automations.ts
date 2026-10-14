@@ -37,6 +37,7 @@ import {
   updateAutomationTrigger,
   withWorkspaceGatewayCustomModelReadLock,
   withWorkspaceOpenRouterCustomModelReadLock,
+  withWorkspaceProviderCustomModelReadLock,
   type AutomationSourceSecret,
 } from "@opengeni/db";
 import {
@@ -550,62 +551,72 @@ export async function acceptAutomationEvent(
             await withWorkspaceOpenRouterCustomModelReadLock(
               gatewayLockedDb,
               { accountId: source.accountId, workspaceId: source.workspaceId },
-              async (lockedDb) => {
-                const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
-                const catalogSettings = (
-                  await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
+              async (openRouterLockedDb) =>
+                await withWorkspaceProviderCustomModelReadLock(
+                  openRouterLockedDb,
+                  {
                     accountId: source.accountId,
                     workspaceId: source.workspaceId,
-                  })
-                ).settings;
-                const matchingAtAcceptance = [];
-                for (const trigger of matchingByEvent) {
-                  try {
-                    const render = adapter.render({
-                      event: normalizedEvent,
-                      trigger,
-                      source,
+                    providerKind: "opper",
+                  },
+                  async (lockedDb) => {
+                    const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+                    const catalogSettings = (
+                      await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
+                        accountId: source.accountId,
+                        workspaceId: source.workspaceId,
+                      })
+                    ).settings;
+                    const matchingAtAcceptance = [];
+                    for (const trigger of matchingByEvent) {
+                      try {
+                        const render = adapter.render({
+                          event: normalizedEvent,
+                          trigger,
+                          source,
+                        });
+                        requireAutomationCredentialRestrictionPermissions(
+                          trigger.sessionTemplate.credentialRestriction ??
+                            input.credentialRestriction,
+                          render.sessionTemplate.firstPartyMcpPermissions,
+                        );
+                        const requestedModel =
+                          render.sessionTemplate.model ?? catalogSettings.openaiModel;
+                        const model = canonicalConfiguredModel(catalogSettings, requestedModel);
+                        if (!model) continue;
+                        await assertWorkspaceModelPolicyAllows(
+                          lockedDb,
+                          catalogSettings,
+                          source.workspaceId,
+                          model,
+                        );
+                        matchingAtAcceptance.push(trigger);
+                      } catch (error) {
+                        if (isUnprocessableEntity(error)) continue;
+                        throw error;
+                      }
+                    }
+                    return await recordAutomationEvent(lockedDb, {
+                      accountId: source.accountId,
+                      workspaceId: source.workspaceId,
+                      sourceId: source.id,
+                      sourceVersion: source.version,
+                      sourceConfiguration: source.configuration,
+                      matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
+                        triggerId: trigger.id,
+                        revision: trigger.revision,
+                      })),
+                      deliveryKey: input.deliveryKey,
+                      requestDigest: input.requestDigest,
+                      normalizedEvent,
+                      ...(input.credentialRestriction
+                        ? { credentialRestriction: input.credentialRestriction }
+                        : {}),
+                      ignoredReason:
+                        matchingAtAcceptance.length === 0 ? "no_executable_triggers" : null,
                     });
-                    requireAutomationCredentialRestrictionPermissions(
-                      trigger.sessionTemplate.credentialRestriction ?? input.credentialRestriction,
-                      render.sessionTemplate.firstPartyMcpPermissions,
-                    );
-                    const requestedModel =
-                      render.sessionTemplate.model ?? catalogSettings.openaiModel;
-                    const model = canonicalConfiguredModel(catalogSettings, requestedModel);
-                    if (!model) continue;
-                    await assertWorkspaceModelPolicyAllows(
-                      lockedDb,
-                      catalogSettings,
-                      source.workspaceId,
-                      model,
-                    );
-                    matchingAtAcceptance.push(trigger);
-                  } catch (error) {
-                    if (isUnprocessableEntity(error)) continue;
-                    throw error;
-                  }
-                }
-                return await recordAutomationEvent(lockedDb, {
-                  accountId: source.accountId,
-                  workspaceId: source.workspaceId,
-                  sourceId: source.id,
-                  sourceVersion: source.version,
-                  sourceConfiguration: source.configuration,
-                  matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
-                    triggerId: trigger.id,
-                    revision: trigger.revision,
-                  })),
-                  deliveryKey: input.deliveryKey,
-                  requestDigest: input.requestDigest,
-                  normalizedEvent,
-                  ...(input.credentialRestriction
-                    ? { credentialRestriction: input.credentialRestriction }
-                    : {}),
-                  ignoredReason:
-                    matchingAtAcceptance.length === 0 ? "no_executable_triggers" : null,
-                });
-              },
+                  },
+                ),
             ),
         );
   const matching = await getAutomationTriggerRevisions(deps.db, {

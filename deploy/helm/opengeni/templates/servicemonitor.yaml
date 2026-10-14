@@ -77,6 +77,13 @@ spec:
           targetLabel: release
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
           targetLabel: opengeni_workload_component
+        # Discovery identity is independent of the producer's worker_pod_uid.
+        # Keep it on up as well as raw series; readiness removal during drain
+        # must not turn a missing physical worker into an observed idle zero.
+        - sourceLabels: [__meta_kubernetes_pod_uid]
+          targetLabel: pod_uid
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
 {{- end }}
 {{- end }}
 {{- if and .Values.relay.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}

@@ -152,6 +152,119 @@ export function isRetryableDatabaseTransportFailure(error: unknown): boolean {
 }
 
 /**
+ * SQLSTATEs PostgreSQL sends when it ends or refuses the session itself:
+ * operator intervention (`pg_terminate_backend`, shutdown, crash recovery,
+ * "the database system is starting up") and the connection-exception class.
+ */
+const DATABASE_CONNECTION_LOSS_SQLSTATES = new Set([
+  "57P01", // admin_shutdown (pg_terminate_backend, smart/fast shutdown)
+  "57P02", // crash_shutdown
+  "57P03", // cannot_connect_now
+  "08000", // connection_exception
+  "08001", // sqlclient_unable_to_establish_sqlconnection
+  "08003", // connection_does_not_exist
+  "08004", // sqlserver_rejected_establishment_of_sqlconnection
+  "08006", // connection_failure
+]);
+
+/**
+ * node-postgres (Better Auth's pool) reports a lost socket as a plain Error with
+ * no code. Only these exact library sentences are recognized.
+ */
+const NODE_POSTGRES_CONNECTION_LOSS_MESSAGES = new Set([
+  "Connection terminated unexpectedly",
+  "Connection terminated",
+  "Connection terminated due to connection timeout",
+  "Client has encountered a connection error and is not queryable",
+  "Client was closed and is not queryable",
+]);
+
+/**
+ * Explicit marker for a dependency that hid its driver error behind its own
+ * generic failure but is known to have failed reading the database.
+ */
+export class DatabaseUnavailableError extends Error {
+  readonly code = "DATABASE_UNAVAILABLE";
+
+  constructor(message = "database unavailable", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "DatabaseUnavailableError";
+  }
+}
+
+/**
+ * True when a failure means the database connection itself went away (an
+ * operator drain, failover, restart, or socket loss), not that a statement was
+ * rejected. Such a failure is transient: a fresh pooled connection succeeds once
+ * the server accepts connections again. It says nothing about whether a write
+ * in flight committed.
+ *
+ * Socket and postgres.js transport codes (`ECONNRESET`, `CONNECTION_CLOSED`,
+ * ...) count only when the same failure proves it came from the database: a
+ * query-bearing driver or ORM error, a PostgresError, or postgres.js's own
+ * connection error. The same codes from NATS, a provider fetch, or a browser
+ * transport are not database loss.
+ */
+export function isDatabaseConnectionLoss(error: unknown): boolean {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  let transportFailure = false;
+  let databaseOrigin = false;
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof DatabaseUnavailableError) return true;
+    for (const key of SQLSTATE_KEYS) {
+      const value = current[key];
+      if (
+        typeof value === "string" &&
+        DATABASE_CONNECTION_LOSS_SQLSTATES.has(value.toUpperCase())
+      ) {
+        return true;
+      }
+    }
+    if (
+      typeof current.message === "string" &&
+      NODE_POSTGRES_CONNECTION_LOSS_MESSAGES.has(current.message)
+    ) {
+      return true;
+    }
+    if (hasTransportCode(current)) transportFailure = true;
+    if (isDatabaseOrigin(current)) databaseOrigin = true;
+    if (transportFailure && databaseOrigin) return true;
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return false;
+}
+
+function hasTransportCode(current: Record<string, unknown>): boolean {
+  return (["code", "errno"] as const).some((key) => {
+    const value = current[key];
+    return typeof value === "string" && RETRYABLE_DATABASE_TRANSPORT_CODES.has(value.toUpperCase());
+  });
+}
+
+function isDatabaseOrigin(current: Record<string, unknown>): boolean {
+  if (typeof current.name === "string" && DATABASE_ERROR_NAMES.has(current.name)) return true;
+  // postgres.js stamps the failed query onto its error; Drizzle wraps it as
+  // DrizzleQueryError with `query` + `params`.
+  if (typeof current.query === "string") return true;
+  // postgres.js connection errors: `write <CODE> <host:port>` with errno === code.
+  return (
+    typeof current.code === "string" &&
+    current.errno === current.code &&
+    "address" in current &&
+    typeof current.message === "string" &&
+    current.message.startsWith(`write ${current.code} `)
+  );
+}
+
+/**
  * Distinguish database/ORM failures from expected domain exceptions when a
  * driver omitted SQLSTATE. This checks shape only; callers retain the original
  * failure independently as canonical error evidence.
@@ -213,12 +326,23 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
   return facts;
 }
 
-/**
- * Typed persistence classification that retains the exact original failure as
- * `cause` for internal diagnostics. The ordinary Error message is deliberately
- * stable and source-free so a generic presentation path can never disclose SQL,
- * parameters, or driver detail by rendering `.message`.
- */
+/** Own-driver transaction boundary; callback errors never establish provenance. */
+export class DatabaseTransactionError extends Error {
+  readonly name = "DatabaseTransactionError";
+
+  constructor(
+    readonly stage: "admission" | "settlement",
+    cause: unknown,
+    // A rollback failure must not erase a callback's no-replay/permanent
+    // evidence. The recovery classifier inspects both branches for vetoes.
+    readonly original?: unknown,
+  ) {
+    super(`Database transaction ${stage} failed`, { cause });
+  }
+}
+
+/** Typed persistence classification retaining the original cause internally.
+ * Its ordinary message is stable and contains no SQL or driver parameters. */
 export class SessionEventPersistenceError extends Error {
   readonly name = "SessionEventPersistenceError";
 

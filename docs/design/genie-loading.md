@@ -1,8 +1,16 @@
 # Genie loading
 
+The web conversation shows this indicator as soon as the current message is accepted,
+including the wait before a worker starts. Later prompts queued behind active work
+retain their queue controls. Live dispatch problems replace decorative copy immediately
+and reveal retry diagnostics through the same disclosure; they are not terminal turn
+failures or synthetic execution events. The queue span keeps its identity and acceptance
+time when the first worker claim arrives. Pause and non-startup states suppress this
+pre-execution presentation.
+
 Startup presentation lives in `packages/react/src/timeline/activity-rail.tsx`.
 Normal preparation shows the MIT-licensed `thinking-orbs` React component (`searching`, 64px, speed 0.8) with a fixed list of playful phrases,
-randomly selected every five seconds. After 30 seconds, factual waiting copy
+randomly selected every five seconds. After 60 seconds, factual waiting copy
 replaces the phrases. Failure and cancellation stop the animation; actual
 reasoning/tool activity replaces it. Reduced-motion preferences disable animation.
 Once the model request is dispatched, the same indicator reads “Waiting for a
@@ -18,7 +26,7 @@ actual preparation and model provider failures remain failures. A successful
 recovery attempt replaces its interrupted startup spans. The Debug inspector's
 Startup tab displays recorded durations, including overlapping phases. Its
 “Show startup details in chat” switch is off by default and stored only in the
-current browser under `opengeni:startup-details:v1`. “Behind the magic” appears after 15 seconds and reveals
+current browser under `opengeni:startup-details:v1`. “Behind the magic” appears after 30 seconds and reveals
 one activity group's details without changing that preference.
 
 Run `bun run --cwd packages/react demo`, then open `/genie-loading.html` for
@@ -62,8 +70,8 @@ English copy:
 ```
 
 `status` and `slowStatus` are the stable screen-reader announcements; phrase
-rotation stays decorative. The slow text appears after 30 seconds, while the
-details button appears after 15 seconds (or whenever details are open). Message
+rotation stays decorative. The slow text appears after 60 seconds, while the
+details button appears after 30 seconds (or whenever details are open). Message
 overrides preserve native timing, accessibility, and details behavior. Empty
 phrase arrays retain the default phrase list.
 

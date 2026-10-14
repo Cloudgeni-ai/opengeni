@@ -197,7 +197,6 @@ test("current post-cutover runtime accepts the complete real PostgreSQL routine 
     expectedRole: new URL(shared.appUrl).username,
     rlsStrategy: "force" as const,
     targetSchema: "public",
-    organizationTenancyCanonicalActivationEnabled: true,
   };
   const roles = {
     appRole: options.expectedRole,
@@ -240,7 +239,6 @@ test("current readiness rejects a revoked amount reader until canonical provisio
     expectedRole: new URL(shared.appUrl).username,
     rlsStrategy: "force" as const,
     targetSchema: "public",
-    organizationTenancyCanonicalActivationEnabled: true,
   };
   const roles = {
     appRole: options.expectedRole,

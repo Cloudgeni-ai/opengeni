@@ -1,4 +1,9 @@
-import { configuredModels, type ResolvedModelProvider, type Settings } from "@opengeni/config";
+import {
+  configuredModels,
+  opperMaxOutputTokens,
+  type ResolvedModelProvider,
+  type Settings,
+} from "@opengeni/config";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
@@ -17,11 +22,14 @@ import type {
 import {
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
+  OrganizationOpperUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
+  WorkspaceOpperUnavailableError,
 } from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
+  chatModelRequestPolicy,
   modelRequestPolicyForProvider,
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
@@ -31,10 +39,12 @@ import {
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
   captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
+  type PreparedClaudeRequest,
 } from "./claude-subscription-usage";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
@@ -45,11 +55,12 @@ export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null |
 
 export function recordRuntimeMcpToolCallMetric(
   outcome: McpToolCallOutcome,
+  tool: string,
   startedAt: number,
 ): void {
   const durationSeconds = Math.max(0, (performance.now() - startedAt) / 1_000);
   try {
-    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, durationSeconds });
+    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, tool, durationSeconds });
   } catch {
     // Metrics emission must never affect an MCP call or rewrite its result.
   }
@@ -95,21 +106,49 @@ export function buildOpenAIClientFromSettings(
             : undefined,
         fetch: sdkRetryingModelFetch(
           settings.openaiMaxRetries,
-          instrumentedModelFetch(providerId, globalThis.fetch),
+          streamIdleTimeoutModelFetch(
+            providerId,
+            modelStreamIdlePolicy(settings),
+            instrumentedModelFetch(providerId, globalThis.fetch),
+          ),
         ),
       },
-      { modelRequestPolicy: azureModelRequestPolicy },
+      {
+        modelRequestPolicy: (request) =>
+          chatModelRequestPolicy(request) ?? azureModelRequestPolicy(request),
+      },
     );
   }
-  return new ReplayableJsonOpenAI({
-    apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
-    ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
-    maxRetries: settings.openaiMaxRetries,
-    fetch: sdkRetryingModelFetch(
-      settings.openaiMaxRetries,
-      instrumentedModelFetch(providerId, globalThis.fetch),
-    ),
-  });
+  return new ReplayableJsonOpenAI(
+    {
+      apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
+      ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
+      maxRetries: settings.openaiMaxRetries,
+      fetch: sdkRetryingModelFetch(
+        settings.openaiMaxRetries,
+        streamIdleTimeoutModelFetch(
+          providerId,
+          modelStreamIdlePolicy(settings),
+          instrumentedModelFetch(providerId, globalThis.fetch),
+        ),
+      ),
+    },
+    { modelRequestPolicy: chatModelRequestPolicy },
+  );
+}
+
+/**
+ * Effective generic stream stall bounds: a registry provider override wins
+ * over the deployment default. Codex/SuperGrok/Anthropic own their transports.
+ */
+export function modelStreamIdlePolicy(
+  settings: Pick<Settings, "modelStreamIdleTimeoutMs" | "modelStreamProgressTimeoutMs">,
+  provider?: Pick<ResolvedModelProvider, "streamIdleTimeoutMs" | "streamProgressTimeoutMs">,
+): { idleTimeoutMs: number; progressTimeoutMs: number } {
+  return {
+    idleTimeoutMs: provider?.streamIdleTimeoutMs ?? settings.modelStreamIdleTimeoutMs,
+    progressTimeoutMs: provider?.streamProgressTimeoutMs ?? settings.modelStreamProgressTimeoutMs,
+  };
 }
 
 /**
@@ -157,6 +196,7 @@ function providerClientCacheKey(
   provider: ResolvedModelProvider,
   settings: Settings,
   gatewayPolicies: ReadonlyMap<string, unknown> | undefined,
+  opperOutputLimits?: ReadonlyMap<string, number>,
 ): string {
   const sortedRecord = (value: Record<string, string> | undefined) =>
     value
@@ -186,7 +226,15 @@ function providerClientCacheKey(
         gatewayPolicies: gatewayPolicies
           ? [...gatewayPolicies.entries()].sort(([left], [right]) => left.localeCompare(right))
           : null,
+        ...(opperOutputLimits
+          ? {
+              opperOutputLimits: [...opperOutputLimits.entries()].sort(([left], [right]) =>
+                left.localeCompare(right),
+              ),
+            }
+          : {}),
         openaiMaxRetries: settings.openaiMaxRetries,
+        streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         builtin:
           provider.builtin && settings.openaiProvider === "azure"
             ? {
@@ -287,14 +335,31 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     provider.kind === "openrouter-managed" ||
     provider.kind === "openrouter-workspace" ||
     provider.kind === "openrouter-organization";
-  const gatewayPolicies = gatewayProvider
+  const opperProvider =
+    provider.kind === "opper-managed" ||
+    provider.kind === "opper-workspace" ||
+    provider.kind === "opper-organization";
+  // Opper reuses the exact-upstream lookup so an unknown slug fails before
+  // network I/O; its entries carry no Gateway route policy.
+  const gatewayPolicies =
+    gatewayProvider || opperProvider
+      ? new Map(
+          configuredModels(settings)
+            .filter((model) => model.providerId === provider.id)
+            .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
+        )
+      : undefined;
+  const opperOutputLimits = opperProvider
     ? new Map(
         configuredModels(settings)
           .filter((model) => model.providerId === provider.id)
-          .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
+          .flatMap((model) => {
+            const limit = opperMaxOutputTokens(settings, model.upstreamModelId);
+            return limit === undefined ? [] : [[model.upstreamModelId, limit] as const];
+          }),
       )
     : undefined;
-  const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies);
+  const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies, opperOutputLimits);
   const cached = scopedCredentialProvider ? undefined : providerClientCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -313,14 +378,21 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     if (provider.kind === "openrouter-workspace") {
       throw new WorkspaceOpenRouterUnavailableError();
     }
+    if (provider.kind === "opper-organization") {
+      throw new OrganizationOpperUnavailableError();
+    }
+    if (provider.kind === "opper-workspace") {
+      throw new WorkspaceOpperUnavailableError();
+    }
     throw new WorkspaceGatewayUnavailableError();
   }
   const anonymousProvider = provider.kind === "anonymous";
-  // Gateway and OpenRouter requests can incur upstream work or charges
-  // before a retryable response failure reaches this process. Neither
-  // transport has a provider idempotency key tied to our durable call,
+  // Gateway, OpenRouter and Opper requests can incur upstream work or charges
+  // before a retryable response failure reaches this process. None of these
+  // transports has a provider idempotency key tied to our durable call,
   // so never let the SDK replay them blindly.
-  const registryMaxRetries = gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries;
+  const registryMaxRetries =
+    gatewayProvider || openRouterProvider || opperProvider ? 0 : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -343,7 +415,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
             fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
           },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+          {
+            modelRequestPolicy: modelRequestPolicyForProvider(
+              provider,
+              gatewayPolicies,
+              opperOutputLimits,
+            ),
+          },
         )
       : provider.kind === "xai-subscription"
         ? // SuperGrok subscription uses one workspace-scoped request context.
@@ -361,7 +439,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
               fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+            {
+              modelRequestPolicy: modelRequestPolicyForProvider(
+                provider,
+                gatewayPolicies,
+                opperOutputLimits,
+              ),
+            },
           )
         : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
           // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
@@ -386,20 +470,30 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
               fetch: sdkRetryingModelFetch(
                 registryMaxRetries,
-                anonymousProvider
-                  ? withoutAuthenticationHeaders(
-                      instrumentedModelFetch(provider.id, globalThis.fetch),
-                    )
-                  : gatewayProvider
-                    ? vercelGatewayRoutingFetch(
-                        provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                streamIdleTimeoutModelFetch(
+                  provider.id,
+                  modelStreamIdlePolicy(settings, provider),
+                  anonymousProvider
+                    ? withoutAuthenticationHeaders(
                         instrumentedModelFetch(provider.id, globalThis.fetch),
-                        gatewayPolicies,
                       )
-                    : instrumentedModelFetch(provider.id, globalThis.fetch),
+                    : gatewayProvider
+                      ? vercelGatewayRoutingFetch(
+                          provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                          instrumentedModelFetch(provider.id, globalThis.fetch),
+                          gatewayPolicies,
+                        )
+                      : instrumentedModelFetch(provider.id, globalThis.fetch),
+                ),
               ),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+            {
+              modelRequestPolicy: modelRequestPolicyForProvider(
+                provider,
+                gatewayPolicies,
+                opperOutputLimits,
+              ),
+            },
           );
   if (!scopedCredentialProvider) {
     cacheProviderClient(cacheKey, provider.id, client);
@@ -414,16 +508,54 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     }
     const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
     init = prepared.init;
-    const claudeRequestToken = captureClaudeRequestToken(input, init);
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();
     recordModelTransportDispatched(started);
+    // A request whose bearer a subscription core leased is admitted by its
+    // custody as the last awaited step before the fetch, then settled from
+    // its outcome; any other request passes straight through.
+    const send = async (current: PreparedClaudeRequest, requestInit: RequestInit | undefined) => {
+      const requestToken = captureClaudeRequestToken(input, requestInit);
+      await current.admit();
+      let response: Response;
+      try {
+        response = await inner(input, requestInit);
+      } catch (error) {
+        await current.failed();
+        throw error;
+      }
+      try {
+        current.observe(response, requestToken);
+        return await current.responded(response);
+      } catch (error) {
+        // A response the custody could not take is never left open.
+        await response.body?.cancel().catch(() => undefined);
+        throw error;
+      }
+    };
     try {
-      const response = await inner(input, capture.init);
-      prepared.observe(response, claudeRequestToken);
+      let response = await send(prepared, capture.init);
+      // A leased bearer refused as unauthorized is renewed (at most once per
+      // request; the custody decides whether the retry may run) and the same
+      // request sent again when its body can be sent again.
+      if (response.status === 401 && prepared.renew && replayableRequest(input, capture.init)) {
+        const refused = response;
+        const renewed = await prepared.renew().catch(async (error: unknown) => {
+          await refused.body?.cancel().catch(() => undefined);
+          throw error;
+        });
+        // Without a renewal the refusal the provider sent is surfaced as is.
+        if (renewed) {
+          await refused.body?.cancel().catch(() => undefined);
+          response = await send(renewed, {
+            ...capture.init,
+            ...(renewed.init?.headers ? { headers: renewed.init.headers } : {}),
+          });
+        }
+      }
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {
@@ -432,6 +564,20 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
       throw error;
     }
   }) as typeof fetch;
+}
+
+/** Whether a request can be sent a second time unchanged (its body is not a consumed stream). */
+function replayableRequest(input: Parameters<typeof fetch>[0], init: RequestInit | undefined) {
+  if (input instanceof Request && input.body !== null) return false;
+  const body = init?.body;
+  return (
+    body === undefined ||
+    body === null ||
+    typeof body === "string" ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body) ||
+    body instanceof URLSearchParams
+  );
 }
 
 function recordModelCallMetric(

@@ -10,6 +10,8 @@ const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const requestedMode = params.get("mode");
 const crowdedChrome = params.get("chrome") === "crowded";
+// `basis=container` mirrors the embedded OpenGeniChat composer.
+const responsiveBasis = params.get("basis") === "container" ? "container" : undefined;
 const initialMode: FixtureMode =
   requestedMode === "denied" || requestedMode === "hanging" ? requestedMode : "normal";
 if (theme === "light") document.documentElement.dataset.ogTheme = "light";
@@ -183,6 +185,7 @@ function App() {
       <ChatComposer
         composer={composer}
         effectiveControl={crowdedChrome ? activeControl : undefined}
+        responsiveBasis={responsiveBasis}
         transcription={{
           client: client as never,
           workspaceId: "11111111-1111-4111-8111-111111111111",

@@ -254,6 +254,14 @@ export type CodexAuthDeps = {
     workspaceId: string,
     credentialId: string,
   ) => Promise<void>;
+  /**
+   * Separates local refresh single-flight between resolvers that load the same
+   * row under different authorities (for example Codex Apps versus inference),
+   * so one caller never adopts another authority's outcome. The database refresh
+   * lock still serializes them; the second re-reads the version and skips the
+   * provider refresh.
+   */
+  refreshKeyScope?: string;
 };
 
 export function buildCodexTokenResolver(
@@ -359,7 +367,7 @@ export function buildCodexTokenResolver(
   // ALL refreshes — whether proactive or a 401 retry — coalesce locally and then
   // serialize globally before any rotating refresh token reaches the provider.
   const doRefresh = (cred: CodexCredentialForRun): Promise<CodexCredentialTokenSnapshot> => {
-    const key = `${cred.id}:${cred.version}`;
+    const key = `${deps.refreshKeyScope ?? "default"}:${cred.id}:${cred.version}`;
     const existing = inflight.get(key);
     if (existing) {
       return existing;

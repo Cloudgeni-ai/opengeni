@@ -55,6 +55,7 @@ export type {
   McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
+  OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRecoveryOverview,
   CreateWorkspaceRequest,
@@ -125,6 +126,7 @@ export type {
   SandboxBackend,
   ScheduledTask,
   ScheduledTaskAccessAttention,
+  ScheduledTaskAccountPlan,
   ScheduledTaskAgentConfig,
   ScheduledTaskPolicyDrift,
   ScheduledTaskRun,
@@ -146,16 +148,12 @@ export type {
   VerifyPublicGitHubRepositoryRefRequest,
   VerifyPublicGitHubRepositoryRefResponse,
   Workspace,
-  WorkspaceEnvironment,
-  VariableSet,
-  VariableSetSecret,
-  VariableSetVariableMetadata,
-  WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
   WorkspaceMemberCandidate,
   WorkspaceMemorySearchMode,
   WorkspaceMemorySearchResponse,
   WorkspaceMemorySearchResult,
+  PrivateScheduledTaskSummary,
 } from "@opengeni/sdk";
 
 // Infer lifecycle leaf types from the public client rather than mirroring wire
@@ -177,9 +175,6 @@ export type OrganizationRetentionPolicy = Awaited<
   ReturnType<OpenGeniBrowserClient["getOrganizationRetentionPolicy"]>
 >;
 
-export type WorkspaceVariableSet = VariableSet;
-export type WorkspaceVariableSetSecret = VariableSetSecret;
-export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type {
   GoalSpec,
@@ -188,9 +183,6 @@ import type {
   ResourceRef,
   SandboxBackend,
   ToolRef,
-  VariableSet,
-  VariableSetSecret,
-  VariableSetVariableMetadata,
 } from "@opengeni/sdk";
 export type { ClientModel } from "@opengeni/sdk";
 
@@ -202,10 +194,6 @@ export type TurnSubmission = {
   reasoningEffort?: ReasoningEffort;
   latencyMode?: LatencyMode;
   sandboxBackend?: SandboxBackend;
-  variableSetIds?: string[];
-  variableSetId?: string;
-  /**  use variableSetId */
-  environmentId?: string;
   /** The rig this session rides (resolved + frozen at create). */
   rigId?: string;
   goal?: GoalSpec;

@@ -756,6 +756,8 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
     if (path.endsWith("/connection-authorities")) return json({ authorities: [] });
     if (path.endsWith("/skills") || path.endsWith("/skills/content"))
       return json({ skills: [], nextCursor: null });
+    if (path.endsWith("/capabilities/discovery/plugins"))
+      return json({ items: [], total: 0, nextOffset: null });
     if (path.endsWith("/plugins")) return json({ plugins: [] });
     if (path.endsWith("/github/app"))
       return json({ configured: false, missing: [], installUrl: null });
@@ -914,12 +916,15 @@ for (const width of [1280, 390]) {
       await input.press("Enter");
       await state.gates.send.entered;
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
+      const startup = page.locator(".og-genie-loading");
+      assert.equal(await startup.count(), 0, "pending Send has not been accepted yet");
       await capture("optimistic");
       state.gates.send.release();
       await page
-        .locator('[data-session-dispatch-wait] [role="status"]')
-        .getByText("Starting", { exact: true })
+        .locator('.og-genie-loading [role="status"]')
+        .getByText("Preparing your task.", { exact: true })
         .waitFor();
+      assert.equal(await startup.count(), 1, "accepted work has one startup indicator");
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       assert.equal(await page.getByRole("button", { name: /queued prompt/i }).count(), 0);
       assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
@@ -928,7 +933,10 @@ for (const width of [1280, 390]) {
         "Starting",
       );
       await state.gates.dispatchDetail.entered;
-      assert.equal(await page.getByText("Still waiting to start", { exact: true }).count(), 0);
+      assert.equal(
+        await startup.getByText("A little longer than usual…", { exact: true }).count(),
+        0,
+      );
       await capture("delayed-detail");
       state.deferDetail = false;
       state.gates.dispatchDetail.release();
@@ -936,21 +944,48 @@ for (const width of [1280, 390]) {
       // A hard reconnect must recover durable admission without moving the bubble.
       await page.reload();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
+      await startup
+        .getByRole("status")
+        .getByText("Preparing your task.", { exact: true })
+        .waitFor();
+      assert.equal(await startup.count(), 1);
       await capture("reconnected");
-      state.session.updatedAt = new Date(Date.now() - 60_000).toISOString();
+      const acceptedAt = new Date(Date.now() - 65_000).toISOString();
+      for (const event of state.events) {
+        if (event.turnId === turnId) event.occurredAt = acceptedAt;
+      }
+      state.session.updatedAt = acceptedAt;
       await page.reload();
-      await page.getByText("Still waiting to start", { exact: true }).waitFor();
+      await startup
+        .getByRole("status")
+        .getByText("Preparing your task. Taking longer than usual.", { exact: true })
+        .waitFor();
+      await startup.getByText("A little longer than usual…", { exact: true }).waitFor();
+      await startup.getByRole("button", { name: "Behind the magic" }).click();
+      await page
+        .getByText("Your messages are saved. No agent turn is running yet.", { exact: true })
+        .waitFor();
+      await page
+        .getByText("The start request was accepted; a worker has not started the turn yet.", {
+          exact: true,
+        })
+        .waitFor();
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       await capture("stalled");
       state.session.dispatchWait = {
         state: "pending",
         attempts: 3,
-        nextAttemptAt: null,
+        nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
         lastError: "Worker dispatch unavailable",
       };
       await page.reload();
-      await page.getByText("Unable to start yet", { exact: true }).waitFor();
-      await page.getByText("Start details", { exact: true }).click();
+      await startup
+        .getByRole("status")
+        .getByText("Unable to start yet. Your messages are saved.", { exact: true })
+        .waitFor();
+      await startup.getByRole("button", { name: "Behind the magic" }).click();
+      await page.getByText("3 dispatch attempts.", { exact: true }).waitFor();
+      await page.getByText(/Automatic start retry at/).waitFor();
       await page
         .getByText("Last recorded dispatch error: Worker dispatch unavailable", { exact: true })
         .waitFor();
@@ -958,13 +993,21 @@ for (const width of [1280, 390]) {
       Object.assign(state.session, { status: "waiting_capacity" });
       await page.reload();
       await page.locator("header [data-status=waiting_capacity]:visible").waitFor();
+      assert.equal(await startup.count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("capacity");
       Object.assign(state.session, { status: "running", activeTurnId: turnId });
       state.turns = [];
       await page.reload();
       await page.locator("header [data-status=running]:visible").waitFor();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
-      assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
+      assert.equal(
+        await page
+          .getByText("Unable to start yet. Your messages are saved.", { exact: true })
+          .count(),
+        0,
+      );
       await capture("running");
       state.turns = [
         {
@@ -987,11 +1030,13 @@ for (const width of [1280, 390]) {
       await page.reload();
       await page.getByRole("button", { name: /1 queued prompt/ }).waitFor();
       await page.getByRole("list", { name: "Queued prompts" }).waitFor();
+      assert.equal(await startup.count(), 1, "a queued follow-up must not add another startup");
       await capture("genuine-queue");
       state.session.effectiveControl = { ...control, state: "paused", directState: "paused" };
       await page.reload();
       await page.getByRole("list", { name: "Queued prompts" }).waitFor();
-      assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await startup.count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("paused-queue");
       state.denyAccess = true;
       await page.reload();
@@ -1953,4 +1998,407 @@ for (const [mismatch, width] of [
       await context.close();
     }
   }, 45_000);
+}
+
+// Review the shipped chat surface against exact saved facts, including on a cold reload.
+for (const width of [390, 1440]) {
+  test(`production account tool choices ${width}px`, async () => {
+    const { CapabilityCatalogItem } = await import("@opengeni/contracts");
+    const { default: AxeBuilder } = await import("@axe-core/playwright");
+    const context = await browser.newContext({
+      viewport: { width, height: 950 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage(),
+      state = fixtures();
+    Object.values(state.gates).forEach((value) => value.release());
+    await installApi(page, state);
+    const capabilityId = "mcp:synthetic-mail";
+    const item = CapabilityCatalogItem.parse({
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Example Mail",
+      category: "communication",
+      description: "Manage synthetic messages.",
+      enabled: true,
+      runtime: { available: true },
+      mcpUrl: "https://mail.example.test/mcp",
+      authKind: "none",
+      actions: ["configure", "inspect"],
+    });
+    await page.route(`${base}/v1/workspaces/${workspaceId}/capabilities`, (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ items: [item], installations: [] }),
+      }),
+    );
+    const accounts = [
+      { connectionId: "account-a", label: "First · first@example.test", scope: "personal" },
+      { connectionId: "account-b", label: "Second · second@example.test", scope: "personal" },
+    ];
+    let permission = "ask",
+      revision = "initial",
+      conflict = true;
+    const writes: Record<string, unknown>[] = [];
+    const reads: string[] = [];
+    const clientErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") clientErrors.push(message.text());
+    });
+    page.on("pageerror", (error) => clientErrors.push(error.message));
+    await page.route(
+      `${base}/v1/workspaces/${workspaceId}/capabilities/*/tool-permissions*`,
+      async (route) => {
+        if (route.request().method() === "PATCH") {
+          const input = route.request().postDataJSON();
+          writes.push(input);
+          if (conflict) {
+            conflict = false;
+            revision = "changed-elsewhere";
+            return route.fulfill({
+              status: 409,
+              contentType: "application/json",
+              body: JSON.stringify({ message: "Tool permissions changed. Reload before saving." }),
+            });
+          }
+          permission = input.permission ?? "ask";
+          revision = "saved";
+          return route.fulfill({
+            contentType: "application/json",
+            body: JSON.stringify({ updated: true }),
+          });
+        }
+        const connectionId =
+          new URL(route.request().url()).searchParams.get("connectionId") ??
+          accounts[0]!.connectionId;
+        reads.push(connectionId);
+        await route.fulfill({
+          contentType: "application/json",
+          body: JSON.stringify({
+            connectionId,
+            serverId: "synthetic-mail",
+            defaultPermission: null,
+            revision,
+            accountLabel: accounts.find((a) => a.connectionId === connectionId)!.label,
+            accounts,
+            tools: [
+              {
+                name: "organize",
+                title: "Organize messages",
+                group: "write",
+                permission,
+                inherited: false,
+                approvalRequired: true,
+                source: "tool",
+                conditional: revision === "initial",
+                actionPermissions:
+                  revision === "initial" ? [{ actionName: "trash", permission: "block" }] : [],
+                resetReason: revision !== "saved" ? "operation_changed" : undefined,
+              },
+            ],
+            discoveryError: null,
+            canManage: true,
+            appliesTo: "next_attempt",
+          }),
+        });
+      },
+    );
+    try {
+      await page.goto(
+        `${base}/workspaces/${workspaceId}/plugins?open=${encodeURIComponent(`item:${capabilityId}`)}`,
+      );
+      const permissions = page.getByRole("region", { name: "Tool permissions" });
+      await permissions.getByRole("combobox", { name: "Account for tool permissions" }).waitFor();
+      assert.ok((await permissions.innerText()).includes("Some actions changed"));
+      assert.ok(
+        (
+          await permissions
+            .getByRole("combobox", { name: "Tools that make changes permission" })
+            .innerText()
+        ).includes("Mixed"),
+      );
+      await permissions.getByRole("combobox", { name: "Account for tool permissions" }).click();
+      await page.getByRole("option", { name: "Second · second@example.test" }).click();
+      await page.waitForFunction(() =>
+        document
+          .querySelector('[aria-label="Account for tool permissions"]')
+          ?.textContent?.includes("Second"),
+      );
+      await permissions.getByRole("button", { name: "Tools that make changes" }).click();
+      const choice = permissions.getByRole("combobox", {
+        name: "Permission for Organize messages",
+        exact: true,
+      });
+      await choice.click();
+      await page.getByRole("option", { name: "Allow", exact: false }).click();
+      await permissions.getByText(/Couldn't save tool permissions/).waitFor();
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0]!.connectionId, "account-b");
+      assert.equal(writes[0]!.expectedRevision, "initial");
+      await permissions.getByRole("button", { name: "Retry" }).click();
+      await choice.waitFor();
+      await choice.click();
+      await page.getByRole("option", { name: "Allow", exact: false }).click();
+      await permissions.getByText("Permissions saved.", { exact: true }).waitFor();
+      assert.equal(writes[1]!.expectedRevision, "changed-elsewhere");
+      await choice.click();
+      await page.getByRole("option", { name: "Use default", exact: true }).click();
+      await permissions.getByText("Permissions saved.", { exact: true }).waitFor();
+      assert.equal(writes[2]!.permission, null);
+      if (width === 390) await page.evaluate(() => document.documentElement.classList.add("dark"));
+      const scan = await new AxeBuilder({ page })
+        .include('[aria-label="Tool permissions"]')
+        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+        .analyze();
+      assert.deepEqual(
+        scan.violations.filter((v) => v.impact === "serious" || v.impact === "critical"),
+        [],
+      );
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+        ),
+        true,
+      );
+      for (const choiceControl of await permissions.getByRole("combobox").all()) {
+        const bounds = await choiceControl.boundingBox();
+        assert.ok(
+          bounds && bounds.x >= 0 && bounds.x + bounds.width <= width - 16,
+          "Permission choices remain inside the page padding",
+        );
+      }
+      await page.screenshot({ path: `${output}/permissions-${width}.png`, fullPage: true });
+    } catch (error) {
+      await page.screenshot({ path: `${output}/permissions-failure-${width}.png`, fullPage: true });
+      await Bun.write(
+        `${output}/permissions-failure-${width}.json`,
+        JSON.stringify({
+          reads,
+          writes,
+          clientErrors,
+          text: await page.locator("body").innerText(),
+        }),
+      );
+      throw error;
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [390, 768, 1440]) {
+    test(`production tool review ${width}px ${theme}`, async () => {
+      const { toolReviewAction, toolReviewFields, toolReviewDetails } =
+        await import("@opengeni/contracts");
+      const { default: AxeBuilder } = await import("@axe-core/playwright");
+      const context = await browser.newContext({
+        viewport: { width, height: 950 },
+        colorScheme: theme,
+        reducedMotion: "reduce",
+        hasTouch: width === 390,
+      });
+      const page = await context.newPage();
+      const state = fixtures();
+      const approvalId = "synthetic-mail-action";
+      const args = {
+        messageIds: Array.from({ length: 600 }, (_, i) => `synthetic-${i + 1}`),
+        addLabelIds: ["TRASH", "ExampleLabel"],
+        removeLabelIds: ["INBOX"],
+      };
+      const hints = { kind: "gmail" as const, accountLabel: "Mail · mailbox@example.test" };
+      let decisions = 0;
+      const review = {
+        version: 1 as const,
+        id: approvalId,
+        actionDigest: "b".repeat(64),
+        revision: "1",
+        status: "pending" as const,
+        ...toolReviewAction("batch_modify_messages", args, hints),
+        ...toolReviewFields(args, hints),
+        accountLabel: hints.accountLabel,
+        reason: "Your permission setting for this action is Ask.",
+        createdAt: state.session.createdAt,
+        updatedAt: state.session.updatedAt,
+        availableActions: ["approve", "reject"],
+        detailsAvailable: true,
+      };
+      state.session.status = "requires_action";
+      state.session.activeTurnId = turnId;
+      for (const [type, payload] of [
+        ["turn.started", {}],
+        [
+          "agent.toolCall.created",
+          { id: approvalId, name: "mcp_example__batch_modify_messages", arguments: args },
+        ],
+        [
+          "session.requiresAction",
+          {
+            approvals: [
+              { id: approvalId, name: "mcp_example__batch_modify_messages", arguments: args },
+            ],
+          },
+        ],
+      ] as const)
+        state.events.push({
+          id: crypto.randomUUID(),
+          workspaceId,
+          sessionId,
+          turnId,
+          sequence: state.events.length + 1,
+          type,
+          payload,
+          occurredAt: state.session.createdAt,
+        });
+      state.session.lastSequence = state.events.length;
+      Object.values(state.gates).forEach((value) => value.release());
+      await installApi(page, state);
+      await page.route(
+        `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/tool-reviews/**`,
+        async (route) => {
+          const url = new URL(route.request().url());
+          await route.fulfill({
+            contentType: "application/json",
+            body: JSON.stringify(
+              url.pathname.endsWith("/details")
+                ? {
+                    version: 1,
+                    id: approvalId,
+                    actionDigest: review.actionDigest,
+                    ...toolReviewDetails(
+                      args,
+                      hints,
+                      url.searchParams.get("path") ?? "",
+                      Number(url.searchParams.get("offset") ?? 0),
+                    ),
+                  }
+                : review,
+            ),
+          });
+        },
+      );
+      await page.route(
+        `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
+        async (route) => {
+          if (route.request().method() !== "POST") return route.fallback();
+          const input = route.request().postDataJSON();
+          assert.equal(input.type, "user.approvalDecision");
+          assert.equal(input.payload.approvalId, approvalId);
+          decisions++;
+          const event = {
+            ...input,
+            id: crypto.randomUUID(),
+            workspaceId,
+            sessionId,
+            turnId,
+            sequence: state.events.length + 1,
+            occurredAt: new Date().toISOString(),
+          };
+          state.events.push(event);
+          state.session.lastSequence = state.events.length;
+          review.availableActions = [];
+          Object.assign(review, {
+            status: input.payload.decision === "approve" ? "approved" : "rejected",
+            revision: "2",
+          });
+          await route.fulfill({ contentType: "application/json", body: JSON.stringify(event) });
+        },
+      );
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      try {
+        await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        await page.evaluate(
+          (value) => document.documentElement.classList.toggle("dark", value === "dark"),
+          theme,
+        );
+        const surface = page.locator("[data-og-approval-surface]");
+        await surface.getByRole("heading", { name: "Move 600 messages to Trash" }).waitFor();
+        const verifyForcedColorsFocus = async (selector: string) => {
+          await page.emulateMedia({ forcedColors: "active" });
+          const heading = page.locator(selector).getByRole("heading");
+          await heading.focus();
+          assert.deepEqual(
+            await heading.evaluate((element) => {
+              const style = getComputedStyle(element);
+              return { style: style.outlineStyle, width: style.outlineWidth };
+            }),
+            { style: "solid", width: "2px" },
+          );
+          await page.emulateMedia({ forcedColors: "none" });
+        };
+        await verifyForcedColorsFocus("[data-og-approval-surface]");
+        assert.ok((await surface.innerText()).includes("ExampleLabel"));
+        assert.ok((await surface.innerText()).includes(hints.accountLabel));
+        assert.equal(await surface.locator("pre").count(), 0);
+        const scan = async (selector: string) => {
+          const report = await new AxeBuilder({ page })
+            .include(selector)
+            .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+            .analyze();
+          assert.deepEqual(
+            report.violations.filter(
+              (item) => item.impact === "serious" || item.impact === "critical",
+            ),
+            [],
+          );
+          assert.equal(
+            await page.evaluate(
+              () =>
+                document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+            ),
+            true,
+          );
+        };
+        await scan("[data-og-approval-surface]");
+        await page.screenshot({ path: `${output}/review-${width}-${theme}.png`, fullPage: true });
+        const open = surface.getByRole("button", { name: "View all 600 messages" });
+        await open.focus();
+        await page.keyboard.press("Enter");
+        const details = page.locator("[data-og-review-details]");
+        await details.getByText("synthetic-25", { exact: true }).waitFor();
+        await verifyForcedColorsFocus("[data-og-review-details]");
+        assert.equal(await details.getByText("synthetic-26", { exact: true }).count(), 0);
+        await details.getByRole("button", { name: "Next", exact: true }).click();
+        await details.getByText("synthetic-50", { exact: true }).waitFor();
+        await scan("[data-og-review-details]");
+        await details.getByRole("button", { name: "Back to review" }).click();
+        await surface.waitFor();
+        // The surface restores focus to the opener in the next animation frame,
+        // so wait for it instead of reading focus in the same frame as the render.
+        assert.equal(
+          await open.evaluate(
+            (element) =>
+              new Promise<boolean>((resolve) => {
+                const deadline = performance.now() + 5_000;
+                const check = () => {
+                  if (element === document.activeElement) resolve(true);
+                  else if (performance.now() > deadline) resolve(false);
+                  else requestAnimationFrame(check);
+                };
+                check();
+              }),
+          ),
+          true,
+        );
+        if (width === 768) {
+          await page.evaluate(() => {
+            document.documentElement.style.zoom = "2";
+          });
+          await scan("[data-og-approval-surface]");
+        }
+        await surface.getByRole("button", { name: "Move to Trash", exact: true }).click();
+        await surface.waitFor({ state: "hidden" });
+        assert.equal(decisions, 1);
+        assert.deepEqual(errors, []);
+        await page.reload();
+        await page.locator('[data-testid="session-timeline"]').waitFor();
+        assert.equal(await page.locator("[data-og-approval-surface]").count(), 0);
+        assert.equal(decisions, 1);
+      } finally {
+        await context.close();
+      }
+    }, 120_000);
+  }
 }

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionTurn } from "@opengeni/contracts";
-import { inputWaitReply } from "../src/activities/agent-turn/input-wait-reply";
+import {
+  INPUT_WAIT_REPLY_REFUSAL,
+  MAX_INPUT_WAIT_REPLY_REFUSALS,
+  inputWaitReply,
+  inputWaitReplyRefusal,
+} from "../src/activities/agent-turn/input-wait-reply";
 
 const status = "Two of the ten reviews are done; the rest are still running.";
 
@@ -101,5 +106,44 @@ describe("reply recorded when a turn ends waiting for input", () => {
       },
     });
     expect(read).toBe(false);
+  });
+});
+
+describe("a wait cannot end a person's turn without a visible reply", () => {
+  const refusal = async (turn: Turn, hasVisibleReply: boolean, refusalsSoFar = 0) =>
+    await inputWaitReplyRefusal({
+      turn,
+      refusalsSoFar,
+      hasVisibleReply: async () => hasVisibleReply,
+    });
+
+  test("a person's question with no reply yet is refused until the model answers", async () => {
+    for (const source of ["user", "api"] as const) {
+      expect(await refusal({ ...human, source }, false)).toBe(INPUT_WAIT_REPLY_REFUSAL);
+      expect(await refusal({ ...human, source }, true)).toBeNull();
+    }
+    expect(INPUT_WAIT_REPLY_REFUSAL).toContain("reasoning is not shown");
+  });
+
+  test("machine-started and agent-relayed turns may wait silently", async () => {
+    for (const source of ["goal", "system", "scheduled_task", "compaction"] as const) {
+      expect(await refusal({ ...human, source }, false)).toBeNull();
+    }
+    expect(
+      await refusal({ ...human, initiatorContext: { via: [agentHop] } } as Turn, false),
+    ).toBeNull();
+    expect(
+      await refusal(
+        { ...human, initiator: { kind: "service", subjectId: "scheduler" } } as Turn,
+        false,
+      ),
+    ).toBeNull();
+  });
+
+  test("refusal is bounded so a model that never answers still waits", async () => {
+    expect(await refusal(human, false, MAX_INPUT_WAIT_REPLY_REFUSALS - 1)).toBe(
+      INPUT_WAIT_REPLY_REFUSAL,
+    );
+    expect(await refusal(human, false, MAX_INPUT_WAIT_REPLY_REFUSALS)).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 //! The signed channel manifest — discovery + artifact selection + cohort gating.
 //!
-//! OpenGeni owns release truth via a tiny signed JSON manifest per channel
+//! Opengeni owns release truth via a tiny signed JSON manifest per channel
 //! (`$BASE/agent/{stable,beta}/manifest.json` + `.minisig`), NOT the raw GitHub
 //! API. The manifest is itself minisign-signed, so a compromised
 //! CDN can neither redirect to an attacker artifact nor roll the fleet backward.

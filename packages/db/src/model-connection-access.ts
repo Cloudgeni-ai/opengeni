@@ -1,11 +1,30 @@
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { rawRows, type Database } from "./database";
+import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
+import { SUBSCRIPTION_CORE_XAI_PROVIDER } from "./subscription-core-xai-adapter";
+import { subscriptionCoreProvider } from "./subscription-core-providers";
 import {
-  withRlsContext,
-  withWorkspaceSubjectRls,
-  setSubjectRlsContext,
-  rawRows,
-  type Database,
-} from "./database";
+  subscriptionCoreWakeReason,
+  type SubscriptionCoreWake,
+} from "./subscription-core/administration";
+import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
+import {
+  getSubscriptionCoreModelConnectionAccess,
+  ModelConnectionWorkspaceNotInOrganizationError,
+  readSubscriptionCoreModelConnectionAccess,
+  updateSubscriptionCoreModelConnectionAccess,
+  withModelConnectionAccessScope,
+  type ModelConnectionAccess,
+} from "./subscription-core/access-editor";
+import type { SubscriptionCoreAccess } from "./subscription-core/access";
+
+// The policy shape, its errors and the route scope are shared with the
+// provider-neutral core editor; the public names stay exported from here.
+export {
+  ModelConnectionAccessForbiddenError,
+  ModelConnectionWorkspaceNotInOrganizationError,
+  type ModelConnectionAccess,
+} from "./subscription-core/access-editor";
 
 export type ModelConnectionKind =
   | "codex"
@@ -13,13 +32,8 @@ export type ModelConnectionKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
-export type ModelConnectionAccess = {
-  allowedModels: string[] | null;
-  allowedWorkspaces: string[] | null;
-  allowPersonalWorkspaces: boolean;
-  version: number;
-};
+  | "claude_subscription"
+  | "opper";
 export type ModelConnectionTarget = {
   accountId: string;
   workspaceId: string | null;
@@ -51,25 +65,8 @@ export function assignedConnectionDefault(
 }
 
 function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition: SQL } {
-  if (
-    target.kind === "codex" ||
-    target.kind === "supergrok" ||
-    target.kind === "claude_subscription"
-  )
-    return {
-      table: sql.identifier(
-        target.kind === "codex"
-          ? "codex_subscription_credentials"
-          : target.kind === "supergrok"
-            ? "xai_subscription_credentials"
-            : "claude_subscription_credentials",
-      ),
-      condition: sql`id = ${target.connectionId}::uuid AND account_id = ${target.accountId}::uuid AND ${
-        target.workspaceId === null
-          ? sql`authority_scope = 'organization'`
-          : sql`workspace_id = ${target.workspaceId}::uuid AND authority_scope <> 'organization'`
-      }`,
-    };
+  if (subscriptionCoreProviderOfKind(target.kind))
+    throw new Error("Subscription access policies use the shared core");
   if (target.workspaceId === null)
     return {
       table: sql.identifier("organization_model_provider_connections"),
@@ -81,35 +78,18 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
     condition: sql`account_id = ${target.accountId}::uuid AND workspace_id = ${target.workspaceId}::uuid
       AND id = ${target.connectionId}::uuid AND subject_id IS NULL AND kind = 'api_key' AND status = 'active'
       AND metadata->>'credentialRole' = ${target.kind === "vercel_gateway" ? "vercel_ai_gateway" : target.kind}
-      ${target.kind === "anthropic" ? sql`AND lower(provider_domain) = 'api.anthropic.com'` : sql``}`,
+      ${target.kind === "anthropic" ? sql`AND lower(provider_domain) = 'api.anthropic.com'` : sql``}
+      ${target.kind === "opper" ? sql`AND lower(provider_domain) = 'api.opper.ai'` : sql``}`,
   };
-}
-
-async function scoped<T>(
-  db: Database,
-  target: ModelConnectionTarget,
-  use: (db: Database) => Promise<T>,
-) {
-  if (target.workspaceId !== null)
-    return await withWorkspaceSubjectRls(db, target.workspaceId, target.subjectId, use);
-  return await withRlsContext(
-    db,
-    { accountId: target.accountId, workspaceId: null },
-    async (tx) => {
-      await setSubjectRlsContext(tx, target.subjectId);
-      await tx.execute(
-        sql`select get_organization_administration_overview(${target.accountId}::uuid, ${target.subjectId})`,
-      );
-      return await use(tx);
-    },
-  );
 }
 
 export async function getModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
 ): Promise<ModelConnectionAccess | null> {
-  return await scoped(db, target, async (tx) => {
+  if (subscriptionCoreProviderOfKind(target.kind))
+    return await getSubscriptionCoreProviderModelConnectionAccess(db, target);
+  return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     const [row] = await rawRows<ModelConnectionAccess>(
       tx,
@@ -122,12 +102,114 @@ export async function getModelConnectionAccess(
   });
 }
 
+/**
+ * The core provider of a connection kind whose access policy lives on the
+ * shared subscription core once that provider cut over; null for the kinds
+ * that never move (API-key connections) or have not moved yet.
+ */
+function subscriptionCoreProviderOfKind(kind: ModelConnectionKind): string | null {
+  if (kind === "codex") return SUBSCRIPTION_CORE_CODEX_PROVIDER;
+  if (kind === "supergrok") return SUBSCRIPTION_CORE_XAI_PROVIDER;
+  if (kind === "claude_subscription") return SUBSCRIPTION_CORE_CLAUDE_PROVIDER;
+  return null;
+}
+
+/**
+ * The core wake of an access change to a connection of this kind (a wider
+ * scope or model list can make waiting work placeable), with the provider
+ * and the display name the wake reports, all from the provider's binding;
+ * null for a kind whose provider is not on the core.
+ */
+export function subscriptionCoreAccessChangeWake(
+  kind: ModelConnectionKind,
+  accountId: string,
+): { provider: string; displayName: string; wake: SubscriptionCoreWake } | null {
+  const providerId = subscriptionCoreProviderOfKind(kind);
+  if (!providerId) return null;
+  const binding = subscriptionCoreProvider(providerId);
+  return {
+    provider: binding.adapter.provider,
+    displayName: binding.adapter.displayName,
+    wake: { accountId, reason: subscriptionCoreWakeReason(binding, "access_changed") },
+  };
+}
+
+/**
+ * A shared subscription connection's access on the shared subscription core,
+ * with the workspaces that use it as their own and its delegated manager, for
+ * a kind whose provider is on the core (the caller checked its route is
+ * `core`).
+ */
+export async function readSubscriptionCoreProviderModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<SubscriptionCoreAccess | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not read from the core");
+  return await readSubscriptionCoreModelConnectionAccess(db, provider, target);
+}
+
+/** A shared subscription connection's access policy on the core (see the reader). */
+export async function getSubscriptionCoreProviderModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<ModelConnectionAccess | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not read from the core");
+  return await getSubscriptionCoreModelConnectionAccess(db, provider, target);
+}
+
+/** Save what a shared subscription connection serves on the core (see the reader). */
+export async function updateSubscriptionCoreProviderModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+  policy: ModelConnectionAccess,
+): Promise<ModelConnectionAccess | null> {
+  const provider = subscriptionCoreProviderOfKind(target.kind);
+  if (!provider) throw new Error("This connection kind is not written to the core");
+  return await updateSubscriptionCoreModelConnectionAccess(db, provider, target, policy);
+}
+
+/**
+ * A shared Codex connection's access on the shared subscription core, with
+ * the workspaces that use it as their own and its delegated manager.
+ */
+export async function readSubscriptionCoreCodexModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<SubscriptionCoreAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
+  return await readSubscriptionCoreProviderModelConnectionAccess(db, target);
+}
+
+/** A shared Codex connection's access policy on the shared subscription core. */
+export async function getSubscriptionCoreCodexModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+): Promise<ModelConnectionAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are read from the core");
+  return await getSubscriptionCoreProviderModelConnectionAccess(db, target);
+}
+
+/** Save what a shared Codex connection serves on the core. */
+export async function updateSubscriptionCoreCodexModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+  policy: ModelConnectionAccess,
+): Promise<ModelConnectionAccess | null> {
+  if (target.kind !== "codex") throw new Error("Only Codex connections are written to the core");
+  return await updateSubscriptionCoreProviderModelConnectionAccess(db, target, policy);
+}
+
 export async function updateModelConnectionAccess(
   db: Database,
   target: ModelConnectionTarget,
   policy: ModelConnectionAccess,
 ): Promise<ModelConnectionAccess | null> {
-  return await scoped(db, target, async (tx) => {
+  if (subscriptionCoreProviderOfKind(target.kind)) return null;
+  if (policy.allowedPeople != null)
+    throw new Error("Only accounts on the shared subscription core can be limited to people");
+  return await withModelConnectionAccessScope(db, target, async (tx) => {
     const { table, condition } = relation(target);
     if (target.workspaceId !== null && policy.allowedWorkspaces !== null)
       throw new Error("Workspace connections cannot assign other workspaces");
@@ -138,7 +220,7 @@ export async function updateModelConnectionAccess(
       );
       const ids = new Set(allowed.map((row) => row.workspace_id));
       if (policy.allowedWorkspaces.some((id) => !ids.has(id)))
-        throw new Error("A selected workspace is not in this organization");
+        throw new ModelConnectionWorkspaceNotInOrganizationError();
     }
     const [row] = await rawRows<ModelConnectionAccess>(
       tx,

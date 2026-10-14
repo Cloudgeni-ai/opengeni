@@ -316,13 +316,19 @@ export function createCodexRealtimeV3Bridge(
       if (closed || fatal) break;
 
       for (const entry of result.outbound) {
-        // This is OpenGeni's durable browser-delivery acknowledgment. The
+        // This is Opengeni's durable browser-delivery acknowledgment. The
         // provider send below remains at-least-once because pinned V3 exposes
         // no provider receipt and providerAckSequences is never populated.
         if (entry.clientAckedAt === null && !clientReceivedSequences.has(entry.sequence)) {
           clientReceivedSequences.add(entry.sequence);
           clientAckThroughSequence = Math.max(clientAckThroughSequence ?? 0, entry.sequence);
         }
+      }
+      // Persist final inbound fragments even after the provider starts closing.
+      // Pending outbound context remains replayable on the next connection.
+      if (options.events.readyState !== "open") {
+        publish();
+        continue;
       }
       for (let index = 0; index < result.outbound.length;) {
         const entry = result.outbound[index]!;
@@ -497,7 +503,7 @@ export function createCodexRealtimeV3Bridge(
       }
     } else if (event.type === "output_audio.delta") {
       speaking = true;
-    } else if (event.type === "turn.done") {
+    } else if (event.type === "turn.done" || event.type === "transcript.segment") {
       speaking = false;
       if (event.transcript.length > 0 && !finalizedTurnIds.has(event.turnId)) {
         const coveredByDelegationItemId =
@@ -570,7 +576,7 @@ export function createCodexRealtimeV3Bridge(
 
 function finalTranscript(
   randomUUID: () => string,
-  event: Extract<CodexRealtimeV3Event, { type: "turn.done" }>,
+  event: Extract<CodexRealtimeV3Event, { type: "turn.done" | "transcript.segment" }>,
   coveredByDelegationItemId: string | null,
   modelContext: string | undefined,
 ): SessionRealtimeInboundEntry {
@@ -581,6 +587,9 @@ function finalTranscript(
     text: event.transcript,
     payload: {
       turnId: event.turnId,
+      ...(event.type === "transcript.segment"
+        ? { transcriptSource: "provider_fragments", grouping: "application_segment" }
+        : {}),
       ...(coveredByDelegationItemId ? { coveredByDelegationItemId } : {}),
     },
     ...(modelContext ? { modelContext } : {}),

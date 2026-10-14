@@ -198,7 +198,7 @@ function mutationError(outcomeUnknown: boolean): OpenGeniApiError {
     retryable: outcomeUnknown,
     outcomeUnknown,
     displayMessage: outcomeUnknown
-      ? "OpenGeni is temporarily unavailable — retry."
+      ? "Opengeni is temporarily unavailable — retry."
       : "The command was rejected.",
   });
 }

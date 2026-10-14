@@ -3,6 +3,7 @@ import { getOrCreateTrace, OpenAIChatCompletionsModel, OpenAIResponsesModel } fr
 import type { ModelRequest } from "@openai/agents";
 import { BadRequestError } from "openai";
 import {
+  markModelPreparationTransportStarted,
   markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,
   recordModelTransportStarted,
@@ -129,6 +130,43 @@ describe("model preparation diagnostics", () => {
           phase === "mcp_tools_before_input_filter",
       ),
     ).toBe(false);
+  });
+
+  test("does not report a runner gap for an MCP snapshot taken after the first model request", () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () => {
+        markModelPreparationTransportStarted();
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+      },
+    );
+    expect(measurements.map(({ phase }) => phase)).toEqual(["mcp_tools_snapshot"]);
+  });
+
+  test("still reports the runner gap once when the snapshot precedes the first model request", () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () => {
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+        markModelPreparationTransportStarted();
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+      },
+    );
+    expect(measurements.filter(({ phase }) => phase === "runner_before_mcp_tools")).toHaveLength(1);
   });
 
   test("manifest inventory remains fail-open when iteration throws", () => {

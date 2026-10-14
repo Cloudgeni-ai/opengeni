@@ -39,7 +39,12 @@ async function fixture() {
     await symlink("synthetic-host-"+browser.pid,${JSON.stringify(join(profileDirectory, "SingletonLock"))});
     console.log(JSON.stringify({browserPid:browser.pid}));setInterval(()=>{},60000);`;
   await writeFile(script, daemonScript, { mode: 0o600 });
+  // The synthetic launcher stands in for agent-browser's native daemon, whose
+  // browser outlives it. `bun test --no-orphans` (CI) exports this flag to nested
+  // Bun processes, which would take the synthetic browser down with its launcher.
+  const { BUN_FEATURE_FLAG_NO_ORPHANS: _noOrphans, ...daemonEnv } = process.env;
   const daemon = Bun.spawn([process.execPath, "--no-env-file", script], {
+    env: daemonEnv,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -211,13 +216,6 @@ test.skipIf(!native)(
     try {
       const receipt = (await f.attest())!;
       await expect(
-        AgentBrowserJsonRunner.create({
-          ...f.options,
-          headed: true,
-          recoverOwnedProcess: receipt,
-        }),
-      ).rejects.toThrow("lineage");
-      await expect(
         f.reattach({ ...receipt, birth: "synthetic-reused-browser-pid" }),
       ).rejects.toThrow("birth");
       const extraFile = join(f.runDirectory, "other.pid");
@@ -240,6 +238,81 @@ test.skipIf(!native)(
       await f.close();
     }
   },
+);
+
+test.skipIf(!native)(
+  "a headed browser from an earlier controller release is adopted with its exact launcher",
+  async () => {
+    const f = await fixture();
+    try {
+      const receipt = (await f.attest())!;
+      const otherRelease = await AgentBrowserJsonRunner.create({
+        ...f.options,
+        sessionName: "replacement",
+        headed: true,
+        binary: { ...f.options.binary, path: "/bin/sh", version: "0.33.2" as const },
+        recoverOwnedProcess: receipt,
+      });
+      expect(await otherRelease.daemonPid()).toBe(f.daemon.pid);
+      expect(await otherRelease.run<{ cdpUrl: string }>(["get", "cdp-url"])).toEqual({
+        cdpUrl: f.endpoint,
+      });
+      await otherRelease.terminate();
+      await f.daemon.exited;
+      expect(() => process.kill(f.browserPid, 0)).toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test.skipIf(!native)(
+  "a proven browser whose launcher was killed is adopted and retired on its own",
+  async () => {
+    const f = await fixture();
+    try {
+      const receipt = (await f.attest())!;
+      // A service stop kills the launcher but not the browser; its pid file stays behind.
+      f.daemon.kill("SIGKILL");
+      await f.daemon.exited;
+      expect(await inspectOwnedManagedBrowserProcess(receipt)).toBe("live");
+      const replacement = await f.reattach(receipt);
+      expect(await replacement.daemonPid()).toBeNull();
+      expect(await replacement.run<{ cdpUrl: string }>(["get", "cdp-url"])).toEqual({
+        cdpUrl: f.endpoint,
+      });
+      const bystander = f.otherProcess();
+      await expect(replacement.terminate(bystander.pid)).rejects.toThrow("lineage");
+      expect(() => process.kill(f.browserPid, 0)).not.toThrow();
+      await replacement.terminate();
+      expect(() => process.kill(f.browserPid, 0)).toThrow();
+      expect(() => process.kill(bystander.pid, 0)).not.toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
+);
+
+test.skipIf(!native)(
+  "a killed launcher's pid reused by an unrelated process refuses adoption",
+  async () => {
+    const f = await fixture();
+    try {
+      const receipt = (await f.attest())!;
+      f.daemon.kill("SIGKILL");
+      await f.daemon.exited;
+      const reused = f.otherProcess();
+      await writeFile(f.pidFile, String(reused.pid), { mode: 0o600 });
+      await expect(f.reattach(receipt)).rejects.toThrow("lineage");
+      expect(() => process.kill(f.browserPid, 0)).not.toThrow();
+      expect(() => process.kill(reused.pid, 0)).not.toThrow();
+    } finally {
+      await f.close();
+    }
+  },
+  15_000,
 );
 
 test.skipIf(!native)(

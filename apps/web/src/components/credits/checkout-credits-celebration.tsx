@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { waitForCheckoutCredits, type CreditCheckoutClient } from "@/lib/credit-checkout";
 import { formatCreditAmount } from "@/lib/onboarding-use-case";
+import { notifyCreditBalanceChanged } from "@/lib/credit-balance-events";
 
 /** "You got $100 in free credits" for a coupon, "You added $25 in credits" for a purchase. */
 export function checkoutCreditsHeading(status: Pick<BillingCheckoutStatus, "credit">): string {
@@ -47,8 +48,10 @@ export function CheckoutCreditsCelebration({
     toast.loading("Adding your credits…", { id: toastId });
     void waitForCheckoutCredits(client, { accountId, checkoutSessionId, signal: controller.signal })
       .then((status) => {
+        if (controller.signal.aborted) return;
         toast.dismiss(toastId);
         if (status.credit.state === "granted") {
+          notifyCreditBalanceChanged(accountId);
           setGranted(status);
           setOpen(true);
         } else {
@@ -93,9 +96,7 @@ export function CreditsCelebrationDialog({
           />
           <DialogHeader>
             <DialogTitle>{checkoutCreditsHeading(status)}</DialogTitle>
-            <DialogDescription>
-              They're ready to use. New chats on Opengeni credits draw from this balance.
-            </DialogDescription>
+            <DialogDescription>Ready to use. Pick a model to start chatting.</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button type="button" onClick={() => onOpenChange(false)}>

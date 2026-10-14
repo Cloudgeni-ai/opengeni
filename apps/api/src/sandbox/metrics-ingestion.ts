@@ -38,6 +38,8 @@ import {
   clearEnrollmentWentOffline,
   disconnectAttachedBrowserDevices,
   advanceEnrollmentAgentUpdate,
+  enrollmentMacPermissionCapabilities,
+  enrollmentMacPermissions,
   getEnrollment,
   getLiveEnrollmentConnection,
   ingestMachineMetricsSample,
@@ -50,27 +52,34 @@ import {
   setEnrollmentOpStreamState,
   type AppendEventInput,
   type Database,
+  type EnrollmentMacPermissions,
   type MachineMetricsSample,
 } from "@opengeni/db";
 import {
+  AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndContract,
   AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContract,
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContractValue,
+  type AttachedBrowserConnectionEnd as AttachedBrowserConnectionEndValue,
 } from "@opengeni/contracts";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { normalizeConnectedMachineWorkspaceRoot } from "@opengeni/runtime/sandbox";
+import type { AutomaticAgentUpdater } from "./agent-update";
 import {
   AgentEvent,
   AgentUpdateStage,
   Arch,
+  AttachedBrowserConnectionEndReason as WireConnectionEndReason,
   GoingOfflineReason,
   Hello,
   Os,
   goingOfflineReasonToJSON,
+  type AttachedBrowserConnectionEnd as WireAttachedBrowserConnectionEnd,
   type AttachedBrowserInventorySnapshot as WireAttachedBrowserInventorySnapshot,
   type MetricsSample,
 } from "@opengeni/agent-proto";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
+import { reconcileScreenControlOnHello } from "./screen-control";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -314,7 +323,51 @@ export function wireAttachedBrowserInventoryToContract(
       tabCount: safeWireInteger(device.tabCount, "attached browser tab count"),
       capabilities: device.capabilities,
     })),
+    connectionEnds: (wire.connectionEnds ?? []).flatMap(wireConnectionEndToContract),
   });
+}
+
+const WIRE_CONNECTION_END_REASONS = new Map<
+  WireConnectionEndReason,
+  AttachedBrowserConnectionEndValue["reason"]
+>([
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_CLOSED_PORT,
+    "browser_closed_port",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_MESSAGE_INVALID,
+    "browser_message_invalid",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_BROWSER_OUTPUT_FAILED,
+    "browser_output_failed",
+  ],
+  [
+    WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_NATIVE_HOST_LOST,
+    "native_host_lost",
+  ],
+  [WireConnectionEndReason.ATTACHED_BROWSER_CONNECTION_END_REASON_AGENT_REJECTED, "agent_rejected"],
+]);
+
+/** Connection ends are diagnostics. One the contract cannot hold (a future
+ *  reason, or the generation of a hello the bridge rejected as malformed) is
+ *  dropped instead of rejecting the authoritative device inventory. */
+function wireConnectionEndToContract(
+  wire: WireAttachedBrowserConnectionEnd,
+): AttachedBrowserConnectionEndValue[] {
+  const reason = WIRE_CONNECTION_END_REASONS.get(wire.reason);
+  const endedAtMs = Number(wire.endedAtUnixMs);
+  if (!reason || !Number.isSafeInteger(endedAtMs) || endedAtMs <= 0) return [];
+  const parsed = AttachedBrowserConnectionEndContract.safeParse({
+    deviceId: wire.deviceId,
+    connectionGeneration: wire.connectionGeneration,
+    reason,
+    detail: wire.detail.slice(0, 512) || null,
+    endedAt: new Date(endedAtMs).toISOString(),
+    connectedMs: Math.min(Number(wire.connectedMs) || 0, Number.MAX_SAFE_INTEGER),
+  });
+  return parsed.success ? [parsed.data] : [];
 }
 
 function safeWireInteger(value: string | number, label: string): number {
@@ -452,6 +505,7 @@ export async function handleAgentEventPayload(
   payload: Uint8Array,
   subject: string,
   bus?: EventBus,
+  agentUpdates?: AutomaticAgentUpdater | null,
 ): Promise<void> {
   const ids = parseAgentEventSubject(subject);
   if (!ids) {
@@ -619,6 +673,9 @@ export async function handleAgentEventPayload(
     });
     return;
   }
+  // A live machine behind its promoted build is asked to update; the decision
+  // reads only this enrollment, and a request never blocks heartbeat ingestion.
+  agentUpdates?.consider(enrollment);
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {
@@ -638,12 +695,18 @@ export async function handleAgentEventPayload(
       const status = heartbeat.desktopStatus;
       const available = status.available && !status.unavailableReason;
       const reason = status.unavailableReason || null;
+      const macPermissions = status.macPermissions;
+      const stored = enrollmentMacPermissions(enrollment.agentCapabilities);
       // The heartbeat already read the exact enrollment. Steady state adds no
       // extra query; the change path re-reads and fences its eventual write.
       if (
         enrollment.hasDisplay !== available ||
         (enrollment.desktopUnavailableReason ?? null) !== reason ||
-        enrollment.agentCapabilities?.desktop !== available
+        enrollment.agentCapabilities?.desktop !== available ||
+        (macPermissions !== undefined &&
+          (stored?.screenRecording !== macPermissions.screenRecording ||
+            stored?.accessibility !== macPermissions.accessibility ||
+            stored?.inputMonitoring !== macPermissions.inputMonitoring))
       ) {
         await refreshEnrollmentDisplay(db, {
           workspaceId: ids.workspaceId,
@@ -651,6 +714,7 @@ export async function handleAgentEventPayload(
           hasDisplay: available,
           desktopUnavailableReason: reason,
           runtimeDesktop: available,
+          ...(macPermissions ? { macPermissions } : {}),
           connectionInstanceId: ids.connectionInstanceId,
         });
       }
@@ -687,10 +751,18 @@ export function startMetricsIngestion(deps: {
   db: Database;
   bus: EventBus;
   observability?: Observability;
+  agentUpdates?: AutomaticAgentUpdater | null;
 }): () => void {
   const scheduler = createAgentEventIngestionScheduler(
     (payload, subject) =>
-      handleAgentEventPayload(deps.db, deps.observability, payload, subject, deps.bus),
+      handleAgentEventPayload(
+        deps.db,
+        deps.observability,
+        payload,
+        subject,
+        deps.bus,
+        deps.agentUpdates,
+      ),
     {
       onHeartbeatCoalesced: () =>
         deps.observability?.incrementCounter({
@@ -770,6 +842,9 @@ export function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> 
     operationResourcePolicy: caps.operationResourcePolicy === true,
     operationCpuQuota: caps.operationCpuQuota === true,
     transactionalFsWrite: caps.transactionalFsWrite === true,
+    credentialRenew: caps.credentialRenew === true,
+    screenControl: caps.consentedScreenControl === true,
+    ...(caps.macPermissions ? enrollmentMacPermissionCapabilities(caps.macPermissions) : {}),
   };
 }
 
@@ -810,6 +885,7 @@ export async function refreshEnrollmentDisplay(
     hasDisplay: boolean;
     desktopUnavailableReason?: string | null;
     runtimeDesktop?: boolean;
+    macPermissions?: EnrollmentMacPermissions;
     connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
@@ -822,7 +898,14 @@ export async function refreshEnrollmentDisplay(
     enrollment.hasDisplay === input.hasDisplay &&
     (enrollment.desktopUnavailableReason ?? null) === desktopUnavailableReason &&
     (input.runtimeDesktop === undefined ||
-      enrollment.agentCapabilities?.desktop === input.runtimeDesktop)
+      enrollment.agentCapabilities?.desktop === input.runtimeDesktop) &&
+    (input.macPermissions === undefined ||
+      JSON.stringify(enrollmentMacPermissions(enrollment.agentCapabilities)) ===
+        JSON.stringify({
+          screenRecording: input.macPermissions.screenRecording,
+          accessibility: input.macPermissions.accessibility,
+          inputMonitoring: input.macPermissions.inputMonitoring,
+        }))
   ) {
     // Both fields unchanged — do not even issue the UPDATE (no churn on a
     // steady-state Hello).
@@ -835,6 +918,7 @@ export async function refreshEnrollmentDisplay(
     hasDisplay: input.hasDisplay,
     desktopUnavailableReason,
     ...(input.runtimeDesktop !== undefined ? { runtimeDesktop: input.runtimeDesktop } : {}),
+    ...(input.macPermissions ? { macPermissions: input.macPermissions } : {}),
     ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
   });
 }
@@ -958,6 +1042,21 @@ export async function handleHelloPayload(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  // Screen control allowed while this machine was offline (or before its agent
+  // could renew on request) applies now. Detached: it waits for the agent to
+  // subscribe and must not hold up Hello ingestion.
+  void reconcileScreenControlOnHello(
+    { bus, observability },
+    {
+      authority,
+      hello,
+      target: {
+        workspaceId: ids.workspaceId,
+        enrollmentId: ids.agentId,
+        connectionInstanceId: ids.connectionInstanceId,
+      },
+    },
+  );
   // A reconnect Hello re-announces the machine, so any pending clean going-offline
   // marker no longer holds — clear it so the liveness derivation stops reading the
   // machine offline. Best-effort + fail-soft, and change-guarded in the DB (a

@@ -2,9 +2,11 @@ import type {
   AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
+  HumanInputSecretAnswerResult,
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
+  Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
@@ -20,6 +22,13 @@ import type {
    row component consume — the SINGLE SOURCE OF TRUTH used by both the live app
    and the component demo.
    -------------------------------------------------------------------------- */
+
+/** The person who sent a message: their subject and the label frozen with it. */
+export type MessageSender = {
+  subjectId: string;
+  /** What the deployment knew them as when the message was accepted, such as an email. */
+  label: string | null;
+};
 
 export type TimelineAnnotationSourceDescriptor = Omit<
   TimelineAnnotationSource,
@@ -50,6 +59,11 @@ export type UserMessageItem = {
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */
   tools: ToolRef[];
+  /**
+   * The person who sent this message, as frozen when it was accepted. Absent
+   * for messages from agents, services and schedules, and for older messages.
+   */
+  sender?: MessageSender | undefined;
   occurredAt: string;
   /** Local-only delivery projection; absent for authoritative durable events. */
   delivery?:
@@ -68,6 +82,8 @@ export type HumanInputAnswerSummary = {
   label: string;
   prompt: string;
   values: string[];
+  /** A secret question's saved reference (never a value). */
+  secret?: HumanInputSecretAnswerResult | undefined;
 };
 
 /**
@@ -173,6 +189,12 @@ export type WorkerItem = {
   action: "spawn" | "message";
   /** The worker's initial message / the message sent to it, when parseable. */
   prompt: string | null;
+  /**
+   * The title the manager gave a spawned worker (`session_create` `title`),
+   * when present. Hosts can supply a live title for any session id; this is
+   * the timeline's own fallback so a spawn names its agent even offline.
+   */
+  title?: string | null | undefined;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
   /** Bounded structured failure retained from session_create/session_send_message. */
@@ -223,6 +245,10 @@ export type StartupPhaseItem = {
   id: string;
   turnId: string | null;
   phase: StartupPhase;
+  /** Live presentation only: accepted work waiting for its first worker claim. */
+  dispatchWait?: Session["dispatchWait"];
+  /** Renderer-only elapsed anchor when acceptance preceded recorded startup spans. */
+  loadingStartedAt?: string | undefined;
   status: "running" | "complete" | "failed" | "cancelled";
   startedAt: string;
   completedAt: string | null;
@@ -356,6 +382,11 @@ export type SessionStatusItem = {
   kind: "session-status";
   id: string;
   status: SessionStatus;
+  /**
+   * The runtime refused to start the next turn (an admission block). Nothing
+   * is asked of the person, so it reads as stuck, not "waiting on you".
+   */
+  blocked?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;
@@ -384,6 +415,13 @@ export type NoticeItem = {
   text: string;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
+  /**
+   * A model-capacity wait (no subscription capacity for the turn). Live, the
+   * turn's work row carries it as `label` with `detail` as one quiet secondary
+   * line; once `resolvedAt` is set it leaves no row, and its span is excluded
+   * from the turn's worked duration.
+   */
+  capacityWait?: { turnId: string | null; label: string; detail: string };
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
   /**
@@ -403,7 +441,20 @@ export type NoticeItem = {
    * (customizable with `renderAllowanceExhausted` / `allowanceExhaustedLabels`).
    */
   allowance?: AllowanceExhaustedRefusal;
+  /**
+   * The task's own usage limit stopped further model requests: a calm,
+   * non-failure stop. Amounts are null when the marker carried none.
+   * `MessageTimeline` renders it as a "Usage limit reached" row.
+   */
+  sessionUsageLimit?: SessionUsageLimitStop;
   occurredAt: string;
+};
+
+/** What a timeline row knows about a task usage-limit stop. */
+export type SessionUsageLimitStop = {
+  rootSessionId: string | null;
+  limitMicros: number | null;
+  usedMicros: number | null;
 };
 
 /**
@@ -424,6 +475,11 @@ export type ContextCompactionItem = {
    * definitively rejected the compaction request. Content-free identifiers.
    */
   providerRejection: ContextCompactionProviderRejection | null;
+  /**
+   * The same turn's recorded failure text, when that turn failed because this
+   * compaction did. Diagnostics shown behind Details only.
+   */
+  failureDetail?: string;
   /** Provider implementation id for debug disclosure only. */
   implementation: string | null;
   occurredAt: string;
@@ -498,7 +554,7 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
-  /** Host-owned bindings must never be routed into OpenGeni's native reconnect flow. */
+  /** Host-owned bindings must never be routed into Opengeni's native reconnect flow. */
   authoritySource?: ToolAuthNeededPayload["authoritySource"] | null | undefined;
   reason: ToolAuthNeededPayload["reason"] | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
@@ -584,8 +640,30 @@ export type TimelineGroup =
         startedAt: string;
         endedAt?: string;
         responseStartedAt?: string;
-        waiting?: { label: string; since: string };
+        /**
+         * A live wait. `untimed` marks a capacity wait, whose row shows no
+         * running clock: that span is not work and ends on a quota reset or
+         * a person's choice, not after a predictable time.
+         */
+        waiting?: { label: string; since: string; detail?: string; untimed?: true };
+        /**
+         * Settled capacity-wait time inside this work span. It is not work:
+         * the worked duration and the live working clock exclude it.
+         */
+        pausedMs?: number;
         details: TimelineGroup[];
+        /**
+         * While the turn is live, its progress notes stay readable above the
+         * work row and are also listed in `details`. These are their item ids,
+         * so an expanded work disclosure can fold the outside copies away.
+         */
+        liveNoteIds?: string[];
+        /**
+         * Set when this row folds several quiet wake-work-wait cycles (routine
+         * input, work without a visible reply, a finished wait) into one row.
+         * `summary` is the latest wait reason, shown under the collapsed row.
+         */
+        cycles?: { count: number; summary?: string };
       };
     }
   | {

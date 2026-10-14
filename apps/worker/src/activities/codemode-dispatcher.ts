@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { bindMcpTelemetry, measureMcpPhase, withMcpCallIdentity } from "@opengeni/observability";
+import {
+  bindMcpTelemetry,
+  measureMcpPhase,
+  withMcpCallIdentity,
+  recordToolApproval,
+} from "@opengeni/observability";
 import {
   AttemptToolApprovalRequiredError,
   AttemptToolCatalogStaleError,
@@ -15,13 +20,19 @@ import {
   CODEMODE_CLAIM_LEASE_MS,
   CODEMODE_CLAIM_HEARTBEAT_MS,
   CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
-  type CodemodeOperation,
+  CodemodeOperation,
+  isSecretReferenceError,
   type SessionEvent,
   type ToolDisplayMetadata,
   type ToolFamily,
 } from "@opengeni/contracts";
 import {
   cancelQueuedCodemodeOperationsForAttempt,
+  waitForCodemodeApproval,
+  bindCodemodePreparation,
+  listTurnCodemodeApprovals,
+  adoptCodemodeApprovalWithOutput,
+  readTurnCodemodeOperation,
   claimCodemodeOperation,
   failCodemodeOperation,
   getSessionEventByClientEventId,
@@ -51,6 +62,12 @@ export type CodemodeDispatcherTimings = {
   claimHeartbeatMs?: number;
 };
 
+const RESUMABLE_STATES: readonly CodemodeOperation["state"][] = [
+  "waiting_for_approval",
+  "queued",
+  "running",
+];
+
 /**
  * Owns the only Codemode execution edge for one exact attempt. NATS carries a
  * wake-up only; the durable row is claimed before any side effect and the call
@@ -76,6 +93,7 @@ export class CodemodeAttemptDispatcher {
     private readonly toolDisplayMetadata?: (modelName: string) => ToolDisplayMetadata | undefined,
     /** Content-free analytics family for a catalog entry; event enrichment only. */
     private readonly toolFamily?: (entry: AttemptToolCatalogEntry) => ToolFamily | null,
+    private readonly approvalWait?: { beginWait(): (accepted: boolean) => void },
   ) {
     if (
       environment.catalog.accountId !== scope.accountId ||
@@ -179,6 +197,126 @@ export class CodemodeAttemptDispatcher {
     );
   }
 
+  /**
+   * Join-on-use recovery before the first model request. The journal read needs
+   * no tool environment, so a turn with nothing unfinished returns at once and
+   * never waits on lazy MCP preparation. Only a stored waiting/queued/running
+   * operation awaits the prepared dispatcher to adopt and execute it.
+   */
+  static async resumeApproved(
+    db: Database,
+    scope: CodemodeDispatcherScope,
+    callerSubjectId: string,
+    decisionOperationId: string | undefined,
+    prepared: () => Promise<CodemodeAttemptDispatcher | null>,
+  ): Promise<CodemodeOperation[]> {
+    const operations = await listTurnCodemodeApprovals(db, scope);
+    if (
+      decisionOperationId &&
+      // Model-tool approval IDs are opaque strings. Only programmatic UUIDs
+      // can address the Codemode operation journal.
+      CodemodeOperation.shape.operationId.safeParse(decisionOperationId).success &&
+      !operations.some((operation) => operation.operationId === decisionOperationId)
+    ) {
+      const decided = await readTurnCodemodeOperation(db, {
+        ...scope,
+        callerSubjectId,
+        operationId: decisionOperationId,
+      });
+      if (decided) operations.push(decided);
+    }
+    if (!operations.some((operation) => RESUMABLE_STATES.includes(operation.state))) {
+      return operations;
+    }
+    return (await (await prepared())?.resumeOperations(operations, callerSubjectId)) ?? [];
+  }
+
+  async resumeApproved(
+    callerSubjectId: string,
+    decisionOperationId?: string,
+  ): Promise<CodemodeOperation[]> {
+    return await CodemodeAttemptDispatcher.resumeApproved(
+      this.db,
+      this.scope,
+      callerSubjectId,
+      decisionOperationId,
+      async () => this,
+    );
+  }
+
+  private async resumeOperations(
+    operations: CodemodeOperation[],
+    callerSubjectId: string,
+  ): Promise<CodemodeOperation[]> {
+    for (const operation of operations) {
+      if (!RESUMABLE_STATES.includes(operation.state)) continue;
+      let effectDigest: string | null = null;
+      try {
+        effectDigest = this.environment.effectDigest(operation.identity);
+      } catch {
+        /* Removed tool: stale. */
+      }
+      const continuation = await adoptCodemodeApprovalWithOutput(this.db, {
+        ...this.scope,
+        operationId: operation.operationId,
+        callerSubjectId,
+        catalogDigest: this.environment.catalog.digest,
+        effectDigest,
+      });
+      await publishDurableSessionEvents(
+        this.bus,
+        this.scope.workspaceId,
+        this.scope.sessionId,
+        continuation.events,
+      );
+      const adopted = continuation.operation;
+      if (adopted && adopted.state !== operation.state) {
+        const outcome =
+          adopted.state === "queued"
+            ? "resumed"
+            : adopted.state === "outcome_unknown"
+              ? "unknown"
+              : adopted.errorCode === "approval_stale"
+                ? "stale"
+                : "rejected";
+        recordToolApproval(
+          outcome,
+          "continuation",
+          operation.state === "waiting_for_approval"
+            ? Math.max(0, Date.now() - Date.parse(operation.updatedAt))
+            : undefined,
+        );
+      }
+      if (adopted?.state !== "queued") continue;
+      const claim = await claimCodemodeOperation(this.db, {
+        ...this.scope,
+        operationId: adopted.operationId,
+        claimId: randomUUID(),
+        catalogDigest: this.environment.catalog.digest,
+        claimLeaseMs: this.claimLeaseMs,
+      });
+      if (claim.status === "claimed") {
+        const execution = this.execute(claim.operation, claim.claimId, true);
+        this.inFlight.set(adopted.operationId, execution);
+        try {
+          await execution;
+        } finally {
+          this.inFlight.delete(adopted.operationId);
+        }
+      }
+    }
+    const receipts: CodemodeOperation[] = [];
+    for (const operation of operations) {
+      const receipt = await readTurnCodemodeOperation(this.db, {
+        ...this.scope,
+        callerSubjectId,
+        operationId: operation.operationId,
+      });
+      if (receipt) receipts.push(receipt);
+    }
+    return receipts;
+  }
+
   async close(reason = "Execution attempt ended"): Promise<void> {
     if (this.closing) {
       await Promise.allSettled([...this.inFlight.values()]);
@@ -277,18 +415,67 @@ export class CodemodeAttemptDispatcher {
     }
 
     let preparedCall: Awaited<ReturnType<AttemptToolEnvironment["prepareCall"]>>;
+    let releaseWait: ((accepted: boolean) => void) | undefined;
     try {
+      if (operation.durableApproval) {
+        if (!this.approvalWait) throw new Error("Durable approval yield is unavailable");
+        // The wait gate is sealed while a model request is in flight or the
+        // stream is settling. A call arriving then cannot durably wait, but it
+        // must not fail outright: prepare it like a non-waiting client, so an
+        // allowed call still executes and an Ask settles approval_required.
+        try {
+          releaseWait = this.approvalWait.beginWait();
+        } catch {
+          releaseWait = undefined;
+        }
+      }
+      if (releaseWait) {
+        if (
+          !(await bindCodemodePreparation(this.db, {
+            ...this.scope,
+            operationId: operation.operationId,
+            claimId,
+            effectDigest: this.environment.effectDigest(operation.identity),
+          }))
+        )
+          throw new Error("Operation preparation is stale");
+      }
       preparedCall = await this.environment.prepareCall(
         {
           operationId: operation.operationId,
-          catalogDigest: operation.catalogDigest,
+          catalogDigest: this.environment.catalog.digest,
           identity: operation.identity,
           arguments: operation.arguments,
-          caller: operation.caller,
+          caller: {
+            kind: "codemode",
+            subjectId:
+              operation.caller.subjectId === `sandbox:${operation.attemptId}`
+                ? `sandbox:${this.scope.attemptId}`
+                : operation.caller.subjectId,
+          },
         },
-        { signal },
+        {
+          signal,
+          ...(releaseWait ? { transportMeta: { durableApproval: true } } : {}),
+        },
       );
+      if (preparedCall.waitingForApproval) {
+        if (!releaseWait) throw new AttemptToolApprovalRequiredError();
+        const waiting = await waitForCodemodeApproval(this.db, {
+          ...this.scope,
+          operationId: operation.operationId,
+          claimId,
+          ...preparedCall.waitingForApproval,
+          effectDigest: preparedCall.effectDigest!,
+        });
+        if (!waiting) throw new Error("Approval could not be bound to the operation");
+        recordToolApproval("waiting");
+        releaseWait?.(true);
+        return;
+      }
+      releaseWait?.(false);
     } catch (error) {
+      releaseWait?.(false);
       await this.settleWithOutput(operation, claimId, {
         state: "failed",
         errorCode: errorCode(error, signal, false),
@@ -321,6 +508,8 @@ export class CodemodeAttemptDispatcher {
         error instanceof AttemptToolApprovalRequiredError ||
         error instanceof AttemptToolCatalogStaleError ||
         error instanceof AttemptToolNotFoundError ||
+        // Secret resolution runs before the executor; nothing was sent.
+        isSecretReferenceError(error) ||
         connectorActionWasNotExecuted(error);
       await this.settleWithOutput(operation, claimId, {
         state: knownPreExecution ? "failed" : "outcome_unknown",
@@ -448,6 +637,7 @@ export class CodemodeAttemptDispatcher {
       settlement,
     });
     if (!result.committed || result.events.length === 0) return;
+    recordToolApproval(settlement.state === "outcome_unknown" ? "unknown" : settlement.state);
     await publishDurableSessionEvents(
       this.bus,
       this.scope.workspaceId,
@@ -490,8 +680,8 @@ function assertMatchingCodemodeToolCallCreated(
   if (
     event.type !== "agent.toolCall.created" ||
     event.turnId !== scope.turnId ||
-    event.turnGeneration !== scope.executionGeneration ||
-    event.turnAttemptId !== scope.attemptId ||
+    event.turnGeneration !== operation.executionGeneration ||
+    event.turnAttemptId !== operation.attemptId ||
     event.turnAssociation !== "current" ||
     payload?.id !== operation.operationId ||
     payload?.name !== entry.modelName ||
@@ -537,7 +727,17 @@ function errorCode(error: unknown, signal: AbortSignal, executionStarted: boolea
   return "tool_outcome_unknown";
 }
 
+/** Codemode journal error messages are bounded (CodemodeOperation.errorMessage). */
+const CODEMODE_ERROR_MESSAGE_MAX = 4_096;
+
 function safeErrorMessage(error: unknown): string {
+  if (isSecretReferenceError(error)) {
+    // References and the ready ask card only; never values.
+    const output = error.toModelOutput();
+    return output.length <= CODEMODE_ERROR_MESSAGE_MAX
+      ? output
+      : error.message.slice(0, CODEMODE_ERROR_MESSAGE_MAX);
+  }
   if (
     error instanceof AttemptToolApprovalRequiredError ||
     error instanceof AttemptToolCatalogStaleError ||

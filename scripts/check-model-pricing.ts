@@ -2,11 +2,11 @@
 /**
  * Compare hand-maintained debit/list comparison rates against llm-prices.com.
  *
- * OpenGeni debit authority stays in `defaultModelPricing`
+ * Opengeni debit authority stays in `defaultModelPricing`
  * (`packages/config/src/index.ts`). llm-prices is an external ground-truth
  * canary for Standard short/long-context rates — never a generator or runtime
  * source. New comparison metadata stays separate in reviewedModelListPricing.
- * Fast multipliers, Fireworks, and marginBps are OpenGeni-owned and
+ * Fast multipliers, Fireworks, and marginBps are Opengeni-owned and
  * are not asserted here.
  *
  * Usage:
@@ -85,7 +85,7 @@ const AUDIT_MODELS: Array<{
 const NON_LLM_PRICES_MODELS = [
   {
     id: "accounts/fireworks/models/glm-5p2",
-    reason: "OpenGeni-only; not in llm-prices",
+    reason: "Opengeni-only; not in llm-prices",
   },
   {
     id: "deepseek-v4-flash-0731",
@@ -124,18 +124,18 @@ function comparePricing(label: string, ours: ModelPricing, theirs: ModelPricing)
   const errors: string[] = [];
   if (ours.inputMicrosPerMillionTokens !== theirs.inputMicrosPerMillionTokens) {
     errors.push(
-      `${label} input: OpenGeni ${ours.inputMicrosPerMillionTokens} vs llm-prices ${theirs.inputMicrosPerMillionTokens}`,
+      `${label} input: Opengeni ${ours.inputMicrosPerMillionTokens} vs llm-prices ${theirs.inputMicrosPerMillionTokens}`,
     );
   }
   if (ours.outputMicrosPerMillionTokens !== theirs.outputMicrosPerMillionTokens) {
     errors.push(
-      `${label} output: OpenGeni ${ours.outputMicrosPerMillionTokens} vs llm-prices ${theirs.outputMicrosPerMillionTokens}`,
+      `${label} output: Opengeni ${ours.outputMicrosPerMillionTokens} vs llm-prices ${theirs.outputMicrosPerMillionTokens}`,
     );
   }
   const ourCache = ours.cachedInputMicrosPerMillionTokens;
   const theirCache = theirs.cachedInputMicrosPerMillionTokens;
   if (theirCache !== undefined && ourCache !== theirCache) {
-    errors.push(`${label} cached: OpenGeni ${ourCache ?? "—"} vs llm-prices ${theirCache}`);
+    errors.push(`${label} cached: Opengeni ${ourCache ?? "—"} vs llm-prices ${theirCache}`);
   }
   return errors;
 }
@@ -156,7 +156,7 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
   for (const entry of AUDIT_MODELS) {
     const schedule = AUDIT_PRICING[entry.productId];
     if (!schedule) {
-      errors.push(`missing OpenGeni schedule for ${entry.productId}`);
+      errors.push(`missing Opengeni schedule for ${entry.productId}`);
       continue;
     }
 
@@ -181,7 +181,7 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
         errors.push(`llm-prices missing long-context row ${entry.longId}`);
       } else if (!tier) {
         errors.push(
-          `OpenGeni missing long-context tier ${entry.longMinimumInputTokens} for ${entry.productId}`,
+          `Opengeni missing long-context tier ${entry.longMinimumInputTokens} for ${entry.productId}`,
         );
       } else {
         const mismatches = comparePricing(
@@ -204,7 +204,7 @@ export function auditModelPricingAgainstLlmPrices(doc: LlmPricesDocument): {
     lines.push(`skip ${entry.id} (${entry.reason})`);
   }
 
-  lines.push("note Fast/priority multipliers and marginBps are OpenGeni-owned — not audited here");
+  lines.push("note Fast/priority multipliers and marginBps are Opengeni-owned — not audited here");
 
   return { ok: errors.length === 0, lines, errors };
 }
@@ -228,7 +228,7 @@ async function loadDocument(argv: string[]): Promise<LlmPricesDocument> {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
-    console.log(`Compare OpenGeni defaultModelPricing to llm-prices.com
+    console.log(`Compare Opengeni defaultModelPricing to llm-prices.com
 
 Usage:
   bun run check:model-pricing
@@ -252,7 +252,7 @@ Docs: docs/model-providers.md § Price audit`);
     }
     process.exit(1);
   }
-  console.log("\nAll audited OpenGeni list prices match llm-prices.");
+  console.log("\nAll audited Opengeni list prices match llm-prices.");
 }
 
 if (import.meta.main) {

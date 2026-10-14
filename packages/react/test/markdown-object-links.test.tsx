@@ -21,7 +21,7 @@ const REPLY = [
   `[Download export](artifact:${FILE})`,
 ].join("\n\n");
 
-describe("OpenGeni object links inside an embedding host", () => {
+describe("Opengeni object links inside an embedding host", () => {
   test("console paths never render as navigations when the host resolves nothing", () => {
     const html = renderToStaticMarkup(<Markdown>{REPLY}</Markdown>);
     expect(html).not.toContain(`href="/workspaces/`);

@@ -1,5 +1,6 @@
 import {
   configuredStaticUsageLimits,
+  canonicalizeConfiguredModelId,
   resolveModelProviderForTurn,
   type Settings,
 } from "@opengeni/config";
@@ -16,9 +17,11 @@ import {
   countActiveOrganizationApiKeysForAccount,
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
-  getBillingBalance,
+  getSpendableCreditBalance,
   isCodexBilledTurn,
+  readSubscriptionCoreRouteFunding,
   recordUsageEvent,
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
   sumUsageQuantity,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -51,6 +54,7 @@ export type LimitCheckInput = {
   workspaceId?: string;
   /** Frozen causal human, never the API key or service admitting the work. */
   initiatingHumanSubjectId?: string | null;
+  acceptedTurn?: { sessionId: string; turnId: string };
   action: LimitAction;
   quantity?: number;
   // The turn's model id, when the action represents an agent turn. The model's
@@ -64,6 +68,12 @@ export function modelFundingForAdmission(
   settings: Settings,
   model: string | null | undefined,
   codexBilled: boolean,
+  /**
+   * The shared core's live funding answer for a connected subscription that
+   * has cut over to the core (`coreRoutedSubscriptionFunding`); undefined
+   * keeps the legacy answer.
+   */
+  coreRoutedFunding?: boolean,
 ): { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean } {
   const resolvedModel = model ? resolveModelProviderForTurn(settings, model)?.model : null;
   const codexSubscriptionModel =
@@ -71,15 +81,67 @@ export function modelFundingForAdmission(
     resolvedModel.credentialSource.provider === "codex";
   return {
     // A Codex namespace/definition never bypasses credits by itself: the live
-    // workspace credential predicate above remains authoritative. SuperGrok's
-    // static overlay is likewise secret-free; its worker/provider admission
-    // owns live account selection before any upstream request can occur.
+    // workspace credential predicate above remains authoritative. Claude's
+    // static overlay is likewise secret-free on its legacy route; its
+    // worker/provider admission owns live account selection before any
+    // upstream request can occur. On the core route (the only SuperGrok
+    // route) the core's funding answer is authoritative instead.
     fundedWithoutCredits:
       codexBilled ||
-      (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits"),
+      (coreRoutedFunding ??
+        (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits")),
     countsTowardTokenCap:
       !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment",
   };
+}
+
+/**
+ * Connected subscriptions whose legacy runtime was deleted after their
+ * cutover: only the shared core funds them, so any other route is unfunded.
+ */
+const CORE_ONLY_SUBSCRIPTION_PROVIDERS: ReadonlySet<string> = new Set([
+  SUBSCRIPTION_CORE_XAI_PROVIDER,
+]);
+
+/**
+ * The shared core's funding answer for a non-Codex connected subscription
+ * whose provider has cut over (design 5.3, EP-N19): the provider-neutral form
+ * of `isCodexBilledTurn`, with explicit workspace, causal human, accepted
+ * work and model. Undefined on the provider's legacy route (one receipt
+ * read) and for every other model (no read). Codex keeps `isCodexBilledTurn`.
+ * A provider opts in at its own chat placement step and only while it is
+ * enabled on the deployment, as its catalog readiness does.
+ */
+const CORE_ROUTED_FUNDING: Partial<Record<string, (settings: Settings) => boolean>> = {
+  xai: (settings) => settings.supergrokSubscriptionEnabled,
+  claude: (settings) => settings.claudeSubscriptionEnabled,
+};
+
+export async function coreRoutedSubscriptionFunding(
+  db: LimitDependencies["db"],
+  settings: Settings,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    model: string | null | undefined;
+    subjectId: string | null;
+    acceptedTurn?: { sessionId: string; turnId: string };
+  },
+): Promise<boolean | undefined> {
+  if (!input.model) return undefined;
+  const source = resolveModelProviderForTurn(settings, input.model)?.model.credentialSource;
+  if (source?.kind !== "connected_subscription") return undefined;
+  if (!CORE_ROUTED_FUNDING[source.provider]?.(settings)) return undefined;
+  const answer = await readSubscriptionCoreRouteFunding(db, {
+    provider: source.provider,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    productModelId: input.model,
+    ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
+  });
+  if (answer.route === "core") return answer.value;
+  return CORE_ONLY_SUBSCRIPTION_PROVIDERS.has(source.provider) ? false : undefined;
 }
 
 export async function requireLimit(deps: LimitDependencies, input: LimitCheckInput): Promise<void> {
@@ -109,22 +171,38 @@ export async function checkLimit(
         settings: deps.settings,
         workspaceId: input.workspaceId,
         model: input.model,
+        // On the shared Codex core the causal human's own personal
+        // connection in their Personal workspace also funds the turn.
+        accountId: input.accountId,
+        subjectId: input.initiatingHumanSubjectId ?? null,
+        ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
       })
     : false;
+  const coreFunding = input.workspaceId
+    ? await coreRoutedSubscriptionFunding(deps.db, deps.settings, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        model: input.model,
+        subjectId: input.initiatingHumanSubjectId ?? null,
+        ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
+      })
+    : undefined;
   const { fundedWithoutCredits, countsTowardTokenCap } = modelFundingForAdmission(
     deps.settings,
     input.model,
     codexBilled,
+    coreFunding,
   );
   const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
   if (!creditDecision.allowed) {
     return creditDecision;
   }
-  if (!fundedWithoutCredits && isCostlyAction(input.action) && input.workspaceId) {
+  if (isCostlyAction(input.action) && input.workspaceId) {
     const refusal = await checkWorkspaceAllowance(deps.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.initiatingHumanSubjectId ?? null,
+      ...(fundedWithoutCredits ? { fundedWithoutCredits: true } : {}),
     });
     if (refusal) return { allowed: false, ...refusal };
   }
@@ -143,16 +221,26 @@ async function checkCreditBalance(
   externallyBilled: boolean,
 ): Promise<LimitDecision> {
   if (externallyBilled) {
-    return { allowed: true }; // paid outside OpenGeni — zero OpenGeni credits
+    return { allowed: true }; // paid outside Opengeni — zero Opengeni credits
   }
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
   }
-  const balance = await getBillingBalance(deps.db, input.accountId);
+  const balance = await getSpendableCreditBalance(
+    deps.db,
+    input.accountId,
+    input.model ? canonicalizeConfiguredModelId(deps.settings, input.model) : undefined,
+  );
   if (balance.balanceMicros > 0) {
     return { allowed: true };
   }
-  return { allowed: false, code: "insufficient_credits", message: "insufficient OpenGeni credits" };
+  return {
+    allowed: false,
+    code: "insufficient_credits",
+    message: input.model
+      ? "No credits available for this model. Choose a model covered by your promotional credits or add credits."
+      : "No general credits available. Promotional credits cover eligible models only.",
+  };
 }
 
 async function checkStaticCaps(

@@ -56,6 +56,10 @@ export type EditableArtifactViewProps = Readonly<{
   onTitle?: ((title: string) => void) | undefined;
   /** Loading copy; defaults to the `opening` label. */
   loadingLabel?: string | undefined;
+  /** Host-authenticated XLSX export; omitted for hosts without export support. */
+  downloadSpreadsheet?:
+    | ((opened: OpenedEditableArtifact, signal: AbortSignal) => Promise<Blob>)
+    | undefined;
 }>;
 
 type LoadState =
@@ -79,6 +83,7 @@ export function EditableArtifactView({
   describeError,
   onTitle,
   loadingLabel,
+  downloadSpreadsheet,
 }: EditableArtifactViewProps) {
   const [loadEpoch, setLoadEpoch] = useState(0);
   const labels = useArtifactLabels();
@@ -165,7 +170,12 @@ export function EditableArtifactView({
         sessionKey={sessionKey}
         createSession={createSession}
         document={surface}
-        spreadsheet={surface}
+        spreadsheet={{
+          ...surface,
+          download: downloadSpreadsheet
+            ? (signal) => downloadSpreadsheet(current.value, signal)
+            : undefined,
+        }}
         presentation={surface}
       />
     </div>

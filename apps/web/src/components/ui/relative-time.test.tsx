@@ -7,6 +7,7 @@ import {
   formatDate,
   formatExactTime,
   formatRelativeTime,
+  formatShortTime,
   inSentence,
   timeZoneLabel,
 } from "./relative-time";
@@ -96,6 +97,17 @@ describe("formatDate and formatExactTime", () => {
     );
     expect(timeZoneLabel("America/Los_Angeles")).toBe("Los Angeles time");
     expect(timeZoneLabel("Etc/UTC")).toBe("UTC");
+  });
+});
+
+describe("formatShortTime", () => {
+  test("later today is the clock alone, this week the weekday, then the date", () => {
+    expect(formatShortTime("2026-09-26T15:10:00Z", OSLO)).toBe("17:10");
+    expect(formatShortTime("2026-09-27T07:00:00Z", OSLO)).toBe("Sun 09:00");
+    expect(formatShortTime("2026-10-02T07:00:00Z", OSLO)).toBe("Fri 09:00");
+    expect(formatShortTime("2026-10-03T07:00:00Z", OSLO)).toBe("3 Oct");
+    expect(formatShortTime("2027-01-03T07:00:00Z", OSLO)).toBe("3 Jan 2027");
+    expect(formatShortTime("2026-09-26T15:10:00Z", { now: NOW, utc: true })).toBe("15:10 UTC");
   });
 });
 

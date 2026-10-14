@@ -178,7 +178,7 @@ export class ModelRequestCaptureModel implements Model {
 
 /**
  * Wrap every name-resolved model so Debug capture sees the ModelRequest the
- * provider client actually receives. OpenGeni agents almost always set
+ * provider client actually receives. Opengeni agents almost always set
  * `agent.model` to a string; wrapping only `agent.model` is a no-op there.
  */
 export class ModelRequestCaptureProvider implements ModelProvider {

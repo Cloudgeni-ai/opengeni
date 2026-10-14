@@ -8,7 +8,10 @@ import {
 import { and, desc, eq, sql } from "drizzle-orm";
 import { rawRows, type Database, type SessionActivityDatabase } from "./database";
 import * as schema from "./schema";
-import { clearCodexCapacityRecovery } from "./codex-capacity-recovery";
+import {
+  clearCodexCapacityRecovery,
+  isSubscriptionCoreWaitExhaustedCode,
+} from "./codex-capacity-recovery";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
@@ -28,6 +31,7 @@ export class SessionRetryConflictError extends Error {
       | "RETRY_EXECUTION_UNRESOLVED"
       | "RETRY_PAUSED"
       | "RETRY_SANDBOX_RECOVERY_REQUIRED"
+      | "RETRY_TOOL_OUTCOME_UNKNOWN"
       | "RETRY_UNSUPPORTED_FAILURE",
     message: string,
   ) {
@@ -204,8 +208,6 @@ async function retryFailedSessionInTransaction(
           and owner_turn.status not in ('completed', 'failed', 'cancelled', 'superseded', 'withdrawn_for_edit'))
         or exists (select 1 from session_turn_attempts owner where owner.workspace_id = pending.workspace_id and owner.id = pending.attempt_id
           and (owner.state <> 'closed' or (owner.quiesced_at is null and exists (select 1 from session_attempt_interruptions interruption where interruption.attempt_id = owner.id))))))
-    or exists (select 1 from session_events tool_event where tool_event.workspace_id = ${workspaceId} and tool_event.session_id = ${sessionId} and tool_event.turn_id = ${turn.id}
-      and tool_event.type = 'agent.toolCall.output' and tool_event.payload->'recovery'->>'outcome' = 'unknown')
     or exists (select 1 from session_turns live where live.workspace_id = ${workspaceId} and live.session_id = ${sessionId} and live.status in ('running', 'recovering', 'requires_action', 'waiting_capacity'))
   ) as pending`,
   );
@@ -213,6 +215,19 @@ async function retryFailedSessionInTransaction(
     throw new SessionRetryConflictError(
       "RETRY_EXECUTION_UNRESOLVED",
       "Execution or tool settlement is unresolved; retry cannot replay it",
+    );
+  // A settled call whose side effects are unknown is permanent, not settling:
+  // replaying the turn could repeat it. A call proven not started is replay
+  // safe and never blocks Retry.
+  const [unknownToolOutcome] = await rawRows<{ unknown: boolean }>(
+    db,
+    sql`select exists (select 1 from session_events tool_event where tool_event.workspace_id = ${workspaceId} and tool_event.session_id = ${sessionId} and tool_event.turn_id = ${turn.id}
+      and tool_event.type = 'agent.toolCall.output' and tool_event.payload->'recovery'->>'outcome' = 'unknown') as unknown`,
+  );
+  if (unknownToolOutcome?.unknown)
+    throw new SessionRetryConflictError(
+      "RETRY_TOOL_OUTCOME_UNKNOWN",
+      "A tool call in this turn has an unknown outcome; Retry could repeat it",
     );
   const now = new Date();
   if (await sessionEffectiveSandboxRecoveryBlocked(db, session))
@@ -228,7 +243,8 @@ async function retryFailedSessionInTransaction(
     failurePayload !== null &&
     typeof failurePayload === "object" &&
     !Array.isArray(failurePayload) &&
-    (failurePayload as Record<string, unknown>).code === "codex_capacity_recovery_exhausted";
+    // Every core waiter's breaker (one code per provider) shares this state.
+    isSubscriptionCoreWaitExhaustedCode((failurePayload as Record<string, unknown>).code);
   // Only this explicitly authorized, exact failure-event Retry may replenish
   // the breaker. Preserve accepted credential policy/refusal ledgers and all
   // unrelated recovery budgets. Receipt replay returned above cannot reset it.

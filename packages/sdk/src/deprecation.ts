@@ -1,5 +1,5 @@
 /**
- * Deprecation notices advertised by the OpenGeni API.
+ * Deprecation notices advertised by the Opengeni API.
  *
  * Per the public API compatibility policy, a route whose behaviour is scheduled
  * for removal answers with the standard `Deprecation` (RFC 9745) and `Sunset`

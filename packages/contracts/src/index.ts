@@ -1,3 +1,8 @@
+import { defineSchema } from "./define-schema";
+export * from "./session-target";
+export * from "./turn-serving-policy";
+import { modelLogoUrl } from "./model-display";
+import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -10,19 +15,24 @@ export {
 } from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
+export * from "./site-data";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+export * from "./model-account-settings";
+export * from "./model-account-choice";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
+import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
 export * from "./agent-config";
+export * from "./first-party-tool-authorization";
 export * from "./model-availability";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
@@ -46,6 +56,7 @@ import {
   SKILL_MAX_TOTAL_BYTES,
 } from "./skill-files";
 export * from "./model-connection-access";
+export * from "./subscription-account-actions";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
 import {
@@ -55,26 +66,30 @@ import {
   SessionTurnSurface,
   ToolFamily,
 } from "./product-analytics";
-export const HostMcpCreateSelections = z
-  .array(
-    z
-      .object({
-        serverId: z.string().min(1).max(256),
-        delegationId: z
-          .string()
-          .uuid()
-          .transform((value) => value.toLowerCase()),
-        generation: z.number().int().positive().safe(),
-      })
-      .strict(),
-  )
-  .max(128)
-  .superRefine((values, ctx) => {
-    if (new Set(values.map((value) => value.serverId)).size !== values.length)
-      ctx.addIssue({ code: "custom", message: "Duplicate host server selection" });
-  });
+export const HostMcpCreateSelections = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(
+      z
+        .object({
+          serverId: z.string().min(1).max(256),
+          delegationId: z
+            .string()
+            .uuid()
+            .transform((value) => value.toLowerCase()),
+          generation: z.number().int().positive().safe(),
+        })
+        .strict(),
+    )
+    .max(128)
+    .superRefine((values, ctx) => {
+      if (new Set(values.map((value) => value.serverId)).size !== values.length)
+        ctx.addIssue({ code: "custom", message: "Duplicate host server selection" });
+    }),
+);
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { VaultFieldName, VaultName, VaultPolicy } from "./vaults";
+import { GeneratePasswordSpec } from "./secret-generator";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
 export * from "./organization-access";
@@ -114,6 +129,7 @@ export * from "./editable-artifact-serialized-commit";
 export * from "./signup-attribution";
 export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
+export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
@@ -126,12 +142,19 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./vaults";
+export * from "./secret-references";
+export * from "./secret-resolution";
+export * from "./secret-generator";
+export * from "./secret-totp";
 
 export {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
+  UpdateWorkspaceArtifactVisibilityRequest,
+  UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -148,6 +171,7 @@ export {
   WorkspaceArtifactSourcePath,
   WorkspaceArtifactStatus,
   WorkspaceArtifactVersion,
+  WorkspaceArtifactVisibility,
   WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS,
   WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
@@ -175,8 +199,10 @@ export {
 
 export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  TOOL_CALL_OUTPUT_EVENT_MAX_BYTES,
   approximateSessionEventTokens,
   boundSessionEventPayload,
+  boundSessionEventPayloadForWrite,
   measureSessionEventJson,
   sessionEventJsonBytes,
   sessionEventMediaPreview,
@@ -263,23 +289,25 @@ export {
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
 // enrolled as a first-class sandbox), then `opensandbox` (an optional
 // Kubernetes-native provisioned sandbox provider).
-export const SandboxBackend = z.enum([
-  "docker",
-  "modal",
-  "local",
-  "none",
-  "daytona",
-  "runloop",
-  "e2b",
-  "blaxel",
-  "cloudflare",
-  "vercel",
-  "selfhosted",
-  "opensandbox",
-]);
+export const SandboxBackend = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "docker",
+    "modal",
+    "local",
+    "none",
+    "daytona",
+    "runloop",
+    "e2b",
+    "blaxel",
+    "cloudflare",
+    "vercel",
+    "selfhosted",
+    "opensandbox",
+  ]),
+);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
-// OpenGeni-owned identity carried beside the provider's opaque SDK envelope.
+// Opengeni-owned identity carried beside the provider's opaque SDK envelope.
 // Provider serializers intentionally use different keys (`sandboxId`,
 // `devboxId`, `sandboxName`, ...); durable lease logic must not need to learn a
 // new provider's private state shape. Existing envelopes remain readable via
@@ -315,7 +343,7 @@ export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
 
 /**
  * Durable proof that a provider may replace an execution wrapper without
- * replacing the workspace OpenGeni owns. This is intentionally narrower than
+ * replacing the workspace Opengeni owns. This is intentionally narrower than
  * generic provider resume: only a provider adapter that can prove the same
  * continuity key may consume it, and only a cold->warming owner or teardown
  * claimant may authorize that replacement.
@@ -329,17 +357,19 @@ export type SandboxProviderContinuityRecovery = {
 };
 
 // OS axis. Only "linux" is reachable in v1; macos/windows are seam placeholders.
-export const SandboxOs = z.enum(["linux", "macos", "windows"]);
+export const SandboxOs = /* @__PURE__ */ defineSchema(() => z.enum(["linux", "macos", "windows"]));
 export type SandboxOs = z.infer<typeof SandboxOs>;
 
 // The five surfaceable sandbox capabilities (PascalCase, the canonical names).
-export const SandboxCapabilityName = z.enum([
-  "FileSystem", // Channel A: list/read/write/search (Pierre tree)
-  "Terminal", // Channel A: command-output firehose (+ future pty-ws)
-  "Git", // Channel A: status/diff/log/show (Pierre diff)
-  "DesktopStream", // Channel B: noVNC pixels over a scoped tunnel URL
-  "Recording", // ffmpeg x11grab -> object storage
-]);
+export const SandboxCapabilityName = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "FileSystem", // Channel A: list/read/write/search (Pierre tree)
+    "Terminal", // Channel A: command-output firehose (+ future pty-ws)
+    "Git", // Channel A: status/diff/log/show (Pierre diff)
+    "DesktopStream", // Channel B: noVNC pixels over a scoped tunnel URL
+    "Recording", // ffmpeg x11grab -> object storage
+  ]),
+);
 export type SandboxCapabilityName = z.infer<typeof SandboxCapabilityName>;
 
 // How a backend exposes a network port to the data plane.
@@ -666,7 +696,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   // (Linux X11/Xvfb, macOS CGEvent/ScreenCaptureKit) consent-gated at enroll;
   // the online/offline/consent/display negotiation lives in select.ts (M3), this
   // row is the static feasibility ceiling. Always-on (process-lifetime, never
-  // idle-reaped) and NOT persistable — OpenGeni cannot snapshot the user's disk,
+  // idle-reaped) and NOT persistable — Opengeni cannot snapshot the user's disk,
   // so resume = "is the agent's subject live?", never a cold re-create. Ports
   // surface on-demand through the stateless relay edge, which lands behind the
   // `resolveExposedPort` swap-seam later; until then it reuses the existing
@@ -697,7 +727,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
       resumeIsLockFree: true, // resume = address the live NATS subject; no provider lock
     },
     // persistable:false forces snapshot.kind:"none" (the descriptor invariant
-    // `persistable ⇒ snapshot.kind!=="none"`): OpenGeni cannot snapshot the
+    // `persistable ⇒ snapshot.kind!=="none"`): Opengeni cannot snapshot the
     // user's disk — the machine itself is the persistence.
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
@@ -708,7 +738,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
   // Optional Kubernetes-native provisioned sandbox through OpenSandbox.
   // Desktop-class when the box image includes ttyd/browserd/Xvfb: PTY over ttyd,
-  // noVNC and browserd over signed URI-mode ingress. OpenGeni owns persistence
+  // noVNC and browserd over signed URI-mode ingress. Opengeni owns persistence
   // through its portable tar checkpoint path in object storage; native
   // OpenSandbox pause/resume and snapshots are deliberately not used.
   opensandbox: {
@@ -738,82 +768,95 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
 };
 
-export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export const ReasoningEffort = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+);
 
 /** Provider service-tier / latency mode selected for a turn or session default. */
-export const LatencyMode = z.enum(["standard", "priority", "fast"]);
+export const LatencyMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["standard", "priority", "fast"]),
+);
 export type LatencyMode = z.infer<typeof LatencyMode>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
-export const ErrorCode = z.enum([
-  "allowance_exhausted",
-  "unauthenticated",
-  "forbidden",
-  "not_found",
-  "validation_failed",
-  "conflict",
-  "idempotency_conflict",
-  "payment_required",
-  "limit_exceeded",
-  "nested_agent_depth_exceeded",
-  "nested_agent_depth_override_forbidden",
-  "codex_compaction_v2_provider_locked",
-  "provider_verification_failed",
-  "upstream_unavailable",
-  "internal_error",
-]);
+export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "allowance_exhausted",
+    /** The task's root usage limit is reached; details carry SessionUsageLimitReachedRefusal fields. */
+    "session_usage_limit_reached",
+    "unauthenticated",
+    "forbidden",
+    "not_found",
+    "validation_failed",
+    "conflict",
+    "idempotency_conflict",
+    "payment_required",
+    "limit_exceeded",
+    "nested_agent_depth_exceeded",
+    "nested_agent_depth_override_forbidden",
+    "codex_compaction_v2_provider_locked",
+    "provider_verification_failed",
+    "upstream_unavailable",
+    "tab_not_responding",
+    "tab_crashed",
+    "internal_error",
+  ]),
+);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 
-export const ErrorEnvelope = z.object({
-  error: z.object({
-    status: z.number().int().min(400).max(599),
-    code: ErrorCode,
-    message: z.string(),
-    retryable: z.boolean(),
-    outcomeUnknown: z.boolean().optional(),
-    requestId: z.string().optional(),
-    details: z.record(z.string(), z.unknown()).optional(),
+export const ErrorEnvelope = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    error: z.object({
+      status: z.number().int().min(400).max(599),
+      code: ErrorCode,
+      message: z.string(),
+      retryable: z.boolean(),
+      outcomeUnknown: z.boolean().optional(),
+      requestId: z.string().optional(),
+      details: z.record(z.string(), z.unknown()).optional(),
+    }),
   }),
-});
+);
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
 /** A denied child can be one greater than the persisted PostgreSQL int ceiling. */
-export const NestedAgentDepthAttemptValue = z
-  .number()
-  .int()
-  .nonnegative()
-  .max(MAX_NESTED_AGENT_DEPTH + 1);
+export const NestedAgentDepthAttemptValue = /* @__PURE__ */ defineSchema(() =>
+  z
+    .number()
+    .int()
+    .nonnegative()
+    .max(MAX_NESTED_AGENT_DEPTH + 1),
+);
 
-export const NestedAgentDepthPolicySource = z.enum([
-  "session",
-  "workspace",
-  "deployment",
-  "default",
-]);
+export const NestedAgentDepthPolicySource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["session", "workspace", "deployment", "default"]),
+);
 export type NestedAgentDepthPolicySource = z.infer<typeof NestedAgentDepthPolicySource>;
 
 /** Durable evidence for a session-create denial at the database admission boundary. */
-export const SessionSpawnDenial = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  parentSessionId: z.string().uuid().nullable(),
-  rootSessionId: z.string().uuid().nullable(),
-  currentDepth: NestedAgentDepthValue,
-  attemptedDepth: NestedAgentDepthAttemptValue,
-  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
-  requestedMaxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
-  policySource: NestedAgentDepthPolicySource,
-  policySessionId: z.string().uuid().nullable(),
-  subjectId: z.string().nullable(),
-  code: z.enum(["nested_agent_depth_exceeded", "nested_agent_depth_override_forbidden"]),
-  idempotencyKey: z.string().nullable(),
-  createdAt: z.string(),
-});
+export const SessionSpawnDenial = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    parentSessionId: z.string().uuid().nullable(),
+    rootSessionId: z.string().uuid().nullable(),
+    currentDepth: NestedAgentDepthValue,
+    attemptedDepth: NestedAgentDepthAttemptValue,
+    effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+    requestedMaxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+    policySource: NestedAgentDepthPolicySource,
+    policySessionId: z.string().uuid().nullable(),
+    subjectId: z.string().nullable(),
+    code: z.enum(["nested_agent_depth_exceeded", "nested_agent_depth_override_forbidden"]),
+    idempotencyKey: z.string().nullable(),
+    createdAt: z.string(),
+  }),
+);
 export type SessionSpawnDenial = z.infer<typeof SessionSpawnDenial>;
 
 /**
- * Capability-first permissions signed into a session's first-party OpenGeni
+ * Capability-first permissions signed into a session's first-party Opengeni
  * MCP token when a top-level creator does not explicitly narrow them.
  *
  * Keep this contract shared by admission and runtime signing: a worker-signed
@@ -840,6 +883,7 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "variable-sets:attach",
   "variable-sets:use",
   "secrets:list",
+  "secrets:use",
   "secrets:write",
   "rigs:use",
   "github:use",
@@ -857,6 +901,9 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
  */
 export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
+  "notify_user",
+  "notification_withdraw",
+  "inbox_tidy",
   "goal_set",
   "goal_update",
   "goal_progress",
@@ -903,6 +950,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sandbox_provision",
   "connected_machine_remove",
   "connected_machine_enroll_token",
+  "connected_machine_enable_screen_control",
   "project_list",
   "project_get",
   "project_create",
@@ -910,6 +958,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "project_reorder",
   "project_delete",
   "session_set_project",
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -924,6 +975,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "command_read",
   "session_create",
   "session_send_message",
+  "session_message_status",
+  "session_target_get",
+  "session_target_set",
   "session_pause",
   "session_resume",
   "session_steer",
@@ -951,6 +1005,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
+  "secret_search",
+  "secret_save",
+  "secret_get",
+  "secret_move",
+  "secret_delete",
   "variable_set_list",
   "environment_list",
   "variable_set_get_variable",
@@ -1024,6 +1083,16 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_rollback",
   "artifacts_archive",
   "artifacts_restore",
+  "site_data_describe",
+  "site_data_define_collection",
+  "site_data_query",
+  "site_data_write",
+  "site_data_import",
+  "site_data_export",
+  "site_data_reset",
+  "site_files_list",
+  "site_files_upload",
+  "site_files_delete",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -1034,7 +1103,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "editable_artifact_export",
   "editable_artifact_export_status",
 ] as const;
-export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
+export const FirstPartyMcpToolName = /* @__PURE__ */ defineSchema(() =>
+  z.enum(FIRST_PARTY_MCP_TOOL_NAMES),
+);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
 
 /**
@@ -1094,6 +1165,27 @@ export const RETIRED_AGENT_LEARNING_TOOL_NAMES = [
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const retiredLearningTools = new Set<FirstPartyMcpToolName>(RETIRED_AGENT_LEARNING_TOOL_NAMES);
 
+/**
+ * Variable-set tools replaced by the `secret_*` tools (vaults). Stored tool
+ * selections naming them still parse and select their successor; the remote
+ * server never registers them.
+ */
+export const RETIRED_SECRET_TOOL_NAMES = [
+  "variable_set_list",
+  "environment_list",
+  "variable_set_get_variable",
+  "variable_set_set_variable",
+  "environment_set_variable",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredSecretTools = new Set<FirstPartyMcpToolName>(RETIRED_SECRET_TOOL_NAMES);
+const RETIRED_SECRET_TOOL_SUCCESSORS = {
+  variable_set_list: "secret_search",
+  environment_list: "secret_search",
+  variable_set_get_variable: "secret_get",
+  variable_set_set_variable: "secret_save",
+  environment_set_variable: "secret_save",
+} as const satisfies Record<(typeof RETIRED_SECRET_TOOL_NAMES)[number], FirstPartyMcpToolName>;
+
 /** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
 export function currentAgentLearningToolSelection(
   names: readonly FirstPartyMcpToolName[],
@@ -1116,10 +1208,15 @@ export function currentAgentLearningToolSelection(
     selected.add("instruction_policy_save");
     selected.add("instruction_policy_get");
   }
+  for (const [retired, successor] of Object.entries(RETIRED_SECRET_TOOL_SUCCESSORS)) {
+    if (selected.has(retired as FirstPartyMcpToolName)) selected.add(successor);
+  }
   // Only already-selected legacy confirmations survive for paused turn recovery.
   // New defaults never advertise this tool and it cannot create proposals.
   return [...selected].filter(
-    (name) => name === "remember_confirm" || !retiredLearningTools.has(name),
+    (name) =>
+      name === "remember_confirm" ||
+      (!retiredLearningTools.has(name) && !retiredSecretTools.has(name)),
   );
 }
 
@@ -1130,6 +1227,7 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "atlassian_search",
   "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
+  ...RETIRED_SECRET_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1150,8 +1248,8 @@ const FIRST_PARTY_TOOL_FAMILY_NAME_SET: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Analytics tool family for a tool OpenGeni itself defines. Only names from
- * OpenGeni's fixed first-party lists qualify; anything else returns null, so a
+ * Analytics tool family for a tool Opengeni itself defines. Only names from
+ * Opengeni's fixed first-party lists qualify; anything else returns null, so a
  * model-invented or third-party name never becomes an exported value.
  */
 export function firstPartyToolFamily(toolName: string | null | undefined): ToolFamily | null {
@@ -1173,38 +1271,63 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
- * Connector-wide tools are explicit-only. Ordinary session omission selects
- * the non-connector catalog, while an explicit session policy may still select
- * any catalogued connector tool and remains independently permission-gated.
+ * Tools a session has only while it has admin access: the organization's
+ * actions, run as the owner or admin who gave it. Admin access, not the
+ * session's tool selection, decides whether they are there.
+ */
+export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
+  "admin_actions_search",
+  "admin_action_describe",
+  "admin_action_call",
+] as const satisfies readonly FirstPartyMcpToolName[];
+export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
+  SESSION_ADMIN_ACCESS_TOOL_NAMES,
+);
+
+/**
+ * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
+ * chats may select the bot's explicit channel without borrowing a personal
+ * account; accepted turn/task policies and permission ceilings remain fixed.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
     !retiredLearningTools.has(name) &&
+    !retiredSecretTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
-    !name.startsWith("slack_bot_") &&
+    (!name.startsWith("slack_bot_") ||
+      name === "slack_bot_list_channels" ||
+      name === "slack_bot_prepare_message" ||
+      name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_"),
+    !name.startsWith("atlassian_") &&
+    !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }
 
-export const ProductAccessMode = z.enum(["local", "configured", "managed"]);
+export const ProductAccessMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["local", "configured", "managed"]),
+);
 export type ProductAccessMode = z.infer<typeof ProductAccessMode>;
 
-export const BillingMode = z.enum(["disabled", "stripe"]);
+export const BillingMode = /* @__PURE__ */ defineSchema(() => z.enum(["disabled", "stripe"]));
 export type BillingMode = z.infer<typeof BillingMode>;
 
-export const EntitlementsMode = z.enum(["none", "static", "managed"]);
+export const EntitlementsMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["none", "static", "managed"]),
+);
 export type EntitlementsMode = z.infer<typeof EntitlementsMode>;
 
-export const UsageLimitsMode = z.enum(["none", "static", "managed"]);
+export const UsageLimitsMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["none", "static", "managed"]),
+);
 export type UsageLimitsMode = z.infer<typeof UsageLimitsMode>;
 
-export const AccountRole = z.enum(["owner", "admin", "member"]);
+export const AccountRole = /* @__PURE__ */ defineSchema(() => z.enum(["owner", "admin", "member"]));
 export type AccountRole = z.infer<typeof AccountRole>;
 
 /**
@@ -1212,38 +1335,34 @@ export type AccountRole = z.infer<typeof AccountRole>;
  * more than one workspace. This names authority only; parsing one of these
  * contracts never authorizes access by itself.
  */
-export const ResourceAuthorityScope = z.enum(["organization", "workspace", "user"]);
+export const ResourceAuthorityScope = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["organization", "workspace", "user"]),
+);
 export type ResourceAuthorityScope = z.infer<typeof ResourceAuthorityScope>;
 
-export const ResourceAuthorityListScope = z.enum([
-  "effective",
-  "organization",
-  "workspace",
-  "user",
-]);
+export const ResourceAuthorityListScope = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["effective", "organization", "workspace", "user"]),
+);
 export type ResourceAuthorityListScope = z.infer<typeof ResourceAuthorityListScope>;
 
-export const OrganizationMembershipStatus = z.enum([
-  "provisioning",
-  "active",
-  "suspended",
-  "revoked",
-]);
+export const OrganizationMembershipStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["provisioning", "active", "suspended", "revoked"]),
+);
 export type OrganizationMembershipStatus = z.infer<typeof OrganizationMembershipStatus>;
 
-export const PersonalResourceRetentionMode = z.enum(["retain", "delete_after"]);
+export const PersonalResourceRetentionMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["retain", "delete_after"]),
+);
 export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceRetentionMode>;
 
-export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
+export const SessionTenancyVisibility = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["user_private", "workspace_shared"]),
+);
 
-export const UserResourceAuthorityScope = z.literal("user");
-export const UserResourceKind = z.enum([
-  "connection",
-  "document",
-  "variable_set",
-  "rig",
-  "connected_machine",
-]);
+export const UserResourceAuthorityScope = /* @__PURE__ */ defineSchema(() => z.literal("user"));
+export const UserResourceKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["connection", "document", "variable_set", "rig", "connected_machine"]),
+);
 export type UserResourceKind = z.infer<typeof UserResourceKind>;
 
 export const USER_RESOURCE_ACTION_BY_KIND = {
@@ -1254,7 +1373,9 @@ export const USER_RESOURCE_ACTION_BY_KIND = {
   connected_machine: "connected_machine.use",
 } as const satisfies Record<UserResourceKind, string>;
 
-export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+export const UserResourceLifecycleGrantMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["once", "session", "always"]),
+);
 export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
 export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
   "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
@@ -1264,14 +1385,16 @@ export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
  * Connected Machine closure selected by one session. The server derives every resource,
  * authority and action from the locked session; callers never nominate grants.
  */
-export const PersonalResourceAttachmentIntent = z
-  .object({
-    mode: UserResourceLifecycleGrantMode,
-    expectedAuthorityEpoch: z.number().int().positive().optional(),
-    workspaceSharedAcknowledged: z.boolean().default(false),
-    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
-  })
-  .strict();
+export const PersonalResourceAttachmentIntent = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      mode: UserResourceLifecycleGrantMode,
+      expectedAuthorityEpoch: z.number().int().positive().optional(),
+      workspaceSharedAcknowledged: z.boolean().default(false),
+      sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+    })
+    .strict(),
+);
 export type PersonalResourceAttachmentIntent = z.infer<typeof PersonalResourceAttachmentIntent>;
 
 function requireEstablishedPersonalResourceEpoch(
@@ -1293,109 +1416,129 @@ function requireEstablishedPersonalResourceEpoch(
 }
 
 /** Credential-free accepted-work projection. Resource ids remain private. */
-export const PersonalResourceAttachmentSummary = z
-  .object({
-    mode: UserResourceLifecycleGrantMode,
-    context: SessionTenancyVisibility,
-    resourceCount: z.number().int().positive(),
-    resourceKinds: z
-      .array(z.enum(["variable_set", "rig", "connected_machine"]))
-      .min(1)
-      .max(3),
-    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
-  })
-  .strict();
+export const PersonalResourceAttachmentSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      mode: UserResourceLifecycleGrantMode,
+      context: SessionTenancyVisibility,
+      resourceCount: z.number().int().positive(),
+      resourceKinds: z
+        .array(z.enum(["variable_set", "rig", "connected_machine"]))
+        .min(1)
+        .max(3),
+      sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+    })
+    .strict(),
+);
 export type PersonalResourceAttachmentSummary = z.infer<typeof PersonalResourceAttachmentSummary>;
 /** Public owner-management deliberately excludes race-prone standalone `once`. */
-export const ManagedUserResourceGrantMode = z.enum(["session", "always"]);
-export const UserResourceAuthorityGrant = z.object({
-  grantId: z.string().uuid(),
-  targetWorkspaceId: z.string().uuid(),
-  targetSessionId: z.string().uuid().nullable(),
-  action: z.enum([
-    "connection.use",
-    "document.read",
-    "variable_set.use",
-    "rig.use",
-    "connected_machine.use",
-  ]),
-  mode: UserResourceLifecycleGrantMode,
-  context: SessionTenancyVisibility,
-  authorityEpoch: z.number().int().positive().nullable(),
-  generation: z.number().int().positive(),
-  status: z.enum(["active", "consumed", "revoked", "expired"]),
-  expiresAt: z.string().datetime().nullable(),
-  delegation: z.lazy(() => UserResourceDelegation),
-});
-export const UserResourceAuthoritySummary = z.object({
-  authorityId: z.string().uuid(),
-  resourceKind: UserResourceKind,
-  resourceId: z.string().uuid(),
-  originWorkspaceId: z.string().uuid().nullable(),
-  generation: z.number().int().positive(),
-  status: z.enum(["active", "retained", "revoked"]),
-  grants: z.array(UserResourceAuthorityGrant),
-});
-export const ListUserResourceAuthoritiesQuery = z.object({
-  scope: UserResourceAuthorityScope,
-  resourceKind: UserResourceKind.exclude(["connection"]),
-  cursor: z.string().uuid().optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-});
-export const ListUserResourceAuthoritiesResponse = z.object({
-  scope: UserResourceAuthorityScope,
-  authorities: z.array(UserResourceAuthoritySummary),
-  nextCursor: z.string().uuid().nullable(),
-});
-export const IssueUserResourceGrantRequest = z
-  .object({
+export const ManagedUserResourceGrantMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["session", "always"]),
+);
+export const UserResourceAuthorityGrant = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    grantId: z.string().uuid(),
+    targetWorkspaceId: z.string().uuid(),
+    targetSessionId: z.string().uuid().nullable(),
+    action: z.enum([
+      "connection.use",
+      "document.read",
+      "variable_set.use",
+      "rig.use",
+      "connected_machine.use",
+    ]),
+    mode: UserResourceLifecycleGrantMode,
+    context: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive().nullable(),
+    generation: z.number().int().positive(),
+    status: z.enum(["active", "consumed", "revoked", "expired"]),
+    expiresAt: z.string().datetime().nullable(),
+    delegation: z.lazy(() => UserResourceDelegation),
+  }),
+);
+export const UserResourceAuthoritySummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    authorityId: z.string().uuid(),
+    resourceKind: UserResourceKind,
+    resourceId: z.string().uuid(),
+    originWorkspaceId: z.string().uuid().nullable(),
+    generation: z.number().int().positive(),
+    status: z.enum(["active", "retained", "revoked"]),
+    grants: z.array(UserResourceAuthorityGrant),
+  }),
+);
+export const ListUserResourceAuthoritiesQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
     scope: UserResourceAuthorityScope,
     resourceKind: UserResourceKind.exclude(["connection"]),
-    mode: ManagedUserResourceGrantMode,
-    context: SessionTenancyVisibility,
-    sessionId: z.string().uuid().nullable().optional(),
-    expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
-    workspaceSharedAcknowledged: z.boolean().default(false),
-  })
-  .superRefine((value, context) => {
-    if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
-      context.addIssue({
-        code: "custom",
-        path: ["workspaceSharedAcknowledged"],
-        message: "workspace_shared requires durable shared-output acknowledgement",
-      });
-    }
-    if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
-      context.addIssue({
-        code: "custom",
-        path: ["sessionId"],
-        message: "always is unbound from session authority",
-      });
-    }
-    if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
-      context.addIssue({
-        code: "custom",
-        path: ["sessionId"],
-        message: "session grants require a target session and expectedAuthorityEpoch",
-      });
-    }
-  });
-export const UserResourceGrantMutationResponse = z.object({
-  scope: UserResourceAuthorityScope,
-  grant: UserResourceAuthorityGrant,
-});
-export const UserResourceGrantRevocationResponse = z.object({
-  scope: UserResourceAuthorityScope,
-  grant: z.object({
-    grantId: z.string().uuid(),
-    generation: z.number().int().positive(),
-    status: z.literal("revoked"),
-    revokedAt: z.string().datetime(),
+    cursor: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
   }),
-});
-export const RevokeUserResourceGrantQuery = z.object({
-  scope: UserResourceAuthorityScope,
-});
+);
+export const ListUserResourceAuthoritiesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    scope: UserResourceAuthorityScope,
+    authorities: z.array(UserResourceAuthoritySummary),
+    nextCursor: z.string().uuid().nullable(),
+  }),
+);
+export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      scope: UserResourceAuthorityScope,
+      resourceKind: UserResourceKind.exclude(["connection"]),
+      mode: ManagedUserResourceGrantMode,
+      context: SessionTenancyVisibility,
+      sessionId: z.string().uuid().nullable().optional(),
+      expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
+      workspaceSharedAcknowledged: z.boolean().default(false),
+    })
+    .superRefine((value, context) => {
+      if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
+        context.addIssue({
+          code: "custom",
+          path: ["workspaceSharedAcknowledged"],
+          message: "workspace_shared requires durable shared-output acknowledgement",
+        });
+      }
+      if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
+        context.addIssue({
+          code: "custom",
+          path: ["sessionId"],
+          message: "always is unbound from session authority",
+        });
+      }
+      if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
+        context.addIssue({
+          code: "custom",
+          path: ["sessionId"],
+          message: "session grants require a target session and expectedAuthorityEpoch",
+        });
+      }
+    }),
+);
+export const UserResourceGrantMutationResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    scope: UserResourceAuthorityScope,
+    grant: UserResourceAuthorityGrant,
+  }),
+);
+export const UserResourceGrantRevocationResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    scope: UserResourceAuthorityScope,
+    grant: z.object({
+      grantId: z.string().uuid(),
+      generation: z.number().int().positive(),
+      status: z.literal("revoked"),
+      revokedAt: z.string().datetime(),
+    }),
+  }),
+);
+export const RevokeUserResourceGrantQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    scope: UserResourceAuthorityScope,
+  }),
+);
 export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
 export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
 export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
@@ -1410,7 +1553,9 @@ export type UserResourceGrantRevocationResponse = z.infer<
 export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 
 /** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
-export const SessionVisibility = z.enum(["private", "workspace"]);
+export const SessionVisibility = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["private", "workspace"]),
+);
 export type SessionVisibility = z.infer<typeof SessionVisibility>;
 
 export function sessionVisibilityToPublic(value: SessionTenancyVisibility): SessionVisibility {
@@ -1421,18 +1566,24 @@ export function sessionVisibilityFromPublic(value: SessionVisibility): SessionTe
   return value === "private" ? "user_private" : "workspace_shared";
 }
 
-export const UserResourceGrantMode = z.enum(["once", "session", "always"]);
+export const UserResourceGrantMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["once", "session", "always"]),
+);
 export type UserResourceGrantMode = z.infer<typeof UserResourceGrantMode>;
 
 /** Canonical non-wildcard action named by a personal-resource grant. */
-export const UserResourceGrantAction = z
-  .string()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u);
+export const UserResourceGrantAction = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u),
+);
 export type UserResourceGrantAction = z.infer<typeof UserResourceGrantAction>;
 
-export const UserResourceGrantStatus = z.enum(["active", "consumed", "revoked", "expired"]);
+export const UserResourceGrantStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "consumed", "revoked", "expired"]),
+);
 export type UserResourceGrantStatus = z.infer<typeof UserResourceGrantStatus>;
 
 function refineUserResourceGrantFence(
@@ -1478,13 +1629,15 @@ function refineUserResourceGrantFence(
 }
 
 /** Self-only organization membership projection; no subject identifier leaks. */
-export const OrganizationMembershipProjection = z.object({
-  id: z.string().uuid(),
-  organizationId: z.string().uuid(),
-  status: OrganizationMembershipStatus,
-  personalWorkspaceId: z.string().uuid().nullable(),
-  personalRetentionUntil: z.string().datetime({ offset: true }).nullable(),
-});
+export const OrganizationMembershipProjection = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    status: OrganizationMembershipStatus,
+    personalWorkspaceId: z.string().uuid().nullable(),
+    personalRetentionUntil: z.string().datetime({ offset: true }).nullable(),
+  }),
+);
 export type OrganizationMembershipProjection = z.infer<typeof OrganizationMembershipProjection>;
 
 /**
@@ -1492,19 +1645,23 @@ export type OrganizationMembershipProjection = z.infer<typeof OrganizationMember
  * Retention is intentionally absent because the narrow provisioning capability
  * neither reads nor mutates offboarding policy.
  */
-export const ManagedOrganizationMembershipProjection = z.object({
-  id: z.string().uuid(),
-  organizationId: z.string().uuid(),
-  status: z.literal("active"),
-  personalWorkspaceId: z.string().uuid(),
-});
+export const ManagedOrganizationMembershipProjection = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    status: z.literal("active"),
+    personalWorkspaceId: z.string().uuid(),
+  }),
+);
 export type ManagedOrganizationMembershipProjection = z.infer<
   typeof ManagedOrganizationMembershipProjection
 >;
 
-export const ListManagedOrganizationMembershipsResponse = z.object({
-  memberships: z.array(ManagedOrganizationMembershipProjection),
-});
+export const ListManagedOrganizationMembershipsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    memberships: z.array(ManagedOrganizationMembershipProjection),
+  }),
+);
 export type ListManagedOrganizationMembershipsResponse = z.infer<
   typeof ListManagedOrganizationMembershipsResponse
 >;
@@ -1513,15 +1670,17 @@ export type ListManagedOrganizationMembershipsResponse = z.infer<
  * Opaque user-resource authority projection. Ownership is represented by the
  * server-issued authority id, never a raw subject or membership id.
  */
-export const UserResourceAuthorityProjection = z.object({
-  id: z.string().uuid(),
-  organizationId: z.string().uuid(),
-  scope: z.literal("user"),
-  resourceKind: z.string().min(1).max(64),
-  originWorkspaceId: z.string().uuid().nullable(),
-  generation: z.number().int().positive(),
-  status: z.enum(["active", "retained", "revoked"]),
-});
+export const UserResourceAuthorityProjection = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    scope: z.literal("user"),
+    resourceKind: z.string().min(1).max(64),
+    originWorkspaceId: z.string().uuid().nullable(),
+    generation: z.number().int().positive(),
+    status: z.enum(["active", "retained", "revoked"]),
+  }),
+);
 export type UserResourceAuthorityProjection = z.infer<typeof UserResourceAuthorityProjection>;
 
 /**
@@ -1529,22 +1688,24 @@ export type UserResourceAuthorityProjection = z.infer<typeof UserResourceAuthori
  * boundary proves the organization, owner, workspace, session context, and
  * current authority epoch.
  */
-export const UserResourceGrantProjection = z
-  .object({
-    id: z.string().uuid(),
-    authorityId: z.string().uuid(),
-    organizationId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid().nullable(),
-    action: UserResourceGrantAction,
-    mode: UserResourceGrantMode,
-    context: SessionTenancyVisibility,
-    authorityEpoch: z.number().int().positive().nullable(),
-    generation: z.number().int().positive(),
-    status: UserResourceGrantStatus,
-    expiresAt: z.string().datetime({ offset: true }).nullable(),
-  })
-  .superRefine(refineUserResourceGrantFence);
+export const UserResourceGrantProjection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      authorityId: z.string().uuid(),
+      organizationId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid().nullable(),
+      action: UserResourceGrantAction,
+      mode: UserResourceGrantMode,
+      context: SessionTenancyVisibility,
+      authorityEpoch: z.number().int().positive().nullable(),
+      generation: z.number().int().positive(),
+      status: UserResourceGrantStatus,
+      expiresAt: z.string().datetime({ offset: true }).nullable(),
+    })
+    .superRefine(refineUserResourceGrantFence),
+);
 export type UserResourceGrantProjection = z.infer<typeof UserResourceGrantProjection>;
 
 /**
@@ -1552,22 +1713,24 @@ export type UserResourceGrantProjection = z.infer<typeof UserResourceGrantProjec
  * opaque authority/grant identity and execution fences, never owner identity
  * or credential material.
  */
-export const UserResourceDelegation = z
-  .object({
-    authorityId: z.string().uuid(),
-    grantId: z.string().uuid(),
-    organizationId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid().nullable(),
-    action: UserResourceGrantAction,
-    mode: UserResourceGrantMode,
-    context: SessionTenancyVisibility,
-    authorityEpoch: z.number().int().positive().nullable(),
-    authorityGeneration: z.number().int().positive(),
-    grantGeneration: z.number().int().positive(),
-    resourceVersionId: z.string().uuid().nullable().optional(),
-  })
-  .superRefine(refineUserResourceGrantFence);
+export const UserResourceDelegation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      authorityId: z.string().uuid(),
+      grantId: z.string().uuid(),
+      organizationId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid().nullable(),
+      action: UserResourceGrantAction,
+      mode: UserResourceGrantMode,
+      context: SessionTenancyVisibility,
+      authorityEpoch: z.number().int().positive().nullable(),
+      authorityGeneration: z.number().int().positive(),
+      grantGeneration: z.number().int().positive(),
+      resourceVersionId: z.string().uuid().nullable().optional(),
+    })
+    .superRefine(refineUserResourceGrantFence),
+);
 export type UserResourceDelegation = z.infer<typeof UserResourceDelegation>;
 
 /**
@@ -1575,416 +1738,507 @@ export type UserResourceDelegation = z.infer<typeof UserResourceDelegation>;
  * authority parse to workspace-only behavior; user authority is impossible
  * without one complete opaque delegation.
  */
-export const ResourceAuthorityEnvelope = z
-  .object({
-    scope: ResourceAuthorityScope.default("workspace"),
-    userDelegation: UserResourceDelegation.optional(),
-  })
-  .superRefine((value, context) => {
-    if (value.scope === "user" && value.userDelegation === undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["userDelegation"],
-        message: "user scope requires an explicit immutable delegation",
-      });
-    }
-    if (value.scope !== "user" && value.userDelegation !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["userDelegation"],
-        message: "only user scope may carry a user delegation",
-      });
-    }
-  });
+export const ResourceAuthorityEnvelope = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      scope: ResourceAuthorityScope.default("workspace"),
+      userDelegation: UserResourceDelegation.optional(),
+    })
+    .superRefine((value, context) => {
+      if (value.scope === "user" && value.userDelegation === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["userDelegation"],
+          message: "user scope requires an explicit immutable delegation",
+        });
+      }
+      if (value.scope !== "user" && value.userDelegation !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["userDelegation"],
+          message: "only user scope may carry a user delegation",
+        });
+      }
+    }),
+);
 export type ResourceAuthorityEnvelope = z.infer<typeof ResourceAuthorityEnvelope>;
 
 /** Secret-safe generic session tenancy metadata for an authorized viewer. */
-export const SessionTenancyProjection = z.object({
-  visibility: SessionTenancyVisibility,
-  authorityEpoch: z.number().int().positive(),
-  ownedByCurrentUser: z.boolean(),
-  fork: z
-    .object({
-      sourceVisibility: SessionTenancyVisibility,
-      sourceAuthorityEpoch: z.number().int().positive(),
-      forkedAt: z.string().datetime({ offset: true }),
-    })
-    .nullable(),
-});
+export const SessionTenancyProjection = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    visibility: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive(),
+    ownedByCurrentUser: z.boolean(),
+    fork: z
+      .object({
+        sourceVisibility: SessionTenancyVisibility,
+        sourceAuthorityEpoch: z.number().int().positive(),
+        forkedAt: z.string().datetime({ offset: true }),
+      })
+      .nullable(),
+  }),
+);
 export type SessionTenancyProjection = z.infer<typeof SessionTenancyProjection>;
 
 /** Secret-safe public projection used by activated session APIs. */
-export const SessionTenancyPublicProjection = z.object({
-  visibility: SessionVisibility,
-  authorityEpoch: z.number().int().positive(),
-  ownedByCurrentUser: z.boolean(),
-  fork: z
-    .object({
-      sourceVisibility: SessionVisibility,
-      sourceAuthorityEpoch: z.number().int().positive(),
-      forkedAt: z.string().datetime({ offset: true }),
-    })
-    .nullable(),
-});
+export const SessionTenancyPublicProjection = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    visibility: SessionVisibility,
+    authorityEpoch: z.number().int().positive(),
+    ownedByCurrentUser: z.boolean(),
+    fork: z
+      .object({
+        sourceVisibility: SessionVisibility,
+        sourceAuthorityEpoch: z.number().int().positive(),
+        forkedAt: z.string().datetime({ offset: true }),
+      })
+      .nullable(),
+  }),
+);
 export type SessionTenancyPublicProjection = z.infer<typeof SessionTenancyPublicProjection>;
 
-export const SessionTenancyBlocker = z.enum([
-  "nonterminal_turn",
-  "nonterminal_attempt",
-  "unsettled_interruption",
-  "pending_system_update",
-  "pending_human_input",
-  "pending_tool_receipt",
-  "run_state",
-  "active_goal",
-  "capacity_waiter",
-  "active_realtime",
-  "active_scheduled_task",
-  "workspace_mutation_admission",
-  "retained_process",
-  "active_sandbox_access",
-  "shared_sandbox_group",
-]);
+export const SessionTenancyBlocker = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "nonterminal_turn",
+    "nonterminal_attempt",
+    "unsettled_interruption",
+    "pending_system_update",
+    "pending_human_input",
+    "pending_tool_receipt",
+    "run_state",
+    "active_goal",
+    "capacity_waiter",
+    "active_realtime",
+    "active_scheduled_task",
+    "workspace_mutation_admission",
+    "retained_process",
+    "active_sandbox_access",
+    "shared_sandbox_group",
+  ]),
+);
 export type SessionTenancyBlocker = z.infer<typeof SessionTenancyBlocker>;
 
 export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
 export const MAX_SELECTED_VARIABLE_SETS = 25;
-const SessionTenancyIdempotencyKey = z.string().trim().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+const SessionTenancyIdempotencyKey = /* @__PURE__ */ defineSchema(() =>
+  z.string().trim().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
+);
 
-export const UpdateSessionVisibilityRequest = z
-  .object({
-    visibility: SessionVisibility,
-    expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    idempotencyKey: SessionTenancyIdempotencyKey,
-  })
-  .strict();
+export const UpdateSessionVisibilityRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      visibility: SessionVisibility,
+      expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      idempotencyKey: SessionTenancyIdempotencyKey,
+      /**
+       * "Make private anyway": stop the chat's visible work (the running or
+       * parked response, queued messages, an active goal, a live voice session)
+       * and drop what carries another person's access (their pending updates and
+       * account choices) as part of the change. Without it, any of that answers
+       * `active_work` with the same summary. Leftover records are settled either
+       * way, and nothing else refuses the change.
+       */
+      stopActiveWork: z.boolean().optional(),
+    })
+    .strict(),
+);
 export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
 
-export const UpdateSessionVisibilityResponse = z
-  .object({
-    operationId: z.string().uuid(),
-    eventId: z.string().uuid().nullable(),
-    eventSequence: z.number().int().positive().nullable(),
-    visibility: SessionVisibility,
-    authorityEpoch: z.number().int().positive(),
-    changed: z.boolean(),
-    replay: z.boolean(),
-    revokedGrantCount: z.number().int().nonnegative(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.changed !== (value.eventId !== null && value.eventSequence !== null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["changed"],
-        message: "changed must match the presence of the durable event receipt",
-      });
-    }
-    if ((value.eventId === null) !== (value.eventSequence === null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["eventId"],
-        message: "eventId and eventSequence must be present or absent together",
-      });
-    }
-  });
+/** What a confirmed change to Only me stops or removes. */
+export const SessionVisibilityWork = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      runningTurnCount: z.number().int().nonnegative(),
+      queuedTurnCount: z.number().int().nonnegative(),
+      activeGoal: z.boolean(),
+      liveVoice: z.boolean(),
+      otherPeoplePendingUpdateCount: z.number().int().nonnegative(),
+      otherPeopleAccountChoiceCount: z.number().int().nonnegative(),
+    })
+    .strict(),
+);
+export type SessionVisibilityWork = z.infer<typeof SessionVisibilityWork>;
+
+/** Owner-only answer to "what happens if this chat changes audience?". */
+export const SessionVisibilityChangePreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      visibility: SessionVisibility,
+      targetVisibility: SessionVisibility,
+      authorityEpoch: z.number().int().positive(),
+      /**
+       * What the change stops or removes when `stopActiveWork` is sent; empty
+       * for workspace. Nothing else refuses a change to Only me.
+       */
+      work: SessionVisibilityWork,
+      /** @deprecated Always `null`: nothing refuses a change to Only me any more. */
+      blocker: SessionTenancyBlocker.nullable(),
+    })
+    .strict(),
+);
+export type SessionVisibilityChangePreview = z.infer<typeof SessionVisibilityChangePreview>;
+
+export const UpdateSessionVisibilityResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      eventId: z.string().uuid().nullable(),
+      eventSequence: z.number().int().positive().nullable(),
+      visibility: SessionVisibility,
+      authorityEpoch: z.number().int().positive(),
+      changed: z.boolean(),
+      replay: z.boolean(),
+      revokedGrantCount: z.number().int().nonnegative(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.changed !== (value.eventId !== null && value.eventSequence !== null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["changed"],
+          message: "changed must match the presence of the durable event receipt",
+        });
+      }
+      if ((value.eventId === null) !== (value.eventSequence === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["eventId"],
+          message: "eventId and eventSequence must be present or absent together",
+        });
+      }
+    }),
+);
 export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibilityResponse>;
 
-export const ForkSessionRequest = z
-  .object({
-    sourceEventId: z.string().uuid().optional(),
-    idempotencyKey: SessionTenancyIdempotencyKey,
-    visibility: SessionVisibility,
-    workspaceSharedAcknowledged: z.boolean(),
-    // Optional fresh-session runtime setup. Omission preserves the historical
-    // content-only fork; explicit null/[] creates a rigless, set-free restart.
-    rigId: z.string().uuid().nullable().optional(),
-    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.sourceEventId && (value.rigId !== undefined || value.variableSetIds !== undefined)) {
-      context.addIssue({
-        code: "custom",
-        path: ["sourceEventId"],
-        message: "Message forks cannot replace runtime setup",
-      });
-    }
-    if (value.visibility === "private" && value.workspaceSharedAcknowledged) {
-      context.addIssue({
-        code: "custom",
-        path: ["workspaceSharedAcknowledged"],
-        message: "workspaceSharedAcknowledged must be false for a private destination",
-      });
-    }
-    if (
-      value.variableSetIds &&
-      new Set(value.variableSetIds).size !== value.variableSetIds.length
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["variableSetIds"],
-        message: "variableSetIds must not contain duplicates",
-      });
-    }
-  });
+export const ForkSessionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sourceEventId: z.string().uuid().optional(),
+      idempotencyKey: SessionTenancyIdempotencyKey,
+      visibility: SessionVisibility,
+      workspaceSharedAcknowledged: z.boolean(),
+      // Optional fresh-session runtime setup. Omission preserves the historical
+      // content-only fork; explicit null/[] creates a rigless, set-free restart.
+      rigId: z.string().uuid().nullable().optional(),
+      variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (
+        value.sourceEventId &&
+        (value.rigId !== undefined || value.variableSetIds !== undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["sourceEventId"],
+          message: "Message forks cannot replace runtime setup",
+        });
+      }
+      if (value.visibility === "private" && value.workspaceSharedAcknowledged) {
+        context.addIssue({
+          code: "custom",
+          path: ["workspaceSharedAcknowledged"],
+          message: "workspaceSharedAcknowledged must be false for a private destination",
+        });
+      }
+      if (
+        value.variableSetIds &&
+        new Set(value.variableSetIds).size !== value.variableSetIds.length
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["variableSetIds"],
+          message: "variableSetIds must not contain duplicates",
+        });
+      }
+    }),
+);
 export type ForkSessionRequest = z.infer<typeof ForkSessionRequest>;
 
-export const ForkSessionResponse = z
-  .object({
-    operationId: z.string().uuid(),
-    eventId: z.string().uuid(),
-    eventSequence: z.number().int().positive(),
-    sessionId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    visibility: SessionVisibility,
-    authorityEpoch: z.literal(1),
-    copiedHistoryItemCount: z.number().int().nonnegative(),
-    replay: z.boolean(),
-  })
-  .strict();
+export const ForkSessionResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      eventId: z.string().uuid(),
+      eventSequence: z.number().int().positive(),
+      sessionId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      visibility: SessionVisibility,
+      authorityEpoch: z.literal(1),
+      copiedHistoryItemCount: z.number().int().nonnegative(),
+      replay: z.boolean(),
+    })
+    .strict(),
+);
 export type ForkSessionResponse = z.infer<typeof ForkSessionResponse>;
 
-export const ManagedAccount = z.object({
-  id: z.string().uuid(),
-  name: z.string(),
-  externalSource: z.string().nullable(),
-  externalId: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const ManagedAccount = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    externalSource: z.string().nullable(),
+    externalId: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type ManagedAccount = z.infer<typeof ManagedAccount>;
 
-export const WorkspacePauseTimer = z.object({
-  id: z.string().uuid(),
-  action: z.enum(["pause", "resume"]),
-  dueAt: z.string().datetime(),
-  pauseForSeconds: z.number().int().min(60).max(2592000).nullable(),
-});
+export const WorkspacePauseTimer = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    action: z.enum(["pause", "resume"]),
+    dueAt: z.string().datetime(),
+    pauseForSeconds: z.number().int().min(60).max(2592000).nullable(),
+  }),
+);
 export type WorkspacePauseTimer = z.infer<typeof WorkspacePauseTimer>;
-export const WorkspacePauseTimerRequest = z
-  .object({
-    action: z.enum(["set", "cancel"]),
-    pauseInSeconds: z
-      .number()
-      .int()
-      .min(0)
-      .max(2592000)
-      .refine((v) => v === 0 || v >= 60)
-      .optional(),
-    pauseForSeconds: z.number().int().min(60).max(2592000).nullable().optional(),
-    clientEventId: z.string().min(1).max(200),
-    expectedRevision: z.number().int().nonnegative(),
-  })
-  .strict();
+export const WorkspacePauseTimerRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      action: z.enum(["set", "cancel"]),
+      pauseInSeconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(2592000)
+        .refine((v) => v === 0 || v >= 60)
+        .optional(),
+      pauseForSeconds: z.number().int().min(60).max(2592000).nullable().optional(),
+      clientEventId: z.string().min(1).max(200),
+      expectedRevision: z.number().int().nonnegative(),
+    })
+    .strict(),
+);
 export type WorkspacePauseTimerRequest = z.infer<typeof WorkspacePauseTimerRequest>;
 
-export const Workspace = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  kind: z.enum(["personal", "shared"]),
-  name: z.string(),
-  slug: z.string().nullable(),
-  externalSource: z.string().nullable(),
-  externalId: z.string().nullable(),
-  // Per-workspace agent persona template (white-label override). null means
-  // the deployment default (OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE /
-  // DEFAULT_AGENT_INSTRUCTIONS) is used. The runtime always injects the
-  // non-bypassable CORE (goal-loop ownership + variableSet block), so an
-  // override restyles the persona without dropping that contract.
-  agentInstructions: z.string().nullable(),
-  // Growth-ready per-workspace settings bag (migration 0045). Known keys are
-  // validated by WorkspaceSettingsSchema; unknown keys are preserved across
-  // PATCH merges so newer settings survive an older server.
-  settings: z.record(z.string(), z.unknown()),
-  inferenceControl: z.object({
-    timer: WorkspacePauseTimer.nullable().optional(),
-    serverTime: z.string().optional(),
-    state: z.enum(["active", "paused"]),
-    revision: z.number().int().nonnegative(),
-    reason: z.string().nullable(),
-    changedBy: z.string().nullable(),
-    changedAt: z.string().nullable(),
+export const Workspace = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    kind: z.enum(["personal", "shared"]),
+    name: z.string(),
+    slug: z.string().nullable(),
+    externalSource: z.string().nullable(),
+    externalId: z.string().nullable(),
+    // Per-workspace agent persona template (white-label override). null means
+    // the deployment default (OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE /
+    // DEFAULT_AGENT_INSTRUCTIONS) is used. The runtime always injects the
+    // non-bypassable CORE (goal-loop ownership + variableSet block), so an
+    // override restyles the persona without dropping that contract.
+    agentInstructions: z.string().nullable(),
+    // Growth-ready per-workspace settings bag (migration 0045). Known keys are
+    // validated by WorkspaceSettingsSchema; unknown keys are preserved across
+    // PATCH merges so newer settings survive an older server.
+    settings: z.record(z.string(), z.unknown()),
+    inferenceControl: z.object({
+      timer: WorkspacePauseTimer.nullable().optional(),
+      serverTime: z.string().optional(),
+      state: z.enum(["active", "paused"]),
+      revision: z.number().int().nonnegative(),
+      reason: z.string().nullable(),
+      changedBy: z.string().nullable(),
+      changedAt: z.string().nullable(),
+    }),
+    // Workspace default rig used by session/scheduled-task create fallback.
+    defaultRigId: z.string().uuid().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
   }),
-  // Workspace default rig used by session/scheduled-task create fallback.
-  defaultRigId: z.string().uuid().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+);
 export type Workspace = z.infer<typeof Workspace>;
 
-export const WorkspaceTranscriptionTarget = z
-  .object({
-    provider: z.string().trim().min(1).max(128),
-    model: z.string().trim().min(1).max(256).nullable(),
-    credentialMode: z.enum(["managed", "byok"]),
-    // A workspace-scoped connection reference, never credential material.
-    credentialConnectionId: z.string().uuid().nullable(),
-    region: z.string().trim().min(1).max(128).nullable(),
-  })
-  .strict()
-  .superRefine((target, context) => {
-    if (target.provider === "azure-speech" && target.credentialMode !== "byok") {
-      context.addIssue({
-        code: "custom",
-        path: ["credentialMode"],
-        message: "Azure Speech is supported only through workspace BYOK",
-      });
-    }
-    if (target.credentialMode === "byok" && target.credentialConnectionId === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["credentialConnectionId"],
-        message: "BYOK transcription targets require a workspace connection reference",
-      });
-    }
-    if (target.credentialMode === "managed" && target.credentialConnectionId !== null) {
-      context.addIssue({
-        code: "custom",
-        path: ["credentialConnectionId"],
-        message: "managed transcription targets cannot name a BYOK connection",
-      });
-    }
-  });
+export const WorkspaceTranscriptionTarget = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      provider: z.string().trim().min(1).max(128),
+      model: z.string().trim().min(1).max(256).nullable(),
+      credentialMode: z.enum(["managed", "byok"]),
+      // A workspace-scoped connection reference, never credential material.
+      credentialConnectionId: z.string().uuid().nullable(),
+      region: z.string().trim().min(1).max(128).nullable(),
+    })
+    .strict()
+    .superRefine((target, context) => {
+      if (target.provider === "azure-speech" && target.credentialMode !== "byok") {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialMode"],
+          message: "Azure Speech is supported only through workspace BYOK",
+        });
+      }
+      if (target.credentialMode === "byok" && target.credentialConnectionId === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialConnectionId"],
+          message: "BYOK transcription targets require a workspace connection reference",
+        });
+      }
+      if (target.credentialMode === "managed" && target.credentialConnectionId !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialConnectionId"],
+          message: "managed transcription targets cannot name a BYOK connection",
+        });
+      }
+    }),
+);
 export type WorkspaceTranscriptionTarget = z.infer<typeof WorkspaceTranscriptionTarget>;
 
-export const TranscriptionErrorCode = z.enum([
-  "permission_denied",
-  "not_supported",
-  "network",
-  "provider",
-  "policy_blocked",
-  "timeout",
-  "cancelled",
-  "unavailable",
-  "too_large",
-  "invalid_audio",
-  "unknown",
-]);
+export const TranscriptionErrorCode = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "permission_denied",
+    "not_supported",
+    "network",
+    "provider",
+    "policy_blocked",
+    "timeout",
+    "cancelled",
+    "unavailable",
+    "too_large",
+    "invalid_audio",
+    "unknown",
+    "insufficient_credits",
+    "allowance_exhausted",
+    "monthly_model_cost_limit",
+  ]),
+);
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
 
 /** Stable user-safe error codes for the native voice-input transcription path. */
 export const VoiceInputErrorCode = TranscriptionErrorCode;
 export type VoiceInputErrorCode = TranscriptionErrorCode;
 
-export const TranscriptionTimeSpan = z
-  .object({
-    startMilliseconds: z.number().finite().nonnegative(),
-    endMilliseconds: z.number().finite().nonnegative(),
-  })
-  .strict()
-  .superRefine((span, context) => {
-    if (span.endMilliseconds < span.startMilliseconds) {
-      context.addIssue({
-        code: "custom",
-        path: ["endMilliseconds"],
-        message: "transcription spans must not end before they start",
-      });
-    }
-  });
+export const TranscriptionTimeSpan = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      startMilliseconds: z.number().finite().nonnegative(),
+      endMilliseconds: z.number().finite().nonnegative(),
+    })
+    .strict()
+    .superRefine((span, context) => {
+      if (span.endMilliseconds < span.startMilliseconds) {
+        context.addIssue({
+          code: "custom",
+          path: ["endMilliseconds"],
+          message: "transcription spans must not end before they start",
+        });
+      }
+    }),
+);
 export type TranscriptionTimeSpan = z.infer<typeof TranscriptionTimeSpan>;
 
-export const TranscriptionSpeaker = z
-  .object({
-    id: z.string().trim().min(1).max(128),
-    label: z.string().trim().min(1).max(128).optional(),
-  })
-  .strict();
+export const TranscriptionSpeaker = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().trim().min(1).max(128),
+      label: z.string().trim().min(1).max(128).optional(),
+    })
+    .strict(),
+);
 export type TranscriptionSpeaker = z.infer<typeof TranscriptionSpeaker>;
 
-export const TranscriptionWord = z
-  .object({
-    text: z.string().min(1).max(4096),
-    span: TranscriptionTimeSpan,
-    confidence: z.number().finite().min(0).max(1).optional(),
-    speaker: TranscriptionSpeaker.optional(),
-  })
-  .strict();
+export const TranscriptionWord = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      text: z.string().min(1).max(4096),
+      span: TranscriptionTimeSpan,
+      confidence: z.number().finite().min(0).max(1).optional(),
+      speaker: TranscriptionSpeaker.optional(),
+    })
+    .strict(),
+);
 export type TranscriptionWord = z.infer<typeof TranscriptionWord>;
 
-export const TranscriptionResultMetadata = z
-  .object({
-    detectedLanguage: z.string().trim().min(1).max(64).optional(),
-    span: TranscriptionTimeSpan.optional(),
-    confidence: z.number().finite().min(0).max(1).optional(),
-    speaker: TranscriptionSpeaker.optional(),
-    words: z.array(TranscriptionWord).max(10_000).optional(),
-  })
-  .strict()
-  .superRefine((metadata, context) => {
-    let previousStart = -1;
-    for (const [index, word] of (metadata.words ?? []).entries()) {
-      if (word.span.startMilliseconds < previousStart) {
-        context.addIssue({
-          code: "custom",
-          path: ["words", index, "span", "startMilliseconds"],
-          message: "transcription words must be ordered by start time",
-        });
+export const TranscriptionResultMetadata = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      detectedLanguage: z.string().trim().min(1).max(64).optional(),
+      span: TranscriptionTimeSpan.optional(),
+      confidence: z.number().finite().min(0).max(1).optional(),
+      speaker: TranscriptionSpeaker.optional(),
+      words: z.array(TranscriptionWord).max(10_000).optional(),
+    })
+    .strict()
+    .superRefine((metadata, context) => {
+      let previousStart = -1;
+      for (const [index, word] of (metadata.words ?? []).entries()) {
+        if (word.span.startMilliseconds < previousStart) {
+          context.addIssue({
+            code: "custom",
+            path: ["words", index, "span", "startMilliseconds"],
+            message: "transcription words must be ordered by start time",
+          });
+        }
+        previousStart = word.span.startMilliseconds;
+        if (
+          metadata.span &&
+          (word.span.startMilliseconds < metadata.span.startMilliseconds ||
+            word.span.endMilliseconds > metadata.span.endMilliseconds)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["words", index, "span"],
+            message: "transcription word spans must fall within the result span",
+          });
+        }
       }
-      previousStart = word.span.startMilliseconds;
-      if (
-        metadata.span &&
-        (word.span.startMilliseconds < metadata.span.startMilliseconds ||
-          word.span.endMilliseconds > metadata.span.endMilliseconds)
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["words", index, "span"],
-          message: "transcription word spans must fall within the result span",
-        });
-      }
-    }
-  });
+    }),
+);
 export type TranscriptionResultMetadata = z.infer<typeof TranscriptionResultMetadata>;
 
-const TranscriptionEventBase = z
-  .object({
-    localSessionId: z.string().min(1).max(256),
-    sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    occurredAt: z.string().datetime({ offset: true }),
-  })
-  .strict();
+const TranscriptionEventBase = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      localSessionId: z.string().min(1).max(256),
+      sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      occurredAt: z.string().datetime({ offset: true }),
+    })
+    .strict(),
+);
 
 /** Strict provider-neutral event surface; provider payload bags are rejected. */
-export const TranscriptionEvent = z.discriminatedUnion("type", [
-  TranscriptionEventBase.extend({ type: z.literal("permission.requested") }),
-  TranscriptionEventBase.extend({
-    type: z.literal("session.opened"),
-    providerSessionId: z.string().min(1).max(512),
-  }),
-  TranscriptionEventBase.extend({
-    type: z.literal("transcript.partial"),
-    segmentId: z.string().min(1).max(512),
-    text: z.string().max(1_000_000),
-    metadata: TranscriptionResultMetadata.optional(),
-  }),
-  TranscriptionEventBase.extend({
-    type: z.literal("transcript.final"),
-    segmentId: z.string().min(1).max(512),
-    text: z.string().max(1_000_000),
-    providerAcceptanceId: z.string().min(1).max(512),
-    metadata: TranscriptionResultMetadata.optional(),
-  }),
-  TranscriptionEventBase.extend({
-    type: z.literal("usage"),
-    audioMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    costUsd: z.number().finite().nonnegative().max(1_000_000_000).nullable(),
-  }),
-  TranscriptionEventBase.extend({
-    type: z.literal("session.reconnecting"),
-    attempt: z.number().int().nonnegative().max(10_000),
-    reason: z.string().min(1).max(256),
-  }),
-  TranscriptionEventBase.extend({
-    type: z.literal("session.error"),
-    code: TranscriptionErrorCode,
-    recoverable: z.boolean(),
-  }),
-  TranscriptionEventBase.extend({
-    type: z.literal("session.closed"),
-    reason: z.enum(["completed", "cancelled", "error", "replaced"]),
-  }),
-]);
+export const TranscriptionEvent = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [
+    TranscriptionEventBase.extend({ type: z.literal("permission.requested") }),
+    TranscriptionEventBase.extend({
+      type: z.literal("session.opened"),
+      providerSessionId: z.string().min(1).max(512),
+    }),
+    TranscriptionEventBase.extend({
+      type: z.literal("transcript.partial"),
+      segmentId: z.string().min(1).max(512),
+      text: z.string().max(1_000_000),
+      metadata: TranscriptionResultMetadata.optional(),
+    }),
+    TranscriptionEventBase.extend({
+      type: z.literal("transcript.final"),
+      segmentId: z.string().min(1).max(512),
+      text: z.string().max(1_000_000),
+      providerAcceptanceId: z.string().min(1).max(512),
+      metadata: TranscriptionResultMetadata.optional(),
+    }),
+    TranscriptionEventBase.extend({
+      type: z.literal("usage"),
+      audioMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      costUsd: z.number().finite().nonnegative().max(1_000_000_000).nullable(),
+    }),
+    TranscriptionEventBase.extend({
+      type: z.literal("session.reconnecting"),
+      attempt: z.number().int().nonnegative().max(10_000),
+      reason: z.string().min(1).max(256),
+    }),
+    TranscriptionEventBase.extend({
+      type: z.literal("session.error"),
+      code: TranscriptionErrorCode,
+      recoverable: z.boolean(),
+    }),
+    TranscriptionEventBase.extend({
+      type: z.literal("session.closed"),
+      reason: z.enum(["completed", "cancelled", "error", "replaced"]),
+    }),
+  ]),
+);
 export type TranscriptionEvent = z.infer<typeof TranscriptionEvent>;
 
 /**
@@ -1996,145 +2250,148 @@ export type TranscriptionEvent = z.infer<typeof TranscriptionEvent>;
  * than secrets. `acceptanceId` changes whenever an admin accepts a new target
  * set, so clients can bind a microphone session to one exact policy revision.
  */
-export const WorkspaceTranscriptionPolicy = z
-  .object({
-    enabled: z.boolean(),
-    acceptanceId: z.string().uuid().nullable(),
-    primary: WorkspaceTranscriptionTarget.nullable(),
-    language: z.string().trim().min(1).max(64).nullable(),
-    autoDetectLanguage: z.boolean(),
-    diarization: z
-      .object({
-        enabled: z.boolean(),
-        maxSpeakers: z.number().int().min(2).max(100).nullable(),
-      })
-      .strict(),
-    retention: z
-      .object({
-        mode: z.enum(["none", "provider-policy"]),
-        maxDays: z.number().int().nonnegative().max(3650).nullable(),
-      })
-      .strict(),
-    privacy: z
-      .object({
-        allowProviderLogging: z.boolean(),
-        allowProviderTraining: z.boolean(),
-      })
-      .strict(),
-    fallback: z
-      .object({
-        mode: z.enum(["disabled", "explicit"]),
-        targets: z.array(WorkspaceTranscriptionTarget).max(8),
-      })
-      .strict(),
-    cost: z
-      .object({
-        currency: z.literal("USD"),
-        maxPerHour: z.number().finite().nonnegative().max(10_000).nullable(),
-        maxPerMonth: z.number().finite().nonnegative().max(1_000_000).nullable(),
-      })
-      .strict(),
-  })
-  .strict()
-  .superRefine((policy, context) => {
-    if (policy.enabled && policy.acceptanceId === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["acceptanceId"],
-        message: "enabled transcription requires an accepted policy identity",
-      });
-    }
-    if (policy.enabled && policy.primary === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["primary"],
-        message: "enabled transcription requires a primary target",
-      });
-    }
-    if (policy.enabled && !policy.autoDetectLanguage && policy.language === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["language"],
-        message: "enabled transcription requires a language or accepted automatic detection",
-      });
-    }
-    if (policy.autoDetectLanguage && policy.language !== null) {
-      context.addIssue({
-        code: "custom",
-        path: ["language"],
-        message: "automatic language detection and a fixed language are mutually exclusive",
-      });
-    }
-    if (!policy.diarization.enabled && policy.diarization.maxSpeakers !== null) {
-      context.addIssue({
-        code: "custom",
-        path: ["diarization", "maxSpeakers"],
-        message: "disabled diarization cannot retain a speaker limit",
-      });
-    }
-    if (policy.fallback.mode === "disabled" && policy.fallback.targets.length > 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["fallback", "targets"],
-        message: "disabled fallback cannot retain accepted targets",
-      });
-    }
-    if (policy.fallback.mode === "explicit" && policy.fallback.targets.length === 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["fallback", "targets"],
-        message: "explicit fallback requires at least one accepted target",
-      });
-    }
-    const targetKeys = [policy.primary, ...policy.fallback.targets]
-      .filter((target): target is WorkspaceTranscriptionTarget => target !== null)
-      .map((target) =>
-        [
-          target.provider,
-          target.model ?? "",
-          target.credentialMode,
-          target.credentialConnectionId ?? "",
-          target.region ?? "",
-        ].join("\u0000"),
-      );
-    if (new Set(targetKeys).size !== targetKeys.length) {
-      context.addIssue({
-        code: "custom",
-        path: ["fallback", "targets"],
-        message: "transcription targets must be unique",
-      });
-    }
-  });
+export const WorkspaceTranscriptionPolicy = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      enabled: z.boolean(),
+      acceptanceId: z.string().uuid().nullable(),
+      primary: WorkspaceTranscriptionTarget.nullable(),
+      language: z.string().trim().min(1).max(64).nullable(),
+      autoDetectLanguage: z.boolean(),
+      diarization: z
+        .object({
+          enabled: z.boolean(),
+          maxSpeakers: z.number().int().min(2).max(100).nullable(),
+        })
+        .strict(),
+      retention: z
+        .object({
+          mode: z.enum(["none", "provider-policy"]),
+          maxDays: z.number().int().nonnegative().max(3650).nullable(),
+        })
+        .strict(),
+      privacy: z
+        .object({
+          allowProviderLogging: z.boolean(),
+          allowProviderTraining: z.boolean(),
+        })
+        .strict(),
+      fallback: z
+        .object({
+          mode: z.enum(["disabled", "explicit"]),
+          targets: z.array(WorkspaceTranscriptionTarget).max(8),
+        })
+        .strict(),
+      cost: z
+        .object({
+          currency: z.literal("USD"),
+          maxPerHour: z.number().finite().nonnegative().max(10_000).nullable(),
+          maxPerMonth: z.number().finite().nonnegative().max(1_000_000).nullable(),
+        })
+        .strict(),
+    })
+    .strict()
+    .superRefine((policy, context) => {
+      if (policy.enabled && policy.acceptanceId === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["acceptanceId"],
+          message: "enabled transcription requires an accepted policy identity",
+        });
+      }
+      if (policy.enabled && policy.primary === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["primary"],
+          message: "enabled transcription requires a primary target",
+        });
+      }
+      if (policy.enabled && !policy.autoDetectLanguage && policy.language === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["language"],
+          message: "enabled transcription requires a language or accepted automatic detection",
+        });
+      }
+      if (policy.autoDetectLanguage && policy.language !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["language"],
+          message: "automatic language detection and a fixed language are mutually exclusive",
+        });
+      }
+      if (!policy.diarization.enabled && policy.diarization.maxSpeakers !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["diarization", "maxSpeakers"],
+          message: "disabled diarization cannot retain a speaker limit",
+        });
+      }
+      if (policy.fallback.mode === "disabled" && policy.fallback.targets.length > 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["fallback", "targets"],
+          message: "disabled fallback cannot retain accepted targets",
+        });
+      }
+      if (policy.fallback.mode === "explicit" && policy.fallback.targets.length === 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["fallback", "targets"],
+          message: "explicit fallback requires at least one accepted target",
+        });
+      }
+      const targetKeys = [policy.primary, ...policy.fallback.targets]
+        .filter((target): target is WorkspaceTranscriptionTarget => target !== null)
+        .map((target) =>
+          [
+            target.provider,
+            target.model ?? "",
+            target.credentialMode,
+            target.credentialConnectionId ?? "",
+            target.region ?? "",
+          ].join("\u0000"),
+        );
+      if (new Set(targetKeys).size !== targetKeys.length) {
+        context.addIssue({
+          code: "custom",
+          path: ["fallback", "targets"],
+          message: "transcription targets must be unique",
+        });
+      }
+    }),
+);
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
 /**
  * Workspace voice-input preferences. Public provider identifiers express the
  * preferred billing route; credentials and model configuration remain private.
  */
-export const VoiceInputProviderId = z.enum([
-  "supergrok-subscription",
-  "codex-subscription",
-  "openai",
-  "azure-openai",
-]);
+export const VoiceInputProviderId = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["supergrok-subscription", "codex-subscription", "openai", "azure-openai", "azure-mai"]),
+);
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 
-export const WorkspaceVoiceInputSettings = z
-  .object({
-    enabled: z.boolean(),
-    preferredProvider: VoiceInputProviderId.nullable().optional(),
-    fallbackEnabled: z.boolean().optional(),
-  })
-  .strict();
+export const WorkspaceVoiceInputSettings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      enabled: z.boolean(),
+      preferredProvider: VoiceInputProviderId.nullable().optional(),
+      fallbackEnabled: z.boolean().optional(),
+    })
+    .strict(),
+);
 export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
 
 /** Model policy inherited by newly created chats and scheduled tasks. */
-export const WorkspaceSessionDefaults = z
-  .object({
-    model: z.string().trim().min(1).max(256),
-    reasoningEffort: ReasoningEffort,
-  })
-  .strict();
+export const WorkspaceSessionDefaults = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      model: z.string().trim().min(1).max(256),
+      reasoningEffort: ReasoningEffort,
+    })
+    .strict(),
+);
 export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
 
 /**
@@ -2145,57 +2402,65 @@ export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
  * keeps the runtime independent from presentation labels and lets a session
  * narrow the resulting policy without changing the workspace default.
  */
-export const WorkspaceSessionToolDefaults = z
-  .object({
-    inheritConnectedMcpServers: z.boolean().optional(),
-    mcpServerIds: z
-      .array(z.string().trim().min(1).max(128))
-      .max(128)
-      .transform((ids) => [...new Set(ids)])
-      .optional(),
-    firstPartyMcpTools: z
-      .array(FirstPartyMcpToolName)
-      .max(512)
-      .transform((tools) => [...new Set(tools)])
-      .optional(),
-  })
-  .strict();
+export const WorkspaceSessionToolDefaults = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      inheritConnectedMcpServers: z.boolean().optional(),
+      mcpServerIds: z
+        .array(z.string().trim().min(1).max(128))
+        .max(128)
+        .transform((ids) => [...new Set(ids)])
+        .optional(),
+      firstPartyMcpTools: z
+        .array(FirstPartyMcpToolName)
+        .max(512)
+        .transform((tools) => [...new Set(tools)])
+        .optional(),
+    })
+    .strict(),
+);
 export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
 
 // Omitted keys preserve the stored selection; null removes only that override.
-export const WorkspaceSessionToolDefaultsPatch = z
-  .object({
-    inheritConnectedMcpServers:
-      WorkspaceSessionToolDefaults.shape.inheritConnectedMcpServers.nullable(),
-    mcpServerIds: WorkspaceSessionToolDefaults.shape.mcpServerIds.nullable(),
-    firstPartyMcpTools: WorkspaceSessionToolDefaults.shape.firstPartyMcpTools.nullable(),
-  })
-  .strict();
+export const WorkspaceSessionToolDefaultsPatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      inheritConnectedMcpServers:
+        WorkspaceSessionToolDefaults.shape.inheritConnectedMcpServers.nullable(),
+      mcpServerIds: WorkspaceSessionToolDefaults.shape.mcpServerIds.nullable(),
+      firstPartyMcpTools: WorkspaceSessionToolDefaults.shape.firstPartyMcpTools.nullable(),
+    })
+    .strict(),
+);
 
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
-export const ClientVoiceInputConfig = z
-  .object({
-    available: z.boolean(),
-    providers: z.array(VoiceInputProviderId).optional(),
-    maxDurationSeconds: z.number().int().positive().max(600),
-    maxSizeBytes: z
-      .number()
-      .int()
-      .positive()
-      .max(25 * 1024 * 1024),
-    acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
-    resumable: ClientResumableVoiceInputConfig.optional(),
-  })
-  .strict();
+export const ClientVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      available: z.boolean(),
+      providers: z.array(VoiceInputProviderId).optional(),
+      maxDurationSeconds: z.number().int().positive().max(600),
+      maxSizeBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(25 * 1024 * 1024),
+      acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+      resumable: ClientResumableVoiceInputConfig.optional(),
+    })
+    .strict(),
+);
 export type ClientVoiceInputConfig = z.infer<typeof ClientVoiceInputConfig>;
 
 /** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
-export const TranscribeAudioResponse = z
-  .object({
-    text: z.string().max(1_000_000),
-    languages: z.array(z.string().trim().min(1).max(64)).max(16).default([]),
-  })
-  .strict();
+export const TranscribeAudioResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      text: z.string().max(1_000_000),
+      languages: z.array(z.string().trim().min(1).max(64)).max(16).default([]),
+    })
+    .strict(),
+);
 export type TranscribeAudioResponse = z.infer<typeof TranscribeAudioResponse>;
 
 /** Default safety ceiling for one-shot native voice input (60 seconds). */
@@ -2217,47 +2482,57 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 export * from "./transcription-recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
-export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
+export const CodexCompactionMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["remote_v2", "portable"]),
+);
 export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
 
-export const SlackReactionEmojiName = z.literal("genie");
+export const SlackReactionEmojiName = /* @__PURE__ */ defineSchema(() => z.literal("genie"));
 export type SlackReactionEmojiName = z.infer<typeof SlackReactionEmojiName>;
 
-export const WorkspaceSlackReactionChannelPolicy = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("bot_member") }).strict(),
-  z
-    .object({
-      mode: z.literal("allowlist"),
-      channelIds: z.array(z.string().trim().min(1).max(64)).max(100),
-    })
-    .strict(),
-]);
+export const WorkspaceSlackReactionChannelPolicy = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("bot_member") }).strict(),
+    z
+      .object({
+        mode: z.literal("allowlist"),
+        channelIds: z.array(z.string().trim().min(1).max(64)).max(100),
+      })
+      .strict(),
+  ]),
+);
 export type WorkspaceSlackReactionChannelPolicy = z.infer<
   typeof WorkspaceSlackReactionChannelPolicy
 >;
 
-export const WorkspaceSlackReactionSummonSettings = z
-  .object({
-    enabled: z.boolean(),
-    emoji: SlackReactionEmojiName,
-    channelPolicy: WorkspaceSlackReactionChannelPolicy,
-  })
-  .strict();
+export const WorkspaceSlackReactionSummonSettings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      enabled: z.boolean(),
+      emoji: SlackReactionEmojiName,
+      channelPolicy: WorkspaceSlackReactionChannelPolicy,
+    })
+    .strict(),
+);
 export type WorkspaceSlackReactionSummonSettings = z.infer<
   typeof WorkspaceSlackReactionSummonSettings
 >;
 
-export const SlackReactionChannel = z.object({
-  id: z.string().min(1).max(64),
-  name: z.string().min(1).max(256).nullable(),
-  isPrivate: z.boolean(),
-});
+export const SlackReactionChannel = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1).max(64),
+    name: z.string().min(1).max(256).nullable(),
+    isPrivate: z.boolean(),
+  }),
+);
 export type SlackReactionChannel = z.infer<typeof SlackReactionChannel>;
 
-export const SlackReactionChannelListResponse = z.object({
-  channels: z.array(SlackReactionChannel).max(200),
-  nextCursor: z.string().max(1_024).nullable(),
-});
+export const SlackReactionChannelListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    channels: z.array(SlackReactionChannel).max(200),
+    nextCursor: z.string().max(1_024).nullable(),
+  }),
+);
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
 
 /** Active, non-shared channels the bot belongs to, offered as a task's fixed destination. */
@@ -2265,40 +2540,46 @@ export const ScheduledTaskSlackChannelListResponse = SlackReactionChannelListRes
 export type ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
 
 /** Where one Slack channel starts work. */
-export const SlackChannelRoute = z.object({
-  slackChannelId: z.string().min(1).max(64),
-  targetWorkspaceId: z.string().uuid(),
-  // Unbounded like `Workspace.name` itself: a cap here would reject a row the
-  // database happily holds.
-  targetWorkspaceName: z.string().min(1).nullable(),
-  source: z.enum(["picker", "admin"]),
-  updatedAt: z.string(),
-});
+export const SlackChannelRoute = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    slackChannelId: z.string().min(1).max(64),
+    targetWorkspaceId: z.string().uuid(),
+    // Unbounded like `Workspace.name` itself: a cap here would reject a row the
+    // database happily holds.
+    targetWorkspaceName: z.string().min(1).nullable(),
+    source: z.enum(["picker", "admin"]),
+    updatedAt: z.string(),
+  }),
+);
 export type SlackChannelRoute = z.infer<typeof SlackChannelRoute>;
 
-export const SlackChannelRouteListResponse = z.object({
-  /** Every stored route. Bounded in practice by the channels the bot is in. */
-  routes: z.array(SlackChannelRoute),
-  /**
-   * Whether routing is switched on for this deployment. With it off the stored
-   * routes are inert, so the surface says so instead of implying they apply.
-   */
-  routingEnabled: z.boolean(),
-});
+export const SlackChannelRouteListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Every stored route. Bounded in practice by the channels the bot is in. */
+    routes: z.array(SlackChannelRoute),
+    /**
+     * Whether routing is switched on for this deployment. With it off the stored
+     * routes are inert, so the surface says so instead of implying they apply.
+     */
+    routingEnabled: z.boolean(),
+  }),
+);
 export type SlackChannelRouteListResponse = z.infer<typeof SlackChannelRouteListResponse>;
 
-export const UpdateSlackChannelRoutesRequest = z.object({
-  connectionId: z.string().uuid(),
-  routes: z
-    .array(
-      z.object({
-        slackChannelId: z.string().min(1).max(64),
-        /** Null clears the route, so the channel asks once again. */
-        targetWorkspaceId: z.string().uuid().nullable(),
-      }),
-    )
-    .max(200),
-});
+export const UpdateSlackChannelRoutesRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connectionId: z.string().uuid(),
+    routes: z
+      .array(
+        z.object({
+          slackChannelId: z.string().min(1).max(64),
+          /** Null clears the route, so the channel asks once again. */
+          targetWorkspaceId: z.string().uuid().nullable(),
+        }),
+      )
+      .max(200),
+  }),
+);
 export type UpdateSlackChannelRoutesRequest = z.infer<typeof UpdateSlackChannelRoutesRequest>;
 
 export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
@@ -2326,10 +2607,12 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
  * newer release added, and a rollback must not cost five unrelated settings.
  * An invalid VALUE still fails the bag, and therefore fails closed to silence.
  */
-export const WorkspaceSlackOrchestrationNoticeSettings = z.object({
-  childRequiresAction: z.boolean().optional(),
-  goalPaused: z.boolean().optional(),
-});
+export const WorkspaceSlackOrchestrationNoticeSettings = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    childRequiresAction: z.boolean().optional(),
+    goalPaused: z.boolean().optional(),
+  }),
+);
 export type WorkspaceSlackOrchestrationNoticeSettings = z.infer<
   typeof WorkspaceSlackOrchestrationNoticeSettings
 >;
@@ -2358,7 +2641,9 @@ export const DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS = {
 // agentHumanInputEnabled, codexCompactionDefault, voiceInput and Slack summon
 // to their defaults. The value is accepted and then ignored: see
 // resolveWorkspaceMemoryPromptMode.
-export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
+export const WorkspaceMemoryPromptMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["legacy_standing", "retrieval_only"]),
+);
 export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
 
 /**
@@ -2367,65 +2652,290 @@ export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode
  * `legacy_standing`. That is a fact about history, not a mode anyone can pick -
  * keep the two apart so retiring the setting never rewrites the record.
  */
-export const HistoricalMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
+export const HistoricalMemoryPromptMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["legacy_standing", "retrieval_only"]),
+);
 export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMode>;
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults on and the
 // Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
-export const WorkspaceDefaultSandboxImage = z
-  .string()
-  .trim()
-  .min(1)
-  .max(512)
-  .regex(/^[^\s]+$/, "image reference must not contain whitespace");
+export const WorkspaceDefaultSandboxImage = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(512)
+    .regex(/^[^\s]+$/, "image reference must not contain whitespace"),
+);
 
-export const WorkspaceSettingsSchema = z
-  .object({
-    memoryEnabled: z.boolean().optional(),
-    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
-    sessionDefaults: WorkspaceSessionDefaults.optional(),
-    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
-    /** Preferred workspace voice-input toggle. */
-    voiceInput: WorkspaceVoiceInputSettings.optional(),
+export const ModelCompactionTokenThreshold = /* @__PURE__ */ defineSchema(() =>
+  z.number().int().min(16_000).max(2_147_483_647),
+);
+/** Independent exact product-model patches. Null resets just that model. */
+export const WorkspaceModelCompactionThresholdsPatch = /* @__PURE__ */ defineSchema(() =>
+  z
+    .unknown()
+    .refine(
+      (value) =>
+        !value ||
+        typeof value !== "object" ||
+        !Object.keys(value).some((key) => ["__proto__", "constructor", "prototype"].includes(key)),
+      "Invalid model ID",
+    )
+    .pipe(
+      z
+        .record(
+          z
+            .string()
+            .min(1)
+            .max(512)
+            .refine((key) => !["__proto__", "constructor", "prototype"].includes(key)),
+          ModelCompactionTokenThreshold.nullable(),
+        )
+        .refine(
+          (value) => Object.keys(value).length <= 256,
+          "At most 256 model preferences per patch",
+        ),
+    ),
+);
+
+export const ModelCompactionPolicy = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    defaultTokens: z.number().int().nonnegative(),
+    /** This scope's own preference; null follows the inherited value or the model default. */
+    overrideTokens: ModelCompactionTokenThreshold.nullable(),
     /**
-     * @deprecated Legacy host-adapter policy. Read for compatibility; new writes
-     * should use `voiceInput`.
+     * The organization's preference a workspace follows while it sets none of
+     * its own. Absent or null on an organization-scope projection.
      */
-    transcription: WorkspaceTranscriptionPolicy.optional(),
-    // null clears the workspace override and falls back to the persisted
-    // deployment policy. The database boundary validates the same range.
-    maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
-    // Default compaction strategy for NEW Codex sessions created in this
-    // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
-    codexCompactionDefault: CodexCompactionMode.optional(),
-    // Whether agents may expose and invoke the built-in structured human-input
-    // tool. Absent preserves the historical enabled behavior.
-    agentHumanInputEnabled: z.boolean().optional(),
-    // Whether agents get the Jev-backed `code_search` tool. Absent or null
-    // follows the deployment default; the deployment can always keep it off.
-    codeSearchEnabled: z.boolean().nullable().optional(),
-    // Optional Slack reaction invocation. Absent/invalid fails closed to the
-    // disabled default via resolveWorkspaceSlackReactionSummonSettings.
-    slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
-    // Optional Slack orchestration notices (blocked child worker, paused goal).
-    // BOTH DEFAULT OFF: absent, malformed, or partially invalid settings fail
-    // closed to disabled via resolveWorkspaceSlackOrchestrationNoticeSettings,
-    // because an unsolicited Slack post is worse than a missed one.
-    slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
-    // Sandbox image for new managed boxes in this workspace. Only images on the
-    // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
-    // null uses the deployment image.
-    defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
-    // Agent configuration defaults for new sessions ("Defaults for new
-    // sessions"). Validated leniently here and resolved by
-    // resolveWorkspaceAgentDefaults, so a value written by a newer release can
-    // never fail this bag and revert unrelated settings; writes are strict.
-    sessionAgentDefaults: z.unknown().optional(),
-  })
-  .passthrough();
+    organizationTokens: ModelCompactionTokenThreshold.nullable().optional(),
+    effectiveTokens: z.number().int().nonnegative(),
+    minimumTokens: z.number().int().nonnegative(),
+    maximumTokens: z.number().int().nonnegative(),
+  }),
+);
+export type ModelCompactionPolicy = z.infer<typeof ModelCompactionPolicy>;
+
+/** Read one preference leniently; bad/newer fields cannot reset unrelated settings. */
+export function workspaceModelCompactionThreshold(
+  settings: unknown,
+  modelId: string,
+): number | null {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return null;
+  const values = (settings as Record<string, unknown>).modelCompactionThresholds;
+  if (
+    !values ||
+    typeof values !== "object" ||
+    Array.isArray(values) ||
+    !Object.hasOwn(values, modelId)
+  )
+    return null;
+  const parsed = ModelCompactionTokenThreshold.safeParse(
+    (values as Record<string, unknown>)[modelId],
+  );
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Model defaults an organization owner or admin sets once for every workspace
+ * in the organization. Each workspace follows them until it sets its own
+ * value; a workspace value always wins, field by field and model by model.
+ * Subscriptions and keys are not defaults: they stay organization resources
+ * that are shared with workspaces.
+ */
+export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Model and reasoning for new chats and schedules; null leaves it automatic. */
+    sessionDefaults: WorkspaceSessionDefaults.nullable(),
+    /** Provider allowlist for workspaces without their own policy; null allows every provider. */
+    allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
+    /** Exact model allowlist for workspaces without their own policy; null allows every model. */
+    allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
+    /** Automatic compaction trigger by exact model id. */
+    modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
+    updatedAt: z.string().nullable(),
+  }),
+);
+export type OrganizationModelDefaults = z.infer<typeof OrganizationModelDefaults>;
+
+export const EMPTY_ORGANIZATION_MODEL_DEFAULTS: OrganizationModelDefaults = Object.freeze({
+  sessionDefaults: null,
+  allowedProviders: null,
+  allowedModels: null,
+  modelCompactionThresholds: Object.freeze({}) as Record<string, number>,
+  updatedAt: null,
+});
+
+/**
+ * PATCH body for organization model defaults. Each field is independent:
+ * omitted keeps it, `sessionDefaults: null` makes it automatic again,
+ * `modelPolicy` replaces both allowlists at once (null allows everything),
+ * and compaction merges by exact model id (null resets just that model).
+ */
+export const UpdateOrganizationModelDefaultsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
+      modelPolicy: z
+        .object({
+          allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
+          allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
+        })
+        .nullable()
+        .optional(),
+      modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
+    })
+    .strict(),
+);
+export type UpdateOrganizationModelDefaultsRequest = z.infer<
+  typeof UpdateOrganizationModelDefaultsRequest
+>;
+
+/**
+ * Whether owners and admins may give an agent session admin access. Off by
+ * default; turning it off ends every session's admin access.
+ */
+export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sessionAdminAccessAllowed: z.boolean(),
+    updatedAt: z.string().nullable(),
+  }),
+);
+export type OrganizationAgentAdminAccess = z.infer<typeof OrganizationAgentAdminAccess>;
+
+export const UpdateOrganizationAgentAdminAccessRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ sessionAdminAccessAllowed: z.boolean() }).strict(),
+);
+export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
+  typeof UpdateOrganizationAgentAdminAccessRequest
+>;
+
+/**
+ * A session's admin access as the viewer sees it. While `active`, the agent
+ * in this session can do what `grantedBy` can manage across the
+ * organization, checked live on every action.
+ */
+export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    active: z.boolean(),
+    grantedBy: z.object({ subjectId: z.string(), name: z.string().nullable() }).nullable(),
+    grantedAt: z.string().nullable(),
+    /** While active: when it ends by itself, or null for no time limit. */
+    expiresAt: z.string().nullable().default(null),
+    /** The organization allows admin access for sessions. */
+    allowed: z.boolean(),
+    /**
+     * The viewer may turn it on, or choose a new time limit while it is on: an
+     * owner or admin, in person, on their own session.
+     */
+    canGrant: z.boolean(),
+    /** The viewer may turn it off. */
+    canRevoke: z.boolean(),
+  }),
+);
+export type SessionAdminAccess = z.infer<typeof SessionAdminAccess>;
+
+/** The longest time limit for a session's admin access, in hours (30 days). */
+export const MAX_SESSION_ADMIN_ACCESS_HOURS = 720;
+
+/**
+ * How long a session's admin access lasts from now: whole hours, or null for
+ * no time limit. Omitted means one hour.
+ */
+export const GrantSessionAdminAccessRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      durationHours: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_SESSION_ADMIN_ACCESS_HOURS)
+        .nullable()
+        .default(1)
+        .describe(
+          "Hours until admin access ends by itself (1 to 720), or null for no time limit. Defaults to 1.",
+        ),
+    })
+    .strict(),
+);
+export type GrantSessionAdminAccessRequest = z.input<typeof GrantSessionAdminAccessRequest>;
+
+/** The organization's compaction preference for one exact model, or null. */
+export function organizationModelCompactionThreshold(
+  defaults: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null | undefined,
+  modelId: string,
+): number | null {
+  const values = defaults?.modelCompactionThresholds;
+  if (!values || !Object.hasOwn(values, modelId)) return null;
+  const parsed = ModelCompactionTokenThreshold.safeParse(values[modelId]);
+  return parsed.success ? parsed.data : null;
+}
+
+export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      memoryEnabled: z.boolean().optional(),
+      memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+      // Null (written by no current release) reads as unset, never as a bad bag.
+      sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
+      sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
+      /** Preferred workspace voice-input toggle. */
+      voiceInput: WorkspaceVoiceInputSettings.optional(),
+      /**
+       * @deprecated Legacy host-adapter policy. Read for compatibility; new writes
+       * should use `voiceInput`.
+       */
+      transcription: WorkspaceTranscriptionPolicy.optional(),
+      // null clears the workspace override and falls back to the persisted
+      // deployment policy. The database boundary validates the same range.
+      maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
+      // Default compaction strategy for NEW Codex sessions created in this
+      // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
+      codexCompactionDefault: CodexCompactionMode.optional(),
+      // Read leniently; each exact-model preference is resolved independently.
+      modelCompactionThresholds: z.unknown().optional(),
+      // Whether agents may expose and invoke the built-in structured human-input
+      // tool. Absent preserves the historical enabled behavior.
+      agentHumanInputEnabled: z.boolean().optional(),
+      // Whether agents get the Jev-backed `code_search` tool. Absent or null
+      // follows the deployment default; the deployment can always keep it off.
+      codeSearchEnabled: z.boolean().nullable().optional(),
+      // Optional Slack reaction invocation. Absent/invalid fails closed to the
+      // disabled default via resolveWorkspaceSlackReactionSummonSettings.
+      slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
+      // Optional Slack orchestration notices (blocked child worker, paused goal).
+      // BOTH DEFAULT OFF: absent, malformed, or partially invalid settings fail
+      // closed to disabled via resolveWorkspaceSlackOrchestrationNoticeSettings,
+      // because an unsolicited Slack post is worse than a missed one.
+      slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+      // Sandbox image for new managed boxes in this workspace. Only images on the
+      // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
+      // null uses the deployment image.
+      defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      // Agent configuration defaults for new sessions ("Defaults for new
+      // sessions"). Validated leniently here and resolved by
+      // resolveWorkspaceAgentDefaults, so a value written by a newer release can
+      // never fail this bag and revert unrelated settings; writes are strict.
+      sessionAgentDefaults: z.unknown().optional(),
+      // The workspace credit switch: only an explicit false blocks every model
+      // billed in Opengeni credits (current and future); absent allows them.
+      // Read leniently so a malformed value never fails the whole bag.
+      allowCreditModels: z.boolean().optional().catch(undefined),
+    })
+    .passthrough(),
+);
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+/** Whether workspace settings allow models billed in Opengeni credits. */
+export function workspaceSettingsAllowCreditModels(settings: unknown): boolean {
+  return !(
+    settings !== null &&
+    typeof settings === "object" &&
+    (settings as { allowCreditModels?: unknown }).allowCreditModels === false
+  );
+}
 
 /** Explicit agent defaults for new sessions, or null when unset/unreadable. */
 export function resolveWorkspaceAgentDefaults(settings: unknown): WorkspaceAgentDefaults | null {
@@ -2585,94 +3095,141 @@ export function workspaceSlackReactionChannelAllowed(
 // PATCH body for workspace settings: a partial top-level patch that merges into
 // the stored bag. Nested voiceInput/transcription updates are full replacements;
 // passthrough carries forward-compatible unknown keys.
-export const UpdateWorkspaceSettingsRequest = z
-  .object({
-    memoryEnabled: z.boolean().optional(),
-    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
-    sessionDefaults: WorkspaceSessionDefaults.optional(),
-    sessionToolDefaults: WorkspaceSessionToolDefaultsPatch.optional(),
-    voiceInput: WorkspaceVoiceInputSettings.optional(),
-    /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
-    transcription: WorkspaceTranscriptionPolicy.optional(),
-    maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
-    codexCompactionDefault: CodexCompactionMode.optional(),
-    agentHumanInputEnabled: z.boolean().optional(),
-    // null returns the workspace to the deployment default.
-    codeSearchEnabled: z.boolean().nullable().optional(),
-    slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
-    slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
-    defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
-    // Agent defaults for new sessions; null clears them. Requires the agent
-    // configuration admission switch.
-    sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
-  })
-  .passthrough();
+export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      memoryEnabled: z.boolean().optional(),
+      memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+      // null removes the workspace's own default so it follows the organization's.
+      sessionDefaults: WorkspaceSessionDefaults.nullable().optional(),
+      sessionToolDefaults: WorkspaceSessionToolDefaultsPatch.optional(),
+      voiceInput: WorkspaceVoiceInputSettings.optional(),
+      /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
+      transcription: WorkspaceTranscriptionPolicy.optional(),
+      maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
+      codexCompactionDefault: CodexCompactionMode.optional(),
+      modelCompactionThresholds: WorkspaceModelCompactionThresholdsPatch.optional(),
+      agentHumanInputEnabled: z.boolean().optional(),
+      // null returns the workspace to the deployment default.
+      codeSearchEnabled: z.boolean().nullable().optional(),
+      slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
+      slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+      defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+      // Agent defaults for new sessions; null clears them.
+      sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
+      // False blocks every model billed in Opengeni credits in this workspace.
+      allowCreditModels: z.boolean().optional(),
+    })
+    .passthrough(),
+);
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
 
-export const SetWorkspaceDefaultRigRequest = z.object({
-  rigId: z.string().uuid().nullable(),
-});
+export const SetWorkspaceDefaultRigRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    rigId: z.string().uuid().nullable(),
+  }),
+);
 export type SetWorkspaceDefaultRigRequest = z.infer<typeof SetWorkspaceDefaultRigRequest>;
 
 // PUT body for the workspace model policy (full replace, not a merge). null (or
 // omitted) = unrestricted for that dimension; an EMPTY array is a valid,
 // explicit total block. Entries are provider ids / exact model ids as the
 // router resolves them (see evaluateWorkspaceModelPolicy).
-export const UpdateWorkspaceModelPolicyRequest = z.object({
-  allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
-  allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
-});
+// The credit switch is not part of this body: it is the workspace setting
+// `allowCreditModels` (PATCH /v1/workspaces/:workspaceId/settings), so a PUT
+// never changes it and following the organization's allowlists keeps it.
+export const UpdateWorkspaceModelPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
+    allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
+  }),
+);
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
+
+/**
+ * The model policy a workspace runs with (`allowedProviders`/`allowedModels`)
+ * and where it comes from: its own saved policy, the organization's default it
+ * follows, or no restriction at all. `organization` is what the workspace would
+ * follow after removing its own policy.
+ */
+export const WorkspaceModelPolicyResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    allowedProviders: z.array(z.string()).nullable(),
+    allowedModels: z.array(z.string()).nullable(),
+    source: z.enum(["workspace", "organization", "none"]),
+    organization: z
+      .object({
+        allowedProviders: z.array(z.string()).nullable(),
+        allowedModels: z.array(z.string()).nullable(),
+      })
+      .nullable(),
+    /**
+     * The workspace's credit switch (its `allowCreditModels` setting), whichever
+     * allowlist it follows. False blocks every model billed in Opengeni credits,
+     * including credit models added later.
+     */
+    allowCreditModels: z.boolean(),
+  }),
+);
+export type WorkspaceModelPolicyResponse = z.infer<typeof WorkspaceModelPolicyResponse>;
 
 export const WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH = 238;
 
-export const CreateWorkspaceGatewayCustomModelRequest = z
-  .object({
-    operationId: z.string().uuid(),
-    upstreamModelId: z
-      .string()
-      .max(WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH)
-      .regex(/^[!-{}-~]+$/),
-    label: z
-      .string()
-      .min(1)
-      .max(128)
-      .refine((value) => new TextEncoder().encode(value).byteLength <= 128, {
-        message: "label must be at most 128 UTF-8 bytes",
-      })
-      .refine((value) => !/[\r\n|]/u.test(value), {
-        message: "label must not contain newlines or the | field separator",
-      })
-      .optional(),
-  })
-  .strict();
+export const CreateWorkspaceGatewayCustomModelRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      upstreamModelId: z
+        .string()
+        .max(WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH)
+        .regex(/^[!-{}-~]+$/),
+      label: z
+        .string()
+        .min(1)
+        .max(128)
+        .refine((value) => new TextEncoder().encode(value).byteLength <= 128, {
+          message: "label must be at most 128 UTF-8 bytes",
+        })
+        .refine((value) => !/[\r\n|]/u.test(value), {
+          message: "label must not contain newlines or the | field separator",
+        })
+        .optional(),
+    })
+    .strict(),
+);
 export type CreateWorkspaceGatewayCustomModelRequest = z.infer<
   typeof CreateWorkspaceGatewayCustomModelRequest
 >;
 
-export const DeleteWorkspaceGatewayCustomModelRequest = z
-  .object({
-    expectedVersion: z.number().int().positive(),
-    operationId: z.string().uuid(),
-  })
-  .strict();
+export const DeleteWorkspaceGatewayCustomModelRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedVersion: z.number().int().positive(),
+      operationId: z.string().uuid(),
+    })
+    .strict(),
+);
 export type DeleteWorkspaceGatewayCustomModelRequest = z.infer<
   typeof DeleteWorkspaceGatewayCustomModelRequest
 >;
 
-export const WorkspaceGatewayCustomModel = z.object({
-  id: z.string().uuid(),
-  upstreamModelId: z.string(),
-  label: z.string().nullable(),
-  version: z.number().int().positive(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
+export const WorkspaceGatewayCustomModel = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    upstreamModelId: z.string(),
+    label: z.string().nullable(),
+    version: z.number().int().positive(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+);
 export type WorkspaceGatewayCustomModel = z.infer<typeof WorkspaceGatewayCustomModel>;
 
-export const WorkspaceGatewayCustomModelsResponse = z.object({
-  models: z.array(WorkspaceGatewayCustomModel),
-});
+export const WorkspaceGatewayCustomModelsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    models: z.array(WorkspaceGatewayCustomModel),
+  }),
+);
 export type WorkspaceGatewayCustomModelsResponse = z.infer<
   typeof WorkspaceGatewayCustomModelsResponse
 >;
@@ -2690,12 +3247,35 @@ export type DeleteWorkspaceOpenRouterCustomModelRequest = z.infer<
 export const WorkspaceOpenRouterCustomModel = WorkspaceGatewayCustomModel;
 export type WorkspaceOpenRouterCustomModel = z.infer<typeof WorkspaceOpenRouterCustomModel>;
 
-export const WorkspaceOpenRouterCustomModelsResponse = z.object({
-  models: z.array(WorkspaceOpenRouterCustomModel),
-});
+export const WorkspaceOpenRouterCustomModelsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    models: z.array(WorkspaceOpenRouterCustomModel),
+  }),
+);
 export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
   typeof WorkspaceOpenRouterCustomModelsResponse
 >;
+
+export const CreateWorkspaceOpperCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type CreateWorkspaceOpperCustomModelRequest = z.infer<
+  typeof CreateWorkspaceOpperCustomModelRequest
+>;
+
+export const DeleteWorkspaceOpperCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteWorkspaceOpperCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceOpperCustomModelRequest
+>;
+
+// Same row shape as the Gateway/OpenRouter custom model; no separate schema
+// so the public surface keeps one canonical name for it.
+export type WorkspaceOpperCustomModel = WorkspaceGatewayCustomModel;
+
+export const WorkspaceOpperCustomModelsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    models: z.array(WorkspaceGatewayCustomModel),
+  }),
+);
+export type WorkspaceOpperCustomModelsResponse = z.infer<typeof WorkspaceOpperCustomModelsResponse>;
 
 export const CreateOrganizationProviderCustomModelRequest =
   CreateWorkspaceGatewayCustomModelRequest;
@@ -2709,50 +3289,55 @@ export type DeleteOrganizationProviderCustomModelRequest = z.infer<
 >;
 export const OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
 export type OrganizationProviderCustomModel = z.infer<typeof OrganizationProviderCustomModel>;
-export const OrganizationProviderCustomModelsResponse = z.object({
-  models: z.array(OrganizationProviderCustomModel),
-});
+export const OrganizationProviderCustomModelsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    models: z.array(OrganizationProviderCustomModel),
+  }),
+);
 export type OrganizationProviderCustomModelsResponse = z.infer<
   typeof OrganizationProviderCustomModelsResponse
 >;
 
-export const OrganizationModelProviderKind = z.enum([
-  "vercel_gateway",
-  "openrouter",
-  "anthropic",
-  "claude_subscription",
-]);
+export const OrganizationModelProviderKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["vercel_gateway", "openrouter", "anthropic", "claude_subscription", "opper"]),
+);
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
-export const OrganizationModelProviderConnectionResponse = z.object({
-  providerKind: OrganizationModelProviderKind,
-  status: z.enum(["active", "revoked"]),
-  version: z.number().int().positive(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
+export const OrganizationModelProviderConnectionResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    providerKind: OrganizationModelProviderKind,
+    status: z.enum(["active", "revoked"]),
+    version: z.number().int().positive(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  }),
+);
 export type OrganizationModelProviderConnectionResponse = z.infer<
   typeof OrganizationModelProviderConnectionResponse
 >;
-export const UpsertOrganizationModelProviderConnectionRequest = z
-  .object({
-    operationId: z.string().uuid(),
-    expectedVersion: z.number().int().nonnegative().optional(),
-    apiKey: z.string().trim().min(1).max(8192),
-    claudeIdentity: z
-      .object({
-        accountUuid: z.string().uuid(),
-        deviceId: z.string().regex(/^[a-f0-9]{64}$/),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict();
+export const UpsertOrganizationModelProviderConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      expectedVersion: z.number().int().nonnegative().optional(),
+      apiKey: z.string().trim().min(1).max(8192),
+      claudeIdentity: z
+        .object({
+          accountUuid: z.string().uuid(),
+          deviceId: z.string().regex(/^[a-f0-9]{64}$/),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+);
 export type UpsertOrganizationModelProviderConnectionRequest = z.infer<
   typeof UpsertOrganizationModelProviderConnectionRequest
 >;
-export const RevokeOrganizationModelProviderConnectionRequest = z
-  .object({ operationId: z.string().uuid(), expectedVersion: z.number().int().positive() })
-  .strict();
+export const RevokeOrganizationModelProviderConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({ operationId: z.string().uuid(), expectedVersion: z.number().int().positive() })
+    .strict(),
+);
 export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
   typeof RevokeOrganizationModelProviderConnectionRequest
 >;
@@ -2772,18 +3357,20 @@ export const UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID = "unattributed-legacy" as
  * describe causal machine work, but it is not a generic human-impersonation
  * mechanism. The authenticated grant remains the authorization boundary.
  */
-export const ServiceTurnInitiator = z.object({
-  kind: z.literal("service"),
-  subjectId: z
-    .string()
-    .min(1)
-    .max(1024)
-    .refine((value) => value !== UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID, {
-      message: "unattributed-legacy is reserved for migrated rows",
-    }),
-  /** Immutable display snapshot; never an authorization input. */
-  label: z.string().min(1).max(256).optional(),
-});
+export const ServiceTurnInitiator = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.literal("service"),
+    subjectId: z
+      .string()
+      .min(1)
+      .max(1024)
+      .refine((value) => value !== UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID, {
+        message: "unattributed-legacy is reserved for migrated rows",
+      }),
+    /** Immutable display snapshot; never an authorization input. */
+    label: z.string().min(1).max(256).optional(),
+  }),
+);
 export type ServiceTurnInitiator = z.infer<typeof ServiceTurnInitiator>;
 
 /**
@@ -2791,7 +3378,9 @@ export type ServiceTurnInitiator = z.infer<typeof ServiceTurnInitiator>;
  * context (for example an external occurrence id), not a second identity or
  * authorization surface.
  */
-export const TurnInitiatorContext = z.record(z.string(), z.unknown());
+export const TurnInitiatorContext = /* @__PURE__ */ defineSchema(() =>
+  z.record(z.string(), z.unknown()),
+);
 export type TurnInitiatorContext = z.infer<typeof TurnInitiatorContext>;
 
 const reservedServiceTurnInitiatorContextKeys = new Set([
@@ -2805,70 +3394,76 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
   "viaTruncated",
 ]);
 
-/** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
-export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((value, ctx) => {
-  for (const key of reservedServiceTurnInitiatorContextKeys) {
-    if (Object.prototype.hasOwnProperty.call(value, key)) {
+/** Bounded host provenance that cannot forge Opengeni-owned lineage fields. */
+export const ServiceTurnInitiatorContext = /* @__PURE__ */ defineSchema(() =>
+  TurnInitiatorContext.superRefine((value, ctx) => {
+    for (const key of reservedServiceTurnInitiatorContextKeys) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is reserved Opengeni initiator context`,
+        });
+      }
+    }
+    try {
+      if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 4096) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "service initiator context exceeds 4096 UTF-8 bytes",
+        });
+      }
+    } catch {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: [key],
-        message: `${key} is reserved OpenGeni initiator context`,
+        message: "service initiator context must be JSON-serializable",
       });
     }
-  }
-  try {
-    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 4096) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "service initiator context exceeds 4096 UTF-8 bytes",
-      });
-    }
-  } catch {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "service initiator context must be JSON-serializable",
-    });
-  }
-});
+  }),
+);
 export type ServiceTurnInitiatorContext = z.infer<typeof ServiceTurnInitiatorContext>;
 
-export const DelegatedAccessPrincipalKind = z.enum(["human_session", "agent_attempt", "service"]);
+export const DelegatedAccessPrincipalKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["human_session", "agent_attempt", "service"]),
+);
 export type DelegatedAccessPrincipalKind = z.infer<typeof DelegatedAccessPrincipalKind>;
 
-export const AccessPrincipalKind = z.enum([
-  ...DelegatedAccessPrincipalKind.options,
-  "api_key",
-  "configured_key",
-]);
+export const AccessPrincipalKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([...DelegatedAccessPrincipalKind.options, "api_key", "configured_key"]),
+);
 export type AccessPrincipalKind = z.infer<typeof AccessPrincipalKind>;
 
-export const AccountGrant = z.object({
-  accountId: z.string().uuid(),
-  subjectId: z.string().min(1),
-  subjectLabel: z.string().optional(),
-  role: AccountRole.optional(),
-  permissions: z.array(Permission),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
+export const AccountGrant = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: z.string().uuid(),
+    subjectId: z.string().min(1),
+    subjectLabel: z.string().optional(),
+    role: AccountRole.optional(),
+    permissions: z.array(Permission),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }),
+);
 export type AccountGrant = z.infer<typeof AccountGrant>;
 
-export const AccessGrant = z.object({
-  workspaceId: z.string().uuid(),
-  accountId: z.string().uuid(),
-  subjectId: z.string().min(1),
-  subjectLabel: z.string().optional(),
-  permissions: z.array(Permission),
-  /** Explicit policies do not expand workspace:admin into unselected permissions. */
-  permissionMode: z.enum(["legacy", "explicit"]).optional(),
-  // Trusted principal provenance. Delegated grants copy this from the signed
-  // token claim; managed/local grants derive it from their authenticated path.
-  principalKind: AccessPrincipalKind.optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-  // Optional trusted causal principal for a command submitted by an embedding
-  // host. Authorization still uses subjectId + permissions above.
-  serviceInitiator: ServiceTurnInitiator.optional(),
-  serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
-});
+export const AccessGrant = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    subjectId: z.string().min(1),
+    subjectLabel: z.string().optional(),
+    permissions: z.array(Permission),
+    /** Explicit policies do not expand workspace:admin into unselected permissions. */
+    permissionMode: z.enum(["legacy", "explicit"]).optional(),
+    // Trusted principal provenance. Delegated grants copy this from the signed
+    // token claim; managed/local grants derive it from their authenticated path.
+    principalKind: AccessPrincipalKind.optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    // Optional trusted causal principal for a command submitted by an embedding
+    // host. Authorization still uses subjectId + permissions above.
+    serviceInitiator: ServiceTurnInitiator.optional(),
+    serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
+  }),
+);
 export type AccessGrant = z.infer<typeof AccessGrant>;
 
 /**
@@ -2879,169 +3474,180 @@ export type AccessGrant = z.infer<typeof AccessGrant>;
  * management or credential delegation. The tier is derived from stored permissions, never
  * stored separately: a key whose permissions omit `workspace:admin` is `read`.
  */
-export const OrganizationApiKeyAccess = z.enum(["full", "read", "developer_setup"]);
+export const OrganizationApiKeyAccess = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["full", "read", "developer_setup"]),
+);
 export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
 
 /** Informational projection of direct API-key authority, not an authorization grant. */
-export const AccessCredential = z.object({
-  kind: z.enum(["organization_api_key", "workspace_api_key"]),
-  /** Organization access tier; workspace keys instead carry explicit permissions. */
-  access: OrganizationApiKeyAccess.optional(),
-  accountId: z.string().uuid(),
-  /** Null for organization keys: authority applies to all same-organization shared workspaces. */
-  workspaceId: z.string().uuid().nullable(),
-  /**
-   * Workspace permissions resolved by authorization, including wildcard expansion.
-   * A full organization key can provision workspaces, members and asUser sessions;
-   * user requests still require user authority. Personal workspaces are excluded
-   * from organization-key authority. Account permissions remain in accountGrants.
-   */
-  effectiveWorkspacePermissions: z.array(Permission),
-  policy: OrganizationAccessPolicy.optional(),
-  workspaceScope: OrganizationWorkspaceScope.optional(),
-  note: z.string(),
-});
+export const AccessCredential = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum(["organization_api_key", "workspace_api_key"]),
+    /** Organization access tier; workspace keys instead carry explicit permissions. */
+    access: OrganizationApiKeyAccess.optional(),
+    accountId: z.string().uuid(),
+    /** Null for organization keys: authority applies to all same-organization shared workspaces. */
+    workspaceId: z.string().uuid().nullable(),
+    /**
+     * Workspace permissions resolved by authorization, including wildcard expansion.
+     * A full organization key can provision workspaces, members and asUser sessions;
+     * user requests still require user authority. Personal workspaces are excluded
+     * from organization-key authority. Account permissions remain in accountGrants.
+     */
+    effectiveWorkspacePermissions: z.array(Permission),
+    policy: OrganizationAccessPolicy.optional(),
+    workspaceScope: OrganizationWorkspaceScope.optional(),
+    note: z.string(),
+  }),
+);
 export type AccessCredential = z.infer<typeof AccessCredential>;
 
-export const AccessContext = z.object({
-  mode: ProductAccessMode,
-  subjectId: z.string().min(1),
-  subjectLabel: z.string().optional(),
-  accountGrants: z.array(AccountGrant),
-  workspaceGrants: z.array(AccessGrant),
-  defaultAccountId: z.string().uuid().nullable(),
-  defaultWorkspaceId: z.string().uuid().nullable(),
-  /** Direct API-key authority only; omitted for human, delegated and asUser contexts. */
-  credential: AccessCredential.optional(),
-});
-export type AccessContext = z.infer<typeof AccessContext>;
-
-export const DelegatedAccessTokenPayload = z
-  .object({
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
+export const AccessContext = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    mode: ProductAccessMode,
     subjectId: z.string().min(1),
     subjectLabel: z.string().optional(),
-    permissions: z.array(Permission).min(1),
-    // Required and covered by the token HMAC. Authorization must positively
-    // select a principal kind instead of inferring "human" from absent machine
-    // markers.
-    principalKind: DelegatedAccessPrincipalKind,
-    /** Trusted frozen setup-key ceiling, covered by the token HMAC. */
-    credentialRestriction: z.literal("developer_setup").optional(),
-    // Trusted embedding hosts can sign a causal service principal separately
-    // from the grant subject that authorizes the request. The claim is consumed
-    // only when a command creates a new session/turn.
-    serviceInitiator: ServiceTurnInitiator.optional(),
-    serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
-    // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
-    // agent-controlled); enables session-scoped tools such as goal management.
-    sessionId: z.string().uuid().optional(),
-    // Model-visible first-party tool selection for a worker-bound session.
-    // This is visibility only; permissions remain the authorization boundary.
-    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
-    // Trusted root-relative depth facts frozen when the worker prepares this
-    // attempt. They shape only the model-visible tool catalog; the database
-    // remains authoritative for admission and concurrent policy changes.
-    nestedAgentDepth: NestedAgentDepthValue.optional(),
-    effectiveMaxNestedAgentDepth: NestedAgentDepthValue.optional(),
-    // The turn making the call (the caller's identity), HMAC-signed by the worker
-    // at turn setup. Lets a tool classify WHO is calling from the token itself,
-    // instead of racily re-reading the session's live active_turn_id — e.g. the
-    // sacred-pause guard must know if the CALLER is a machine child-notification
-    // turn, and the active pointer can flip to another turn mid-check.
-    turnId: z.string().uuid().optional(),
-    // Exact execution owner. Agent control commands are accepted only while this
-    // attempt still owns the signed turn.
-    attemptId: z.string().uuid().optional(),
-    executionGeneration: z.number().int().positive().optional(),
-    exp: z.number().int().positive(),
-  })
-  .superRefine((payload, ctx) => {
-    const exactAttemptClaims = [
-      payload.sessionId,
-      payload.turnId,
-      payload.attemptId,
-      payload.executionGeneration,
-    ];
-    const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
-    const depthClaimCount = [payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth].filter(
-      (value) => value !== undefined,
-    ).length;
-    if (depthClaimCount !== 0 && depthClaimCount !== 2) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["nestedAgentDepth"],
-        message: "nested-agent depth claims must be supplied together",
-      });
-    }
-    if (depthClaimCount > 0 && payload.principalKind !== "agent_attempt") {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["principalKind"],
-        message: "nested-agent depth claims require an agent_attempt principal",
-      });
-    }
-    if (
-      payload.principalKind === "human_session" &&
-      (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["principalKind"],
-        message: "human_session principal cannot carry machine authority claims",
-      });
-    }
-    if (
-      payload.principalKind === "agent_attempt" &&
-      (exactAttemptClaimCount !== exactAttemptClaims.length ||
-        payload.serviceInitiator !== undefined)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["principalKind"],
-        message: "agent_attempt principal requires one exact signed attempt authority",
-      });
-    }
-    if (
-      payload.principalKind === "service" &&
-      (payload.turnId !== undefined ||
-        payload.attemptId !== undefined ||
-        payload.executionGeneration !== undefined)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["principalKind"],
-        message: "service principal cannot carry exact agent-attempt authority",
-      });
-    }
-    if (payload.serviceInitiator && payload.principalKind !== "service") {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["principalKind"],
-        message: "serviceInitiator requires a service principal",
-      });
-    }
-    if (payload.serviceInitiatorContext && !payload.serviceInitiator) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["serviceInitiatorContext"],
-        message: "serviceInitiatorContext requires serviceInitiator",
-      });
-    }
-    if (
-      payload.serviceInitiator &&
-      (payload.turnId !== undefined ||
-        payload.attemptId !== undefined ||
-        payload.executionGeneration !== undefined)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["serviceInitiator"],
-        message: "serviceInitiator cannot replace an exact agent-attempt initiator",
-      });
-    }
-  });
+    accountGrants: z.array(AccountGrant),
+    workspaceGrants: z.array(AccessGrant),
+    defaultAccountId: z.string().uuid().nullable(),
+    defaultWorkspaceId: z.string().uuid().nullable(),
+    /** Direct API-key authority only; omitted for human, delegated and asUser contexts. */
+    credential: AccessCredential.optional(),
+  }),
+);
+export type AccessContext = z.infer<typeof AccessContext>;
+
+export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      subjectId: z.string().min(1),
+      subjectLabel: z.string().optional(),
+      permissions: z.array(Permission).min(1),
+      // Required and covered by the token HMAC. Authorization must positively
+      // select a principal kind instead of inferring "human" from absent machine
+      // markers.
+      principalKind: DelegatedAccessPrincipalKind,
+      /** Trusted frozen setup-key ceiling, covered by the token HMAC. */
+      credentialRestriction: z.literal("developer_setup").optional(),
+      // Trusted embedding hosts can sign a causal service principal separately
+      // from the grant subject that authorizes the request. The claim is consumed
+      // only when a command creates a new session/turn.
+      serviceInitiator: ServiceTurnInitiator.optional(),
+      serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
+      // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
+      // agent-controlled); enables session-scoped tools such as goal management.
+      sessionId: z.string().uuid().optional(),
+      // Model-visible first-party tool selection for a worker-bound session.
+      // This is visibility only; permissions remain the authorization boundary.
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+      // Trusted root-relative depth facts frozen when the worker prepares this
+      // attempt. They shape only the model-visible tool catalog; the database
+      // remains authoritative for admission and concurrent policy changes.
+      nestedAgentDepth: NestedAgentDepthValue.optional(),
+      effectiveMaxNestedAgentDepth: NestedAgentDepthValue.optional(),
+      // The turn making the call (the caller's identity), HMAC-signed by the worker
+      // at turn setup. Lets a tool classify WHO is calling from the token itself,
+      // instead of racily re-reading the session's live active_turn_id — e.g. the
+      // sacred-pause guard must know if the CALLER is a machine child-notification
+      // turn, and the active pointer can flip to another turn mid-check.
+      turnId: z.string().uuid().optional(),
+      // Exact execution owner. Agent control commands are accepted only while this
+      // attempt still owns the signed turn.
+      attemptId: z.string().uuid().optional(),
+      executionGeneration: z.number().int().positive().optional(),
+      exp: z.number().int().positive(),
+    })
+    .superRefine((payload, ctx) => {
+      const exactAttemptClaims = [
+        payload.sessionId,
+        payload.turnId,
+        payload.attemptId,
+        payload.executionGeneration,
+      ];
+      const exactAttemptClaimCount = exactAttemptClaims.filter(
+        (value) => value !== undefined,
+      ).length;
+      const depthClaimCount = [
+        payload.nestedAgentDepth,
+        payload.effectiveMaxNestedAgentDepth,
+      ].filter((value) => value !== undefined).length;
+      if (depthClaimCount !== 0 && depthClaimCount !== 2) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["nestedAgentDepth"],
+          message: "nested-agent depth claims must be supplied together",
+        });
+      }
+      if (depthClaimCount > 0 && payload.principalKind !== "agent_attempt") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["principalKind"],
+          message: "nested-agent depth claims require an agent_attempt principal",
+        });
+      }
+      if (
+        payload.principalKind === "human_session" &&
+        (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["principalKind"],
+          message: "human_session principal cannot carry machine authority claims",
+        });
+      }
+      if (
+        payload.principalKind === "agent_attempt" &&
+        (exactAttemptClaimCount !== exactAttemptClaims.length ||
+          payload.serviceInitiator !== undefined)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["principalKind"],
+          message: "agent_attempt principal requires one exact signed attempt authority",
+        });
+      }
+      if (
+        payload.principalKind === "service" &&
+        (payload.turnId !== undefined ||
+          payload.attemptId !== undefined ||
+          payload.executionGeneration !== undefined)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["principalKind"],
+          message: "service principal cannot carry exact agent-attempt authority",
+        });
+      }
+      if (payload.serviceInitiator && payload.principalKind !== "service") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["principalKind"],
+          message: "serviceInitiator requires a service principal",
+        });
+      }
+      if (payload.serviceInitiatorContext && !payload.serviceInitiator) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["serviceInitiatorContext"],
+          message: "serviceInitiatorContext requires serviceInitiator",
+        });
+      }
+      if (
+        payload.serviceInitiator &&
+        (payload.turnId !== undefined ||
+          payload.attemptId !== undefined ||
+          payload.executionGeneration !== undefined)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["serviceInitiator"],
+          message: "serviceInitiator cannot replace an exact agent-attempt initiator",
+        });
+      }
+    }),
+);
 export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;
 
 const delegatedAccessTokenPrefix = "ogd_";
@@ -3134,19 +3740,21 @@ export async function verifyDelegatedAccessToken(
 // subscribes to. Signed with resolveEnrollmentSigningSecret; the secret value is
 // NEVER logged. The real per-workspace NATS Account creds binding is infra-deferred
 // (M4/relay) — this bearer is the application-tier identity proof.
-export const EnrollmentBearerPayload = z.object({
-  workspaceId: z.string().uuid(),
-  agentId: z.string().uuid(),
-  enrollmentId: z.string().uuid(),
-  // Backward-compatible credential-family fence. Generationless bearers minted
-  // before migration 0061 parse ONLY as generation 1, matching the migration's
-  // default for existing rows. signEnrollmentBearer serializes the parsed output,
-  // so every newly signed bearer carries this claim explicitly.
-  credentialGeneration: z.number().int().positive().default(1),
-  // The Account-scoped control-plane subject prefix the agent subscribes to.
-  subjectPrefix: z.string().min(1),
-  exp: z.number().int().positive(),
-});
+export const EnrollmentBearerPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    enrollmentId: z.string().uuid(),
+    // Backward-compatible credential-family fence. Generationless bearers minted
+    // before migration 0061 parse ONLY as generation 1, matching the migration's
+    // default for existing rows. signEnrollmentBearer serializes the parsed output,
+    // so every newly signed bearer carries this claim explicitly.
+    credentialGeneration: z.number().int().positive().default(1),
+    // The Account-scoped control-plane subject prefix the agent subscribes to.
+    subjectPrefix: z.string().min(1),
+    exp: z.number().int().positive(),
+  }),
+);
 export type EnrollmentBearerPayload = z.infer<typeof EnrollmentBearerPayload>;
 
 export async function signEnrollmentBearer(
@@ -3204,10 +3812,28 @@ export async function verifyEnrollmentBearer(
 // bearer (verifyEnrollmentBearer's `oge_` prefix check rejects it) and vice-versa
 // (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
 // secret value is NEVER logged.
-export const EnrollTokenPayload = z.object({
-  // Domain-separation claim — fixed "enroll" so an `oge_`/`ogd_`/`ogs_` payload (no
-  // typ, or a different typ) can never satisfy verifyEnrollToken even past the prefix.
-  typ: z.literal("enroll"),
+/**
+ * The Opengeni Browser Chrome extension (Chrome Web Store). It bridges Chrome to
+ * an installed Connected Machine agent through native messaging, so the machine
+ * must be connected before the extension can link up.
+ */
+export const OPENGENI_BROWSER_EXTENSION_URL =
+  "https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch";
+
+/**
+ * Who can use a machine connected with an enroll token. `user` makes it the
+ * minting person's own machine (it follows them across same-organization
+ * workspaces they can access; nobody else can use it). `workspace` shares it
+ * with the minting workspace's members.
+ */
+export const EnrollTokenScope = /* @__PURE__ */ defineSchema(() => z.enum(["user", "workspace"]));
+export type EnrollTokenScope = z.infer<typeof EnrollTokenScope>;
+
+const enrollTokenId = /* @__PURE__ */ defineSchema(() =>
+  z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
+);
+
+const enrollTokenClaims = {
   workspaceId: z.string().uuid(),
   accountId: z.string().uuid(),
   // The screen-control consent baked into the token at mint (the minting user's
@@ -3215,8 +3841,43 @@ export const EnrollTokenPayload = z.object({
   allowScreenControl: z.boolean(),
   iat: z.number().int().nonnegative(),
   exp: z.number().int().positive(),
-});
+  // Unique token id. The exchange records it so one token connects one machine;
+  // the same machine (same public key) may retry. Optional only for tokens minted
+  // before single-use redemption shipped; those still expire after one hour.
+  jti: enrollTokenId.optional(),
+};
+
+// Two token kinds, separated by their domain claim. `enroll` is the original
+// workspace-shared token. `enroll_user` binds the authenticated human who
+// minted it as the machine's owner. A distinct typ (rather than an optional
+// claim) makes an API replica that predates personal tokens reject one as
+// invalid instead of stripping the owner and connecting a workspace machine.
+export const EnrollTokenPayload = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("typ", [
+    z.object({
+      // Domain-separation claim — fixed "enroll" so an `oge_`/`ogd_`/`ogs_` payload (no
+      // typ, or a different typ) can never satisfy verifyEnrollToken even past the prefix.
+      typ: z.literal("enroll"),
+      ...enrollTokenClaims,
+    }),
+    z.object({
+      typ: z.literal("enroll_user"),
+      // The minting human's subject. Only the server signs it; the exchange
+      // rechecks this person's live organization membership and workspace access.
+      // Same bound as an organization member's subject.
+      ownerSubjectId: z.string().min(1).max(1024),
+      ...enrollTokenClaims,
+      // Personal tokens were single-use from the start, so the id is required.
+      jti: enrollTokenId,
+    }),
+  ]),
+);
 export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
+
+/** Who can use the machine a verified enroll token connects. */
+export function enrollTokenScope(payload: EnrollTokenPayload): EnrollTokenScope {
+  return payload.typ === "enroll_user" ? "user" : "workspace";
+}
 
 export async function signEnrollToken(
   secret: string,
@@ -3230,8 +3891,9 @@ export async function signEnrollToken(
 /**
  * Verify an enroll token: rejects (returns null) on a bad prefix (NOT `oget_`),
  * a malformed envelope, a bad HMAC signature (constant-time), schema-invalid
- * claims (which includes `typ !== "enroll"` — the `z.literal` rejects it), or an
- * expired token (`exp < now`). Mirrors verifyEnrollmentBearer exactly. An `oge_`
+ * claims (which includes a `typ` other than `enroll` / `enroll_user`, and a
+ * personal token without its owner or id), or an expired token (`exp < now`).
+ * Mirrors verifyEnrollmentBearer exactly. An `oge_`
  * bearer fails the prefix gate; a same-secret token that lacks the typ claim fails
  * the schema gate — both halves of the domain separation are enforced here.
  */
@@ -3271,7 +3933,7 @@ export async function verifyEnrollToken(
 //
 // REUSES the existing HMAC envelope (sign/verifyDelegatedAccessToken's
 // base64Url + hmacSha256Base64Url) — NOT a second crypto — but with a distinct
-// `ogs_` prefix and a HARD-NARROW claim set. The token is a CLAIM the OpenGeni
+// `ogs_` prefix and a HARD-NARROW claim set. The token is a CLAIM the Opengeni
 // control plane mints; it is NOT the provider's tunnel secret. The browser
 // receives { providerUrl, streamToken }; the provider tunnel URL is the
 // transport, the streamToken is what the in-box edge validates (websockify
@@ -3284,32 +3946,34 @@ export async function verifyEnrollToken(
 // epoch) the URL is re-minted with epoch+1 and the old tunnel is torn down, so a
 // stale token points at a dead tunnel. Epoch mismatch is enforced at USE (by the
 // caller comparing the claim against the live lease), not inside verify.
-export const StreamTokenPayload = z.object({
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  // Identifies the sandbox_lease_holders row (the viewer holder).
-  viewerId: z.string().uuid(),
-  // Fence: the token logically dies when the box is re-elected (epoch++).
-  leaseEpoch: z.number().int().nonnegative(),
-  // v1 is always "view"; "control" is the never-granted raw-input plane.
-  mode: z.enum(["view", "control"]),
-  // 6080 (noVNC); pins the token to ONE exposed port.
-  port: z.number().int().positive(),
-  // Short TTL (120s default); rotation is event-driven under the epoch fence,
-  // not on a keepalive clock.
-  exp: z.number().int().positive(),
-  // The authenticated subject the token was minted for (0281). Optional for
-  // rolling compatibility: old verifiers strip it, old mints omit it.
-  subjectId: z.string().min(1).max(512).optional(),
-  // The session authority epoch observed at mint (0281). The relay tracks the
-  // highest value presented per LIVE channel and rejects tokens below that
-  // floor. The floor is defense-in-depth, not the revocation authority: it
-  // lives only as long as the channel does (both sides detached, the
-  // half-open reaper, or a relay restart reset it), so a stale in-TTL token
-  // can still attach to a fresh channel. Real revocation is the mint refusing
-  // to issue new tokens plus the 120 s TTL bounding the old ones.
-  authorityEpoch: z.number().int().positive().optional(),
-});
+export const StreamTokenPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    // Identifies the sandbox_lease_holders row (the viewer holder).
+    viewerId: z.string().uuid(),
+    // Fence: the token logically dies when the box is re-elected (epoch++).
+    leaseEpoch: z.number().int().nonnegative(),
+    // v1 is always "view"; "control" is the never-granted raw-input plane.
+    mode: z.enum(["view", "control"]),
+    // 6080 (noVNC); pins the token to ONE exposed port.
+    port: z.number().int().positive(),
+    // Short TTL (120s default); rotation is event-driven under the epoch fence,
+    // not on a keepalive clock.
+    exp: z.number().int().positive(),
+    // The authenticated subject the token was minted for (0281). Optional for
+    // rolling compatibility: old verifiers strip it, old mints omit it.
+    subjectId: z.string().min(1).max(512).optional(),
+    // The session authority epoch observed at mint (0281). The relay tracks the
+    // highest value presented per LIVE channel and rejects tokens below that
+    // floor. The floor is defense-in-depth, not the revocation authority: it
+    // lives only as long as the channel does (both sides detached, the
+    // half-open reaper, or a relay restart reset it), so a stale in-TTL token
+    // can still attach to a fresh channel. Real revocation is the mint refusing
+    // to issue new tokens plus the 120 s TTL bounding the old ones.
+    authorityEpoch: z.number().int().positive().optional(),
+  }),
+);
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
 
 export async function signStreamToken(
@@ -3386,15 +4050,17 @@ export async function verifyStreamToken(
 // The Rust relay re-implements this verify (the same base64url(JSON) + HMAC-SHA256
 // + prefix split) so TS-mint and Rust-verify provably agree — see the cross-stack
 // fixture in agent/crates/opengeni-relay/tests and the relay's `token` module doc.
-export const RelayTokenPayload = z.object({
-  // The workspace the agent (and its channels) belong to — the relay asserts this
-  // equals the channel-key's ws so a producer can only register its own channels.
-  workspaceId: z.string().uuid(),
-  // The agent (machine) id — the relay asserts this equals the channel-key's agent.
-  agentId: z.string().uuid(),
-  // Expiry (unix seconds). Enrollment-scoped horizon (re-minted on re-enroll).
-  exp: z.number().int().positive(),
-});
+export const RelayTokenPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // The workspace the agent (and its channels) belong to — the relay asserts this
+    // equals the channel-key's ws so a producer can only register its own channels.
+    workspaceId: z.string().uuid(),
+    // The agent (machine) id — the relay asserts this equals the channel-key's agent.
+    agentId: z.string().uuid(),
+    // Expiry (unix seconds). Enrollment-scoped horizon (re-minted on re-enroll).
+    exp: z.number().int().positive(),
+  }),
+);
 export type RelayTokenPayload = z.infer<typeof RelayTokenPayload>;
 
 export async function signRelayToken(secret: string, payload: RelayTokenPayload): Promise<string> {
@@ -3444,189 +4110,267 @@ export async function verifyRelayToken(
   return payload.data;
 }
 
-export const CreateWorkspaceRequest = z.object({
-  accountId: z.string().uuid().optional(),
-  name: z.string().min(1),
-  slug: z.string().min(1).optional(),
-  externalSource: z.string().min(1).optional(),
-  externalId: z.string().min(1).optional(),
-  // White-label persona override for this workspace's agent. null/omitted uses
-  // the deployment default template.
-  agentInstructions: z.string().min(1).nullable().optional(),
-});
-export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
-
-export const EnsureWorkspaceRequest = z
-  .object({
-    // Owning organization. An organization API key may omit it: the key's own
-    // organization is the only one it can create workspaces in. Every other
-    // caller (a human may belong to several organizations) must send it.
+export const CreateWorkspaceRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
     accountId: z.string().uuid().optional(),
-    externalSource: z.string().trim().min(1).max(200),
-    externalId: z.string().trim().min(1).max(1024),
-    name: z.string().trim().min(1).max(200),
-    slug: z.string().trim().min(1).max(200).optional(),
+    name: z.string().min(1),
+    slug: z.string().min(1).optional(),
+    externalSource: z.string().min(1).optional(),
+    externalId: z.string().min(1).optional(),
     // White-label persona override for this workspace's agent. null/omitted uses
     // the deployment default template.
     agentInstructions: z.string().min(1).nullable().optional(),
-  })
-  .strict();
+  }),
+);
+export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
+
+export const EnsureWorkspaceRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      // Owning organization. An organization API key may omit it: the key's own
+      // organization is the only one it can create workspaces in. Every other
+      // caller (a human may belong to several organizations) must send it.
+      accountId: z.string().uuid().optional(),
+      externalSource: z.string().trim().min(1).max(200),
+      externalId: z.string().trim().min(1).max(1024),
+      name: z.string().trim().min(1).max(200),
+      slug: z.string().trim().min(1).max(200).optional(),
+      // White-label persona override for this workspace's agent. null/omitted uses
+      // the deployment default template.
+      agentInstructions: z.string().min(1).nullable().optional(),
+    })
+    .strict(),
+);
 export type EnsureWorkspaceRequest = z.infer<typeof EnsureWorkspaceRequest>;
 
-export const EnsureWorkspaceResponse = z
-  .object({
-    workspace: Workspace,
-    created: z.boolean(),
-  })
-  .strict();
+export const EnsureWorkspaceResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      workspace: Workspace,
+      created: z.boolean(),
+    })
+    .strict(),
+);
 export type EnsureWorkspaceResponse = z.infer<typeof EnsureWorkspaceResponse>;
 
-export const UpdateWorkspaceRequest = z
-  .object({
-    name: z.string().min(1).optional(),
-    slug: z.string().min(1).nullable().optional(),
-    // White-label persona override. Pass null to clear it back to the deployment
-    // default; omit to leave it unchanged.
-    agentInstructions: z.string().min(1).nullable().optional(),
-  })
-  .strict();
+export const UpdateWorkspaceRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().min(1).optional(),
+      slug: z.string().min(1).nullable().optional(),
+      // White-label persona override. Pass null to clear it back to the deployment
+      // default; omit to leave it unchanged.
+      agentInstructions: z.string().min(1).nullable().optional(),
+    })
+    .strict(),
+);
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
 
-export const ApiKey = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid().nullable(),
-  name: z.string(),
-  description: z.string().nullable(),
-  prefix: z.string(),
-  permissions: z.array(Permission),
-  /**
-   * Organization keys only: the access tier derived from `permissions`.
-   * Omitted for workspace-scoped keys, whose permissions are explicit.
-   */
-  access: OrganizationApiKeyAccess.optional(),
-  policy: OrganizationAccessPolicy.optional(),
-  workspaceScope: OrganizationWorkspaceScope.optional(),
-  /** Legacy keys retain their historical workspace-admin wildcard. */
-  permissionMode: z.enum(["legacy", "explicit"]).optional(),
-  /** Organization keys: the service account that holds the key. */
-  serviceAccount: z
-    .object({ id: z.string().uuid(), name: z.string(), role: z.enum(["admin", "member"]) })
-    .nullable()
-    .optional(),
-  expiresAt: z.string().nullable(),
-  revokedAt: z.string().nullable(),
-  lastUsedAt: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const ApiKey = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid().nullable(),
+    name: z.string(),
+    description: z.string().nullable(),
+    prefix: z.string(),
+    permissions: z.array(Permission),
+    /**
+     * Organization keys only: the access tier derived from `permissions`.
+     * Omitted for workspace-scoped keys, whose permissions are explicit.
+     */
+    access: OrganizationApiKeyAccess.optional(),
+    policy: OrganizationAccessPolicy.optional(),
+    workspaceScope: OrganizationWorkspaceScope.optional(),
+    /** Legacy keys retain their historical workspace-admin wildcard. */
+    permissionMode: z.enum(["legacy", "explicit"]).optional(),
+    /** Organization keys: the service account that holds the key. */
+    serviceAccount: z
+      .object({ id: z.string().uuid(), name: z.string(), role: z.enum(["admin", "member"]) })
+      .nullable()
+      .optional(),
+    expiresAt: z.string().nullable(),
+    revokedAt: z.string().nullable(),
+    lastUsedAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type ApiKey = z.infer<typeof ApiKey>;
 
-export const CreateApiKeyRequest = z.object({
-  name: z.string().min(1),
-  description: z.string().trim().min(1).max(500).optional(),
-  workspaceId: z.string().uuid().optional(),
-  permissions: z.array(Permission).min(1),
-  expiresAt: z.string().datetime({ offset: true }).optional(),
-});
+export const CreateApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1),
+    description: z.string().trim().min(1).max(500).optional(),
+    workspaceId: z.string().uuid().optional(),
+    permissions: z.array(Permission).min(1),
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+  }),
+);
 export type CreateApiKeyRequest = z.infer<typeof CreateApiKeyRequest>;
 
-export const CreateApiKeyResponse = z.object({
-  apiKey: ApiKey,
-  token: z.string().min(1),
-});
+export const CreateApiKeyResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    apiKey: ApiKey,
+    token: z.string().min(1),
+  }),
+);
 export type CreateApiKeyResponse = z.infer<typeof CreateApiKeyResponse>;
 
-export const CreateOrganizationApiKeyRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200),
-    description: z.string().trim().min(1).max(500).optional(),
-    expiresAt: z.string().datetime({ offset: true }).optional(),
-    /** Access tier; omitted means `full` so existing callers keep their keys. */
-    access: OrganizationApiKeyAccess.default("full"),
-    /** Optional creation alias for the developer_setup access tier. */
-    preset: OrganizationApiKeyPreset.optional(),
-    policy: OrganizationAccessPolicy.optional(),
-    /** The service account that holds the key; omitted creates one named after the key. */
-    serviceAccountId: z.string().uuid().optional(),
-  })
-  .strict()
-  .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
-    path: ["access"],
-    message: "Developer setup is not read-only organization API key access",
-  })
-  .refine((request) => !request.policy || (!request.preset && request.access === "full"), {
-    path: ["policy"],
-    message: "Choose either a policy or a legacy access tier/preset",
-  });
+export const CreateOrganizationApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      description: z.string().trim().min(1).max(500).optional(),
+      expiresAt: z.string().datetime({ offset: true }).optional(),
+      /** Access tier; omitted means `full` so existing callers keep their keys. */
+      access: OrganizationApiKeyAccess.default("full"),
+      /** Optional creation alias for the developer_setup access tier. */
+      preset: OrganizationApiKeyPreset.optional(),
+      policy: OrganizationAccessPolicy.optional(),
+      /** The service account that holds the key; omitted creates one named after the key. */
+      serviceAccountId: z.string().uuid().optional(),
+    })
+    .strict()
+    .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
+      path: ["access"],
+      message: "Developer setup is not read-only organization API key access",
+    })
+    .refine((request) => !request.policy || (!request.preset && request.access === "full"), {
+      path: ["policy"],
+      message: "Choose either a policy or a legacy access tier/preset",
+    }),
+);
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 
-export const UpdateOrganizationApiKeyRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200).optional(),
-    description: z.string().trim().min(1).max(500).nullable().optional(),
-    policy: OrganizationAccessPolicy.optional(),
-  })
-  .strict()
-  .refine((request) => Object.keys(request).length > 0, "At least one change is required");
+/**
+ * A personal API key acts as the person who created it: anything done with it
+ * is done as them, with their current access in this organization, capped by
+ * the key's own access setting. It stops working when they leave.
+ */
+export const PersonalApiKey = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    name: z.string(),
+    description: z.string().nullable(),
+    /** The first characters of the key, to recognize it. */
+    prefix: z.string(),
+    access: OrganizationAccessPolicy,
+    owner: z.object({ subjectId: z.string(), name: z.string() }),
+    expiresAt: z.string().nullable(),
+    lastUsedAt: z.string().nullable(),
+    createdAt: z.string(),
+  }),
+);
+export type PersonalApiKey = z.infer<typeof PersonalApiKey>;
+
+export const ListPersonalApiKeysResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    apiKeys: z.array(PersonalApiKey),
+    /** Owners and admins see everyone's keys and can revoke them. */
+    canManageAll: z.boolean(),
+  }),
+);
+export type ListPersonalApiKeysResponse = z.infer<typeof ListPersonalApiKeysResponse>;
+
+export const CreatePersonalApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      description: z.string().trim().min(1).max(500).optional(),
+      access: OrganizationAccessPolicy,
+      /** Omitted means the key never expires. */
+      expiresAt: z.string().datetime({ offset: true }).optional(),
+    })
+    .strict(),
+);
+export type CreatePersonalApiKeyRequest = z.infer<typeof CreatePersonalApiKeyRequest>;
+
+export const CreatePersonalApiKeyResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    apiKey: PersonalApiKey,
+    /** Shown once. Only a hash is stored. */
+    token: z.string().min(1),
+  }),
+);
+export type CreatePersonalApiKeyResponse = z.infer<typeof CreatePersonalApiKeyResponse>;
+
+export const UpdateOrganizationApiKeyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200).optional(),
+      description: z.string().trim().min(1).max(500).nullable().optional(),
+      policy: OrganizationAccessPolicy.optional(),
+    })
+    .strict()
+    .refine((request) => Object.keys(request).length > 0, "At least one change is required"),
+);
 export type UpdateOrganizationApiKeyRequest = z.infer<typeof UpdateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
 // row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People
 // surface lists the `user:` subjects (api_key subjects belong to API keys).
-export const WorkspaceMember = z.object({
-  subjectId: z.string().min(1),
-  subjectLabel: z.string().nullable(),
-  role: z.string(),
-  permissions: z.array(Permission),
-  createdAt: z.string(),
-});
+export const WorkspaceMember = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    subjectId: z.string().min(1),
+    subjectLabel: z.string().nullable(),
+    role: z.string(),
+    permissions: z.array(Permission),
+    createdAt: z.string(),
+  }),
+);
 export type WorkspaceMember = z.infer<typeof WorkspaceMember>;
 
-export const ListWorkspaceMembersResponse = z.object({
-  members: z.array(WorkspaceMember),
-});
+export const ListWorkspaceMembersResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    members: z.array(WorkspaceMember),
+  }),
+);
 export type ListWorkspaceMembersResponse = z.infer<typeof ListWorkspaceMembersResponse>;
 
-export const WorkspaceMemberCandidate = z.object({
-  organizationMembershipId: z.string().uuid(),
-  subjectId: z.string().min(1),
-  name: z.string().min(1).max(1024).nullable(),
-  email: z.string().email().max(320).nullable(),
-  organizationRole: z.enum(["owner", "admin", "member"]),
-});
+export const WorkspaceMemberCandidate = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    organizationMembershipId: z.string().uuid(),
+    subjectId: z.string().min(1),
+    name: z.string().min(1).max(1024).nullable(),
+    email: z.string().email().max(320).nullable(),
+    organizationRole: z.enum(["owner", "admin", "member"]),
+  }),
+);
 export type WorkspaceMemberCandidate = z.infer<typeof WorkspaceMemberCandidate>;
 
-export const ListWorkspaceMemberCandidatesResponse = z.object({
-  members: z.array(WorkspaceMemberCandidate).max(1000),
-});
+export const ListWorkspaceMemberCandidatesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    members: z.array(WorkspaceMemberCandidate).max(1000),
+  }),
+);
 export type ListWorkspaceMemberCandidatesResponse = z.infer<
   typeof ListWorkspaceMemberCandidatesResponse
 >;
 
-export const AddWorkspaceMemberRequest = z.object({
-  // The candidate inventory exposes this opaque organization-local identifier.
-  // Organization invitations stay in the organization-admin lifecycle.
-  organizationMembershipId: z.string().uuid(),
-  role: z.string().min(1).optional(),
-  permissions: z.array(Permission),
-});
+export const AddWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // The candidate inventory exposes this opaque organization-local identifier.
+    // Organization invitations stay in the organization-admin lifecycle.
+    organizationMembershipId: z.string().uuid(),
+    role: z.string().min(1).optional(),
+    permissions: z.array(Permission),
+  }),
+);
 export type AddWorkspaceMemberRequest = z.infer<typeof AddWorkspaceMemberRequest>;
 
-export const UpdateWorkspaceMemberRequest = z.object({
-  role: z.string().min(1).optional(),
-  permissions: z.array(Permission),
-});
+export const UpdateWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    role: z.string().min(1).optional(),
+    permissions: z.array(Permission),
+  }),
+);
 export type UpdateWorkspaceMemberRequest = z.infer<typeof UpdateWorkspaceMemberRequest>;
 
-export const SlackUserLinkAccessRequestStatus = z.enum([
-  "prepared",
-  "pending",
-  "completed",
-  "denied",
-  "cancelled",
-  "expired",
-]);
+export const SlackUserLinkAccessRequestStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["prepared", "pending", "completed", "denied", "cancelled", "expired"]),
+);
 export type SlackUserLinkAccessRequestStatus = z.infer<typeof SlackUserLinkAccessRequestStatus>;
 
 /**
@@ -3634,234 +4378,275 @@ export type SlackUserLinkAccessRequestStatus = z.infer<typeof SlackUserLinkAcces
  * The original bearer and its digest are deliberately absent from every
  * public response.
  */
-export const SlackUserLinkAccessRequest = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  workspaceDisplayName: z.string().min(1).max(256).nullable(),
-  subjectLabel: z.string().min(1).max(512).nullable(),
-  status: SlackUserLinkAccessRequestStatus,
-  version: z.number().int().positive(),
-  expiresAt: z.string().datetime({ offset: true }),
-  requestedAt: z.string().datetime({ offset: true }).nullable(),
-  decidedAt: z.string().datetime({ offset: true }).nullable(),
-  completedAt: z.string().datetime({ offset: true }).nullable(),
-  createdAt: z.string().datetime({ offset: true }),
-  updatedAt: z.string().datetime({ offset: true }),
-});
+export const SlackUserLinkAccessRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    workspaceDisplayName: z.string().min(1).max(256).nullable(),
+    subjectLabel: z.string().min(1).max(512).nullable(),
+    status: SlackUserLinkAccessRequestStatus,
+    version: z.number().int().positive(),
+    expiresAt: z.string().datetime({ offset: true }),
+    requestedAt: z.string().datetime({ offset: true }).nullable(),
+    decidedAt: z.string().datetime({ offset: true }).nullable(),
+    completedAt: z.string().datetime({ offset: true }).nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type SlackUserLinkAccessRequest = z.infer<typeof SlackUserLinkAccessRequest>;
 
-export const PrepareSlackUserLinkAccessRequest = z.object({
-  linkToken: z.string().min(1).max(2_048),
-});
+export const PrepareSlackUserLinkAccessRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    linkToken: z.string().min(1).max(2_048),
+  }),
+);
 export type PrepareSlackUserLinkAccessRequest = z.infer<typeof PrepareSlackUserLinkAccessRequest>;
 
-export const SlackUserLinkAccessMutationRequest = z.object({
-  expectedVersion: z.number().int().positive(),
-  idempotencyKey: z.string().trim().min(1).max(200),
-});
+export const SlackUserLinkAccessMutationRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    expectedVersion: z.number().int().positive(),
+    idempotencyKey: z.string().trim().min(1).max(200),
+  }),
+);
 export type SlackUserLinkAccessMutationRequest = z.infer<typeof SlackUserLinkAccessMutationRequest>;
 
-export const ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest.extend({
-  role: z.string().trim().min(1).max(128).optional(),
-  permissions: z.array(Permission).min(1),
-});
+export const ApproveSlackUserLinkAccessRequest = /* @__PURE__ */ defineSchema(() =>
+  SlackUserLinkAccessMutationRequest.extend({
+    role: z.string().trim().min(1).max(128).optional(),
+    permissions: z.array(Permission).min(1),
+  }),
+);
 export type ApproveSlackUserLinkAccessRequest = z.infer<typeof ApproveSlackUserLinkAccessRequest>;
 
-export const ListSlackUserLinkAccessRequestsResponse = z.object({
-  requests: z.array(SlackUserLinkAccessRequest),
-});
+export const ListSlackUserLinkAccessRequestsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    requests: z.array(SlackUserLinkAccessRequest),
+  }),
+);
 export type ListSlackUserLinkAccessRequestsResponse = z.infer<
   typeof ListSlackUserLinkAccessRequestsResponse
 >;
 
 export * from "./organization-usage";
 export * from "./usage-allowances";
+export * from "./session-usage-limits";
 
-export const UsageEventType = z.enum([
-  "agent_run.created",
-  "agent_run.completed",
-  "model.tokens",
-  "model.cost",
-  "file.uploaded",
-  "file.deleted",
-  "document.indexed",
-  "scheduled_task.fired",
-  "knowledge_source_sync.fired",
-  "knowledge_source_sync.completed",
-  "knowledge_source_sync.items",
-  "knowledge_source_sync.bytes",
-  "api_key.request",
-  // --- sandbox warm-time metering (P2.1) ---
-  // Wall-clock seconds a box was warm — the billable warm-time meter. Accrued on
-  // the two stateless ticks (turn heartbeat + reaper sweep), idempotent on
-  // (sandbox_group_id, lease_epoch, tick) so a shared box (N sessions) is metered
-  // EXACTLY ONCE per tick (N sessions != N x bill). Orthogonal to model.tokens /
-  // model.cost (model API cost vs provider compute cost — both real, no overlap).
-  "sandbox.warm_seconds",
-  // usd_micros: warm-seconds x the per-provider per-second warm rate.
-  "sandbox.warm_cost",
-]);
+export const UsageEventType = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "agent_run.created",
+    "agent_run.completed",
+    "model.tokens",
+    "model.cost",
+    "file.uploaded",
+    "file.deleted",
+    "document.indexed",
+    "scheduled_task.fired",
+    "knowledge_source_sync.fired",
+    "knowledge_source_sync.completed",
+    "knowledge_source_sync.items",
+    "knowledge_source_sync.bytes",
+    "api_key.request",
+    // --- sandbox warm-time metering (P2.1) ---
+    // Wall-clock seconds a box was warm — the billable warm-time meter. Accrued on
+    // the two stateless ticks (turn heartbeat + reaper sweep), idempotent on
+    // (sandbox_group_id, lease_epoch, tick) so a shared box (N sessions) is metered
+    // EXACTLY ONCE per tick (N sessions != N x bill). Orthogonal to model.tokens /
+    // model.cost (model API cost vs provider compute cost — both real, no overlap).
+    "sandbox.warm_seconds",
+    // usd_micros: warm-seconds x the per-provider per-second warm rate.
+    "sandbox.warm_cost",
+  ]),
+);
 export type UsageEventType = z.infer<typeof UsageEventType>;
 
-export const UsageEvent = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  accountId: z.string().uuid(),
-  subjectId: z.string().nullable(),
-  eventType: UsageEventType,
-  quantity: z.number(),
-  unit: z.string(),
-  sourceResourceType: z.string().nullable(),
-  sourceResourceId: z.string().nullable(),
-  idempotencyKey: z.string(),
-  occurredAt: z.string(),
-  recordedAt: z.string(),
-  exportedToBillingAt: z.string().nullable(),
-  billingProviderEventId: z.string().nullable(),
-});
+export const UsageEvent = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    subjectId: z.string().nullable(),
+    eventType: UsageEventType,
+    quantity: z.number(),
+    unit: z.string(),
+    sourceResourceType: z.string().nullable(),
+    sourceResourceId: z.string().nullable(),
+    idempotencyKey: z.string(),
+    occurredAt: z.string(),
+    recordedAt: z.string(),
+    exportedToBillingAt: z.string().nullable(),
+    billingProviderEventId: z.string().nullable(),
+  }),
+);
 export type UsageEvent = z.infer<typeof UsageEvent>;
 
 /** UTC Insights windows. "this month" aligns with billing's UTC month. */
-export const InsightsRange = z.enum(["today", "week", "month", "ytd"]);
+export const InsightsRange = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["today", "week", "month", "ytd"]),
+);
 export type InsightsRange = z.infer<typeof InsightsRange>;
 
-export const InsightsBillingPath = z.enum(["opengeni_credits", "external"]);
+export const InsightsBillingPath = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["opengeni_credits", "external"]),
+);
 export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
 
-export const InsightsPricingSource = z.enum(["configured_list_price", "gateway_reported"]);
+export const InsightsPricingSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["configured_list_price", "gateway_reported"]),
+);
 export type InsightsPricingSource = z.infer<typeof InsightsPricingSource>;
 
-export const ModelContextContributionSource = z.enum([
-  "workspace_instruction_policy",
-  "legacy_workspace_instructions",
-  "preference_registry_descriptor",
-  "company_profile",
-  "legacy_memory_v1",
-  "runtime_skill_catalog",
-]);
+export const ModelContextContributionSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "workspace_instruction_policy",
+    "legacy_workspace_instructions",
+    "preference_registry_descriptor",
+    "company_profile",
+    "legacy_memory_v1",
+    "runtime_skill_catalog",
+  ]),
+);
 export type ModelContextContributionSource = z.infer<typeof ModelContextContributionSource>;
 
 /** Content-free per-call summary of model-visible Agent Knowledge material. */
-export const ModelContextContributionSummary = z
-  .object({
-    source: ModelContextContributionSource,
-    items: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    utf8Bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    estimatedTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  })
-  .strict();
+export const ModelContextContributionSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      source: ModelContextContributionSource,
+      items: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      utf8Bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+      estimatedTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    })
+    .strict(),
+);
 export type ModelContextContributionSummary = z.infer<typeof ModelContextContributionSummary>;
 
-export const ModelContextContributionSummaries = z
-  .array(ModelContextContributionSummary)
-  .max(6)
-  .superRefine((summaries, context) => {
-    const seen = new Set<ModelContextContributionSource>();
-    for (const [index, summary] of summaries.entries()) {
-      if (seen.has(summary.source)) {
-        context.addIssue({
-          code: "custom",
-          message: "Model context contribution sources must be unique",
-          path: [index, "source"],
-        });
+export const ModelContextContributionSummaries = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(ModelContextContributionSummary)
+    .max(6)
+    .superRefine((summaries, context) => {
+      const seen = new Set<ModelContextContributionSource>();
+      for (const [index, summary] of summaries.entries()) {
+        if (seen.has(summary.source)) {
+          context.addIssue({
+            code: "custom",
+            message: "Model context contribution sources must be unique",
+            path: [index, "source"],
+          });
+        }
+        seen.add(summary.source);
       }
-      seen.add(summary.source);
-    }
-  });
+    }),
+);
 
-export const InsightsPromptContributionRow = ModelContextContributionSummary.extend({
-  calls: z.number().int().nonnegative(),
-});
+export const InsightsPromptContributionRow = /* @__PURE__ */ defineSchema(() =>
+  ModelContextContributionSummary.extend({
+    calls: z.number().int().nonnegative(),
+  }),
+);
 export type InsightsPromptContributionRow = z.infer<typeof InsightsPromptContributionRow>;
 
-export const InsightsPromptContributions = z.object({
-  /** Sum of UTF-8 byte / 4 estimates across calls with contribution receipts. */
-  estimatedTokens: z.number().int().nonnegative(),
-  utf8Bytes: z.number().int().nonnegative(),
-  coveredCalls: z.number().int().nonnegative(),
-  totalCalls: z.number().int().nonnegative(),
-  sources: z.array(InsightsPromptContributionRow),
-});
+export const InsightsPromptContributions = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Sum of UTF-8 byte / 4 estimates across calls with contribution receipts. */
+    estimatedTokens: z.number().int().nonnegative(),
+    utf8Bytes: z.number().int().nonnegative(),
+    coveredCalls: z.number().int().nonnegative(),
+    totalCalls: z.number().int().nonnegative(),
+    sources: z.array(InsightsPromptContributionRow),
+  }),
+);
 export type InsightsPromptContributions = z.infer<typeof InsightsPromptContributions>;
 
-export const InsightsModelUsageRow = z.object({
-  id: z.string().min(1),
-  model: z.string().min(1),
-  provider: z.string().min(1),
-  billing: InsightsBillingPath,
-  calls: z.number().int().nonnegative(),
-  inputTokens: z.number().nonnegative(),
-  outputTokens: z.number().nonnegative(),
-  cachedTokens: z.number().nonnegative(),
-  cacheInputTokens: z.number().nonnegative(),
-  cacheWriteTokens: z.number().nonnegative(),
-  reasoningTokens: z.number().nonnegative(),
-  totalTokens: z.number().nonnegative(),
-  tokenKnownCalls: z.number().int().nonnegative(),
-  cacheKnownCalls: z.number().int().nonnegative(),
-  /** Priced OpenGeni credit $ for this model×provider (from model_call_facts). */
-  creditUsd: z.number().nonnegative(),
-  /** Hypothetical provider-rate USD; never an OpenGeni charge. */
-  estimatedProviderUsd: z.number().nonnegative(),
-  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  /** OpenGeni credit price at the captured rate, whether or not credits paid for the call. */
-  equivalentCreditUsd: z.number().nonnegative(),
-  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
-});
+export const InsightsModelUsageRow = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1),
+    model: z.string().min(1),
+    provider: z.string().min(1),
+    billing: InsightsBillingPath,
+    calls: z.number().int().nonnegative(),
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cachedTokens: z.number().nonnegative(),
+    cacheInputTokens: z.number().nonnegative(),
+    cacheWriteTokens: z.number().nonnegative(),
+    reasoningTokens: z.number().nonnegative(),
+    totalTokens: z.number().nonnegative(),
+    tokenKnownCalls: z.number().int().nonnegative(),
+    cacheKnownCalls: z.number().int().nonnegative(),
+    /** Priced Opengeni credit $ for this model×provider (from model_call_facts). */
+    creditUsd: z.number().nonnegative(),
+    /** Hypothetical provider-rate USD; never an Opengeni charge. */
+    estimatedProviderUsd: z.number().nonnegative(),
+    estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+    /** Opengeni credit price at the captured rate, whether or not credits paid for the call. */
+    equivalentCreditUsd: z.number().nonnegative(),
+    equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+  }),
+);
 export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
-export const InsightsSeriesPoint = z.object({
-  label: z.string().min(1),
-  /** UTC hour/day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
-  modelCostUsd: z.number().nonnegative(),
-  /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
-  estimatedProviderUsd: z.number().nonnegative(),
-  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  /** UTC hour/day-bucketed equivalent OpenGeni credit price for calls with captured pricing. */
-  equivalentCreditUsd: z.number().nonnegative(),
-  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
-  warmSeconds: z.number().nonnegative(),
-  inputTokens: z.number().nonnegative(),
-  outputTokens: z.number().nonnegative(),
-  cachedTokens: z.number().nonnegative(),
-  cacheInputTokens: z.number().nonnegative(),
-  cacheWriteTokens: z.number().nonnegative(),
-  reasoningTokens: z.number().nonnegative(),
-  totalTokens: z.number().nonnegative(),
-  tokenKnownCalls: z.number().int().nonnegative(),
-  cacheKnownCalls: z.number().int().nonnegative(),
-  cacheHitPct: z.number().int().min(0).max(100),
-  calls: z.number().int().nonnegative(),
-});
+export const InsightsSeriesPoint = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    label: z.string().min(1),
+    /** UTC hour/day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
+    modelCostUsd: z.number().nonnegative(),
+    /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
+    estimatedProviderUsd: z.number().nonnegative(),
+    estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+    /** UTC hour/day-bucketed equivalent Opengeni credit price for calls with captured pricing. */
+    equivalentCreditUsd: z.number().nonnegative(),
+    equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+    warmSeconds: z.number().nonnegative(),
+    inputTokens: z.number().nonnegative(),
+    outputTokens: z.number().nonnegative(),
+    cachedTokens: z.number().nonnegative(),
+    cacheInputTokens: z.number().nonnegative(),
+    cacheWriteTokens: z.number().nonnegative(),
+    reasoningTokens: z.number().nonnegative(),
+    totalTokens: z.number().nonnegative(),
+    tokenKnownCalls: z.number().int().nonnegative(),
+    cacheKnownCalls: z.number().int().nonnegative(),
+    cacheHitPct: z.number().int().min(0).max(100),
+    calls: z.number().int().nonnegative(),
+  }),
+);
 export type InsightsSeriesPoint = z.infer<typeof InsightsSeriesPoint>;
 
-export const InsightsDepthBucket = z.object({
-  depth: z.number().int().nonnegative(),
-  sessions: z.number().int().nonnegative(),
-});
+export const InsightsDepthBucket = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    depth: z.number().int().nonnegative(),
+    sessions: z.number().int().nonnegative(),
+  }),
+);
 export type InsightsDepthBucket = z.infer<typeof InsightsDepthBucket>;
 
-export const InsightsModelFacet = z.object({
-  provider: z.string().min(1),
-  model: z.string().min(1),
-});
+export const InsightsModelFacet = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    provider: z.string().min(1),
+    model: z.string().min(1),
+  }),
+);
 export type InsightsModelFacet = z.infer<typeof InsightsModelFacet>;
 
-export const InsightsSpendDriver = z.object({
-  id: z.string().min(1),
-  groupBy: z.enum(["root_session", "schedule"]),
-  label: z.string().min(1),
-  creditUsd: z.number().nonnegative(),
-  estimatedProviderUsd: z.number().nonnegative(),
-  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  equivalentCreditUsd: z.number().nonnegative(),
-  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
-  tokens: z.number().nonnegative(),
-  cacheHitPct: z.number().int().min(0).max(100),
-  pctOfCreditUsd: z.number().int().min(0).max(100),
-  pctOfTokens: z.number().int().min(0).max(100),
-  deltaUsdVsPrior: z.number(),
-});
+export const InsightsSpendDriver = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1),
+    groupBy: z.enum(["root_session", "schedule"]),
+    label: z.string().min(1),
+    creditUsd: z.number().nonnegative(),
+    estimatedProviderUsd: z.number().nonnegative(),
+    estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+    equivalentCreditUsd: z.number().nonnegative(),
+    equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+    tokens: z.number().nonnegative(),
+    cacheHitPct: z.number().int().min(0).max(100),
+    pctOfCreditUsd: z.number().int().min(0).max(100),
+    pctOfTokens: z.number().int().min(0).max(100),
+    deltaUsdVsPrior: z.number(),
+  }),
+);
 export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
 
 /**
@@ -3870,285 +4655,315 @@ export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
  * the viewer cannot read; `deleted` holds retained usage without a session.
  * Rows sum to the window totals. Neither amounts-only bucket identifies chats.
  */
-export const InsightsProjectRow = z.object({
-  id: z.string().min(1),
-  kind: z.enum(["project", "other", "unfiled", "unavailable", "deleted"]),
-  label: z.string().min(1),
-  projects: z.number().int().nonnegative(),
-  rootSessions: z.number().int().nonnegative(),
-  calls: z.number().int().nonnegative(),
-  creditUsd: z.number().nonnegative(),
-  estimatedProviderUsd: z.number().nonnegative(),
-  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  tokens: z.number().nonnegative(),
-  cacheHitPct: z.number().int().min(0).max(100).nullable(),
-});
+export const InsightsProjectRow = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1),
+    kind: z.enum(["project", "other", "unfiled", "unavailable", "deleted"]),
+    label: z.string().min(1),
+    projects: z.number().int().nonnegative(),
+    rootSessions: z.number().int().nonnegative(),
+    calls: z.number().int().nonnegative(),
+    creditUsd: z.number().nonnegative(),
+    estimatedProviderUsd: z.number().nonnegative(),
+    estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+    tokens: z.number().nonnegative(),
+    cacheHitPct: z.number().int().min(0).max(100).nullable(),
+  }),
+);
 export type InsightsProjectRow = z.infer<typeof InsightsProjectRow>;
 
-export const InsightsWarmGroupRow = z.object({
-  id: z.string().min(1),
-  groupId: z.string().uuid(),
-  label: z.string().min(1),
-  /** Live lease backend when known; null when only historical warm ticks exist. */
-  backend: z.string().nullable(),
-  warmSeconds: z.number().nonnegative(),
-  /** Currently attached sessions — not cost share. */
-  sessionsAttached: z.number().int().nonnegative(),
-});
+export const InsightsWarmGroupRow = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1),
+    groupId: z.string().uuid(),
+    label: z.string().min(1),
+    /** Live lease backend when known; null when only historical warm ticks exist. */
+    backend: z.string().nullable(),
+    warmSeconds: z.number().nonnegative(),
+    /** Currently attached sessions — not cost share. */
+    sessionsAttached: z.number().int().nonnegative(),
+  }),
+);
 export type InsightsWarmGroupRow = z.infer<typeof InsightsWarmGroupRow>;
 
-export const InsightsLiveWarmLease = z.object({
-  id: z.string().uuid(),
-  groupId: z.string().uuid(),
-  backend: z.string().min(1),
-  turnHolders: z.number().int().nonnegative(),
-  viewerHolders: z.number().int().nonnegative(),
-  warmForLabel: z.string().min(1),
-  warmSeconds: z.number().nonnegative(),
-});
+export const InsightsLiveWarmLease = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    groupId: z.string().uuid(),
+    backend: z.string().min(1),
+    turnHolders: z.number().int().nonnegative(),
+    viewerHolders: z.number().int().nonnegative(),
+    warmForLabel: z.string().min(1),
+    warmSeconds: z.number().nonnegative(),
+  }),
+);
 export type InsightsLiveWarmLease = z.infer<typeof InsightsLiveWarmLease>;
 
-export const InsightsFloorSession = z.object({
-  id: z.string().uuid(),
-  title: z.string(),
-  state: z.enum(["running", "paused", "failed", "idle", "compacting", "waiting"]),
-  depth: z.number().int().nonnegative(),
-  model: z.string().nullable(),
-  provider: z.string().nullable(),
-  ageLabel: z.string(),
-  cacheHitPct: z.number().int().min(0).max(100).nullable(),
-  route: z.string().nullable(),
-});
+export const InsightsFloorSession = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    title: z.string(),
+    state: z.enum(["running", "paused", "failed", "idle", "compacting", "waiting"]),
+    depth: z.number().int().nonnegative(),
+    model: z.string().nullable(),
+    provider: z.string().nullable(),
+    ageLabel: z.string(),
+    cacheHitPct: z.number().int().min(0).max(100).nullable(),
+    route: z.string().nullable(),
+  }),
+);
 export type InsightsFloorSession = z.infer<typeof InsightsFloorSession>;
 
-export const InsightsScheduleRow = z.object({
-  id: z.string().uuid(),
-  name: z.string(),
-  fires: z.number().int().nonnegative(),
-  /** Null when no facts carry scheduled_task_id for this window. */
-  creditUsd: z.number().nonnegative().nullable(),
-  estimatedProviderUsd: z.number().nonnegative().nullable(),
-  estimatedProviderCostKnownCalls: z.number().int().nonnegative().nullable(),
-  equivalentCreditUsd: z.number().nonnegative().nullable(),
-  equivalentCreditCostKnownCalls: z.number().int().nonnegative().nullable(),
-  tokens: z.number().nonnegative().nullable(),
-  cacheHitPct: z.number().int().min(0).max(100).nullable(),
-  billing: InsightsBillingPath.nullable(),
-});
+export const InsightsScheduleRow = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    fires: z.number().int().nonnegative(),
+    /** Null when no facts carry scheduled_task_id for this window. */
+    creditUsd: z.number().nonnegative().nullable(),
+    estimatedProviderUsd: z.number().nonnegative().nullable(),
+    estimatedProviderCostKnownCalls: z.number().int().nonnegative().nullable(),
+    equivalentCreditUsd: z.number().nonnegative().nullable(),
+    equivalentCreditCostKnownCalls: z.number().int().nonnegative().nullable(),
+    tokens: z.number().nonnegative().nullable(),
+    cacheHitPct: z.number().int().min(0).max(100).nullable(),
+    billing: InsightsBillingPath.nullable(),
+  }),
+);
 export type InsightsScheduleRow = z.infer<typeof InsightsScheduleRow>;
 
-export const InsightsModelCallRow = z.object({
-  id: z.string().uuid(),
-  occurredAt: z.string().datetime(),
-  recordedAt: z.string().datetime(),
-  sessionId: z.string().uuid(),
-  sessionTitle: z.string(),
-  turnId: z.string().uuid(),
-  provider: z.string().min(1),
-  providerApi: z.string().min(1),
-  model: z.string().min(1),
-  billing: InsightsBillingPath,
-  inputTokens: z.number().nonnegative().nullable(),
-  outputTokens: z.number().nonnegative().nullable(),
-  cachedTokens: z.number().nonnegative().nullable(),
-  cacheWriteTokens: z.number().nonnegative().nullable(),
-  reasoningTokens: z.number().nonnegative().nullable(),
-  totalTokens: z.number().nonnegative().nullable(),
-  /** OpenGeni credit price for this call. External calls are always zero. */
-  creditUsd: z.number().nonnegative(),
-  /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
-  estimatedProviderUsd: z.number().nonnegative().nullable(),
-  /** Equivalent OpenGeni credit price; null when historical pricing is unavailable. */
-  equivalentCreditUsd: z.number().nonnegative().nullable(),
-  pricingSource: InsightsPricingSource.nullable(),
-});
+export const InsightsModelCallRow = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    occurredAt: z.string().datetime(),
+    recordedAt: z.string().datetime(),
+    sessionId: z.string().uuid(),
+    sessionTitle: z.string(),
+    turnId: z.string().uuid(),
+    provider: z.string().min(1),
+    providerApi: z.string().min(1),
+    model: z.string().min(1),
+    billing: InsightsBillingPath,
+    inputTokens: z.number().nonnegative().nullable(),
+    outputTokens: z.number().nonnegative().nullable(),
+    cachedTokens: z.number().nonnegative().nullable(),
+    cacheWriteTokens: z.number().nonnegative().nullable(),
+    reasoningTokens: z.number().nonnegative().nullable(),
+    totalTokens: z.number().nonnegative().nullable(),
+    /** Opengeni credit price for this call. External calls are always zero. */
+    creditUsd: z.number().nonnegative(),
+    /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
+    estimatedProviderUsd: z.number().nonnegative().nullable(),
+    /** Equivalent Opengeni credit price; null when historical pricing is unavailable. */
+    equivalentCreditUsd: z.number().nonnegative().nullable(),
+    pricingSource: InsightsPricingSource.nullable(),
+  }),
+);
 export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
 
-export const InsightsScope = z.object({
-  rootSessionId: z.string().uuid().nullable(),
-  sessionId: z.string().uuid().nullable(),
-});
+export const InsightsScope = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    rootSessionId: z.string().uuid().nullable(),
+    sessionId: z.string().uuid().nullable(),
+  }),
+);
 export type InsightsScope = z.infer<typeof InsightsScope>;
 
-export const WorkspaceInsightsSnapshot = z.object({
-  range: InsightsRange,
-  rangeLabel: z.string().min(1),
-  priorLabel: z.string().min(1),
-  seriesLabel: z.string().min(1),
-  cacheSeriesLabel: z.string().min(1),
-  windowStart: z.string().datetime(),
-  windowEnd: z.string().datetime(),
-  generatedAt: z.string().datetime(),
-  /** All ranges/series are UTC. */
-  timezone: z.literal("UTC"),
-  models: z.array(InsightsModelUsageRow),
-  /** Unfiltered provider×model pairs in the window — drives filter dropdowns. */
-  facets: z.array(InsightsModelFacet),
-  series: z.array(InsightsSeriesPoint),
-  depth: z.array(InsightsDepthBucket),
-  drivers: z.array(InsightsSpendDriver),
-  projects: z.array(InsightsProjectRow).default([]),
-  /** Invisible chats, amounts only, grouped by opaque person key (never a session id). */
-  privateChats: z
-    .array(
-      z.object({
-        ownerKey: z.string().min(1),
-        name: z.string().nullable(),
-        you: z.boolean(),
-        calls: z.number().int().nonnegative(),
-        tokens: z.number().nonnegative(),
-        creditUsd: z.number().nonnegative(),
-        estimatedProviderUsd: z.number().nonnegative(),
-        estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-      }),
-    )
-    .max(200)
-    .default([]),
-  privateChatsTruncated: z.boolean().default(false),
-  schedules: z.array(InsightsScheduleRow),
-  recentCalls: z.array(InsightsModelCallRow),
-  promptContributions: InsightsPromptContributions.default({
-    estimatedTokens: 0,
-    utf8Bytes: 0,
-    coveredCalls: 0,
-    totalCalls: 0,
-    sources: [],
+export const WorkspaceInsightsSnapshot = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    range: InsightsRange,
+    rangeLabel: z.string().min(1),
+    priorLabel: z.string().min(1),
+    seriesLabel: z.string().min(1),
+    cacheSeriesLabel: z.string().min(1),
+    windowStart: z.string().datetime(),
+    windowEnd: z.string().datetime(),
+    generatedAt: z.string().datetime(),
+    /** All ranges/series are UTC. */
+    timezone: z.literal("UTC"),
+    models: z.array(InsightsModelUsageRow),
+    /** Unfiltered provider×model pairs in the window — drives filter dropdowns. */
+    facets: z.array(InsightsModelFacet),
+    series: z.array(InsightsSeriesPoint),
+    depth: z.array(InsightsDepthBucket),
+    drivers: z.array(InsightsSpendDriver),
+    projects: z.array(InsightsProjectRow).default([]),
+    /** Invisible chats, amounts only, grouped by opaque person key (never a session id). */
+    privateChats: z
+      .array(
+        z.object({
+          ownerKey: z.string().min(1),
+          name: z.string().nullable(),
+          you: z.boolean(),
+          calls: z.number().int().nonnegative(),
+          tokens: z.number().nonnegative(),
+          creditUsd: z.number().nonnegative(),
+          estimatedProviderUsd: z.number().nonnegative(),
+          estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+        }),
+      )
+      .max(200)
+      .default([]),
+    privateChatsTruncated: z.boolean().default(false),
+    schedules: z.array(InsightsScheduleRow),
+    recentCalls: z.array(InsightsModelCallRow),
+    promptContributions: InsightsPromptContributions.default({
+      estimatedTokens: 0,
+      utf8Bytes: 0,
+      coveredCalls: 0,
+      totalCalls: 0,
+      sources: [],
+    }),
+    warmSeconds: z.number().nonnegative(),
+    priorWarmSeconds: z.number().nonnegative(),
+    warmGroups: z.array(InsightsWarmGroupRow),
+    liveWarm: z.array(InsightsLiveWarmLease),
+    floor: z.array(InsightsFloorSession),
+    selfhostedEnabled: z.boolean(),
+    machinesOnline: z.number().int().nonnegative(),
+    /** Workspace-wide Opengeni credit $ from usage_events.model.cost (unfiltered). */
+    workspaceCreditUsd: z.number().nonnegative(),
+    priorWorkspaceCreditUsd: z.number().nonnegative(),
+    /** Model-filterable credit $ from facts (equals workspace when unfiltered, ignoring late-reject drift). */
+    creditUsd: z.number().nonnegative(),
+    priorCreditUsd: z.number().nonnegative(),
+    /** Hypothetical provider-rate USD for calls whose historical price was captured. */
+    estimatedProviderUsd: z.number().nonnegative(),
+    priorEstimatedProviderUsd: z.number().nonnegative(),
+    estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+    priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+    /** Equivalent Opengeni credit price across calls whose historical price was captured. */
+    equivalentCreditUsd: z.number().nonnegative(),
+    priorEquivalentCreditUsd: z.number().nonnegative(),
+    equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+    priorEquivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+    modelCalls: z.number().int().nonnegative(),
+    priorInputTokens: z.number().nonnegative(),
+    priorTotalTokens: z.number().nonnegative(),
+    priorCacheHitPct: z.number().int().min(0).max(100),
+    /** Prior input whose cache details are known. Omitted by older API replicas. */
+    priorCacheInputTokens: z.number().nonnegative().optional(),
+    priorCalls: z.number().int().nonnegative(),
+    /** Lifetime workspace topology (not scoped to the selected Insights range). */
+    goalsActive: z.number().int().nonnegative(),
+    goalsCompleted: z.number().int().nonnegative(),
+    sessionsTouched: z.number().int().nonnegative(),
+    rootSessions: z.number().int().nonnegative(),
+    deepestDepth: z.number().int().nonnegative(),
+    deepestSessionTitle: z.string(),
+    avgDepth: z.number().nonnegative(),
+    warmIdleNow: z.number().int().nonnegative(),
+    /** Billable credits-path tokens this UTC month (usage_events.model.tokens). */
+    billableTokensUsed: z.number().nonnegative(),
+    billableTokenCap: z.number().int().positive().nullable(),
+    /** Agent runs this UTC month (usage_events.agent_run.created). */
+    agentRunsUsed: z.number().nonnegative(),
+    agentRunCap: z.number().int().positive().nullable(),
+    /** True when provider/model filters exclude workspace-wide warm/caps meaning. */
+    modelFilterActive: z.boolean(),
+    /** Latest `recorded_at` among visible facts in the window; null when none were ingested. */
+    dataThrough: z.string().datetime().nullable().default(null),
+    /** Released v1 percentage computation; zero when no positive cache-input denominator exists. */
+    cacheHitPct: z.number().int().min(0).max(100).default(0),
+    scope: InsightsScope.default({ rootSessionId: null, sessionId: null }),
+    /** Root sessions with spend in the window; `drivers` holds the top slice. */
+    driverGroups: z.number().int().nonnegative().default(0),
+    driversTruncated: z.boolean().default(false),
+    facetsTruncated: z.boolean().default(false),
+    recentCallsTruncated: z.boolean().default(false),
   }),
-  warmSeconds: z.number().nonnegative(),
-  priorWarmSeconds: z.number().nonnegative(),
-  warmGroups: z.array(InsightsWarmGroupRow),
-  liveWarm: z.array(InsightsLiveWarmLease),
-  floor: z.array(InsightsFloorSession),
-  selfhostedEnabled: z.boolean(),
-  machinesOnline: z.number().int().nonnegative(),
-  /** Workspace-wide OpenGeni credit $ from usage_events.model.cost (unfiltered). */
-  workspaceCreditUsd: z.number().nonnegative(),
-  priorWorkspaceCreditUsd: z.number().nonnegative(),
-  /** Model-filterable credit $ from facts (equals workspace when unfiltered, ignoring late-reject drift). */
-  creditUsd: z.number().nonnegative(),
-  priorCreditUsd: z.number().nonnegative(),
-  /** Hypothetical provider-rate USD for calls whose historical price was captured. */
-  estimatedProviderUsd: z.number().nonnegative(),
-  priorEstimatedProviderUsd: z.number().nonnegative(),
-  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
-  /** Equivalent OpenGeni credit price across calls whose historical price was captured. */
-  equivalentCreditUsd: z.number().nonnegative(),
-  priorEquivalentCreditUsd: z.number().nonnegative(),
-  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
-  priorEquivalentCreditCostKnownCalls: z.number().int().nonnegative(),
-  modelCalls: z.number().int().nonnegative(),
-  priorInputTokens: z.number().nonnegative(),
-  priorTotalTokens: z.number().nonnegative(),
-  priorCacheHitPct: z.number().int().min(0).max(100),
-  /** Prior input whose cache details are known. Omitted by older API replicas. */
-  priorCacheInputTokens: z.number().nonnegative().optional(),
-  priorCalls: z.number().int().nonnegative(),
-  /** Lifetime workspace topology (not scoped to the selected Insights range). */
-  goalsActive: z.number().int().nonnegative(),
-  goalsCompleted: z.number().int().nonnegative(),
-  sessionsTouched: z.number().int().nonnegative(),
-  rootSessions: z.number().int().nonnegative(),
-  deepestDepth: z.number().int().nonnegative(),
-  deepestSessionTitle: z.string(),
-  avgDepth: z.number().nonnegative(),
-  warmIdleNow: z.number().int().nonnegative(),
-  /** Billable credits-path tokens this UTC month (usage_events.model.tokens). */
-  billableTokensUsed: z.number().nonnegative(),
-  billableTokenCap: z.number().int().positive().nullable(),
-  /** Agent runs this UTC month (usage_events.agent_run.created). */
-  agentRunsUsed: z.number().nonnegative(),
-  agentRunCap: z.number().int().positive().nullable(),
-  /** True when provider/model filters exclude workspace-wide warm/caps meaning. */
-  modelFilterActive: z.boolean(),
-  /** Latest `recorded_at` among visible facts in the window; null when none were ingested. */
-  dataThrough: z.string().datetime().nullable().default(null),
-  /** Released v1 percentage computation; zero when no positive cache-input denominator exists. */
-  cacheHitPct: z.number().int().min(0).max(100).default(0),
-  scope: InsightsScope.default({ rootSessionId: null, sessionId: null }),
-  /** Root sessions with spend in the window; `drivers` holds the top slice. */
-  driverGroups: z.number().int().nonnegative().default(0),
-  driversTruncated: z.boolean().default(false),
-  facetsTruncated: z.boolean().default(false),
-  recentCallsTruncated: z.boolean().default(false),
-});
+);
 export type WorkspaceInsightsSnapshot = z.infer<typeof WorkspaceInsightsSnapshot>;
 
-export const WorkspaceInsightsResponse = z.object({
-  snapshot: WorkspaceInsightsSnapshot,
-});
+export const WorkspaceInsightsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    snapshot: WorkspaceInsightsSnapshot,
+  }),
+);
 export type WorkspaceInsightsResponse = z.infer<typeof WorkspaceInsightsResponse>;
 
-export const LimitAction = z.enum([
-  "agent_run:create",
-  "tokens:consume",
-  "file:upload",
-  "document:index",
-  "schedule:create",
-  "workspace:create",
-  "api_key:create",
-]);
+export const LimitAction = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "agent_run:create",
+    "tokens:consume",
+    "file:upload",
+    "document:index",
+    "schedule:create",
+    "workspace:create",
+    "api_key:create",
+  ]),
+);
 export type LimitAction = z.infer<typeof LimitAction>;
 
-export const StaticUsageLimits = z.object({
-  maxWorkspacesPerAccount: z.number().int().positive().optional(),
-  maxApiKeysPerWorkspace: z.number().int().positive().optional(),
-  maxSchedulesPerWorkspace: z.number().int().positive().optional(),
-  maxFileUploadBytes: z.number().int().positive().optional(),
-  maxMonthlyAgentRunsPerWorkspace: z.number().int().positive().optional(),
-  maxMonthlyTokensPerWorkspace: z.number().int().positive().optional(),
-  maxMonthlyCostMicrosPerAccount: z.number().int().positive().optional(),
-  maxDocumentIndexedChunksPerWorkspace: z.number().int().positive().optional(),
-});
+export const StaticUsageLimits = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    maxWorkspacesPerAccount: z.number().int().positive().optional(),
+    maxApiKeysPerWorkspace: z.number().int().positive().optional(),
+    maxSchedulesPerWorkspace: z.number().int().positive().optional(),
+    maxFileUploadBytes: z.number().int().positive().optional(),
+    maxMonthlyAgentRunsPerWorkspace: z.number().int().positive().optional(),
+    maxMonthlyTokensPerWorkspace: z.number().int().positive().optional(),
+    maxMonthlyCostMicrosPerAccount: z.number().int().positive().optional(),
+    maxDocumentIndexedChunksPerWorkspace: z.number().int().positive().optional(),
+  }),
+);
 export type StaticUsageLimits = z.infer<typeof StaticUsageLimits>;
 
-export const EntitlementValue = z.union([z.boolean(), z.string(), z.number(), z.array(z.string())]);
+export const EntitlementValue = /* @__PURE__ */ defineSchema(() =>
+  z.union([z.boolean(), z.string(), z.number(), z.array(z.string())]),
+);
 export type EntitlementValue = z.infer<typeof EntitlementValue>;
 
-export const Entitlements = z.record(z.string().min(1), EntitlementValue);
+export const Entitlements = /* @__PURE__ */ defineSchema(() =>
+  z.record(z.string().min(1), EntitlementValue),
+);
 export type Entitlements = z.infer<typeof Entitlements>;
 
-export const LimitDecision = z.discriminatedUnion("allowed", [
-  z.object({ allowed: z.literal(true) }),
-  z.object({
-    allowed: z.literal(false),
-    code: z.string(),
-    message: z.string(),
-    scope: z.enum(["workspace", "member"]).optional(),
-    resetsAt: z.string().nullable().optional(),
-    subjectId: z.string().optional(),
-  }),
-]);
+export const LimitDecision = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("allowed", [
+    z.object({ allowed: z.literal(true) }),
+    z.object({
+      allowed: z.literal(false),
+      code: z.string(),
+      message: z.string(),
+      scope: z.enum(["workspace", "member"]).optional(),
+      resetsAt: z.string().nullable().optional(),
+      subjectId: z.string().optional(),
+    }),
+  ]),
+);
 export type LimitDecision = z.infer<typeof LimitDecision>;
 
 // ============ P3 — Entitlements port (§7.5) ============
 //
-// The host-providable admission seam over OpenGeni's TWO existing admission
+// The host-providable admission seam over Opengeni's TWO existing admission
 // sites: the API edge (`checkLimit`/`requireLimit`, billing/limits.ts) AND the
 // worker edge (`ensureRunAllowed`, agent-turn.ts — both turn-entry and the
 // mid-stream budget valve). A host that owns its OWN ledger/meter binds this to
-// keep OpenGeni from re-deriving admission from its local ledger.
+// keep Opengeni from re-deriving admission from its local ledger.
 //
 // CRITICAL CONTRACT: `admitRun` returns a transport-neutral allow/deny decision
 // (+ optional structured reason + the echoed quantity it admitted) and NEVER
 // exposes `getBillingBalance` or any ledger internals — the host's balance math
 // stays on the host side of the boundary. This is what lets the same port serve
-// both PUSH (host funds OpenGeni's ledger; admission is a LOCAL read of that
+// both PUSH (host funds Opengeni's ledger; admission is a LOCAL read of that
 // funded ledger) and PULL (a network callback to the host's own meter).
 //
 // `action` is a free `string` (NOT the internal `LimitAction` enum) so a host
-// meter can key on actions OpenGeni does not model. `quantity` is the units the
+// meter can key on actions Opengeni does not model. `quantity` is the units the
 // caller is about to consume (tokens, bytes, 1 run, …); the decision MAY echo
 // the admitted quantity so a PULL host can grant a partial allowance.
-export const EntitlementDecision = z.discriminatedUnion("allowed", [
-  z.object({ allowed: z.literal(true), quantity: z.number().optional() }),
-  z.object({
-    allowed: z.literal(false),
-    reason: z.string(),
-    code: z.string().optional(),
-    quantity: z.number().optional(),
-  }),
-]);
+export const EntitlementDecision = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("allowed", [
+    z.object({ allowed: z.literal(true), quantity: z.number().optional() }),
+    z.object({
+      allowed: z.literal(false),
+      reason: z.string(),
+      code: z.string().optional(),
+      quantity: z.number().optional(),
+    }),
+  ]),
+);
 export type EntitlementDecision = z.infer<typeof EntitlementDecision>;
 
 export type AdmitRunInput = {
@@ -4162,41 +4977,49 @@ export type EntitlementsPort = {
   admitRun(input: AdmitRunInput): Promise<EntitlementDecision>;
 };
 
-export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
+export const GitCredentialProvider = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["github", "gitlab", "azure_devops"]),
+);
 export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
 
 // Host-opaque identity for one independently mintable Git credential. It is
 // deliberately NOT constrained to a filesystem-safe alphabet: runtimes hash it
 // before using it in paths, command text, or environment variable names.
-export const GitCredentialBindingId = z.string().min(1).max(256);
+export const GitCredentialBindingId = /* @__PURE__ */ defineSchema(() =>
+  z.string().min(1).max(256),
+);
 export type GitCredentialBindingId = z.infer<typeof GitCredentialBindingId>;
 
-export const GitRepositoryAccess = z.enum(["read", "write"]);
+export const GitRepositoryAccess = /* @__PURE__ */ defineSchema(() => z.enum(["read", "write"]));
 export type GitRepositoryAccess = z.infer<typeof GitRepositoryAccess>;
 
-const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
+const GitProviderRepositoryId = /* @__PURE__ */ defineSchema(() =>
+  z.union([z.number().int().positive(), z.string().min(1)]),
+);
 
-export const GitCredentialRepositoryRef = z.object({
-  provider: GitCredentialProvider.optional(),
-  credentialBindingId: GitCredentialBindingId.optional(),
-  access: GitRepositoryAccess.optional(),
-  uri: z.string().min(1),
-  ref: z.string().min(1),
-  /** Immutable commit the caller expects `ref` to materialize. */
-  expectedCommitSha: z
-    .string()
-    .regex(/^[0-9a-f]{40}$/)
-    .optional(),
-  repositoryId: GitProviderRepositoryId.optional(),
-  installationId: GitProviderRepositoryId.optional(),
-  projectId: GitProviderRepositoryId.optional(),
-  connectionId: z.string().min(1).optional(),
-});
+export const GitCredentialRepositoryRef = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    provider: GitCredentialProvider.optional(),
+    credentialBindingId: GitCredentialBindingId.optional(),
+    access: GitRepositoryAccess.optional(),
+    uri: z.string().min(1),
+    ref: z.string().min(1),
+    /** Immutable commit the caller expects `ref` to materialize. */
+    expectedCommitSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
+    repositoryId: GitProviderRepositoryId.optional(),
+    installationId: GitProviderRepositoryId.optional(),
+    projectId: GitProviderRepositoryId.optional(),
+    connectionId: z.string().min(1).optional(),
+  }),
+);
 export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
 
 // ============ connection-credential provider — Connection-credential provider (§7.6) ============
 //
-// The host-providable credential seam over OpenGeni's run-scoped credential
+// The host-providable credential seam over Opengeni's run-scoped credential
 // sites in the worker and API:
 //   - GIT credentials: run-scoped provider tokens minted in
 //     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
@@ -4210,7 +5033,7 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 //
 // In embedded/separate topologies the HOST owns these external connections
 // (its GitHub App, its secret vault + encryption key). When a host binds this
-// port, OpenGeni asks the host to mint/decrypt per-run instead of self-minting
+// port, Opengeni asks the host to mint/decrypt per-run instead of self-minting
 // from `settings`. Unset (standalone default) → byte-for-byte today's
 // self-mint.
 //
@@ -4238,7 +5061,7 @@ export type GitCredentialsRequest = {
   provider?: GitCredentialProvider;
   // Present when the host supplied an explicit binding or when more than one
   // independently mintable credential exists for this provider. A host must
-  // mint only this binding; OpenGeni never treats provider identity as enough
+  // mint only this binding; Opengeni never treats provider identity as enough
   // to select among multiple accounts/installations.
   credentialBindingId?: GitCredentialBindingId;
   // Canonical lower-case host shared by this binding's repository refs when
@@ -4285,14 +5108,14 @@ export type GitCredentials = {
   // before lazy sandbox provision. The value never enters the manifest.
   token?: string;
   // A host-owned exact smart-Git transport for providers whose available token
-  // cannot be constrained to the selected repositories. OpenGeni rewrites only
+  // cannot be constrained to the selected repositories. Opengeni rewrites only
   // the echoed repository remotes and never exposes this bearer to provider
   // CLIs. Omitted means the token is a direct provider credential.
   transport?: GitCredentialTransport;
   // workspace-scope cross-check echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
-  // Strict request echoes for binding-aware requests. OpenGeni validates these
+  // Strict request echoes for binding-aware requests. Opengeni validates these
   // before accepting a token, preventing a host routing bug from returning a
   // sibling connection's credential. They remain optional for legacy single-
   // binding/provider hosts.
@@ -4300,62 +5123,12 @@ export type GitCredentials = {
   provider?: GitCredentialProvider;
   providerHost?: string;
   // Optional provider expiry for host-managed proactive renewal. ISO-8601;
-  // null/omitted means the host does not expose a deadline and OpenGeni uses
+  // null/omitted means the host does not expose a deadline and Opengeni uses
   // its conservative bounded refresh cadence instead.
   expiresAt?: string | null;
   // Optional git identity override. When omitted the activity falls back to
   // today's `githubAppBotIdentity(settings)`.
   identity?: { name: string; email: string } | null;
-};
-
-export type SandboxSecretsRequest = {
-  accountId: string;
-  workspaceId: string;
-  // Exact live attempt authority. Hosts MUST revalidate this tuple, the
-  // session's selected resource identity, and any personal-resource grant
-  // immediately before returning plaintext.
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  // Organization/workspace Variable Sets may be materialized by a pure
-  // service turn (for example, the scheduler). Personal Variable Sets still
-  // require this causal human and an exact personal-resource grant.
-  initiator: TurnInitiator;
-  initiatingHumanSubjectId: string | null;
-  variableSetId: string;
-  /**
-   * Exact accepted scheduled-occurrence generation. Present only for scheduled
-   * attempts; ordinary live turns omit it, so hosts that predate this field keep
-   * working unchanged for those.
-   */
-  expectedGeneration?: number | null;
-};
-
-export type SandboxSecrets = {
-  // The decrypted variableSet values the run injects, replacing the local
-  // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
-  // produces (plaintext name→value).
-  values: Record<string, string>;
-  // Exact scope/resource echoes are mandatory so a host routing bug cannot
-  // inject a sibling tenant, resource, or stale attempt's plaintext.
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  variableSetId: string;
-  /** Must echo the request's `expectedGeneration` when one was supplied. */
-  expectedGeneration?: number | null;
-  scope: VariableSetScope;
-  generation: number;
-  // Optional variableSet metadata; when omitted the activity uses the
-  // variableSetId as both id and name (the local decrypt carries the row's
-  // id/name/description, but only `id` is load-bearing downstream).
-  id?: string;
-  name?: string;
-  description?: string | null;
 };
 
 export type CredentialAuthNeededReason =
@@ -4365,7 +5138,7 @@ export type CredentialAuthNeededReason =
   | "refresh_failed";
 
 /**
- * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * Host-owned run credentials are materialized below one Opengeni-owned sandbox
  * directory. Paths are relative POSIX names; the runtime validates traversal,
  * collisions, bounds, and modes before any content reaches a sandbox.
  */
@@ -4446,249 +5219,262 @@ export type RunCredentialsResolution =
       authNeeded: RunCredentialAuthNeeded[];
     };
 
-export const McpConnectionResourceScope = z
-  .object({
-    /** Provider-stable repository identity, serialized as a string on the wire. */
-    id: z.string().min(1).max(512),
-    kind: z.literal("repository"),
-  })
-  .strict();
+export const McpConnectionResourceScope = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Provider-stable repository identity, serialized as a string on the wire. */
+      id: z.string().min(1).max(512),
+      kind: z.literal("repository"),
+    })
+    .strict(),
+);
 export type McpConnectionResourceScope = z.infer<typeof McpConnectionResourceScope>;
 
-const McpConnectionResourceScopes = z
-  .array(McpConnectionResourceScope)
-  .min(1)
-  .max(256)
-  .superRefine((resources, context) => {
-    const seen = new Set<string>();
-    for (const [index, resource] of resources.entries()) {
-      const key = `${resource.kind}\0${resource.id}`;
-      if (seen.has(key)) {
-        context.addIssue({
-          code: "custom",
-          message: "selectedResources must not contain duplicates",
-          path: [index],
-        });
+const McpConnectionResourceScopes = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(McpConnectionResourceScope)
+    .min(1)
+    .max(256)
+    .superRefine((resources, context) => {
+      const seen = new Set<string>();
+      for (const [index, resource] of resources.entries()) {
+        const key = `${resource.kind}\0${resource.id}`;
+        if (seen.has(key)) {
+          context.addIssue({
+            code: "custom",
+            message: "selectedResources must not contain duplicates",
+            path: [index],
+          });
+        }
+        seen.add(key);
       }
-      seen.add(key);
-    }
-  });
+    }),
+);
 
-export const McpServerConnectionRef = z
-  .object({
-    /** Opaque host or standalone connection identifier. */
-    connectionId: z.string().min(1).optional(),
-    /** Explicit native catalog selector. Never overrides an exact connection pin. */
-    accountSelection: z.literal("all_eligible").optional(),
-    /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
-    authoritySource: z.literal("host").optional(),
-    /** Durable fixed reference, or an explicit configuration-only selector.
-     * accepted_turn resolves only from immutable accepted-work authority. */
-    hostBinding: z
-      .union([
-        z
-          .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
-          .strict(),
-        z.object({ selection: z.literal("accepted_turn") }).strict(),
-      ])
-      .optional(),
-    /** Stable provider family (for example github, gitlab, or azure_devops). */
-    provider: z.string().min(1).max(128).optional(),
-    /** Provider host or tenant domain. */
-    providerDomain: z.string().min(1),
-    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    scopes: z.array(z.string().min(1)).optional(),
-    /** OAuth resource indicator. This is distinct from selectedResources. */
-    resource: z.string().min(1).optional(),
-    /** Exact provider resources this MCP binding is allowed to operate on. */
-    selectedResources: McpConnectionResourceScopes.optional(),
-    subjectScope: z.enum(["workspace", "subject"]).optional(),
-  })
-  .strict()
-  .superRefine((reference, context) => {
-    if (
-      reference.accountSelection &&
-      (reference.connectionId !== undefined ||
-        reference.authoritySource === "host" ||
-        reference.selectedResources !== undefined)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["accountSelection"],
-        message:
-          "An all-eligible selector cannot contain an exact connection, host authority, or selected resources",
-      });
-    }
-    const acceptedTurn = reference.hostBinding && "selection" in reference.hostBinding;
-    if (
-      acceptedTurn &&
-      (reference.connectionId !== undefined || reference.subjectScope !== "subject")
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["hostBinding"],
-        message:
-          "Accepted-turn selection requires subject scope and forbids a configured connectionId",
-      });
-    }
-    if (reference.authoritySource === "host" && !reference.connectionId && !acceptedTurn) {
-      context.addIssue({
-        code: "custom",
-        message: "host authority requires connectionId",
-        path: ["connectionId"],
-      });
-    }
-    if (reference.hostBinding && reference.authoritySource !== "host")
-      context.addIssue({
-        code: "custom",
-        path: ["hostBinding"],
-        message: "Durable binding requires host authority",
-      });
-    if (!reference.selectedResources) return;
-    if (!reference.connectionId && !acceptedTurn) {
-      context.addIssue({
-        code: "custom",
-        message: "selectedResources requires connectionId",
-        path: ["connectionId"],
-      });
-    }
-    if (!reference.provider) {
-      context.addIssue({
-        code: "custom",
-        message: "selectedResources requires provider",
-        path: ["provider"],
-      });
-    }
-  });
-export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
-
-/** Internal frozen authority for one personal MCP connection. */
-export const McpPersonalConnectionDelegation = z
-  .object({
-    serverId: z.string().min(1).max(256),
-    /** Canonical policy/catalog identity when serverId is an account route. */
-    canonicalServerId: z.string().min(1).max(256).optional(),
-    connectionId: z.string().uuid(),
-    /**
-     * Immutable physical workspace that owns an activated common-user
-     * connection. It is server-resolved from the selected authority and lets
-     * provider adapters load only that exact row when the accepted turn runs
-     * in another workspace of the same organization.
-     */
-    originWorkspaceId: z.string().uuid().optional(),
-    ownerSubjectId: z.string().min(1).max(512),
-    providerDomain: z.string().min(1).max(2048),
-    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    connectionType: z.enum(["mcp", "social", "atlassian", "github_personal"]).optional(),
-    /**
-     * Historical receipt data only. This schema also reads persisted work from
-     * before the sender-owned cutover. Current admission rejects this field;
-     * provider execution requires the canonical sender snapshot, never this grant.
-     */
-    userDelegation: UserResourceDelegation.optional(),
-    /**
-     * Personal GitHub only: the exact repository authority frozen when this
-     * accepted work was admitted. The credential binding is evidence, not an
-     * authorization; physical provider use must revalidate every mutable
-     * connection/grant/selection fence against this snapshot.
-     */
-    personalGitHubRepositorySelection: z
-      .object({
-        credentialBindingId: z.string().uuid(),
-        connectionAuthorityGeneration: z.number().int().positive(),
-        selectionGeneration: z.number().int().positive(),
-        repositories: z
-          .array(
-            z
-              .object({
-                repositoryId: z.string().regex(/^[1-9]\d*$/u),
-                fullName: z.string().min(3).max(140),
-                canonicalUrl: z.string().url().max(512),
-                ref: z.string().min(1).max(255),
-                access: GitRepositoryAccess,
-                selectionGeneration: z.number().int().positive(),
-              })
-              .strict(),
-          )
-          .min(1)
-          .max(100),
-      })
-      .strict()
-      .optional(),
-    /**
-     * Google Drive publication only: the exact output destination frozen when
-     * this delegation was accepted, so a later connection-settings change can
-     * never redirect an already-accepted turn's publication. Structurally
-     * mirrors GoogleDriveOutputDestination (defined in ./google-drive, which
-     * imports this module - hence the inline shape). Absent on pre-freeze
-     * turns, which keep the bounded legacy live-resolution behavior.
-     */
-    outputDestination: z
-      .object({
-        folderId: z.string().min(1).max(256),
-        folderName: z.string().min(1).max(1024),
-        driveId: z.string().min(1).max(256).nullable(),
-        location: z.enum(["my_drive", "shared_drive"]),
-        selectedAt: z.string().datetime({ offset: true }),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict()
-  .superRefine((delegation, context) => {
-    const personalGitHub = delegation.connectionType === "github_personal";
-    if (personalGitHub !== (delegation.personalGitHubRepositorySelection !== undefined)) {
-      context.addIssue({
-        code: "custom",
-        path: ["personalGitHubRepositorySelection"],
-        message: "personal GitHub delegation requires one repository authority snapshot",
-      });
-    }
-    if (!personalGitHub) return;
-    if (
-      delegation.serverId !== "github:personal" ||
-      delegation.providerDomain !== "github.com" ||
-      delegation.kind !== "oauth2" ||
-      !delegation.originWorkspaceId
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "personal GitHub delegation requires exact user-owned connection authority",
-      });
-    }
-    const repositories = delegation.personalGitHubRepositorySelection?.repositories ?? [];
-    const repositoryIds = new Set<string>();
-    const canonicalUrls = new Set<string>();
-    repositories.forEach((repository, index) => {
-      const canonicalUrl = repository.canonicalUrl.toLowerCase();
+export const McpServerConnectionRef = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Opaque host or standalone connection identifier. */
+      connectionId: z.string().min(1).optional(),
+      /** Explicit native catalog selector. Never overrides an exact connection pin. */
+      accountSelection: z.literal("all_eligible").optional(),
+      /** Host-owned credential authority; omission keeps Opengeni's native connection authority. */
+      authoritySource: z.literal("host").optional(),
+      /** Durable fixed reference, or an explicit configuration-only selector.
+       * accepted_turn resolves only from immutable accepted-work authority. */
+      hostBinding: z
+        .union([
+          z
+            .object({
+              bindingId: z.string().uuid(),
+              generation: z.number().int().positive().safe(),
+            })
+            .strict(),
+          z.object({ selection: z.literal("accepted_turn") }).strict(),
+        ])
+        .optional(),
+      /** Stable provider family (for example github, gitlab, or azure_devops). */
+      provider: z.string().min(1).max(128).optional(),
+      /** Provider host or tenant domain. */
+      providerDomain: z.string().min(1),
+      kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+      scopes: z.array(z.string().min(1)).optional(),
+      /** OAuth resource indicator. This is distinct from selectedResources. */
+      resource: z.string().min(1).optional(),
+      /** Exact provider resources this MCP binding is allowed to operate on. */
+      selectedResources: McpConnectionResourceScopes.optional(),
+      subjectScope: z.enum(["workspace", "subject"]).optional(),
+    })
+    .strict()
+    .superRefine((reference, context) => {
       if (
-        !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(repository.fullName) ||
-        repository.canonicalUrl !== `https://github.com/${repository.fullName}`
+        reference.accountSelection &&
+        (reference.connectionId !== undefined ||
+          reference.authoritySource === "host" ||
+          reference.selectedResources !== undefined)
       ) {
         context.addIssue({
           code: "custom",
-          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
-          message: "personal GitHub repository identity must be canonical",
+          path: ["accountSelection"],
+          message:
+            "An all-eligible selector cannot contain an exact connection, host authority, or selected resources",
         });
       }
-      if (repositoryIds.has(repository.repositoryId)) {
+      const acceptedTurn = reference.hostBinding && "selection" in reference.hostBinding;
+      if (
+        acceptedTurn &&
+        (reference.connectionId !== undefined || reference.subjectScope !== "subject")
+      ) {
         context.addIssue({
           code: "custom",
-          path: ["personalGitHubRepositorySelection", "repositories", index, "repositoryId"],
-          message: "personal GitHub repositories must be unique by provider id",
+          path: ["hostBinding"],
+          message:
+            "Accepted-turn selection requires subject scope and forbids a configured connectionId",
         });
       }
-      if (canonicalUrls.has(canonicalUrl)) {
+      if (reference.authoritySource === "host" && !reference.connectionId && !acceptedTurn) {
         context.addIssue({
           code: "custom",
-          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
-          message: "personal GitHub repositories must be unique by canonical URL",
+          message: "host authority requires connectionId",
+          path: ["connectionId"],
         });
       }
-      repositoryIds.add(repository.repositoryId);
-      canonicalUrls.add(canonicalUrl);
-    });
-  });
+      if (reference.hostBinding && reference.authoritySource !== "host")
+        context.addIssue({
+          code: "custom",
+          path: ["hostBinding"],
+          message: "Durable binding requires host authority",
+        });
+      if (!reference.selectedResources) return;
+      if (!reference.connectionId && !acceptedTurn) {
+        context.addIssue({
+          code: "custom",
+          message: "selectedResources requires connectionId",
+          path: ["connectionId"],
+        });
+      }
+      if (!reference.provider) {
+        context.addIssue({
+          code: "custom",
+          message: "selectedResources requires provider",
+          path: ["provider"],
+        });
+      }
+    }),
+);
+export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
+
+/** Internal frozen authority for one personal MCP connection. */
+export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      serverId: z.string().min(1).max(256),
+      /** Canonical policy/catalog identity when serverId is an account route. */
+      canonicalServerId: z.string().min(1).max(256).optional(),
+      connectionId: z.string().uuid(),
+      /**
+       * Immutable physical workspace that owns an activated common-user
+       * connection. It is server-resolved from the selected authority and lets
+       * provider adapters load only that exact row when the accepted turn runs
+       * in another workspace of the same organization.
+       */
+      originWorkspaceId: z.string().uuid().optional(),
+      ownerSubjectId: z.string().min(1).max(512),
+      providerDomain: z.string().min(1).max(2048),
+      kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+      connectionType: z.enum(["mcp", "social", "atlassian", "github_personal"]).optional(),
+      /**
+       * Historical receipt data only. This schema also reads persisted work from
+       * before the sender-owned cutover. Current admission rejects this field;
+       * provider execution requires the canonical sender snapshot, never this grant.
+       */
+      userDelegation: UserResourceDelegation.optional(),
+      /**
+       * Personal GitHub only: the exact repository authority frozen when this
+       * accepted work was admitted. The credential binding is evidence, not an
+       * authorization; physical provider use must revalidate every mutable
+       * connection/grant/selection fence against this snapshot.
+       */
+      personalGitHubRepositorySelection: z
+        .object({
+          credentialBindingId: z.string().uuid(),
+          connectionAuthorityGeneration: z.number().int().positive(),
+          selectionGeneration: z.number().int().positive(),
+          repositories: z
+            .array(
+              z
+                .object({
+                  repositoryId: z.string().regex(/^[1-9]\d*$/u),
+                  fullName: z.string().min(3).max(140),
+                  canonicalUrl: z.string().url().max(512),
+                  ref: z.string().min(1).max(255),
+                  access: GitRepositoryAccess,
+                  selectionGeneration: z.number().int().positive(),
+                })
+                .strict(),
+            )
+            .min(1)
+            .max(100),
+        })
+        .strict()
+        .optional(),
+      /**
+       * Google Drive publication only: the exact output destination frozen when
+       * this delegation was accepted, so a later connection-settings change can
+       * never redirect an already-accepted turn's publication. Structurally
+       * mirrors GoogleDriveOutputDestination (defined in ./google-drive, which
+       * imports this module - hence the inline shape). Absent on pre-freeze
+       * turns, which keep the bounded legacy live-resolution behavior.
+       */
+      outputDestination: z
+        .object({
+          folderId: z.string().min(1).max(256),
+          folderName: z.string().min(1).max(1024),
+          driveId: z.string().min(1).max(256).nullable(),
+          location: z.enum(["my_drive", "shared_drive"]),
+          selectedAt: z.string().datetime({ offset: true }),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict()
+    .superRefine((delegation, context) => {
+      const personalGitHub = delegation.connectionType === "github_personal";
+      if (personalGitHub !== (delegation.personalGitHubRepositorySelection !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection"],
+          message: "personal GitHub delegation requires one repository authority snapshot",
+        });
+      }
+      if (!personalGitHub) return;
+      if (
+        delegation.serverId !== "github:personal" ||
+        delegation.providerDomain !== "github.com" ||
+        delegation.kind !== "oauth2" ||
+        !delegation.originWorkspaceId
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "personal GitHub delegation requires exact user-owned connection authority",
+        });
+      }
+      const repositories = delegation.personalGitHubRepositorySelection?.repositories ?? [];
+      const repositoryIds = new Set<string>();
+      const canonicalUrls = new Set<string>();
+      repositories.forEach((repository, index) => {
+        const canonicalUrl = repository.canonicalUrl.toLowerCase();
+        if (
+          !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
+            repository.fullName,
+          ) ||
+          repository.canonicalUrl !== `https://github.com/${repository.fullName}`
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
+            message: "personal GitHub repository identity must be canonical",
+          });
+        }
+        if (repositoryIds.has(repository.repositoryId)) {
+          context.addIssue({
+            code: "custom",
+            path: ["personalGitHubRepositorySelection", "repositories", index, "repositoryId"],
+            message: "personal GitHub repositories must be unique by provider id",
+          });
+        }
+        if (canonicalUrls.has(canonicalUrl)) {
+          context.addIssue({
+            code: "custom",
+            path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
+            message: "personal GitHub repositories must be unique by canonical URL",
+          });
+        }
+        repositoryIds.add(repository.repositoryId);
+        canonicalUrls.add(canonicalUrl);
+      });
+    }),
+);
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
 
 /**
@@ -4696,135 +5482,174 @@ export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnecti
  * One server can have at most one account; bounded validation keeps corrupt JSON
  * from becoming executable credential authority at a DB read boundary.
  */
-export const McpPersonalConnectionDelegations = z
-  .array(McpPersonalConnectionDelegation)
-  .max(128)
-  .superRefine((delegations, context) => {
-    const seen = new Set<string>();
-    for (const [index, delegation] of delegations.entries()) {
-      if (seen.has(delegation.serverId)) {
-        context.addIssue({
-          code: "custom",
-          message: "personal MCP delegations must be unique by serverId",
-          path: [index, "serverId"],
-        });
+export const McpPersonalConnectionDelegations = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(McpPersonalConnectionDelegation)
+    .max(128)
+    .superRefine((delegations, context) => {
+      const seen = new Set<string>();
+      for (const [index, delegation] of delegations.entries()) {
+        if (seen.has(delegation.serverId)) {
+          context.addIssue({
+            code: "custom",
+            message: "personal MCP delegations must be unique by serverId",
+            path: [index, "serverId"],
+          });
+        }
+        seen.add(delegation.serverId);
       }
-      seen.add(delegation.serverId);
-    }
-  });
+    }),
+);
 
-export const McpPersonalConnectionSummary = z
-  .object({
-    serverId: z.string().min(1).max(256),
-    providerDomain: z.string().min(1).max(2048),
-  })
-  .strict();
+export const McpPersonalConnectionSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      serverId: z.string().min(1).max(256),
+      providerDomain: z.string().min(1).max(2048),
+    })
+    .strict(),
+);
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
 /** Internal, server-resolved account route frozen with accepted work. It is
  * not a public credential grant and must never be accepted from a caller. */
-export const McpConnectionAccountBinding = z
-  .object({
-    serverId: z.string().min(1).max(256),
-    canonicalServerId: z.string().min(1).max(256),
-    connectionId: z.string().uuid(),
-    originWorkspaceId: z.string().uuid(),
-    subjectScope: z.enum(["workspace", "subject"]),
-    ownerSubjectId: z.string().min(1).max(512).nullable(),
-    accountLabel: z.string().min(1).max(512),
-    providerDomain: z.string().min(1).max(2048),
-    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
-    connectionRef: McpServerConnectionRef,
-    connectionAuthorityGeneration: z.number().int().positive().optional(),
-  })
-  .strict()
-  .superRefine((binding, context) => {
-    if (
-      binding.connectionRef.authoritySource === "host" ||
-      binding.connectionRef.connectionId !== binding.connectionId ||
-      binding.connectionRef.subjectScope !== binding.subjectScope ||
-      binding.connectionRef.providerDomain !== binding.providerDomain ||
-      binding.connectionRef.kind !== binding.kind
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["connectionRef"],
-        message: "Account reference must match its frozen identity",
-      });
-    }
-    if ((binding.subjectScope === "subject") !== (binding.ownerSubjectId !== null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["ownerSubjectId"],
-        message: "Only personal account bindings retain an owner",
-      });
-    }
-  });
-export type McpConnectionAccountBinding = z.infer<typeof McpConnectionAccountBinding>;
-
-export const McpConnectionAccountBindings = z
-  .array(McpConnectionAccountBinding)
-  .max(128)
-  .superRefine((bindings, context) => {
-    const routes = new Set<string>();
-    const accounts = new Set<string>();
-    bindings.forEach((binding, index) => {
-      const account = JSON.stringify([binding.canonicalServerId, binding.connectionId]);
-      if (routes.has(binding.serverId) || accounts.has(account)) {
+export const McpConnectionAccountBinding = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      serverId: z.string().min(1).max(256),
+      canonicalServerId: z.string().min(1).max(256),
+      connectionId: z.string().uuid(),
+      originWorkspaceId: z.string().uuid(),
+      subjectScope: z.enum(["workspace", "subject"]),
+      ownerSubjectId: z.string().min(1).max(512).nullable(),
+      accountLabel: z.string().min(1).max(512),
+      providerDomain: z.string().min(1).max(2048),
+      kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+      connectionRef: McpServerConnectionRef,
+      connectionAuthorityGeneration: z.number().int().positive().optional(),
+    })
+    .strict()
+    .superRefine((binding, context) => {
+      if (
+        binding.connectionRef.authoritySource === "host" ||
+        binding.connectionRef.connectionId !== binding.connectionId ||
+        binding.connectionRef.subjectScope !== binding.subjectScope ||
+        binding.connectionRef.providerDomain !== binding.providerDomain ||
+        binding.connectionRef.kind !== binding.kind
+      ) {
         context.addIssue({
           code: "custom",
-          path: [index],
-          message: "Account bindings require unique routes and connector-account pairs",
+          path: ["connectionRef"],
+          message: "Account reference must match its frozen identity",
         });
       }
-      routes.add(binding.serverId);
-      accounts.add(account);
-    });
-  });
+      if ((binding.subjectScope === "subject") !== (binding.ownerSubjectId !== null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["ownerSubjectId"],
+          message: "Only personal account bindings retain an owner",
+        });
+      }
+    }),
+);
+export type McpConnectionAccountBinding = z.infer<typeof McpConnectionAccountBinding>;
+
+export const McpConnectionAccountBindings = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(McpConnectionAccountBinding)
+    .max(128)
+    .superRefine((bindings, context) => {
+      const routes = new Set<string>();
+      const accounts = new Set<string>();
+      bindings.forEach((binding, index) => {
+        const account = JSON.stringify([binding.canonicalServerId, binding.connectionId]);
+        if (routes.has(binding.serverId) || accounts.has(account)) {
+          context.addIssue({
+            code: "custom",
+            path: [index],
+            message: "Account bindings require unique routes and connector-account pairs",
+          });
+        }
+        routes.add(binding.serverId);
+        accounts.add(account);
+      });
+    }),
+);
 
 /**
  * Account choice only. The authenticated sender supplies authority; selecting
  * an account never delegates it to another participant or conversation.
  */
-export const McpConnectionAccountSelection = z
-  .object({
-    serverId: z.string().min(1).max(256),
-    connectionId: z.string().uuid(),
-  })
-  .strict();
+export const McpConnectionAccountSelection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      serverId: z.string().min(1).max(256),
+      connectionId: z.string().uuid(),
+    })
+    .strict(),
+);
 export type McpConnectionAccountSelection = z.infer<typeof McpConnectionAccountSelection>;
 
-export const McpConnectionAccountSelections = z
-  .array(McpConnectionAccountSelection)
-  .max(128)
-  .superRefine((selections, context) => {
-    const seen = new Set<string>();
-    const specialized = new Set<string>();
-    for (const [index, selection] of selections.entries()) {
-      if (
-        selection.serverId === "github:personal" ||
-        selection.serverId === "google-drive-publishing"
-      ) {
-        if (specialized.has(selection.serverId)) {
+export const McpConnectionAccountSelections = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(McpConnectionAccountSelection)
+    .max(128)
+    .superRefine((selections, context) => {
+      const seen = new Set<string>();
+      const specialized = new Set<string>();
+      for (const [index, selection] of selections.entries()) {
+        if (
+          selection.serverId === "github:personal" ||
+          selection.serverId === "google-drive-publishing"
+        ) {
+          if (specialized.has(selection.serverId)) {
+            context.addIssue({
+              code: "custom",
+              message: "This specialized surface accepts only one connection account",
+              path: [index, "serverId"],
+            });
+          }
+          specialized.add(selection.serverId);
+        }
+        const key = JSON.stringify([selection.serverId, selection.connectionId]);
+        if (seen.has(key)) {
           context.addIssue({
             code: "custom",
-            message: "This specialized surface accepts only one connection account",
+            message: "connection account selections must be unique by serverId and connectionId",
             path: [index, "serverId"],
           });
         }
-        specialized.add(selection.serverId);
+        seen.add(key);
       }
-      const key = JSON.stringify([selection.serverId, selection.connectionId]);
-      if (seen.has(key)) {
-        context.addIssue({
-          code: "custom",
-          message: "connection account selections must be unique by serverId and connectionId",
-          path: [index, "serverId"],
-        });
-      }
-      seen.add(key);
-    }
-  });
+    }),
+);
+
+/**
+ * What a person decided about connector accounts for a turn, as opposed to the
+ * accounts that turn was bound to. Autonomous work that continues the turn
+ * (goal continuations, wait wake-ups, command results, child results) carries
+ * this intent and resolves it again for the same person at each turn, so it
+ * uses that person's current accounts instead of a copy of earlier ones.
+ *
+ * `principal` is whose personal accounts may be used: the person whose
+ * authenticated request accepted the turn, or `none` when that request could
+ * not use personal accounts (service work, delegated bearers). `selections`
+ * are the accounts the person explicitly picked; every other connector uses
+ * the principal's default accounts.
+ */
+export const ConnectionAccountIntent = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      principal: z.discriminatedUnion("kind", [
+        z.object({ kind: z.literal("subject"), subjectId: z.string().min(1).max(512) }).strict(),
+        z.object({ kind: z.literal("none") }).strict(),
+      ]),
+      selections: McpConnectionAccountSelections,
+    })
+    .strict(),
+);
+export type ConnectionAccountIntent = z.infer<typeof ConnectionAccountIntent>;
 
 export type McpCredentialsRequest = {
   accountId: string;
@@ -4878,12 +5703,12 @@ export type ConnectionCredentialPlacement = {
 export type ConnectionCredentialsPort = {
   // Every leg is optional: a host may drive only the credential classes it
   // owns. An unset leg falls through to today's standalone implementation for
-  // that leg only.
+  // that leg only. Host-owned secret stores are supplied through the
+  // `vaultProvider` leg (`VaultConnectionCredentialsPort` in `@opengeni/vaults`).
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
-  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
   /**
    * Resolve host-owned, session-aware sandbox credentials independently of an
-   * OpenGeni variable set. OpenGeni transports and renews the material; the host
+   * Opengeni variable set. Opengeni transports and renews the material; the host
    * remains the sole owner of connection selection and credential policy.
    */
   runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
@@ -4895,7 +5720,7 @@ export type ConnectionCredentialsPort = {
 // gate (storage) axis; this closes the credential leg by making the live
 // GitHub-API calls host-PROVIDABLE so a BYO-GitHub-App host drives its OWN App
 // credentials (its own JWT-signing key, its own OAuth client) instead of
-// OpenGeni self-minting from `settings`:
+// Opengeni self-minting from `settings`:
 //   - authorizeUser: OAuth code exchange + user-visible installation and
 //     repository permission discovery. Retained for provider ABI compatibility;
 //     visibility is not proof of installation authority and core does not use
@@ -4910,7 +5735,7 @@ export type ConnectionCredentialsPort = {
 //     `listGitHubAppRepositories(settings, …)`).
 //
 // Unset (standalone default) → today's `settings`-based self-mint runs
-// byte-for-byte (the live GitHub-API verify/list against OpenGeni's own App).
+// byte-for-byte (the live GitHub-API verify/list against Opengeni's own App).
 
 export type GitHubInstallationSummary = {
   installationId: number;
@@ -5004,42 +5829,70 @@ export type GitHubAppApiPort = {
   }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
-export const BillingBalance = z.object({
-  accountId: z.string().uuid(),
-  balanceMicros: z.number().int(),
-  currency: z.literal("usd"),
-  updatedAt: z.string(),
-});
+export const PromotionalCreditScope = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    label: z.string().trim().min(1).max(120),
+    eligibleModelIds: z.array(z.string().trim().min(1).max(200)).min(1).max(40),
+  }),
+);
+export type PromotionalCreditScope = z.infer<typeof PromotionalCreditScope>;
+
+export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
+  PromotionalCreditScope.extend({
+    grantId: z.string().uuid(),
+    remainingMicros: z.number().int().nonnegative(),
+    /** Also pays for dictation and live voice, like general credits (signup credits). */
+    coversVoice: z.boolean().optional(),
+  }),
+);
+export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
+
+export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: z.string().uuid(),
+    balanceMicros: z.number().int(),
+    currency: z.literal("usd"),
+    updatedAt: z.string(),
+    /** General credits, including unrestricted legacy grants. May be negative after use. */
+    generalBalanceMicros: z.number().int().optional(),
+    promotionalCredits: z.array(PromotionalCreditBalance).optional(),
+  }),
+);
 export type BillingBalance = z.infer<typeof BillingBalance>;
 
-export const CreateCheckoutRequest = z.object({
-  accountId: z.string().uuid().optional(),
-  /**
-   * Credits to buy. Required unless `promotionCode` is given; a fixed-amount
-   * USD code then sets the amount, so a $100 code buys exactly $100 of credits.
-   */
-  amountUsd: z
-    .number()
-    .min(5)
-    .max(10_000)
-    .refine(
-      (value) => Number.isFinite(value) && Math.abs(value - Math.round(value * 100) / 100) < 1e-9,
-      { message: "amountUsd must use cent precision" },
-    )
-    .optional(),
-  /** A Stripe promotion code to apply up front, as the customer typed it. */
-  promotionCode: z.string().trim().min(1).max(64).optional(),
-  successUrl: z.string().url().optional(),
-  cancelUrl: z.string().url().optional(),
-});
+export const CreateCheckoutRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: z.string().uuid().optional(),
+    /**
+     * Credits to buy. Required unless `promotionCode` is given; a fixed-amount
+     * USD code then sets the amount, so a $100 code buys exactly $100 of credits.
+     */
+    amountUsd: z
+      .number()
+      .min(5)
+      .max(10_000)
+      .refine(
+        (value) => Number.isFinite(value) && Math.abs(value - Math.round(value * 100) / 100) < 1e-9,
+        { message: "amountUsd must use cent precision" },
+      )
+      .optional(),
+    /** A Stripe promotion code to apply up front, as the customer typed it. */
+    promotionCode: z.string().trim().min(1).max(64).optional(),
+    successUrl: z.string().url().optional(),
+    cancelUrl: z.string().url().optional(),
+  }),
+);
 export type CreateCheckoutRequest = z.infer<typeof CreateCheckoutRequest>;
 
-export const CreateCheckoutResponse = z.object({
-  checkoutSessionId: z.string(),
-  url: z.string().url(),
-  /** The credits this checkout grants once it completes. */
-  amountUsd: z.number().optional(),
-});
+export const CreateCheckoutResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    checkoutSessionId: z.string(),
+    url: z.string().url(),
+    /** The credits this checkout grants once it completes. */
+    amountUsd: z.number().optional(),
+    promotionalScope: PromotionalCreditScope.optional(),
+  }),
+);
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
 
 /**
@@ -5047,67 +5900,76 @@ export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
  * reached the organization's balance. Credits post from Stripe's webhook; this
  * read also settles a completed checkout whose webhook has not arrived yet.
  */
-export const BillingCheckoutStatus = z.object({
-  checkoutSessionId: z.string(),
-  status: z.enum(["open", "complete", "expired"]),
-  credit: z.object({
-    state: z.enum(["pending", "granted"]),
-    amountMicros: z.number().int(),
-    currency: z.literal("usd"),
-    /** True when a coupon covered the whole checkout, so nothing was charged. */
-    free: z.boolean(),
+export const BillingCheckoutStatus = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    checkoutSessionId: z.string(),
+    status: z.enum(["open", "complete", "expired"]),
+    credit: z.object({
+      state: z.enum(["pending", "granted"]),
+      amountMicros: z.number().int(),
+      currency: z.literal("usd"),
+      /** True when a coupon covered the whole checkout, so nothing was charged. */
+      free: z.boolean(),
+      promotionalScope: PromotionalCreditScope.optional(),
+    }),
+    balance: BillingBalance.nullable(),
   }),
-  balance: BillingBalance.nullable(),
-});
+);
 export type BillingCheckoutStatus = z.infer<typeof BillingCheckoutStatus>;
 
-export const CreateBillingPortalRequest = z.object({
-  accountId: z.string().uuid().optional(),
-  returnUrl: z.string().url().optional(),
-});
+export const CreateBillingPortalRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accountId: z.string().uuid().optional(),
+    returnUrl: z.string().url().optional(),
+  }),
+);
 export type CreateBillingPortalRequest = z.infer<typeof CreateBillingPortalRequest>;
 
-export const CreateBillingPortalResponse = z.object({
-  portalSessionId: z.string(),
-  url: z.string().url(),
-});
+export const CreateBillingPortalResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    portalSessionId: z.string(),
+    url: z.string().url(),
+  }),
+);
 export type CreateBillingPortalResponse = z.infer<typeof CreateBillingPortalResponse>;
 
-export const RepositoryResourceRef = z.object({
-  kind: z.literal("repository"),
-  uri: z.string().min(1),
-  ref: z.string().min(1),
-  /**
-   * Optional immutable Git object fence. Repository materialization must fail
-   * when the checked-out HEAD is not this exact commit. Event-driven sessions
-   * use it to prevent a mutable PR branch from changing underneath a review.
-   */
-  expectedCommitSha: z
-    .string()
-    .regex(/^[0-9a-f]{40}$/)
-    .optional(),
-  mountPath: z.string().min(1).optional(),
-  subpath: z.string().min(1).optional(),
-  provider: GitCredentialProvider.optional(),
-  connectionType: z.literal("github_personal").optional(),
-  credentialBindingId: GitCredentialBindingId.optional(),
-  access: GitRepositoryAccess.optional(),
-  repositoryId: GitProviderRepositoryId.optional(),
-  installationId: GitProviderRepositoryId.optional(),
-  projectId: GitProviderRepositoryId.optional(),
-  connectionId: z.string().min(1).optional(),
-  githubInstallationId: z.number().int().positive().optional(),
-  githubRepositoryId: z.number().int().positive().optional(),
-  /**
-   * Best-effort materialization. When true, a failed clone of this repository
-   * logs a warning and the session continues without it instead of failing
-   * sandbox setup. OpenGeni sets it on repositories it attaches on the
-   * person's behalf (a Slack task's recently used repositories); a repository
-   * a caller names explicitly stays strict unless the caller opts in. Only
-   * `true` is stored.
-   */
-  optional: z.boolean().optional(),
-});
+export const RepositoryResourceRef = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.literal("repository"),
+    uri: z.string().min(1),
+    ref: z.string().min(1),
+    /**
+     * Optional immutable Git object fence. Repository materialization must fail
+     * when the checked-out HEAD is not this exact commit. Event-driven sessions
+     * use it to prevent a mutable PR branch from changing underneath a review.
+     */
+    expectedCommitSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
+    mountPath: z.string().min(1).optional(),
+    subpath: z.string().min(1).optional(),
+    provider: GitCredentialProvider.optional(),
+    connectionType: z.literal("github_personal").optional(),
+    credentialBindingId: GitCredentialBindingId.optional(),
+    access: GitRepositoryAccess.optional(),
+    repositoryId: GitProviderRepositoryId.optional(),
+    installationId: GitProviderRepositoryId.optional(),
+    projectId: GitProviderRepositoryId.optional(),
+    connectionId: z.string().min(1).optional(),
+    githubInstallationId: z.number().int().positive().optional(),
+    githubRepositoryId: z.number().int().positive().optional(),
+    /**
+     * Best-effort materialization. When true, a failed clone of this repository
+     * logs a warning and the session continues without it instead of failing
+     * sandbox setup. Opengeni sets it on repositories it attaches on the
+     * person's behalf (a Slack task's recently used repositories); a repository
+     * a caller names explicitly stays strict unless the caller opts in. Only
+     * `true` is stored.
+     */
+    optional: z.boolean().optional(),
+  }),
+);
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
 
 function positiveGitProviderInteger(value: unknown): number | null {
@@ -5244,11 +6106,13 @@ export function gitRemotePathAliases(
   );
 }
 
-export const FileResourceRef = z.object({
-  kind: z.literal("file"),
-  fileId: z.string().uuid(),
-  mountPath: z.string().min(1).optional(),
-});
+export const FileResourceRef = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.literal("file"),
+    fileId: z.string().uuid(),
+    mountPath: z.string().min(1).optional(),
+  }),
+);
 export type FileResourceRef = z.infer<typeof FileResourceRef>;
 
 /**
@@ -5262,12 +6126,14 @@ export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
  * Structured timeline annotations retained beside the deterministic user-text
- * projection in canonical history. Provider adapters remove this OpenGeni
+ * projection in canonical history. Provider adapters remove this Opengeni
  * extension field; the numbered projection in `content` remains model-visible.
  */
 export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
 
-export const ResourceRef = z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]);
+export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),
+);
 export type ResourceRef = z.infer<typeof ResourceRef>;
 
 export class ResourceMountPathError extends Error {
@@ -5401,107 +6267,129 @@ export function assertUniqueResourceMountPaths(resources: readonly ResourceRef[]
   }
 }
 
-export const FileStatus = z.enum(["pending_upload", "ready", "failed", "expired", "deleted"]);
+export const FileStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["pending_upload", "ready", "failed", "expired", "deleted"]),
+);
 export type FileStatus = z.infer<typeof FileStatus>;
 
-export const FileUploadStatus = z.enum([
-  "pending",
-  "cleanup_pending",
-  "completed",
-  "expired",
-  "failed",
-]);
+export const FileUploadStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["pending", "cleanup_pending", "completed", "expired", "failed"]),
+);
 export type FileUploadStatus = z.infer<typeof FileUploadStatus>;
 
-export const FileAsset = z.object({
-  scope: z.enum(["workspace", "personal"]).optional(),
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  status: FileStatus,
-  filename: z.string(),
-  safeFilename: z.string(),
-  contentType: z.string(),
-  sizeBytes: z.number().int().nonnegative(),
-  sha256: z.string().nullable(),
-  bucket: z.string(),
-  objectKey: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const FileAsset = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    scope: z.enum(["workspace", "personal"]).optional(),
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    status: FileStatus,
+    filename: z.string(),
+    safeFilename: z.string(),
+    contentType: z.string(),
+    sizeBytes: z.number().int().nonnegative(),
+    sha256: z.string().nullable(),
+    bucket: z.string(),
+    objectKey: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type FileAsset = z.infer<typeof FileAsset>;
 
-export const FileListRequest = z
-  .object({
-    scope: z.enum(["all", "workspace", "personal"]).default("all"),
-    limit: z.number().int().min(1).max(50).default(30),
-    cursor: z.string().max(2048).optional(),
-  })
-  .strict();
+export const FileListRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      scope: z.enum(["all", "workspace", "personal"]).default("all"),
+      limit: z.number().int().min(1).max(50).default(30),
+      cursor: z.string().max(2048).optional(),
+    })
+    .strict(),
+);
 export type FileListRequest = z.input<typeof FileListRequest>;
-export const FileListResponse = z.object({
-  files: z.array(FileAsset),
-  nextCursor: z.string().nullable(),
-});
+export const FileListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    files: z.array(FileAsset),
+    nextCursor: z.string().nullable(),
+  }),
+);
 export type FileListResponse = z.infer<typeof FileListResponse>;
 
-export const CreateFileUploadRequest = z.object({
-  scope: z.enum(["workspace", "personal"]).optional(),
-  filename: z.string().min(1),
-  contentType: z.string().min(1),
-  sizeBytes: z.number().int().positive(),
-  sha256: z.string().min(1).optional(),
-});
+export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    scope: z.enum(["workspace", "personal"]).optional(),
+    filename: z.string().min(1),
+    contentType: z.string().min(1),
+    sizeBytes: z.number().int().positive(),
+    sha256: z.string().min(1).optional(),
+  }),
+);
 export type CreateFileUploadRequest = z.infer<typeof CreateFileUploadRequest>;
 
-export const CreateFileUploadResponse = z.object({
-  fileId: z.string().uuid(),
-  uploadId: z.string().uuid(),
-  putUrl: z.string().url(),
-  requiredHeaders: z.record(z.string(), z.string()),
-  expiresAt: z.string(),
-  maxSizeBytes: z.number().int().positive(),
-});
+export const CreateFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    fileId: z.string().uuid(),
+    uploadId: z.string().uuid(),
+    putUrl: z.string().url(),
+    requiredHeaders: z.record(z.string(), z.string()),
+    expiresAt: z.string(),
+    maxSizeBytes: z.number().int().positive(),
+  }),
+);
 export type CreateFileUploadResponse = z.infer<typeof CreateFileUploadResponse>;
 
-export const CompleteFileUploadResponse = z.object({
-  file: FileAsset,
-});
+export const CompleteFileUploadResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    file: FileAsset,
+  }),
+);
 export type CompleteFileUploadResponse = z.infer<typeof CompleteFileUploadResponse>;
 
-export const FileDownloadUrlResponse = z.object({
-  url: z.string().url(),
-  expiresAt: z.string(),
-});
+export const FileDownloadUrlResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: z.string().url(),
+    expiresAt: z.string(),
+  }),
+);
 export type FileDownloadUrlResponse = z.infer<typeof FileDownloadUrlResponse>;
 
-export const DocumentStatus = z.enum(["queued", "indexing", "ready", "failed"]);
+export const DocumentStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["queued", "indexing", "ready", "failed"]),
+);
 export type DocumentStatus = z.infer<typeof DocumentStatus>;
 
-export const KnowledgeSourceKind = z.enum([
-  "manual_upload",
-  "meeting_transcript",
-  "repository",
-  "email",
-  "chat",
-  "document",
-  "web",
-  "other",
-]);
+export const KnowledgeSourceKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "manual_upload",
+    "meeting_transcript",
+    "repository",
+    "email",
+    "chat",
+    "document",
+    "web",
+    "other",
+  ]),
+);
 export type KnowledgeSourceKind = z.infer<typeof KnowledgeSourceKind>;
 
-export const DocumentSearchMode = z.enum(["hybrid", "vector", "keyword"]);
+export const DocumentSearchMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["hybrid", "vector", "keyword"]),
+);
 export type DocumentSearchMode = z.infer<typeof DocumentSearchMode>;
 
 // Durable document authority. Collections/bases are organizational metadata,
 // never an authorization boundary.
-export const DocumentAuthorityKind = z.enum(["organization", "workspace", "personal"]);
+export const DocumentAuthorityKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["organization", "workspace", "personal"]),
+);
 export type DocumentAuthorityKind = z.infer<typeof DocumentAuthorityKind>;
 
 // 'workspace' documents are readable by anyone with workspace access;
 // 'private' documents are readable only by the grant subject that created them.
 // Retained as a compatibility projection over authorityKind:
 // personal -> private; organization/workspace -> workspace.
-export const DocumentVisibility = z.enum(["workspace", "private"]);
+export const DocumentVisibility = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["workspace", "private"]),
+);
 export type DocumentVisibility = z.infer<typeof DocumentVisibility>;
 
 // Knowledge-drop auto-curation lifecycle. 'none' = ordinary caller-described add
@@ -5510,184 +6398,204 @@ export type DocumentVisibility = z.infer<typeof DocumentVisibility>;
 // conflict) — the suggestion lives in Document.curation. 'auto_filed' = curated
 // and moved into the suggested base. 'failed' = curation errored (fail-soft;
 // the document still indexes and stays searchable).
-export const DocumentCurationStatus = z.enum([
-  "none",
-  "pending",
-  "suggested",
-  "auto_filed",
-  "failed",
-]);
+export const DocumentCurationStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["none", "pending", "suggested", "auto_filed", "failed"]),
+);
 export type DocumentCurationStatus = z.infer<typeof DocumentCurationStatus>;
 
 // Curator audit blob persisted on the document.
-export const DocumentCuration = z.object({
-  suggestedBaseId: z.string().uuid().nullable(),
-  suggestedBaseName: z.string().nullable(),
-  confidence: z.number().min(0).max(1),
-  reason: z.string().nullable(),
-  originalTitle: z.string().nullable(),
-  model: z.string().nullable(),
-});
+export const DocumentCuration = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    suggestedBaseId: z.string().uuid().nullable(),
+    suggestedBaseName: z.string().nullable(),
+    confidence: z.number().min(0).max(1),
+    reason: z.string().nullable(),
+    originalTitle: z.string().nullable(),
+    model: z.string().nullable(),
+  }),
+);
 export type DocumentCuration = z.infer<typeof DocumentCuration>;
 
-export const DocumentBase = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  name: z.string(),
-  description: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const DocumentBase = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    description: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type DocumentBase = z.infer<typeof DocumentBase>;
 
-export const Document = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  baseId: z.string().uuid(),
-  fileId: z.string().uuid(),
-  status: DocumentStatus,
-  title: z.string(),
-  parser: z.string(),
-  chunkCount: z.number().int().nonnegative(),
-  error: z.string().nullable(),
-  sourceKind: KnowledgeSourceKind,
-  sourceUri: z.string().nullable(),
-  sourceExternalId: z.string().nullable(),
-  sourceTitle: z.string().nullable(),
-  sourceAuthor: z.string().nullable(),
-  sourceCreatedAt: z.string().nullable(),
-  sourceUpdatedAt: z.string().nullable(),
-  sourceVersion: z.string().nullable(),
-  aclTags: z.array(z.string()),
-  authorityKind: DocumentAuthorityKind,
-  authorityWorkspaceId: z.string().uuid().nullable(),
-  authoritySubjectId: z.string().nullable(),
-  // Opaque handle used by the owning human to issue explicit personal-scope
-  // grants. Organization/workspace and legacy anchored personal rows are null.
-  authorityId: z.string().uuid().nullable().optional(),
-  visibility: DocumentVisibility,
-  createdBy: z.string().nullable(),
-  agentAccess: z.boolean(),
-  summary: z.string().nullable(),
-  topics: z.array(z.string()),
-  curationStatus: DocumentCurationStatus,
-  curation: DocumentCuration.nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const Document = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    baseId: z.string().uuid(),
+    fileId: z.string().uuid(),
+    status: DocumentStatus,
+    title: z.string(),
+    parser: z.string(),
+    chunkCount: z.number().int().nonnegative(),
+    error: z.string().nullable(),
+    sourceKind: KnowledgeSourceKind,
+    sourceUri: z.string().nullable(),
+    sourceExternalId: z.string().nullable(),
+    sourceTitle: z.string().nullable(),
+    sourceAuthor: z.string().nullable(),
+    sourceCreatedAt: z.string().nullable(),
+    sourceUpdatedAt: z.string().nullable(),
+    sourceVersion: z.string().nullable(),
+    aclTags: z.array(z.string()),
+    authorityKind: DocumentAuthorityKind,
+    authorityWorkspaceId: z.string().uuid().nullable(),
+    authoritySubjectId: z.string().nullable(),
+    // Opaque handle used by the owning human to issue explicit personal-scope
+    // grants. Organization/workspace and legacy anchored personal rows are null.
+    authorityId: z.string().uuid().nullable().optional(),
+    visibility: DocumentVisibility,
+    createdBy: z.string().nullable(),
+    agentAccess: z.boolean(),
+    summary: z.string().nullable(),
+    topics: z.array(z.string()),
+    curationStatus: DocumentCurationStatus,
+    curation: DocumentCuration.nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type Document = z.infer<typeof Document>;
 
-export const DocumentSearchResult = z.object({
-  chunkId: z.string().uuid(),
-  // The workspace that ingested the document. Organization-authority results
-  // may originate in another workspace in the same account; this identifier
-  // is provenance and does not grant access to that workspace or its resources.
-  workspaceId: z.string().uuid(),
-  documentId: z.string().uuid(),
-  baseId: z.string().uuid(),
-  fileId: z.string().uuid(),
-  title: z.string(),
-  text: z.string(),
-  score: z.number(),
-  matchType: DocumentSearchMode,
-  vectorScore: z.number().nullable(),
-  keywordScore: z.number().nullable(),
-  chunkIndex: z.number().int().nonnegative(),
-  metadata: z.record(z.string(), z.unknown()),
-  sourceKind: KnowledgeSourceKind,
-  sourceUri: z.string().nullable(),
-  sourceExternalId: z.string().nullable(),
-  sourceTitle: z.string().nullable(),
-  sourceAuthor: z.string().nullable(),
-  sourceCreatedAt: z.string().nullable(),
-  sourceUpdatedAt: z.string().nullable(),
-  sourceVersion: z.string().nullable(),
-  aclTags: z.array(z.string()),
-  authorityKind: DocumentAuthorityKind,
-  authorityWorkspaceId: z.string().uuid().nullable(),
-  authoritySubjectId: z.string().nullable(),
-  citation: KnowledgeProviderCitation.nullable().optional(),
-});
+export const DocumentSearchResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    chunkId: z.string().uuid(),
+    // The workspace that ingested the document. Organization-authority results
+    // may originate in another workspace in the same account; this identifier
+    // is provenance and does not grant access to that workspace or its resources.
+    workspaceId: z.string().uuid(),
+    documentId: z.string().uuid(),
+    baseId: z.string().uuid(),
+    fileId: z.string().uuid(),
+    title: z.string(),
+    text: z.string(),
+    score: z.number(),
+    matchType: DocumentSearchMode,
+    vectorScore: z.number().nullable(),
+    keywordScore: z.number().nullable(),
+    chunkIndex: z.number().int().nonnegative(),
+    metadata: z.record(z.string(), z.unknown()),
+    sourceKind: KnowledgeSourceKind,
+    sourceUri: z.string().nullable(),
+    sourceExternalId: z.string().nullable(),
+    sourceTitle: z.string().nullable(),
+    sourceAuthor: z.string().nullable(),
+    sourceCreatedAt: z.string().nullable(),
+    sourceUpdatedAt: z.string().nullable(),
+    sourceVersion: z.string().nullable(),
+    aclTags: z.array(z.string()),
+    authorityKind: DocumentAuthorityKind,
+    authorityWorkspaceId: z.string().uuid().nullable(),
+    authoritySubjectId: z.string().nullable(),
+    citation: KnowledgeProviderCitation.nullable().optional(),
+  }),
+);
 export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
 
-export const DocumentSearchResponse = z.object({
-  results: z.array(DocumentSearchResult),
-});
+export const DocumentSearchResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    results: z.array(DocumentSearchResult),
+  }),
+);
 export type DocumentSearchResponse = z.infer<typeof DocumentSearchResponse>;
 
-export const IndexedDocumentSource = z.object({
-  kind: KnowledgeSourceKind,
-  uri: z.string().nullable(),
-  externalId: z.string().nullable(),
-  title: z.string().nullable(),
-  author: z.string().nullable(),
-  createdAt: z.string().nullable(),
-  updatedAt: z.string().nullable(),
-  version: z.string().nullable(),
-});
+export const IndexedDocumentSource = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: KnowledgeSourceKind,
+    uri: z.string().nullable(),
+    externalId: z.string().nullable(),
+    title: z.string().nullable(),
+    author: z.string().nullable(),
+    createdAt: z.string().nullable(),
+    updatedAt: z.string().nullable(),
+    version: z.string().nullable(),
+  }),
+);
 export type IndexedDocumentSource = z.infer<typeof IndexedDocumentSource>;
 
-export const IndexedDocumentProvenance = z.object({
-  ingestionWorkspaceId: z.string().uuid(),
-  baseId: z.string().uuid(),
-  fileId: z.string().uuid(),
-  authorityKind: DocumentAuthorityKind,
-  authorityWorkspaceId: z.string().uuid().nullable(),
-  authoritySubjectId: z.string().nullable(),
-  createdBy: z.string().nullable(),
-  createdAt: z.string(),
-  citation: KnowledgeProviderCitation.nullable().optional(),
-});
+export const IndexedDocumentProvenance = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ingestionWorkspaceId: z.string().uuid(),
+    baseId: z.string().uuid(),
+    fileId: z.string().uuid(),
+    authorityKind: DocumentAuthorityKind,
+    authorityWorkspaceId: z.string().uuid().nullable(),
+    authoritySubjectId: z.string().nullable(),
+    createdBy: z.string().nullable(),
+    createdAt: z.string(),
+    citation: KnowledgeProviderCitation.nullable().optional(),
+  }),
+);
 export type IndexedDocumentProvenance = z.infer<typeof IndexedDocumentProvenance>;
 
-export const IndexedDocumentSummary = z.object({
-  id: z.string().uuid(),
-  title: z.string(),
-  parser: z.string(),
-  chunkCount: z.number().int().nonnegative(),
-  indexedAt: z.string(),
-  summary: z.string().nullable(),
-  topics: z.array(z.string()),
-  source: IndexedDocumentSource,
-  provenance: IndexedDocumentProvenance,
-});
+export const IndexedDocumentSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    title: z.string(),
+    parser: z.string(),
+    chunkCount: z.number().int().nonnegative(),
+    indexedAt: z.string(),
+    summary: z.string().nullable(),
+    topics: z.array(z.string()),
+    source: IndexedDocumentSource,
+    provenance: IndexedDocumentProvenance,
+  }),
+);
 export type IndexedDocumentSummary = z.infer<typeof IndexedDocumentSummary>;
 
-export const ListIndexedDocumentsRequest = z.object({
-  checkpoint: z.string().min(1).max(1_024).optional(),
-  limit: z.number().int().positive().max(100).default(50),
-});
+export const ListIndexedDocumentsRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    checkpoint: z.string().min(1).max(1_024).optional(),
+    limit: z.number().int().positive().max(100).default(50),
+  }),
+);
 export type ListIndexedDocumentsRequest = z.infer<typeof ListIndexedDocumentsRequest>;
 
-export const ListIndexedDocumentsResponse = z.object({
-  documents: z.array(IndexedDocumentSummary),
-  nextCheckpoint: z.string().min(1).max(1_024),
-  hasMore: z.boolean(),
-});
+export const ListIndexedDocumentsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    documents: z.array(IndexedDocumentSummary),
+    nextCheckpoint: z.string().min(1).max(1_024),
+    hasMore: z.boolean(),
+  }),
+);
 export type ListIndexedDocumentsResponse = z.infer<typeof ListIndexedDocumentsResponse>;
 
-export const CreateDocumentBaseRequest = z.object({
-  name: z.string().min(1),
-  description: z.string().optional(),
-});
+export const CreateDocumentBaseRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+  }),
+);
 export type CreateDocumentBaseRequest = z.infer<typeof CreateDocumentBaseRequest>;
 
-export const AddDocumentRequest = z.object({
-  fileId: z.string().uuid(),
-  title: z.string().min(1).optional(),
-  sourceKind: KnowledgeSourceKind.optional(),
-  sourceUri: z.string().min(1).optional(),
-  sourceExternalId: z.string().min(1).optional(),
-  sourceTitle: z.string().min(1).optional(),
-  sourceAuthor: z.string().min(1).optional(),
-  sourceCreatedAt: z.string().datetime({ offset: true }).optional(),
-  sourceUpdatedAt: z.string().datetime({ offset: true }).optional(),
-  sourceVersion: z.string().min(1).optional(),
-  aclTags: z.array(z.string().min(1)).optional(),
-  authorityKind: DocumentAuthorityKind.optional(),
-  visibility: DocumentVisibility.optional(),
-  agentAccess: z.boolean().optional(),
-});
+export const AddDocumentRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    fileId: z.string().uuid(),
+    title: z.string().min(1).optional(),
+    sourceKind: KnowledgeSourceKind.optional(),
+    sourceUri: z.string().min(1).optional(),
+    sourceExternalId: z.string().min(1).optional(),
+    sourceTitle: z.string().min(1).optional(),
+    sourceAuthor: z.string().min(1).optional(),
+    sourceCreatedAt: z.string().datetime({ offset: true }).optional(),
+    sourceUpdatedAt: z.string().datetime({ offset: true }).optional(),
+    sourceVersion: z.string().min(1).optional(),
+    aclTags: z.array(z.string().min(1)).optional(),
+    authorityKind: DocumentAuthorityKind.optional(),
+    visibility: DocumentVisibility.optional(),
+    agentAccess: z.boolean().optional(),
+  }),
+);
 export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
 
 // A knowledge drop: raw text or an already-uploaded file, with no required
@@ -5695,125 +6603,149 @@ export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
 // curation provider is enabled, it may name, summarize, categorize, and
 // (confidence permitting) move the document; provider=none leaves caller
 // metadata and Default placement unchanged.
-export const CreateKnowledgeDropRequest = z
-  .object({
-    text: z.string().min(1).max(2_000_000).optional(),
-    fileId: z.string().uuid().optional(),
-    filename: z.string().min(1).optional(),
-    title: z.string().min(1).optional(),
-    authorityKind: DocumentAuthorityKind.optional(),
-    visibility: DocumentVisibility.optional(),
-    agentAccess: z.boolean().optional(),
-  })
-  .refine((value) => (value.text === undefined) !== (value.fileId === undefined), {
-    message: "provide exactly one of text or fileId",
-  });
+export const CreateKnowledgeDropRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      text: z.string().min(1).max(2_000_000).optional(),
+      fileId: z.string().uuid().optional(),
+      filename: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
+      authorityKind: DocumentAuthorityKind.optional(),
+      visibility: DocumentVisibility.optional(),
+      agentAccess: z.boolean().optional(),
+    })
+    .refine((value) => (value.text === undefined) !== (value.fileId === undefined), {
+      message: "provide exactly one of text or fileId",
+    }),
+);
 export type CreateKnowledgeDropRequest = z.infer<typeof CreateKnowledgeDropRequest>;
 
 // Move a document (and its indexed chunks) to another base. With no explicit
 // targetBaseId, applies the document's stored curation suggestion.
-export const MoveDocumentRequest = z.object({
-  targetBaseId: z.string().uuid().optional(),
-});
+export const MoveDocumentRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    targetBaseId: z.string().uuid().optional(),
+  }),
+);
 export type MoveDocumentRequest = z.infer<typeof MoveDocumentRequest>;
 
-export const DocumentAuthorityTuple = z.object({
-  kind: DocumentAuthorityKind,
-  workspaceId: z.string().uuid().nullable(),
-  subjectId: z.string().nullable(),
-  authorityId: z.string().uuid().nullable(),
-});
+export const DocumentAuthorityTuple = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: DocumentAuthorityKind,
+    workspaceId: z.string().uuid().nullable(),
+    subjectId: z.string().nullable(),
+    authorityId: z.string().uuid().nullable(),
+  }),
+);
 export type DocumentAuthorityTuple = z.infer<typeof DocumentAuthorityTuple>;
 
-export const ReclassifyDocumentAuthorityRequest = z.object({
-  operationId: z.string().uuid(),
-  expectedAuthority: DocumentAuthorityTuple,
-  targetAuthorityKind: DocumentAuthorityKind,
-});
+export const ReclassifyDocumentAuthorityRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    operationId: z.string().uuid(),
+    expectedAuthority: DocumentAuthorityTuple,
+    targetAuthorityKind: DocumentAuthorityKind,
+  }),
+);
 export type ReclassifyDocumentAuthorityRequest = z.infer<typeof ReclassifyDocumentAuthorityRequest>;
 
-export const DocumentAuthorityReclassification = z.object({
-  operationId: z.string().uuid(),
-  documentId: z.string().uuid(),
-  previousAuthority: DocumentAuthorityTuple,
-  authority: DocumentAuthorityTuple,
-  createdAt: z.string().datetime({ offset: true }),
-});
+export const DocumentAuthorityReclassification = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    operationId: z.string().uuid(),
+    documentId: z.string().uuid(),
+    previousAuthority: DocumentAuthorityTuple,
+    authority: DocumentAuthorityTuple,
+    createdAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type DocumentAuthorityReclassification = z.infer<typeof DocumentAuthorityReclassification>;
 
 export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT = 50;
 export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT = 100;
 export const DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS = 1_024;
 
-export const ListDocumentAuthorityReclassificationsQuery = z.object({
-  limit: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
-    .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
-  cursor: z.string().min(1).max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).optional(),
-});
+export const ListDocumentAuthorityReclassificationsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    limit: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
+      .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
+    cursor: z.string().min(1).max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).optional(),
+  }),
+);
 export type ListDocumentAuthorityReclassificationsQuery = z.infer<
   typeof ListDocumentAuthorityReclassificationsQuery
 >;
 
-export const ListDocumentAuthorityReclassificationsResponse = z.object({
-  receipts: z.array(DocumentAuthorityReclassification),
-  hasMore: z.boolean(),
-  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
-});
+export const ListDocumentAuthorityReclassificationsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receipts: z.array(DocumentAuthorityReclassification),
+    hasMore: z.boolean(),
+    nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+  }),
+);
 export type ListDocumentAuthorityReclassificationsResponse = z.infer<
   typeof ListDocumentAuthorityReclassificationsResponse
 >;
 
-export const RunDocumentDefaultCollectionBackfillRequest = z.object({
-  runId: z.string().uuid(),
-  operationId: z.string().uuid(),
-  batchSize: z.number().int().min(1).max(100).default(50),
-});
+export const RunDocumentDefaultCollectionBackfillRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    runId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    batchSize: z.number().int().min(1).max(100).default(50),
+  }),
+);
 export type RunDocumentDefaultCollectionBackfillRequest = z.infer<
   typeof RunDocumentDefaultCollectionBackfillRequest
 >;
 
-export const DocumentDefaultCollectionBackfill = z.object({
-  runId: z.string().uuid(),
-  operationId: z.string().uuid(),
-  status: z.enum(["running", "completed"]),
-  lastWorkspaceId: z.string().uuid().nullable(),
-  processedCount: z.number().int().nonnegative(),
-  createdCount: z.number().int().nonnegative(),
-  adoptedCount: z.number().int().nonnegative(),
-  completedAt: z.string().datetime({ offset: true }).nullable(),
-});
+export const DocumentDefaultCollectionBackfill = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    runId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    status: z.enum(["running", "completed"]),
+    lastWorkspaceId: z.string().uuid().nullable(),
+    processedCount: z.number().int().nonnegative(),
+    createdCount: z.number().int().nonnegative(),
+    adoptedCount: z.number().int().nonnegative(),
+    completedAt: z.string().datetime({ offset: true }).nullable(),
+  }),
+);
 export type DocumentDefaultCollectionBackfill = z.infer<typeof DocumentDefaultCollectionBackfill>;
 
-export const DocumentDefaultCollectionBackfillRunAudit = DocumentDefaultCollectionBackfill.omit({
-  operationId: true,
-}).extend({
-  actorSubjectId: z.string().min(1),
-  startedAt: z.string().datetime({ offset: true }),
-  updatedAt: z.string().datetime({ offset: true }),
-});
+export const DocumentDefaultCollectionBackfillRunAudit = /* @__PURE__ */ defineSchema(() =>
+  DocumentDefaultCollectionBackfill.omit({
+    operationId: true,
+  }).extend({
+    actorSubjectId: z.string().min(1),
+    startedAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type DocumentDefaultCollectionBackfillRunAudit = z.infer<
   typeof DocumentDefaultCollectionBackfillRunAudit
 >;
 
-export const DocumentDefaultCollectionBackfillOperationAudit = z.object({
-  operationId: z.string().uuid(),
-  result: DocumentDefaultCollectionBackfill,
-  createdAt: z.string().datetime({ offset: true }),
-});
+export const DocumentDefaultCollectionBackfillOperationAudit = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    operationId: z.string().uuid(),
+    result: DocumentDefaultCollectionBackfill,
+    createdAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type DocumentDefaultCollectionBackfillOperationAudit = z.infer<
   typeof DocumentDefaultCollectionBackfillOperationAudit
 >;
 
-export const DocumentDefaultCollectionBackfillReceiptAudit = z.object({
-  workspaceId: z.string().uuid(),
-  baseId: z.string().uuid(),
-  outcome: z.enum(["created", "adopted"]),
-  createdAt: z.string().datetime({ offset: true }),
-});
+export const DocumentDefaultCollectionBackfillReceiptAudit = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    baseId: z.string().uuid(),
+    outcome: z.enum(["created", "adopted"]),
+    createdAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type DocumentDefaultCollectionBackfillReceiptAudit = z.infer<
   typeof DocumentDefaultCollectionBackfillReceiptAudit
 >;
@@ -5821,83 +6753,96 @@ export type DocumentDefaultCollectionBackfillReceiptAudit = z.infer<
 export const ListDocumentMigrationAuditQuery = ListDocumentAuthorityReclassificationsQuery;
 export type ListDocumentMigrationAuditQuery = z.infer<typeof ListDocumentMigrationAuditQuery>;
 
-export const ListDocumentDefaultCollectionBackfillRunsResponse = z.object({
-  runs: z.array(DocumentDefaultCollectionBackfillRunAudit),
-  hasMore: z.boolean(),
-  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
-});
+export const ListDocumentDefaultCollectionBackfillRunsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    runs: z.array(DocumentDefaultCollectionBackfillRunAudit),
+    hasMore: z.boolean(),
+    nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+  }),
+);
 export type ListDocumentDefaultCollectionBackfillRunsResponse = z.infer<
   typeof ListDocumentDefaultCollectionBackfillRunsResponse
 >;
 
-export const GetDocumentDefaultCollectionBackfillAuditQuery = z.object({
-  limit: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
-    .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
-  operationCursor: z
-    .string()
-    .min(1)
-    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
-    .optional(),
-  receiptCursor: z
-    .string()
-    .min(1)
-    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
-    .optional(),
-});
+export const GetDocumentDefaultCollectionBackfillAuditQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    limit: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
+      .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
+    operationCursor: z
+      .string()
+      .min(1)
+      .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+      .optional(),
+    receiptCursor: z
+      .string()
+      .min(1)
+      .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+      .optional(),
+  }),
+);
 export type GetDocumentDefaultCollectionBackfillAuditQuery = z.infer<
   typeof GetDocumentDefaultCollectionBackfillAuditQuery
 >;
 
-export const DocumentDefaultCollectionBackfillAudit = z.object({
-  run: DocumentDefaultCollectionBackfillRunAudit,
-  operations: z.array(DocumentDefaultCollectionBackfillOperationAudit),
-  receipts: z.array(DocumentDefaultCollectionBackfillReceiptAudit),
-  operationsHasMore: z.boolean(),
-  operationsNextCursor: z
-    .string()
-    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
-    .nullable(),
-  receiptsHasMore: z.boolean(),
-  receiptsNextCursor: z
-    .string()
-    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
-    .nullable(),
-});
+export const DocumentDefaultCollectionBackfillAudit = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    run: DocumentDefaultCollectionBackfillRunAudit,
+    operations: z.array(DocumentDefaultCollectionBackfillOperationAudit),
+    receipts: z.array(DocumentDefaultCollectionBackfillReceiptAudit),
+    operationsHasMore: z.boolean(),
+    operationsNextCursor: z
+      .string()
+      .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+      .nullable(),
+    receiptsHasMore: z.boolean(),
+    receiptsNextCursor: z
+      .string()
+      .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+      .nullable(),
+  }),
+);
 export type DocumentDefaultCollectionBackfillAudit = z.infer<
   typeof DocumentDefaultCollectionBackfillAudit
 >;
 
 export const OrganizationDocumentAuthorityReclassification =
-  DocumentAuthorityReclassification.extend({
-    actorSubjectId: z.string().min(1),
-    requestWorkspaceId: z.string().uuid(),
-  });
+  /* @__PURE__ */ defineSchema(() =>
+    DocumentAuthorityReclassification.extend({
+      actorSubjectId: z.string().min(1),
+      requestWorkspaceId: z.string().uuid(),
+    }),
+  );
 export type OrganizationDocumentAuthorityReclassification = z.infer<
   typeof OrganizationDocumentAuthorityReclassification
 >;
 
-export const ListOrganizationDocumentAuthorityReclassificationsResponse = z.object({
-  receipts: z.array(OrganizationDocumentAuthorityReclassification),
-  hasMore: z.boolean(),
-  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
-});
+export const ListOrganizationDocumentAuthorityReclassificationsResponse =
+  /* @__PURE__ */ defineSchema(() =>
+    z.object({
+      receipts: z.array(OrganizationDocumentAuthorityReclassification),
+      hasMore: z.boolean(),
+      nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+    }),
+  );
 export type ListOrganizationDocumentAuthorityReclassificationsResponse = z.infer<
   typeof ListOrganizationDocumentAuthorityReclassificationsResponse
 >;
 
-export const DocumentSearchRequest = z.object({
-  query: z.string().min(1),
-  baseIds: z.array(z.string().uuid()).optional(),
-  mode: DocumentSearchMode.optional(),
-  sourceKinds: z.array(KnowledgeSourceKind).optional(),
-  authorityKinds: z.array(DocumentAuthorityKind).max(3).optional(),
-  aclTags: z.array(z.string().min(1)).optional(),
-  limit: z.number().int().positive().max(50).default(5),
-});
+export const DocumentSearchRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    query: z.string().min(1),
+    baseIds: z.array(z.string().uuid()).optional(),
+    mode: DocumentSearchMode.optional(),
+    sourceKinds: z.array(KnowledgeSourceKind).optional(),
+    authorityKinds: z.array(DocumentAuthorityKind).max(3).optional(),
+    aclTags: z.array(z.string().min(1)).optional(),
+    limit: z.number().int().positive().max(50).default(5),
+  }),
+);
 export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
 
 // proposed/approved/rejected are the legacy curated-knowledge review states
@@ -5905,67 +6850,62 @@ export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
 // Memory V1: agent-written memories land `active` (usable immediately — human is
 // auditor, not gatekeeper), get `superseded` when replaced, `archived` when
 // retired. Agent-visible set = active ∪ approved.
-export const KnowledgeMemoryStatus = z.enum([
-  "proposed",
-  "approved",
-  "rejected",
-  "active",
-  "superseded",
-  "archived",
-]);
+export const KnowledgeMemoryStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["proposed", "approved", "rejected", "active", "superseded", "archived"]),
+);
 export type KnowledgeMemoryStatus = z.infer<typeof KnowledgeMemoryStatus>;
 
-export const KnowledgeMemoryKind = z.enum([
-  "semantic",
-  "episodic",
-  "procedural",
-  "decision",
-  "preference",
-]);
+export const KnowledgeMemoryKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["semantic", "episodic", "procedural", "decision", "preference"]),
+);
 export type KnowledgeMemoryKind = z.infer<typeof KnowledgeMemoryKind>;
 
-export const KnowledgeSourceRef = z.object({
-  kind: z.enum(["document_chunk", "document", "session_event", "memory", "external"]),
-  id: z.string().min(1),
-  uri: z.string().min(1).optional(),
-  title: z.string().min(1).optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-});
+export const KnowledgeSourceRef = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum(["document_chunk", "document", "session_event", "memory", "external"]),
+    id: z.string().min(1),
+    uri: z.string().min(1).optional(),
+    title: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  }),
+);
 export type KnowledgeSourceRef = z.infer<typeof KnowledgeSourceRef>;
 
-export const KnowledgeMemory = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  status: KnowledgeMemoryStatus,
-  kind: KnowledgeMemoryKind,
-  scope: z.string(),
-  /** Typed selector (migration 0152/0426): workspace, user, session, role, ephemeral, legacy. */
-  scopeType: z.string().optional(),
-  /** `end_user:v1:<tuple hash>` for a session end-user layer; null otherwise. */
-  scopeSubjectId: z.string().nullable().optional(),
-  /** Lineage root for a session layer; null otherwise. */
-  scopeSessionId: z.string().uuid().nullable().optional(),
-  text: z.string(),
-  sourceRefs: z.array(KnowledgeSourceRef),
-  confidence: z.number().min(0).max(1),
-  metadata: z.record(z.string(), z.unknown()),
-  createdBySessionId: z.string().uuid().nullable(),
-  reviewedBy: z.string().nullable(),
-  reviewedAt: z.string().nullable(),
-  // Workspace Memory V1 fields. usageCount/lastUsedAt feed end-state ranking and
-  // decay; supersedesId/supersededById link correction chains; validFrom/validUntil
-  // are the point-in-time window. embedding/embeddingModel/textHash are internal
-  // and never exposed on the wire.
-  pinned: z.boolean(),
-  usageCount: z.number().int(),
-  lastUsedAt: z.string().nullable(),
-  supersedesId: z.string().uuid().nullable(),
-  supersededById: z.string().uuid().nullable(),
-  validFrom: z.string(),
-  validUntil: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const KnowledgeMemory = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    status: KnowledgeMemoryStatus,
+    kind: KnowledgeMemoryKind,
+    scope: z.string(),
+    /** Typed selector (migration 0152/0426): workspace, user, session, role, ephemeral, legacy. */
+    scopeType: z.string().optional(),
+    /** `end_user:v1:<tuple hash>` for a session end-user layer; null otherwise. */
+    scopeSubjectId: z.string().nullable().optional(),
+    /** Lineage root for a session layer; null otherwise. */
+    scopeSessionId: z.string().uuid().nullable().optional(),
+    text: z.string(),
+    sourceRefs: z.array(KnowledgeSourceRef),
+    confidence: z.number().min(0).max(1),
+    metadata: z.record(z.string(), z.unknown()),
+    createdBySessionId: z.string().uuid().nullable(),
+    reviewedBy: z.string().nullable(),
+    reviewedAt: z.string().nullable(),
+    // Workspace Memory V1 fields. usageCount/lastUsedAt feed end-state ranking and
+    // decay; supersedesId/supersededById link correction chains; validFrom/validUntil
+    // are the point-in-time window. embedding/embeddingModel/textHash are internal
+    // and never exposed on the wire.
+    pinned: z.boolean(),
+    usageCount: z.number().int(),
+    lastUsedAt: z.string().nullable(),
+    supersedesId: z.string().uuid().nullable(),
+    supersededById: z.string().uuid().nullable(),
+    validFrom: z.string(),
+    validUntil: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type KnowledgeMemory = z.infer<typeof KnowledgeMemory>;
 
 // Default status is `active`: a create through this request lands an
@@ -5973,165 +6913,198 @@ export type KnowledgeMemory = z.infer<typeof KnowledgeMemory>;
 // explicit `proposed`/`approved`/`rejected` status routes to the legacy curated
 // create instead (the docs-MCP memory_propose lane). pinned/replacesId apply to
 // the active (memory) path.
-export const CreateKnowledgeMemoryRequest = z.object({
-  status: KnowledgeMemoryStatus.default("active"),
-  kind: KnowledgeMemoryKind.default("semantic"),
-  scope: z.string().min(1).default("workspace"),
-  text: z.string().min(1),
-  sourceRefs: z.array(KnowledgeSourceRef).default([]),
-  confidence: z.number().min(0).max(1).default(0.5),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  createdBySessionId: z.string().uuid().optional(),
-  pinned: z.boolean().optional(),
-  replacesId: z.string().min(1).optional(),
-  slackPublication: MemorySlackPublicationDistribution.optional(),
-});
+export const CreateKnowledgeMemoryRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    status: KnowledgeMemoryStatus.default("active"),
+    kind: KnowledgeMemoryKind.default("semantic"),
+    scope: z.string().min(1).default("workspace"),
+    text: z.string().min(1),
+    sourceRefs: z.array(KnowledgeSourceRef).default([]),
+    confidence: z.number().min(0).max(1).default(0.5),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    createdBySessionId: z.string().uuid().optional(),
+    pinned: z.boolean().optional(),
+    replacesId: z.string().min(1).optional(),
+    slackPublication: MemorySlackPublicationDistribution.optional(),
+  }),
+);
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 
-export const UpdateKnowledgeMemoryRequest = z.object({
-  status: KnowledgeMemoryStatus.optional(),
-  kind: KnowledgeMemoryKind.optional(),
-  scope: z.string().min(1).optional(),
-  text: z.string().min(1).optional(),
-  sourceRefs: z.array(KnowledgeSourceRef).optional(),
-  confidence: z.number().min(0).max(1).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-  reviewedBy: z.string().min(1).optional(),
-  // Human audit action: pin (never decays) / unpin.
-  pinned: z.boolean().optional(),
-});
+export const UpdateKnowledgeMemoryRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    status: KnowledgeMemoryStatus.optional(),
+    kind: KnowledgeMemoryKind.optional(),
+    scope: z.string().min(1).optional(),
+    text: z.string().min(1).optional(),
+    sourceRefs: z.array(KnowledgeSourceRef).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    reviewedBy: z.string().min(1).optional(),
+    // Human audit action: pin (never decays) / unpin.
+    pinned: z.boolean().optional(),
+  }),
+);
 export type UpdateKnowledgeMemoryRequest = z.infer<typeof UpdateKnowledgeMemoryRequest>;
 
 // GET list/filter over knowledge memories (curated + memory).
-export const KnowledgeMemorySearchRequest = z.object({
-  query: z.string().min(1).optional(),
-  status: KnowledgeMemoryStatus.optional(),
-  kind: KnowledgeMemoryKind.optional(),
-  scope: z.string().min(1).optional(),
-  limit: z.number().int().positive().max(100).default(20),
-});
+export const KnowledgeMemorySearchRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    query: z.string().min(1).optional(),
+    status: KnowledgeMemoryStatus.optional(),
+    kind: KnowledgeMemoryKind.optional(),
+    scope: z.string().min(1).optional(),
+    limit: z.number().int().positive().max(100).default(20),
+  }),
+);
 export type KnowledgeMemorySearchRequest = z.infer<typeof KnowledgeMemorySearchRequest>;
 
-export const WorkspaceMemorySearchMode = z.enum(["hybrid", "vector", "keyword"]);
+export const WorkspaceMemorySearchMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["hybrid", "vector", "keyword"]),
+);
 export type WorkspaceMemorySearchMode = z.infer<typeof WorkspaceMemorySearchMode>;
 
 // POST hybrid search over the workspace's agent-visible memory (active ∪ approved).
-export const WorkspaceMemorySearchRequest = z.object({
-  query: z.string().min(1),
-  kind: KnowledgeMemoryKind.optional(),
-  limit: z.number().int().positive().max(20).optional(),
-  mode: WorkspaceMemorySearchMode.optional(),
-});
+export const WorkspaceMemorySearchRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    query: z.string().min(1),
+    kind: KnowledgeMemoryKind.optional(),
+    limit: z.number().int().positive().max(20).optional(),
+    mode: WorkspaceMemorySearchMode.optional(),
+  }),
+);
 export type WorkspaceMemorySearchRequest = z.infer<typeof WorkspaceMemorySearchRequest>;
 
-export const WorkspaceMemorySearchResult = z.object({
-  memory: KnowledgeMemory,
-  score: z.number(),
-  matchType: WorkspaceMemorySearchMode,
-  vectorScore: z.number().nullable(),
-  keywordScore: z.number().nullable(),
-});
+export const WorkspaceMemorySearchResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    memory: KnowledgeMemory,
+    score: z.number(),
+    matchType: WorkspaceMemorySearchMode,
+    vectorScore: z.number().nullable(),
+    keywordScore: z.number().nullable(),
+  }),
+);
 export type WorkspaceMemorySearchResult = z.infer<typeof WorkspaceMemorySearchResult>;
 
-export const WorkspaceMemorySearchResponse = z.object({
-  results: z.array(WorkspaceMemorySearchResult),
-});
+export const WorkspaceMemorySearchResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    results: z.array(WorkspaceMemorySearchResult),
+  }),
+);
 export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
 
-export const ToolRef = z.object({
-  kind: z.literal("mcp"),
-  id: z.string().min(1),
-  // Session-scoped startup choice. `true` prepares this server's authorized
-  // schemas before the first model request; absent/false keeps it behind
-  // progressive discovery. This never grants a server or tool permission.
-  eager: z.boolean().optional(),
-  // Non-fatal-on-connect marker for MCP server refs that can degrade
-  // gracefully. On new input, absent/false is STRICT: the id must be configured
-  // and an unavailable registered server fails closed when its preparation is
-  // demanded. Only the independent eager marker makes that a startup failure.
-  // Persisted refs are
-  // intersected with the current registry at each turn boundary, so a server
-  // disconnected after admission is retained in policy/audit truth but skipped
-  // until it is registered again. `optional:true` additionally makes runtime
-  // connect/list failures skip a known server; if the deployment does not
-  // configure the id, validation drops the ref. Auto-attached workspace-default
-  // capability MCPs also use this marker.
-  optional: z.boolean().optional(),
-});
+export const ToolRef = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.literal("mcp"),
+    id: z.string().min(1),
+    // Session-scoped startup choice. `true` prepares this server's authorized
+    // schemas before the first model request; absent/false keeps it behind
+    // progressive discovery. This never grants a server or tool permission.
+    eager: z.boolean().optional(),
+    // Non-fatal-on-connect marker for MCP server refs that can degrade
+    // gracefully. On new input, absent/false is STRICT: the id must be configured
+    // and an unavailable registered server fails closed when its preparation is
+    // demanded. Only the independent eager marker makes that a startup failure.
+    // Persisted refs are
+    // intersected with the current registry at each turn boundary, so a server
+    // disconnected after admission is retained in policy/audit truth but skipped
+    // until it is registered again. `optional:true` additionally makes runtime
+    // connect/list failures skip a known server; if the deployment does not
+    // configure the id, validation drops the ref. Auto-attached workspace-default
+    // capability MCPs also use this marker.
+    optional: z.boolean().optional(),
+  }),
+);
 export type ToolRef = z.infer<typeof ToolRef>;
 
 const registryId = /^[A-Za-z0-9_-]+$/;
-export const SessionMcpServerId = z.string().min(1).regex(registryId);
+export const SessionMcpServerId = /* @__PURE__ */ defineSchema(() =>
+  z.string().min(1).regex(registryId),
+);
 export type SessionMcpServerId = z.infer<typeof SessionMcpServerId>;
 
 /** Session exclusions narrow live defaults without freezing future connections. */
-export const SessionExcludedMcpServerIds = z.array(SessionMcpServerId.max(200)).max(64);
+export const SessionExcludedMcpServerIds = /* @__PURE__ */ defineSchema(() =>
+  z.array(SessionMcpServerId.max(200)).max(64),
+);
 
 // How a session's persisted tool selection was chosen.
-export const SessionToolPolicy = z.object({
-  mode: z.enum(["workspace_default", "explicit", "inherited"]),
-  inheritedFromSessionId: z.string().uuid().nullable(),
-  excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
-});
+export const SessionToolPolicy = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    mode: z.enum(["workspace_default", "explicit", "inherited"]),
+    inheritedFromSessionId: z.string().uuid().nullable(),
+    excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
+    // Independent of connector selection. Absence preserves an ambiguous legacy
+    // snapshot; only an explicit default intent follows future built-in tools.
+    firstPartyMode: z.enum(["workspace_default", "explicit"]).optional(),
+    // Built-in tools the session's creator guarantees on top of the defaults it
+    // follows (for example a chat surface's own read tools). Applied only while
+    // firstPartyMode is workspace_default; kept across explicit edits so a later
+    // reset to defaults restores them. Deployment policy and the agent
+    // configuration still bound them.
+    firstPartyAdditions: z.array(FirstPartyMcpToolName).max(64).optional(),
+  }),
+);
 export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
 
 export const SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT = 64;
 export const SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH = 200;
-const SessionEffectiveToolPolicyId = z
-  .string()
-  .min(1)
-  .max(SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH)
-  .regex(registryId);
-const SessionEffectiveToolPolicyIds = z
-  .array(SessionEffectiveToolPolicyId)
-  .max(SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT);
+const SessionEffectiveToolPolicyId = /* @__PURE__ */ defineSchema(() =>
+  z.string().min(1).max(SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH).regex(registryId),
+);
+const SessionEffectiveToolPolicyIds = /* @__PURE__ */ defineSchema(() =>
+  z.array(SessionEffectiveToolPolicyId).max(SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT),
+);
 
 // Secret-safe, read-time policy truth. This projection contains only bounded
 // MCP registry ids and exact counts: never URLs, names, headers, credentials,
 // connector configuration, or tool schemas. IDs are samples when capped;
 // counts remain exact and idsTruncated makes that explicit to clients.
-export const SessionEffectiveToolPolicy = z
-  .object({
-    mode: z.enum(["workspace_default", "explicit", "inherited"]),
-    inheritedFromSessionId: z.string().uuid().nullable(),
-    selectedIds: SessionEffectiveToolPolicyIds,
-    effectiveIds: SessionEffectiveToolPolicyIds,
-    mandatoryIds: SessionEffectiveToolPolicyIds,
-    lazyRouter: z
-      .object({
-        state: z.enum(["required", "disabled"]),
-        deferredIds: SessionEffectiveToolPolicyIds,
-      })
-      .strict(),
-    configuredIds: SessionEffectiveToolPolicyIds,
-    droppedIds: SessionEffectiveToolPolicyIds,
-    counts: z
-      .object({
-        selected: z.number().int().nonnegative(),
-        effective: z.number().int().nonnegative(),
-        mandatory: z.number().int().nonnegative(),
-        deferred: z.number().int().nonnegative(),
-        configured: z.number().int().nonnegative(),
-        dropped: z.number().int().nonnegative(),
-      })
-      .strict(),
-    idsTruncated: z.boolean(),
-  })
-  .strict();
+export const SessionEffectiveToolPolicy = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      mode: z.enum(["workspace_default", "explicit", "inherited"]),
+      inheritedFromSessionId: z.string().uuid().nullable(),
+      selectedIds: SessionEffectiveToolPolicyIds,
+      effectiveIds: SessionEffectiveToolPolicyIds,
+      mandatoryIds: SessionEffectiveToolPolicyIds,
+      lazyRouter: z
+        .object({
+          state: z.enum(["required", "disabled"]),
+          deferredIds: SessionEffectiveToolPolicyIds,
+        })
+        .strict(),
+      configuredIds: SessionEffectiveToolPolicyIds,
+      droppedIds: SessionEffectiveToolPolicyIds,
+      counts: z
+        .object({
+          selected: z.number().int().nonnegative(),
+          effective: z.number().int().nonnegative(),
+          mandatory: z.number().int().nonnegative(),
+          deferred: z.number().int().nonnegative(),
+          configured: z.number().int().nonnegative(),
+          dropped: z.number().int().nonnegative(),
+        })
+        .strict(),
+      idsTruncated: z.boolean(),
+    })
+    .strict(),
+);
 export type SessionEffectiveToolPolicy = z.infer<typeof SessionEffectiveToolPolicy>;
-const httpsUrl = z
-  .string()
-  .url()
-  .refine(
-    (value) => {
-      try {
-        return new URL(value).protocol === "https:";
-      } catch {
-        return false;
-      }
-    },
-    { message: "URL must use https" },
-  );
+const httpsUrl = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .url()
+    .refine(
+      (value) => {
+        try {
+          return new URL(value).protocol === "https:";
+        } catch {
+          return false;
+        }
+      },
+      { message: "URL must use https" },
+    ),
+);
 
 /**
  * Human-approval policy for one MCP server. `true` gates every tool, `false`
@@ -6142,160 +7115,184 @@ export const SESSION_MCP_APPROVAL_POLICY_MAX_BYTES = 256 * 1024;
 export const SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES = 1_024;
 export const SESSION_MCP_SERVERS_MAX = 64;
 
-const sessionMcpApprovalToolName = z
-  .string()
-  .min(1)
-  .superRefine((name, ctx) => {
-    if (new TextEncoder().encode(name).byteLength > SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `MCP approval tool names must be at most ${SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES} UTF-8 bytes`,
-      });
-    }
-  });
-const selectiveSessionMcpApprovalPolicy = z
-  .array(sessionMcpApprovalToolName)
-  .max(SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES)
-  .superRefine((names, ctx) => {
-    const bytes = names.reduce(
-      (total, name) => total + new TextEncoder().encode(name).byteLength,
-      0,
-    );
-    if (bytes > SESSION_MCP_APPROVAL_POLICY_MAX_BYTES) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `MCP approval policies must be at most ${SESSION_MCP_APPROVAL_POLICY_MAX_BYTES} UTF-8 bytes`,
-      });
-    }
-  })
-  .transform((names) => [...new Set(names)].sort());
-export const SessionMcpApprovalPolicy = z.union([z.boolean(), selectiveSessionMcpApprovalPolicy]);
+const sessionMcpApprovalToolName = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .superRefine((name, ctx) => {
+      if (new TextEncoder().encode(name).byteLength > SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `MCP approval tool names must be at most ${SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+    }),
+);
+const selectiveSessionMcpApprovalPolicy = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(sessionMcpApprovalToolName)
+    .max(SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES)
+    .superRefine((names, ctx) => {
+      const bytes = names.reduce(
+        (total, name) => total + new TextEncoder().encode(name).byteLength,
+        0,
+      );
+      if (bytes > SESSION_MCP_APPROVAL_POLICY_MAX_BYTES) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `MCP approval policies must be at most ${SESSION_MCP_APPROVAL_POLICY_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+    })
+    .transform((names) => [...new Set(names)].sort()),
+);
+export const SessionMcpApprovalPolicy = /* @__PURE__ */ defineSchema(() =>
+  z.union([z.boolean(), selectiveSessionMcpApprovalPolicy]),
+);
 export type SessionMcpApprovalPolicy = z.infer<typeof SessionMcpApprovalPolicy>;
 
-export const SessionMcpServerInput = z.object({
-  id: SessionMcpServerId,
-  name: z.string().min(1).optional(),
-  url: httpsUrl,
-  allowedTools: z.array(z.string().min(1)).optional(),
-  timeoutMs: z.number().int().positive().optional(),
-  cacheToolsList: z.boolean().optional(),
-  // The caller resolves an approval pause with `user.approvalDecision`.
-  requireApproval: SessionMcpApprovalPolicy.optional(),
-  // Write-only credential headers. Values are encrypted at rest and never
-  // returned in session responses or events; response metadata exposes names.
-  headers: z.record(z.string(), z.string()).optional(),
-  // Non-secret pointer resolved by the native connection credential engine.
-  connectionRef: McpServerConnectionRef.optional(),
-});
+export const SessionMcpServerInput = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: SessionMcpServerId,
+    name: z.string().min(1).optional(),
+    url: httpsUrl,
+    allowedTools: z.array(z.string().min(1)).optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    cacheToolsList: z.boolean().optional(),
+    // The caller resolves an approval pause with `user.approvalDecision`.
+    requireApproval: SessionMcpApprovalPolicy.optional(),
+    // Write-only credential headers. Values are encrypted at rest and never
+    // returned in session responses or events; response metadata exposes names.
+    headers: z.record(z.string(), z.string()).optional(),
+    // Non-secret pointer resolved by the native connection credential engine.
+    connectionRef: McpServerConnectionRef.optional(),
+  }),
+);
 export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 
-export const SessionMcpCredentialUpdateInput = z.object({
-  id: SessionMcpServerId,
-  headers: z.record(z.string(), z.string()),
-});
+export const SessionMcpCredentialUpdateInput = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: SessionMcpServerId,
+    headers: z.record(z.string(), z.string()),
+  }),
+);
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
 
 /** Standalone credential maintenance; never admits or retries model work. */
-export const RotateSessionMcpCredentialsRequest = z
-  .object({
-    operationKey: z.string().uuid(),
-    updates: z
-      .array(
-        z
-          .object({
-            id: SessionMcpServerId,
-            expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
-            expectedServerUrl: httpsUrl,
-            headers: z.record(z.string(), z.string()),
-          })
-          .strict()
-          .or(
-            z
-              .object({
-                id: SessionMcpServerId,
-                expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
-                expectedServerUrl: httpsUrl,
-                /** Resolve from the authenticated caller's native account inventory. */
-                nativeConnectionId: z.string().uuid(),
-                /** Explicit opt-in; must match the selected account's bound MCP URL. */
-                replacementServerUrl: httpsUrl.optional(),
-              })
-              .strict(),
-          ),
-      )
-      .min(1)
-      .max(64),
-  })
-  .strict();
+export const RotateSessionMcpCredentialsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationKey: z.string().uuid(),
+      updates: z
+        .array(
+          z
+            .object({
+              id: SessionMcpServerId,
+              expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
+              expectedServerUrl: httpsUrl,
+              headers: z.record(z.string(), z.string()),
+            })
+            .strict()
+            .or(
+              z
+                .object({
+                  id: SessionMcpServerId,
+                  expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
+                  expectedServerUrl: httpsUrl,
+                  /** Resolve from the authenticated caller's native account inventory. */
+                  nativeConnectionId: z.string().uuid(),
+                  /** Explicit opt-in; must match the selected account's bound MCP URL. */
+                  replacementServerUrl: httpsUrl.optional(),
+                })
+                .strict(),
+            ),
+        )
+        .min(1)
+        .max(64),
+    })
+    .strict(),
+);
 export type RotateSessionMcpCredentialsRequest = z.infer<typeof RotateSessionMcpCredentialsRequest>;
 
-export const RotateSessionMcpCredentialsReceipt = z
-  .object({
-    operationKey: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    servers: z
-      .array(
-        z
-          .object({
-            id: SessionMcpServerId,
-            credentialVersion: z.number().int().positive(),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(64),
-    appliedAt: z.string().datetime(),
-  })
-  .strict();
+export const RotateSessionMcpCredentialsReceipt = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationKey: z.string().uuid(),
+      sessionId: z.string().uuid(),
+      servers: z
+        .array(
+          z
+            .object({
+              id: SessionMcpServerId,
+              credentialVersion: z.number().int().positive(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(64),
+      appliedAt: z.string().datetime(),
+    })
+    .strict(),
+);
 export type RotateSessionMcpCredentialsReceipt = z.infer<typeof RotateSessionMcpCredentialsReceipt>;
 
-export const SessionMcpServerMetadata = z
-  .object({
-    id: SessionMcpServerId,
-    name: z.string().min(1).nullable(),
-    url: httpsUrl,
-    headerNames: z.array(z.string()).default([]),
-    credentialVersion: z.number().int().positive(),
-    requireApproval: SessionMcpApprovalPolicy.default(false),
-    connectionRef: McpServerConnectionRef.nullable().default(null),
-  })
-  .strict();
-export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
-
-/** Session-local policies for inherited MCP capabilities, not server attachments. */
-export const SessionMcpApprovalPolicies = z
-  .record(SessionMcpServerId, SessionMcpApprovalPolicy)
-  .refine(
-    (policies) => Object.keys(policies).length <= 64,
-    "At most 64 MCP approval policies are allowed",
-  );
-export const SessionMcpApprovalPolicyTarget = z.union([
-  SessionMcpServerMetadata,
+export const SessionMcpServerMetadata = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       id: SessionMcpServerId,
-      requireApproval: SessionMcpApprovalPolicy,
-      source: z.literal("workspace"),
+      name: z.string().min(1).nullable(),
+      url: httpsUrl,
+      headerNames: z.array(z.string()).default([]),
+      credentialVersion: z.number().int().positive(),
+      requireApproval: SessionMcpApprovalPolicy.default(false),
+      connectionRef: McpServerConnectionRef.nullable().default(null),
     })
     .strict(),
-]);
+);
+export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
+
+/** Session-local policies for inherited MCP capabilities, not server attachments. */
+export const SessionMcpApprovalPolicies = /* @__PURE__ */ defineSchema(() =>
+  z
+    .record(SessionMcpServerId, SessionMcpApprovalPolicy)
+    .refine(
+      (policies) => Object.keys(policies).length <= 64,
+      "At most 64 MCP approval policies are allowed",
+    ),
+);
+export const SessionMcpApprovalPolicyTarget = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    SessionMcpServerMetadata,
+    z
+      .object({
+        id: SessionMcpServerId,
+        requireApproval: SessionMcpApprovalPolicy,
+        source: z.literal("workspace"),
+      })
+      .strict(),
+  ]),
+);
 export type SessionMcpApprovalPolicyTarget = z.infer<typeof SessionMcpApprovalPolicyTarget>;
 
-export const UpdateSessionMcpApprovalPolicyRequest = z
-  .object({
-    requireApproval: SessionMcpApprovalPolicy,
-  })
-  .strict();
+export const UpdateSessionMcpApprovalPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      requireApproval: SessionMcpApprovalPolicy,
+    })
+    .strict(),
+);
 export type UpdateSessionMcpApprovalPolicyRequest = z.infer<
   typeof UpdateSessionMcpApprovalPolicyRequest
 >;
 
-export const UpdateSessionMcpApprovalPolicyResponse = z
-  .object({
-    server: SessionMcpApprovalPolicyTarget,
-    effectiveFrom: z.literal("next_attempt"),
-  })
-  .strict();
+export const UpdateSessionMcpApprovalPolicyResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      server: SessionMcpApprovalPolicyTarget,
+      effectiveFrom: z.literal("next_attempt"),
+    })
+    .strict(),
+);
 export type UpdateSessionMcpApprovalPolicyResponse = z.infer<
   typeof UpdateSessionMcpApprovalPolicyResponse
 >;
@@ -6433,47 +7430,48 @@ function sortJson(value: unknown): unknown {
   return value;
 }
 
-export const SessionTurnStatus = z.enum([
-  "queued",
-  "running",
-  "requires_action",
-  "recovering",
-  "waiting_capacity",
-  "completed",
-  "failed",
-  "cancelled",
-  "superseded",
-  "withdrawn_for_edit",
-]);
+export const SessionTurnStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "queued",
+    "running",
+    "requires_action",
+    "recovering",
+    "waiting_capacity",
+    "completed",
+    "failed",
+    "cancelled",
+    "superseded",
+    "withdrawn_for_edit",
+  ]),
+);
 export type SessionTurnStatus = z.infer<typeof SessionTurnStatus>;
 
-export const SessionTurnSource = z.enum([
-  "user",
-  "scheduled_task",
-  "api",
-  "goal",
-  "system",
-  "compaction",
-]);
+export const SessionTurnSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["user", "scheduled_task", "api", "goal", "system", "compaction"]),
+);
 export type SessionTurnSource = z.infer<typeof SessionTurnSource>;
 
-export const SessionControlState = z.enum(["active", "paused"]);
+export const SessionControlState = /* @__PURE__ */ defineSchema(() => z.enum(["active", "paused"]));
 export type SessionControlState = z.infer<typeof SessionControlState>;
 
-export const WorkspaceInferenceState = z.enum(["active", "paused"]);
+export const WorkspaceInferenceState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "paused"]),
+);
 export type WorkspaceInferenceState = z.infer<typeof WorkspaceInferenceState>;
 
-export const SessionGoalCreatedBy = z.enum(["api", "agent", "scheduled_task"]);
+export const SessionGoalCreatedBy = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["api", "agent", "scheduled_task"]),
+);
 export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
 
-export const SessionGoalMutationPolicy = z.enum([
-  "review_changes",
-  "preserve_intent",
-  "autonomous_adaptation",
-]);
+export const SessionGoalMutationPolicy = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["review_changes", "preserve_intent", "autonomous_adaptation"]),
+);
 export type SessionGoalMutationPolicy = z.infer<typeof SessionGoalMutationPolicy>;
 
-export const SessionGoalChangeKind = z.enum(["refinement", "adaptation", "replacement"]);
+export const SessionGoalChangeKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["refinement", "adaptation", "replacement"]),
+);
 export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
 
 export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
@@ -6520,22 +7518,24 @@ export function normalizeSessionGoalRootConstraints(values: readonly string[]): 
   return [...new Set(values.map((value) => value.replace(/^ +| +$/g, "")))].sort(compareUtf8);
 }
 
-export const SessionGoalRootConstraintsWrite = z
-  .array(boundedSessionGoalString(SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES, "goal root constraint"))
-  .transform(normalizeSessionGoalRootConstraints)
-  .pipe(
-    z
-      .array(z.string().min(1))
-      .max(SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS)
-      .refine(
-        (values) =>
-          values.reduce((total, value) => total + sessionGoalUtf8Bytes(value), 0) <=
-          SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES,
-        {
-          message: `goal root constraints exceed ${SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES} aggregate UTF-8 bytes`,
-        },
-      ),
-  );
+export const SessionGoalRootConstraintsWrite = /* @__PURE__ */ defineSchema(() =>
+  z
+    .array(boundedSessionGoalString(SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES, "goal root constraint"))
+    .transform(normalizeSessionGoalRootConstraints)
+    .pipe(
+      z
+        .array(z.string().min(1))
+        .max(SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS)
+        .refine(
+          (values) =>
+            values.reduce((total, value) => total + sessionGoalUtf8Bytes(value), 0) <=
+            SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES,
+          {
+            message: `goal root constraints exceed ${SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES} aggregate UTF-8 bytes`,
+          },
+        ),
+    ),
+);
 export type SessionGoalRootConstraintsWrite = z.infer<typeof SessionGoalRootConstraintsWrite>;
 
 const SessionGoalTextWrite = boundedSessionGoalString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
@@ -6548,123 +7548,139 @@ const SessionGoalRationaleWrite = boundedSessionGoalString(
   "goal rationale",
 );
 
-export const SessionGoalSnapshot = z.discriminatedUnion("state", [
-  z.object({ state: z.literal("none"), capturedAt: z.string() }),
-  z.object({
-    state: z.enum(["active", "paused", "completed"]),
-    goalId: z.string().uuid(),
-    objectiveRevision: z.number().int().positive(),
-    text: SessionGoalTextWrite,
-    successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
-    rootConstraints: SessionGoalRootConstraintsWrite.default([]),
-    reportRequirements: SessionGoalReportRequirements.optional(),
-    mutationPolicy: SessionGoalMutationPolicy,
-    capturedAt: z.string(),
-  }),
-]);
+export const SessionGoalSnapshot = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("state", [
+    z.object({ state: z.literal("none"), capturedAt: z.string() }),
+    z.object({
+      state: z.enum(["active", "paused", "completed"]),
+      goalId: z.string().uuid(),
+      objectiveRevision: z.number().int().positive(),
+      text: SessionGoalTextWrite,
+      successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
+      rootConstraints: SessionGoalRootConstraintsWrite.default([]),
+      reportRequirements: SessionGoalReportRequirements.optional(),
+      mutationPolicy: SessionGoalMutationPolicy,
+      capturedAt: z.string(),
+    }),
+  ]),
+);
 export type SessionGoalSnapshot = z.infer<typeof SessionGoalSnapshot>;
 
-export const SessionGoalRevision = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  goalId: z.string().uuid(),
-  disposition: z.enum(["applied", "proposed", "rejected"]),
-  changeKind: SessionGoalChangeKind,
-  baseObjectiveRevision: z.number().int().nonnegative(),
-  resultObjectiveRevision: z.number().int().positive().nullable(),
-  text: z.string().min(1),
-  successCriteria: z.string().nullable(),
-  rootConstraints: z.array(z.string().min(1)).default([]),
-  mutationPolicy: SessionGoalMutationPolicy,
-  rationale: z.string().min(1),
-  actor: z.enum(["agent", "api", "scheduled_task"]),
-  actorTurnId: z.string().uuid().nullable(),
-  actorAttemptId: z.string().uuid().nullable(),
-  proposalId: z.string().uuid().nullable(),
-  rollbackOfRevisionId: z.string().uuid().nullable(),
-  createdAt: z.string(),
-});
+export const SessionGoalRevision = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    goalId: z.string().uuid(),
+    disposition: z.enum(["applied", "proposed", "rejected"]),
+    changeKind: SessionGoalChangeKind,
+    baseObjectiveRevision: z.number().int().nonnegative(),
+    resultObjectiveRevision: z.number().int().positive().nullable(),
+    text: z.string().min(1),
+    successCriteria: z.string().nullable(),
+    rootConstraints: z.array(z.string().min(1)).default([]),
+    mutationPolicy: SessionGoalMutationPolicy,
+    rationale: z.string().min(1),
+    actor: z.enum(["agent", "api", "scheduled_task"]),
+    actorTurnId: z.string().uuid().nullable(),
+    actorAttemptId: z.string().uuid().nullable(),
+    proposalId: z.string().uuid().nullable(),
+    rollbackOfRevisionId: z.string().uuid().nullable(),
+    createdAt: z.string(),
+  }),
+);
 export type SessionGoalRevision = z.infer<typeof SessionGoalRevision>;
 
 export const SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT = 50;
 export const SESSION_GOAL_REVISION_LIST_MAX_LIMIT = 100;
 
-export const ListSessionGoalRevisionsQuery = z.object({
-  limit: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(SESSION_GOAL_REVISION_LIST_MAX_LIMIT)
-    .default(SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT),
-  before: z.string().uuid().optional(),
-});
+export const ListSessionGoalRevisionsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    limit: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(SESSION_GOAL_REVISION_LIST_MAX_LIMIT)
+      .default(SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT),
+    before: z.string().uuid().optional(),
+  }),
+);
 export type ListSessionGoalRevisionsQuery = z.infer<typeof ListSessionGoalRevisionsQuery>;
 
-export const ListSessionGoalRevisionsResponse = z.object({
-  revisions: z.array(SessionGoalRevision),
-  hasMore: z.boolean(),
-  nextCursor: z.string().uuid().nullable(),
-});
+export const ListSessionGoalRevisionsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    revisions: z.array(SessionGoalRevision),
+    hasMore: z.boolean(),
+    nextCursor: z.string().uuid().nullable(),
+  }),
+);
 export type ListSessionGoalRevisionsResponse = z.infer<typeof ListSessionGoalRevisionsResponse>;
 
-export const ApplySessionGoalRevisionRequest = z.object({
-  expectedObjectiveRevision: z.number().int().positive(),
-  rationale: SessionGoalRationaleWrite.optional(),
-});
+export const ApplySessionGoalRevisionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    expectedObjectiveRevision: z.number().int().positive(),
+    rationale: SessionGoalRationaleWrite.optional(),
+  }),
+);
 export type ApplySessionGoalRevisionRequest = z.infer<typeof ApplySessionGoalRevisionRequest>;
 
-export const RejectSessionGoalRevisionRequest = z.object({
-  expectedObjectiveRevision: z.number().int().positive(),
-  rationale: SessionGoalRationaleWrite,
-});
+export const RejectSessionGoalRevisionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    expectedObjectiveRevision: z.number().int().positive(),
+    rationale: SessionGoalRationaleWrite,
+  }),
+);
 export type RejectSessionGoalRevisionRequest = z.infer<typeof RejectSessionGoalRevisionRequest>;
 
-export const RollbackSessionGoalRevisionRequest = z.object({
-  expectedObjectiveRevision: z.number().int().positive(),
-  rationale: SessionGoalRationaleWrite,
-});
+export const RollbackSessionGoalRevisionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    expectedObjectiveRevision: z.number().int().positive(),
+    rationale: SessionGoalRationaleWrite,
+  }),
+);
 export type RollbackSessionGoalRevisionRequest = z.infer<typeof RollbackSessionGoalRevisionRequest>;
 
-export const SessionGoalPausedReason = z.enum([
-  "agent",
-  "user_pause",
-  "api",
-  "no_progress",
-  "max_auto_continuations",
-  "limits",
-  "allowance",
-]);
+export const SessionGoalPausedReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "agent",
+    "user_pause",
+    "api",
+    "no_progress",
+    "max_auto_continuations",
+    "limits",
+    "allowance",
+    /** The task's root usage limit is reached; raising it never resumes automatically. */
+    "session_usage_limit",
+  ]),
+);
 export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
 
-export const SessionGoalContinuationState = z.enum([
-  "inactive",
-  "scheduled",
-  "running",
-  "blocked",
-  "invariant_broken",
-]);
+export const SessionGoalContinuationState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["inactive", "scheduled", "running", "blocked", "invariant_broken"]),
+);
 export type SessionGoalContinuationState = z.infer<typeof SessionGoalContinuationState>;
 
-export const SessionGoalContinuationReason = z.enum([
-  "goal_inactive",
-  "wake_pending",
-  "continuation_pending",
-  "human_work_pending",
-  "goal_turn_running",
-  "human_turn_running",
-  "workstream_paused",
-  "approval_required",
-  "provider_backpressure",
-  "session_cancelled",
-  "system_work_pending",
-  "held_for_input",
-  // Idle backoff: consecutive no-input continuations are paced, and the next
-  // evaluation is armed as a delayed workflow wake at `nextAttemptAt`.
-  "backoff_pending",
-  "missing_obligation",
-]);
+export const SessionGoalContinuationReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "goal_inactive",
+    "wake_pending",
+    "continuation_pending",
+    "human_work_pending",
+    "goal_turn_running",
+    "human_turn_running",
+    "workstream_paused",
+    "approval_required",
+    "provider_backpressure",
+    "session_cancelled",
+    "system_work_pending",
+    "held_for_input",
+    // Idle backoff: consecutive no-input continuations are paced, and the next
+    // evaluation is armed as a delayed workflow wake at `nextAttemptAt`.
+    "backoff_pending",
+    "missing_obligation",
+  ]),
+);
 export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
 
 /**
@@ -6675,151 +7691,182 @@ export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuati
  * never user intent, so a `user_pause`/`api`/`agent`/`limits` pause is never
  * auto-resumed.
  */
-export const SessionGoalResumedReason = z.enum(["api", "external_input"]);
+export const SessionGoalResumedReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["api", "external_input"]),
+);
 export type SessionGoalResumedReason = z.infer<typeof SessionGoalResumedReason>;
 
-export const SessionGoalResumedEventPayload = z
-  .object({
-    goalId: z.string().uuid(),
-    actor: z.enum(["api", "system"]),
-    reason: SessionGoalResumedReason,
-    cause: z
-      .object({
-        kind: z.string().min(1),
-        updateId: z.string().uuid().optional(),
-        turnId: z.string().uuid().optional(),
-      })
-      .optional(),
-  })
-  .passthrough();
+export const SessionGoalResumedEventPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      goalId: z.string().uuid(),
+      actor: z.enum(["api", "system"]),
+      reason: SessionGoalResumedReason,
+      cause: z
+        .object({
+          kind: z.string().min(1),
+          updateId: z.string().uuid().optional(),
+          turnId: z.string().uuid().optional(),
+        })
+        .optional(),
+    })
+    .passthrough(),
+);
 export type SessionGoalResumedEventPayload = z.infer<typeof SessionGoalResumedEventPayload>;
 
-export const SessionGoalContinuation = z.object({
-  state: SessionGoalContinuationState,
-  reason: SessionGoalContinuationReason,
-  wakeRevision: z.number().int().nonnegative(),
-  observedRevision: z.number().int().nonnegative(),
-  nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
-  lastError: z.string().nullable(),
-  /**
-   * The agent's stated reason for a `held_for_input` hold (`wait_for_input`), so a
-   * human can see why the goal is waiting and until when (`nextAttemptAt`).
-   * Null for every other state; omitted by older servers.
-   */
-  holdReason: z.string().nullable().optional(),
-});
+export const SessionGoalContinuation = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    state: SessionGoalContinuationState,
+    reason: SessionGoalContinuationReason,
+    wakeRevision: z.number().int().nonnegative(),
+    observedRevision: z.number().int().nonnegative(),
+    nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
+    lastError: z.string().nullable(),
+    /**
+     * The agent's stated reason for a `held_for_input` hold (`wait_for_input`), so a
+     * human can see why the goal is waiting and until when (`nextAttemptAt`).
+     * Null for every other state; omitted by older servers.
+     */
+    holdReason: z.string().nullable().optional(),
+  }),
+);
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
 
-export const SessionGoal = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  status: SessionGoalStatus,
-  text: z.string(),
-  successCriteria: z.string().nullable(),
-  rootConstraints: z.array(z.string().min(1)).default([]),
-  reportRequirements: SessionGoalReportRequirements.default([]),
-  evidence: z.string().nullable(),
-  rationale: z.string().nullable(),
-  pausedReason: z.string().nullable(),
-  createdBy: SessionGoalCreatedBy,
-  version: z.number().int().positive(),
-  objectiveRevision: z.number().int().positive(),
-  mutationPolicy: SessionGoalMutationPolicy,
-  autoContinuations: z.number().int().nonnegative(),
-  noProgressStreak: z.number().int().nonnegative(),
-  maxAutoContinuations: z.number().int().positive().nullable(),
-  metadata: z.record(z.string(), z.unknown()),
-  // Optional for source compatibility with older clients; the API always
-  // supplies this authoritative continuation projection.
-  continuation: SessionGoalContinuation.optional(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+/** New admission pauses are specific; the wire field remains open for older peers. */
+export type GoalAdmissionPausedReason =
+  | "model_unavailable"
+  | "model_policy"
+  | "credits"
+  | "budget"
+  | "usage_limit"
+  | "usage_policy"
+  | "allowance"
+  | "session_usage_limit";
+
+export const SessionGoal = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    status: SessionGoalStatus,
+    text: z.string(),
+    successCriteria: z.string().nullable(),
+    rootConstraints: z.array(z.string().min(1)).default([]),
+    reportRequirements: SessionGoalReportRequirements.default([]),
+    evidence: z.string().nullable(),
+    rationale: z.string().nullable(),
+    pausedReason: z.string().nullable(),
+    createdBy: SessionGoalCreatedBy,
+    version: z.number().int().positive(),
+    objectiveRevision: z.number().int().positive(),
+    mutationPolicy: SessionGoalMutationPolicy,
+    autoContinuations: z.number().int().nonnegative(),
+    noProgressStreak: z.number().int().nonnegative(),
+    maxAutoContinuations: z.number().int().positive().nullable(),
+    metadata: z.record(z.string(), z.unknown()),
+    // Optional for source compatibility with older clients; the API always
+    // supplies this authoritative continuation projection.
+    continuation: SessionGoalContinuation.optional(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type SessionGoal = z.infer<typeof SessionGoal>;
 
-export const GoalSpec = z.object({
-  text: SessionGoalTextWrite,
-  successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
-  rootConstraints: SessionGoalRootConstraintsWrite.optional(),
-  reportRequirements: SessionGoalReportRequirements.optional(),
-  maxAutoContinuations: z.number().int().positive().optional(),
-  mutationPolicy: SessionGoalMutationPolicy.optional(),
-});
-export type GoalSpec = z.infer<typeof GoalSpec>;
-
-export const UpdateSessionGoalRequest = z.union([
-  z.object({
-    status: z.enum(["paused", "active"]),
-    rationale: SessionGoalRationaleWrite.optional(),
-  }),
+export const GoalSpec = /* @__PURE__ */ defineSchema(() =>
   z.object({
     text: SessionGoalTextWrite,
-    successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
+    successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
     rootConstraints: SessionGoalRootConstraintsWrite.optional(),
+    reportRequirements: SessionGoalReportRequirements.optional(),
+    maxAutoContinuations: z.number().int().positive().optional(),
     mutationPolicy: SessionGoalMutationPolicy.optional(),
-    rationale: SessionGoalRationaleWrite,
-    expectedObjectiveRevision: z.number().int().positive(),
   }),
-]);
+);
+export type GoalSpec = z.infer<typeof GoalSpec>;
+
+export const UpdateSessionGoalRequest = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    z.object({
+      status: z.enum(["paused", "active"]),
+      rationale: SessionGoalRationaleWrite.optional(),
+    }),
+    z.object({
+      text: SessionGoalTextWrite,
+      successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
+      rootConstraints: SessionGoalRootConstraintsWrite.optional(),
+      mutationPolicy: SessionGoalMutationPolicy.optional(),
+      rationale: SessionGoalRationaleWrite,
+      expectedObjectiveRevision: z.number().int().positive(),
+    }),
+  ]),
+);
 export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
-export const UpdateSessionRequest = z.object({
-  title: z.string().min(1).max(200),
-});
+export const UpdateSessionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    title: z.string().min(1).max(200),
+  }),
+);
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
 /** Explicit future defaults, not a message, wake, or queued-turn edit. */
-export const SetSessionModelRequest = z
-  .object({
-    model: z.string().min(1).max(512),
-    reasoningEffort: ReasoningEffort,
-    idempotencyKey: z.string().uuid(),
-  })
-  .strict();
+export const SetSessionModelRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      model: z.string().min(1).max(512),
+      reasoningEffort: ReasoningEffort,
+      idempotencyKey: z.string().uuid(),
+    })
+    .strict(),
+);
 export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
 
-export const UpdateSessionVariableSetsRequest = z
-  .object({
-    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["variableSetIds"],
-        message: "variableSetIds must not contain duplicates",
-      });
-    }
-  });
+export const UpdateSessionVariableSetsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["variableSetIds"],
+          message: "variableSetIds must not contain duplicates",
+        });
+      }
+    }),
+);
 export type UpdateSessionVariableSetsRequest = z.infer<typeof UpdateSessionVariableSetsRequest>;
 
 /**
  * Replace the complete durable session tool policy, or explicitly opt back in
- * to current workspace defaults. MCP servers and individual OpenGeni tools
+ * to current workspace defaults. MCP servers and individual Opengeni tools
  * advance atomically under one policy version.
  */
-export const UpdateSessionToolPolicyRequest = z.union([
-  z
-    .object({
-      mode: z.literal("workspace_default"),
-      // When supplied, edit only connector exclusions and preserve built-in tools.
-      // Omission explicitly resets the complete policy to workspace defaults.
-      excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
-      expectedVersion: z.number().int().positive(),
-    })
-    .strict(),
-  z
-    .object({
-      mode: z.literal("explicit"),
-      tools: z.array(ToolRef).max(64),
-      firstPartyMcpTools: z.array(FirstPartyMcpToolName),
-      expectedVersion: z.number().int().positive(),
-    })
-    .strict(),
-]);
+export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    z
+      .object({
+        mode: z.literal("workspace_default"),
+        // When supplied, edit only connector exclusions and preserve built-in tools.
+        // Omission explicitly resets the complete policy to workspace defaults.
+        excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
+        expectedVersion: z.number().int().positive(),
+      })
+      .strict(),
+    z
+      .object({
+        mode: z.literal("explicit"),
+        tools: z.array(ToolRef).max(64),
+        firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+        expectedVersion: z.number().int().positive(),
+      })
+      .strict(),
+  ]),
+);
 export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
 
 /**
@@ -6828,10 +7875,12 @@ export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPol
  * client that has a known version can fail closed rather than overwrite a newer
  * action from another browser.
  */
-export const UpdateSessionPinRequest = z.object({
-  pinned: z.boolean(),
-  expectedVersion: z.number().int().nonnegative().optional(),
-});
+export const UpdateSessionPinRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    pinned: z.boolean(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+  }),
+);
 export type UpdateSessionPinRequest = z.infer<typeof UpdateSessionPinRequest>;
 
 /**
@@ -6842,31 +7891,66 @@ export type UpdateSessionPinRequest = z.infer<typeof UpdateSessionPinRequest>;
  * consumed by a delayed acknowledgement request.
  * `activelyWorking` is an independent personal label that survives read state.
  */
-export const UpdateSessionAttentionRequest = z
-  .object({
-    unread: z.boolean().optional(),
-    acknowledgedThroughSequence: z.number().int().nonnegative().optional(),
-    activelyWorking: z.boolean().optional(),
-    expectedVersion: z.number().int().nonnegative().optional(),
-  })
-  .strict()
-  .refine((value) => value.unread !== undefined || value.activelyWorking !== undefined, {
-    message: "unread or activelyWorking is required",
-  })
-  .refine((value) => value.acknowledgedThroughSequence === undefined || value.unread === false, {
-    message: "acknowledgedThroughSequence requires unread false",
-    path: ["acknowledgedThroughSequence"],
-  });
+export const UpdateSessionAttentionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      unread: z.boolean().optional(),
+      acknowledgedThroughSequence: z.number().int().nonnegative().optional(),
+      activelyWorking: z.boolean().optional(),
+      expectedVersion: z.number().int().nonnegative().optional(),
+    })
+    .strict()
+    .refine((value) => value.unread !== undefined || value.activelyWorking !== undefined, {
+      message: "unread or activelyWorking is required",
+    })
+    .refine((value) => value.acknowledgedThroughSequence === undefined || value.unread === false, {
+      message: "acknowledgedThroughSequence requires unread false",
+      path: ["acknowledgedThroughSequence"],
+    }),
+);
 export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
 
 /** A member's personal archive state for a root chat. */
-export const UpdateSessionArchiveRequest = z
-  .object({
-    archived: z.boolean(),
-    expectedVersion: z.number().int().nonnegative().optional(),
-  })
-  .strict();
+export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      archived: z.boolean(),
+      expectedVersion: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+);
 export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveRequest>;
+
+/**
+ * Idle-session archive state (docs/session-storage-lifecycle.md). `archive` is
+ * null while the session is live. An archived session keeps its readable
+ * timeline but is read-only.
+ */
+export const SessionRetention = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Never archive this session, however long it stays idle. */
+      keepLive: z.boolean(),
+      archive: z
+        .object({
+          state: z.enum(["archiving", "archived"]),
+          archivedAt: z.string().nullable(),
+        })
+        .strict()
+        .nullable(),
+    })
+    .strict(),
+);
+export type SessionRetention = z.infer<typeof SessionRetention>;
+
+export const UpdateSessionRetentionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      keepLive: z.boolean(),
+    })
+    .strict(),
+);
+export type UpdateSessionRetentionRequest = z.infer<typeof UpdateSessionRetentionRequest>;
 
 // Operator context controls (slash-command palette: /clear, /compact). These
 // are session/operator actions, NOT a structured way to talk to the agent —
@@ -6877,9 +7961,11 @@ export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveReq
  * so an accidental/empty POST cannot wipe context — the destructive intent is
  * explicit on the wire, mirroring the client-side confirm affordance.
  */
-export const ClearSessionContextRequest = z.object({
-  confirm: z.literal(true),
-});
+export const ClearSessionContextRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    confirm: z.literal(true),
+  }),
+);
 export type ClearSessionContextRequest = z.infer<typeof ClearSessionContextRequest>;
 
 /**
@@ -6951,17 +8037,21 @@ export function isOpenSuffixRunStateBlob(serialized: string | null | undefined):
 }
 
 /** Trigger conversation compaction now. No body fields today (forward-room). */
-export const CompactSessionContextRequest = z.object({}).strict();
+export const CompactSessionContextRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({}).strict(),
+);
 export type CompactSessionContextRequest = z.infer<typeof CompactSessionContextRequest>;
 
 /** Outcome of a manual /compact trigger. */
-export const CompactSessionContextResult = z.object({
-  // pending: an active/paused session will compact at its next safe boundary.
-  // completed: an idle compaction-only activity completed synchronously.
-  // noop: there is no active history to compact.
-  status: z.enum(["pending", "completed", "noop"]),
-  message: z.string(),
-});
+export const CompactSessionContextResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // pending: an active/paused session will compact at its next safe boundary.
+    // completed: an idle compaction-only activity completed synchronously.
+    // noop: there is no active history to compact.
+    status: z.enum(["pending", "completed", "noop"]),
+    message: z.string(),
+  }),
+);
 export type CompactSessionContextResult = z.infer<typeof CompactSessionContextResult>;
 
 /**
@@ -6969,400 +8059,487 @@ export type CompactSessionContextResult = z.infer<typeof CompactSessionContextRe
  * opaque host/standalone identity and therefore must never encode `kind` by
  * convention: embedding hosts own their subject namespace.
  */
-export const TurnInitiator = z.object({
-  kind: z.enum(["subject", "service"]),
-  ...turnInitiatorIdentityFields,
-});
+export const TurnInitiator = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum(["subject", "service"]),
+    ...turnInitiatorIdentityFields,
+  }),
+);
 export type TurnInitiator = z.infer<typeof TurnInitiator>;
 
 // ============ embedding host session authorization ============
 //
-// Workspace permissions answer whether a principal may use an OpenGeni
+// Workspace permissions answer whether a principal may use an Opengeni
 // capability. An embedding host can additionally own per-session visibility
 // (ownership, sharing, nested workspaces, revocation). This port is the one
-// host-neutral boundary for that second decision. Inputs contain OpenGeni ids
+// host-neutral boundary for that second decision. Inputs contain Opengeni ids
 // and immutable, non-secret authority only; host records and policy details
 // never cross the boundary.
 
-export const SessionAuthorizationSurface = z.enum([
-  "http",
-  "core",
-  "stream",
-  "first_party_mcp",
-  "codemode",
-]);
+export const SessionAuthorizationSurface = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["http", "core", "stream", "first_party_mcp", "codemode"]),
+);
 export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
 
 // Native connected-Codex GPT-Live WebRTC negotiation. The browser sends its
 // SDP offer, non-provider session configuration, and proof of the exact active
 // ordinary-session realtime owner. The API consumes that proof before resolving
 // the subscription credential and returns only the provider's SDP answer.
-export const CodexRealtimeWebrtcVersion = z.literal("v3");
+export const CodexRealtimeWebrtcVersion = /* @__PURE__ */ defineSchema(() => z.literal("v3"));
 export type CodexRealtimeWebrtcVersion = z.infer<typeof CodexRealtimeWebrtcVersion>;
 
-export const CodexRealtimeVoice = z.enum([
-  "juniper",
-  "maple",
-  "spruce",
-  "ember",
-  "vale",
-  "breeze",
-  "arbor",
-  "sol",
-  "cove",
-]);
+export const CodexRealtimeVoice = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"]),
+);
 export type CodexRealtimeVoice = z.infer<typeof CodexRealtimeVoice>;
 
-const SessionRealtimeOwnerProof = z.object({
-  browserInstanceId: z.string().min(1).max(256),
-  ownerKey: z.string().min(32).max(1024),
-});
+const SessionRealtimeOwnerProof = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    browserInstanceId: z.string().min(1).max(256),
+    ownerKey: z.string().min(32).max(1024),
+  }),
+);
 
-export const CodexRealtimeWebrtcRequest = SessionRealtimeOwnerProof.extend({
-  realtimeId: z.string().uuid(),
-  operationId: z.string().uuid(),
-  expectedVersion: z.number().int().positive(),
-  expectedConnectionEpoch: z.number().int().positive(),
-  rotate: z.boolean(),
-  browserActivation: z.literal("required").optional(),
-  sdp: z
-    .string()
-    .min(1)
-    .max(1024 * 1024),
-  version: CodexRealtimeWebrtcVersion,
-  instructions: z.string().max(32_768).optional(),
-  voice: CodexRealtimeVoice.optional(),
-}).strict();
-export type CodexRealtimeWebrtcRequest = z.infer<typeof CodexRealtimeWebrtcRequest>;
-
-export const CodexRealtimeWebrtcResponse = z
-  .object({
+export const CodexRealtimeWebrtcRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionRealtimeOwnerProof.extend({
+    realtimeId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().positive(),
+    expectedConnectionEpoch: z.number().int().positive(),
+    rotate: z.boolean(),
+    browserActivation: z.literal("required").optional(),
     sdp: z
       .string()
       .min(1)
       .max(1024 * 1024),
     version: CodexRealtimeWebrtcVersion,
-    model: z.literal("gpt-live-1-boulder-alpha"),
-    connectionId: z.string().uuid(),
-    connectionEpoch: z.number().int().positive(),
-    startupFenceSequence: z.number().int().nonnegative(),
-    modeVersion: z.number().int().positive(),
-    replay: z.boolean(),
-  })
-  .strict();
+    instructions: z.string().max(32_768).optional(),
+    voice: CodexRealtimeVoice.optional(),
+  }).strict(),
+);
+export type CodexRealtimeWebrtcRequest = z.infer<typeof CodexRealtimeWebrtcRequest>;
+
+export const CodexRealtimeWebrtcResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sdp: z
+        .string()
+        .min(1)
+        .max(1024 * 1024),
+      version: CodexRealtimeWebrtcVersion,
+      model: z.enum(["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"]),
+      connectionId: z.string().uuid(),
+      connectionEpoch: z.number().int().positive(),
+      startupFenceSequence: z.number().int().nonnegative(),
+      modeVersion: z.number().int().positive(),
+      replay: z.boolean(),
+    })
+    .strict(),
+);
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
 
-export const GatewayRealtimeConnectRequest = SessionRealtimeOwnerProof.extend({
-  realtimeId: z.string().uuid(),
-  operationId: z.string().uuid(),
-  expectedVersion: z.number().int().positive(),
-  expectedConnectionEpoch: z.number().int().positive(),
-  rotate: z.boolean(),
-}).strict();
+export const GatewayRealtimeConnectRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionRealtimeOwnerProof.extend({
+    realtimeId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().positive(),
+    expectedConnectionEpoch: z.number().int().positive(),
+    rotate: z.boolean(),
+  }).strict(),
+);
 export type GatewayRealtimeConnectRequest = z.infer<typeof GatewayRealtimeConnectRequest>;
 
-export const GatewayRealtimeInitialItem = z.object({
-  role: z.enum(["user", "developer", "assistant"]),
-  text: z.string().min(1).max(131_072),
-});
+export const GatewayRealtimeInitialItem = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    role: z.enum(["user", "developer", "assistant"]),
+    text: z.string().min(1).max(131_072),
+  }),
+);
 export type GatewayRealtimeInitialItem = z.infer<typeof GatewayRealtimeInitialItem>;
 
-export const GatewayRealtimeConnectResponse = z
-  .object({
-    token: z.string().min(1).max(16_384),
-    url: z.string().url(),
-    upstreamModelId: z.string().min(1).max(256),
-    expiresAt: z.number().int().positive().nullable(),
-    connectionId: z.string().uuid(),
-    connectionEpoch: z.number().int().positive(),
-    startupFenceSequence: z.number().int().nonnegative(),
-    modeVersion: z.number().int().positive(),
-    initialItems: z.array(GatewayRealtimeInitialItem).max(128),
-    instructions: z.string().min(1).max(32_768),
-    replay: z.literal(false),
-  })
-  .strict();
+export const GatewayRealtimeConnectResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      token: z.string().min(1).max(16_384),
+      url: z.string().url(),
+      upstreamModelId: z.string().min(1).max(256),
+      expiresAt: z.number().int().positive().nullable(),
+      connectionId: z.string().uuid(),
+      connectionEpoch: z.number().int().positive(),
+      startupFenceSequence: z.number().int().nonnegative(),
+      modeVersion: z.number().int().positive(),
+      initialItems: z.array(GatewayRealtimeInitialItem).max(128),
+      instructions: z.string().min(1).max(32_768),
+      replay: z.literal(false),
+    })
+    .strict(),
+);
 export type GatewayRealtimeConnectResponse = z.infer<typeof GatewayRealtimeConnectResponse>;
 
-export const ActivateCodexRealtimeConnectionRequest = SessionRealtimeOwnerProof.extend({
-  operationId: z.string().uuid(),
-  connectionEpoch: z.number().int().positive(),
-  expectedVersion: z.number().int().positive(),
-  expectedConnectionEpoch: z.number().int().positive(),
-}).strict();
+export const ActivateCodexRealtimeConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionRealtimeOwnerProof.extend({
+    operationId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    expectedVersion: z.number().int().positive(),
+    expectedConnectionEpoch: z.number().int().positive(),
+  }).strict(),
+);
 export type ActivateCodexRealtimeConnectionRequest = z.infer<
   typeof ActivateCodexRealtimeConnectionRequest
 >;
 
-export const SessionRealtimeLedgerDirection = z.enum(["provider_in", "provider_out"]);
+export const SessionRealtimeLedgerDirection = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["provider_in", "provider_out"]),
+);
 export type SessionRealtimeLedgerDirection = z.infer<typeof SessionRealtimeLedgerDirection>;
 
-export const SessionRealtimeLedgerKind = z.enum([
-  "user_transcript",
-  "assistant_transcript",
-  "delegation_call",
-  "delegation_progress",
-  "delegation_result",
-  "interruption",
-  "session_update",
-  "error",
-]);
+export const SessionRealtimeLedgerKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "user_transcript",
+    "assistant_transcript",
+    "delegation_call",
+    "delegation_progress",
+    "delegation_result",
+    "interruption",
+    "session_update",
+    "error",
+  ]),
+);
 export type SessionRealtimeLedgerKind = z.infer<typeof SessionRealtimeLedgerKind>;
 
-export const SessionRealtimeLedgerEntry = z
-  .object({
-    id: z.string().uuid(),
-    realtimeId: z.string().uuid(),
-    operationId: z.string().uuid(),
-    connectionEpoch: z.number().int().positive(),
-    sequence: z.number().int().positive(),
-    direction: SessionRealtimeLedgerDirection,
-    kind: SessionRealtimeLedgerKind,
-    role: z.enum(["user", "assistant"]).nullable(),
-    providerEventId: z.string().nullable(),
-    delegationItemId: z.string().nullable(),
-    sourceUpdateId: z.string().uuid().nullable(),
-    historyItemId: z.string().uuid().nullable(),
-    turnId: z.string().uuid().nullable(),
-    text: z.string().nullable(),
-    payload: z.record(z.string(), z.unknown()),
-    clientAckedAt: z.string().datetime().nullable(),
-    providerAckedAt: z.string().datetime().nullable(),
-    createdAt: z.string().datetime(),
-    updatedAt: z.string().datetime(),
-  })
-  .strict();
+export const SessionRealtimeLedgerEntry = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      realtimeId: z.string().uuid(),
+      operationId: z.string().uuid(),
+      connectionEpoch: z.number().int().positive(),
+      sequence: z.number().int().positive(),
+      direction: SessionRealtimeLedgerDirection,
+      kind: SessionRealtimeLedgerKind,
+      role: z.enum(["user", "assistant"]).nullable(),
+      providerEventId: z.string().nullable(),
+      delegationItemId: z.string().nullable(),
+      sourceUpdateId: z.string().uuid().nullable(),
+      historyItemId: z.string().uuid().nullable(),
+      turnId: z.string().uuid().nullable(),
+      text: z.string().nullable(),
+      payload: z.record(z.string(), z.unknown()),
+      clientAckedAt: z.string().datetime().nullable(),
+      providerAckedAt: z.string().datetime().nullable(),
+      createdAt: z.string().datetime(),
+      updatedAt: z.string().datetime(),
+    })
+    .strict(),
+);
 export type SessionRealtimeLedgerEntry = z.infer<typeof SessionRealtimeLedgerEntry>;
 
-export const SessionRealtimeInboundEntry = z
-  .object({
-    operationId: z.string().uuid(),
-    kind: z.enum([
-      "user_transcript",
-      "assistant_transcript",
-      "delegation_call",
-      "interruption",
-      "error",
-    ]),
-    role: z.enum(["user", "assistant"]).nullable().optional(),
-    providerEventId: z.string().max(1024).nullable().optional(),
-    delegationItemId: z.string().max(1024).nullable().optional(),
-    text: z.string().max(131_072).nullable().optional(),
-    payload: z.record(z.string(), z.unknown()).optional(),
-    // Application context attached to the exact delegation/transcript message.
-    // It is ordinary model-visible user-message content when materialized, not
-    // a secret or instruction-authority boundary.
-    modelContext: z.string().trim().min(1).max(32768).optional(),
-  })
-  .strict()
-  .superRefine((entry, context) => {
-    if (
-      entry.modelContext !== undefined &&
-      entry.kind !== "delegation_call" &&
-      entry.kind !== "user_transcript" &&
-      entry.kind !== "assistant_transcript"
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["modelContext"],
-        message: "modelContext requires a delegation or finalized transcript entry",
-      });
-    }
-  });
-export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
-
-export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend({
-  expectedVersion: z.number().int().positive(),
-  connectionId: z.string().uuid(),
-  connectionEpoch: z.number().int().positive(),
-  entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
-  clientAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
-  providerAckSequences: z.array(z.number().int().positive()).max(100).optional(),
-  providerStarted: z
+export const SessionRealtimeInboundEntry = /* @__PURE__ */ defineSchema(() =>
+  z
     .object({
-      providerSessionId: z.string().min(1).max(1024),
-      providerEventId: z.string().min(1).max(1024).nullable().optional(),
+      operationId: z.string().uuid(),
+      kind: z.enum([
+        "user_transcript",
+        "assistant_transcript",
+        "delegation_call",
+        "interruption",
+        "error",
+      ]),
+      role: z.enum(["user", "assistant"]).nullable().optional(),
+      providerEventId: z.string().max(1024).nullable().optional(),
+      delegationItemId: z.string().max(1024).nullable().optional(),
+      text: z.string().max(131_072).nullable().optional(),
+      payload: z.record(z.string(), z.unknown()).optional(),
+      // Application context attached to the exact delegation/transcript message.
+      // It is ordinary model-visible user-message content when materialized, not
+      // a secret or instruction-authority boundary.
+      modelContext: z.string().trim().min(1).max(32768).optional(),
     })
     .strict()
-    .optional(),
-}).strict();
+    .superRefine((entry, context) => {
+      if (
+        entry.modelContext !== undefined &&
+        entry.kind !== "delegation_call" &&
+        entry.kind !== "user_transcript" &&
+        entry.kind !== "assistant_transcript"
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["modelContext"],
+          message: "modelContext requires a delegation or finalized transcript entry",
+        });
+      }
+    }),
+);
+export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
+
+export const SyncSessionRealtimeLedgerRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionRealtimeOwnerProof.extend({
+    expectedVersion: z.number().int().positive(),
+    connectionId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
+    clientAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
+    providerAckSequences: z.array(z.number().int().positive()).max(100).optional(),
+    providerStarted: z
+      .object({
+        providerSessionId: z.string().min(1).max(1024),
+        providerEventId: z.string().min(1).max(1024).nullable().optional(),
+      })
+      .strict()
+      .optional(),
+  }).strict(),
+);
 export type SyncSessionRealtimeLedgerRequest = z.infer<typeof SyncSessionRealtimeLedgerRequest>;
 
-export const SyncSessionRealtimeLedgerResponse = z
-  .object({
-    accepted: z.array(
-      z.object({ entry: SessionRealtimeLedgerEntry, replay: z.boolean() }).strict(),
-    ),
-    outbound: z.array(SessionRealtimeLedgerEntry),
-  })
-  .strict();
+export const SyncSessionRealtimeLedgerResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      accepted: z.array(
+        z.object({ entry: SessionRealtimeLedgerEntry, replay: z.boolean() }).strict(),
+      ),
+      outbound: z.array(SessionRealtimeLedgerEntry),
+    })
+    .strict(),
+);
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
-export const SessionRealtimeModel = z.enum([
-  "gpt-live-1-boulder-alpha",
-  "supergrok/grok-voice-think-fast-2.0",
-  "opengeni-gateway/openai/gpt-realtime-2.1",
-  "opengeni-gateway/openai/gpt-realtime-mini",
-  "opengeni-gateway/xai/grok-voice-think-fast-2.0",
-  "workspace-gateway/openai/gpt-realtime-2.1",
-  "workspace-gateway/openai/gpt-realtime-mini",
-  "workspace-gateway/xai/grok-voice-think-fast-2.0",
-]);
+export const SessionRealtimeModel = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "opengeni-azure/gpt-live-1",
+    "gpt-live-1-boulder-alpha",
+    "supergrok/grok-voice-think-fast-2.0",
+    "opengeni-gateway/openai/gpt-realtime-2.1",
+    "opengeni-gateway/openai/gpt-realtime-mini",
+    "opengeni-gateway/xai/grok-voice-think-fast-2.0",
+    "workspace-gateway/openai/gpt-realtime-2.1",
+    "workspace-gateway/openai/gpt-realtime-mini",
+    "workspace-gateway/xai/grok-voice-think-fast-2.0",
+  ]),
+);
 export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
 
-export const WorkspaceRealtimeModelCatalogItem = z.object({
-  id: SessionRealtimeModel,
-  label: z.string().min(1),
-  provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
-  description: z.string().min(1),
-  available: z.boolean(),
-  unavailableReason: z.string().nullable(),
-  recommended: z.boolean(),
-});
+export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: SessionRealtimeModel,
+    label: z.string().min(1),
+    provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
+    description: z.string().min(1),
+    available: z.boolean(),
+    unavailableReason: z.string().nullable(),
+    /**
+     * Machine-readable reason when unavailable. Credit refusals use the same
+     * codes as voice input (`insufficient_credits`, `allowance_exhausted`,
+     * `monthly_model_cost_limit`).
+     */
+    unavailableCode: z.string().min(1).max(64).nullable().optional(),
+    recommended: z.boolean(),
+  }),
+);
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
 
-export const WorkspaceRealtimeModelCatalogResponse = z.object({
-  models: z.array(WorkspaceRealtimeModelCatalogItem),
-});
+export const WorkspaceRealtimeModelCatalogResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    models: z.array(WorkspaceRealtimeModelCatalogItem),
+  }),
+);
 export type WorkspaceRealtimeModelCatalogResponse = z.infer<
   typeof WorkspaceRealtimeModelCatalogResponse
 >;
 
-export const SessionRealtimeState = z.enum(["active", "ended"]);
+export const SessionRealtimeState = /* @__PURE__ */ defineSchema(() => z.enum(["active", "ended"]));
 export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
 
-export const SessionRealtimeEndReason = z.enum([
-  "user_stop",
-  "browser_unload",
-  "lease_expired",
-  "authority_revoked",
-]);
+export const SessionRealtimeEndReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["user_stop", "browser_unload", "lease_expired", "authority_revoked"]),
+);
 export type SessionRealtimeEndReason = z.infer<typeof SessionRealtimeEndReason>;
 
-export const SessionRealtimeMode = z.object({
-  id: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  operationId: z.string().uuid(),
-  browserInstanceId: z.string().min(1).max(256),
-  model: SessionRealtimeModel,
-  state: SessionRealtimeState,
-  version: z.number().int().positive(),
-  connectionEpoch: z.number().int().positive(),
-  leaseExpiresAt: z.string().datetime(),
-  lastHeartbeatAt: z.string().datetime(),
-  startedAt: z.string().datetime(),
-  endedAt: z.string().datetime().nullable(),
-  endReason: SessionRealtimeEndReason.nullable(),
-});
+export const SessionRealtimeMode = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    browserInstanceId: z.string().min(1).max(256),
+    model: SessionRealtimeModel,
+    state: SessionRealtimeState,
+    version: z.number().int().positive(),
+    connectionEpoch: z.number().int().positive(),
+    leaseExpiresAt: z.string().datetime(),
+    lastHeartbeatAt: z.string().datetime(),
+    startedAt: z.string().datetime(),
+    endedAt: z.string().datetime().nullable(),
+    endReason: SessionRealtimeEndReason.nullable(),
+  }),
+);
 export type SessionRealtimeMode = z.infer<typeof SessionRealtimeMode>;
 
-export const BeginSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
-  operationId: z.string().uuid(),
-  model: SessionRealtimeModel,
-});
+export const BeginSessionRealtimeRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionRealtimeOwnerProof.extend({
+    operationId: z.string().uuid(),
+    model: SessionRealtimeModel,
+  }),
+);
 export type BeginSessionRealtimeRequest = z.infer<typeof BeginSessionRealtimeRequest>;
 
-export const RenewSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
-  expectedVersion: z.number().int().positive(),
-});
+export const RenewSessionRealtimeRequest = /* @__PURE__ */ defineSchema(() =>
+  SessionRealtimeOwnerProof.extend({
+    expectedVersion: z.number().int().positive(),
+  }),
+);
 export type RenewSessionRealtimeRequest = z.infer<typeof RenewSessionRealtimeRequest>;
 
-export const EndSessionRealtimeRequest = RenewSessionRealtimeRequest.extend({
-  reason: z.enum(["user_stop", "browser_unload"]),
-});
+export const EndSessionRealtimeRequest = /* @__PURE__ */ defineSchema(() =>
+  RenewSessionRealtimeRequest.extend({
+    reason: z.enum(["user_stop", "browser_unload"]),
+  }),
+);
 export type EndSessionRealtimeRequest = z.infer<typeof EndSessionRealtimeRequest>;
 
-export const SessionRealtimeMutationResponse = z.object({
-  mode: SessionRealtimeMode,
-  replay: z.boolean(),
-});
+/**
+ * Server instruction to end a live call now. Deployment-funded voice returns
+ * it from a heartbeat when credits run out; the lease is then no longer
+ * extended, so the client should drain and end the call gracefully.
+ */
+export const SessionRealtimeStopInstruction = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    code: z.string().min(1).max(64),
+    message: z.string().min(1).max(512),
+  }),
+);
+export type SessionRealtimeStopInstruction = z.infer<typeof SessionRealtimeStopInstruction>;
+
+export const SessionRealtimeMutationResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    mode: SessionRealtimeMode,
+    replay: z.boolean(),
+    stop: SessionRealtimeStopInstruction.optional(),
+  }),
+);
 export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
 
-export const SessionAuthorizationOperation = z.enum([
-  "session.read",
-  "session.events.read",
-  "session.stream.read",
-  "session.stream.acknowledge",
-  "session.turns.read",
-  "session.append",
-  "session.steer",
-  "session.control",
-  "session.queue.read",
-  "session.queue.control",
-  "session.composer.read",
-  "session.composer.write",
-  "session.lineage.read",
-  "session.capture.read",
-  "session.files.read",
-  "session.files.write",
-  "session.git.read",
-  "session.terminal.read",
-  "session.terminal.control",
-  "session.viewer.read",
-  "session.viewer.control",
-  "session.first_party_mcp.call",
-  "session.secret.read",
-  "session.codemode.call",
-  "session.pin.write",
-  "session.feedback.write",
-  "session.attention.write",
-  "session.archive.write",
-  "session.delete",
-  "session.codex_account.write",
-  "session.realtime.start",
-  "session.realtime.control",
-  "session.context.write",
-  "session.approval.write",
-  "session.human_input.read",
-  "session.human_input.write",
-  "session.title.write",
-  "session.model.write",
-  "session.channel.write",
-  "session.variable_sets.write",
-  "session.mcp.approval_policy.write",
-  "session.mcp.credentials.rotate",
-  "session.tool_policy.write",
-  "session.goal.read",
-  "session.goal.write",
-  "session.child.create",
-  "session.visibility.write",
-  "session.fork.create",
-  "session.personal_resource.grant",
-]);
+export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "session.read",
+    "session.events.read",
+    "session.stream.read",
+    "session.stream.acknowledge",
+    "session.turns.read",
+    "session.append",
+    "session.steer",
+    "session.control",
+    "session.queue.read",
+    "session.queue.control",
+    "session.composer.read",
+    "session.composer.write",
+    "session.lineage.read",
+    "session.capture.read",
+    "session.files.read",
+    "session.files.write",
+    "session.git.read",
+    "session.terminal.read",
+    "session.terminal.control",
+    "session.viewer.read",
+    "session.viewer.control",
+    "session.first_party_mcp.call",
+    "session.secret.read",
+    "session.codemode.call",
+    "session.pin.write",
+    "session.feedback.write",
+    "session.attention.write",
+    "session.archive.write",
+    "session.retention.write",
+    "session.delete",
+    /**
+     * @deprecated Older name of `session.model_account.write`. Still a valid
+     * host-boundary value by default for rolling compatibility. Hosts opt in
+     * to the neutral name through `SessionAuthorizationPort.capabilities`
+     * after migrating their policy keys.
+     */
+    "session.codex_account.write",
+    /** Choose the model account a session uses (any provider), or return it to automatic. */
+    "session.model_account.write",
+    "session.realtime.start",
+    "session.realtime.control",
+    "session.context.write",
+    "session.approval.write",
+    "session.human_input.read",
+    "session.human_input.write",
+    "session.title.write",
+    "session.model.write",
+    "session.channel.write",
+    "session.variable_sets.write",
+    "session.mcp.approval_policy.write",
+    "session.mcp.credentials.rotate",
+    "session.tool_policy.write",
+    "session.goal.read",
+    "session.goal.write",
+    "session.child.create",
+    "session.visibility.write",
+    "session.fork.create",
+    "session.personal_resource.grant",
+  ]),
+);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
 
-export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("subject"),
-    subjectId: z.string().min(1),
-    subjectLabel: z.string().min(1).optional(),
-  }),
-  z.object({
-    kind: z.literal("agent_attempt"),
-    /** Technical, authenticated first-party caller (not the host authority). */
-    subjectId: z.string().min(1),
-    callerSessionId: z.string().uuid(),
-    callerRootSessionId: z.string().uuid(),
-    turnId: z.string().uuid(),
-    attemptId: z.string().uuid(),
-    executionGeneration: z.number().int().positive(),
-    /** Frozen authority that admitted the calling turn. */
-    initiator: TurnInitiator,
-    initiatorContext: TurnInitiatorContext,
-    /**
-     * Durable causal-human selector for named human-bound capabilities. It never
-     * authorizes by itself and is null for pure service work.
-     */
-    initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
-  }),
-]);
+/**
+ * Older session authorization operation names and the operation each one now
+ * means. Internal classification uses the canonical name; host delivery is
+ * capability-gated. Normalizing inputs also requires migrating policy keys.
+ */
+export const SESSION_AUTHORIZATION_OPERATION_ALIASES = {
+  "session.codex_account.write": "session.model_account.write",
+} as const satisfies Partial<Record<SessionAuthorizationOperation, SessionAuthorizationOperation>>;
+
+/** The canonical name of a session authorization operation (resolves older aliases). */
+export function canonicalSessionAuthorizationOperation(
+  operation: SessionAuthorizationOperation,
+): SessionAuthorizationOperation {
+  return (
+    (
+      SESSION_AUTHORIZATION_OPERATION_ALIASES as Partial<
+        Record<SessionAuthorizationOperation, SessionAuthorizationOperation>
+      >
+    )[operation] ?? operation
+  );
+}
+
+export const SessionAuthorizationActor = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("subject"),
+      subjectId: z.string().min(1),
+      subjectLabel: z.string().min(1).optional(),
+    }),
+    z.object({
+      kind: z.literal("agent_attempt"),
+      /** Technical, authenticated first-party caller (not the host authority). */
+      subjectId: z.string().min(1),
+      callerSessionId: z.string().uuid(),
+      callerRootSessionId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      attemptId: z.string().uuid(),
+      executionGeneration: z.number().int().positive(),
+      /** Frozen authority that admitted the calling turn. */
+      initiator: TurnInitiator,
+      initiatorContext: TurnInitiatorContext,
+      /**
+       * Durable causal-human selector for named human-bound capabilities. It never
+       * authorizes by itself and is null for pure service work.
+       */
+      initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
+    }),
+  ]),
+);
 export type SessionAuthorizationActor = z.infer<typeof SessionAuthorizationActor>;
 
-export const SessionAuthorizationTarget = z.object({
-  sessionId: z.string().uuid(),
-  /** Server-resolved workspace lineage root; never accepted from a caller. */
-  rootSessionId: z.string().uuid(),
-});
+export const SessionAuthorizationTarget = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sessionId: z.string().uuid(),
+    /** Server-resolved workspace lineage root; never accepted from a caller. */
+    rootSessionId: z.string().uuid(),
+  }),
+);
 export type SessionAuthorizationTarget = z.infer<typeof SessionAuthorizationTarget>;
 
 export type AuthorizeSessionInput = {
@@ -7374,30 +8551,32 @@ export type AuthorizeSessionInput = {
   surface: SessionAuthorizationSurface;
 };
 
-export const SessionAuthorizationDecision = z.discriminatedUnion("allowed", [
-  z.object({
-    allowed: z.literal(true),
-    /**
-     * Whether related-session metadata may be projected with the target.
-     * `target` is the fail-closed default for exact shares; `root` permits the
-     * target's full lineage tree. This does not authorize a separate operation
-     * against another session, which always requires its own decision.
-     */
-    relatedSessionAccess: z.enum(["target", "root"]).optional(),
-    /** A host may request a tighter stream reauthorization bound. */
-    reauthorizeAfterMs: z.number().int().min(1_000).max(60_000).optional(),
-  }),
-  z.object({
-    allowed: z.literal(false),
-    reason: z.enum(["not_found", "forbidden", "revoked"]),
-  }),
-]);
+export const SessionAuthorizationDecision = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("allowed", [
+    z.object({
+      allowed: z.literal(true),
+      /**
+       * Whether related-session metadata may be projected with the target.
+       * `target` is the fail-closed default for exact shares; `root` permits the
+       * target's full lineage tree. This does not authorize a separate operation
+       * against another session, which always requires its own decision.
+       */
+      relatedSessionAccess: z.enum(["target", "root"]).optional(),
+      /** A host may request a tighter stream reauthorization bound. */
+      reauthorizeAfterMs: z.number().int().min(1_000).max(60_000).optional(),
+    }),
+    z.object({
+      allowed: z.literal(false),
+      reason: z.enum(["not_found", "forbidden", "revoked"]),
+    }),
+  ]),
+);
 export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDecision>;
 
 /**
  * A database-applicable listing scope. `rootSessionIds` includes every
  * descendant of those lineage anchors; `sessionIds` authorizes only the exact
- * sessions. Supplying neither is an explicit empty scope. OpenGeni intersects
+ * sessions. Supplying neither is an explicit empty scope. Opengeni intersects
  * every id with the requested workspace and never trusts a host scope as
  * session existence evidence.
  */
@@ -7412,7 +8591,9 @@ export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
  * are unaffected: this is an agent-to-agent fence enforced only in the core
  * session-authorization seam.
  */
-export const SessionAgentAccess = z.enum(["session", "user", "workspace"]);
+export const SessionAgentAccess = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["session", "user", "workspace"]),
+);
 export type SessionAgentAccess = z.infer<typeof SessionAgentAccess>;
 
 /**
@@ -7420,11 +8601,13 @@ export type SessionAgentAccess = z.infer<typeof SessionAgentAccess>;
  * This is an output/filter value, never caller-supplied creation authority.
  * Human visibility remains an independent resource authorization check.
  */
-export const SessionScopeSubjectId = z
-  .string()
-  .min(1)
-  .max(1024)
-  .regex(/^(?:user:|external_user:).+/);
+export const SessionScopeSubjectId = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(1024)
+    .regex(/^(?:user:|external_user:).+/),
+);
 export type SessionScopeSubjectId = z.infer<typeof SessionScopeSubjectId>;
 
 /**
@@ -7434,7 +8617,9 @@ export type SessionScopeSubjectId = z.infer<typeof SessionScopeSubjectId>;
  * `off` registers no Memory tools for the session. `user` requires an
  * authenticated canonical user on the active turn. Use task notes for task-local data.
  */
-export const SessionMemoryScope = z.enum(["workspace", "user", "off"]);
+export const SessionMemoryScope = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["workspace", "user", "off"]),
+);
 export type SessionMemoryScope = z.infer<typeof SessionMemoryScope>;
 
 /** Read old persisted selectors without promoting task-local data or authority.
@@ -7446,32 +8631,36 @@ export function storedSessionMemoryScope(value: unknown): SessionMemoryScope {
 }
 
 /**
- * The calling agent attempt's own access scope, resolved by OpenGeni from the
+ * The calling agent attempt's own access scope, resolved by Opengeni from the
  * caller session row (never from the request) and applied as one SQL
  * predicate wherever a session list runs for that attempt.
  */
-export const SessionAgentAccessViewer = z
-  .object({
-    callerRootSessionId: z.string().uuid(),
-    agentAccess: SessionAgentAccess,
-    scopeSubjectId: SessionScopeSubjectId.nullable(),
-  })
-  .strict();
+export const SessionAgentAccessViewer = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      callerRootSessionId: z.string().uuid(),
+      agentAccess: SessionAgentAccess,
+      scopeSubjectId: SessionScopeSubjectId.nullable(),
+    })
+    .strict(),
+);
 export type SessionAgentAccessViewer = z.infer<typeof SessionAgentAccessViewer>;
 
-export const SessionAuthorizationListScope = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("all"),
-    /** Set by OpenGeni for an agent attempt; a host-returned value is replaced. */
-    agentAccessViewer: SessionAgentAccessViewer.optional(),
-  }),
-  z.object({
-    kind: z.literal("scoped"),
-    rootSessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
-    sessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
-    agentAccessViewer: SessionAgentAccessViewer.optional(),
-  }),
-]);
+export const SessionAuthorizationListScope = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("all"),
+      /** Set by Opengeni for an agent attempt; a host-returned value is replaced. */
+      agentAccessViewer: SessionAgentAccessViewer.optional(),
+    }),
+    z.object({
+      kind: z.literal("scoped"),
+      rootSessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+      sessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+      agentAccessViewer: SessionAgentAccessViewer.optional(),
+    }),
+  ]),
+);
 export type SessionAuthorizationListScope = z.infer<typeof SessionAuthorizationListScope>;
 
 export type ResolveSessionAuthorizationListScopeInput = {
@@ -7482,9 +8671,17 @@ export type ResolveSessionAuthorizationListScopeInput = {
 };
 
 export type SessionAuthorizationPort = {
+  capabilities?: {
+    /**
+     * Receive `session.model_account.write` instead of the legacy
+     * `session.codex_account.write`. Enable only after migrating policy keys;
+     * omitted or false preserves legacy host allow/deny behavior on both routes.
+     */
+    modelAccountOperation?: boolean;
+  };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
   /**
-   * Return the complete current scope used inside OpenGeni's cursor query.
+   * Return the complete current scope used inside Opengeni's cursor query.
    * This is deliberately not a post-filter callback: search, pinning, ordering,
    * totals, and cursor advancement must all operate on authorized rows.
    */
@@ -7500,18 +8697,14 @@ export const TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES = 512;
 export const TIMELINE_ANNOTATION_LABEL_MAX_BYTES = 256;
 export const TIMELINE_ANNOTATIONS_MAX_BYTES = 64 * 1024;
 
-export const TimelineAnnotationSourceKind = z.enum([
-  "user_message",
-  "assistant_message",
-  "tool_output",
-]);
+export const TimelineAnnotationSourceKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["user_message", "assistant_message", "tool_output"]),
+);
 export type TimelineAnnotationSourceKind = z.infer<typeof TimelineAnnotationSourceKind>;
 
-export const TimelineAnnotationSourceEventType = z.enum([
-  "user.message",
-  "agent.message.completed",
-  "agent.toolCall.output",
-]);
+export const TimelineAnnotationSourceEventType = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["user.message", "agent.message.completed", "agent.toolCall.output"]),
+);
 export type TimelineAnnotationSourceEventType = z.infer<typeof TimelineAnnotationSourceEventType>;
 
 function timelineAnnotationUtf8Bytes(value: string): number {
@@ -7529,74 +8722,78 @@ function timelineAnnotationBoundedText(maxBytes: number, label: string) {
   });
 }
 
-export const TimelineAnnotationSource = z
-  .object({
-    kind: TimelineAnnotationSourceKind,
-    eventId: z.string().uuid(),
-    eventType: TimelineAnnotationSourceEventType,
-    sequence: z.number().int().positive(),
-    turnId: z.string().uuid().nullable(),
-    startOffset: z.number().int().nonnegative(),
-    endOffset: z.number().int().nonnegative(),
-    contextBefore: timelineAnnotationBoundedText(
-      TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES,
-      "annotation source contextBefore",
-    ),
-    contextAfter: timelineAnnotationBoundedText(
-      TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES,
-      "annotation source contextAfter",
-    ),
-    label: timelineAnnotationBoundedText(
-      TIMELINE_ANNOTATION_LABEL_MAX_BYTES,
-      "annotation source label",
-    ).optional(),
-  })
-  .strict()
-  .superRefine((source, ctx) => {
-    if (source.endOffset < source.startOffset) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["endOffset"],
-        message: "annotation source endOffset must not precede startOffset",
-      });
-    }
-    const expectedKind =
-      source.eventType === "user.message"
-        ? "user_message"
-        : source.eventType === "agent.message.completed"
-          ? "assistant_message"
-          : "tool_output";
-    if (source.kind !== expectedKind) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["kind"],
-        message: "annotation source kind does not match eventType",
-      });
-    }
-  });
+export const TimelineAnnotationSource = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: TimelineAnnotationSourceKind,
+      eventId: z.string().uuid(),
+      eventType: TimelineAnnotationSourceEventType,
+      sequence: z.number().int().positive(),
+      turnId: z.string().uuid().nullable(),
+      startOffset: z.number().int().nonnegative(),
+      endOffset: z.number().int().nonnegative(),
+      contextBefore: timelineAnnotationBoundedText(
+        TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES,
+        "annotation source contextBefore",
+      ),
+      contextAfter: timelineAnnotationBoundedText(
+        TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES,
+        "annotation source contextAfter",
+      ),
+      label: timelineAnnotationBoundedText(
+        TIMELINE_ANNOTATION_LABEL_MAX_BYTES,
+        "annotation source label",
+      ).optional(),
+    })
+    .strict()
+    .superRefine((source, ctx) => {
+      if (source.endOffset < source.startOffset) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["endOffset"],
+          message: "annotation source endOffset must not precede startOffset",
+        });
+      }
+      const expectedKind =
+        source.eventType === "user.message"
+          ? "user_message"
+          : source.eventType === "agent.message.completed"
+            ? "assistant_message"
+            : "tool_output";
+      if (source.kind !== expectedKind) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["kind"],
+          message: "annotation source kind does not match eventType",
+        });
+      }
+    }),
+);
 export type TimelineAnnotationSource = z.infer<typeof TimelineAnnotationSource>;
 
-export const DraftTimelineAnnotation = z
-  .object({
-    id: z.string().uuid(),
-    source: TimelineAnnotationSource,
-    quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
-    note: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_NOTE_MAX_BYTES, "annotation note"),
-  })
-  .strict()
-  .superRefine((annotation, ctx) => {
-    if (!annotation.quote.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["quote"],
-        message: "annotation quote must contain non-whitespace text",
-      });
-    }
-  });
+export const DraftTimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      source: TimelineAnnotationSource,
+      quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
+      note: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_NOTE_MAX_BYTES, "annotation note"),
+    })
+    .strict()
+    .superRefine((annotation, ctx) => {
+      if (!annotation.quote.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["quote"],
+          message: "annotation quote must contain non-whitespace text",
+        });
+      }
+    }),
+);
 export type DraftTimelineAnnotation = z.infer<typeof DraftTimelineAnnotation>;
 
-export const SubmittedTimelineAnnotation = DraftTimelineAnnotation.superRefine(
-  (annotation, ctx) => {
+export const SubmittedTimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
+  DraftTimelineAnnotation.superRefine((annotation, ctx) => {
     if (!annotation.note.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -7604,24 +8801,26 @@ export const SubmittedTimelineAnnotation = DraftTimelineAnnotation.superRefine(
         message: "annotation note must contain non-whitespace text",
       });
     }
-  },
+  }),
 );
 export type SubmittedTimelineAnnotation = z.infer<typeof SubmittedTimelineAnnotation>;
 
-export const TimelineAnnotation = z
-  .object({
-    id: z.string().uuid(),
-    source: TimelineAnnotationSource,
-    quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
-    note: timelineAnnotationBoundedText(
-      TIMELINE_ANNOTATION_NOTE_MAX_BYTES,
-      "annotation note",
-    ).refine((value) => value.trim().length > 0, {
-      message: "annotation note must contain non-whitespace text",
-    }),
-    ordinal: z.number().int().positive(),
-  })
-  .strict();
+export const TimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      source: TimelineAnnotationSource,
+      quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
+      note: timelineAnnotationBoundedText(
+        TIMELINE_ANNOTATION_NOTE_MAX_BYTES,
+        "annotation note",
+      ).refine((value) => value.trim().length > 0, {
+        message: "annotation note must contain non-whitespace text",
+      }),
+      ordinal: z.number().int().positive(),
+    })
+    .strict(),
+);
 export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
 
 function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
@@ -7707,7 +8906,7 @@ export function renderTimelineAnnotationsForModel(
   ]);
   return [
     ...(text.length > 0 ? [text, ""] : []),
-    "[OpenGeni timeline annotations]",
+    "[Opengeni timeline annotations]",
     ...sections.flatMap((line, index) =>
       index > 0 && line.startsWith("Annotation ") ? ["", line] : [line],
     ),
@@ -7744,9 +8943,31 @@ export function formatModelContextTimestamp(value: Date | string): string {
   return `${MODEL_CONTEXT_WEEKDAYS[date.getUTCDay()]} ${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
-/** The time part of one accepted user-role message, from its acceptance time. */
-export function renderMessageSentAtForModel(sentAt: Date | string): string {
-  return `[Message sent ${formatModelContextTimestamp(sentAt)}]`;
+const MAX_MESSAGE_SENDER_CHARS = 200;
+
+/**
+ * The person a human message came from, as frozen with its turn, made safe for
+ * the one-line metadata part: no brackets or line breaks, bounded length.
+ * Empty when nothing readable remains.
+ */
+export function messageSenderForModel(sender: string | null | undefined): string | undefined {
+  const text = (sender ?? "")
+    .replace(/[[\]\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_MESSAGE_SENDER_CHARS)
+    .trim();
+  return text || undefined;
+}
+
+/**
+ * The metadata part of one accepted user-role message: its acceptance time
+ * and, for a person's message, who sent it. Members of a shared workspace use
+ * the same agent, so the model must be able to tell them apart.
+ */
+export function renderMessageSentAtForModel(sentAt: Date | string, sender?: string | null): string {
+  const from = messageSenderForModel(sender);
+  return `[Message sent ${formatModelContextTimestamp(sentAt)}${from ? ` by ${from}` : ""}]`;
 }
 
 /**
@@ -7778,7 +8999,8 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
  * turn acceptance. `sentAt` is the message's durable acceptance time, so the
  * model knows the current date without spending a tool call on it. All of them
  * remain in the visible message's chronological position, and presentation
- * layers may omit their leading parts.
+ * layers may omit their leading parts. `sender` names the person who sent a
+ * human message; it rides on the `sentAt` part.
  */
 export function renderUserMessageContentForModel(
   text: string,
@@ -7786,6 +9008,7 @@ export function renderUserMessageContentForModel(
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
   sentAt?: Date | string | null,
+  sender?: string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
@@ -7809,207 +9032,208 @@ export function renderUserMessageContentForModel(
         ]
       : []),
     ...(sentAt != null
-      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt) }]
+      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt, sender) }]
       : []),
     { type: "input_text", text: visibleContent },
   ];
 }
 
-export const SessionTurn = z
-  .object({
-    id: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    triggerEventId: z.string().uuid(),
-    temporalWorkflowId: z.string(),
-    status: SessionTurnStatus,
-    source: SessionTurnSource,
-    position: z.number().int(),
-    prompt: z.string(),
-    annotations: TimelineAnnotations.default([]),
-    resources: z.array(ResourceRef),
-    tools: z.array(ToolRef),
-    // Omitted/default discovery and explicit `tools: []` are distinct. False
-    // inherits the durable session policy; true replaces it for this turn after
-    // admission proves the selection is a subset.
-    toolsProvided: z.boolean().optional(),
-    model: z.string().min(1),
-    reasoningEffort: ReasoningEffort,
-    latencyMode: LatencyMode,
-    sandboxBackend: SandboxBackend,
-    // Per-turn OS override. NULL = inherit the session's sandboxOs.
-    sandboxOs: SandboxOs.nullable(),
-    metadata: z.record(z.string(), z.unknown()),
-    version: z.number().int().positive(),
-    executionGeneration: z.number().int().nonnegative(),
-    activeAttemptId: z.string().uuid().nullable(),
-    lineage: z.record(z.string(), z.unknown()),
-    initiator: TurnInitiator,
-    initiatorContext: TurnInitiatorContext,
-    /** Secret-safe projection of the exact personal authority frozen on this turn. */
-    personalConnections: z.array(McpPersonalConnectionSummary).default([]),
-    /** Safe summary only; opaque resource/grant identity remains private. */
-    personalResources: PersonalResourceAttachmentSummary.nullable().default(null),
-    cancelledBy: z.string().nullable(),
-    cancelReason: z.string().nullable(),
-    startedAt: z.string().nullable(),
-    finishedAt: z.string().nullable(),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-  })
-  .superRefine((turn, ctx) => {
-    if (turn.prompt.length === 0 && turn.annotations.length === 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["prompt"],
-        message: "turn prompt or annotations are required",
-      });
-    }
-  });
+export const SessionTurn = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid(),
+      triggerEventId: z.string().uuid(),
+      temporalWorkflowId: z.string(),
+      status: SessionTurnStatus,
+      source: SessionTurnSource,
+      position: z.number().int(),
+      prompt: z.string(),
+      annotations: TimelineAnnotations.default([]),
+      resources: z.array(ResourceRef),
+      tools: z.array(ToolRef),
+      // Omitted/default discovery and explicit `tools: []` are distinct. False
+      // inherits the durable session policy; true replaces it for this turn after
+      // admission proves the selection is a subset.
+      toolsProvided: z.boolean().optional(),
+      model: z.string().min(1),
+      reasoningEffort: ReasoningEffort,
+      latencyMode: LatencyMode,
+      sandboxBackend: SandboxBackend,
+      // Per-turn OS override. NULL = inherit the session's sandboxOs.
+      sandboxOs: SandboxOs.nullable(),
+      metadata: z.record(z.string(), z.unknown()),
+      version: z.number().int().positive(),
+      executionGeneration: z.number().int().nonnegative(),
+      activeAttemptId: z.string().uuid().nullable(),
+      lineage: z.record(z.string(), z.unknown()),
+      initiator: TurnInitiator,
+      initiatorContext: TurnInitiatorContext,
+      /** Secret-safe projection of the exact personal authority frozen on this turn. */
+      personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+      /** Safe summary only; opaque resource/grant identity remains private. */
+      personalResources: PersonalResourceAttachmentSummary.nullable().default(null),
+      cancelledBy: z.string().nullable(),
+      cancelReason: z.string().nullable(),
+      startedAt: z.string().nullable(),
+      finishedAt: z.string().nullable(),
+      createdAt: z.string(),
+      updatedAt: z.string(),
+    })
+    .superRefine((turn, ctx) => {
+      if (turn.prompt.length === 0 && turn.annotations.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["prompt"],
+          message: "turn prompt or annotations are required",
+        });
+      }
+    }),
+);
 export type SessionTurn = z.infer<typeof SessionTurn>;
 
-export const EffectiveControlBlocker = z.object({
-  kind: z.enum(["session", "workspace"]),
-  sessionId: z.string().uuid().optional(),
-  displayName: z.string().min(1),
-  actor: z.string().nullable(),
-  reason: z.string().nullable(),
-  changedAt: z.string().nullable(),
-  revision: z.number().int().nonnegative(),
-});
+export const EffectiveControlBlocker = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum(["session", "workspace"]),
+    sessionId: z.string().uuid().optional(),
+    displayName: z.string().min(1),
+    actor: z.string().nullable(),
+    reason: z.string().nullable(),
+    changedAt: z.string().nullable(),
+    revision: z.number().int().nonnegative(),
+  }),
+);
 export type EffectiveControlBlocker = z.infer<typeof EffectiveControlBlocker>;
 
-export const EffectiveControlResumeOption = z.object({
-  scope: z.enum(["selected", "session", "workspace"]),
-  targetId: z.string().uuid().optional(),
-  selectedStateAfter: SessionControlState,
-  remainingPrimaryBlocker: EffectiveControlBlocker.optional(),
-  impactCopy: z.string().min(1),
-});
+export const EffectiveControlResumeOption = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    scope: z.enum(["selected", "session", "workspace"]),
+    targetId: z.string().uuid().optional(),
+    selectedStateAfter: SessionControlState,
+    remainingPrimaryBlocker: EffectiveControlBlocker.optional(),
+    impactCopy: z.string().min(1),
+  }),
+);
 export type EffectiveControlResumeOption = z.infer<typeof EffectiveControlResumeOption>;
 
-export const EffectiveSessionControl = z.object({
-  state: SessionControlState,
-  controlVersion: z.number().int().nonnegative(),
-  controlEtag: z.string().min(1),
-  directState: SessionControlState,
-  primaryBlocker: EffectiveControlBlocker.nullable(),
-  additionalBlockerCount: z.number().int().nonnegative(),
-  blockers: z.array(EffectiveControlBlocker),
-  resumeOptions: z.array(EffectiveControlResumeOption),
-  override: z
-    .object({
-      rootSessionId: z.string().uuid(),
-      revision: z.number().int().nonnegative(),
-    })
-    .nullable(),
-  settlement: z
-    .object({
-      state: z.literal("stopping"),
-      attemptCount: z.number().int().positive(),
-      interruptionPendingCount: z.number().int().nonnegative(),
-      quiescencePendingCount: z.number().int().nonnegative(),
-    })
-    .nullable(),
-  /** Independent command-cancellation settlement. Session pause/turn state is
-   *  intentionally not overloaded with process lifecycle. */
-  backgroundCommandSettlement: z
-    .object({
-      state: z.literal("stopping"),
-      commandCount: z.number().int().positive(),
-    })
-    .nullable()
-    .optional(),
-});
+export const EffectiveSessionControl = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    state: SessionControlState,
+    controlVersion: z.number().int().nonnegative(),
+    controlEtag: z.string().min(1),
+    directState: SessionControlState,
+    primaryBlocker: EffectiveControlBlocker.nullable(),
+    additionalBlockerCount: z.number().int().nonnegative(),
+    blockers: z.array(EffectiveControlBlocker),
+    resumeOptions: z.array(EffectiveControlResumeOption),
+    override: z
+      .object({
+        rootSessionId: z.string().uuid(),
+        revision: z.number().int().nonnegative(),
+      })
+      .nullable(),
+    settlement: z
+      .object({
+        state: z.literal("stopping"),
+        attemptCount: z.number().int().positive(),
+        interruptionPendingCount: z.number().int().nonnegative(),
+        quiescencePendingCount: z.number().int().nonnegative(),
+      })
+      .nullable(),
+    /** Independent command-cancellation settlement. Session pause/turn state is
+     *  intentionally not overloaded with process lifecycle. */
+    backgroundCommandSettlement: z
+      .object({
+        state: z.literal("stopping"),
+        commandCount: z.number().int().positive(),
+      })
+      .nullable()
+      .optional(),
+  }),
+);
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
-const SessionOperationKey = z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+const SessionOperationKey = /* @__PURE__ */ defineSchema(() =>
+  z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
+);
 
-export const SessionCommandReceipt = z.object({
-  id: z.string().uuid(),
-  action: z.string().min(1),
-  operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
-  targetSessionId: z.string().uuid().nullable(),
-  targetTurnId: z.string().uuid().nullable(),
-  appliedControlRevision: z.number().int().nonnegative().nullable(),
-  appliedQueueVersion: z.number().int().nonnegative().nullable(),
-  appliedTurnVersion: z.number().int().positive().nullable(),
-  appliedDraftRevision: z.number().int().positive().nullable(),
-  createdAt: z.string(),
-});
+export const SessionCommandReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    action: z.string().min(1),
+    operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
+    targetSessionId: z.string().uuid().nullable(),
+    targetTurnId: z.string().uuid().nullable(),
+    appliedControlRevision: z.number().int().nonnegative().nullable(),
+    appliedQueueVersion: z.number().int().nonnegative().nullable(),
+    appliedTurnVersion: z.number().int().positive().nullable(),
+    appliedDraftRevision: z.number().int().positive().nullable(),
+    createdAt: z.string(),
+  }),
+);
 export type SessionCommandReceipt = z.infer<typeof SessionCommandReceipt>;
 
 /** The server-owned destination of an accepted human prompt at admission time. */
-export const SessionPromptRouting = z.enum([
-  "accepted_for_execution",
-  "queued_for_execution",
-  "accepted_for_steering",
-]);
+export const SessionPromptRouting = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["accepted_for_execution", "queued_for_execution", "accepted_for_steering"]),
+);
 export type SessionPromptRouting = z.infer<typeof SessionPromptRouting>;
 
-export const ComposerDraft = z.object({
-  revision: z.number().int().nonnegative(),
-  text: z.string(),
-  annotations: DraftTimelineAnnotations.default([]),
-  resources: z.array(ResourceRef),
-  model: z.string().min(1),
-  reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode,
-  sourceTurnId: z.string().uuid().nullable(),
-  sourceTurnVersion: z.number().int().positive().nullable(),
-  updatedAt: z.string().nullable(),
-});
+export const ComposerDraft = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    revision: z.number().int().nonnegative(),
+    text: z.string(),
+    annotations: DraftTimelineAnnotations.default([]),
+    resources: z.array(ResourceRef),
+    model: z.string().min(1),
+    reasoningEffort: ReasoningEffort,
+    latencyMode: LatencyMode,
+    sourceTurnId: z.string().uuid().nullable(),
+    sourceTurnVersion: z.number().int().positive().nullable(),
+    updatedAt: z.string().nullable(),
+  }),
+);
 export type ComposerDraft = z.infer<typeof ComposerDraft>;
 
-export const MoveSessionQueueItemRequest = z.object({
-  clientEventId: SessionOperationKey,
-  expectedQueueVersion: z.number().int().nonnegative(),
-  beforeTurnId: z.string().uuid().nullable(),
-});
+export const MoveSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    clientEventId: SessionOperationKey,
+    expectedQueueVersion: z.number().int().nonnegative(),
+    beforeTurnId: z.string().uuid().nullable(),
+  }),
+);
 export type MoveSessionQueueItemRequest = z.infer<typeof MoveSessionQueueItemRequest>;
 
-export const EditSessionQueueItemRequest = z.object({
-  clientEventId: SessionOperationKey,
-  expectedTurnVersion: z.number().int().positive(),
-  expectedDraftRevision: z.number().int().nonnegative(),
-  replaceDraft: z.boolean(),
-});
+export const EditSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    clientEventId: SessionOperationKey,
+    expectedTurnVersion: z.number().int().positive(),
+    expectedDraftRevision: z.number().int().nonnegative(),
+    replaceDraft: z.boolean(),
+  }),
+);
 export type EditSessionQueueItemRequest = z.infer<typeof EditSessionQueueItemRequest>;
 
-export const SteerSessionQueueItemRequest = z.object({
-  clientEventId: SessionOperationKey,
-  expectedTurnVersion: z.number().int().positive(),
-  controlEtag: z.string().min(1).optional(),
-});
+export const SteerSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    clientEventId: SessionOperationKey,
+    expectedTurnVersion: z.number().int().positive(),
+    controlEtag: z.string().min(1).optional(),
+  }),
+);
 export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
 
-export const DeleteSessionQueueItemRequest = z.object({
-  clientEventId: SessionOperationKey,
-  expectedTurnVersion: z.number().int().positive(),
-  reason: z.string().min(1).optional(),
-});
+export const DeleteSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    clientEventId: SessionOperationKey,
+    expectedTurnVersion: z.number().int().positive(),
+    reason: z.string().min(1).optional(),
+  }),
+);
 export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueItemRequest>;
 
-export const SaveComposerDraftRequest = ComposerDraft.pick({
-  text: true,
-  annotations: true,
-  resources: true,
-  model: true,
-  reasoningEffort: true,
-  latencyMode: true,
-}).extend({ expectedRevision: z.number().int().nonnegative() });
-export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
-
-/**
- * Submit one exact established-session draft. Content is repeated only as an
- * integrity fence for outcome-unknown idempotent replay; the matching durable
- * draft revision remains authoritative and is atomically rotated on acceptance.
- */
-export const SubmitComposerDraftRequest = z.preprocess(
-  (input) =>
-    input && typeof input === "object" && Object.hasOwn(input, "selectedHostMcpDelegations")
-      ? null
-      : input,
+export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
   ComposerDraft.pick({
     text: true,
     annotations: true,
@@ -8017,20 +9241,43 @@ export const SubmitComposerDraftRequest = z.preprocess(
     model: true,
     reasoningEffort: true,
     latencyMode: true,
-  })
-    .extend({
-      expectedDraftRevision: z.number().int().positive(),
-      clientEventId: SessionOperationKey,
-      delivery: z.enum(["send", "steer"]),
-      controlEtag: z.string().min(1).optional(),
-      modelContext: z.string().trim().min(1).max(32768).optional(),
-      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-      connectionAuthorities: z.never().optional(),
-      connectionAccounts: McpConnectionAccountSelections.default([]),
+  }).extend({ expectedRevision: z.number().int().nonnegative() }),
+);
+export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
-      personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+/**
+ * Submit one exact established-session draft. Content is repeated only as an
+ * integrity fence for outcome-unknown idempotent replay; the matching durable
+ * draft revision remains authoritative and is atomically rotated on acceptance.
+ */
+export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
+  z.preprocess(
+    (input) =>
+      input && typeof input === "object" && Object.hasOwn(input, "selectedHostMcpDelegations")
+        ? null
+        : input,
+    ComposerDraft.pick({
+      text: true,
+      annotations: true,
+      resources: true,
+      model: true,
+      reasoningEffort: true,
+      latencyMode: true,
     })
-    .superRefine(requireEstablishedPersonalResourceEpoch),
+      .extend({
+        expectedDraftRevision: z.number().int().positive(),
+        clientEventId: SessionOperationKey,
+        delivery: z.enum(["send", "steer"]),
+        controlEtag: z.string().min(1).optional(),
+        modelContext: z.string().trim().min(1).max(32768).optional(),
+        mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+        connectionAuthorities: z.never().optional(),
+        connectionAccounts: McpConnectionAccountSelections.default([]),
+
+        personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+      })
+      .superRefine(requireEstablishedPersonalResourceEpoch),
+  ),
 );
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
 
@@ -8061,121 +9308,143 @@ export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
  * entries and their machine entries are MRU ordered. A null target means the
  * managed sandbox; a null working directory means the machine's launch root.
  */
-export const NewSessionSelectionHistory = z.object({
-  projects: z
-    .array(
-      z.object({
-        channelId: z.string().uuid().nullable(),
-        targetSandboxId: z.string().uuid().nullable(),
-        machines: z
-          .array(
-            z.object({
-              sandboxId: z.string().uuid(),
-              workingDir: z.string().min(1).max(4096).nullable(),
-            }),
-          )
-          .max(20),
-      }),
-    )
-    .max(50),
-});
+export const NewSessionSelectionHistory = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    projects: z
+      .array(
+        z.object({
+          channelId: z.string().uuid().nullable(),
+          targetSandboxId: z.string().uuid().nullable(),
+          machines: z
+            .array(
+              z.object({
+                sandboxId: z.string().uuid(),
+                workingDir: z.string().min(1).max(4096).nullable(),
+              }),
+            )
+            .max(20),
+        }),
+      )
+      .max(50),
+  }),
+);
 export type NewSessionSelectionHistory = z.infer<typeof NewSessionSelectionHistory>;
 
 /** Actor-private, server-authoritative composer state before a session exists. */
-export const NewSessionDraft = z.object({
-  revision: z.number().int().nonnegative(),
-  text: z.string(),
-  resources: z.array(ResourceRef),
-  tools: z.array(ToolRef),
-  /** False means the workspace-default MCP policy is still inherited. */
-  toolsProvided: z.boolean().default(false),
-  model: z.string().min(1),
-  reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode,
-  /**
-   * True when the person chose this model policy (model, reasoning, latency).
-   * False means it follows the resolved default for new chats, so a later
-   * subscription or credit purchase can replace it. Absent on a save from an
-   * older client; the server then treats a draft that names the deployment
-   * default as following the default and any other model as chosen.
-   */
-  modelProvided: z.boolean().optional(),
-  /** Absent on legacy drafts; null is explicit provenance for the Default project. */
-  selectedProjectChannelId: z.string().uuid().nullable().optional(),
-  options: NewSessionDraftOptions,
-  selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
-  updatedAt: z.string().nullable(),
-});
+export const NewSessionDraft = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    revision: z.number().int().nonnegative(),
+    text: z.string(),
+    resources: z.array(ResourceRef),
+    tools: z.array(ToolRef),
+    /** False means the workspace-default MCP policy is still inherited. */
+    toolsProvided: z.boolean().default(false),
+    model: z.string().min(1),
+    reasoningEffort: ReasoningEffort,
+    latencyMode: LatencyMode,
+    /**
+     * True when the person chose this model policy (model, reasoning, latency).
+     * False means it follows the resolved default for new chats, so a later
+     * subscription or credit purchase can replace it. Absent on a save from an
+     * older client; the server then treats a draft that names the deployment
+     * default as following the default and any other model as chosen.
+     */
+    modelProvided: z.boolean().optional(),
+    /** Absent on legacy drafts; null is explicit provenance for the Default project. */
+    selectedProjectChannelId: z.string().uuid().nullable().optional(),
+    options: NewSessionDraftOptions,
+    selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
+    updatedAt: z.string().nullable(),
+  }),
+);
 export type NewSessionDraft = z.infer<typeof NewSessionDraft>;
 
-export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
-  text: true,
-  resources: true,
-  tools: true,
-  toolsProvided: true,
-  model: true,
-  reasoningEffort: true,
-  latencyMode: true,
-  modelProvided: true,
-  selectedProjectChannelId: true,
-  options: true,
-}).extend({ expectedRevision: z.number().int().nonnegative() });
+export const SaveNewSessionDraftRequest = /* @__PURE__ */ defineSchema(() =>
+  NewSessionDraft.pick({
+    text: true,
+    resources: true,
+    tools: true,
+    toolsProvided: true,
+    model: true,
+    reasoningEffort: true,
+    latencyMode: true,
+    modelProvided: true,
+    selectedProjectChannelId: true,
+    options: true,
+  }).extend({ expectedRevision: z.number().int().nonnegative() }),
+);
 export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
 
 export const WORKSPACE_CONTROL_REASON_MAX_BYTES = 8 * 1024;
 export const WORKSPACE_CONTROL_ACTOR_MAX_BYTES = 1024;
 export const WORKSPACE_CONTROL_EVENT_MAX_BYTES = 16 * 1024;
 
-const WorkspaceControlReason = z
-  .string()
-  .min(1)
-  .refine((value) => !value.includes("\u0000"), "reason must not contain NUL bytes")
-  .refine(
-    (value) => workspaceControlUtf8Bytes(value) <= WORKSPACE_CONTROL_REASON_MAX_BYTES,
-    `reason must not exceed ${WORKSPACE_CONTROL_REASON_MAX_BYTES} UTF-8 bytes`,
-  );
+const WorkspaceControlReason = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .refine((value) => !value.includes("\u0000"), "reason must not contain NUL bytes")
+    .refine(
+      (value) => workspaceControlUtf8Bytes(value) <= WORKSPACE_CONTROL_REASON_MAX_BYTES,
+      `reason must not exceed ${WORKSPACE_CONTROL_REASON_MAX_BYTES} UTF-8 bytes`,
+    ),
+);
 
-export const SessionControlRequest = z.object({
-  action: z.enum(["pause", "resume", "cancel"]),
-  reason: WorkspaceControlReason.optional(),
-  clientEventId: SessionOperationKey,
-  expectedControlEtag: z.string().min(1).optional(),
-});
+export const SessionControlRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    action: z
+      .enum(["pause", "resume", "cancel"])
+      .describe(
+        "pause stops the session and its sub-sessions until resume. cancel ends them for good and can't be undone; use pause to stop work you may want back.",
+      ),
+    reason: WorkspaceControlReason.optional(),
+    clientEventId: SessionOperationKey,
+    expectedControlEtag: z.string().min(1).optional(),
+  }),
+);
 export type SessionControlRequest = z.infer<typeof SessionControlRequest>;
 
 /** Retry an exact failed boundary without admitting another human message. */
-export const SessionRetryRequest = z
-  .object({
-    clientEventId: SessionOperationKey,
-    failureEventId: z.string().uuid(),
-    model: z.string().min(1).optional(),
-    reasoningEffort: ReasoningEffort.optional(),
-    latencyMode: LatencyMode.optional(),
-  })
-  .strict();
+export const SessionRetryRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      clientEventId: SessionOperationKey,
+      failureEventId: z.string().uuid(),
+      model: z.string().min(1).optional(),
+      reasoningEffort: ReasoningEffort.optional(),
+      latencyMode: LatencyMode.optional(),
+    })
+    .strict(),
+);
 export type SessionRetryRequest = z.infer<typeof SessionRetryRequest>;
-export const SessionRetryResponse = z.object({
-  outcome: z.enum(["accepted", "replayed"]),
-  turnId: z.string().uuid(),
-  failureEventId: z.string().uuid(),
-});
+export const SessionRetryResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    outcome: z.enum(["accepted", "replayed"]),
+    turnId: z.string().uuid(),
+    failureEventId: z.string().uuid(),
+  }),
+);
 export type SessionRetryResponse = z.infer<typeof SessionRetryResponse>;
 
-export const WorkspaceInferenceControlRequest = z.object({
-  action: z.enum(["pause", "resume"]),
-  reason: WorkspaceControlReason.optional(),
-  clientEventId: SessionOperationKey,
-  expectedRevision: z.number().int().nonnegative().optional(),
-});
+export const WorkspaceInferenceControlRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    action: z.enum(["pause", "resume"]),
+    reason: WorkspaceControlReason.optional(),
+    clientEventId: SessionOperationKey,
+    expectedRevision: z.number().int().nonnegative().optional(),
+  }),
+);
 export type WorkspaceInferenceControlRequest = z.infer<typeof WorkspaceInferenceControlRequest>;
 
-export const WorkspaceInferenceControlResponse = z.object({
-  receipt: SessionCommandReceipt,
-  state: SessionControlState,
-  revision: z.number().int().nonnegative(),
-  interruptionCount: z.number().int().nonnegative(),
-  wakeCount: z.number().int().nonnegative(),
-});
+export const WorkspaceInferenceControlResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receipt: SessionCommandReceipt,
+    state: SessionControlState,
+    revision: z.number().int().nonnegative(),
+    interruptionCount: z.number().int().nonnegative(),
+    wakeCount: z.number().int().nonnegative(),
+  }),
+);
 export type WorkspaceInferenceControlResponse = z.infer<typeof WorkspaceInferenceControlResponse>;
 
 /**
@@ -8183,46 +9452,50 @@ export type WorkspaceInferenceControlResponse = z.infer<typeof WorkspaceInferenc
  * It is not conversation history and never becomes queue work; clients use it
  * only to refetch authoritative workspace/session projections.
  */
-export const WorkspaceControlEventTruncation = z.object({
-  truncated: z.literal(true),
-  surface: z.enum([
-    "durable_control",
-    "database_guard",
-    "http_projection",
-    "nats_legacy_guard",
-    "sse_legacy_guard",
-  ]),
-  deliveredBytes: z.number().int().nonnegative(),
-  fields: z.array(
-    z.object({
-      field: z.enum(["reason", "actor"]),
-      originalBytes: z.number().int().nonnegative(),
-      deliveredBytes: z.number().int().nonnegative(),
-      omittedBytes: z.number().int().nonnegative(),
+export const WorkspaceControlEventTruncation = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    truncated: z.literal(true),
+    surface: z.enum([
+      "durable_control",
+      "database_guard",
+      "http_projection",
+      "nats_legacy_guard",
+      "sse_legacy_guard",
+    ]),
+    deliveredBytes: z.number().int().nonnegative(),
+    fields: z.array(
+      z.object({
+        field: z.enum(["reason", "actor"]),
+        originalBytes: z.number().int().nonnegative(),
+        deliveredBytes: z.number().int().nonnegative(),
+        omittedBytes: z.number().int().nonnegative(),
+      }),
+    ),
+    fullEvidence: z.object({
+      available: z.literal(false),
+      reason: z.literal("not_retained"),
     }),
-  ),
-  fullEvidence: z.object({
-    available: z.literal(false),
-    reason: z.literal("not_retained"),
   }),
-});
+);
 export type WorkspaceControlEventTruncation = z.infer<typeof WorkspaceControlEventTruncation>;
 
-export const WorkspaceControlEvent = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sequence: z.number().int().positive(),
-  revision: z.number().int().positive(),
-  type: z.literal("workspace.control.changed"),
-  scope: z.enum(["workspace", "session"]),
-  rootSessionId: z.string().uuid().nullable(),
-  action: z.enum(["pause", "resume", "timer_set", "timer_cancelled"]),
-  automatic: z.boolean(),
-  reason: z.string().nullable(),
-  actor: z.string().min(1),
-  occurredAt: z.string(),
-  truncation: WorkspaceControlEventTruncation.nullable().optional(),
-});
+export const WorkspaceControlEvent = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sequence: z.number().int().positive(),
+    revision: z.number().int().positive(),
+    type: z.literal("workspace.control.changed"),
+    scope: z.enum(["workspace", "session"]),
+    rootSessionId: z.string().uuid().nullable(),
+    action: z.enum(["pause", "resume", "timer_set", "timer_cancelled"]),
+    automatic: z.boolean(),
+    reason: z.string().nullable(),
+    actor: z.string().min(1),
+    occurredAt: z.string(),
+    truncation: WorkspaceControlEventTruncation.nullable().optional(),
+  }),
+);
 export type WorkspaceControlEvent = z.infer<typeof WorkspaceControlEvent>;
 
 export type WorkspaceControlBoundarySurface = WorkspaceControlEventTruncation["surface"];
@@ -8352,24 +9625,28 @@ function settleWorkspaceControlDeliveredBytes(
   }
 }
 
-export const SystemUpdateClassification = z.enum(["success", "failure", "action_required", "info"]);
+export const SystemUpdateClassification = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["success", "failure", "action_required", "info"]),
+);
 export type SystemUpdateClassification = z.infer<typeof SystemUpdateClassification>;
 
-export const SessionSystemUpdateKind = z.enum([
-  "scheduled_occurrence",
-  "goal_continuation",
-  "agent_message",
-  "agent_steer_instruction",
-  "session_wait_timeout",
-  "background_command_result",
-  "child_terminal_result",
-  "media_generation_result",
-  "child_requires_action",
-  "child_requires_action_resolved",
-  "child_paused",
-  "child_waiting_capacity",
-  "child_progress",
-]);
+export const SessionSystemUpdateKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "scheduled_occurrence",
+    "goal_continuation",
+    "agent_message",
+    "agent_steer_instruction",
+    "session_wait_timeout",
+    "background_command_result",
+    "child_terminal_result",
+    "media_generation_result",
+    "child_requires_action",
+    "child_requires_action_resolved",
+    "child_paused",
+    "child_waiting_capacity",
+    "child_progress",
+  ]),
+);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 
 /**
@@ -8445,99 +9722,103 @@ const boundedUtf8String = (maxBytes: number) =>
     message: `must be at most ${maxBytes} UTF-8 bytes`,
   });
 
-export const ChildRequiresActionRequest = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("human_input"),
-    requestId: z.string().uuid(),
-    questionCount: z.number().int().nonnegative(),
-    firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
-    allowSkip: z.boolean(),
-    expiresAt: z.string().nullable(),
-  }),
-  z.object({
-    kind: z.literal("approval"),
-    approvalId: boundedUtf8String(256),
-    toolName: boundedUtf8String(128).nullable(),
-  }),
-]);
+export const ChildRequiresActionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("human_input"),
+      requestId: z.string().uuid(),
+      questionCount: z.number().int().nonnegative(),
+      firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
+      allowSkip: z.boolean(),
+      expiresAt: z.string().nullable(),
+    }),
+    z.object({
+      kind: z.literal("approval"),
+      approvalId: boundedUtf8String(256),
+      toolName: boundedUtf8String(128).nullable(),
+    }),
+  ]),
+);
 export type ChildRequiresActionRequest = z.infer<typeof ChildRequiresActionRequest>;
 
-export const ChildRequiresActionPayload = z
-  .object({
-    type: z.literal("child_requires_action"),
-    childSessionId: z.string().uuid(),
-    childTurnId: z.string().uuid(),
-    childTurnGeneration: z.number().int().positive(),
-    requests: z.array(ChildRequiresActionRequest).max(CHILD_REQUIRES_ACTION_MAX_REQUESTS),
-    truncated: z.boolean(),
-  })
-  .passthrough();
+export const ChildRequiresActionPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("child_requires_action"),
+      childSessionId: z.string().uuid(),
+      childTurnId: z.string().uuid(),
+      childTurnGeneration: z.number().int().positive(),
+      requests: z.array(ChildRequiresActionRequest).max(CHILD_REQUIRES_ACTION_MAX_REQUESTS),
+      truncated: z.boolean(),
+    })
+    .passthrough(),
+);
 export type ChildRequiresActionPayload = z.infer<typeof ChildRequiresActionPayload>;
 
-export const ChildRequiresActionResolvedOutcome = z.enum([
-  "answered",
-  "skipped",
-  "expired",
-  "cancelled",
-  "approved",
-  "rejected",
-]);
+export const ChildRequiresActionResolvedOutcome = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["answered", "skipped", "expired", "cancelled", "approved", "rejected"]),
+);
 export type ChildRequiresActionResolvedOutcome = z.infer<typeof ChildRequiresActionResolvedOutcome>;
 
-export const ChildRequiresActionRespondedByKind = z.enum([
-  "human",
-  "api",
-  "agent_attempt",
-  "system",
-]);
+export const ChildRequiresActionRespondedByKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["human", "api", "agent_attempt", "system"]),
+);
 export type ChildRequiresActionRespondedByKind = z.infer<typeof ChildRequiresActionRespondedByKind>;
 
-export const ChildRequiresActionResolvedPayload = z
-  .object({
-    type: z.literal("child_requires_action_resolved"),
-    childSessionId: z.string().uuid(),
-    childTurnId: z.string().uuid(),
-    childTurnGeneration: z.number().int().positive(),
-    requestId: z.string().uuid().nullable(),
-    approvalId: boundedUtf8String(256).nullable(),
-    outcome: ChildRequiresActionResolvedOutcome,
-    respondedByKind: ChildRequiresActionRespondedByKind,
-  })
-  .passthrough();
+export const ChildRequiresActionResolvedPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("child_requires_action_resolved"),
+      childSessionId: z.string().uuid(),
+      childTurnId: z.string().uuid(),
+      childTurnGeneration: z.number().int().positive(),
+      requestId: z.string().uuid().nullable(),
+      approvalId: boundedUtf8String(256).nullable(),
+      outcome: ChildRequiresActionResolvedOutcome,
+      respondedByKind: ChildRequiresActionRespondedByKind,
+    })
+    .passthrough(),
+);
 export type ChildRequiresActionResolvedPayload = z.infer<typeof ChildRequiresActionResolvedPayload>;
 
-export const ChildPausedPayload = z
-  .object({
-    type: z.literal("child_paused"),
-    childSessionId: z.string().uuid(),
-    operationId: z.string().uuid(),
-    actorKind: z.enum(["human", "api", "agent"]),
-    reason: boundedUtf8String(CHILD_PAUSED_REASON_MAX_BYTES).nullable(),
-  })
-  .passthrough();
+export const ChildPausedPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("child_paused"),
+      childSessionId: z.string().uuid(),
+      operationId: z.string().uuid(),
+      actorKind: z.enum(["human", "api", "agent"]),
+      reason: boundedUtf8String(CHILD_PAUSED_REASON_MAX_BYTES).nullable(),
+    })
+    .passthrough(),
+);
 export type ChildPausedPayload = z.infer<typeof ChildPausedPayload>;
 
-export const ChildWaitingCapacityPayload = z
-  .object({
-    type: z.literal("child_waiting_capacity"),
-    childSessionId: z.string().uuid(),
-    childTurnId: z.string().uuid(),
-    provider: z.enum(["codex", "xai", "claude"]),
-    nextCheckAt: z.string().nullable(),
-  })
-  .passthrough();
+export const ChildWaitingCapacityPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("child_waiting_capacity"),
+      childSessionId: z.string().uuid(),
+      childTurnId: z.string().uuid(),
+      provider: z.enum(["codex", "xai", "claude"]),
+      nextCheckAt: z.string().nullable(),
+    })
+    .passthrough(),
+);
 export type ChildWaitingCapacityPayload = z.infer<typeof ChildWaitingCapacityPayload>;
 
-export const ChildProgressPayload = z
-  .object({
-    type: z.literal("child_progress"),
-    childSessionId: z.string().uuid(),
-    goalId: z.string().uuid(),
-    objectiveRevision: z.number().int().nonnegative(),
-    operationId: z.string().uuid(),
-    progressNote: boundedUtf8String(CHILD_PROGRESS_NOTE_MAX_BYTES),
-  })
-  .passthrough();
+export const ChildProgressPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("child_progress"),
+      childSessionId: z.string().uuid(),
+      goalId: z.string().uuid(),
+      objectiveRevision: z.number().int().nonnegative(),
+      operationId: z.string().uuid(),
+      progressNote: boundedUtf8String(CHILD_PROGRESS_NOTE_MAX_BYTES),
+    })
+    .passthrough(),
+);
 export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
 
 /**
@@ -8565,39 +9846,41 @@ export const CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES = 8 * 1024;
  * out, `totalBytes` counts every part, and `nextAction` reads all of them from
  * the first.
  */
-export const ChildTerminalResultFinalAnswer = z
-  .object({
-    sequence: z.number().int().positive(),
-    text: z.string(),
-    truncated: z.boolean(),
-    totalBytes: z.number().int().nonnegative(),
-    goalContinuations: z
-      .array(
-        z
-          .object({
-            sequence: z.number().int().positive(),
-            text: z.string().min(1),
-          })
-          .passthrough(),
-      )
-      .min(1)
-      .optional(),
-    omittedSequences: z.array(z.number().int().positive()).min(1).max(64).optional(),
-    nextAction: z
-      .object({
-        tool: z.literal("session_events"),
-        arguments: z
-          .object({
-            sessionId: z.string().uuid(),
-            view: z.literal("results"),
-            after: z.number().int().nonnegative(),
-          })
-          .passthrough(),
-      })
-      .passthrough()
-      .optional(),
-  })
-  .passthrough();
+export const ChildTerminalResultFinalAnswer = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sequence: z.number().int().positive(),
+      text: z.string(),
+      truncated: z.boolean(),
+      totalBytes: z.number().int().nonnegative(),
+      goalContinuations: z
+        .array(
+          z
+            .object({
+              sequence: z.number().int().positive(),
+              text: z.string().min(1),
+            })
+            .passthrough(),
+        )
+        .min(1)
+        .optional(),
+      omittedSequences: z.array(z.number().int().positive()).min(1).max(64).optional(),
+      nextAction: z
+        .object({
+          tool: z.literal("session_events"),
+          arguments: z
+            .object({
+              sessionId: z.string().uuid(),
+              view: z.literal("results"),
+              after: z.number().int().nonnegative(),
+            })
+            .passthrough(),
+        })
+        .passthrough()
+        .optional(),
+    })
+    .passthrough(),
+);
 export type ChildTerminalResultFinalAnswer = z.infer<typeof ChildTerminalResultFinalAnswer>;
 
 /**
@@ -8726,112 +10009,117 @@ export function childTerminalResultFinalAnswerWithGoalContinuations(input: {
   };
 }
 
-export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("scheduled_occurrence"),
-      text: z.string().min(1),
-      scheduledTaskId: z.string().uuid(),
-      scheduledTaskRunId: z.string().uuid(),
-      resources: z.array(ResourceRef).optional(),
-      tools: z.array(ToolRef).optional(),
-    })
-    .passthrough(),
-  z
-    .object({
-      type: z.literal("goal_continuation"),
-      goalId: z.string().uuid(),
-      goalVersion: z.number().int().positive(),
-      prompt: z.string().min(1),
-      reason: z.string().optional(),
-    })
-    .passthrough(),
-  z
-    .object({
-      type: z.literal("agent_message"),
-      text: z.string().min(1),
-      operationId: z.string().uuid(),
-    })
-    .passthrough(),
-  z
-    .object({
-      type: z.literal("agent_steer_instruction"),
-      instruction: z.string().min(1),
-      operationId: z.string().uuid(),
-    })
-    .passthrough(),
-  z
-    .object({
-      type: z.literal("session_wait_timeout"),
-      waitTurnId: z.string().uuid(),
-      deadlineAt: z.string().datetime({ offset: true }),
-      reason: boundedUtf8String(2 * 1024),
-    })
-    .passthrough(),
-  z
-    .object({
-      type: z.literal("background_command_result"),
-      commandId: z.string().uuid(),
-      state: z.enum(["exited", "lost"]),
-      exitCode: z.number().int().nullable(),
-      reason: boundedUtf8String(512),
-      failure: z.lazy(() => SessionCommandFailure).optional(),
-      outputLocator: z
-        .object({
-          eventType: z.literal("sandbox.command.output.delta"),
-          commandId: z.string().uuid(),
-        })
-        .strict(),
-    })
-    .passthrough(),
-  z
-    .object({
-      type: z.literal("child_terminal_result"),
-      childSessionId: z.string().uuid(),
-      status: z.enum(["idle", "failed", "cancelled"]),
-      /** Optional so older rows and older producers remain valid. */
-      finalAnswer: ChildTerminalResultFinalAnswer.optional(),
-    })
-    .passthrough(),
-  MediaGenerationResult,
-  ChildRequiresActionPayload,
-  ChildRequiresActionResolvedPayload,
-  ChildPausedPayload,
-  ChildWaitingCapacityPayload,
-  ChildProgressPayload,
-]);
+export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [
+    z
+      .object({
+        type: z.literal("scheduled_occurrence"),
+        text: z.string().min(1),
+        scheduledTaskId: z.string().uuid(),
+        scheduledTaskRunId: z.string().uuid(),
+        resources: z.array(ResourceRef).optional(),
+        tools: z.array(ToolRef).optional(),
+        /**
+         * Connectors this occurrence runs without because every account a
+         * person pinned for them can no longer be used.
+         */
+        unavailableConnectors: z.array(z.string().min(1).max(256)).max(128).optional(),
+      })
+      .passthrough(),
+    z
+      .object({
+        type: z.literal("goal_continuation"),
+        goalId: z.string().uuid(),
+        goalVersion: z.number().int().positive(),
+        prompt: z.string().min(1),
+        reason: z.string().optional(),
+      })
+      .passthrough(),
+    z
+      .object({
+        type: z.literal("agent_message"),
+        text: z.string().min(1),
+        operationId: z.string().uuid(),
+      })
+      .passthrough(),
+    z
+      .object({
+        type: z.literal("agent_steer_instruction"),
+        instruction: z.string().min(1),
+        operationId: z.string().uuid(),
+      })
+      .passthrough(),
+    z
+      .object({
+        type: z.literal("session_wait_timeout"),
+        waitTurnId: z.string().uuid(),
+        deadlineAt: z.string().datetime({ offset: true }),
+        reason: boundedUtf8String(2 * 1024),
+      })
+      .passthrough(),
+    z
+      .object({
+        type: z.literal("background_command_result"),
+        commandId: z.string().uuid(),
+        state: z.enum(["exited", "lost"]),
+        exitCode: z.number().int().nullable(),
+        reason: boundedUtf8String(512),
+        failure: z.lazy(() => SessionCommandFailure).optional(),
+        outputLocator: z
+          .object({
+            eventType: z.literal("sandbox.command.output.delta"),
+            commandId: z.string().uuid(),
+          })
+          .strict(),
+      })
+      .passthrough(),
+    z
+      .object({
+        type: z.literal("child_terminal_result"),
+        childSessionId: z.string().uuid(),
+        status: z.enum(["idle", "failed", "cancelled"]),
+        /** Optional so older rows and older producers remain valid. */
+        finalAnswer: ChildTerminalResultFinalAnswer.optional(),
+      })
+      .passthrough(),
+    MediaGenerationResult,
+    ChildRequiresActionPayload,
+    ChildRequiresActionResolvedPayload,
+    ChildPausedPayload,
+    ChildWaitingCapacityPayload,
+    ChildProgressPayload,
+  ]),
+);
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
 
-export const SessionSystemUpdateState = z.enum([
-  "pending",
-  "delivered",
-  "cancelled",
-  "superseded",
-  "failed",
-]);
+export const SessionSystemUpdateState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["pending", "delivered", "cancelled", "superseded", "failed"]),
+);
 export type SessionSystemUpdateState = z.infer<typeof SessionSystemUpdateState>;
 
-export const SessionSystemUpdate = z.object({
-  id: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  kind: SessionSystemUpdateKind,
-  classification: SystemUpdateClassification,
-  sourceId: z.string(),
-  dedupeKey: z.string(),
-  summary: z.string(),
-  payload: SessionSystemUpdatePayload,
-  lineage: z.record(z.string(), z.unknown()),
-  state: SessionSystemUpdateState,
-  deliveredTurnId: z.string().uuid().nullable(),
-  /**
-   * The exact durable model-memory row containing the coalesced batch that
-   * delivered this update. Null until claim; every member of one batch shares
-   * the same id.
-   */
-  deliveredHistoryItemId: z.string().uuid().nullable(),
-  deliveredAt: z.string().nullable(),
-  createdAt: z.string(),
-});
+export const SessionSystemUpdate = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    kind: SessionSystemUpdateKind,
+    classification: SystemUpdateClassification,
+    sourceId: z.string(),
+    dedupeKey: z.string(),
+    summary: z.string(),
+    payload: SessionSystemUpdatePayload,
+    lineage: z.record(z.string(), z.unknown()),
+    state: SessionSystemUpdateState,
+    deliveredTurnId: z.string().uuid().nullable(),
+    /**
+     * The exact durable model-memory row containing the coalesced batch that
+     * delivered this update. Null until claim; every member of one batch shares
+     * the same id.
+     */
+    deliveredHistoryItemId: z.string().uuid().nullable(),
+    deliveredAt: z.string().nullable(),
+    createdAt: z.string(),
+  }),
+);
 export type SessionSystemUpdate = z.infer<typeof SessionSystemUpdate>;
 
 /**
@@ -8839,45 +10127,49 @@ export type SessionSystemUpdate = z.infer<typeof SessionSystemUpdate>;
  * lineage, and dedupe data remain in canonical storage and never inflate the
  * hot queue response.
  */
-export const SessionPendingInputPreview = SessionSystemUpdate.pick({
-  id: true,
-  sessionId: true,
-  kind: true,
-  classification: true,
-  sourceId: true,
-  summary: true,
-  createdAt: true,
-});
+export const SessionPendingInputPreview = /* @__PURE__ */ defineSchema(() =>
+  SessionSystemUpdate.pick({
+    id: true,
+    sessionId: true,
+    kind: true,
+    classification: true,
+    sourceId: true,
+    summary: true,
+    createdAt: true,
+  }),
+);
 export type SessionPendingInputPreview = z.infer<typeof SessionPendingInputPreview>;
 
-export const SessionQueueSnapshot = z.object({
-  version: z.number().int().nonnegative(),
-  effectiveControl: EffectiveSessionControl,
-  /** Secret-safe personal MCP summaries frozen on the exact active turn. */
-  activePersonalConnections: z.array(McpPersonalConnectionSummary).default([]),
-  /**
-   * True while the latest attempt is interrupted but has not durably proved
-   * quiescence: no more inference, user-visible output, or workspace-persistence
-   * authority. Temporal cancellation/terminalization is not that proof. This is
-   * distinct from ordinary capacity queueing, remains accurate with an empty
-   * visible queue, and is independent of Steer-row metadata or withdrawal.
-   */
-  stoppingPreviousAttempt: z.boolean(),
-  items: z.array(SessionTurn),
-  /** Canonical bounded previews; never reconstructed from session events. */
-  pendingInputs: z.array(SessionPendingInputPreview),
-  /**
-   * Exact members of the next bounded machine-input batch that will join an
-   * already-waiting human/API prompt. Null means the next machine-input claim
-   * is standalone. This is a projection of canonical rows, not queue state.
-   */
-  pendingInputAttachment: z
-    .object({
-      turnId: z.string().uuid(),
-      inputIds: z.array(z.string().uuid()).min(1),
-    })
-    .nullable(),
-});
+export const SessionQueueSnapshot = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    version: z.number().int().nonnegative(),
+    effectiveControl: EffectiveSessionControl,
+    /** Secret-safe personal MCP summaries frozen on the exact active turn. */
+    activePersonalConnections: z.array(McpPersonalConnectionSummary).default([]),
+    /**
+     * True while the latest attempt is interrupted but has not durably proved
+     * quiescence: no more inference, user-visible output, or workspace-persistence
+     * authority. Temporal cancellation/terminalization is not that proof. This is
+     * distinct from ordinary capacity queueing, remains accurate with an empty
+     * visible queue, and is independent of Steer-row metadata or withdrawal.
+     */
+    stoppingPreviousAttempt: z.boolean(),
+    items: z.array(SessionTurn),
+    /** Canonical bounded previews; never reconstructed from session events. */
+    pendingInputs: z.array(SessionPendingInputPreview),
+    /**
+     * Exact members of the next bounded machine-input batch that will join an
+     * already-waiting human/API prompt. Null means the next machine-input claim
+     * is standalone. This is a projection of canonical rows, not queue state.
+     */
+    pendingInputAttachment: z
+      .object({
+        turnId: z.string().uuid(),
+        inputIds: z.array(z.string().uuid()).min(1),
+      })
+      .nullable(),
+  }),
+);
 export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
 type RenderableSessionSystemUpdate = Pick<
@@ -8893,6 +10185,8 @@ type RenderableSessionSystemUpdate = Pick<
  */
 export type SessionSystemUpdateBatchRenderOptions = {
   deliveredAt?: Date | string | null;
+  /** Server-derived configuration facts, model memory only. */
+  selectionNotes?: Readonly<Record<string, string>>;
 };
 
 function renderSessionSystemUpdateDeliveredAt(
@@ -8917,7 +10211,7 @@ export function renderSessionSystemUpdateBatch(
     throw new TypeError("A durable machine-input batch requires at least one update");
   }
   return [
-    "[OpenGeni internal updates]",
+    "[Opengeni internal updates]",
     "These platform updates were delivered together for this inference.",
     ...renderSessionSystemUpdateDeliveredAt(options),
     JSON.stringify({
@@ -8930,12 +10224,15 @@ export function renderSessionSystemUpdateBatch(
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
+        ...(options.selectionNotes?.[update.id]
+          ? { selectionNote: options.selectionNotes[update.id] }
+          : {}),
       })),
     }),
   ].join("\n");
 }
 
-export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurrence]" as const;
+export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurrence]" as const;
 
 /**
  * A pure scheduled-occurrence batch is a new task boundary for the model, not
@@ -8986,6 +10283,11 @@ function renderScheduledOccurrenceTaskBatch(
         ...(occurrence.update.createdAt
           ? [`Created: ${formatModelContextTimestamp(occurrence.update.createdAt)}`]
           : []),
+        ...(occurrence.payload.unavailableConnectors?.length
+          ? [
+              `Unavailable in this occurrence: ${occurrence.payload.unavailableConnectors.join(", ")}. The accounts a person pinned for these connectors can no longer be used, so their tools are absent and the schedule owner is told. Do not reach them another way; if the instructions need them, say so in your result.`,
+            ]
+          : []),
         "Instructions:",
         occurrence.payload.text,
       ];
@@ -9014,10 +10316,206 @@ export function sessionSystemUpdateBatchHistoryItem(
   };
 }
 
-export const VariableSetVariableName = z
-  .string()
-  .regex(/^[A-Z][A-Z0-9_]*$/)
-  .max(128);
+const SESSION_GOAL_CONTEXT_PREFIX = `${SESSION_GOAL_CONTEXT_LABEL}\n`;
+const SESSION_GOAL_CONTEXT_HEADER =
+  /^(?:Standing|Previous) session goal \(frozen at logical-turn acceptance; objective revision (\d+); status ([a-z_]+)\)/;
+const SESSION_GOAL_CONTEXT_UNCHANGED =
+  /^Standing session goal unchanged: identical to the full goal text shown earlier \(objective revision (\d+); status ([a-z_]+)\)\.$/;
+const SESSION_SYSTEM_UPDATE_BATCH_BODY_LABELS = [
+  "[Opengeni internal updates]",
+  SCHEDULED_OCCURRENCE_TASK_LABEL,
+] as const;
+
+type SessionGoalContextIdentity = { objectiveRevision: string; state: string };
+
+function sessionGoalContextIdentity(block: string): SessionGoalContextIdentity | null {
+  if (!block.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const match = SESSION_GOAL_CONTEXT_HEADER.exec(block.slice(SESSION_GOAL_CONTEXT_PREFIX.length));
+  return match ? { objectiveRevision: match[1]!, state: match[2]! } : null;
+}
+
+function unchangedSessionGoalContextIdentity(block: string): SessionGoalContextIdentity | null {
+  if (!block.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const match = SESSION_GOAL_CONTEXT_UNCHANGED.exec(
+    block.slice(SESSION_GOAL_CONTEXT_PREFIX.length),
+  );
+  return match ? { objectiveRevision: match[1]!, state: match[2]! } : null;
+}
+
+/**
+ * The short stand-in for a goal context identical to the most recent one the
+ * model has already been given in the same request.
+ */
+export function renderUnchangedSessionGoalContext(goalContextBlock: string): string | undefined {
+  const identity = sessionGoalContextIdentity(goalContextBlock);
+  if (!identity) return undefined;
+  return `${SESSION_GOAL_CONTEXT_PREFIX}Standing session goal unchanged: identical to the full goal text shown earlier (objective revision ${identity.objectiveRevision}; status ${identity.state}).`;
+}
+
+/** Split a durable system-batch string into its leading goal block and body. */
+function splitSystemBatchGoalContext(content: string): { goal: string; body: string } | null {
+  if (!content.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) return null;
+  const boundaries = SESSION_SYSTEM_UPDATE_BATCH_BODY_LABELS.flatMap((label) => {
+    const index = content.indexOf(`\n\n${label}\n`);
+    return index >= 0 ? [index] : [];
+  });
+  if (boundaries.length === 0) return null;
+  const boundary = Math.min(...boundaries);
+  return {
+    goal: content.slice(0, boundary),
+    body: content.slice(boundary + 2),
+  };
+}
+
+type GoalContextRewrite = (block: string) => string;
+
+function rewriteGoalContextBlocks<T extends Record<string, unknown>>(
+  items: readonly T[],
+  rewrite: GoalContextRewrite,
+): T[] {
+  let changedAny = false;
+  const result = items.map((item) => {
+    if (item.type !== "message" || (item.role !== "user" && item.role !== "system")) return item;
+    const content = item.content;
+    if (typeof content === "string") {
+      const split = splitSystemBatchGoalContext(content);
+      if (!split) return item;
+      const goal = rewrite(split.goal);
+      if (goal === split.goal) return item;
+      changedAny = true;
+      return { ...item, content: `${goal}\n\n${split.body}` };
+    }
+    if (!Array.isArray(content)) return item;
+    let changed = false;
+    const parts = content.map((part: unknown) => {
+      if (!part || typeof part !== "object") return part;
+      const record = part as Record<string, unknown>;
+      if (typeof record.text !== "string" || !record.text.startsWith(SESSION_GOAL_CONTEXT_PREFIX)) {
+        return part;
+      }
+      const text = rewrite(record.text);
+      if (text === record.text) return part;
+      changed = true;
+      return { ...record, text };
+    });
+    if (!changed) return item;
+    changedAny = true;
+    return { ...item, content: parts };
+  });
+  return changedAny ? result : (items as T[]);
+}
+
+/**
+ * Restore every "unchanged" stand-in to the full goal context it refers to,
+ * using the most recent full context earlier in the same list. A stand-in
+ * without a matching earlier context is left as it is.
+ */
+export function expandUnchangedSessionGoalContexts<T extends Record<string, unknown>>(
+  items: readonly T[],
+): T[] {
+  let latest: { block: string; identity: SessionGoalContextIdentity } | null = null;
+  return rewriteGoalContextBlocks(items, (block) => {
+    const unchanged = unchangedSessionGoalContextIdentity(block);
+    if (unchanged) {
+      return latest &&
+        latest.identity.objectiveRevision === unchanged.objectiveRevision &&
+        latest.identity.state === unchanged.state
+        ? latest.block
+        : block;
+    }
+    const identity = sessionGoalContextIdentity(block);
+    if (identity) latest = { block, identity };
+    return block;
+  });
+}
+
+/**
+ * Accepted turns freeze the session goal onto their input, so a long session
+ * repeats the same goal on every message. Give the model each distinct goal
+ * context once: a context identical to the most recent one earlier in the list
+ * becomes a one-line "unchanged" stand-in, while a changed goal (new revision,
+ * state or text) is rendered in full. Each item depends only on the items
+ * before it, so appending history never rewrites an earlier request prefix.
+ */
+export function collapseRepeatedSessionGoalContexts<T extends Record<string, unknown>>(
+  items: readonly T[],
+): T[] {
+  const expanded = expandUnchangedSessionGoalContexts(items);
+  let latest: string | null = null;
+  return rewriteGoalContextBlocks(expanded, (block) => {
+    if (unchangedSessionGoalContextIdentity(block)) return block;
+    if (block === latest) return renderUnchangedSessionGoalContext(block) ?? block;
+    if (sessionGoalContextIdentity(block)) latest = block;
+    return block;
+  });
+}
+
+/**
+ * Machine-update kinds that only report status of work the agent already
+ * started (or a nudge to continue). Once newer input exists, the compaction
+ * summary carries what they said; retaining them verbatim only repeats it.
+ */
+const TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS: ReadonlySet<string> = new Set<SessionSystemUpdateKind>(
+  [
+    "goal_continuation",
+    "session_wait_timeout",
+    "background_command_result",
+    "child_progress",
+    "child_waiting_capacity",
+    "child_requires_action_resolved",
+  ],
+);
+
+/**
+ * True when a durable machine-update batch message consists only of transient
+ * status updates. Scheduled occurrences, agent messages, steering, child
+ * results and anything unparseable are never transient.
+ */
+export function isTransientSessionSystemUpdateBatch(item: Record<string, unknown>): boolean {
+  if (item.type !== "message" || item.role !== "system" || typeof item.content !== "string") {
+    return false;
+  }
+  const body = splitSystemBatchGoalContext(item.content)?.body ?? item.content;
+  if (!body.startsWith("[Opengeni internal updates]\n")) return false;
+  const json = body.split("\n").find((line) => line.startsWith('{"updates":'));
+  if (!json) return false;
+  try {
+    const parsed = JSON.parse(json) as { updates?: unknown };
+    if (!Array.isArray(parsed.updates) || parsed.updates.length === 0) return false;
+    return parsed.updates.every(
+      (update) =>
+        update !== null &&
+        typeof update === "object" &&
+        typeof (update as { kind?: unknown }).kind === "string" &&
+        TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS.has((update as { kind: string }).kind),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The full goal context leading a message, if any. */
+export function leadingSessionGoalContext(item: Record<string, unknown>): string | undefined {
+  if (item.type !== "message") return undefined;
+  const content = item.content;
+  if (typeof content === "string") {
+    const goal = splitSystemBatchGoalContext(content)?.goal;
+    return goal && sessionGoalContextIdentity(goal) ? goal : undefined;
+  }
+  if (!Array.isArray(content)) return undefined;
+  for (const part of content) {
+    const text = (part as { text?: unknown } | null)?.text;
+    if (typeof text === "string" && sessionGoalContextIdentity(text)) return text;
+  }
+  return undefined;
+}
+
+export const VariableSetVariableName = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .regex(/^[A-Z][A-Z0-9_]*$/)
+    .max(128),
+);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
 export const VARIABLE_SET_RESERVED_EXACT_NAMES = [
@@ -9114,27 +10612,33 @@ function withVariableSetIdAlias<T extends z.ZodRawShape>(
 // Generic variable-set reads remain metadata-only. Exact plaintext has one
 // dedicated response schema so callers cannot accidentally widen another
 // workspace/session response with secret material.
-export const VariableSetVariableMetadata = z.object({
-  name: VariableSetVariableName,
-  version: z.number().int().positive(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const VariableSetVariableMetadata = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: VariableSetVariableName,
+    version: z.number().int().positive(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type VariableSetVariableMetadata = z.infer<typeof VariableSetVariableMetadata>;
 /** @deprecated use VariableSetVariableMetadata */
 export const WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 /** @deprecated use VariableSetVariableMetadata */
 export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 
-export const VariableSetSecret = z.object({
-  variableSetId: z.string().uuid(),
-  name: VariableSetVariableName,
-  version: z.number().int().positive(),
-  value: z.string(),
-});
+export const VariableSetSecret = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    variableSetId: z.string().uuid(),
+    name: VariableSetVariableName,
+    version: z.number().int().positive(),
+    value: z.string(),
+  }),
+);
 export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
-export const VariableSetScope = z.enum(["organization", "workspace", "user"]);
+export const VariableSetScope = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["organization", "workspace", "user"]),
+);
 export type VariableSetScope = z.infer<typeof VariableSetScope>;
 
 /**
@@ -9142,91 +10646,105 @@ export type VariableSetScope = z.infer<typeof VariableSetScope>;
  * names, descriptions, and variable-name metadata so attach/use authority does
  * not become general catalog access.
  */
-export const VariableSetAttachmentMetadata = z.object({
-  id: z.string().uuid(),
-  scope: VariableSetScope,
-});
+export const VariableSetAttachmentMetadata = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    scope: VariableSetScope,
+  }),
+);
 export type VariableSetAttachmentMetadata = z.infer<typeof VariableSetAttachmentMetadata>;
 
 export const MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS = MAX_SELECTED_VARIABLE_SETS * 2;
-export const ResolveVariableSetAttachmentsRequest = z
-  .object({
-    // One create can carry 25 explicit selections plus 25 defaults from its Rig.
-    variableSetIds: z.array(z.string().uuid()).max(MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["variableSetIds"],
-        message: "variableSetIds must not contain duplicates",
-      });
-    }
-  });
+export const ResolveVariableSetAttachmentsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      // One create can carry 25 explicit selections plus 25 defaults from its Rig.
+      variableSetIds: z.array(z.string().uuid()).max(MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["variableSetIds"],
+          message: "variableSetIds must not contain duplicates",
+        });
+      }
+    }),
+);
 export type ResolveVariableSetAttachmentsRequest = z.infer<
   typeof ResolveVariableSetAttachmentsRequest
 >;
 
-export const ResolveVariableSetAttachmentsResponse = z.object({
-  variableSets: z.array(VariableSetAttachmentMetadata),
-});
+export const ResolveVariableSetAttachmentsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    variableSets: z.array(VariableSetAttachmentMetadata),
+  }),
+);
 export type ResolveVariableSetAttachmentsResponse = z.infer<
   typeof ResolveVariableSetAttachmentsResponse
 >;
 
-export const VariableSet = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  scope: VariableSetScope,
-  generation: z.number().int().positive(),
-  status: z.enum(["active", "revoked"]),
-  name: z.string(),
-  description: z.string().nullable(),
-  variables: z.array(VariableSetVariableMetadata),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const VariableSet = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    scope: VariableSetScope,
+    generation: z.number().int().positive(),
+    status: z.enum(["active", "revoked"]),
+    name: z.string(),
+    description: z.string().nullable(),
+    variables: z.array(VariableSetVariableMetadata),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type VariableSet = z.infer<typeof VariableSet>;
 /** @deprecated use VariableSet */
 export const WorkspaceEnvironment = VariableSet;
 /** @deprecated use VariableSet */
 export type WorkspaceEnvironment = VariableSet;
 
-export const CreateVariableSetRequest = z.object({
-  // Omitted remains the legacy workspace-owned creation path.
-  scope: VariableSetScope.default("workspace"),
-  name: z.string().min(1).max(120),
-  description: z.string().max(2000).optional(),
-  variables: z
-    .array(
-      z.object({
-        name: VariableSetVariableName,
-        value: z.string().min(1).max(32768),
-      }),
-    )
-    .default([]),
-});
+export const CreateVariableSetRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // Omitted remains the legacy workspace-owned creation path.
+    scope: VariableSetScope.default("workspace"),
+    name: z.string().min(1).max(120),
+    description: z.string().max(2000).optional(),
+    variables: z
+      .array(
+        z.object({
+          name: VariableSetVariableName,
+          value: z.string().min(1).max(32768),
+        }),
+      )
+      .default([]),
+  }),
+);
 export type CreateVariableSetRequest = z.infer<typeof CreateVariableSetRequest>;
 /** @deprecated use CreateVariableSetRequest */
 export const CreateWorkspaceEnvironmentRequest = CreateVariableSetRequest;
 /** @deprecated use CreateVariableSetRequest */
 export type CreateWorkspaceEnvironmentRequest = CreateVariableSetRequest;
 
-export const UpdateVariableSetRequest = z.object({
-  name: z.string().min(1).max(120).optional(),
-  description: z.string().max(2000).nullable().optional(),
-});
+export const UpdateVariableSetRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1).max(120).optional(),
+    description: z.string().max(2000).nullable().optional(),
+  }),
+);
 export type UpdateVariableSetRequest = z.infer<typeof UpdateVariableSetRequest>;
 /** @deprecated use UpdateVariableSetRequest */
 export const UpdateWorkspaceEnvironmentRequest = UpdateVariableSetRequest;
 /** @deprecated use UpdateVariableSetRequest */
 export type UpdateWorkspaceEnvironmentRequest = UpdateVariableSetRequest;
 
-export const SetVariableSetVariableRequest = z.object({
-  value: z.string().min(1).max(32768),
-});
+export const SetVariableSetVariableRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    value: z.string().min(1).max(32768),
+  }),
+);
 export type SetVariableSetVariableRequest = z.infer<typeof SetVariableSetVariableRequest>;
 /** @deprecated use SetVariableSetVariableRequest */
 export const SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
@@ -9239,587 +10757,657 @@ export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableReque
 // append-only and content-immutable; exactly one is active per rig.
 
 // A self-declared health check: a name + the shell command that must exit 0.
-export const RigCheck = z.object({
-  name: z.string().min(1).max(120),
-  command: z.string().min(1).max(8192),
-});
+export const RigCheck = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1).max(120),
+    command: z.string().min(1).max(8192),
+  }),
+);
 export type RigCheck = z.infer<typeof RigCheck>;
 
-export const RigProviderImageBuildStatus = z.enum(["building", "ready", "failed", "unsupported"]);
+export const RigProviderImageBuildStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["building", "ready", "failed", "unsupported"]),
+);
 export type RigProviderImageBuildStatus = z.infer<typeof RigProviderImageBuildStatus>;
 
-export const RigProviderImage = z
-  .object({
-    backend: SandboxBackend,
-    provider: z.string().min(1).max(64),
-    status: RigProviderImageBuildStatus,
-    // Exact immutable rig-definition/setup identity used to reject stale image
-    // reuse when a version or its effective base image changes.
-    contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
-    setupHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
-    sourceImage: z.string().max(2048).nullable(),
-    buildRequestId: z.string().uuid(),
-    imageId: z.string().min(1).max(512).nullable(),
-    imageDigest: z.string().min(1).max(512).nullable(),
-    artifactId: z.string().uuid().nullable(),
-    providerBindingKeyHash: z
-      .string()
-      .regex(/^sha256:[0-9a-f]{64}$/u)
-      .nullable(),
-    // Added after provider-image v1 shipped. Absence is retained for rolling
-    // compatibility but means runtime must use logical-image + setup fallback
-    // until an explicit verification cold-boots this exact image.
-    coldBootValidation: z
-      .object({
-        version: z.literal(1),
-        checkedAt: z.string().datetime(),
-      })
-      .optional(),
-    provenance: z.object({
-      kind: z.literal("rig_verification"),
-      targetKind: z.enum(["change", "version"]),
-      targetId: z.string().uuid(),
-    }),
-    startedAt: z.string().datetime(),
-    finishedAt: z.string().datetime().nullable(),
-    error: z
-      .object({
-        code: z.string().min(1).max(120),
-        message: z.string().min(1).max(2000),
-        retryable: z.boolean(),
-      })
-      .nullable(),
-  })
-  .superRefine((value, ctx) => {
-    if (value.status === "ready" && !value.imageId && !value.imageDigest) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["imageId"],
-        message: "ready provider images require an immutable image id or digest",
-      });
-    }
-    if (
-      value.status === "ready" &&
-      value.backend === "modal" &&
-      (value.artifactId === null || value.providerBindingKeyHash === null)
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: [value.artifactId === null ? "artifactId" : "providerBindingKeyHash"],
-        message: "ready Modal provider images require durable artifact ownership and binding",
-      });
-    }
-    if (value.status !== "ready" && value.artifactId !== null) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["artifactId"],
-        message: "only ready provider images may retain a durable artifact",
-      });
-    }
-    if (value.status === "building") {
-      if (value.finishedAt !== null) {
+export const RigProviderImage = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      backend: SandboxBackend,
+      provider: z.string().min(1).max(64),
+      status: RigProviderImageBuildStatus,
+      // Exact immutable rig-definition/setup identity used to reject stale image
+      // reuse when a version or its effective base image changes.
+      contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+      setupHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+      sourceImage: z.string().max(2048).nullable(),
+      buildRequestId: z.string().uuid(),
+      imageId: z.string().min(1).max(512).nullable(),
+      imageDigest: z.string().min(1).max(512).nullable(),
+      artifactId: z.string().uuid().nullable(),
+      providerBindingKeyHash: z
+        .string()
+        .regex(/^sha256:[0-9a-f]{64}$/u)
+        .nullable(),
+      // Added after provider-image v1 shipped. Absence is retained for rolling
+      // compatibility but means runtime must use logical-image + setup fallback
+      // until an explicit verification cold-boots this exact image.
+      coldBootValidation: z
+        .object({
+          version: z.literal(1),
+          checkedAt: z.string().datetime(),
+        })
+        .optional(),
+      provenance: z.object({
+        kind: z.literal("rig_verification"),
+        targetKind: z.enum(["change", "version"]),
+        targetId: z.string().uuid(),
+      }),
+      startedAt: z.string().datetime(),
+      finishedAt: z.string().datetime().nullable(),
+      error: z
+        .object({
+          code: z.string().min(1).max(120),
+          message: z.string().min(1).max(2000),
+          retryable: z.boolean(),
+        })
+        .nullable(),
+    })
+    .superRefine((value, ctx) => {
+      if (value.status === "ready" && !value.imageId && !value.imageDigest) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["imageId"],
+          message: "ready provider images require an immutable image id or digest",
+        });
+      }
+      if (
+        value.status === "ready" &&
+        value.backend === "modal" &&
+        (value.artifactId === null || value.providerBindingKeyHash === null)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: [value.artifactId === null ? "artifactId" : "providerBindingKeyHash"],
+          message: "ready Modal provider images require durable artifact ownership and binding",
+        });
+      }
+      if (value.status !== "ready" && value.artifactId !== null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["artifactId"],
+          message: "only ready provider images may retain a durable artifact",
+        });
+      }
+      if (value.status === "building") {
+        if (value.finishedAt !== null) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["finishedAt"],
+            message: "building provider images cannot be finished",
+          });
+        }
+        if (value.error !== null) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["error"],
+            message: "building provider images cannot have a terminal error",
+          });
+        }
+      } else if (value.finishedAt === null) {
         ctx.addIssue({
           code: "custom",
           path: ["finishedAt"],
-          message: "building provider images cannot be finished",
+          message: "terminal provider images require a finish timestamp",
         });
       }
-      if (value.error !== null) {
+      if ((value.status === "failed" || value.status === "unsupported") && value.error === null) {
         ctx.addIssue({
           code: "custom",
           path: ["error"],
-          message: "building provider images cannot have a terminal error",
+          message: `${value.status} provider images require failure truth`,
         });
       }
-    } else if (value.finishedAt === null) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["finishedAt"],
-        message: "terminal provider images require a finish timestamp",
-      });
-    }
-    if ((value.status === "failed" || value.status === "unsupported") && value.error === null) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["error"],
-        message: `${value.status} provider images require failure truth`,
-      });
-    }
-    if (value.status === "ready" && value.error !== null) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["error"],
-        message: "ready provider images cannot retain an error",
-      });
-    }
-    if (value.status !== "ready" && value.coldBootValidation !== undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["coldBootValidation"],
-        message: "only ready provider images may retain cold-boot validation",
-      });
-    }
-  });
+      if (value.status === "ready" && value.error !== null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["error"],
+          message: "ready provider images cannot retain an error",
+        });
+      }
+      if (value.status !== "ready" && value.coldBootValidation !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["coldBootValidation"],
+          message: "only ready provider images may retain cold-boot validation",
+        });
+      }
+    }),
+);
 export type RigProviderImage = z.infer<typeof RigProviderImage>;
 
-export const RigProviderImages = z.partialRecord(SandboxBackend, RigProviderImage);
+export const RigProviderImages = /* @__PURE__ */ defineSchema(() =>
+  z.partialRecord(SandboxBackend, RigProviderImage),
+);
 export type RigProviderImages = z.infer<typeof RigProviderImages>;
 
-export const RigVersion = z.object({
-  id: z.string().uuid(),
-  rigId: z.string().uuid(),
-  version: z.number().int().positive(),
-  image: z.string().nullable(),
-  setupScript: z.string().nullable(),
-  checks: z.array(RigCheck),
-  credentialHooks: z.array(z.string()),
-  defaultVariableSetIds: z.array(z.string().uuid()),
-  changelog: z.string().nullable(),
-  // Operational build metadata is version-bound but not part of the immutable
-  // rig definition. Each backend records its own truthful build state.
-  providerImages: RigProviderImages.default({}),
-  // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
-  createdBy: z.string().nullable(),
-  active: z.boolean(),
-  createdAt: z.string(),
-});
+export const RigVersion = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    rigId: z.string().uuid(),
+    version: z.number().int().positive(),
+    image: z.string().nullable(),
+    setupScript: z.string().nullable(),
+    checks: z.array(RigCheck),
+    credentialHooks: z.array(z.string()),
+    defaultVariableSetIds: z.array(z.string().uuid()),
+    changelog: z.string().nullable(),
+    // Operational build metadata is version-bound but not part of the immutable
+    // rig definition. Each backend records its own truthful build state.
+    providerImages: RigProviderImages.default({}),
+    // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
+    createdBy: z.string().nullable(),
+    active: z.boolean(),
+    createdAt: z.string(),
+  }),
+);
 export type RigVersion = z.infer<typeof RigVersion>;
 
-export const RigVerificationHealth = z.object({
-  checkHealth: z.enum(["passing", "failing", "unknown"]),
-  lastVerifiedAt: z.string().nullable(),
-});
+export const RigVerificationHealth = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    checkHealth: z.enum(["passing", "failing", "unknown"]),
+    lastVerifiedAt: z.string().nullable(),
+  }),
+);
 export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
 
-export const Rig = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  scope: ResourceAuthorityScope,
-  generation: z.number().int().positive(),
-  status: z.enum(["active", "revoked"]),
-  name: z.string(),
-  description: z.string().nullable(),
-  createdBy: z.string().nullable(),
-  // The rig's currently-active version (present after create; nullable so a
-  // partial/list read can omit it without a schema change).
-  activeVersion: RigVersion.nullable(),
-  // Summary for the currently active version. null only when there is no active
-  // version; otherwise "unknown" means the active version has no verification.
-  activeVersionHealth: RigVerificationHealth.nullable(),
-  versionCount: z.number().int().nonnegative(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const Rig = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    scope: ResourceAuthorityScope,
+    generation: z.number().int().positive(),
+    status: z.enum(["active", "revoked"]),
+    name: z.string(),
+    description: z.string().nullable(),
+    createdBy: z.string().nullable(),
+    // The rig's currently-active version (present after create; nullable so a
+    // partial/list read can omit it without a schema change).
+    activeVersion: RigVersion.nullable(),
+    // Summary for the currently active version. null only when there is no active
+    // version; otherwise "unknown" means the active version has no verification.
+    activeVersionHealth: RigVerificationHealth.nullable(),
+    versionCount: z.number().int().nonnegative(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type Rig = z.infer<typeof Rig>;
 
-export const RigChangeKind = z.enum(["setup_append", "definition_edit"]);
+export const RigChangeKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["setup_append", "definition_edit"]),
+);
 export type RigChangeKind = z.infer<typeof RigChangeKind>;
 
-export const RigChangeStatus = z.enum(["proposed", "verifying", "merged", "rejected", "failed"]);
+export const RigChangeStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["proposed", "verifying", "merged", "rejected", "failed"]),
+);
 export type RigChangeStatus = z.infer<typeof RigChangeStatus>;
 
 // A single check's outcome inside a verification run (populated in M4).
-export const RigCheckResult = z.object({
-  name: z.string(),
-  command: z.string(),
-  exitCode: z.number().int().nullable(),
-  output: z.string().optional(),
-});
+export const RigCheckResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string(),
+    command: z.string(),
+    exitCode: z.number().int().nullable(),
+    output: z.string().optional(),
+  }),
+);
 export type RigCheckResult = z.infer<typeof RigCheckResult>;
 
 // The verification record a rig-CI run writes onto a change (M4). Open-ended
 // (passthrough) so M4 can enrich it without a contracts break.
-export const RigChangeVerification = z
-  .object({
-    startedAt: z.string().optional(),
-    finishedAt: z.string().optional(),
-    log: z.string().optional(),
-    platformCheckResults: z.array(RigCheckResult).optional(),
-    checkResults: z.array(RigCheckResult).optional(),
-  })
-  .passthrough();
+export const RigChangeVerification = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      startedAt: z.string().optional(),
+      finishedAt: z.string().optional(),
+      log: z.string().optional(),
+      platformCheckResults: z.array(RigCheckResult).optional(),
+      checkResults: z.array(RigCheckResult).optional(),
+    })
+    .passthrough(),
+);
 export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
 
-export const RigChange = z.object({
-  id: z.string().uuid(),
-  rigId: z.string().uuid(),
-  baseVersionId: z.string().uuid().nullable(),
-  kind: RigChangeKind,
-  payload: z.record(z.string(), z.unknown()),
-  status: RigChangeStatus,
-  proposedBy: z.string().nullable(),
-  verification: RigChangeVerification.nullable(),
-  resultVersionId: z.string().uuid().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const RigChange = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    rigId: z.string().uuid(),
+    baseVersionId: z.string().uuid().nullable(),
+    kind: RigChangeKind,
+    payload: z.record(z.string(), z.unknown()),
+    status: RigChangeStatus,
+    proposedBy: z.string().nullable(),
+    verification: RigChangeVerification.nullable(),
+    resultVersionId: z.string().uuid().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type RigChange = z.infer<typeof RigChange>;
 
 // Rig setup payloads are transferred to sandboxes in bounded chunks. Keep the
 // public definition limit independent from provider command-argument ceilings.
 export const RIG_SETUP_SCRIPT_MAX_CHARS = 1024 * 1024;
 
-export const CreateRigRequest = z.object({
-  // Omitted remains the compatibility workspace-owned creation path.
-  scope: ResourceAuthorityScope.default("workspace"),
-  name: z.string().min(1).max(120),
-  description: z.string().max(2000).optional(),
-  // Initial (version 1) content, inline.
-  // Explicit Rig base images are temporarily disabled. Rigs always compose on
-  // the deployment-owned platform sandbox image so Computer, Browser, Terminal,
-  // and the stock runtime cannot be replaced by a user definition. Keep an
-  // explicit never-field instead of silently stripping `image` from older
-  // clients: callers must receive a validation error and remove the override.
-  image: z.never().optional(),
-  setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).optional(),
-  checks: z.array(RigCheck).max(100).default([]),
-  credentialHooks: z.array(z.string().min(1).max(200)).max(50).default([]),
-  defaultVariableSetIds: z.array(z.string().uuid()).max(25).default([]),
-});
+export const CreateRigRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // Omitted remains the compatibility workspace-owned creation path.
+    scope: ResourceAuthorityScope.default("workspace"),
+    name: z.string().min(1).max(120),
+    description: z.string().max(2000).optional(),
+    // Initial (version 1) content, inline.
+    // Explicit Rig base images are temporarily disabled. Rigs always compose on
+    // the deployment-owned platform sandbox image so Computer, Browser, Terminal,
+    // and the stock runtime cannot be replaced by a user definition. Keep an
+    // explicit never-field instead of silently stripping `image` from older
+    // clients: callers must receive a validation error and remove the override.
+    image: z.never().optional(),
+    setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).optional(),
+    checks: z.array(RigCheck).max(100).default([]),
+    credentialHooks: z.array(z.string().min(1).max(200)).max(50).default([]),
+    defaultVariableSetIds: z.array(z.string().uuid()).max(25).default([]),
+  }),
+);
 export type CreateRigRequest = z.infer<typeof CreateRigRequest>;
 
-export const UpdateRigRequest = z.object({
-  name: z.string().min(1).max(120).optional(),
-  description: z.string().max(2000).nullable().optional(),
-});
+export const UpdateRigRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().min(1).max(120).optional(),
+    description: z.string().max(2000).nullable().optional(),
+  }),
+);
 export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
 
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Pure organizational metadata: filing a session into a
 // channel never affects execution, authority, memory, or history.
-export const Channel = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  name: z.string(),
-  description: z.string().nullable(),
-  pinned: z.boolean(),
-  sortOrder: z.number().int().nonnegative(),
-  createdBy: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const Channel = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    description: z.string().nullable(),
+    pinned: z.boolean(),
+    sortOrder: z.number().int().nonnegative(),
+    createdBy: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type Channel = z.infer<typeof Channel>;
 
-export const CreateChannelRequest = z.object({
-  name: z.string().trim().min(1).max(80),
-  description: z.string().max(2000).optional(),
-});
+export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().trim().min(1).max(80),
+    description: z.string().max(2000).optional(),
+  }),
+);
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
 
-export const UpdateChannelRequest = z.object({
-  name: z.string().trim().min(1).max(80).optional(),
-  description: z.string().max(2000).nullable().optional(),
-  pinned: z.boolean().optional(),
-});
+export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    name: z.string().trim().min(1).max(80).optional(),
+    description: z.string().max(2000).nullable().optional(),
+    pinned: z.boolean().optional(),
+  }),
+);
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
 
 /** Complete workspace project order. It is replaced atomically after a drag. */
-export const ReorderChannelsRequest = z
-  .object({ channelIds: z.array(z.string().uuid()).min(1).max(200) })
-  .strict();
+export const ReorderChannelsRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ channelIds: z.array(z.string().uuid()).min(1).max(200) }).strict(),
+);
 export type ReorderChannelsRequest = z.infer<typeof ReorderChannelsRequest>;
 
 // Re-files one session (rail organization only). null moves it back to the
 // unfiled inbox.
-export const UpdateSessionChannelRequest = z.object({
-  channelId: z.string().uuid().nullable(),
-});
+export const UpdateSessionChannelRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    channelId: z.string().uuid().nullable(),
+  }),
+);
 export type UpdateSessionChannelRequest = z.infer<typeof UpdateSessionChannelRequest>;
 
 // setup_append: the exact command that already worked (+ an optional note).
-export const RigSetupAppendPayload = z.object({
-  command: z.string().min(1).max(8192),
-  note: z.string().max(2000).optional(),
-});
+export const RigSetupAppendPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    command: z.string().min(1).max(8192),
+    note: z.string().max(2000).optional(),
+  }),
+);
 export type RigSetupAppendPayload = z.infer<typeof RigSetupAppendPayload>;
 
 // definition_edit: the full next-version content (all fields optional; unset
 // fields inherit from the base version at promote time).
-export const RigDefinitionEditPayload = z.object({
-  // See CreateRigRequest.image. Historical RigVersion.image values remain on
-  // the read model for compatibility, but no new definition may set or clear
-  // one through the public write contract.
-  image: z.never().optional(),
-  setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).nullish(),
-  checks: z.array(RigCheck).max(100).optional(),
-  credentialHooks: z.array(z.string().min(1).max(200)).max(50).optional(),
-  defaultVariableSetIds: z.array(z.string().uuid()).max(25).optional(),
-  changelog: z.string().max(4096).nullish(),
-});
+export const RigDefinitionEditPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // See CreateRigRequest.image. Historical RigVersion.image values remain on
+    // the read model for compatibility, but no new definition may set or clear
+    // one through the public write contract.
+    image: z.never().optional(),
+    setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).nullish(),
+    checks: z.array(RigCheck).max(100).optional(),
+    credentialHooks: z.array(z.string().min(1).max(200)).max(50).optional(),
+    defaultVariableSetIds: z.array(z.string().uuid()).max(25).optional(),
+    changelog: z.string().max(4096).nullish(),
+  }),
+);
 export type RigDefinitionEditPayload = z.infer<typeof RigDefinitionEditPayload>;
 
-export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),
-  z.object({
-    kind: z.literal("definition_edit"),
-    payload: RigDefinitionEditPayload,
-  }),
-]);
+export const ProposeRigChangeRequest = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),
+    z.object({
+      kind: z.literal("definition_edit"),
+      payload: RigDefinitionEditPayload,
+    }),
+  ]),
+);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
 // Declared ahead of the scheduled-task projections that name it; the
 // `tool.auth_needed` payload below uses the same enum.
-export const ToolAuthNeededReason = z.enum([
-  "missing_connection",
-  "expired",
-  "insufficient_scope",
-  "refresh_failed",
-  "personal_authority_unavailable",
-  "unsupported_auth",
-  "resource_scope_unavailable",
-]);
+export const ToolAuthNeededReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "missing_connection",
+    "expired",
+    "insufficient_scope",
+    "refresh_failed",
+    "personal_authority_unavailable",
+    "unsupported_auth",
+    "resource_scope_unavailable",
+    // The workspace's explicitly designated credential (for example Codex Apps)
+    // cannot be used; distinct from a token refresh failure.
+    "designated_credential_unavailable",
+  ]),
+);
 export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
 
-export const ScheduledTaskStatus = /* @__PURE__ */ z.enum(["active", "paused"]);
+export const ScheduledTaskStatus = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "paused"]),
+);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
-export const ScheduledTaskRunStatus = /* @__PURE__ */ z.enum([
-  "queued",
-  "dispatched",
-  "succeeded",
-  "skipped",
-  "failed",
-]);
+export const ScheduledTaskRunStatus = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["queued", "dispatched", "succeeded", "skipped", "failed"]),
+);
 export type ScheduledTaskRunStatus = z.infer<typeof ScheduledTaskRunStatus>;
 
-export const ScheduledTaskRunMode = /* @__PURE__ */ z.enum([
-  "new_session_per_run",
-  "reusable_session",
-  "existing_session",
-]);
+export const ScheduledTaskRunMode = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["new_session_per_run", "reusable_session", "existing_session"]),
+);
 export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 
-export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ z.enum([
-  "allow_concurrent",
-  "skip",
-  "buffer_one",
-]);
+export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["allow_concurrent", "skip", "buffer_one"]),
+);
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
-export const ScheduledTaskTriggerType = /* @__PURE__ */ z.enum([
-  "scheduled",
-  "manual",
-  "initial",
-  "provider_event",
-  "retry",
-  "repair",
-]);
+export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair"]),
+);
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
-export const ScheduledTaskActionKind = /* @__PURE__ */ z.enum([
-  "agent_turn",
-  "knowledge_source_sync",
-]);
+export const ScheduledTaskActionKind = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["agent_turn", "knowledge_source_sync"]),
+);
 export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
 
-const KnowledgeSourceSyncPositiveInteger = z.number().int().positive();
-const KnowledgeSourceSyncNonnegativeInteger = z.number().int().nonnegative();
-const KnowledgeSourceSyncZeroInteger = KnowledgeSourceSyncNonnegativeInteger.default(0);
-const KnowledgeSourceSyncUuid = z.string().uuid();
-const KnowledgeSourceSyncSubject = z.string().min(1).max(1024);
-const KnowledgeSourceSyncEnabled = z.boolean().default(true);
-const KnowledgeSourceSyncDisabled = z.boolean().default(false);
+const KnowledgeSourceSyncPositiveInteger = /* @__PURE__ */ defineSchema(() =>
+  z.number().int().positive(),
+);
+const KnowledgeSourceSyncNonnegativeInteger = /* @__PURE__ */ defineSchema(() =>
+  z.number().int().nonnegative(),
+);
+const KnowledgeSourceSyncZeroInteger = /* @__PURE__ */ defineSchema(() =>
+  KnowledgeSourceSyncNonnegativeInteger.default(0),
+);
+const KnowledgeSourceSyncUuid = /* @__PURE__ */ defineSchema(() => z.string().uuid());
+const KnowledgeSourceSyncSubject = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(1024));
+const KnowledgeSourceSyncEnabled = /* @__PURE__ */ defineSchema(() => z.boolean().default(true));
+const KnowledgeSourceSyncDisabled = /* @__PURE__ */ defineSchema(() => z.boolean().default(false));
 
-export const KnowledgeSourceSyncLimits = /* @__PURE__ */ z.object({
-  maxItems: KnowledgeSourceSyncPositiveInteger.max(10_000).default(500),
-  maxBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(500_000_000),
-  maxFileBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(100_000_000),
-  maxProviderRequests: KnowledgeSourceSyncPositiveInteger.max(10_000).default(1_000),
-  maxElapsedSeconds: KnowledgeSourceSyncPositiveInteger.max(3_600).default(300),
-  maxConcurrency: KnowledgeSourceSyncPositiveInteger.max(32).default(4),
-  maxFailureDetails: KnowledgeSourceSyncPositiveInteger.max(100).default(25),
-});
+export const KnowledgeSourceSyncLimits = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    maxItems: KnowledgeSourceSyncPositiveInteger.max(10_000).default(500),
+    maxBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(500_000_000),
+    maxFileBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(100_000_000),
+    maxProviderRequests: KnowledgeSourceSyncPositiveInteger.max(10_000).default(1_000),
+    maxElapsedSeconds: KnowledgeSourceSyncPositiveInteger.max(3_600).default(300),
+    maxConcurrency: KnowledgeSourceSyncPositiveInteger.max(32).default(4),
+    maxFailureDetails: KnowledgeSourceSyncPositiveInteger.max(100).default(25),
+  }),
+);
 export type KnowledgeSourceSyncLimits = z.infer<typeof KnowledgeSourceSyncLimits>;
 
-export const KnowledgeSourceSyncConnectionAuthority = /* @__PURE__ */ z.object({
-  connectionId: KnowledgeSourceSyncUuid,
-  connectionVersion: KnowledgeSourceSyncPositiveInteger,
-  providerDomain: z.string().min(1).max(2048),
-  kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
-  ownerSubjectId: KnowledgeSourceSyncSubject,
-});
+export const KnowledgeSourceSyncConnectionAuthority = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
+  () =>
+    z.object({
+      connectionId: KnowledgeSourceSyncUuid,
+      connectionVersion: KnowledgeSourceSyncPositiveInteger,
+      providerDomain: z.string().min(1).max(2048),
+      kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+      ownerSubjectId: KnowledgeSourceSyncSubject,
+    }),
+);
 export type KnowledgeSourceSyncConnectionAuthority = z.infer<
   typeof KnowledgeSourceSyncConnectionAuthority
 >;
 
-export const KnowledgeSourceSyncAction = /* @__PURE__ */ z
-  .object({
-    kind: z.literal("knowledge_source_sync"),
-    sourceId: KnowledgeSourceSyncUuid,
-    sourceGeneration: KnowledgeSourceSyncNonnegativeInteger,
-    sourceLifecycleGeneration: KnowledgeSourceSyncPositiveInteger,
-    sourceConfigGeneration: KnowledgeSourceSyncPositiveInteger,
-    controlWorkspaceId: KnowledgeSourceSyncUuid,
-    providerCoordinationKey: z.string().trim().min(1).max(1024),
-    connection: KnowledgeSourceSyncConnectionAuthority,
-    destination: ScopedKnowledgeScope,
-    initiatingSubjectId: KnowledgeSourceSyncSubject,
-    allDescendants: KnowledgeSourceSyncEnabled,
-    limits: KnowledgeSourceSyncLimits.prefault({}),
-  })
-  .strict();
+export const KnowledgeSourceSyncAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.literal("knowledge_source_sync"),
+      sourceId: KnowledgeSourceSyncUuid,
+      sourceGeneration: KnowledgeSourceSyncNonnegativeInteger,
+      sourceLifecycleGeneration: KnowledgeSourceSyncPositiveInteger,
+      sourceConfigGeneration: KnowledgeSourceSyncPositiveInteger,
+      controlWorkspaceId: KnowledgeSourceSyncUuid,
+      providerCoordinationKey: z.string().trim().min(1).max(1024),
+      connection: KnowledgeSourceSyncConnectionAuthority,
+      destination: ScopedKnowledgeScope,
+      initiatingSubjectId: KnowledgeSourceSyncSubject,
+      allDescendants: KnowledgeSourceSyncEnabled,
+      limits: KnowledgeSourceSyncLimits.prefault({}),
+    })
+    .strict(),
+);
 export type KnowledgeSourceSyncAction = z.infer<typeof KnowledgeSourceSyncAction>;
 
-export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ z
-  .object({
-    sourceEnabled: KnowledgeSourceSyncEnabled,
-    connectionPaused: KnowledgeSourceSyncDisabled,
-  })
-  .strict();
+export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sourceEnabled: KnowledgeSourceSyncEnabled,
+      connectionPaused: KnowledgeSourceSyncDisabled,
+    })
+    .strict(),
+);
 export type KnowledgeSourceSyncScheduleControl = z.infer<typeof KnowledgeSourceSyncScheduleControl>;
 
-export const ScheduledTaskAction = /* @__PURE__ */ z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("agent_turn") }).strict(),
-  KnowledgeSourceSyncAction,
-]);
+export const ScheduledTaskAction = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("agent_turn") }).strict(),
+    KnowledgeSourceSyncAction,
+  ]),
+);
 export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
 
-export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion("type", [
-  z.object({ type: z.literal("manual") }).strict(),
-  z.object({
-    type: z.literal("once"),
-    runAt: z.string().datetime({ offset: true }),
-    timeZone: z.string().min(1).default("UTC"),
-  }),
-  z.object({
-    type: z.literal("interval"),
-    everySeconds: z.number().int().positive(),
-    startAt: z.string().datetime({ offset: true }).optional(),
-    endAt: z.string().datetime({ offset: true }).optional(),
-  }),
-  z.object({
-    type: z.literal("calendar"),
-    timeZone: z.string().min(1).default("UTC"),
-    hour: z.number().int().min(0).max(23),
-    minute: z.number().int().min(0).max(59),
-    daysOfWeek: z
-      .array(z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"]))
-      .min(1)
-      .optional(),
-  }),
-]);
+export const ScheduledTaskScheduleSpec = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [
+    z.object({ type: z.literal("manual") }).strict(),
+    z.object({
+      type: z.literal("once"),
+      runAt: z.string().datetime({ offset: true }),
+      timeZone: z.string().min(1).default("UTC"),
+    }),
+    z.object({
+      type: z.literal("interval"),
+      everySeconds: z.number().int().positive(),
+      startAt: z.string().datetime({ offset: true }).optional(),
+      endAt: z.string().datetime({ offset: true }).optional(),
+    }),
+    z.object({
+      type: z.literal("calendar"),
+      timeZone: z.string().min(1).default("UTC"),
+      hour: z.number().int().min(0).max(23),
+      minute: z.number().int().min(0).max(59),
+      daysOfWeek: z
+        .array(
+          z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"]),
+        )
+        .min(1)
+        .optional(),
+    }),
+  ]),
+);
 export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
 
-export const IncidentTelemetryExecutionClass = z.literal("incident_telemetry");
+export const IncidentTelemetryExecutionClass = /* @__PURE__ */ defineSchema(() =>
+  z.literal("incident_telemetry"),
+);
 export type IncidentTelemetryExecutionClass = z.infer<typeof IncidentTelemetryExecutionClass>;
 
-const IncidentTelemetryIdentifier = z.string().trim().min(1).max(200);
-const IncidentTelemetryMetricName = z
-  .string()
-  .trim()
-  .min(1)
-  .max(200)
-  .regex(/^[A-Za-z_:][A-Za-z0-9_:]*$/);
-const IncidentTelemetryLabelName = z
-  .string()
-  .trim()
-  .min(1)
-  .max(200)
-  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+const IncidentTelemetryIdentifier = /* @__PURE__ */ defineSchema(() =>
+  z.string().trim().min(1).max(200),
+);
+const IncidentTelemetryMetricName = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .regex(/^[A-Za-z_:][A-Za-z0-9_:]*$/),
+);
+const IncidentTelemetryLabelName = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+);
 
-export const IncidentTelemetrySeriesMetadata = z
-  .object({
-    metric: IncidentTelemetryMetricName,
-    labels: z.array(IncidentTelemetryLabelName).min(1).max(64),
-  })
-  .strict();
+export const IncidentTelemetrySeriesMetadata = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      metric: IncidentTelemetryMetricName,
+      labels: z.array(IncidentTelemetryLabelName).min(1).max(64),
+    })
+    .strict(),
+);
 export type IncidentTelemetrySeriesMetadata = z.infer<typeof IncidentTelemetrySeriesMetadata>;
 
-export const IncidentTelemetryDataRoute = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("mcp"),
-      serverId: SessionMcpServerId,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("first_party"),
-      tool: FirstPartyMcpToolName,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("variable_set"),
-      variableSetName: z.string().trim().min(1).max(120),
-      variableNames: z.array(VariableSetVariableName).min(1).max(100),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("rig_credential_hook"),
-      credentialHookId: IncidentTelemetryIdentifier,
-    })
-    .strict(),
-]);
-export type IncidentTelemetryDataRoute = z.infer<typeof IncidentTelemetryDataRoute>;
-
-export const IncidentTelemetryPreflight = z
-  .object({
-    // These are exact selected resource refs, not discovery hints. The core
-    // validator requires every entry to already be present in agentConfig.
-    requiredResources: z.array(ResourceRef).max(100).default([]),
-    requiredMcpServerIds: z.array(SessionMcpServerId).max(64).default([]),
-    requiredFirstPartyMcpTools: z.array(FirstPartyMcpToolName).max(100).default([]),
-    requiredFirstPartyMcpPermissions: z.array(Permission).max(100).default([]),
-    requiredRig: z
+export const IncidentTelemetryDataRoute = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z
       .object({
-        name: z.string().trim().min(1).max(120),
-        credentialHookIds: z.array(IncidentTelemetryIdentifier).max(50).default([]),
-      })
-      .strict()
-      .nullable()
-      .default(null),
-    // Names only. The dispatch preflight never reads or decrypts values.
-    requiredVariableSetNames: z.array(z.string().trim().min(1).max(120)).max(25).default([]),
-    requiredVariableNames: z.array(VariableSetVariableName).max(100).default([]),
-    dataSource: z
-      .object({
-        kind: z.literal("prometheus"),
-        // Exposition endpoints such as /metrics are deliberately excluded.
-        queryPath: z.enum(["/api/v1/query", "/api/v1/query_range"]),
-        workspaceLabel: IncidentTelemetryLabelName,
-        // Exact non-workspace labels whose values come from the validated
-        // structured alert occurrence and bound every telemetry query.
-        alertSelectorLabels: z.array(IncidentTelemetryLabelName).min(1).max(16),
-        route: IncidentTelemetryDataRoute,
-        requiredSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(100),
-        availableSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(500),
+        kind: z.literal("mcp"),
+        serverId: SessionMcpServerId,
       })
       .strict(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    for (const [index, label] of value.dataSource.alertSelectorLabels.entries()) {
-      if (label === value.dataSource.workspaceLabel) {
-        context.addIssue({
-          code: "custom",
-          path: ["dataSource", "alertSelectorLabels", index],
-          message: "alert selector labels must be non-workspace labels",
-        });
-      }
-    }
-    for (const [index, series] of value.dataSource.requiredSeries.entries()) {
-      if (!series.labels.includes(value.dataSource.workspaceLabel)) {
-        context.addIssue({
-          code: "custom",
-          path: ["dataSource", "requiredSeries", index, "labels"],
-          message: "required incident series must include the workspace label",
-        });
-      }
-      for (const label of value.dataSource.alertSelectorLabels) {
-        if (!series.labels.includes(label)) {
+    z
+      .object({
+        kind: z.literal("first_party"),
+        tool: FirstPartyMcpToolName,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("variable_set"),
+        variableSetName: z.string().trim().min(1).max(120),
+        variableNames: z.array(VariableSetVariableName).min(1).max(100),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("rig_credential_hook"),
+        credentialHookId: IncidentTelemetryIdentifier,
+      })
+      .strict(),
+  ]),
+);
+export type IncidentTelemetryDataRoute = z.infer<typeof IncidentTelemetryDataRoute>;
+
+export const IncidentTelemetryPreflight = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      // These are exact selected resource refs, not discovery hints. The core
+      // validator requires every entry to already be present in agentConfig.
+      requiredResources: z.array(ResourceRef).max(100).default([]),
+      requiredMcpServerIds: z.array(SessionMcpServerId).max(64).default([]),
+      requiredFirstPartyMcpTools: z.array(FirstPartyMcpToolName).max(100).default([]),
+      requiredFirstPartyMcpPermissions: z.array(Permission).max(100).default([]),
+      requiredRig: z
+        .object({
+          name: z.string().trim().min(1).max(120),
+          credentialHookIds: z.array(IncidentTelemetryIdentifier).max(50).default([]),
+        })
+        .strict()
+        .nullable()
+        .default(null),
+      // Names only. The dispatch preflight never reads or decrypts values.
+      requiredVariableSetNames: z.array(z.string().trim().min(1).max(120)).max(25).default([]),
+      requiredVariableNames: z.array(VariableSetVariableName).max(100).default([]),
+      dataSource: z
+        .object({
+          kind: z.literal("prometheus"),
+          // Exposition endpoints such as /metrics are deliberately excluded.
+          queryPath: z.enum(["/api/v1/query", "/api/v1/query_range"]),
+          workspaceLabel: IncidentTelemetryLabelName,
+          // Exact non-workspace labels whose values come from the validated
+          // structured alert occurrence and bound every telemetry query.
+          alertSelectorLabels: z.array(IncidentTelemetryLabelName).min(1).max(16),
+          route: IncidentTelemetryDataRoute,
+          requiredSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(100),
+          availableSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(500),
+        })
+        .strict(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      for (const [index, label] of value.dataSource.alertSelectorLabels.entries()) {
+        if (label === value.dataSource.workspaceLabel) {
           context.addIssue({
             code: "custom",
-            path: ["dataSource", "requiredSeries", index, "labels"],
-            message: "required incident series must include every alert selector label",
+            path: ["dataSource", "alertSelectorLabels", index],
+            message: "alert selector labels must be non-workspace labels",
           });
         }
       }
-    }
-  });
+      for (const [index, series] of value.dataSource.requiredSeries.entries()) {
+        if (!series.labels.includes(value.dataSource.workspaceLabel)) {
+          context.addIssue({
+            code: "custom",
+            path: ["dataSource", "requiredSeries", index, "labels"],
+            message: "required incident series must include the workspace label",
+          });
+        }
+        for (const label of value.dataSource.alertSelectorLabels) {
+          if (!series.labels.includes(label)) {
+            context.addIssue({
+              code: "custom",
+              path: ["dataSource", "requiredSeries", index, "labels"],
+              message: "required incident series must include every alert selector label",
+            });
+          }
+        }
+      }
+    }),
+);
 export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflight>;
 
 /**
@@ -9922,12 +11510,12 @@ export const ScheduledTaskMetadataInput =
   );
 
 /** A Slack public or private channel ID. Direct messages are not destinations. */
-export const ScheduledTaskSlackChannelId = z
-  .string()
-  .regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789");
+export const ScheduledTaskSlackChannelId = /* @__PURE__ */ defineSchema(() =>
+  z.string().regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789"),
+);
 
 /**
- * The only first-party tools that post as the OpenGeni bot. A generated
+ * The only first-party tools that post as the Opengeni bot. A generated
  * session receives them only when a person chose its task's Slack channel,
  * and they refuse every other destination.
  */
@@ -9938,6 +11526,20 @@ export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
 
 export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS = 60;
 export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * A schedule that follows the workspace's default connectors at each run,
+ * the way a new chat does. Connectors a person turned off stay off.
+ */
+export const ScheduledTaskToolPolicy = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      mode: z.literal("workspace_default"),
+      excludedMcpServerIds: SessionExcludedMcpServerIds,
+    })
+    .strict(),
+);
+export type ScheduledTaskToolPolicy = z.infer<typeof ScheduledTaskToolPolicy>;
 
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
@@ -9965,14 +11567,23 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
           .max(SCHEDULED_TASK_TOOL_MAX_COUNT - 1)
           .default([])
       : z.array(ToolRef).default([]),
+    /**
+     * How a schedule that starts its own session chooses connectors.
+     * `workspace_default`: every run gets the workspace's default connectors
+     * as they are when it starts (except `excludedMcpServerIds`), like a new
+     * chat, plus the tools listed in `tools`. Absent: runs get exactly
+     * `tools`. A schedule that posts into an existing chat never has it; that
+     * chat supplies its connectors.
+     */
+    toolPolicy: ScheduledTaskToolPolicy.optional(),
     metadata: bounded
       ? ScheduledTaskMetadataInput.default({})
       : z.record(z.string(), z.unknown()).default({}),
-    // Explicit workspace-shared OpenGeni Slack bot binding for scheduled runs.
+    // Explicit workspace-shared Opengeni Slack bot binding for scheduled runs.
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
-    // The one Slack channel this task's runs may post to as the OpenGeni bot.
+    // The one Slack channel this task's runs may post to as the Opengeni bot.
     // Only a person chooses it (never an agent attempt); it requires
     // slackBotConnectionId and is read from the task at every post.
     slackBotChannelId: ScheduledTaskSlackChannelId.optional(),
@@ -10030,14 +11641,28 @@ function refineScheduledTaskAgentConfig(
 }
 
 /** Storage/projection shape. Deliberately unbounded so stored rows always parse. */
-export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
-  .object(scheduledTaskAgentConfigShape(false))
-  .extend({
-    /** Exact accepted choices when frozen; legacy omission retains historical selection. */
-    connectionAccounts: McpConnectionAccountSelections.optional(),
-    connectionAccountsFrozen: z.literal(true).optional(),
-  })
-  .superRefine(refineScheduledTaskAgentConfig);
+export const ScheduledTaskAgentConfig = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object(scheduledTaskAgentConfigShape(false))
+    .extend({
+      /**
+       * Connector accounts a person explicitly pinned for a schedule that starts
+       * its own session. Each pinned pair narrows its connector to exactly those
+       * accounts; every other connector follows the owner's current accounts at
+       * each run. Never derived from what a run resolved, and never set on a
+       * schedule that posts into an existing chat (that chat supplies its
+       * connectors and the owner's live accounts).
+       */
+      pinnedAccounts: McpConnectionAccountSelections.optional(),
+      /**
+       * Skip an occurrence instead of running without a connector whose pinned
+       * account can no longer be used. Omitted: the run continues without that
+       * connector and the owner is told.
+       */
+      pinnedAccountsRequired: z.literal(true).optional(),
+    })
+    .superRefine(refineScheduledTaskAgentConfig),
+);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
 /** Legacy actions are readable for migration/cleanup, never new dispatch. */
@@ -10074,9 +11699,8 @@ export function knowledgeSourceAgentConfig(
 }
 
 /** Ingress-bounded agent config for create/update requests. */
-export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
-  .object(scheduledTaskAgentConfigShape(true))
-  .superRefine((value, context) => {
+export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object(scheduledTaskAgentConfigShape(true)).superRefine((value, context) => {
     if (value.machineTarget && value.sandboxBackend !== undefined) {
       context.addIssue({
         code: "custom",
@@ -10109,313 +11733,484 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
       });
     }
     refineScheduledTaskAgentConfig(value, context);
-  });
+  }),
+);
 export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
 /** One connector named in a scheduled task's access report. */
-export const ScheduledTaskAccessConnector = /* @__PURE__ */ z
-  .object({
-    id: z.string().min(1).max(256),
-    name: z.string().min(1).max(256),
-  })
-  .strict();
+export const ScheduledTaskAccessConnector = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(256),
+      name: z.string().min(1).max(256),
+    })
+    .strict(),
+);
 export type ScheduledTaskAccessConnector = z.infer<typeof ScheduledTaskAccessConnector>;
 
 export const SCHEDULED_TASK_ACCESS_CONNECTORS_MAX = 64;
 
 /**
- * What a scheduled task's frozen tools and connector accounts lack compared
- * with what its owner would get by saving it again now. A task freezes its
- * connectors, its connector accounts and (when an agent created it, migration
- * 0428) its OpenGeni tool policy, so later workspace changes never reach its
- * runs on their own. This read-only projection names what
+ * What a scheduled task's saved tools lack compared with what its owner would
+ * get by saving it again now, plus the accounts a person pinned that can no
+ * longer be used. A separate-agent task saves its connectors and (when an
+ * agent created it, migration 0428) its Opengeni tool policy; connector
+ * accounts are never saved, they follow the owner's current accounts at each
+ * run unless a person pinned one. This read-only projection names what
  * `POST .../scheduled-tasks/:taskId/refresh-access` would add or remove; the
- * refresh adds only the OpenGeni permissions those named tools need and drops
+ * refresh adds only the Opengeni permissions those named tools need and drops
  * frozen permissions the refreshing person no longer holds.
  *
  * Present only for a viewer who can act on it: the task owner, or anyone who
  * manages schedules for a task without an owner. `null` or absent means there
  * is nothing to refresh or the viewer cannot refresh it.
  */
-export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
-  .object({
-    /** Workspace default connectors that new schedules get and this one lacks. */
-    missingConnectors: z
-      .array(ScheduledTaskAccessConnector)
-      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
-    /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
-    unavailableConnectors: z
-      .array(ScheduledTaskAccessConnector)
-      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
-    /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
-    missingOpenGeniTools: z.array(FirstPartyMcpToolName).max(FIRST_PARTY_MCP_TOOL_NAMES.length),
-    /** Connectors whose chosen account can no longer be used by this schedule. */
-    unavailableAccounts: z
-      .array(ScheduledTaskAccessConnector)
-      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
-    /** Connectors this schedule has no account for, although one is now available. */
-    attachableAccounts: z
-      .array(ScheduledTaskAccessConnector)
-      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
-    /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
-    canRefresh: z.boolean(),
-  })
-  .strict();
+export const ScheduledTaskPolicyDrift = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Workspace default connectors that new schedules get and this one lacks. */
+      missingConnectors: z
+        .array(ScheduledTaskAccessConnector)
+        .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+      /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
+      unavailableConnectors: z
+        .array(ScheduledTaskAccessConnector)
+        .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+      /** Default Opengeni tools missing from an agent-created task's frozen tools. */
+      missingOpenGeniTools: z.array(FirstPartyMcpToolName).max(FIRST_PARTY_MCP_TOOL_NAMES.length),
+      /**
+       * Connectors whose pinned account can no longer be used. Runs continue
+       * without them (or are skipped when the schedule requires its pinned
+       * accounts) until a person pins another account or unpins them.
+       */
+      unavailableAccounts: z
+        .array(ScheduledTaskAccessConnector)
+        .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+      /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
+      canRefresh: z.boolean(),
+    })
+    .strict(),
+);
 export type ScheduledTaskPolicyDrift = z.infer<typeof ScheduledTaskPolicyDrift>;
 
-export const ScheduledTask = /* @__PURE__ */ z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  name: z.string(),
-  /** Immutable execution owner; null for workspace/service tasks. */
-  ownerSubjectId: z.string().min(1).nullable(),
-  status: ScheduledTaskStatus,
-  schedule: ScheduledTaskScheduleSpec,
-  temporalScheduleId: z.string(),
-  runMode: ScheduledTaskRunMode,
-  overlapPolicy: ScheduledTaskOverlapPolicy,
-  action: ScheduledTaskAction.default({ kind: "agent_turn" }),
-  agentConfig: ScheduledTaskAgentConfig,
-  createdBy: TurnInitiator.default({
-    kind: "service",
-    subjectId: "unattributed-legacy",
+export const SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX = 32;
+
+/** One connector account a scheduled run would act as. */
+export const ScheduledTaskAccountPlanAccount = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      connectionId: z.string().uuid(),
+      label: z.string().min(1).max(512),
+      /** `personal`: the schedule owner's own account. `shared`: a workspace account. */
+      scope: z.enum(["personal", "shared"]),
+    })
+    .strict(),
+);
+export type ScheduledTaskAccountPlanAccount = z.infer<typeof ScheduledTaskAccountPlanAccount>;
+
+export const ScheduledTaskAccountPlanConnector = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(256),
+      name: z.string().min(1).max(256),
+      /**
+       * `default`: each run uses the owner's current accounts for this
+       * connector. `pinned`: a person chose the accounts; runs use only those.
+       */
+      mode: z.enum(["default", "pinned"]),
+      /**
+       * The accounts a run would use if it started now. Empty when none can be
+       * used: a run then goes without this connector (or, for a pinned connector
+       * on a schedule that requires its pinned accounts, is skipped).
+       */
+      accounts: z
+        .array(ScheduledTaskAccountPlanAccount)
+        .max(SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX),
+      /** Pinned accounts that can no longer be used. Always empty in `default` mode. */
+      unavailablePins: z
+        .array(z.object({ connectionId: z.string().uuid() }).strict())
+        .max(SCHEDULED_TASK_ACCOUNT_PLAN_ACCOUNTS_MAX),
+    })
+    .strict(),
+);
+export type ScheduledTaskAccountPlanConnector = z.infer<typeof ScheduledTaskAccountPlanConnector>;
+
+/**
+ * Which connector accounts a run of this schedule would use if it started
+ * now, per connector: Default (the owner's current accounts) or Pinned (the
+ * accounts a person chose), resolved at read time from the owner's live
+ * connections. Nothing here is stored; runs resolve again when they start.
+ * Connectors whose credentials an embedding host supplies are not listed.
+ */
+export const ScheduledTaskAccountPlan = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      connectors: z
+        .array(ScheduledTaskAccountPlanConnector)
+        .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    })
+    .strict(),
+);
+export type ScheduledTaskAccountPlan = z.infer<typeof ScheduledTaskAccountPlan>;
+
+export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    /** Immutable execution owner; null for workspace/service tasks. */
+    ownerSubjectId: z.string().min(1).nullable(),
+    /**
+     * Who can see this schedule. `workspace`: everyone in the workspace (only the
+     * owner can change or run it). `private`: only its owner; its runs create
+     * Only me chats owned by that person.
+     */
+    visibility: SessionVisibility.default("workspace"),
+    status: ScheduledTaskStatus,
+    schedule: ScheduledTaskScheduleSpec,
+    temporalScheduleId: z.string(),
+    runMode: ScheduledTaskRunMode,
+    overlapPolicy: ScheduledTaskOverlapPolicy,
+    action: ScheduledTaskAction.default({ kind: "agent_turn" }),
+    agentConfig: ScheduledTaskAgentConfig,
+    createdBy: TurnInitiator.default({
+      kind: "service",
+      subjectId: "unattributed-legacy",
+    }),
+    createdByContext: TurnInitiatorContext.default({}),
+    authorityRevision: z.number().int().positive().default(1),
+    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    reusableSessionId: z.string().uuid().nullable(),
+    targetSessionId: z.string().uuid().nullable().default(null),
+    variableSetId: z.string().uuid().nullable().default(null),
+    /** @deprecated use variableSetId */
+    environmentId: z.string().uuid().nullable().default(null),
+    // The rig each run binds to (M3). Stored on the task; the ACTIVE version is
+    // resolved PER FIRE (at dispatch), so a task always runs the rig's current
+    // version rather than one frozen at task-create time. Null ⇒ rig-less runs.
+    rigId: z.string().uuid().nullable().default(null),
+    /** Vaults every run may resolve secret references from (the task vault is always included). */
+    vaultPolicy: VaultPolicy.default({ mode: "all" }),
+    metadata: z.record(z.string(), z.unknown()),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    /** Read-only response projection; never stored and never execution authority. */
+    policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
+    /**
+     * Read-only response projection for a viewer who can act on the task (the
+     * same viewers as `policyDrift`); never stored and never execution
+     * authority. Absent when it could not be computed.
+     */
+    accountPlan: ScheduledTaskAccountPlan.optional(),
   }),
-  createdByContext: TurnInitiatorContext.default({}),
-  authorityRevision: z.number().int().positive().default(1),
-  executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
-  reusableSessionId: z.string().uuid().nullable(),
-  targetSessionId: z.string().uuid().nullable().default(null),
-  variableSetId: z.string().uuid().nullable().default(null),
-  /** @deprecated use variableSetId */
-  environmentId: z.string().uuid().nullable().default(null),
-  // The rig each run binds to (M3). Stored on the task; the ACTIVE version is
-  // resolved PER FIRE (at dispatch), so a task always runs the rig's current
-  // version rather than one frozen at task-create time. Null ⇒ rig-less runs.
-  rigId: z.string().uuid().nullable().default(null),
-  metadata: z.record(z.string(), z.unknown()),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  /** Read-only response projection; never stored and never execution authority. */
-  policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
-});
+);
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
+
+/**
+ * What an admin sees of someone else's Only me schedule: that it exists, whose
+ * it is, how often it runs and what it costs. Never its name, prompt, settings
+ * or runs. An admin can pause it.
+ */
+export const PrivateScheduledTaskSummary = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      ownerSubjectId: z.string().min(1),
+      /** The owner's display name or email, when known. */
+      ownerName: z.string().nullable(),
+      status: ScheduledTaskStatus,
+      schedule: ScheduledTaskScheduleSpec,
+      lastRunAt: z.string().nullable(),
+      /** Usage of this schedule's runs over the last 30 days. */
+      last30Days: z
+        .object({
+          runs: z.number().int().nonnegative(),
+          creditUsd: z.number().nonnegative(),
+          estimatedProviderUsd: z.number().nonnegative(),
+        })
+        .strict(),
+      createdAt: z.string(),
+    })
+    .strict(),
+);
+export type PrivateScheduledTaskSummary = z.infer<typeof PrivateScheduledTaskSummary>;
+
+export const ListPrivateScheduledTaskSummariesResponse =
+  /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+    z.object({ schedules: z.array(PrivateScheduledTaskSummary) }).strict(),
+  );
+export type ListPrivateScheduledTaskSummariesResponse = z.infer<
+  typeof ListPrivateScheduledTaskSummariesResponse
+>;
+
+/**
+ * A pinned connector account an admitted run could not use. The run went
+ * ahead without that connector; it never substitutes another account.
+ */
+export const ScheduledTaskDegradedAccount = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      serverId: z.string().min(1).max(256),
+      /** Null when the whole connector became unusable (for example the owner lost access). */
+      connectionId: z.string().uuid().nullable(),
+      reason: z.enum([
+        "connector_unavailable",
+        "account_not_visible",
+        "account_inactive",
+        "account_mismatch",
+        "selection_unavailable",
+        "owner_access_unavailable",
+      ]),
+    })
+    .strict(),
+);
+export type ScheduledTaskDegradedAccount = z.infer<typeof ScheduledTaskDegradedAccount>;
+export const ScheduledTaskDegradedAccounts = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.array(ScheduledTaskDegradedAccount).max(128),
+);
 
 /**
  * Complete credential-free execution truth accepted for one scheduled agent
  * occurrence. Retries consume this immutable snapshot instead of a mutable
  * scheduled-task head.
  */
-export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
-  .object({
-    version: z.literal(1),
-    // Historical accepted snapshots predate task ownership. Their execution
-    // identity remains the separately frozen causal human, never this default.
-    task: ScheduledTask.extend({ ownerSubjectId: z.string().min(1).nullable().default(null) }),
-    resolvedModel: z.string().min(1),
-    resolvedReasoningEffort: ReasoningEffort,
-    resolvedLatencyMode: LatencyMode,
-    /** Secret-safe TurnExecutionPolicyV1 accepted with this occurrence. Kept
-     * structurally open here because the canonical policy schema is declared
-     * later in this package; consumers must parse it with TurnExecutionPolicyV1. */
-    turnExecutionPolicy: z.unknown().optional(),
-    resolvedSandboxBackend: SandboxBackend,
-    resolvedSandboxOs: SandboxOs,
-    resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
-    resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
-    resolvedFirstPartyMcpPermissions: z.array(Permission),
-    /** Agent configuration resolved for generated sessions; absent = legacy. */
-    resolvedAgentConfig: ResolvedAgentConfig.optional(),
-    /** Effective instructions from the `agent.instructions` alias, when set. */
-    resolvedAgentInstructions: z.string().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-    resolvedVariableSet: z
-      .object({
-        id: z.string().uuid(),
-        generation: z.number().int().positive(),
-      })
-      .strict()
-      .nullable(),
-    resolvedRig: z
-      .object({
-        id: z.string().uuid(),
-        versionId: z.string().uuid(),
-        defaultVariableSets: z
-          .array(
-            z
-              .object({
-                id: z.string().uuid(),
-                generation: z.number().int().positive(),
-              })
-              .strict(),
-          )
-          .max(25),
-      })
-      .strict()
-      .nullable(),
-    resolvedSlackBotConnection: z
-      .object({
-        id: z.string().uuid(),
-        version: z.number().int().positive(),
-        verifiedInstallVersion: z.number().int().positive(),
-        metadata: z
-          .object({
-            credentialRole: z.literal("opengeni_slack_bot"),
-            credentialLabel: z.literal("OpenGeni Slack bot"),
-            slackTeamId: z.string().min(1).max(64),
-            slackTeamName: z.string().min(1).max(256),
-            botUserId: z.string().min(1).max(64),
-            botId: z.string().min(1).max(64),
-            botDisplayName: z.enum(["OpenGeni", "OpenGeni Staging"]),
-            verifiedAt: z.string().datetime({ offset: true }),
-          })
-          .passthrough(),
-      })
-      .strict()
-      .nullable(),
-    /**
-     * The effective policy that an existing or already-materialized reusable
-     * session will execute. Generated sessions carry null because their
-     * accepted task policy is used to create the session itself.
-     */
-    targetSessionExecution: z
-      .object({
-        sessionId: z.string().uuid(),
-        visibility: z.enum(["user_private", "workspace_shared"]),
-        authorityEpoch: z.number().int().positive(),
-        model: z.string().min(1),
-        reasoningEffort: ReasoningEffort,
-        latencyMode: LatencyMode,
-        tools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
-        sandboxBackend: SandboxBackend,
-        sandboxOs: SandboxOs,
-        firstPartyMcpTools: z.array(FirstPartyMcpToolName),
-        firstPartyMcpPermissions: z.array(Permission).nullable(),
-        toolPolicy: SessionToolPolicy,
-        mcpServerIds: z.array(z.string().min(1).max(256)).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
-        effectiveMcpServerIds: z
-          .array(z.string().min(1).max(256))
-          .max(SCHEDULED_TASK_TOOL_MAX_COUNT),
-        toolPolicyVersion: z.number().int().nonnegative(),
-        variableSets: z
-          .array(
-            z
-              .object({
-                id: z.string().uuid(),
-                generation: z.number().int().positive(),
-              })
-              .strict(),
-          )
-          .max(MAX_SELECTED_VARIABLE_SETS)
-          .default([]),
-        variableSetId: z.string().uuid().nullable(),
-        variableSetGeneration: z.number().int().positive().nullable(),
-        rigId: z.string().uuid().nullable(),
-        rigVersionId: z.string().uuid().nullable(),
-        rigDefaultVariableSets: z
-          .array(
-            z
-              .object({
-                id: z.string().uuid(),
-                generation: z.number().int().positive(),
-              })
-              .strict(),
-          )
-          .max(25),
-        maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
-        effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
-      })
-      .strict()
-      .nullable(),
-    generatedSessionBinding: z
-      .object({
-        createIdempotencyKey: z.string().min(1).max(512),
-        effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
-        nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
-        codexCompactionMode: CodexCompactionMode,
-      })
-      .strict()
-      .nullable(),
-    personalConnectionDelegations: McpPersonalConnectionDelegations,
-    mcpAccountBindings: McpConnectionAccountBindings.nullable().optional(),
-    personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
-    /** One accepted human principal for every resource-bearing scheduled run. */
-    causalHumanSubjectId: z.string().min(1).nullable().default(null),
-    /** Exact revision-bound human membership proof; never inferred at execution. */
-    causalHumanAuthority: z
-      .object({
-        subjectId: z.string().min(1),
-        organizationMembershipId: z.string().uuid(),
-        membershipAuthorizationRevision: z.number().int().positive(),
-      })
-      .strict()
-      .nullable()
-      .default(null),
-    xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1,
-    claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.default(
-      WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
-    ),
-    xaiAuthoritySubjectId: z.string().min(1).nullable(),
-    claudeAuthoritySubjectId: z.string().min(1).nullable().default(null),
-    connectionAuthoritySubjectId: z.string().min(1).nullable(),
-    triggerInitiator: TurnInitiator,
-    agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
-    incidentPreflightRequired: z.boolean(),
-    alertOccurrenceLabels: z.record(z.string(), z.string()).nullable(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
-      context.addIssue({
-        code: "custom",
-        message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
-      });
-    }
-  });
+export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      // Historical accepted snapshots predate task ownership. Their execution
+      // identity remains the separately frozen causal human, never this default.
+      task: ScheduledTask.extend({ ownerSubjectId: z.string().min(1).nullable().default(null) }),
+      resolvedModel: z.string().min(1),
+      resolvedReasoningEffort: ReasoningEffort,
+      resolvedLatencyMode: LatencyMode,
+      /** Secret-safe TurnExecutionPolicyV1 accepted with this occurrence. Kept
+       * structurally open here because the canonical policy schema is declared
+       * later in this package; consumers must parse it with TurnExecutionPolicyV1. */
+      turnExecutionPolicy: z.unknown().optional(),
+      resolvedSandboxBackend: SandboxBackend,
+      resolvedSandboxOs: SandboxOs,
+      resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+      resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
+      resolvedFirstPartyMcpPermissions: z.array(Permission),
+      /** Agent configuration resolved for generated sessions; absent = legacy. */
+      resolvedAgentConfig: ResolvedAgentConfig.optional(),
+      /** Effective instructions from the `agent.instructions` alias, when set. */
+      resolvedAgentInstructions: z
+        .string()
+        .min(1)
+        .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
+        .optional(),
+      resolvedVariableSet: z
+        .object({
+          id: z.string().uuid(),
+          generation: z.number().int().positive(),
+        })
+        .strict()
+        .nullable(),
+      resolvedRig: z
+        .object({
+          id: z.string().uuid(),
+          versionId: z.string().uuid(),
+          defaultVariableSets: z
+            .array(
+              z
+                .object({
+                  id: z.string().uuid(),
+                  generation: z.number().int().positive(),
+                })
+                .strict(),
+            )
+            .max(25),
+        })
+        .strict()
+        .nullable(),
+      resolvedSlackBotConnection: z
+        .object({
+          id: z.string().uuid(),
+          version: z.number().int().positive(),
+          verifiedInstallVersion: z.number().int().positive(),
+          metadata: z
+            .object({
+              credentialRole: z.literal("opengeni_slack_bot"),
+              credentialLabel: z.literal("OpenGeni Slack bot"),
+              slackTeamId: z.string().min(1).max(64),
+              slackTeamName: z.string().min(1).max(256),
+              botUserId: z.string().min(1).max(64),
+              botId: z.string().min(1).max(64),
+              botDisplayName: z.enum([
+                "Opengeni",
+                "Opengeni Staging",
+                "OpenGeni",
+                "OpenGeni Staging",
+              ]),
+              verifiedAt: z.string().datetime({ offset: true }),
+            })
+            .passthrough(),
+        })
+        .strict()
+        .nullable(),
+      /**
+       * The effective policy that an existing or already-materialized reusable
+       * session will execute. Generated sessions carry null because their
+       * accepted task policy is used to create the session itself.
+       */
+      targetSessionExecution: z
+        .object({
+          sessionId: z.string().uuid(),
+          visibility: z.enum(["user_private", "workspace_shared"]),
+          authorityEpoch: z.number().int().positive(),
+          model: z.string().min(1),
+          reasoningEffort: ReasoningEffort,
+          latencyMode: LatencyMode,
+          tools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+          sandboxBackend: SandboxBackend,
+          sandboxOs: SandboxOs,
+          firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+          // Keep the stored list above for the admission CAS. This independent
+          // effective snapshot follows defaults once, never during recovery.
+          effectiveFirstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+          firstPartyMcpPermissions: z.array(Permission).nullable(),
+          toolPolicy: SessionToolPolicy,
+          mcpServerIds: z.array(z.string().min(1).max(256)).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+          effectiveMcpServerIds: z
+            .array(z.string().min(1).max(256))
+            .max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+          toolPolicyVersion: z.number().int().nonnegative(),
+          variableSets: z
+            .array(
+              z
+                .object({
+                  id: z.string().uuid(),
+                  generation: z.number().int().positive(),
+                })
+                .strict(),
+            )
+            .max(MAX_SELECTED_VARIABLE_SETS)
+            .default([]),
+          variableSetId: z.string().uuid().nullable(),
+          variableSetGeneration: z.number().int().positive().nullable(),
+          rigId: z.string().uuid().nullable(),
+          rigVersionId: z.string().uuid().nullable(),
+          rigDefaultVariableSets: z
+            .array(
+              z
+                .object({
+                  id: z.string().uuid(),
+                  generation: z.number().int().positive(),
+                })
+                .strict(),
+            )
+            .max(25),
+          maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+          effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+        })
+        .strict()
+        .nullable(),
+      generatedSessionBinding: z
+        .object({
+          createIdempotencyKey: z.string().min(1).max(512),
+          effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+          nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
+          codexCompactionMode: CodexCompactionMode,
+        })
+        .strict()
+        .nullable(),
+      personalConnectionDelegations: McpPersonalConnectionDelegations,
+      mcpAccountBindings: McpConnectionAccountBindings.nullable().optional(),
+      personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
+      /** One accepted human principal for every resource-bearing scheduled run. */
+      causalHumanSubjectId: z.string().min(1).nullable().default(null),
+      /** Exact revision-bound human membership proof; never inferred at execution. */
+      causalHumanAuthority: z
+        .object({
+          subjectId: z.string().min(1),
+          organizationMembershipId: z.string().uuid(),
+          membershipAuthorizationRevision: z.number().int().positive(),
+        })
+        .strict()
+        .nullable()
+        .default(null),
+      xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1,
+      claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.default(
+        WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+      ),
+      xaiAuthoritySubjectId: z.string().min(1).nullable(),
+      claudeAuthoritySubjectId: z.string().min(1).nullable().default(null),
+      connectionAuthoritySubjectId: z.string().min(1).nullable(),
+      /** Pinned accounts this occurrence could not use; it runs without those connectors. */
+      degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
+      /**
+       * The occurrence's account intent: the owner (or none for a schedule
+       * without one) and the pinned accounts it used. Work that continues the
+       * occurrence resolves this intent again instead of copying its accounts.
+       */
+      connectionAccountIntent: ConnectionAccountIntent.nullable().optional(),
+      triggerInitiator: TurnInitiator,
+      agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
+      incidentPreflightRequired: z.boolean(),
+      alertOccurrenceLabels: z.record(z.string(), z.string()).nullable(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
+        context.addIssue({
+          code: "custom",
+          message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+    }),
+);
 export type ScheduledTaskRunAcceptedExecution = z.infer<typeof ScheduledTaskRunAcceptedExecution>;
 
-export const KnowledgeSourceSyncFailure = /* @__PURE__ */ z.object({
-  externalObjectId: KnowledgeSourceSyncSubject,
-  code: z.enum([
-    "authority_changed",
-    "connection_reconnect_required",
-    "provider_unavailable",
-    "provider_rejected",
-    "provider_payload_invalid",
-    "content_unsupported",
-    "content_too_large",
-    "resource_limit",
-    "item_processing_failed",
-    "indexing_failed",
-    "internal_failure",
-  ]),
-  retryable: z.boolean(),
-  message: z.string().min(1).max(1000),
-});
+export const KnowledgeSourceSyncFailure = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    externalObjectId: KnowledgeSourceSyncSubject,
+    code: z.enum([
+      "authority_changed",
+      "connection_reconnect_required",
+      "provider_unavailable",
+      "provider_rejected",
+      "provider_payload_invalid",
+      "content_unsupported",
+      "content_too_large",
+      "resource_limit",
+      "item_processing_failed",
+      "indexing_failed",
+      "internal_failure",
+    ]),
+    retryable: z.boolean(),
+    message: z.string().min(1).max(1000),
+  }),
+);
 export type KnowledgeSourceSyncFailure = z.infer<typeof KnowledgeSourceSyncFailure>;
 
-export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
-  phase: z
-    .enum(["queued", "inventory", "transfer", "index", "checkpoint", "completed", "failed"])
-    .default("queued"),
-  scanned: KnowledgeSourceSyncZeroInteger,
-  imported: KnowledgeSourceSyncZeroInteger,
-  unchanged: KnowledgeSourceSyncZeroInteger,
-  skipped: KnowledgeSourceSyncZeroInteger,
-  failed: KnowledgeSourceSyncZeroInteger,
-  bytes: KnowledgeSourceSyncZeroInteger,
-  providerRequests: KnowledgeSourceSyncZeroInteger,
-  elapsedMs: KnowledgeSourceSyncZeroInteger,
-  indexed: KnowledgeSourceSyncZeroInteger,
-  aclPending: KnowledgeSourceSyncZeroInteger,
-  retryable: KnowledgeSourceSyncDisabled,
-  limitReached: z
-    .enum(["items", "bytes", "file_bytes", "provider_requests", "elapsed_time"])
-    .nullable()
-    .default(null),
-  checkpointed: KnowledgeSourceSyncDisabled,
-  reconnectRequired: KnowledgeSourceSyncDisabled,
-  failures: z.array(KnowledgeSourceSyncFailure).max(100).default([]),
-});
+export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    phase: z
+      .enum(["queued", "inventory", "transfer", "index", "checkpoint", "completed", "failed"])
+      .default("queued"),
+    scanned: KnowledgeSourceSyncZeroInteger,
+    imported: KnowledgeSourceSyncZeroInteger,
+    unchanged: KnowledgeSourceSyncZeroInteger,
+    skipped: KnowledgeSourceSyncZeroInteger,
+    failed: KnowledgeSourceSyncZeroInteger,
+    bytes: KnowledgeSourceSyncZeroInteger,
+    providerRequests: KnowledgeSourceSyncZeroInteger,
+    elapsedMs: KnowledgeSourceSyncZeroInteger,
+    indexed: KnowledgeSourceSyncZeroInteger,
+    aclPending: KnowledgeSourceSyncZeroInteger,
+    retryable: KnowledgeSourceSyncDisabled,
+    limitReached: z
+      .enum(["items", "bytes", "file_bytes", "provider_requests", "elapsed_time"])
+      .nullable()
+      .default(null),
+    checkpointed: KnowledgeSourceSyncDisabled,
+    reconnectRequired: KnowledgeSourceSyncDisabled,
+    failures: z.array(KnowledgeSourceSyncFailure).max(100).default([]),
+  }),
+);
 export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
 
 /**
@@ -10426,55 +12221,65 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * means every occurrence is refused until the task or a resource it names
  * changes. Known reasons: `scheduled_authority_unavailable`,
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
- * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
- * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
+ * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
+ * (terminal) and
+ * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`,
+ * `session_usage_limit` (an existing-session task reached its per-task usage
+ * limit; admitted again once a person raises or clears it)
  * (transient). Readers must tolerate new reasons.
  */
-export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ z
-  .object({
-    version: z.literal(1),
-    reason: z.string().min(1).max(128),
-    retryable: z.boolean(),
-  })
-  .strict();
+export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      reason: z.string().min(1).max(128),
+      retryable: z.boolean(),
+    })
+    .strict(),
+);
 export type ScheduledTaskAdmissionRefusal = z.infer<typeof ScheduledTaskAdmissionRefusal>;
 
-export const ScheduledTaskRunAwaitingHuman = /* @__PURE__ */ z
-  .object({
-    since: z.string(),
-    expiresAt: z.string().nullable(),
-  })
-  .strict();
+export const ScheduledTaskRunAwaitingHuman = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      since: z.string(),
+      expiresAt: z.string().nullable(),
+    })
+    .strict(),
+);
 export type ScheduledTaskRunAwaitingHuman = z.infer<typeof ScheduledTaskRunAwaitingHuman>;
 
 /** Non-secret evidence of a refused connection selection, never execution authority. */
-export const ConnectionAccountSelectionDiagnostic = /* @__PURE__ */ z
-  .object({
-    version: z.literal(1),
-    reason: z.enum([
-      "selected_account_unavailable",
-      "owner_access_unavailable",
-      "ambiguous_account",
-      "parent_accounts_required",
-      "selection_unavailable",
-    ]),
-    accounts: z.array(
-      z
-        .object({
-          serverId: z.string().min(1).max(256),
-          connectionId: z.string().uuid().nullable(),
-          reason: z.enum([
-            "connector_unavailable",
-            "account_not_visible",
-            "account_inactive",
-            "account_mismatch",
-            "selection_unavailable",
-          ]),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+export const ConnectionAccountSelectionDiagnostic = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
+  () =>
+    z
+      .object({
+        version: z.literal(1),
+        reason: z.enum([
+          "selected_account_unavailable",
+          "owner_access_unavailable",
+          "ambiguous_account",
+          "parent_accounts_required",
+          "selection_unavailable",
+        ]),
+        accounts: z.array(
+          z
+            .object({
+              serverId: z.string().min(1).max(256),
+              connectionId: z.string().uuid().nullable(),
+              reason: z.enum([
+                "connector_unavailable",
+                "account_not_visible",
+                "account_inactive",
+                "account_mismatch",
+                "selection_unavailable",
+              ]),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+);
 export type ConnectionAccountSelectionDiagnostic = z.infer<
   typeof ConnectionAccountSelectionDiagnostic
 >;
@@ -10485,153 +12290,170 @@ export type ConnectionAccountSelectionDiagnostic = z.infer<
  * personal authority). Derived at read time from durable session events;
  * credential-free.
  */
-export const ScheduledTaskRunAccessFailure = /* @__PURE__ */ z
-  .object({
-    /** Configured connector id (the account route is folded into its connector). */
-    serverId: z.string().min(1).max(256),
-    name: z.string().min(1).max(256),
-    providerDomain: z.string().min(1).max(512),
-    reason: ToolAuthNeededReason,
-    /** How many times the run hit this connector and reason. */
-    count: z.number().int().positive(),
-    firstOccurredAt: z.string(),
-  })
-  .strict();
+export const ScheduledTaskRunAccessFailure = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Configured connector id (the account route is folded into its connector). */
+      serverId: z.string().min(1).max(256),
+      name: z.string().min(1).max(256),
+      providerDomain: z.string().min(1).max(512),
+      reason: ToolAuthNeededReason,
+      /** How many times the run hit this connector and reason. */
+      count: z.number().int().positive(),
+      firstOccurredAt: z.string(),
+    })
+    .strict(),
+);
 export type ScheduledTaskRunAccessFailure = z.infer<typeof ScheduledTaskRunAccessFailure>;
 
 export const SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX = 8;
 
-export const ScheduledTaskRun = /* @__PURE__ */ z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  taskId: z.string().uuid(),
-  taskAuthorityRevision: z.number().int().positive().nullable().default(null),
-  taskExecutionDigest: z
-    .string()
-    .regex(/^[0-9a-f]{64}$/u)
-    .nullable()
-    .default(null),
-  status: ScheduledTaskRunStatus,
-  triggerType: ScheduledTaskTriggerType,
-  scheduledAt: z.string().nullable(),
-  firedAt: z.string(),
-  sessionId: z.string().uuid().nullable(),
-  triggerEventId: z.string().uuid().nullable(),
-  actionKind: ScheduledTaskActionKind.default("agent_turn"),
-  knowledgeSyncRunId: KnowledgeSourceSyncUuid.nullable().default(null),
-  knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
-  completedAt: z.string().nullable().default(null),
-  error: z.string().nullable(),
-  admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
-  /** Why the scheduler refused this occurrence before running it (see the schema). */
-  admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
-  /**
-   * Read-time: this dispatched run's own turn is waiting on a person (a tool
-   * approval or structured question) since `since`; `expiresAt` is when the
-   * task's approval timeout answers for it (null: waits indefinitely).
-   * Absent/null when the run is not waiting.
-   */
-  awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().optional(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  /**
-   * Connectors this run could not use. Projected only for a viewer who can act
-   * on the task (see `ScheduledTaskPolicyDrift`); absent otherwise.
-   */
-  accessFailures: z
-    .array(ScheduledTaskRunAccessFailure)
-    .max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX)
-    .optional(),
-});
+export const ScheduledTaskRun = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    taskAuthorityRevision: z.number().int().positive().nullable().default(null),
+    taskExecutionDigest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable()
+      .default(null),
+    status: ScheduledTaskRunStatus,
+    triggerType: ScheduledTaskTriggerType,
+    scheduledAt: z.string().nullable(),
+    firedAt: z.string(),
+    sessionId: z.string().uuid().nullable(),
+    triggerEventId: z.string().uuid().nullable(),
+    actionKind: ScheduledTaskActionKind.default("agent_turn"),
+    knowledgeSyncRunId: KnowledgeSourceSyncUuid.nullable().default(null),
+    knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
+    completedAt: z.string().nullable().default(null),
+    error: z.string().nullable(),
+    admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
+    /**
+     * Pinned connector accounts this run could not use. The run went ahead
+     * without those connectors; no other account was used in their place.
+     * Absent or empty when every pinned account was usable.
+     */
+    degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
+    /** Why the scheduler refused this occurrence before running it (see the schema). */
+    admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
+    /**
+     * Read-time: this dispatched run's own turn is waiting on a person (a tool
+     * approval or structured question) since `since`; `expiresAt` is when the
+     * task's approval timeout answers for it (null: waits indefinitely).
+     * Absent/null when the run is not waiting.
+     */
+    awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().optional(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    /**
+     * Connectors this run could not use. Projected only for a viewer who can act
+     * on the task (see `ScheduledTaskPolicyDrift`); absent otherwise.
+     */
+    accessFailures: z
+      .array(ScheduledTaskRunAccessFailure)
+      .max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX)
+      .optional(),
+  }),
+);
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
 /**
  * A schedule that needs its owner's attention because of connector access:
  * - its latest run with a turn failed closed on a connector and no later run
  *   has cleared it (`runId`, `firedAt` and `failures`); and/or
- * - a connector account it chose can no longer be used
- *   (`unavailableAccounts`), so every fresh occurrence is refused before it
- *   creates a run. There is no run to point at, so `runId` and `firedAt` are
- *   null when only this applies.
+ * - a connector account a person pinned can no longer be used
+ *   (`unavailableAccounts`): runs go ahead without that connector, or are
+ *   skipped when the schedule requires its pinned accounts. `runId` and
+ *   `firedAt` are null when only this applies.
  * At least one of `failures` and `unavailableAccounts` is non-empty. Listed
  * for its owner; a task without an owner is listed only for a key or service
  * that manages schedules.
  */
-export const ScheduledTaskAccessAttention = /* @__PURE__ */ z
-  .object({
-    taskId: z.string().uuid(),
-    taskName: z.string(),
-    /** The task head this item was computed against; a new head is a new notice. */
-    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
-    runId: z.string().uuid().nullable(),
-    firedAt: z.string().nullable(),
-    failures: z.array(ScheduledTaskRunAccessFailure).max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
-    /** Connectors whose chosen account can no longer be used; new runs cannot start. */
-    unavailableAccounts: z
-      .array(ScheduledTaskAccessConnector)
-      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
-    /** The latest run is waiting on a person (approval or question) right now. */
-    awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().default(null),
-  })
-  .strict()
-  .refine(
-    (item) =>
-      item.failures.length > 0 ||
-      item.unavailableAccounts.length > 0 ||
-      item.awaitingHuman !== null,
-    {
-      message:
-        "an attention item names a failed connector, an unavailable account, or a run waiting on a person",
-    },
-  )
-  .refine((item) => (item.runId === null) === (item.firedAt === null), {
-    message: "runId and firedAt are both set or both null",
-  })
-  .refine((item) => item.failures.length === 0 || item.runId !== null, {
-    message: "a run's access failures name the run",
-  });
+export const ScheduledTaskAccessAttention = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      taskId: z.string().uuid(),
+      taskName: z.string(),
+      /** The task head this item was computed against; a new head is a new notice. */
+      executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+      runId: z.string().uuid().nullable(),
+      firedAt: z.string().nullable(),
+      failures: z.array(ScheduledTaskRunAccessFailure).max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
+      /** Connectors whose pinned account can no longer be used. */
+      unavailableAccounts: z
+        .array(ScheduledTaskAccessConnector)
+        .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+      /** The latest run is waiting on a person (approval or question) right now. */
+      awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().default(null),
+    })
+    .strict()
+    .refine(
+      (item) =>
+        item.failures.length > 0 ||
+        item.unavailableAccounts.length > 0 ||
+        item.awaitingHuman !== null,
+      {
+        message:
+          "an attention item names a failed connector, an unavailable account, or a run waiting on a person",
+      },
+    )
+    .refine((item) => (item.runId === null) === (item.firedAt === null), {
+      message: "runId and firedAt are both set or both null",
+    })
+    .refine((item) => item.failures.length === 0 || item.runId !== null, {
+      message: "a run's access failures name the run",
+    }),
+);
 export type ScheduledTaskAccessAttention = z.infer<typeof ScheduledTaskAccessAttention>;
 
 export const SCHEDULED_TASK_ACCESS_ATTENTION_MAX = 100;
 
-export const ListScheduledTaskAccessAttentionResponse = /* @__PURE__ */ z
-  .object({
-    tasks: z.array(ScheduledTaskAccessAttention).max(SCHEDULED_TASK_ACCESS_ATTENTION_MAX),
-  })
-  .strict();
+export const ListScheduledTaskAccessAttentionResponse =
+  /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+    z
+      .object({
+        tasks: z.array(ScheduledTaskAccessAttention).max(SCHEDULED_TASK_ACCESS_ATTENTION_MAX),
+      })
+      .strict(),
+  );
 export type ListScheduledTaskAccessAttentionResponse = z.infer<
   typeof ListScheduledTaskAccessAttentionResponse
 >;
 
 /**
- * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+ * Re-freeze a task's connectors, connector accounts and Opengeni tool policy
  * with the calling person's current authority. `executionDigest` is the task
  * head the person reviewed; a changed task is refused with 409.
  */
-export const RefreshScheduledTaskAccessRequest = /* @__PURE__ */ z
-  .object({
-    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
-    /**
-     * Workspace default connectors and OpenGeni tools the person chose to keep
-     * off this schedule (the drift they dismissed). It only narrows what the
-     * refresh adds; it never removes anything the schedule already has.
-     */
-    leaveOut: z
-      .object({
-        connectors: z
-          .array(z.string().min(1).max(256))
-          .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX)
-          .optional(),
-        openGeniTools: z
-          .array(FirstPartyMcpToolName)
-          .max(FIRST_PARTY_MCP_TOOL_NAMES.length)
-          .optional(),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict();
+export const RefreshScheduledTaskAccessRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+      /**
+       * Workspace default connectors and Opengeni tools the person chose to keep
+       * off this schedule (the drift they dismissed). It only narrows what the
+       * refresh adds; it never removes anything the schedule already has.
+       */
+      leaveOut: z
+        .object({
+          connectors: z
+            .array(z.string().min(1).max(256))
+            .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX)
+            .optional(),
+          openGeniTools: z
+            .array(FirstPartyMcpToolName)
+            .max(FIRST_PARTY_MCP_TOOL_NAMES.length)
+            .optional(),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict(),
+);
 export type RefreshScheduledTaskAccessRequest = z.infer<typeof RefreshScheduledTaskAccessRequest>;
 
 const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
@@ -10649,12 +12471,23 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     runMode: ScheduledTaskRunMode.default("new_session_per_run"),
     overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
     targetSessionId: z.string().uuid().nullable().optional(),
+    /** Who can see it. Omitted: the organization's default for new schedules. */
+    visibility: SessionVisibility.optional(),
     connectionAuthorities: z.never().optional(),
-    connectionAccounts: McpConnectionAccountSelections.default([]),
+    /**
+     * Connector accounts a person pins for a schedule that starts its own
+     * session (never an existing-chat schedule, never an agent). Omitted
+     * connectors follow the owner's current accounts at each run.
+     */
+    pinnedAccounts: McpConnectionAccountSelections.optional(),
+    /** Skip an occurrence instead of running without an unusable pinned account. */
+    pinnedAccountsRequired: z.boolean().optional(),
 
     agentConfig: ScheduledTaskAgentConfigInput,
     status: ScheduledTaskStatus.default("active"),
     variableSetId: z.string().uuid().nullable().optional(),
+    /** Vault narrowing for every run; omission adds none. */
+    vaultPolicy: VaultPolicy.optional(),
     environmentId: z.string().uuid().nullable().optional(),
     // The Sandbox Environment each run binds to; its active version is resolved
     // per fire. Omitted resolves once at create, like session create: the
@@ -10663,13 +12496,24 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
   },
-  { rejectKeys: ["selectedHostMcpDelegations"] },
+  { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
 ).superRefine((value, context) => {
   if (value.runMode === "existing_session" && !value.targetSessionId) {
     context.addIssue({
       code: "custom",
       path: ["targetSessionId"],
       message: "targetSessionId is required when runMode=existing_session",
+    });
+  }
+  if (
+    value.runMode === "existing_session" &&
+    (value.pinnedAccounts !== undefined || value.pinnedAccountsRequired !== undefined)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["pinnedAccounts"],
+      message:
+        "An existing-chat schedule uses that chat's connectors with the owner's current accounts; pin accounts only on a schedule that starts its own session",
     });
   }
   if (value.runMode !== "existing_session" && value.targetSessionId) {
@@ -10695,78 +12539,87 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
   }
 });
 
-const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
-  .object({
-    name: z.string().min(1),
-    schedule: ScheduledTaskScheduleSpec,
-    action: KnowledgeSourceSyncAction,
-    overlapPolicy: z.enum(["skip", "buffer_one"]).default("buffer_one"),
-    status: ScheduledTaskStatus.default("active"),
-    metadata: z.record(z.string(), z.unknown()).default({}),
-  })
-  .strict()
-  .transform((value) => ({
-    ...value,
-    action: { kind: "agent_turn" as const },
-    runMode: "new_session_per_run" as const,
-    targetSessionId: null,
-    agentConfig: knowledgeSourceAgentConfig(value.action),
-    variableSetId: null,
-    environmentId: null,
-    rigId: null,
-    connectionAccounts: [],
-  }));
+const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
+  () =>
+    z
+      .object({
+        name: z.string().min(1),
+        schedule: ScheduledTaskScheduleSpec,
+        action: KnowledgeSourceSyncAction,
+        overlapPolicy: z.enum(["skip", "buffer_one"]).default("buffer_one"),
+        status: ScheduledTaskStatus.default("active"),
+        metadata: z.record(z.string(), z.unknown()).default({}),
+      })
+      .strict()
+      .transform((value) => ({
+        ...value,
+        action: { kind: "agent_turn" as const },
+        runMode: "new_session_per_run" as const,
+        targetSessionId: null,
+        agentConfig: knowledgeSourceAgentConfig(value.action),
+        variableSetId: null,
+        environmentId: null,
+        rigId: null,
+      })),
+);
 
 /** Schedule a message in an existing chat, whose execution settings are inherited. */
-export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
-  .object({
-    name: ScheduledTaskNameInput,
-    schedule: ScheduledTaskScheduleSpec,
-    prompt: ScheduledTaskAgentConfigInput.shape.prompt,
-    targetSessionId: z.string().uuid(),
-    connectionAccounts: McpConnectionAccountSelections.default([]),
-    runMode: z.literal("existing_session").default("existing_session"),
-    overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
-    status: ScheduledTaskStatus.default("active"),
-    metadata: ScheduledTaskMetadataInput.default({}),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const result = ScheduledTaskAgentConfigInput.safeParse({ prompt: value.prompt });
-    if (!result.success) for (const issue of result.error.issues) context.addIssue({ ...issue });
-  })
-  .transform(({ prompt, ...value }) => ({
-    ...value,
-    action: { kind: "agent_turn" as const },
-    agentConfig: {
-      prompt,
-      resources: [],
-      tools: [],
-      metadata: {},
-    } as ScheduledTaskAgentConfigInput,
-    variableSetId: undefined,
-    environmentId: undefined,
-    rigId: undefined,
-  }));
+export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: ScheduledTaskNameInput,
+      schedule: ScheduledTaskScheduleSpec,
+      prompt: ScheduledTaskAgentConfigInput.shape.prompt,
+      targetSessionId: z.string().uuid(),
+      /** A schedule posting into an Only me chat is always Only me. */
+      visibility: SessionVisibility.optional(),
+      runMode: z.literal("existing_session").default("existing_session"),
+      overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+      status: ScheduledTaskStatus.default("active"),
+      metadata: ScheduledTaskMetadataInput.default({}),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      const result = ScheduledTaskAgentConfigInput.safeParse({ prompt: value.prompt });
+      if (!result.success) for (const issue of result.error.issues) context.addIssue({ ...issue });
+    })
+    .transform(({ prompt, ...value }) => ({
+      ...value,
+      action: { kind: "agent_turn" as const },
+      agentConfig: {
+        prompt,
+        resources: [],
+        tools: [],
+        metadata: {},
+      } as ScheduledTaskAgentConfigInput,
+      variableSetId: undefined,
+      environmentId: undefined,
+      rigId: undefined,
+    })),
+);
 
-export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
-  CreateKnowledgeSourceSyncScheduledTaskRequest,
-  CreateAgentScheduledTaskRequest,
-  CreateSessionScheduledTaskRequest,
-]);
+export const CreateScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    CreateKnowledgeSourceSyncScheduledTaskRequest,
+    CreateAgentScheduledTaskRequest,
+    CreateSessionScheduledTaskRequest,
+  ]),
+);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
 /** Reviewable access consequences of moving a schedule to another chat. */
-export const ScheduledTaskTargetAccessChange = z
-  .object({
-    code: z.literal("scheduled_target_access_change"),
-    targetSessionId: z.uuid(),
-    removedVariableSetIds: z.array(z.uuid()).max(100),
-    removedVariableSetCount: z.number().int().min(0).max(100),
-    removedRigId: z.uuid().nullable(),
-    resolution: z.string().max(512),
-  })
-  .strict();
+export const ScheduledTaskTargetAccessChange = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      code: z.literal("scheduled_target_access_change"),
+      targetSessionId: z.uuid(),
+      removedVariableSetIds: z.array(z.uuid()).max(100),
+      removedVariableSetCount: z.number().int().min(0).max(100),
+      removedRigId: z.uuid().nullable(),
+      resolution: z.string().max(512),
+    })
+    .strict(),
+);
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias(
@@ -10787,8 +12640,18 @@ export const UpdateScheduledTaskRequest =
       overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
       action: ScheduledTaskAction.optional(),
       targetSessionId: z.string().uuid().nullable().optional(),
+      /** Vault narrowing for every run. */
+      vaultPolicy: VaultPolicy.optional(),
+      /** Change who can see it. Only the owner can, and a schedule posting into an Only me chat stays Only me. */
+      visibility: SessionVisibility.optional(),
       connectionAuthorities: z.never().optional(),
-      connectionAccounts: McpConnectionAccountSelections.optional(),
+      /**
+       * Replace the person-pinned connector accounts of a schedule that starts
+       * its own session; `[]` unpins every connector. Omitted keeps the pins.
+       */
+      pinnedAccounts: McpConnectionAccountSelections.optional(),
+      /** Skip occurrences instead of running without an unusable pinned account. */
+      pinnedAccountsRequired: z.boolean().optional(),
 
       /** Compare against the reviewed execution digest; rejects concurrent edits. */
       expectedExecutionDigest: z.string().min(1).max(128).optional(),
@@ -10819,7 +12682,7 @@ export const UpdateScheduledTaskRequest =
       rigId: z.string().uuid().nullable().optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
     },
-    { rejectKeys: ["selectedHostMcpDelegations"] },
+    { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
   ).superRefine((value, context) => {
     if (value.adoptSessionSettings && !value.expectedExecutionDigest) {
       context.addIssue({
@@ -10861,6 +12724,17 @@ export const UpdateScheduledTaskRequest =
       });
     }
     if (
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId)) &&
+      ((value.pinnedAccounts?.length ?? 0) > 0 || value.pinnedAccountsRequired === true)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pinnedAccounts"],
+        message:
+          "An existing-chat schedule uses that chat's connectors with the owner's current accounts; pin accounts only on a schedule that starts its own session",
+      });
+    }
+    if (
       value.agentConfig?.goal &&
       (value.runMode === "existing_session" || Boolean(value.targetSessionId))
     ) {
@@ -10888,9 +12762,11 @@ export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskReque
  * retried trigger that reuses the same token charges once and starts one run.
  * Omitting it makes each call a distinct trigger (the server mints a token).
  */
-export const TriggerScheduledTaskRequest = z.object({
-  triggerId: z.string().min(1).max(128).optional(),
-});
+export const TriggerScheduledTaskRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    triggerId: z.string().min(1).max(128).optional(),
+  }),
+);
 export type TriggerScheduledTaskRequest = z.infer<typeof TriggerScheduledTaskRequest>;
 
 // ============ Event-triggered automations ============
@@ -10900,58 +12776,66 @@ export const AUTOMATION_EVENT_PAYLOAD_MAX_BYTES = 256 * 1024;
 export const AUTOMATION_SESSION_TEMPLATE_MAX_BYTES = 512 * 1024;
 export const AUTOMATION_MAX_MATCHED_TRIGGERS = 32;
 
-const AutomationBoundedJson = z.record(z.string(), z.unknown()).superRefine((value, context) => {
-  let bytes = Number.POSITIVE_INFINITY;
-  try {
-    bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
-  } catch {
-    // The shared JSON/protocol boundary reports the exact runtime path later;
-    // this public ingress still fails closed on an unserializable value.
-  }
-  if (bytes > AUTOMATION_EVENT_PAYLOAD_MAX_BYTES) {
-    context.addIssue({
-      code: "custom",
-      message: `automation JSON exceeds ${AUTOMATION_EVENT_PAYLOAD_MAX_BYTES} UTF-8 bytes`,
-    });
-  }
-});
+const AutomationBoundedJson = /* @__PURE__ */ defineSchema(() =>
+  z.record(z.string(), z.unknown()).superRefine((value, context) => {
+    let bytes = Number.POSITIVE_INFINITY;
+    try {
+      bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    } catch {
+      // The shared JSON/protocol boundary reports the exact runtime path later;
+      // this public ingress still fails closed on an unserializable value.
+    }
+    if (bytes > AUTOMATION_EVENT_PAYLOAD_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `automation JSON exceeds ${AUTOMATION_EVENT_PAYLOAD_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  }),
+);
 
-export const AutomationAdapterId = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export const AutomationAdapterId = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+);
 export type AutomationAdapterId = z.infer<typeof AutomationAdapterId>;
 
-export const AutomationSourceStatus = z.enum(["active", "disabled"]);
+export const AutomationSourceStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "disabled"]),
+);
 export type AutomationSourceStatus = z.infer<typeof AutomationSourceStatus>;
 
-export const AutomationTriggerStatus = z.enum(["active", "paused", "disabled"]);
+export const AutomationTriggerStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "paused", "disabled"]),
+);
 export type AutomationTriggerStatus = z.infer<typeof AutomationTriggerStatus>;
 
-export const AutomationRunStatus = z.enum([
-  "queued",
-  "dispatching",
-  "dispatched",
-  "skipped",
-  "failed",
-]);
+export const AutomationRunStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["queued", "dispatching", "dispatched", "skipped", "failed"]),
+);
 export type AutomationRunStatus = z.infer<typeof AutomationRunStatus>;
 
-export const AutomationEventStatus = z.enum(["accepted", "ignored", "failed"]);
+export const AutomationEventStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["accepted", "ignored", "failed"]),
+);
 export type AutomationEventStatus = z.infer<typeof AutomationEventStatus>;
 
-export const SignedJsonAutomationEnvelope = z
-  .object({
-    id: z.string().trim().min(1).max(1024).optional(),
-    type: z.string().trim().min(1).max(256),
-    occurrenceKey: z.string().trim().min(1).max(1024).optional(),
-    occurredAt: z.string().datetime({ offset: true }).nullable().optional(),
-    subject: z.string().trim().min(1).max(512).nullable().optional(),
-    resource: z.string().trim().min(1).max(1024).nullable().optional(),
-    data: z.record(z.string(), z.unknown()).default({}),
-  })
-  .strict();
+export const SignedJsonAutomationEnvelope = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().trim().min(1).max(1024).optional(),
+      type: z.string().trim().min(1).max(256),
+      occurrenceKey: z.string().trim().min(1).max(1024).optional(),
+      occurredAt: z.string().datetime({ offset: true }).nullable().optional(),
+      subject: z.string().trim().min(1).max(512).nullable().optional(),
+      resource: z.string().trim().min(1).max(1024).nullable().optional(),
+      data: z.record(z.string(), z.unknown()).default({}),
+    })
+    .strict(),
+);
 export type SignedJsonAutomationEnvelope = z.infer<typeof SignedJsonAutomationEnvelope>;
 
 export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -11018,19 +12902,21 @@ export const StoredAutomationSessionTemplate = /* @__PURE__ */ defineSkillContra
   z.preprocess(projectStoredTemplateSkillMetadata, AutomationSessionTemplate),
 );
 
-export const AutomationNormalizedEvent = z
-  .object({
-    adapterId: AutomationAdapterId,
-    eventType: z.string().trim().min(1).max(256),
-    occurrenceKey: z.string().trim().min(1).max(1024),
-    occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
-    subject: z.string().trim().min(1).max(512).nullable().default(null),
-    resource: z.string().trim().min(1).max(1024).nullable().default(null),
-    payload: AutomationBoundedJson,
-    /** Server-owned manual-caller restriction, frozen in the immutable event. */
-    credentialRestriction: z.literal("developer_setup").optional(),
-  })
-  .strict();
+export const AutomationNormalizedEvent = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      adapterId: AutomationAdapterId,
+      eventType: z.string().trim().min(1).max(256),
+      occurrenceKey: z.string().trim().min(1).max(1024),
+      occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
+      subject: z.string().trim().min(1).max(512).nullable().default(null),
+      resource: z.string().trim().min(1).max(1024).nullable().default(null),
+      payload: AutomationBoundedJson,
+      /** Server-owned manual-caller restriction, frozen in the immutable event. */
+      credentialRestriction: z.literal("developer_setup").optional(),
+    })
+    .strict(),
+);
 export type AutomationNormalizedEvent = z.infer<typeof AutomationNormalizedEvent>;
 
 export const AutomationAcceptedExecution = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -11064,43 +12950,49 @@ export const StoredAutomationAcceptedExecution = /* @__PURE__ */ defineSkillCont
   }),
 );
 
-export const CreateAutomationSourceRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200),
-    adapterId: AutomationAdapterId.default("signed-json.v1"),
-    webhookSecret: z.string().min(16).max(65_536),
-    configuration: AutomationBoundedJson.default({}),
-  })
-  .strict();
+export const CreateAutomationSourceRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      adapterId: AutomationAdapterId.default("signed-json.v1"),
+      webhookSecret: z.string().min(16).max(65_536),
+      configuration: AutomationBoundedJson.default({}),
+    })
+    .strict(),
+);
 export type CreateAutomationSourceRequest = z.infer<typeof CreateAutomationSourceRequest>;
 
-export const UpdateAutomationSourceRequest = z
-  .object({
-    name: z.string().trim().min(1).max(200).optional(),
-    webhookSecret: z.string().min(16).max(65_536).optional(),
-    configuration: AutomationBoundedJson.optional(),
-    status: AutomationSourceStatus.optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0, "automation source update is empty");
+export const UpdateAutomationSourceRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200).optional(),
+      webhookSecret: z.string().min(16).max(65_536).optional(),
+      configuration: AutomationBoundedJson.optional(),
+      status: AutomationSourceStatus.optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, "automation source update is empty"),
+);
 export type UpdateAutomationSourceRequest = z.infer<typeof UpdateAutomationSourceRequest>;
 
-export const AutomationSource = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  name: z.string(),
-  adapterId: AutomationAdapterId,
-  configuration: z.record(z.string(), z.unknown()),
-  status: AutomationSourceStatus,
-  version: z.number().int().positive(),
+export const AutomationSource = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    adapterId: AutomationAdapterId,
+    configuration: z.record(z.string(), z.unknown()),
+    status: AutomationSourceStatus,
+    version: z.number().int().positive(),
 
-  hasWebhookSecret: z.boolean(),
-  webhookPath: z.string().min(1),
-  createdBySubjectId: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+    hasWebhookSecret: z.boolean(),
+    webhookPath: z.string().min(1),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type AutomationSource = z.infer<typeof AutomationSource>;
 
 export const CreateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -11158,43 +13050,49 @@ export const AutomationTrigger = /* @__PURE__ */ defineSkillContractSchema(() =>
 );
 export type AutomationTrigger = z.infer<typeof AutomationTrigger>;
 
-export const AutomationRun = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sourceId: z.string().uuid(),
-  triggerId: z.string().uuid(),
-  triggerRevision: z.number().int().positive(),
-  eventId: z.string().uuid(),
-  occurrenceKey: z.string(),
-  status: AutomationRunStatus,
-  sessionId: z.string().uuid().nullable(),
-  errorCode: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const AutomationRun = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sourceId: z.string().uuid(),
+    triggerId: z.string().uuid(),
+    triggerRevision: z.number().int().positive(),
+    eventId: z.string().uuid(),
+    occurrenceKey: z.string(),
+    status: AutomationRunStatus,
+    sessionId: z.string().uuid().nullable(),
+    errorCode: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type AutomationRun = z.infer<typeof AutomationRun>;
 
-export const AutomationWebhookResult = z.object({
-  accepted: z.boolean(),
-  duplicate: z.boolean(),
-  ignoredReason: z.string().nullable(),
-  eventId: z.string().uuid().nullable(),
-  runIds: z.array(z.string().uuid()),
-});
+export const AutomationWebhookResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accepted: z.boolean(),
+    duplicate: z.boolean(),
+    ignoredReason: z.string().nullable(),
+    eventId: z.string().uuid().nullable(),
+    runIds: z.array(z.string().uuid()),
+  }),
+);
 export type AutomationWebhookResult = z.infer<typeof AutomationWebhookResult>;
 
-export const TriggerAutomationManuallyRequest = z
-  .object({
-    deliveryId: z.string().trim().min(1).max(512).optional(),
-    eventType: z.string().trim().min(1).max(256),
-    occurrenceKey: z.string().trim().min(1).max(1024),
-    payload: AutomationBoundedJson.default({}),
-    occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
-    subject: z.string().trim().min(1).max(512).nullable().default(null),
-    resource: z.string().trim().min(1).max(1024).nullable().default(null),
-  })
-  .strict();
+export const TriggerAutomationManuallyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      deliveryId: z.string().trim().min(1).max(512).optional(),
+      eventType: z.string().trim().min(1).max(256),
+      occurrenceKey: z.string().trim().min(1).max(1024),
+      payload: AutomationBoundedJson.default({}),
+      occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
+      subject: z.string().trim().min(1).max(512).nullable().default(null),
+      resource: z.string().trim().min(1).max(1024).nullable().default(null),
+    })
+    .strict(),
+);
 export type TriggerAutomationManuallyRequest = z.infer<typeof TriggerAutomationManuallyRequest>;
 
 // Construct canonical Skill validators synchronously, but let browser bundlers
@@ -11207,12 +13105,14 @@ function defineSkillContractSchema<Schema>(factory: () => Schema): Schema {
 
 // One UTF-8 file inside a portable Skill folder. Paths are relative POSIX paths
 // such as "SKILL.md" or "references/runbook.md".
-export const SkillArtifactFile = z.object({
-  path: z.string().min(1).max(512).refine(isSafeSkillRelativePath, {
-    message: "skill file path must be a safe relative POSIX path without '..' segments",
+export const SkillArtifactFile = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string().min(1).max(512).refine(isSafeSkillRelativePath, {
+      message: "skill file path must be a safe relative POSIX path without '..' segments",
+    }),
+    content: z.string().max(SKILL_MAX_FILE_BYTES),
   }),
-  content: z.string().max(SKILL_MAX_FILE_BYTES),
-});
+);
 export type SkillArtifactFile = z.infer<typeof SkillArtifactFile>;
 
 // A portable Skill definition. Files own metadata; optional name/description
@@ -11306,6 +13206,22 @@ export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() 
   z.preprocess(projectStoredSkillMetadata, SessionSkills),
 );
 
+/**
+ * `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills`: replace the
+ * Skills a session carries itself. Each entry is validated like a session
+ * create Skill (SKILL.md owns name and description). Uses the session's
+ * `toolPolicyVersion` (shared CAS) and applies from the next attempt.
+ */
+export const UpdateSessionSkillsRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      skills: z.array(z.unknown()).max(32),
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+);
+export type UpdateSessionSkillsRequest = z.infer<typeof UpdateSessionSkillsRequest>;
+
 function projectStoredSkillMetadata(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
   return value.map((skill: unknown) => {
@@ -11332,25 +13248,21 @@ function projectStoredTemplateSkillMetadata(value: unknown): unknown {
 
 /** Execution view only; never replace the stored manifest or its digest with it. */
 
-// ============ OpenGeni Review Bot — provider-neutral pull-request review automation ============
+// ============ Opengeni Review Bot — provider-neutral pull-request review automation ============
 
 export const OPENGENI_PR_REVIEW_SESSION_ROLE = "pull_request_review" as const;
 
 export const PrReviewProvider = GitCredentialProvider;
 export type PrReviewProvider = z.infer<typeof PrReviewProvider>;
 
-export const PrReviewCredentialKind = /* @__PURE__ */ z.enum([
-  "github_app",
-  "managed_github_app",
-  "provider_token",
-]);
+export const PrReviewCredentialKind = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["github_app", "managed_github_app", "provider_token"]),
+);
 export type PrReviewCredentialKind = z.infer<typeof PrReviewCredentialKind>;
 
-export const PrReviewWebhookAuthKind = /* @__PURE__ */ z.enum([
-  "hmac_sha256",
-  "shared_token",
-  "basic",
-]);
+export const PrReviewWebhookAuthKind = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.enum(["hmac_sha256", "shared_token", "basic"]),
+);
 export type PrReviewWebhookAuthKind = z.infer<typeof PrReviewWebhookAuthKind>;
 
 const PrReviewSecretInput = /* @__PURE__ */ (() => z.string().min(16).max(65_536))();
@@ -11495,7 +13407,7 @@ export const PrReviewManagedGitHubSetup = /* @__PURE__ */ (() =>
   z.object({
     configured: z.boolean(),
     status: z.enum(["unavailable", "not_connected", "connected"]),
-    appName: z.literal("OpenGeni Lens"),
+    appName: z.enum(["Opengeni Lens", "OpenGeni Lens"]),
     connectUrl: z.string().url().nullable(),
     installations: z.array(PrReviewManagedGitHubInstallation),
     missing: z.array(z.string()),
@@ -11557,199 +13469,251 @@ export const PrReviewRepositoryBinding = /* @__PURE__ */ (() =>
   }))();
 export type PrReviewRepositoryBinding = z.infer<typeof PrReviewRepositoryBinding>;
 
-export const SocialProvider = z.enum([
-  "x",
-  "reddit",
-  "linkedin",
-  "instagram",
-  "facebook",
-  "tiktok",
-  "youtube",
-  "custom",
-]);
+export const SocialProvider = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["x", "reddit", "linkedin", "instagram", "facebook", "tiktok", "youtube", "custom"]),
+);
 export type SocialProvider = z.infer<typeof SocialProvider>;
 
-export const SocialConnectionStatus = z.enum(["connected", "needs_reauth", "disabled"]);
+export const SocialConnectionStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["connected", "needs_reauth", "disabled"]),
+);
 export type SocialConnectionStatus = z.infer<typeof SocialConnectionStatus>;
 
-export const ConnectionOwnership = z.enum(["workspace", "personal"]);
+export const ConnectionOwnership = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["workspace", "personal"]),
+);
 export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
 
-export const SocialConnection = z.object({
-  id: z.string().uuid(),
-  /** Present on version-aware deployments; required for observed reconnect. */
-  version: z.number().int().positive().optional(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  provider: SocialProvider,
-  accountHandle: z.string().min(1),
-  accountName: z.string().nullable(),
-  externalAccountId: z.string().nullable(),
-  ownership: ConnectionOwnership,
-  status: SocialConnectionStatus,
-  scopes: z.array(z.string()),
-  credentialRef: z.string().nullable(),
-  tokenMetadata: z.record(z.string(), z.unknown()),
-  metadata: z.record(z.string(), z.unknown()),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const SocialConnection = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    /** Present on version-aware deployments; required for observed reconnect. */
+    version: z.number().int().positive().optional(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    provider: SocialProvider,
+    accountHandle: z.string().min(1),
+    accountName: z.string().nullable(),
+    externalAccountId: z.string().nullable(),
+    ownership: ConnectionOwnership,
+    status: SocialConnectionStatus,
+    scopes: z.array(z.string()),
+    credentialRef: z.string().nullable(),
+    tokenMetadata: z.record(z.string(), z.unknown()),
+    metadata: z.record(z.string(), z.unknown()),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type SocialConnection = z.infer<typeof SocialConnection>;
 
-export const CreateSocialConnectionRequest = z.object({
-  provider: SocialProvider,
-  accountHandle: z.string().min(1),
-  accountName: z.string().min(1).optional(),
-  externalAccountId: z.string().min(1).optional(),
-  status: SocialConnectionStatus.default("connected"),
-  scopes: z.array(z.string().min(1)).default([]),
-  credentialRef: z.string().min(1).optional(),
-  tokenMetadata: z.record(z.string(), z.unknown()).default({}),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-});
+export const CreateSocialConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    provider: SocialProvider,
+    accountHandle: z.string().min(1),
+    accountName: z.string().min(1).optional(),
+    externalAccountId: z.string().min(1).optional(),
+    status: SocialConnectionStatus.default("connected"),
+    scopes: z.array(z.string().min(1)).default([]),
+    credentialRef: z.string().min(1).optional(),
+    tokenMetadata: z.record(z.string(), z.unknown()).default({}),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  }),
+);
 export type CreateSocialConnectionRequest = z.infer<typeof CreateSocialConnectionRequest>;
 
-export const SocialPost = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  connectionId: z.string().uuid(),
-  provider: SocialProvider,
-  externalPostId: z.string().nullable(),
-  url: z.string().url().nullable(),
-  authorHandle: z.string().nullable(),
-  text: z.string(),
-  publishedAt: z.string(),
-  metrics: z.record(z.string(), z.number()),
-  raw: z.record(z.string(), z.unknown()),
-  createdAt: z.string(),
-});
+export const SocialPost = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    connectionId: z.string().uuid(),
+    provider: SocialProvider,
+    externalPostId: z.string().nullable(),
+    url: z.string().url().nullable(),
+    authorHandle: z.string().nullable(),
+    text: z.string(),
+    publishedAt: z.string(),
+    metrics: z.record(z.string(), z.number()),
+    raw: z.record(z.string(), z.unknown()),
+    createdAt: z.string(),
+  }),
+);
 export type SocialPost = z.infer<typeof SocialPost>;
 
-export const CreateSocialPostRequest = z.object({
-  connectionId: z.string().uuid(),
-  externalPostId: z.string().min(1).optional(),
-  url: z.string().url().optional(),
-  authorHandle: z.string().min(1).optional(),
-  text: z.string().min(1),
-  publishedAt: z.string().datetime({ offset: true }),
-  metrics: z.record(z.string(), z.number()).default({}),
-  raw: z.record(z.string(), z.unknown()).default({}),
-});
+export const CreateSocialPostRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connectionId: z.string().uuid(),
+    externalPostId: z.string().min(1).optional(),
+    url: z.string().url().optional(),
+    authorHandle: z.string().min(1).optional(),
+    text: z.string().min(1),
+    publishedAt: z.string().datetime({ offset: true }),
+    metrics: z.record(z.string(), z.number()).default({}),
+    raw: z.record(z.string(), z.unknown()).default({}),
+  }),
+);
 export type CreateSocialPostRequest = z.infer<typeof CreateSocialPostRequest>;
 
 // Social OAuth is first-party (X / Reddit REST APIs), distinct from the MCP
 // integrations OAuth flow: these providers have no MCP resource metadata, so
 // endpoints are pinned per provider and tokens live in social_connections.
-export const SocialOAuthProviderId = z.enum(["x", "reddit"]);
+export const SocialOAuthProviderId = /* @__PURE__ */ defineSchema(() => z.enum(["x", "reddit"]));
 export type SocialOAuthProviderId = z.infer<typeof SocialOAuthProviderId>;
 
-export const SocialOAuthStartRequest = z.object({
-  provider: SocialOAuthProviderId,
-  ownership: ConnectionOwnership.default("workspace"),
-  scopes: z.array(z.string().min(1)).optional(),
-  returnPath: z.string().optional(),
-});
+export const SocialOAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    provider: SocialOAuthProviderId,
+    ownership: ConnectionOwnership.default("workspace"),
+    scopes: z.array(z.string().min(1)).optional(),
+    returnPath: z.string().optional(),
+  }),
+);
 export type SocialOAuthStartRequest = z.infer<typeof SocialOAuthStartRequest>;
 
-export const ConnectionKind = z.enum(["oauth2", "api_key", "app_install", "delegated"]);
+export const ConnectionKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+);
 export type ConnectionKind = z.infer<typeof ConnectionKind>;
 
-export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
+export const ConnectionStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "needs_reauth", "revoked", "error"]),
+);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
 export const OPENGENI_PERSONAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp" as const;
 
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
+// Historical credential discriminator, not a presentation label. Keep its wire value stable.
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
-export const OpenGeniSlackBotDisplayName = z.enum(["OpenGeni", "OpenGeni Staging"]);
+// Accept historical install receipts alongside the current display names.
+export const OpenGeniSlackBotDisplayName = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["Opengeni", "Opengeni Staging", "OpenGeni", "OpenGeni Staging"]),
+);
 export type OpenGeniSlackBotDisplayName = z.infer<typeof OpenGeniSlackBotDisplayName>;
-export const OpenGeniSlackBotConnectionMetadata = z
-  .object({
-    credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
-    credentialLabel: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_LABEL),
-    slackTeamId: z.string().min(1).max(64),
-    slackTeamName: z.string().min(1).max(256),
-    botUserId: z.string().min(1).max(64),
-    botId: z.string().min(1).max(64),
-    botDisplayName: OpenGeniSlackBotDisplayName,
-    verifiedAt: z.string().datetime({ offset: true }),
-  })
-  .passthrough();
+export const OpenGeniSlackBotConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
+      credentialLabel: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_LABEL),
+      slackTeamId: z.string().min(1).max(64),
+      slackTeamName: z.string().min(1).max(256),
+      botUserId: z.string().min(1).max(64),
+      botId: z.string().min(1).max(64),
+      botDisplayName: OpenGeniSlackBotDisplayName,
+      verifiedAt: z.string().datetime({ offset: true }),
+    })
+    .passthrough(),
+);
 export type OpenGeniSlackBotConnectionMetadata = z.infer<typeof OpenGeniSlackBotConnectionMetadata>;
 
 export const FIKEN_PROVIDER_DOMAIN = "fiken.no" as const;
 export const FIKEN_CREDENTIAL_ROLE = "fiken_api_token" as const;
 export const FIKEN_CREDENTIAL_LABEL = "Fiken API token" as const;
 
-export const FikenCompanySummary = z.object({
-  slug: z.string().min(1).max(128),
-  name: z.string().min(1).max(256),
-  organizationNumber: z.string().max(64).nullable(),
-});
+export const FikenCompanySummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    slug: z.string().min(1).max(128),
+    name: z.string().min(1).max(256),
+    organizationNumber: z.string().max(64).nullable(),
+  }),
+);
 export type FikenCompanySummary = z.infer<typeof FikenCompanySummary>;
 
-export const FikenConnectionMetadata = z
-  .object({
-    credentialRole: z.literal(FIKEN_CREDENTIAL_ROLE),
-    credentialLabel: z.literal(FIKEN_CREDENTIAL_LABEL),
-    companies: z.array(FikenCompanySummary).max(100),
-    defaultCompanySlug: z.string().min(1).max(128).nullable(),
-    verifiedAt: z.string().datetime({ offset: true }),
-  })
-  .passthrough();
+export const FikenConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      credentialRole: z.literal(FIKEN_CREDENTIAL_ROLE),
+      credentialLabel: z.literal(FIKEN_CREDENTIAL_LABEL),
+      companies: z.array(FikenCompanySummary).max(100),
+      defaultCompanySlug: z.string().min(1).max(128).nullable(),
+      verifiedAt: z.string().datetime({ offset: true }),
+    })
+    .passthrough(),
+);
 export type FikenConnectionMetadata = z.infer<typeof FikenConnectionMetadata>;
 
-export const FikenInstallRequest = z.object({
-  apiToken: z.string().min(16).max(512),
-  defaultCompanySlug: z.string().min(1).max(128).optional(),
-  /** Existing Fiken connection to rewrite in place (reconnect). */
-  connectionId: z.string().uuid().optional(),
-});
+export const FikenInstallRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    apiToken: z.string().min(16).max(512),
+    defaultCompanySlug: z.string().min(1).max(128).optional(),
+    /** Existing Fiken connection to rewrite in place (reconnect). */
+    connectionId: z.string().uuid().optional(),
+  }),
+);
 export type FikenInstallRequest = z.infer<typeof FikenInstallRequest>;
 
-export const FikenOAuthStartRequest = z.object({
-  /** Same-origin product route to return to after provider consent. */
-  returnPath: z.string().min(1).max(2048).optional(),
-  /** Existing Fiken connection to re-authorize in place (reconnect). */
-  connectionId: z.string().uuid().optional(),
-});
+export const FikenOAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Same-origin product route to return to after provider consent. */
+    returnPath: z.string().min(1).max(2048).optional(),
+    /** Existing Fiken connection to re-authorize in place (reconnect). */
+    connectionId: z.string().uuid().optional(),
+  }),
+);
 export type FikenOAuthStartRequest = z.infer<typeof FikenOAuthStartRequest>;
 
-export const FikenOAuthStartResponse = z.object({
-  authorizationUrl: z.string().url(),
-  expiresAt: z.string().datetime({ offset: true }),
-});
+export const FikenOAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    authorizationUrl: z.string().url(),
+    expiresAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
-export const ConnectionMetadata = z.object({
-  id: z.string().uuid(),
-  /** Opaque owner-only handle used to manage this personal connection's grants. */
-  authorityId: z.string().uuid().optional(),
-  /** Credential-free generation fence for exact accepted account routing. */
-  connectionAuthorityGeneration: z.number().int().positive().optional(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  subjectId: z.string().nullable(),
-  providerDomain: z.string(),
-  kind: ConnectionKind,
-  status: ConnectionStatus,
-  grantedScopes: z.array(z.string()),
-  expiresAt: z.string().nullable(),
-  lastRefreshAt: z.string().nullable(),
-  lastUsedAt: z.string().nullable(),
-  lastError: z.string().nullable(),
-  version: z.number().int().positive(),
-  verifiedInstallAt: z.string().datetime({ offset: true }).nullable().optional(),
-  verifiedInstallVersion: z.number().int().positive().nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()),
-  createdBySubjectId: z.string().nullable(),
-  updatedBySubjectId: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    /** Opaque owner-only handle used to manage this personal connection's grants. */
+    authorityId: z.string().uuid().optional(),
+    /** Credential-free generation fence for exact accepted account routing. */
+    connectionAuthorityGeneration: z.number().int().positive().optional(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    subjectId: z.string().nullable(),
+    providerDomain: z.string(),
+    kind: ConnectionKind,
+    status: ConnectionStatus,
+    grantedScopes: z.array(z.string()),
+    expiresAt: z.string().nullable(),
+    lastRefreshAt: z.string().nullable(),
+    lastUsedAt: z.string().nullable(),
+    lastError: z.string().nullable(),
+    version: z.number().int().positive(),
+    verifiedInstallAt: z.string().datetime({ offset: true }).nullable().optional(),
+    verifiedInstallVersion: z.number().int().positive().nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()),
+    createdBySubjectId: z.string().nullable(),
+    updatedBySubjectId: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
+
+/** Verified bot metadata available in the requested workspace. Credentials
+ * remain in the installation workspace; personal accounts are excluded. */
+export const AvailableOpenGeniSlackBots = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connections: z.array(ConnectionMetadata),
+    organizationSharedConnectionIds: z.array(z.string().uuid()),
+  }),
+);
+export type AvailableOpenGeniSlackBots = z.infer<typeof AvailableOpenGeniSlackBots>;
+export const UpdateOpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({ enabled: z.boolean() }).strict(),
+);
+export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
+  typeof UpdateOpenGeniSlackBotOrganizationAccess
+>;
+export const OpenGeniSlackBotOrganizationAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    enabled: z.boolean(),
+    generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  }),
+);
+export type OpenGeniSlackBotOrganizationAccess = z.infer<typeof OpenGeniSlackBotOrganizationAccess>;
 
 type PersonalSlackCanonicalConnection = Pick<
   ConnectionMetadata,
@@ -11815,7 +13779,9 @@ function compareDescending(left: number | string, right: number | string): numbe
   return left > right ? -1 : 1;
 }
 
-export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
+export const ConnectionCredentialBundle = /* @__PURE__ */ defineSchema(() =>
+  z.record(z.string(), z.unknown()),
+);
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
 export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY =
@@ -11826,275 +13792,329 @@ export const OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY =
   "openRouterCredentialOperationId" as const;
 export const OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
   "openRouterCredentialOperationDigest" as const;
+export const OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY = "opperCredentialOperationId" as const;
+export const OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "opperCredentialOperationDigest" as const;
 
-export const CreateConnectionRequest = z.object({
-  providerDomain: z.string().min(1),
-  kind: ConnectionKind,
-  ownership: ConnectionOwnership.optional(),
-  /** @deprecated use ownership */
-  subjectId: z.string().min(1).nullable().optional(),
-  credential: ConnectionCredentialBundle,
-  grantedScopes: z.array(z.string().min(1)).default([]),
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  operationId: z.string().uuid().optional(),
-  /** For direct OpenAI/Azure keys: run a short provider check before saving. */
-  verifyModelAccess: z.boolean().optional(),
-  /** Retired: connection execution is authorized by the initiating user. */
-  initialUseContexts: z.never().optional(),
-});
+export const CreateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    providerDomain: z.string().min(1),
+    kind: ConnectionKind,
+    ownership: ConnectionOwnership.optional(),
+    /** @deprecated use ownership */
+    subjectId: z.string().min(1).nullable().optional(),
+    credential: ConnectionCredentialBundle,
+    grantedScopes: z.array(z.string().min(1)).default([]),
+    expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    operationId: z.string().uuid().optional(),
+    /** For direct OpenAI/Azure keys: run a short provider check before saving. */
+    verifyModelAccess: z.boolean().optional(),
+    /** Retired: connection execution is authorized by the initiating user. */
+    initialUseContexts: z.never().optional(),
+  }),
+);
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
-export const OpenGeniSlackBotInstallRequest = z.object({
-  connectionId: z.string().uuid().optional(),
-});
+export const OpenGeniSlackBotInstallRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connectionId: z.string().uuid().optional(),
+  }),
+);
 export type OpenGeniSlackBotInstallRequest = z.infer<typeof OpenGeniSlackBotInstallRequest>;
 
-export const OpenGeniSlackBotInstallStart = z.object({
-  authorizationUrl: z.string().url(),
-  expiresAt: z.string().datetime({ offset: true }),
-});
+export const OpenGeniSlackBotInstallStart = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    authorizationUrl: z.string().url(),
+    expiresAt: z.string().datetime({ offset: true }),
+  }),
+);
 export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
-export const SlackInstallationBindingState = z.enum(["active", "quarantined"]);
+export const SlackInstallationBindingState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "quarantined"]),
+);
 export type SlackInstallationBindingState = z.infer<typeof SlackInstallationBindingState>;
 
-export const SlackInstallationBinding = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  accountName: z.string().min(1),
-  workspaceId: z.string().uuid(),
-  workspaceName: z.string().min(1),
-  connectionId: z.string().uuid(),
-  connectionStatus: ConnectionStatus,
-  connectionVersion: z.number().int().positive(),
-  slackTeamId: z.string().min(1).max(64),
-  slackTeamName: z.string().min(1).max(256),
-  botId: z.string().min(1).max(64),
-  botUserId: z.string().min(1).max(64),
-  botDisplayName: OpenGeniSlackBotDisplayName,
-  state: SlackInstallationBindingState,
-  quarantineReason: z.string().min(1).nullable(),
-  version: z.number().int().positive(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const SlackInstallationBinding = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    accountName: z.string().min(1),
+    workspaceId: z.string().uuid(),
+    workspaceName: z.string().min(1),
+    connectionId: z.string().uuid(),
+    connectionStatus: ConnectionStatus,
+    connectionVersion: z.number().int().positive(),
+    slackTeamId: z.string().min(1).max(64),
+    slackTeamName: z.string().min(1).max(256),
+    botId: z.string().min(1).max(64),
+    botUserId: z.string().min(1).max(64),
+    botDisplayName: OpenGeniSlackBotDisplayName,
+    state: SlackInstallationBindingState,
+    quarantineReason: z.string().min(1).nullable(),
+    version: z.number().int().positive(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type SlackInstallationBinding = z.infer<typeof SlackInstallationBinding>;
 
-export const ListSlackInstallationBindingsResponse = z.object({
-  bindings: z.array(SlackInstallationBinding),
-});
+export const ListSlackInstallationBindingsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    bindings: z.array(SlackInstallationBinding),
+  }),
+);
 export type ListSlackInstallationBindingsResponse = z.infer<
   typeof ListSlackInstallationBindingsResponse
 >;
 
-export const UpdateConnectionRequest = z.object({
-  providerDomain: z.string().min(1).optional(),
-  subjectId: z.string().min(1).nullable().optional(),
-  kind: ConnectionKind.optional(),
-  status: ConnectionStatus.optional(),
-  credential: ConnectionCredentialBundle.optional(),
-  grantedScopes: z.array(z.string().min(1)).optional(),
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-  expectedVersion: z.number().int().positive().optional(),
-  operationId: z.string().uuid().optional(),
-});
+export const UpdateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    providerDomain: z.string().min(1).optional(),
+    subjectId: z.string().min(1).nullable().optional(),
+    kind: ConnectionKind.optional(),
+    status: ConnectionStatus.optional(),
+    credential: ConnectionCredentialBundle.optional(),
+    grantedScopes: z.array(z.string().min(1)).optional(),
+    expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    expectedVersion: z.number().int().positive().optional(),
+    operationId: z.string().uuid().optional(),
+  }),
+);
 export type UpdateConnectionRequest = z.infer<typeof UpdateConnectionRequest>;
 
-export const ConnectionResponse = z.object({
-  connection: ConnectionMetadata,
-});
+export const ConnectionResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connection: ConnectionMetadata,
+  }),
+);
 export type ConnectionResponse = z.infer<typeof ConnectionResponse>;
 
-export const ListConnectionsResponse = z.object({
-  connections: z.array(ConnectionMetadata),
-});
+export const ListConnectionsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connections: z.array(ConnectionMetadata),
+  }),
+);
 export type ListConnectionsResponse = z.infer<typeof ListConnectionsResponse>;
 
-export const OAuthStartRequest = z
-  .object({
-    providerDomain: z.string().min(1).optional(),
-    mcpUrl: z.string().url().optional(),
-    resource: z.string().url().optional(),
-    requestedScopes: z.array(z.string().min(1)).default([]),
-    returnPath: z.string().min(1).optional(),
-    returnUrl: z.string().min(1).max(4096).optional(),
-    connectionId: z.string().uuid().optional(),
-    ownership: ConnectionOwnership.optional(),
-    oauthClient: z
-      .object({
-        clientId: z.string().min(1),
-        clientSecret: z.string().min(1).optional(),
-        tokenEndpointAuthMethod: z
-          .enum(["none", "client_secret_post", "client_secret_basic"])
-          .optional(),
-      })
-      .optional(),
-  })
-  .refine((value) => Boolean(value.mcpUrl ?? value.resource), {
-    message: "mcpUrl is required",
-    path: ["mcpUrl"],
-  });
+export const OAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      providerDomain: z.string().min(1).optional(),
+      mcpUrl: z.string().url().optional(),
+      resource: z.string().url().optional(),
+      requestedScopes: z.array(z.string().min(1)).default([]),
+      returnPath: z.string().min(1).optional(),
+      returnUrl: z.string().min(1).max(4096).optional(),
+      connectionId: z.string().uuid().optional(),
+      /** Sign in a further account instead of refreshing the caller's existing
+       * active account for this provider. Never combined with connectionId. */
+      newAccount: z.literal(true).optional(),
+      ownership: ConnectionOwnership.optional(),
+      oauthClient: z
+        .object({
+          clientId: z.string().min(1),
+          clientSecret: z.string().min(1).optional(),
+          tokenEndpointAuthMethod: z
+            .enum(["none", "client_secret_post", "client_secret_basic"])
+            .optional(),
+        })
+        .optional(),
+    })
+    .refine((value) => Boolean(value.mcpUrl ?? value.resource), {
+      message: "mcpUrl is required",
+      path: ["mcpUrl"],
+    })
+    .refine((value) => !(value.newAccount && value.connectionId), {
+      message: "newAccount cannot target an existing connection",
+      path: ["newAccount"],
+    }),
+);
 export type OAuthStartRequest = z.infer<typeof OAuthStartRequest>;
 
-export const OAuthStartResponse = z.object({
-  state: z.string().min(1),
-  authorizationUrl: z.string().url().nullable(),
-  expiresAt: z.string(),
-});
+export const OAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    state: z.string().min(1),
+    authorizationUrl: z.string().url().nullable(),
+    expiresAt: z.string(),
+  }),
+);
 export type OAuthStartResponse = z.infer<typeof OAuthStartResponse>;
 
-export const IntegrationClientMetadata = z.object({
-  client_id: z.string().url(),
-  client_name: z.literal("OpenGeni"),
-  redirect_uris: z.array(z.string().url()),
-  token_endpoint_auth_method: z.literal("none"),
-  grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
-  response_types: z.array(z.literal("code")),
-});
+export const IntegrationClientMetadata = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    client_id: z.string().url(),
+    client_name: z.enum(["Opengeni", "OpenGeni"]),
+    redirect_uris: z.array(z.string().url()),
+    token_endpoint_auth_method: z.literal("none"),
+    grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
+    response_types: z.array(z.literal("code")),
+  }),
+);
 export type IntegrationClientMetadata = z.infer<typeof IntegrationClientMetadata>;
 
-export const CapabilityKind = z.enum(["mcp", "api", "skill", "plugin"]);
+export const CapabilityKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["mcp", "api", "skill", "plugin"]),
+);
 export type CapabilityKind = z.infer<typeof CapabilityKind>;
 
-export const CapabilitySource = z.enum([
-  "built_in",
-  "library",
-  "configured",
-  "public_registry",
-  "registry",
-  "manual",
-]);
+export const CapabilitySource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["built_in", "library", "configured", "public_registry", "registry", "manual"]),
+);
 export type CapabilitySource = z.infer<typeof CapabilitySource>;
 
-export const CapabilityInstallationStatus = z.enum(["active", "disabled"]);
+export const CapabilityInstallationStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "disabled"]),
+);
 export type CapabilityInstallationStatus = z.infer<typeof CapabilityInstallationStatus>;
 
-export const CapabilityCatalogAuthKind = z.enum(["oauth2", "api_key", "none", "unknown"]);
+export const CapabilityCatalogAuthKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["oauth2", "api_key", "none", "unknown"]),
+);
 export type CapabilityCatalogAuthKind = z.infer<typeof CapabilityCatalogAuthKind>;
 
-export const CapabilityCatalogTier = z.enum(["verified", "community"]);
+export const CapabilityCatalogTier = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["verified", "community"]),
+);
 export type CapabilityCatalogTier = z.infer<typeof CapabilityCatalogTier>;
 
-export const CapabilityLifecycleStatus = z.enum([
-  "available",
-  "installed",
-  "connected",
-  "ready",
-  "needs_attention",
-  "unavailable",
-  "managed",
-]);
+export const CapabilityLifecycleStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "available",
+    "installed",
+    "connected",
+    "ready",
+    "needs_attention",
+    "unavailable",
+    "managed",
+  ]),
+);
 export type CapabilityLifecycleStatus = z.infer<typeof CapabilityLifecycleStatus>;
 
-export const CapabilityReadiness = z.enum(["ready", "setup_required", "attention", "unavailable"]);
+export const CapabilityReadiness = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["ready", "setup_required", "attention", "unavailable"]),
+);
 export type CapabilityReadiness = z.infer<typeof CapabilityReadiness>;
 
-export const CapabilityAction = z.enum([
-  "install",
-  "connect",
-  "configure",
-  "update",
-  "repair",
-  "disconnect",
-  "uninstall",
-  "inspect",
-]);
+export const CapabilityAction = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "install",
+    "connect",
+    "configure",
+    "update",
+    "repair",
+    "disconnect",
+    "uninstall",
+    "inspect",
+  ]),
+);
 export type CapabilityAction = z.infer<typeof CapabilityAction>;
 
-export const CapabilityLifecycle = z.object({
-  status: CapabilityLifecycleStatus,
-  readiness: CapabilityReadiness,
-  detail: z.string().nullable().default(null),
-  managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
-});
+export const CapabilityLifecycle = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    status: CapabilityLifecycleStatus,
+    readiness: CapabilityReadiness,
+    detail: z.string().nullable().default(null),
+    managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
+  }),
+);
 export type CapabilityLifecycle = z.infer<typeof CapabilityLifecycle>;
 
-export const CapabilityRuntime = z.object({
-  available: z.boolean().default(false),
-  mcpServerId: z.string().min(1).optional(),
-  transport: z.string().min(1).optional(),
-  notes: z.string().nullable().default(null),
-  // Registry exposure provenance is server-derived and contains no endpoint or
-  // credential material.
-  catalogTrust: z
-    .object({
-      state: z.enum(["trusted", "legacy_active", "unverified"]),
-      reason: z.enum([
-        "trusted_source",
-        "verified_probe",
-        "active_installation_compatibility",
-        "missing_verification",
-      ]),
-    })
-    .optional(),
-});
+export const CapabilityRuntime = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    available: z.boolean().default(false),
+    mcpServerId: z.string().min(1).optional(),
+    transport: z.string().min(1).optional(),
+    notes: z.string().nullable().default(null),
+    // Registry exposure provenance is server-derived and contains no endpoint or
+    // credential material.
+    catalogTrust: z
+      .object({
+        state: z.enum(["trusted", "legacy_active", "unverified"]),
+        reason: z.enum([
+          "trusted_source",
+          "verified_probe",
+          "active_installation_compatibility",
+          "missing_verification",
+        ]),
+      })
+      .optional(),
+    // Server-derived connectability: present when the connector's OAuth
+    // authorization server refuses self-registration, so connecting needs an
+    // operator-registered client. `configured` is whether this deployment has
+    // one; connector surfaces offer the row only when it is true.
+    operatorOAuthClient: z.object({ configured: z.boolean() }).optional(),
+  }),
+);
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 
-export const CapabilityCatalogItem = z.object({
-  id: z.string().min(1),
-  accountId: z.string().uuid().optional(),
-  workspaceId: z.string().uuid().optional(),
-  kind: CapabilityKind,
-  source: CapabilitySource,
-  name: z.string().min(1),
-  description: z.string().nullable().default(null),
-  category: z.string().min(1).default("custom"),
-  tags: z.array(z.string().min(1)).default([]),
-  homepageUrl: z.string().url().nullable().default(null),
-  endpointUrl: z.string().url().nullable().default(null),
-  installUrl: z.string().url().nullable().default(null),
-  authModel: z.string().min(1).nullable().default(null),
-  providerDomain: z.string().min(1).nullable().default(null),
-  surfaceType: z.string().min(1).nullable().default(null),
-  transport: z.string().min(1).nullable().default(null),
-  mcpUrl: z.string().url().nullable().default(null),
-  authKind: CapabilityCatalogAuthKind.nullable().default(null),
-  credentialFacts: z.array(z.record(z.string(), z.unknown())).default([]),
-  tier: CapabilityCatalogTier.nullable().default(null),
-  provenance: z.string().min(1).nullable().default(null),
-  logoAssetPath: z.string().min(1).nullable().default(null),
-  importBatchId: z.string().uuid().nullable().default(null),
-  stale: z.boolean().default(false),
-  staleAt: z.string().nullable().default(null),
-  tools: z.array(ToolRef).default([]),
-  runtime: CapabilityRuntime.default({ available: false, notes: null }),
-  lifecycle: CapabilityLifecycle.default({
-    status: "available",
-    readiness: "setup_required",
-    detail: null,
-    managedBy: null,
+export const CapabilityCatalogItem = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1),
+    accountId: z.string().uuid().optional(),
+    workspaceId: z.string().uuid().optional(),
+    kind: CapabilityKind,
+    source: CapabilitySource,
+    name: z.string().min(1),
+    description: z.string().nullable().default(null),
+    category: z.string().min(1).default("custom"),
+    tags: z.array(z.string().min(1)).default([]),
+    homepageUrl: z.string().url().nullable().default(null),
+    endpointUrl: z.string().url().nullable().default(null),
+    installUrl: z.string().url().nullable().default(null),
+    authModel: z.string().min(1).nullable().default(null),
+    providerDomain: z.string().min(1).nullable().default(null),
+    surfaceType: z.string().min(1).nullable().default(null),
+    transport: z.string().min(1).nullable().default(null),
+    mcpUrl: z.string().url().nullable().default(null),
+    authKind: CapabilityCatalogAuthKind.nullable().default(null),
+    credentialFacts: z.array(z.record(z.string(), z.unknown())).default([]),
+    tier: CapabilityCatalogTier.nullable().default(null),
+    provenance: z.string().min(1).nullable().default(null),
+    logoAssetPath: z.string().min(1).nullable().default(null),
+    importBatchId: z.string().uuid().nullable().default(null),
+    stale: z.boolean().default(false),
+    staleAt: z.string().nullable().default(null),
+    tools: z.array(ToolRef).default([]),
+    runtime: CapabilityRuntime.default({ available: false, notes: null }),
+    lifecycle: CapabilityLifecycle.default({
+      status: "available",
+      readiness: "setup_required",
+      detail: null,
+      managedBy: null,
+    }),
+    actions: z.array(CapabilityAction).default([]),
+    /**
+     * @deprecated Compatibility projection for existing clients. New surfaces
+     * must use lifecycle and actions rather than treating every type as an
+     * enable/disable toggle.
+     */
+    enabled: z.boolean().default(false),
+    /** @deprecated Compatibility explanation paired with enabled. */
+    enabledReason: z.string().nullable().default(null),
+    // The non-secret connection binding stored with an enabled installation.
+    // Native workspace refs retain an exact row id. Native subject refs omit it
+    // so each caller resolves their own row. The first-party catalog projects a
+    // host-owned installation as null for old-browser safety; the schema remains
+    // tolerant of additive host projections from embedding-specific catalogs.
+    connectionRef: z
+      .object({
+        connectionId: z.string().min(1).optional(),
+        accountSelection: z.literal("all_eligible").optional(),
+        authoritySource: z.literal("host").optional(),
+        providerDomain: z.string().min(1),
+        kind: z.string().min(1),
+        subjectScope: z.enum(["workspace", "subject"]).optional(),
+      })
+      .nullable()
+      .default(null),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    createdAt: z.string().optional(),
+    updatedAt: z.string().optional(),
   }),
-  actions: z.array(CapabilityAction).default([]),
-  /**
-   * @deprecated Compatibility projection for existing clients. New surfaces
-   * must use lifecycle and actions rather than treating every type as an
-   * enable/disable toggle.
-   */
-  enabled: z.boolean().default(false),
-  /** @deprecated Compatibility explanation paired with enabled. */
-  enabledReason: z.string().nullable().default(null),
-  // The non-secret connection binding stored with an enabled installation.
-  // Native workspace refs retain an exact row id. Native subject refs omit it
-  // so each caller resolves their own row. The first-party catalog projects a
-  // host-owned installation as null for old-browser safety; the schema remains
-  // tolerant of additive host projections from embedding-specific catalogs.
-  connectionRef: z
-    .object({
-      connectionId: z.string().min(1).optional(),
-      accountSelection: z.literal("all_eligible").optional(),
-      authoritySource: z.literal("host").optional(),
-      providerDomain: z.string().min(1),
-      kind: z.string().min(1),
-      subjectScope: z.enum(["workspace", "subject"]).optional(),
-    })
-    .nullable()
-    .default(null),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  createdAt: z.string().optional(),
-  updatedAt: z.string().optional(),
-});
+);
 export type CapabilityCatalogItem = z.infer<typeof CapabilityCatalogItem>;
 
 /**
@@ -12125,118 +14145,142 @@ export function capabilityCatalogItemIsTrustedForExposure(
   );
 }
 
-export const CapabilityInstallation = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  capabilityId: z.string().min(1),
-  kind: CapabilityKind,
-  status: CapabilityInstallationStatus,
-  config: z.record(z.string(), z.unknown()),
-  metadata: z.record(z.string(), z.unknown()),
-  enabledAt: z.string(),
-  updatedAt: z.string(),
-});
+export const CapabilityInstallation = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    capabilityId: z.string().min(1),
+    kind: CapabilityKind,
+    status: CapabilityInstallationStatus,
+    config: z.record(z.string(), z.unknown()),
+    metadata: z.record(z.string(), z.unknown()),
+    enabledAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type CapabilityInstallation = z.infer<typeof CapabilityInstallation>;
 
-export const CreateCapabilityCatalogItemRequest = z.object({
-  id: z.string().min(1).optional(),
-  kind: z.literal("mcp"),
-  source: CapabilitySource.default("manual"),
-  name: z.string().min(1),
-  description: z.string().min(1).optional(),
-  category: z.string().min(1).default("custom"),
-  tags: z.array(z.string().min(1)).default([]),
-  homepageUrl: z.string().url().optional(),
-  endpointUrl: z.string().url().optional(),
-  installUrl: z.string().url().optional(),
-  authModel: z.string().min(1).optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-});
+export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1).optional(),
+    kind: z.literal("mcp"),
+    source: CapabilitySource.default("manual"),
+    name: z.string().min(1),
+    description: z.string().min(1).optional(),
+    category: z.string().min(1).default("custom"),
+    tags: z.array(z.string().min(1)).default([]),
+    homepageUrl: z.string().url().optional(),
+    endpointUrl: z.string().url().optional(),
+    installUrl: z.string().url().optional(),
+    authModel: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  }),
+);
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
 
-export const EnableCapabilityRequest = z.object({
-  /** Automatic setup may create a missing installation, never rewrite an existing one. */
-  onlyIfUninstalled: z.boolean().optional(),
-  config: z.record(z.string(), z.unknown()).default({}),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  connectionRef: McpServerConnectionRef.optional(),
-  /**
-   * Credential headers for remote MCP capabilities (for example an
-   * Authorization bearer token). Values are encrypted at rest with the
-   * workspace-variable-sets key, injected only into the runtime MCP client,
-   * and never returned by the API — responses expose header names only.
-   */
-  headers: z.record(z.string(), z.string()).default({}),
-});
+export const EnableCapabilityRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Automatic setup may create a missing installation, never rewrite an existing one. */
+    onlyIfUninstalled: z.boolean().optional(),
+    config: z.record(z.string(), z.unknown()).default({}),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    connectionRef: McpServerConnectionRef.optional(),
+    /**
+     * Credential headers for remote MCP capabilities (for example an
+     * Authorization bearer token). Values are encrypted at rest with the
+     * workspace-variable-sets key, injected only into the runtime MCP client,
+     * and never returned by the API — responses expose header names only.
+     */
+    headers: z.record(z.string(), z.string()).default({}),
+  }),
+);
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
 
-export const CapabilityCatalogResponse = z.object({
-  items: z.array(CapabilityCatalogItem),
-  installations: z.array(CapabilityInstallation),
-});
+export const CapabilityCatalogResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    items: z.array(CapabilityCatalogItem),
+    installations: z.array(CapabilityInstallation),
+  }),
+);
 export type CapabilityCatalogResponse = z.infer<typeof CapabilityCatalogResponse>;
 
-export const DiscoverMcpCapabilitiesResponse = z.object({
-  items: z.array(CapabilityCatalogItem),
-  source: z.literal("official_mcp_registry"),
-  sourceUrl: z.string().url(),
-});
+export const DiscoverMcpCapabilitiesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    items: z.array(CapabilityCatalogItem),
+    source: z.literal("official_mcp_registry"),
+    sourceUrl: z.string().url(),
+  }),
+);
 export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabilitiesResponse>;
 
-export const SkillImportSource = z.enum(["github", "skills_sh"]);
+export const SkillImportSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["github", "skills_sh"]),
+);
 export type SkillImportSource = z.infer<typeof SkillImportSource>;
 
-export const SkillInstallationSource = z.enum(["library", "github", "skills_sh"]);
+export const SkillInstallationSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["library", "github", "skills_sh"]),
+);
 export type SkillInstallationSource = z.infer<typeof SkillInstallationSource>;
 
-export const PreviewSkillImportRequest = z.object({
-  url: z.string().url().max(2048),
-});
+export const PreviewSkillImportRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: z.string().url().max(2048),
+  }),
+);
 export type PreviewSkillImportRequest = z.infer<typeof PreviewSkillImportRequest>;
 
-export const SkillImportFileSummary = z.object({
-  path: z.string().min(1).max(1024),
-  byteSize: z.number().int().nonnegative().max(SKILL_MAX_FILE_BYTES),
-  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-});
+export const SkillImportFileSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string().min(1).max(1024),
+    byteSize: z.number().int().nonnegative().max(SKILL_MAX_FILE_BYTES),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  }),
+);
 export type SkillImportFileSummary = z.infer<typeof SkillImportFileSummary>;
 
-export const SkillImportPreview = z.object({
-  markdown: z.string().max(SKILL_MAX_FILE_BYTES).optional(),
-  source: SkillImportSource,
-  sourceUrl: z.string().url(),
-  repositoryUrl: z.string().url(),
-  owner: z.string().min(1).max(100),
-  repository: z.string().min(1).max(100),
-  sourcePath: z.string().min(1).max(1024),
-  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
-  name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
-  description: z.string().min(1).max(2048),
-  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-  totalBytes: z.number().int().positive().max(SKILL_MAX_TOTAL_BYTES),
-  files: z.array(SkillImportFileSummary).min(1).max(SKILL_MAX_FILES),
-  warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
-  installed: z.boolean().default(false),
-  installationVersion: z.number().int().positive().nullable().default(null),
-});
+export const SkillImportPreview = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    markdown: z.string().max(SKILL_MAX_FILE_BYTES).optional(),
+    source: SkillImportSource,
+    sourceUrl: z.string().url(),
+    repositoryUrl: z.string().url(),
+    owner: z.string().min(1).max(100),
+    repository: z.string().min(1).max(100),
+    sourcePath: z.string().min(1).max(1024),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+    description: z.string().min(1).max(2048),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    totalBytes: z.number().int().positive().max(SKILL_MAX_TOTAL_BYTES),
+    files: z.array(SkillImportFileSummary).min(1).max(SKILL_MAX_FILES),
+    warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
+    installed: z.boolean().default(false),
+    installationVersion: z.number().int().positive().nullable().default(null),
+  }),
+);
 export type SkillImportPreview = z.infer<typeof SkillImportPreview>;
 
-export const InstallSkillRequest = z.object({
-  url: z.string().url().max(2048),
-  expectedSourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
-  expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-  expectedInstallationVersion: z.number().int().positive().optional(),
-});
-export type InstallSkillRequest = z.infer<typeof InstallSkillRequest>;
-
-export const InstallLibrarySkillRequest = z
-  .object({
-    expectedVersion: z.string().min(1).max(96),
+export const InstallSkillRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: z.string().url().max(2048),
+    expectedSourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
     expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
     expectedInstallationVersion: z.number().int().positive().optional(),
-  })
-  .strict();
+  }),
+);
+export type InstallSkillRequest = z.infer<typeof InstallSkillRequest>;
+
+export const InstallLibrarySkillRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedVersion: z.string().min(1).max(96),
+      expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      expectedInstallationVersion: z.number().int().positive().optional(),
+    })
+    .strict(),
+);
 export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
 
 export const InstalledSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -12260,117 +14304,135 @@ export const InstalledSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
 );
 export type InstalledSkill = z.infer<typeof InstalledSkill>;
 
-export const CapabilityComponentOwner = z.object({
-  kind: z.enum(["direct", "plugin", "migration"]),
-  id: z.string().min(1).max(512),
-  removable: z.boolean(),
-});
+export const CapabilityComponentOwner = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum(["direct", "plugin", "migration"]),
+    id: z.string().min(1).max(512),
+    removable: z.boolean(),
+  }),
+);
 export type CapabilityComponentOwner = z.infer<typeof CapabilityComponentOwner>;
 
-export const InstalledSkillSummary = z
-  .object({
-    capabilityId: z.string().min(1),
-    pluginKey: z.string().min(1).max(200),
-    installationVersion: z.number().int().positive(),
-    name: z.string().min(1).max(200),
-    description: z.string().max(4000),
-    category: z.string().min(1).max(100),
-    tags: z.array(z.string().min(1).max(100)).max(64),
-    provenance: z.string().min(1).max(4000),
-    source: SkillInstallationSource,
-    version: z.string().min(1).max(96),
-    sourceUrl: z.string().url().max(2048),
-    repositoryUrl: z.string().url().max(2048),
-    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
-    sourcePath: z.string().min(1).max(1024),
-    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-    fileCount: z.number().int().positive().max(128),
-    totalBytes: z.number().int().positive().max(1048576),
-    license: z.string().min(1).max(200).nullable(),
-    installedAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
-    owners: z.array(CapabilityComponentOwner).min(1),
-  })
-  .strict();
+export const InstalledSkillSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1),
+      pluginKey: z.string().min(1).max(200),
+      installationVersion: z.number().int().positive(),
+      name: z.string().min(1).max(200),
+      description: z.string().max(4000),
+      category: z.string().min(1).max(100),
+      tags: z.array(z.string().min(1).max(100)).max(64),
+      provenance: z.string().min(1).max(4000),
+      source: SkillInstallationSource,
+      version: z.string().min(1).max(96),
+      sourceUrl: z.string().url().max(2048),
+      repositoryUrl: z.string().url().max(2048),
+      sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+      sourcePath: z.string().min(1).max(1024),
+      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      fileCount: z.number().int().positive().max(128),
+      totalBytes: z.number().int().positive().max(1048576),
+      license: z.string().min(1).max(200).nullable(),
+      installedAt: z.string().datetime({ offset: true }),
+      updatedAt: z.string().datetime({ offset: true }),
+      owners: z.array(CapabilityComponentOwner).min(1),
+    })
+    .strict(),
+);
 export type InstalledSkillSummary = z.infer<typeof InstalledSkillSummary>;
 
-export const ListInstalledSkillsResponse = z
-  .object({ skills: z.array(InstalledSkillSummary).max(1000) })
-  .strict();
+export const ListInstalledSkillsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ skills: z.array(InstalledSkillSummary).max(1000) }).strict(),
+);
 export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
 
-export const SkillUninstallPreview = z.object({
-  capabilityId: z.string().min(1),
-  installed: z.boolean(),
-  installationVersion: z.number().int().positive().nullable(),
-  directOwner: CapabilityComponentOwner.nullable(),
-  remainingOwners: z.array(CapabilityComponentOwner),
-  removesRuntimeSkill: z.boolean(),
-});
+export const SkillUninstallPreview = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    capabilityId: z.string().min(1),
+    installed: z.boolean(),
+    installationVersion: z.number().int().positive().nullable(),
+    directOwner: CapabilityComponentOwner.nullable(),
+    remainingOwners: z.array(CapabilityComponentOwner),
+    removesRuntimeSkill: z.boolean(),
+  }),
+);
 export type SkillUninstallPreview = z.infer<typeof SkillUninstallPreview>;
 
-export const UninstallSkillRequest = z.object({
-  expectedInstallationVersion: z.number().int().positive(),
-});
+export const UninstallSkillRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    expectedInstallationVersion: z.number().int().positive(),
+  }),
+);
 export type UninstallSkillRequest = z.infer<typeof UninstallSkillRequest>;
 
-export const UninstallSkillResult = z.object({
-  skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
-  capabilityId: z.string().min(1),
-  status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
-  remainingOwners: z.array(CapabilityComponentOwner),
-});
+export const UninstallSkillResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
+    capabilityId: z.string().min(1),
+    status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
+    remainingOwners: z.array(CapabilityComponentOwner),
+  }),
+);
 export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 
-export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
+export const ApiIntegrationProtocol = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["openapi", "graphql"]),
+);
 export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 
-export const IntegrationDefinitionProvenance = z.enum(["curated", "workspace"]);
+export const IntegrationDefinitionProvenance = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["curated", "workspace"]),
+);
 export type IntegrationDefinitionProvenance = z.infer<typeof IntegrationDefinitionProvenance>;
 
-export const IntegrationFacetKey = z
-  .string()
-  .min(1)
-  .max(200)
-  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export const IntegrationFacetKey = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(200)
+    .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+);
 export type IntegrationFacetKey = z.infer<typeof IntegrationFacetKey>;
 
-export const IntegrationFacetKind = z.enum([
-  "tools",
-  "knowledge_source",
-  "inbound_trigger",
-  "delivery_destination",
-  "identity_link",
-]);
+export const IntegrationFacetKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["tools", "knowledge_source", "inbound_trigger", "delivery_destination", "identity_link"]),
+);
 export type IntegrationFacetKind = z.infer<typeof IntegrationFacetKind>;
 
-export const IntegrationFacetStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
+export const IntegrationFacetStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "paused", "needs_attention", "disabled"]),
+);
 export type IntegrationFacetStatus = z.infer<typeof IntegrationFacetStatus>;
 
-const IntegrationFacetJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
-    return;
-  }
-  if (new TextEncoder().encode(serialized).byteLength > 131_072) {
-    ctx.addIssue({
-      code: "custom",
-      message: "must not exceed 131072 UTF-8 bytes",
-    });
-  }
-});
+const IntegrationFacetJsonObject = /* @__PURE__ */ defineSchema(() =>
+  z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
+      return;
+    }
+    if (new TextEncoder().encode(serialized).byteLength > 131_072) {
+      ctx.addIssue({
+        code: "custom",
+        message: "must not exceed 131072 UTF-8 bytes",
+      });
+    }
+  }),
+);
 
-export const IntegrationFacetDefinitionSummary = z
-  .object({
-    facetKey: IntegrationFacetKey,
-    kind: IntegrationFacetKind.exclude(["tools"]),
-    configSchema: IntegrationFacetJsonObject,
-    capabilities: IntegrationFacetJsonObject,
-  })
-  .strict();
+export const IntegrationFacetDefinitionSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      facetKey: IntegrationFacetKey,
+      kind: IntegrationFacetKind.exclude(["tools"]),
+      configSchema: IntegrationFacetJsonObject,
+      capabilities: IntegrationFacetJsonObject,
+    })
+    .strict(),
+);
 export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
 
 /**
@@ -12378,186 +14440,206 @@ export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetD
  * a scope, selects a connection, or replaces server-side authorization; the UI
  * falls back to generic copy for any omitted field.
  */
-export const IntegrationPresentation = z
-  .object({
-    providerName: z.string().min(1).max(120).optional(),
-    icon: z.enum(["calendar", "cloud", "contacts", "files", "mail"]).optional(),
-    introduction: z.string().min(1).max(500).optional(),
-    capabilities: z
-      .array(
-        z
-          .object({
-            title: z.string().min(1).max(160),
-            description: z.string().min(1).max(500),
-          })
-          .strict(),
-      )
-      .max(8)
-      .optional(),
-    permissionSummary: z.string().min(1).max(500).optional(),
-    scopeLabels: z
-      .record(
-        z.string().min(1).max(1024),
-        z
-          .object({
-            label: z.string().min(1).max(160),
-            description: z.string().min(1).max(500),
-          })
-          .strict(),
-      )
-      .optional(),
-  })
-  .strict();
+export const IntegrationPresentation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      providerName: z.string().min(1).max(120).optional(),
+      icon: z.enum(["calendar", "cloud", "contacts", "files", "mail"]).optional(),
+      introduction: z.string().min(1).max(500).optional(),
+      capabilities: z
+        .array(
+          z
+            .object({
+              title: z.string().min(1).max(160),
+              description: z.string().min(1).max(500),
+            })
+            .strict(),
+        )
+        .max(8)
+        .optional(),
+      permissionSummary: z.string().min(1).max(500).optional(),
+      scopeLabels: z
+        .record(
+          z.string().min(1).max(1024),
+          z
+            .object({
+              label: z.string().min(1).max(160),
+              description: z.string().min(1).max(500),
+            })
+            .strict(),
+        )
+        .optional(),
+    })
+    .strict(),
+);
 export type IntegrationPresentation = z.infer<typeof IntegrationPresentation>;
 
-export const IntegrationDefinitionSummary = z
-  .object({
-    id: z.string().min(1).max(128),
-    name: z.string().min(1).max(200),
-    summary: z.string().min(1).max(1000),
-    protocol: z.literal("openapi"),
-    provider: z
-      .object({
-        id: z.enum(["google", "microsoft"]),
-        domain: z.string().min(1).max(253),
-      })
-      .strict(),
-    authentication: z
-      .object({
-        kind: z.literal("oauth2"),
-        scopes: z.array(z.string().min(1).max(1024)).max(256),
-      })
-      .strict(),
-    presentation: IntegrationPresentation.optional(),
-    facets: z.array(IntegrationFacetDefinitionSummary).max(128),
-  })
-  .strict();
+export const IntegrationDefinitionSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      name: z.string().min(1).max(200),
+      summary: z.string().min(1).max(1000),
+      protocol: z.literal("openapi"),
+      provider: z
+        .object({
+          id: z.enum(["google", "microsoft"]),
+          domain: z.string().min(1).max(253),
+        })
+        .strict(),
+      authentication: z
+        .object({
+          kind: z.literal("oauth2"),
+          scopes: z.array(z.string().min(1).max(1024)).max(256),
+        })
+        .strict(),
+      presentation: IntegrationPresentation.optional(),
+      facets: z.array(IntegrationFacetDefinitionSummary).max(128),
+    })
+    .strict(),
+);
 export type IntegrationDefinitionSummary = z.infer<typeof IntegrationDefinitionSummary>;
 
-export const ListIntegrationDefinitionsResponse = z
-  .object({ definitions: z.array(IntegrationDefinitionSummary).max(128) })
-  .strict();
+export const ListIntegrationDefinitionsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ definitions: z.array(IntegrationDefinitionSummary).max(128) }).strict(),
+);
 export type ListIntegrationDefinitionsResponse = z.infer<typeof ListIntegrationDefinitionsResponse>;
 
-export const IntegrationInstanceKey = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export const IntegrationInstanceKey = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+);
 export type IntegrationInstanceKey = z.infer<typeof IntegrationInstanceKey>;
 
-export const IntegrationFacetBindingSummary = z
-  .object({
-    id: z.string().uuid(),
-    facetKey: IntegrationFacetKey,
-    kind: IntegrationFacetKind.exclude(["tools"]),
-    bindingKey: IntegrationInstanceKey,
-    displayName: z.string().min(1).max(200),
-    connectionId: z.string().uuid().nullable(),
-    status: IntegrationFacetStatus,
-    config: IntegrationFacetJsonObject,
-    version: z.number().int().positive(),
-    hasCursor: z.boolean(),
-    lastSuccessAt: z.string().datetime({ offset: true }).nullable(),
-    lastErrorCode: z.string().min(1).max(120).nullable(),
-    createdAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
-    directlyOwned: z.boolean(),
-    owners: z.array(CapabilityComponentOwner),
-  })
-  .strict();
+export const IntegrationFacetBindingSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      facetKey: IntegrationFacetKey,
+      kind: IntegrationFacetKind.exclude(["tools"]),
+      bindingKey: IntegrationInstanceKey,
+      displayName: z.string().min(1).max(200),
+      connectionId: z.string().uuid().nullable(),
+      status: IntegrationFacetStatus,
+      config: IntegrationFacetJsonObject,
+      version: z.number().int().positive(),
+      hasCursor: z.boolean(),
+      lastSuccessAt: z.string().datetime({ offset: true }).nullable(),
+      lastErrorCode: z.string().min(1).max(120).nullable(),
+      createdAt: z.string().datetime({ offset: true }),
+      updatedAt: z.string().datetime({ offset: true }),
+      directlyOwned: z.boolean(),
+      owners: z.array(CapabilityComponentOwner),
+    })
+    .strict(),
+);
 export type IntegrationFacetBindingSummary = z.infer<typeof IntegrationFacetBindingSummary>;
 
-export const IntegrationInstanceFacetsResponse = z
-  .object({
-    capabilityId: z.string().min(1).max(512),
-    instanceKey: IntegrationInstanceKey,
-    providerDomain: z.string().min(1).max(253),
-    connectionId: z.string().uuid().nullable(),
-    facets: z
-      .array(
-        z
-          .object({
-            definition: IntegrationFacetDefinitionSummary,
-            binding: IntegrationFacetBindingSummary.nullable(),
-          })
-          .strict(),
-      )
-      .max(128),
-  })
-  .strict();
+export const IntegrationInstanceFacetsResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1).max(512),
+      instanceKey: IntegrationInstanceKey,
+      providerDomain: z.string().min(1).max(253),
+      connectionId: z.string().uuid().nullable(),
+      facets: z
+        .array(
+          z
+            .object({
+              definition: IntegrationFacetDefinitionSummary,
+              binding: IntegrationFacetBindingSummary.nullable(),
+            })
+            .strict(),
+        )
+        .max(128),
+    })
+    .strict(),
+);
 export type IntegrationInstanceFacetsResponse = z.infer<typeof IntegrationInstanceFacetsResponse>;
 
-export const UpsertIntegrationFacetRequest = z
-  .object({
-    displayName: z.string().min(1).max(200),
-    config: IntegrationFacetJsonObject.default({}),
-    expectedVersion: z.number().int().positive().optional(),
-    idempotencyKey: z.string().uuid(),
-  })
-  .strict();
+export const UpsertIntegrationFacetRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      displayName: z.string().min(1).max(200),
+      config: IntegrationFacetJsonObject.default({}),
+      expectedVersion: z.number().int().positive().optional(),
+      idempotencyKey: z.string().uuid(),
+    })
+    .strict(),
+);
 export type UpsertIntegrationFacetRequest = z.infer<typeof UpsertIntegrationFacetRequest>;
 
-export const MutateIntegrationFacetRequest = z
-  .object({
-    expectedVersion: z.number().int().positive(),
-    idempotencyKey: z.string().uuid(),
-  })
-  .strict();
+export const MutateIntegrationFacetRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedVersion: z.number().int().positive(),
+      idempotencyKey: z.string().uuid(),
+    })
+    .strict(),
+);
 export type MutateIntegrationFacetRequest = z.infer<typeof MutateIntegrationFacetRequest>;
 
-export const IntegrationFacetMutationResult = z
-  .object({
-    capabilityId: z.string().min(1).max(512),
-    instanceKey: IntegrationInstanceKey,
-    facetKey: IntegrationFacetKey,
-    status: z.enum(["configured", "paused", "active"]),
-    binding: IntegrationFacetBindingSummary,
-  })
-  .strict();
+export const IntegrationFacetMutationResult = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1).max(512),
+      instanceKey: IntegrationInstanceKey,
+      facetKey: IntegrationFacetKey,
+      status: z.enum(["configured", "paused", "active"]),
+      binding: IntegrationFacetBindingSummary,
+    })
+    .strict(),
+);
 export type IntegrationFacetMutationResult = z.infer<typeof IntegrationFacetMutationResult>;
 
-export const IntegrationFacetRemovalResult = z
-  .object({
-    capabilityId: z.string().min(1).max(512),
-    instanceKey: IntegrationInstanceKey,
-    facetKey: IntegrationFacetKey,
-    status: z.enum(["not_configured", "removed", "retained_by_other_owners"]),
-    binding: IntegrationFacetBindingSummary.nullable(),
-    remainingOwners: z.array(CapabilityComponentOwner),
-  })
-  .strict();
+export const IntegrationFacetRemovalResult = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1).max(512),
+      instanceKey: IntegrationInstanceKey,
+      facetKey: IntegrationFacetKey,
+      status: z.enum(["not_configured", "removed", "retained_by_other_owners"]),
+      binding: IntegrationFacetBindingSummary.nullable(),
+      remainingOwners: z.array(CapabilityComponentOwner),
+    })
+    .strict(),
+);
 export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
 
-export const IntegrationSource = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("definition"),
-      definitionId: z.string().min(1).max(128),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("openapi"),
-      url: z.string().url().max(2048),
-      baseUrl: z.string().url().max(2048).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("graphql"),
-      endpoint: z.string().url().max(2048),
-      name: z.string().min(1).max(200).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("auto"),
-      url: z.string().url().max(2048),
-      baseUrl: z.string().url().max(2048).optional(),
-    })
-    .strict(),
-]);
+export const IntegrationSource = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("definition"),
+        definitionId: z.string().min(1).max(128),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("openapi"),
+        url: z.string().url().max(2048),
+        baseUrl: z.string().url().max(2048).optional(),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("graphql"),
+        endpoint: z.string().url().max(2048),
+        name: z.string().min(1).max(200).optional(),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("auto"),
+        url: z.string().url().max(2048),
+        baseUrl: z.string().url().max(2048).optional(),
+      })
+      .strict(),
+  ]),
+);
 export type IntegrationSource = z.infer<typeof IntegrationSource>;
 
 /** Custom OpenAPI documents must fit the same 8 MiB bound as fetched specs. */
@@ -12572,408 +14654,451 @@ export const INLINE_OPENAPI_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024;
  * on a private or loopback address stays unreachable unless the operator
  * enables private targets; a local product still needs a public tunnel.
  */
-export const InlineOpenApiDocumentSource = z
-  .object({
-    kind: z.literal("openapi_document"),
-    sourceKey: z
-      .string()
-      .min(1)
-      .max(128)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-    document: z
-      .string()
-      .min(1)
-      .refine(
-        (value) => new TextEncoder().encode(value).byteLength <= INLINE_OPENAPI_DOCUMENT_MAX_BYTES,
-        `OpenAPI document must be at most ${INLINE_OPENAPI_DOCUMENT_MAX_BYTES} bytes`,
-      ),
-    baseUrl: z.string().url().max(2048).optional(),
-  })
-  .strict();
+export const InlineOpenApiDocumentSource = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.literal("openapi_document"),
+      sourceKey: z
+        .string()
+        .min(1)
+        .max(128)
+        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+      document: z
+        .string()
+        .min(1)
+        .refine(
+          (value) =>
+            new TextEncoder().encode(value).byteLength <= INLINE_OPENAPI_DOCUMENT_MAX_BYTES,
+          `OpenAPI document must be at most ${INLINE_OPENAPI_DOCUMENT_MAX_BYTES} bytes`,
+        ),
+      baseUrl: z.string().url().max(2048).optional(),
+    })
+    .strict(),
+);
 export type InlineOpenApiDocumentSource = z.infer<typeof InlineOpenApiDocumentSource>;
 
 /** Preview/install input: every stored source kind plus an inline document. */
-export const IntegrationSourceInput = z.discriminatedUnion("kind", [
-  ...IntegrationSource.options,
-  InlineOpenApiDocumentSource,
-]);
+export const IntegrationSourceInput = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [...IntegrationSource.options, InlineOpenApiDocumentSource]),
+);
 export type IntegrationSourceInput = z.infer<typeof IntegrationSourceInput>;
 
 /** Responses echo an inline document only by its digest, never its text. */
-export const InlineOpenApiDocumentSourceEcho = z
-  .object({
-    kind: z.literal("openapi_document"),
-    sourceKey: InlineOpenApiDocumentSource.shape.sourceKey,
-    documentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-    baseUrl: z.string().url().max(2048).optional(),
-  })
-  .strict();
-export const IntegrationSourceProjection = z.discriminatedUnion("kind", [
-  ...IntegrationSource.options,
-  InlineOpenApiDocumentSourceEcho,
-]);
+export const InlineOpenApiDocumentSourceEcho = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.literal("openapi_document"),
+      sourceKey: InlineOpenApiDocumentSource.shape.sourceKey,
+      documentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      baseUrl: z.string().url().max(2048).optional(),
+    })
+    .strict(),
+);
+export const IntegrationSourceProjection = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [...IntegrationSource.options, InlineOpenApiDocumentSourceEcho]),
+);
 export type IntegrationSourceProjection = z.infer<typeof IntegrationSourceProjection>;
 
-export const PreviewApiIntegrationRequest = z
-  .object({
-    source: IntegrationSourceInput,
-    connectionId: z.string().uuid().optional(),
-    ownership: ConnectionOwnership.optional(),
-  })
-  .strict();
+export const PreviewApiIntegrationRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      source: IntegrationSourceInput,
+      connectionId: z.string().uuid().optional(),
+      ownership: ConnectionOwnership.optional(),
+    })
+    .strict(),
+);
 export type PreviewApiIntegrationRequest = z.infer<typeof PreviewApiIntegrationRequest>;
 
-export const ApiIntegrationOAuthStartRequest = z
-  .object({
-    definitionId: z.string().min(1).max(128),
-    ownership: ConnectionOwnership.optional(),
-    connectionId: z.string().uuid().optional(),
-    returnPath: z.string().min(1).max(2048).optional(),
-  })
-  .strict();
+export const ApiIntegrationOAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      definitionId: z.string().min(1).max(128),
+      ownership: ConnectionOwnership.optional(),
+      connectionId: z.string().uuid().optional(),
+      returnPath: z.string().min(1).max(2048).optional(),
+    })
+    .strict(),
+);
 export type ApiIntegrationOAuthStartRequest = z.infer<typeof ApiIntegrationOAuthStartRequest>;
 
 export const API_INTEGRATION_OAUTH_CREDENTIAL_ROLE = "api_integration_oauth" as const;
 
-export const ApiIntegrationOAuthConnectionMetadata = z
-  .object({
-    credentialRole: z.literal(API_INTEGRATION_OAUTH_CREDENTIAL_ROLE),
-    providerFamily: z.enum(["google", "microsoft"]),
-    providerPrincipalId: z.string().min(1).max(512),
-    providerEmail: z.string().min(1).max(512).nullable(),
-    providerDisplayName: z.string().min(1).max(512).nullable(),
-    authorizedDefinitionIds: z.array(z.string().min(1).max(128)).min(1).max(32),
-    verifiedAt: z.string().datetime({ offset: true }),
-  })
-  .passthrough();
+export const ApiIntegrationOAuthConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      credentialRole: z.literal(API_INTEGRATION_OAUTH_CREDENTIAL_ROLE),
+      providerFamily: z.enum(["google", "microsoft"]),
+      providerPrincipalId: z.string().min(1).max(512),
+      providerEmail: z.string().min(1).max(512).nullable(),
+      providerDisplayName: z.string().min(1).max(512).nullable(),
+      authorizedDefinitionIds: z.array(z.string().min(1).max(128)).min(1).max(32),
+      verifiedAt: z.string().datetime({ offset: true }),
+    })
+    .passthrough(),
+);
 export type ApiIntegrationOAuthConnectionMetadata = z.infer<
   typeof ApiIntegrationOAuthConnectionMetadata
 >;
 
-export const ApiIntegrationAuthPreview = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("none") }).strict(),
-  z
-    .object({
-      kind: z.literal("oauth2"),
-      providerDomain: z.string().min(1).max(253),
-      scopes: z.array(z.string().min(1).max(1024)).max(256),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("api_key"),
-      providerDomain: z.string().min(1).max(253),
-      carrier: z.enum(["header", "query", "cookie"]),
-      name: z.string().min(1).max(256),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("http"),
-      providerDomain: z.string().min(1).max(253),
-      scheme: z.string().min(1).max(64),
-    })
-    .strict(),
-]);
+export const ApiIntegrationAuthPreview = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("none") }).strict(),
+    z
+      .object({
+        kind: z.literal("oauth2"),
+        providerDomain: z.string().min(1).max(253),
+        scopes: z.array(z.string().min(1).max(1024)).max(256),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("api_key"),
+        providerDomain: z.string().min(1).max(253),
+        carrier: z.enum(["header", "query", "cookie"]),
+        name: z.string().min(1).max(256),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("http"),
+        providerDomain: z.string().min(1).max(253),
+        scheme: z.string().min(1).max(64),
+      })
+      .strict(),
+  ]),
+);
 export type ApiIntegrationAuthPreview = z.infer<typeof ApiIntegrationAuthPreview>;
 
-export const ApiIntegrationToolPreview = z
-  .object({
-    id: z.string().min(1).max(200),
-    operationKey: z.string().min(1).max(512),
-    name: z.string().min(1).max(200),
-    description: z.string().max(4000),
-    safety: z.enum(["read", "write", "destructive"]),
-    approvalMode: z.enum(["never", "ask"]),
-    deprecated: z.boolean(),
-  })
-  .strict();
+export const ApiIntegrationToolPreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(200),
+      operationKey: z.string().min(1).max(512),
+      name: z.string().min(1).max(200),
+      description: z.string().max(4000),
+      safety: z.enum(["read", "write", "destructive"]),
+      approvalMode: z.enum(["never", "ask"]),
+      deprecated: z.boolean(),
+    })
+    .strict(),
+);
 export type ApiIntegrationToolPreview = z.infer<typeof ApiIntegrationToolPreview>;
 
-export const ApiIntegrationPreview = z
-  .object({
-    source: IntegrationSourceProjection,
-    definitionId: z.string().min(1).max(200),
-    definitionProvenance: IntegrationDefinitionProvenance,
-    protocol: ApiIntegrationProtocol,
-    capabilityId: z.string().min(1).max(512),
-    pluginKey: z.string().min(1).max(200),
-    serverId: SessionMcpServerId,
-    name: z.string().min(1).max(200),
-    description: z.string().max(4000).nullable(),
-    provider: z.string().min(1).max(128).nullable(),
-    providerDomain: z.string().min(1).max(253),
-    baseUrl: z.string().url().max(2048),
-    sourceUrl: z.string().url().max(2048).nullable(),
-    revisionId: z.string().min(1).max(96),
-    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-    auth: ApiIntegrationAuthPreview,
-    connectionId: z.string().uuid().nullable(),
-    connectionOwnership: ConnectionOwnership.nullable(),
-    tools: z.array(ApiIntegrationToolPreview).min(1).max(2000),
-    warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
-  })
-  .strict();
+export const ApiIntegrationPreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      source: IntegrationSourceProjection,
+      definitionId: z.string().min(1).max(200),
+      definitionProvenance: IntegrationDefinitionProvenance,
+      protocol: ApiIntegrationProtocol,
+      capabilityId: z.string().min(1).max(512),
+      pluginKey: z.string().min(1).max(200),
+      serverId: SessionMcpServerId,
+      name: z.string().min(1).max(200),
+      description: z.string().max(4000).nullable(),
+      provider: z.string().min(1).max(128).nullable(),
+      providerDomain: z.string().min(1).max(253),
+      baseUrl: z.string().url().max(2048),
+      sourceUrl: z.string().url().max(2048).nullable(),
+      revisionId: z.string().min(1).max(96),
+      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      auth: ApiIntegrationAuthPreview,
+      connectionId: z.string().uuid().nullable(),
+      connectionOwnership: ConnectionOwnership.nullable(),
+      tools: z.array(ApiIntegrationToolPreview).min(1).max(2000),
+      warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
+    })
+    .strict(),
+);
 export type ApiIntegrationPreview = z.infer<typeof ApiIntegrationPreview>;
 
-export const InstallApiIntegrationRequest = z
-  .object({
-    source: IntegrationSourceInput,
-    expectedRevisionId: z.string().min(1).max(96),
-    expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-    connectionId: z.string().uuid().optional(),
-    ownership: ConnectionOwnership.optional(),
-    instanceKey: IntegrationInstanceKey.optional(),
-    displayName: z.string().min(1).max(200).optional(),
-    expectedInstanceVersion: z.number().int().positive().optional(),
-    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
-    // Selected write/destructive tools (preview approvalMode "ask") that run
-    // without per-call human approval, for unattended/scheduled work. Custom and
-    // curated Integrations alike; requires capabilities:manage and re-passes
-    // organization acquisition policy. A curated definition may forbid it per
-    // operation (IntegrationDefinition.autoApproval). Declarative: omission restores
-    // approval for every "ask" tool. Session approval policy, connector Block,
-    // and action policies still apply.
-    autoApprovedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
-  })
-  .strict();
+export const InstallApiIntegrationRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      source: IntegrationSourceInput,
+      expectedRevisionId: z.string().min(1).max(96),
+      expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      connectionId: z.string().uuid().optional(),
+      ownership: ConnectionOwnership.optional(),
+      instanceKey: IntegrationInstanceKey.optional(),
+      displayName: z.string().min(1).max(200).optional(),
+      expectedInstanceVersion: z.number().int().positive().optional(),
+      allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
+      // Selected write/destructive tools (preview approvalMode "ask") that run
+      // without per-call human approval, for unattended/scheduled work. Custom and
+      // curated Integrations alike; requires capabilities:manage and re-passes
+      // organization acquisition policy. A curated definition may forbid it per
+      // operation (IntegrationDefinition.autoApproval). Declarative: omission restores
+      // approval for every "ask" tool. Session approval policy, connector Block,
+      // and action policies still apply.
+      autoApprovedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
+    })
+    .strict(),
+);
 export type InstallApiIntegrationRequest = z.infer<typeof InstallApiIntegrationRequest>;
 
-export const InstalledApiIntegration = z
-  .object({
-    capabilityId: z.string().min(1),
-    pluginId: z.string().uuid(),
-    pluginVersionId: z.string().uuid(),
-    integrationFacetId: z.string().uuid(),
-    apiFacetId: z.string().uuid(),
-    pluginInstallationId: z.string().uuid(),
-    integrationFacetInstallationId: z.string().uuid(),
-    apiFacetInstallationId: z.string().uuid(),
-    installationVersion: z.number().int().positive(),
-    instanceId: z.string().uuid(),
-    instanceKey: IntegrationInstanceKey,
-    displayName: z.string().min(1).max(200),
-    instanceVersion: z.number().int().positive(),
-    revisionId: z.string().min(1),
-    serverId: SessionMcpServerId,
-    status: z.literal("installed"),
-  })
-  .strict();
+export const InstalledApiIntegration = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1),
+      pluginId: z.string().uuid(),
+      pluginVersionId: z.string().uuid(),
+      integrationFacetId: z.string().uuid(),
+      apiFacetId: z.string().uuid(),
+      pluginInstallationId: z.string().uuid(),
+      integrationFacetInstallationId: z.string().uuid(),
+      apiFacetInstallationId: z.string().uuid(),
+      installationVersion: z.number().int().positive(),
+      instanceId: z.string().uuid(),
+      instanceKey: IntegrationInstanceKey,
+      displayName: z.string().min(1).max(200),
+      instanceVersion: z.number().int().positive(),
+      revisionId: z.string().min(1),
+      serverId: SessionMcpServerId,
+      status: z.literal("installed"),
+    })
+    .strict(),
+);
 export type InstalledApiIntegration = z.infer<typeof InstalledApiIntegration>;
 
-export const ApiIntegrationInstallationSummary = z
-  .object({
-    capabilityId: z.string().min(1),
-    pluginKey: z.string().min(1),
-    installationVersion: z.number().int().positive(),
-    instanceId: z.string().uuid(),
-    instanceKey: IntegrationInstanceKey,
-    displayName: z.string().min(1).max(200),
-    instanceVersion: z.number().int().positive(),
-    serverId: SessionMcpServerId,
-    name: z.string().min(1),
-    description: z.string().nullable(),
-    protocol: ApiIntegrationProtocol,
-    definitionId: z.string().min(1).max(200),
-    definitionProvenance: IntegrationDefinitionProvenance,
-    providerDomain: z.string().min(1),
-    baseUrl: z.string().url(),
-    sourceUrl: z.string().url().nullable(),
-    connected: z.boolean(),
-    requiresConnection: z.boolean(),
-    connectionId: z.string().uuid().nullable(),
-    ownership: z.enum(["workspace", "personal", "none"]),
-    allowedTools: z.array(z.string().min(1).max(200)).max(2000),
-    toolCount: z.number().int().nonnegative(),
-    approvalRequiredToolCount: z.number().int().nonnegative(),
-    revisionId: z.string().min(1),
-    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-  })
-  .strict();
+export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1),
+      pluginKey: z.string().min(1),
+      installationVersion: z.number().int().positive(),
+      instanceId: z.string().uuid(),
+      instanceKey: IntegrationInstanceKey,
+      displayName: z.string().min(1).max(200),
+      instanceVersion: z.number().int().positive(),
+      serverId: SessionMcpServerId,
+      name: z.string().min(1),
+      description: z.string().nullable(),
+      protocol: ApiIntegrationProtocol,
+      definitionId: z.string().min(1).max(200),
+      definitionProvenance: IntegrationDefinitionProvenance,
+      providerDomain: z.string().min(1),
+      baseUrl: z.string().url(),
+      sourceUrl: z.string().url().nullable(),
+      connected: z.boolean(),
+      requiresConnection: z.boolean(),
+      connectionId: z.string().uuid().nullable(),
+      ownership: z.enum(["workspace", "personal", "none"]),
+      allowedTools: z.array(z.string().min(1).max(200)).max(2000),
+      toolCount: z.number().int().nonnegative(),
+      approvalRequiredToolCount: z.number().int().nonnegative(),
+      revisionId: z.string().min(1),
+      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    })
+    .strict(),
+);
 export type ApiIntegrationInstallationSummary = z.infer<typeof ApiIntegrationInstallationSummary>;
 
-export const ListApiIntegrationsResponse = z
-  .object({ integrations: z.array(ApiIntegrationInstallationSummary) })
-  .strict();
+export const ListApiIntegrationsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ integrations: z.array(ApiIntegrationInstallationSummary) }).strict(),
+);
 export type ListApiIntegrationsResponse = z.infer<typeof ListApiIntegrationsResponse>;
 
-export const ApiIntegrationUninstallPreview = z
-  .object({
-    capabilityId: z.string().min(1),
-    instanceKey: IntegrationInstanceKey,
-    displayName: z.string().min(1).max(200).nullable(),
-    installed: z.boolean(),
-    installationVersion: z.number().int().positive().nullable(),
-    instanceVersion: z.number().int().positive().nullable(),
-    directOwner: CapabilityComponentOwner.nullable(),
-    remainingOwners: z.array(CapabilityComponentOwner),
-    removesRuntimeIntegration: z.boolean(),
-    removesDefinition: z.boolean(),
-  })
-  .strict();
+export const ApiIntegrationUninstallPreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1),
+      instanceKey: IntegrationInstanceKey,
+      displayName: z.string().min(1).max(200).nullable(),
+      installed: z.boolean(),
+      installationVersion: z.number().int().positive().nullable(),
+      instanceVersion: z.number().int().positive().nullable(),
+      directOwner: CapabilityComponentOwner.nullable(),
+      remainingOwners: z.array(CapabilityComponentOwner),
+      removesRuntimeIntegration: z.boolean(),
+      removesDefinition: z.boolean(),
+    })
+    .strict(),
+);
 export type ApiIntegrationUninstallPreview = z.infer<typeof ApiIntegrationUninstallPreview>;
 
-export const UninstallApiIntegrationRequest = z
-  .object({
-    expectedInstallationVersion: z.number().int().positive(),
-    expectedInstanceVersion: z.number().int().positive(),
-  })
-  .strict();
+export const UninstallApiIntegrationRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedInstallationVersion: z.number().int().positive(),
+      expectedInstanceVersion: z.number().int().positive(),
+    })
+    .strict(),
+);
 export type UninstallApiIntegrationRequest = z.infer<typeof UninstallApiIntegrationRequest>;
 
-export const UninstallApiIntegrationResult = z
-  .object({
-    capabilityId: z.string().min(1),
-    instanceKey: IntegrationInstanceKey,
-    status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
-    remainingOwners: z.array(CapabilityComponentOwner),
-    definitionStatus: z.enum(["retained", "disabled"]),
-  })
-  .strict();
+export const UninstallApiIntegrationResult = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().min(1),
+      instanceKey: IntegrationInstanceKey,
+      status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
+      remainingOwners: z.array(CapabilityComponentOwner),
+      definitionStatus: z.enum(["retained", "disabled"]),
+    })
+    .strict(),
+);
 export type UninstallApiIntegrationResult = z.infer<typeof UninstallApiIntegrationResult>;
 
-const PluginComponentKey = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+const PluginComponentKey = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+);
 
-export const PluginManifest = z
-  .object({
-    schemaVersion: z.literal(1),
-    pluginKey: z
-      .string()
-      .min(1)
-      .max(200)
-      .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
-    version: z.string().min(1).max(128),
-    name: z.string().min(1).max(200),
-    description: z.string().max(4000).default(""),
-    category: z.string().min(1).max(100).default("plugins"),
-    tags: z.array(z.string().min(1).max(100)).max(64).default([]),
-    components: z
-      .array(
-        z.discriminatedUnion("kind", [
-          z
-            .object({
-              key: PluginComponentKey,
-              kind: z.literal("skill"),
-              url: z.string().url(),
-            })
-            .strict(),
-          z
-            .object({
-              key: PluginComponentKey,
-              kind: z.literal("integration"),
-              source: IntegrationSource,
-            })
-            .strict(),
-          z
-            .object({
-              key: PluginComponentKey,
-              kind: z.literal("mcp"),
-              serverId: SessionMcpServerId,
-            })
-            .strict(),
-        ]),
-      )
-      .min(1)
-      .max(64),
-  })
-  .strict()
-  .superRefine((manifest, context) => {
-    const seen = new Set<string>();
-    for (const [index, component] of manifest.components.entries()) {
-      if (seen.has(component.key)) {
-        context.addIssue({
-          code: "custom",
-          message: "Plugin component keys must be unique",
-          path: ["components", index, "key"],
-        });
+export const PluginManifest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      pluginKey: z
+        .string()
+        .min(1)
+        .max(200)
+        .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+      version: z.string().min(1).max(128),
+      name: z.string().min(1).max(200),
+      description: z.string().max(4000).default(""),
+      category: z.string().min(1).max(100).default("plugins"),
+      tags: z.array(z.string().min(1).max(100)).max(64).default([]),
+      components: z
+        .array(
+          z.discriminatedUnion("kind", [
+            z
+              .object({
+                key: PluginComponentKey,
+                kind: z.literal("skill"),
+                url: z.string().url(),
+              })
+              .strict(),
+            z
+              .object({
+                key: PluginComponentKey,
+                kind: z.literal("integration"),
+                source: IntegrationSource,
+              })
+              .strict(),
+            z
+              .object({
+                key: PluginComponentKey,
+                kind: z.literal("mcp"),
+                serverId: SessionMcpServerId,
+              })
+              .strict(),
+          ]),
+        )
+        .min(1)
+        .max(64),
+    })
+    .strict()
+    .superRefine((manifest, context) => {
+      const seen = new Set<string>();
+      for (const [index, component] of manifest.components.entries()) {
+        if (seen.has(component.key)) {
+          context.addIssue({
+            code: "custom",
+            message: "Plugin component keys must be unique",
+            path: ["components", index, "key"],
+          });
+        }
+        seen.add(component.key);
       }
-      seen.add(component.key);
-    }
-  });
+    }),
+);
 export type PluginManifest = z.infer<typeof PluginManifest>;
 
-export const PluginComponentBinding = z
-  .object({
-    connectionId: z.string().uuid().optional(),
-    instanceKey: IntegrationInstanceKey.optional(),
-    displayName: z.string().min(1).max(200).optional(),
-  })
-  .strict();
+export const PluginComponentBinding = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      connectionId: z.string().uuid().optional(),
+      instanceKey: IntegrationInstanceKey.optional(),
+      displayName: z.string().min(1).max(200).optional(),
+    })
+    .strict(),
+);
 export type PluginComponentBinding = z.infer<typeof PluginComponentBinding>;
 
-export const PreviewPluginRequest = z
-  .object({
-    url: z.string().url().max(2048),
-    bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
-  })
-  .strict();
+export const PreviewPluginRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      url: z.string().url().max(2048),
+      bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
+    })
+    .strict(),
+);
 export type PreviewPluginRequest = z.infer<typeof PreviewPluginRequest>;
 
-export const PluginComponentPreview = z
-  .object({
-    key: PluginComponentKey,
-    kind: z.enum(["skill", "integration", "mcp"]),
-    name: z.string().min(1).max(200),
-    capabilityId: z.string().min(1).max(512),
-    digest: z.string().regex(/^[0-9a-f]{64}$/),
-    connectionRequired: z.boolean(),
-    connectionId: z.string().uuid().nullable(),
-    instanceKey: IntegrationInstanceKey.nullable(),
-    displayName: z.string().min(1).max(200).nullable(),
-    facts: z.record(z.string(), z.unknown()),
-  })
-  .strict();
+export const PluginComponentPreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      key: PluginComponentKey,
+      kind: z.enum(["skill", "integration", "mcp"]),
+      name: z.string().min(1).max(200),
+      capabilityId: z.string().min(1).max(512),
+      digest: z.string().regex(/^[0-9a-f]{64}$/),
+      connectionRequired: z.boolean(),
+      connectionId: z.string().uuid().nullable(),
+      instanceKey: IntegrationInstanceKey.nullable(),
+      displayName: z.string().min(1).max(200).nullable(),
+      facts: z.record(z.string(), z.unknown()),
+    })
+    .strict(),
+);
 export type PluginComponentPreview = z.infer<typeof PluginComponentPreview>;
 
-export const PluginUpdateDiff = z
-  .object({
-    fromVersion: z.string().nullable(),
-    toVersion: z.string().min(1),
-    added: z.array(PluginComponentKey),
-    removed: z.array(PluginComponentKey),
-    changed: z.array(PluginComponentKey),
-    unchanged: z.array(PluginComponentKey),
-  })
-  .strict();
+export const PluginUpdateDiff = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      fromVersion: z.string().nullable(),
+      toVersion: z.string().min(1),
+      added: z.array(PluginComponentKey),
+      removed: z.array(PluginComponentKey),
+      changed: z.array(PluginComponentKey),
+      unchanged: z.array(PluginComponentKey),
+    })
+    .strict(),
+);
 export type PluginUpdateDiff = z.infer<typeof PluginUpdateDiff>;
 
-export const PluginPreview = z
-  .object({
-    sourceUrl: z.string().url(),
-    manifest: PluginManifest,
-    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
-    installed: z.boolean(),
-    installationVersion: z.number().int().positive().nullable(),
-    components: z.array(PluginComponentPreview).min(1).max(64),
-    diff: PluginUpdateDiff,
-  })
-  .strict();
+export const PluginPreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sourceUrl: z.string().url(),
+      manifest: PluginManifest,
+      manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      installed: z.boolean(),
+      installationVersion: z.number().int().positive().nullable(),
+      components: z.array(PluginComponentPreview).min(1).max(64),
+      diff: PluginUpdateDiff,
+    })
+    .strict(),
+);
 export type PluginPreview = z.infer<typeof PluginPreview>;
 
-export const InstallPluginRequest = z
-  .object({
-    url: z.string().url().max(2048),
-    expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
-    expectedComponents: z
-      .array(
-        z
-          .object({
-            key: PluginComponentKey,
-            digest: z.string().regex(/^[0-9a-f]{64}$/),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(64),
-    bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
-    idempotencyKey: z.string().uuid(),
-    expectedInstallationVersion: z.number().int().positive().optional(),
-  })
-  .strict();
+export const InstallPluginRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      url: z.string().url().max(2048),
+      expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      expectedComponents: z
+        .array(
+          z
+            .object({
+              key: PluginComponentKey,
+              digest: z.string().regex(/^[0-9a-f]{64}$/),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(64),
+      bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
+      idempotencyKey: z.string().uuid(),
+      expectedInstallationVersion: z.number().int().positive().optional(),
+    })
+    .strict(),
+);
 export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 
 export const InstalledPlugin = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -12995,180 +15120,204 @@ export const InstalledPlugin = /* @__PURE__ */ defineSkillContractSchema(() =>
 );
 export type InstalledPlugin = z.infer<typeof InstalledPlugin>;
 
-export const PluginInstallationSummary = z
-  .object({
-    pluginKey: z.string().min(1).max(200),
-    version: z.string().min(1).max(128),
-    name: z.string().min(1).max(200),
-    description: z.string().max(4000),
-    category: z.string().min(1).max(100),
-    tags: z.array(z.string().min(1).max(100)).max(64),
-    logoUrl: z.string().url().max(2048).nullable().optional(),
-    sourceUrl: z.string().url().max(2048).nullable(),
-    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
-    installationVersion: z.number().int().positive(),
-    componentCount: z.number().int().nonnegative().max(64),
-    status: z.enum(["active", "needs_attention"]),
-    installedAt: z.string().datetime({ offset: true }),
-    updatedAt: z.string().datetime({ offset: true }),
-  })
-  .strict();
+export const PluginInstallationSummary = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      pluginKey: z.string().min(1).max(200),
+      version: z.string().min(1).max(128),
+      name: z.string().min(1).max(200),
+      description: z.string().max(4000),
+      category: z.string().min(1).max(100),
+      tags: z.array(z.string().min(1).max(100)).max(64),
+      logoUrl: z.string().url().max(2048).nullable().optional(),
+      sourceUrl: z.string().url().max(2048).nullable(),
+      manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      installationVersion: z.number().int().positive(),
+      componentCount: z.number().int().nonnegative().max(64),
+      status: z.enum(["active", "needs_attention"]),
+      installedAt: z.string().datetime({ offset: true }),
+      updatedAt: z.string().datetime({ offset: true }),
+    })
+    .strict(),
+);
 export type PluginInstallationSummary = z.infer<typeof PluginInstallationSummary>;
 
-export const ListInstalledPluginsResponse = z
-  .object({ plugins: z.array(PluginInstallationSummary).max(1000) })
-  .strict();
+export const ListInstalledPluginsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ plugins: z.array(PluginInstallationSummary).max(1000) }).strict(),
+);
 export type ListInstalledPluginsResponse = z.infer<typeof ListInstalledPluginsResponse>;
 
-export const PluginUninstallComponentImpact = z.object({
-  capabilityId: z.string().min(1),
-  kind: z.enum(["skill", "integration", "mcp"]),
-  retainedByOtherOwners: z.boolean(),
-  name: z.string().min(1),
-  disposition: z.enum(["removed", "retained", "inactive"]),
-  retentionReasons: z.array(
-    z.enum(["other_owners", "customized", "re_scoped", "registry_unavailable"]),
-  ),
-  remainingOwners: z.array(
-    z.object({
-      kind: z.enum(["direct", "plugin", "migration"]),
-      name: z.string().min(1),
-    }),
-  ),
-  skillId: z.string().uuid().optional(),
-});
+export const PluginUninstallComponentImpact = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    capabilityId: z.string().min(1),
+    kind: z.enum(["skill", "integration", "mcp"]),
+    retainedByOtherOwners: z.boolean(),
+    name: z.string().min(1),
+    disposition: z.enum(["removed", "retained", "inactive"]),
+    retentionReasons: z.array(
+      z.enum(["other_owners", "customized", "re_scoped", "registry_unavailable"]),
+    ),
+    remainingOwners: z.array(
+      z.object({
+        kind: z.enum(["direct", "plugin", "migration"]),
+        name: z.string().min(1),
+      }),
+    ),
+    skillId: z.string().uuid().optional(),
+  }),
+);
 export type PluginUninstallComponentImpact = z.infer<typeof PluginUninstallComponentImpact>;
 
-export const PluginUninstallPreview = z
-  .object({
-    pluginKey: z.string().min(1),
-    installed: z.boolean(),
-    version: z.string().nullable(),
-    installationVersion: z.number().int().positive().nullable(),
-    previewToken: z
-      .string()
-      .regex(/^[0-9a-f]{64}$/)
-      .optional(),
-    components: z.array(PluginUninstallComponentImpact),
-  })
-  .strict();
+export const PluginUninstallPreview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      pluginKey: z.string().min(1),
+      installed: z.boolean(),
+      version: z.string().nullable(),
+      installationVersion: z.number().int().positive().nullable(),
+      previewToken: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/)
+        .optional(),
+      components: z.array(PluginUninstallComponentImpact),
+    })
+    .strict(),
+);
 export type PluginUninstallPreview = z.infer<typeof PluginUninstallPreview>;
 
-export const PluginUninstallPreviewConflict = z
-  .object({
-    code: z.literal("plugin_uninstall_preview_changed"),
-    message: z.string().min(1),
-    preview: PluginUninstallPreview,
-  })
-  .strict();
+export const PluginUninstallPreviewConflict = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      code: z.literal("plugin_uninstall_preview_changed"),
+      message: z.string().min(1),
+      preview: PluginUninstallPreview,
+    })
+    .strict(),
+);
 export type PluginUninstallPreviewConflict = z.infer<typeof PluginUninstallPreviewConflict>;
 
-export const UninstallPluginRequest = z
-  .object({
-    expectedInstallationVersion: z.number().int().positive(),
-    expectedPreviewToken: z
-      .string()
-      .regex(/^[0-9a-f]{64}$/)
-      .optional(),
-    idempotencyKey: z.string().uuid(),
-  })
-  .strict();
+export const UninstallPluginRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      expectedInstallationVersion: z.number().int().positive(),
+      expectedPreviewToken: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/)
+        .optional(),
+      idempotencyKey: z.string().uuid(),
+    })
+    .strict(),
+);
 export type UninstallPluginRequest = z.infer<typeof UninstallPluginRequest>;
 
-export const UninstallPluginResult = z
-  .object({
-    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
-    pluginKey: z.string().min(1),
-    status: z.enum(["not_installed", "uninstalled"]),
-    retainedComponents: z.array(z.string().min(1)),
-  })
-  .strict();
+export const UninstallPluginResult = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
+      pluginKey: z.string().min(1),
+      status: z.enum(["not_installed", "uninstalled"]),
+      retainedComponents: z.array(z.string().min(1)),
+    })
+    .strict(),
+);
 export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
-export const SessionBackgroundCommandState = z.enum(["running", "stopping", "exited", "lost"]);
+export const SessionBackgroundCommandState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["running", "stopping", "exited", "lost"]),
+);
 export type SessionBackgroundCommandState = z.infer<typeof SessionBackgroundCommandState>;
 
-export const SessionBackgroundCommandProvider = z.enum(["managed", "connected_machine"]);
+export const SessionBackgroundCommandProvider = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["managed", "connected_machine"]),
+);
 export type SessionBackgroundCommandProvider = z.infer<typeof SessionBackgroundCommandProvider>;
 
-export const SessionBackgroundCommandActivity = z
-  .object({
-    state: z.enum(["running", "stopping"]),
-    count: z.number().int().positive(),
-    unavailableCount: z.number().int().nonnegative().optional(),
-  })
-  .strict();
+export const SessionBackgroundCommandActivity = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.enum(["running", "stopping"]),
+      count: z.number().int().positive(),
+      unavailableCount: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+);
 export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
 
-export const SessionCommandFailure = z
-  .object({
-    code: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-    detail: z.record(z.string().max(128), z.string().max(2048)).optional(),
-    retryable: z.literal(false),
-  })
-  .refine(
-    (failure) =>
-      Object.keys(failure.detail ?? {}).length <= 32 &&
-      new TextEncoder().encode(JSON.stringify(failure)).byteLength <= 4096,
-    "Command failure metadata exceeds its retained bound",
-  );
+export const SessionCommandFailure = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      code: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+      detail: z.record(z.string().max(128), z.string().max(2048)).optional(),
+      retryable: z.literal(false),
+    })
+    .refine(
+      (failure) =>
+        Object.keys(failure.detail ?? {}).length <= 32 &&
+        new TextEncoder().encode(JSON.stringify(failure)).byteLength <= 4096,
+      "Command failure metadata exceeds its retained bound",
+    ),
+);
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
 /** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
-export const SessionBackgroundCommandReconciliation = z
-  .object({
-    lastOutcome: z
-      .string()
-      .regex(/^[a-z][a-z0-9_]{0,63}$/)
-      .nullable(),
-    attempts: z.number().int().nonnegative(),
-    dueAt: z.string().datetime({ offset: true }),
-    claimedAt: z.string().datetime({ offset: true }).nullable(),
-    terminalProof: z
-      .discriminatedUnion("outcome", [
-        z
-          .object({
-            outcome: z.literal("exited"),
-            exitCode: z.number().int(),
-            observedAt: z.string().datetime({ offset: true }),
-          })
-          .strict(),
-        z
-          .object({
-            outcome: z.literal("lost"),
-            exitCode: z.null(),
-            observedAt: z.string().datetime({ offset: true }),
-          })
-          .strict(),
-      ])
-      .nullable(),
-  })
-  .strict();
+export const SessionBackgroundCommandReconciliation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      lastOutcome: z
+        .string()
+        .regex(/^[a-z][a-z0-9_]{0,63}$/)
+        .nullable(),
+      attempts: z.number().int().nonnegative(),
+      dueAt: z.string().datetime({ offset: true }),
+      claimedAt: z.string().datetime({ offset: true }).nullable(),
+      terminalProof: z
+        .discriminatedUnion("outcome", [
+          z
+            .object({
+              outcome: z.literal("exited"),
+              exitCode: z.number().int(),
+              observedAt: z.string().datetime({ offset: true }),
+            })
+            .strict(),
+          z
+            .object({
+              outcome: z.literal("lost"),
+              exitCode: z.null(),
+              observedAt: z.string().datetime({ offset: true }),
+            })
+            .strict(),
+        ])
+        .nullable(),
+    })
+    .strict(),
+);
 export type SessionBackgroundCommandReconciliation = z.infer<
   typeof SessionBackgroundCommandReconciliation
 >;
 
-export const SessionBackgroundCommand = z
-  .object({
-    id: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    provider: SessionBackgroundCommandProvider,
-    state: SessionBackgroundCommandState,
-    observationStatus: z.literal("unavailable").optional(),
-    reconciliation: SessionBackgroundCommandReconciliation.optional(),
-    commandPreview: z.string().max(512),
-    commandText: z.string().optional(),
-    cancelRequestedAt: z.string().nullable(),
-    exitCode: z.number().int().nullable(),
-    settlementReason: z.string().nullable(),
-    failure: SessionCommandFailure.optional(),
-    startedAt: z.string(),
-    settledAt: z.string().nullable(),
-    completionObservedAt: z.string().nullable().optional(),
-    updatedAt: z.string(),
-  })
-  .strict();
+export const SessionBackgroundCommand = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid(),
+      provider: SessionBackgroundCommandProvider,
+      state: SessionBackgroundCommandState,
+      observationStatus: z.literal("unavailable").optional(),
+      reconciliation: SessionBackgroundCommandReconciliation.optional(),
+      commandPreview: z.string().max(512),
+      commandText: z.string().optional(),
+      cancelRequestedAt: z.string().nullable(),
+      exitCode: z.number().int().nullable(),
+      settlementReason: z.string().nullable(),
+      failure: SessionCommandFailure.optional(),
+      startedAt: z.string(),
+      settledAt: z.string().nullable(),
+      completionObservedAt: z.string().nullable().optional(),
+      updatedAt: z.string(),
+    })
+    .strict(),
+);
 export type SessionBackgroundCommand = z.infer<typeof SessionBackgroundCommand>;
 
 export const CommandReadInput = /* @__PURE__ */ (() =>
@@ -13224,35 +15373,37 @@ export const CommandReadResult = /* @__PURE__ */ (() =>
     .strict())();
 export type CommandReadResult = z.infer<typeof CommandReadResult>;
 
-export const SessionBackgroundCommandListResponse = z
-  .object({ commands: z.array(SessionBackgroundCommand).max(1000) })
-  .strict();
+export const SessionBackgroundCommandListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ commands: z.array(SessionBackgroundCommand).max(1000) }).strict(),
+);
 export type SessionBackgroundCommandListResponse = z.infer<
   typeof SessionBackgroundCommandListResponse
 >;
 
-export const CancelSessionBackgroundCommandResult = z
-  .object({ command: SessionBackgroundCommand, accepted: z.boolean() })
-  .strict();
+export const CancelSessionBackgroundCommandResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({ command: SessionBackgroundCommand, accepted: z.boolean() }).strict(),
+);
 export type CancelSessionBackgroundCommandResult = z.infer<
   typeof CancelSessionBackgroundCommandResult
 >;
 
-export const SessionAdmissionBlock = z
-  .object({
-    reason: z.enum([
-      "database_claim_rejected",
-      "initiator_membership_required",
-      "personal_resource_grant_required",
-    ]),
-    sqlState: z
-      .string()
-      .regex(/^[0-9A-Z]{5}$/)
-      .nullable(),
-    retryPolicy: z.literal("explicit_recheck"),
-    blockedAt: z.string().datetime(),
-  })
-  .strict();
+export const SessionAdmissionBlock = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      reason: z.enum([
+        "database_claim_rejected",
+        "initiator_membership_required",
+        "personal_resource_grant_required",
+      ]),
+      sqlState: z
+        .string()
+        .regex(/^[0-9A-Z]{5}$/)
+        .nullable(),
+      retryPolicy: z.literal("explicit_recheck"),
+      blockedAt: z.string().datetime(),
+    })
+    .strict(),
+);
 export type SessionAdmissionBlock = z.infer<typeof SessionAdmissionBlock>;
 
 export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -13363,7 +15514,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set.
     firstPartyMcpPermissions: z.array(Permission).nullable(),
-    // Exact model-visible OpenGeni selection. The default omits connector-wide
+    // Exact model-visible Opengeni selection. The default omits connector-wide
     // tools; [] intentionally selects none.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName),
     // Frozen agent configuration (migration 0559). null = a legacy session
@@ -13384,6 +15535,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Server-authored nested-agent lineage/policy. Root sessions are depth 0;
     // snapshots are immutable and govern only future descendant creation.
     rootSessionId: z.string().uuid(),
+    /**
+     * The task root's usage limit and recorded API-equivalent model usage.
+     * Returned by detail reads and create responses of servers that support
+     * usage limits; omission means an older server or a list read, never "no
+     * limit". A create that requested a limit must see it echoed here.
+     */
+    usageLimit: SessionUsageLimit.optional(),
     nestedAgentDepth: NestedAgentDepthValue,
     maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
     effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
@@ -13454,6 +15612,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     archivedAt: z.string().nullable().default(null),
     /** Workspace-persisted read-only import, independent of a member's rail archive. */
     importedArchive: z.lazy(() => SessionImportedArchive).optional(),
+    /**
+     * Idle-session archive state and the keep-live exemption. Workspace-wide and
+     * independent of a member's personal rail archive (`archived`). Absent on
+     * older servers; treat absence as a live session without an exemption.
+     */
+    retention: z.lazy(() => SessionRetention).optional(),
     /** Optimistic archive-state revision; zero represents an absent personal relation. */
     archiveVersion: z.number().int().nonnegative().default(0),
     /**
@@ -13547,6 +15711,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     filtersApplied: z.literal(true).optional(),
     /** Explicit receipt: older servers may acknowledge other filters only. */
     needsYouOnly: z.literal(true).optional(),
+    /** Explicit receipt for the read-only (archived idle session) filter. */
+    contentArchivedOnly: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
@@ -13588,9 +15754,11 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     archived: true,
     archivedAt: true,
     importedArchive: true,
+    retention: true,
     archiveVersion: true,
     treeStats: true,
     requiresActionSince: true,
+    admissionBlock: true,
     createdAt: true,
     updatedAt: true,
   }).extend({
@@ -13598,6 +15766,16 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     renameSeed: z.string(),
     scheduledTaskId: z.string().nullable(),
     siteOrigin: z.object({ siteId: z.string().uuid(), title: z.string() }).nullable(),
+    /**
+     * Display-only model and reasoning effort for compact rows: the latest
+     * started turn's policy, or the session's stored defaults when an explicit
+     * settings change is newer or no turn has started. A row projected from a
+     * full Session (the SDK fallback for older servers) carries that session's
+     * effective model instead. Detail reads remain authoritative for the
+     * composer default; never use these fields to choose a model.
+     */
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
   }),
 );
 export type SessionListEntry = z.infer<typeof SessionListEntry>;
@@ -13614,14 +15792,16 @@ export type SessionListEntryResponse = z.infer<typeof SessionListEntryResponse>;
  * Organization session queries may filter a canonical scope subject and lifecycle
  * state. Legacy end-user label filters are rejected.
  */
-export const ListOrganizationSessionsQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  cursor: z.string().min(1).optional(),
-  scopeSubjectId: SessionScopeSubjectId.optional(),
-  endUserSource: z.never().optional(),
-  endUserId: z.never().optional(),
-  status: SessionStatus.optional(),
-});
+export const ListOrganizationSessionsQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    cursor: z.string().min(1).optional(),
+    scopeSubjectId: SessionScopeSubjectId.optional(),
+    endUserSource: z.never().optional(),
+    endUserId: z.never().optional(),
+    status: SessionStatus.optional(),
+  }),
+);
 export type ListOrganizationSessionsQuery = z.infer<typeof ListOrganizationSessionsQuery>;
 
 /**
@@ -13669,222 +15849,241 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
 );
 export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
-export const SessionEventType = z.enum([
-  "usage.threshold_reached",
-  "usage.exhausted",
-  "usage.period_reset",
-  "session.created",
-  "session.variable_sets.updated",
-  "session.runtime.configured",
-  "session.personal_resources.attached",
-  "session.visibility.changed",
-  // Defensive read/transport projection for a malformed or historically
-  // oversized retained event envelope. The original row stays durable; this
-  // explicit synthetic type prevents unbounded free-form envelope fields from
-  // crossing NATS, SSE, REST, or browser boundaries.
-  "session.event.envelope_omitted",
-  "session.status.changed",
-  "session.realtime.started",
-  "session.realtime.ended",
-  "session.requiresAction",
-  "session.humanInput.requested",
-  "session.context.compaction.requested",
-  "session.context.compaction.started",
-  "session.context.compacted",
-  "session.context.compaction.skipped",
-  "session.context.cleared",
-  "user.message",
-  "user.pause",
-  "user.approvalDecision",
-  "user.humanInputResponse",
-  "turn.queued",
-  "turn.started",
-  "turn.completed",
-  "turn.failed",
-  "turn.cancelled",
-  "turn.superseded",
-  "turn.recovery.requested",
-  "turn.dispatch.expired",
-  "turn.capacity_waiting",
-  // Compact, attempt-fenced user-visible worker preparation checkpoints. The
-  // payload phase is a closed enum and terminal events carry durationMs; no
-  // session-specific value is ever promoted into Prometheus labels.
-  "turn.startup.phase.started",
-  "turn.startup.phase.completed",
-  "turn.startup.phase.failed",
-  "agent.message.delta",
-  "agent.message.completed",
-  "agent.reasoning.delta",
-  "agent.toolCall.created",
-  "agent.toolCall.output",
-  // Attempt-fenced provider Responses lifecycle metadata (request identity,
-  // liveness policy, first-event/terminal phase, provider request id). Never
-  // request body, credentials, or model output.
-  "agent.model.request",
-  "agent.model.usage",
-  "tool.auth_needed",
-  "credential.auth_needed",
-  "agent.updated",
-  "rig.setup.started",
-  "rig.setup.completed",
-  "rig.setup.skipped",
-  "rig.setup.failed",
-  "sandbox.operation.started",
-  "sandbox.operation.completed",
-  "sandbox.operation.failed",
-  "session.command.backgrounded",
-  "session.command.finished",
-  "session.wait.started",
-  "session.wait.finished",
-  "sandbox.command.output.delta",
-  "artifact.created",
-  "knowledge.confirmation.recovered",
-  "instruction.confirmation.recovered",
-  "knowledge.source.prepared",
-  "knowledge.source.failed",
-  "goal.set",
-  "goal.updated",
-  "goal.progress",
-  "goal.rewrite.proposed",
-  "goal.rewrite.rejected",
-  "goal.completed",
-  "goal.paused",
-  "goal.resumed",
-  "goal.cleared",
-  "goal.held",
-  "goal.continuation",
-  "system.update.pending",
-  "system.update.delivered",
-  "system.update.superseded",
-  "system.update.cancelled",
-  "system.update.settled",
-  "session.control.paused",
-  "session.control.resumed",
-  "session.control.steer_requested",
-  "workspace.inference.paused",
-  "workspace.inference.resumed",
-  "session.queue.changed",
-  "session.queue.prompt.cancelled",
-  "session.queue.history",
-  // A terminal/stale activity callback is retained as an audit wrapper rather
-  // than being dropped or emitted as though it belonged to the current turn.
-  "turn.event.rejected_late",
-  "memory.saved",
-  "memory.corrected",
-  // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
-  // carries opaque RFB and cannot carry a control message the client can act on,
-  // so these ride the durable, sequenced, gap-filled Channel-A SSE spine.
-  "stream.url.rotated", // re-minted {url,token,expiresAt} on box rollover (event-driven)
-  "stream.opened", // a viewer attached (audit + refcount visibility)
-  "stream.closed", // a viewer detached / was reaped
-  "stream.revoked", // a grant was revoked → connected clients MUST disconnect now
-  // Desktop recording signals. The capture loop records the same display humans
-  // watch, then stores the finalized artifact for replay.
-  // → storage. The artifact ref rides the AVAILABLE event (storageKey, NOT a
-  // long-lived URL — clients mint a short-TTL signed GET via the route).
-  "recording.started", // ffmpeg launched on :0 (mode/codec/dimensions)
-  "recording.available", // finalized: bytes PUT to storage, replayable
-  "recording.failed", // ffmpeg/box-death/rollover/upload error — no artifact
-  // Structured-service notifications. File, Git, and terminal reads are
-  // synchronous API-direct point
-  // queries (their result is the HTTP response, NEVER an event). What rides A1
-  // here are the side-effect NOTIFICATIONS — a path changed, git state changed,
-  // a pty opened/printed/exited — durable, sequenced, gap-filled like every
-  // other session event, so any viewer's Pierre tree / diff / terminal stays
-  // live. fs.changed/git.changed are cache-invalidation signals; the pty.*
-  // events carry the interactive terminal byte stream.
-  "fs.changed", // a path was created/modified/deleted (write or agent mutation)
-  "git.changed", // working-tree/index/HEAD changed (debounced re-probe)
-  "terminal.pty.started", // an interactive PTY session opened (carries ptyId)
-  "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
-  "terminal.pty.exited", // PTY session ended (exitCode/reason)
-  "session.title_set",
-  "session.model_settings.updated",
-  "session.mcp.approval_policy.updated",
-  "session.tool_policy.updated",
-  "session.agent.updated",
-  // Multi-account Codex (P1): the account a session's turn runs on changed
-  // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
-  // the in-session "Running on:" indicator's live flip.
-  "codex.account.switched",
-  "codex.account.selection.changed",
-  // credential allocator per-turn selection audit. Payload is metadata only: credential row
-  // id, bounded strategy/reason, and pool counts — never token material.
-  "codex.credential.selected",
-  // Adaptive fleet shadow decision record. Contains only bounded opaque candidate aliases,
-  // normalized pressure/cache/confidence features, deterministic fingerprints,
-  // the actual-vs-shadow comparison, and no credential/account identity.
-  "codex.fleet.decision",
-  // credential allocator durable zero-capacity wait lifecycle. Runtime/system events only;
-  // no synthetic user message is created when capacity returns.
-  "codex.capacity.waiting",
-  "codex.capacity.resumed",
-  "codex.capacity.superseded",
-  // Sandbox durability observability (sandbox-file-persistence). The 2026-07
-  // incidents (mid-session box death with /workspace loss; a fatal manifest-env
-  // delta on a live box) were near-unattributable because box lifecycle left no
-  // durable trace — only worker logs, which rotate within hours. These events
-  // make every box transition and env recomputation drift readable from the DB
-  // alone. Payloads carry ids/flags/key NAMES only — never env values (secrets).
-  "sandbox.box.created", // box cold-created/cold-restored ({hydrated: "archive"|"none"})
-  "sandbox.box.lost", // resume-by-id found the box gone (provider NotFound)
-  "sandbox.box.terminated", // reaper drain terminated the box ({actor, persisted})
-  "sandbox.box.snapshot", // mid-session /workspace snapshot persisted ({trigger})
-  "sandbox.env.drift", // recomputed manifest env != live box env (key names only)
-  // Active-sandbox pointer reconcile (issue #341 invariant B). Turn start found the
-  // persisted (active_sandbox_id, active_epoch) pointing at a target the turn cannot
-  // establish — a deleted/absent sandbox, a Modal sibling with no establisher, or a
-  // selfhosted sandbox with no enrollment — and reset it to the session HOME under
-  // the epoch fence instead of routing every op into the dead target. A VISIBLE,
-  // never-silent downgrade: payload carries the typed reason + from/to epoch, never a
-  // target id or command content. Announce-only; hits the timeline projection default
-  // (no rendered item) like the other sandbox.* diagnostics.
-  "session.route.reconciled",
-  // Workbench v2 turn-end workspace capture. ANNOUNCE-ONLY: a new
-  // capture revision was persisted at turn end; the client refetches the latest
-  // capture. It carries metadata only (revision/turnId/capturedAt/leaseEpoch/stats),
-  // never file content. Hits the timeline projection default case (ignored) — it
-  // must NEVER gain a rendered timeline item without regenerating the golden
-  // snapshots (golden-grammar gate).
-  "workspace.revision.captured",
-  // Repository discovery could not prove a complete capture. The worker
-  // persisted a failed/degraded revision marker and clients must fall back to
-  // the live box rather than trust a zero-repository snapshot.
-  "workspace.revision.degraded",
-  // Connected Machine (selfhosted) op-outcome observability (failure-visibility
-  // doctrine, out-of-band plane). SESSION-scoped facts only: these fire for the
-  // session whose turn ran the op (the two-planes rule — machine-plane facts like
-  // pressure live in the M10 metrics DB, never as session events). Payloads carry
-  // the op kind + a typed fault class + attempt count — NEVER command content.
-  //
-  // `machine.op.failed` fires ONLY for INFRASTRUCTURE fault classes (offline,
-  // draining-exhausted, payload-too-large, reconnecting-timeout, OS/stream/protocol)
-  // — a semantic miss the model asked about (a missing path, a consent gate, a
-  // nonzero exit) is an OUTCOME, not an infra fault, and never fires this.
-  // `machine.op.recovered` is the healed-fault leading indicator (a blip/backpressure
-  // the transport absorbed): announce-only, quiet. Both hit the timeline projection's
-  // quiet status-tick tier (the severity split's "degraded"); adding a rendered item
-  // requires regenerating the golden snapshots (the golden-grammar gate).
-  "machine.op.failed",
-  "machine.op.recovered",
-  // Connected Machine (selfhosted) LINK-plane observability (failure-visibility
-  // doctrine). SESSION-scoped, ANNOUNCE-ONLY facts fanned out to the sessions that
-  // had an active op running on the machine when its control link changed — never
-  // to idle/historical sessions. Payloads carry ids / a typed reason / key-names
-  // only, NEVER command content.
-  //
-  // `machine.link.lost` — the machine announced a clean GoingOffline (its control
-  // link is going away) while a session had a running turn on it. `machine.link.
-  // restored` — a reconnect Hello re-established the link that was previously lost.
-  // `machine.runner.restarted` — the additional signal that the going-offline was
-  // a self-update restart specifically (link.lost also fires for it; this
-  // distinguishes a restart from a plain stop / host shutdown). All three hit the
-  // timeline projection's quiet default tier (no rendered item); adding a rendered
-  // item requires regenerating the golden snapshots (the golden-grammar gate).
-  "machine.link.lost",
-  "machine.link.restored",
-  "machine.runner.restarted",
-]);
+export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "usage.threshold_reached",
+    "usage.exhausted",
+    "usage.period_reset",
+    "session.created",
+    "session.variable_sets.updated",
+    "session.runtime.configured",
+    "session.personal_resources.attached",
+    "session.visibility.changed",
+    // Defensive read/transport projection for a malformed or historically
+    // oversized retained event envelope. The original row stays durable; this
+    // explicit synthetic type prevents unbounded free-form envelope fields from
+    // crossing NATS, SSE, REST, or browser boundaries.
+    "session.event.envelope_omitted",
+    "session.status.changed",
+    "session.realtime.started",
+    "session.realtime.ended",
+    "session.requiresAction",
+    "session.humanInput.requested",
+    // An agent's notification to the person who owns the session (notify_user),
+    // and its withdrawal. They drive that person's inbox and phone notifications.
+    "session.notification.posted",
+    "session.notification.withdrawn",
+    "session.context.compaction.requested",
+    "session.context.compaction.started",
+    "session.context.compacted",
+    "session.context.compaction.skipped",
+    "session.context.cleared",
+    "user.message",
+    "user.pause",
+    "user.approvalDecision",
+    "user.humanInputResponse",
+    "turn.queued",
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+    "turn.cancelled",
+    "turn.superseded",
+    "turn.recovery.requested",
+    "turn.dispatch.expired",
+    "turn.capacity_waiting",
+    // Compact, attempt-fenced user-visible worker preparation checkpoints. The
+    // payload phase is a closed enum and terminal events carry durationMs; no
+    // session-specific value is ever promoted into Prometheus labels.
+    "turn.startup.phase.started",
+    "turn.startup.phase.completed",
+    "turn.startup.phase.failed",
+    "agent.message.delta",
+    "agent.message.completed",
+    "agent.reasoning.delta",
+    "agent.toolCall.created",
+    "agent.toolCall.output",
+    // Attempt-fenced provider Responses lifecycle metadata (request identity,
+    // liveness policy, first-event/terminal phase, provider request id). Never
+    // request body, credentials, or model output.
+    "agent.model.request",
+    "agent.model.usage",
+    "tool.auth_needed",
+    "credential.auth_needed",
+    "agent.updated",
+    "rig.setup.started",
+    "rig.setup.completed",
+    "rig.setup.skipped",
+    "rig.setup.failed",
+    "sandbox.operation.started",
+    "sandbox.operation.completed",
+    "sandbox.operation.failed",
+    "session.command.backgrounded",
+    "session.command.finished",
+    "session.wait.started",
+    "session.wait.finished",
+    "sandbox.command.output.delta",
+    "artifact.created",
+    "knowledge.confirmation.recovered",
+    "instruction.confirmation.recovered",
+    "knowledge.source.prepared",
+    "knowledge.source.failed",
+    "goal.set",
+    "goal.updated",
+    "goal.progress",
+    "goal.rewrite.proposed",
+    "goal.rewrite.rejected",
+    "goal.completed",
+    "goal.paused",
+    "goal.resumed",
+    "goal.cleared",
+    "goal.held",
+    "goal.continuation",
+    "system.update.pending",
+    "system.update.delivered",
+    "system.update.superseded",
+    "system.update.cancelled",
+    "system.update.settled",
+    "session.control.paused",
+    "session.control.resumed",
+    "session.control.steer_requested",
+    "workspace.inference.paused",
+    "workspace.inference.resumed",
+    "session.queue.changed",
+    "session.queue.prompt.cancelled",
+    "session.queue.history",
+    // A terminal/stale activity callback is retained as an audit wrapper rather
+    // than being dropped or emitted as though it belonged to the current turn.
+    "turn.event.rejected_late",
+    "memory.saved",
+    "memory.corrected",
+    // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
+    // carries opaque RFB and cannot carry a control message the client can act on,
+    // so these ride the durable, sequenced, gap-filled Channel-A SSE spine.
+    "stream.url.rotated", // re-minted {url,token,expiresAt} on box rollover (event-driven)
+    "stream.opened", // a viewer attached (audit + refcount visibility)
+    "stream.closed", // a viewer detached / was reaped
+    "stream.revoked", // a grant was revoked → connected clients MUST disconnect now
+    // Desktop recording signals. The capture loop records the same display humans
+    // watch, then stores the finalized artifact for replay.
+    // → storage. The artifact ref rides the AVAILABLE event (storageKey, NOT a
+    // long-lived URL — clients mint a short-TTL signed GET via the route).
+    "recording.started", // ffmpeg launched on :0 (mode/codec/dimensions)
+    "recording.available", // finalized: bytes PUT to storage, replayable
+    "recording.failed", // ffmpeg/box-death/rollover/upload error — no artifact
+    // Structured-service notifications. File, Git, and terminal reads are
+    // synchronous API-direct point
+    // queries (their result is the HTTP response, NEVER an event). What rides A1
+    // here are the side-effect NOTIFICATIONS — a path changed, git state changed,
+    // a pty opened/printed/exited — durable, sequenced, gap-filled like every
+    // other session event, so any viewer's Pierre tree / diff / terminal stays
+    // live. fs.changed/git.changed are cache-invalidation signals; the pty.*
+    // events carry the interactive terminal byte stream.
+    "fs.changed", // a path was created/modified/deleted (write or agent mutation)
+    "git.changed", // working-tree/index/HEAD changed (debounced re-probe)
+    "terminal.pty.started", // an interactive PTY session opened (carries ptyId)
+    "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
+    "terminal.pty.exited", // PTY session ended (exitCode/reason)
+    "session.title_set",
+    "session.model_settings.updated",
+    // An authorized person or host changed the task root's usage limit.
+    "session.usage_limit.updated",
+    "session.mcp.approval_policy.updated",
+    "session.tool_policy.updated",
+    "session.agent.updated",
+    // The Skills a session carries itself were replaced (names only).
+    "session.skills.updated",
+    // Multi-account Codex (P1): the account a session's turn runs on changed
+    // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
+    // the in-session "Running on:" indicator's live flip.
+    "codex.account.switched",
+    // Provider-neutral, lease-backed serving selection and actual transitions.
+    // Accepted model settings stay unchanged; payloads contain opaque ids only.
+    "subscription.account.selected",
+    "subscription.account.switched",
+    "codex.account.selection.changed",
+    // A person chose the account a session runs on (any provider's shared
+    // connection or their own personal one), or returned it to automatic
+    // placement. Payload: provider, connectionId (null for automatic), choice,
+    // appliedTo, turnId and the choosing subject; never credential material.
+    "model_account.selection.changed",
+    // credential allocator per-turn selection audit. Payload is metadata only: credential row
+    // id, bounded strategy/reason, and pool counts — never token material.
+    "codex.credential.selected",
+    // Adaptive fleet shadow decision record. Contains only bounded opaque candidate aliases,
+    // normalized pressure/cache/confidence features, deterministic fingerprints,
+    // the actual-vs-shadow comparison, and no credential/account identity.
+    "codex.fleet.decision",
+    // credential allocator durable zero-capacity wait lifecycle. Runtime/system events only;
+    // no synthetic user message is created when capacity returns.
+    "codex.capacity.waiting",
+    "codex.capacity.resumed",
+    "codex.capacity.superseded",
+    // Sandbox durability observability (sandbox-file-persistence). The 2026-07
+    // incidents (mid-session box death with /workspace loss; a fatal manifest-env
+    // delta on a live box) were near-unattributable because box lifecycle left no
+    // durable trace — only worker logs, which rotate within hours. These events
+    // make every box transition and env recomputation drift readable from the DB
+    // alone. Payloads carry ids/flags/key NAMES only — never env values (secrets).
+    "sandbox.box.created", // box cold-created/cold-restored ({hydrated: "archive"|"none"})
+    "sandbox.box.lost", // resume-by-id found the box gone (provider NotFound)
+    "sandbox.box.terminated", // reaper drain terminated the box ({actor, persisted})
+    "sandbox.box.snapshot", // mid-session /workspace snapshot persisted ({trigger})
+    "sandbox.env.drift", // recomputed manifest env != live box env (key names only)
+    // Active-sandbox pointer reconcile (issue #341 invariant B). Turn start found the
+    // persisted (active_sandbox_id, active_epoch) pointing at a target the turn cannot
+    // establish — a deleted/absent sandbox, a Modal sibling with no establisher, or a
+    // selfhosted sandbox with no enrollment — and reset it to the session HOME under
+    // the epoch fence instead of routing every op into the dead target. A VISIBLE,
+    // never-silent downgrade: payload carries the typed reason + from/to epoch, never a
+    // target id or command content. Announce-only; hits the timeline projection default
+    // (no rendered item) like the other sandbox.* diagnostics.
+    "session.route.reconciled",
+    // Workbench v2 turn-end workspace capture. ANNOUNCE-ONLY: a new
+    // capture revision was persisted at turn end; the client refetches the latest
+    // capture. It carries metadata only (revision/turnId/capturedAt/leaseEpoch/stats),
+    // never file content. Hits the timeline projection default case (ignored) — it
+    // must NEVER gain a rendered timeline item without regenerating the golden
+    // snapshots (golden-grammar gate).
+    "workspace.revision.captured",
+    // Repository discovery could not prove a complete capture. The worker
+    // persisted a failed/degraded revision marker and clients must fall back to
+    // the live box rather than trust a zero-repository snapshot.
+    "workspace.revision.degraded",
+    // Connected Machine (selfhosted) op-outcome observability (failure-visibility
+    // doctrine, out-of-band plane). SESSION-scoped facts only: these fire for the
+    // session whose turn ran the op (the two-planes rule — machine-plane facts like
+    // pressure live in the M10 metrics DB, never as session events). Payloads carry
+    // the op kind + a typed fault class + attempt count — NEVER command content.
+    //
+    // `machine.op.failed` fires ONLY for INFRASTRUCTURE fault classes (offline,
+    // draining-exhausted, payload-too-large, reconnecting-timeout, OS/stream/protocol)
+    // — a semantic miss the model asked about (a missing path, a consent gate, a
+    // nonzero exit) is an OUTCOME, not an infra fault, and never fires this.
+    // `machine.op.recovered` is the healed-fault leading indicator (a blip/backpressure
+    // the transport absorbed): announce-only, quiet. Both hit the timeline projection's
+    // quiet status-tick tier (the severity split's "degraded"); adding a rendered item
+    // requires regenerating the golden snapshots (the golden-grammar gate).
+    "machine.op.failed",
+    "machine.op.recovered",
+    // Connected Machine (selfhosted) LINK-plane observability (failure-visibility
+    // doctrine). SESSION-scoped, ANNOUNCE-ONLY facts fanned out to the sessions that
+    // had an active op running on the machine when its control link changed — never
+    // to idle/historical sessions. Payloads carry ids / a typed reason / key-names
+    // only, NEVER command content.
+    //
+    // `machine.link.lost` — the machine announced a clean GoingOffline (its control
+    // link is going away) while a session had a running turn on it. `machine.link.
+    // restored` — a reconnect Hello re-established the link that was previously lost.
+    // `machine.runner.restarted` — the additional signal that the going-offline was
+    // a self-update restart specifically (link.lost also fires for it; this
+    // distinguishes a restart from a plain stop / host shutdown). All three hit the
+    // timeline projection's quiet default tier (no rendered item); adding a rendered
+    // item requires regenerating the golden snapshots (the golden-grammar gate).
+    "machine.link.lost",
+    "machine.link.restored",
+    "machine.runner.restarted",
+  ]),
+);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
 /**
@@ -13950,14 +16149,9 @@ export function isStreamedAssistantMessageCompletion(event: {
  * projection only: an event keeps its canonical durable `type`, and callers
  * can always combine a class with explicit type include/exclude filters.
  */
-export const SessionEventSemanticClass = z.enum([
-  "control",
-  "terminal",
-  "failure",
-  "checkpoint",
-  "tool_receipt",
-  "provider_account",
-]);
+export const SessionEventSemanticClass = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["control", "terminal", "failure", "checkpoint", "tool_receipt", "provider_account"]),
+);
 export type SessionEventSemanticClass = z.infer<typeof SessionEventSemanticClass>;
 
 /**
@@ -13965,15 +16159,17 @@ export type SessionEventSemanticClass = z.infer<typeof SessionEventSemanticClass
  * the concise public spelling for the historical `tool_receipt` class; the
  * latter remains accepted everywhere for backwards compatibility.
  */
-export const SessionEventLatestClass = z.enum([
-  "control",
-  "terminal",
-  "failure",
-  "checkpoint",
-  "tool_receipt",
-  "provider_account",
-  "receipt",
-]);
+export const SessionEventLatestClass = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "control",
+    "terminal",
+    "failure",
+    "checkpoint",
+    "tool_receipt",
+    "provider_account",
+    "receipt",
+  ]),
+);
 export type SessionEventLatestClass = z.infer<typeof SessionEventLatestClass>;
 
 export function sessionEventLatestClassToSemanticClass(
@@ -13982,17 +16178,25 @@ export function sessionEventLatestClassToSemanticClass(
   return value === "receipt" ? "tool_receipt" : value;
 }
 
-export const SessionEventPayloadMode = z.enum(["none", "summary", "full"]);
+export const SessionEventPayloadMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["none", "summary", "full"]),
+);
 export type SessionEventPayloadMode = z.infer<typeof SessionEventPayloadMode>;
 
 /** Select the compact semantic-result projection instead of an event array. */
-export const SessionEventResultMode = z.enum(["events", "compact"]);
+export const SessionEventResultMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["events", "compact"]),
+);
 export type SessionEventResultMode = z.infer<typeof SessionEventResultMode>;
 
-export const SessionEventReadMode = z.enum(["monitoring", "forensic"]);
+export const SessionEventReadMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["monitoring", "forensic"]),
+);
 export type SessionEventReadMode = z.infer<typeof SessionEventReadMode>;
 
-export const SessionEventReadDirection = z.enum(["after", "before"]);
+export const SessionEventReadDirection = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["after", "before"]),
+);
 export type SessionEventReadDirection = z.infer<typeof SessionEventReadDirection>;
 
 export const SESSION_EVENT_RAW_DELTA_TYPES = [
@@ -14013,6 +16217,8 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.wait.finished",
     "session.requiresAction",
     "session.humanInput.requested",
+    "session.notification.posted",
+    "session.notification.withdrawn",
     "user.pause",
     "user.approvalDecision",
     "user.humanInputResponse",
@@ -14042,7 +16248,9 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
     "session.agent.updated",
+    "session.skills.updated",
     "session.model_settings.updated",
+    "session.usage_limit.updated",
   ],
   terminal: [
     "turn.completed",
@@ -14100,7 +16308,10 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   provider_account: [
     "agent.model.usage",
     "codex.account.switched",
+    "subscription.account.selected",
+    "subscription.account.switched",
     "codex.account.selection.changed",
+    "model_account.selection.changed",
     "codex.credential.selected",
     "codex.capacity.waiting",
     "codex.capacity.resumed",
@@ -14151,116 +16362,426 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
   return { includeTypes: [...included], excludeTypes: [...excluded] };
 }
 
-export const ToolAuthNeededPayload = z
-  .object({
-    serverId: z.string().min(1),
-    /** Exact configured connector for recovery; serverId remains the execution route. */
-    canonicalServerId: z.string().min(1).optional(),
-    /** Scope of the exact failed account, not the canonical catalog default. */
-    connectionSubjectScope: z.enum(["workspace", "subject"]).optional(),
-    toolName: z.string().min(1).nullable().optional(),
-    providerDomain: z.string().min(1),
-    provider: z.string().min(1).max(128).optional(),
-    // Embedded hosts may use an opaque connection identity; never assume an
-    // OpenGeni UUID on the public event wire.
-    connectionId: z.string().min(1).nullable().optional(),
-    /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
-    authoritySource: z.literal("host").optional(),
+/* ----------------------------------------------------------------------------
+   Notifications and the inbox
+
+   An agent notifies the person who owns its session (notify_user). The
+   notification is a session event, so it stays in the session's timeline and
+   reaches webhook subscribers; it also opens an item in that person's inbox,
+   next to the questions and approvals that wait on them. The inbox is a
+   to-do surface: an item leaves when it is answered, resolved, withdrawn or
+   dismissed, never because time passed.
+   -------------------------------------------------------------------------- */
+
+export const NOTIFICATION_KEY_MAX_CHARS = 120;
+export const NOTIFICATION_TITLE_MAX_CHARS = 80;
+export const NOTIFICATION_SUBTITLE_MAX_CHARS = 80;
+/** The message: short paragraphs and "- " bullets, with **bold**, `code` and [links](https://…). */
+export const NOTIFICATION_BODY_MAX_CHARS = 1000;
+export const NOTIFICATION_FACTS_MAX = 4;
+export const NOTIFICATION_FACT_LABEL_MAX_CHARS = 24;
+export const NOTIFICATION_FACT_VALUE_MAX_CHARS = 80;
+export const NOTIFICATION_LINK_LABEL_MAX_CHARS = 40;
+
+/** A stable key: posting the same key again updates the item in place. */
+export const NotificationKey = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(NOTIFICATION_KEY_MAX_CHARS)
+    .regex(/^[A-Za-z0-9._:-]+$/u, "letters, digits and . _ : - only"),
+);
+
+/** Time-sensitive breaks through Focus on the phone; use it only for what cannot wait. */
+export const NotificationUrgency = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["normal", "time_sensitive"]),
+);
+export type NotificationUrgency = z.infer<typeof NotificationUrgency>;
+
+/** A short label and value shown as a compact list under the message, e.g. "Tests" / "412 passed". */
+export const NotificationFact = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      label: z.string().trim().min(1).max(NOTIFICATION_FACT_LABEL_MAX_CHARS),
+      value: z.string().trim().min(1).max(NOTIFICATION_FACT_VALUE_MAX_CHARS),
+    })
+    .strict(),
+);
+export type NotificationFact = z.infer<typeof NotificationFact>;
+
+/** One place outside the session the notification points to, such as a pull request. */
+export const NotificationLink = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      url: z
+        .string()
+        .trim()
+        .url()
+        .max(2000)
+        .refine((value) => /^https:\/\//iu.test(value), "Use an https link"),
+      label: z.string().trim().min(1).max(NOTIFICATION_LINK_LABEL_MAX_CHARS),
+    })
+    .strict(),
+);
+export type NotificationLink = z.infer<typeof NotificationLink>;
+
+/** Why a posted notification reached no one in Opengeni. */
+export const NotificationUndeliveredReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["no_human_recipient"]),
+);
+export type NotificationUndeliveredReason = z.infer<typeof NotificationUndeliveredReason>;
+
+export const SessionNotificationPostedPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      key: NotificationKey,
+      title: z.string().trim().min(1).max(NOTIFICATION_TITLE_MAX_CHARS),
+      subtitle: z.string().trim().max(NOTIFICATION_SUBTITLE_MAX_CHARS).optional(),
+      body: z.string().trim().max(NOTIFICATION_BODY_MAX_CHARS).default(""),
+      facts: z.array(NotificationFact).max(NOTIFICATION_FACTS_MAX).optional(),
+      link: NotificationLink.optional(),
+      urgency: NotificationUrgency.default("normal"),
+      /** True when this post replaced an earlier one with the same key (no new alert). */
+      replaced: z.boolean().default(false),
+      /**
+       * Another member of the workspace to notify instead of the person the
+       * session works for. They must allow other members' agents to notify them.
+       */
+      recipientSubjectId: z.string().min(1).max(300).optional(),
+      /** Who it comes from (the person the session works for), shown to that member. */
+      sender: z
+        .object({ subjectId: z.string().min(1).max(300), label: z.string().min(1).max(200) })
+        .strict()
+        .optional(),
+      /**
+       * Set when Opengeni notified nobody: the session works for no person (an
+       * API key or service started it). Absent when a person was notified.
+       */
+      undeliveredReason: NotificationUndeliveredReason.optional(),
+    })
+    .strict(),
+);
+export type SessionNotificationPostedPayload = z.infer<typeof SessionNotificationPostedPayload>;
+
+export const SessionNotificationWithdrawnPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      key: NotificationKey,
+      /** The session that withdrew it, when another session tidied the inbox. */
+      bySessionId: z.string().uuid().optional(),
+      /** Withdraw only this member's copy; without it every copy of the key goes. */
+      recipientSubjectId: z.string().min(1).max(300).optional(),
+    })
+    .strict(),
+);
+export type SessionNotificationWithdrawnPayload = z.infer<
+  typeof SessionNotificationWithdrawnPayload
+>;
+
+/** Why an item waits on the person. */
+export const InboxItemKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    /** The agent asked a question. */
+    "question",
+    /** A tool call waits for approval. */
+    "approval",
+    /** The session's goal is paused until the person acts. */
+    "goal_paused",
+    /** An agent chose to notify the person. */
+    "notification",
+    /** A session's latest finished reply, for people who keep replies in their inbox. */
+    "reply",
+  ]),
+);
+export type InboxItemKind = z.infer<typeof InboxItemKind>;
+
+/** Kinds that wait on the person: they lead the inbox and count toward "needs you". */
+export const INBOX_NEEDS_YOU_KINDS = ["question", "approval", "goal_paused"] as const;
+
+export const InboxItemStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["open", "resolved", "withdrawn", "dismissed"]),
+);
+export type InboxItemStatus = z.infer<typeof InboxItemStatus>;
+
+export const InboxItem = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    sessionTitle: z.string().nullable(),
+    kind: InboxItemKind,
+    /** The question or approval id, or the notification key. */
+    sourceKey: z.string(),
+    title: z.string(),
+    /** A notification's subtitle; empty otherwise. */
+    subtitle: z.string().default(""),
+    /** Plain text, or for a notification its message (paragraphs, "- " bullets, **bold**, `code`, links). */
+    body: z.string(),
+    /** A notification's label/value facts; empty otherwise. */
+    facts: z
+      .array(z.object({ label: z.string(), value: z.string() }))
+      .max(4)
+      .default([]),
+    /** A notification's link outside the session, or null. */
+    link: z.object({ url: z.string(), label: z.string() }).nullable().default(null),
     /**
-     * Legacy-compatible reason. Host-owned event writers pin this to
-     * unsupported_auth so a pre-host-authority browser cannot launch native
-     * OAuth for the opaque id.
+     * The session event that opened or last updated the item, so opening it can
+     * land on that point in the session's timeline. Null for older items.
      */
-    reason: ToolAuthNeededReason,
-    /** Exact host recovery reason consumed by host-aware clients. */
-    hostReason: ToolAuthNeededReason.optional(),
-    scopes: z.array(z.string().min(1)).optional(),
-    resource: z.string().min(1).optional(),
-    selectedResources: McpConnectionResourceScopes.optional(),
-    authorizationUrl: z.string().url().optional(),
-    subjectId: z.string().min(1).nullable().optional(),
-    // A catalog recommendation is still a tool-level authorization condition:
-    // the agent may describe and request it, but only the authenticated host UI
-    // can start setup. Keeping this nested and optional preserves the established
-    // auth-needed event for ordinary failed MCP calls.
-    capability: z
-      .object({
-        id: z.string().min(1).max(512),
-        name: z.string().min(1).max(256),
-        kind: CapabilityKind,
-        source: CapabilitySource,
-        action: z.enum(["connect", "add_credentials", "enable"]),
-        rationale: z.string().min(1).max(2000),
-        requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
-      })
-      .optional(),
-    /** An agent suggestion, not a catalog entry or authority to contact this URL. */
-    setupRequest: z
-      .object({
-        kind: z.literal("mcp"),
-        name: z.string().trim().min(1).max(256),
-        endpointUrl: z
-          .string()
-          .url()
-          .max(2048)
-          .refine((url) => {
-            const parsed = new URL(url);
-            return (
-              parsed.protocol === "https:" &&
-              !parsed.username &&
-              !parsed.password &&
-              !parsed.hash &&
-              !parsed.search
-            );
-          }),
-        rationale: z.string().trim().min(1).max(2000),
-      })
-      .optional(),
-  })
-  .superRefine((payload, context) => {
-    if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {
-      context.addIssue({
-        code: "custom",
-        message: "A setup proposal cannot carry connection authority",
-        path: ["setupRequest"],
-      });
-    }
-    if (payload.authoritySource === "host") {
-      if (payload.reason !== "unsupported_auth") {
+    eventSequence: z.number().int().positive().nullable().optional(),
+    /** One-tap answers for a single short choice question; empty otherwise. */
+    choices: z.array(z.object({ id: z.string(), label: z.string() })).max(4),
+    urgency: NotificationUrgency,
+    status: InboxItemStatus,
+    /** True while the person has not seen the item's current content. */
+    unread: z.boolean(),
+    snoozedUntil: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    resolvedAt: z.string().nullable(),
+    /** Another member whose agent sent this notification; null for the person's own. */
+    sender: z.object({ subjectId: z.string(), label: z.string() }).nullable().default(null),
+    /**
+     * Whether the person can open the session the item came from. False for
+     * another member's private session: the item then shows no session link.
+     */
+    sessionAvailable: z.boolean().default(true),
+  }),
+);
+export type InboxItem = z.infer<typeof InboxItem>;
+
+export const ListInboxResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    items: z.array(InboxItem),
+    /** Open items that need the person (questions, approvals, paused goals). */
+    needsYouCount: z.number().int().nonnegative(),
+    /** Open, unread, unsnoozed items of any kind. */
+    unreadCount: z.number().int().nonnegative(),
+  }),
+);
+export type ListInboxResponse = z.infer<typeof ListInboxResponse>;
+
+/** The person's own attention on an item. Answering happens in the session. */
+export const UpdateInboxItemRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      seen: z.literal(true).optional(),
+      /** ISO time to hide the item until, or null to unsnooze. */
+      snoozedUntil: z.string().datetime({ offset: true }).nullable().optional(),
+      dismissed: z.literal(true).optional(),
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.seen !== undefined ||
+        value.snoozedUntil !== undefined ||
+        value.dismissed !== undefined,
+      { message: "seen, snoozedUntil or dismissed is required" },
+    ),
+);
+export type UpdateInboxItemRequest = z.infer<typeof UpdateInboxItemRequest>;
+
+/**
+ * What agents may do in the person's inbox. Agents never answer or approve on
+ * the person's behalf, whatever this says.
+ */
+export const InboxTidyPolicy = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    /** Notifications: the session that posted one, and the sessions above it. */
+    "own_sessions",
+    /** Notifications: any agent acting for the person. */
+    "any_agent",
+    /**
+     * Any agent acting for the person sees every open item (questions,
+     * approvals, paused goals, replies and notifications) and may snooze,
+     * unsnooze or dismiss it.
+     */
+    "full_access",
+  ]),
+);
+export type InboxTidyPolicy = z.infer<typeof InboxTidyPolicy>;
+
+export const InboxSettings = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    tidyPolicy: InboxTidyPolicy,
+    /**
+     * Show goals an agent paused in the person's own sessions. Off by default.
+     * Always present in responses; a request that leaves it out keeps it as is.
+     */
+    pausedGoals: z.boolean().optional(),
+    /**
+     * Keep each session's latest reply in the inbox until the person clears it.
+     * Off by default. Always present in responses; leave it out to keep it.
+     */
+    replies: z.boolean().optional(),
+    /**
+     * Alert the phone for the agent's questions and approvals as time-sensitive,
+     * so they break through Focus on iPhone. Off by default. Always present in
+     * responses; leave it out to keep it.
+     */
+    timeSensitiveNeedsYou: z.boolean().optional(),
+  }),
+);
+export type InboxSettings = z.infer<typeof InboxSettings>;
+
+/**
+ * Whether other members' agents may notify this person in one workspace.
+ * Each person decides for themselves; off by default.
+ */
+export const MemberNotificationsSetting = /* @__PURE__ */ defineSchema(() =>
+  z.object({ allowOthers: z.boolean() }).strict(),
+);
+export type MemberNotificationsSetting = z.infer<typeof MemberNotificationsSetting>;
+
+/** The fixed subject of a local install's one built-in human (`productAccessMode` local). */
+export const LOCAL_HUMAN_SUBJECT_ID = "dev";
+
+type InboxAccessContextShape = {
+  mode?: string | undefined;
+  subjectId: string;
+  credential?: unknown;
+  workspaceGrants?:
+    | ReadonlyArray<{
+        principalKind?: string | undefined;
+        metadata?: { delegated?: unknown } | null | undefined;
+        serviceInitiator?: unknown;
+      }>
+    | undefined;
+};
+
+/**
+ * Who has an inbox: a signed-in person (`user:`), or the one human of a local
+ * install. API keys, services, configured or development subjects and agents
+ * act through sessions and have none. This is the shape the web uses to show
+ * the Inbox; the API also checks verified managed-human or local-bootstrap
+ * provenance (see `inboxSubjectForContext` in `@opengeni/core`).
+ */
+export function accessContextHasInbox(
+  context: InboxAccessContextShape | null | undefined,
+): boolean {
+  if (!context || context.credential) return false;
+  if (context.subjectId.startsWith("user:")) return true;
+  const grants = context.workspaceGrants ?? [];
+  return (
+    context.mode === "local" &&
+    context.subjectId === LOCAL_HUMAN_SUBJECT_ID &&
+    grants.length > 0 &&
+    grants.every(
+      (grant) =>
+        grant.principalKind === "human_session" &&
+        grant.metadata?.delegated !== true &&
+        !grant.serviceInitiator,
+    )
+  );
+}
+
+/**
+ * The signed-in person's mute on one session. Muted replies neither reach the
+ * inbox nor alert the phone; the agent's notifications, questions and
+ * approvals still do.
+ */
+export const SessionInboxMute = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    repliesMuted: z.boolean(),
+  }),
+);
+export type SessionInboxMute = z.infer<typeof SessionInboxMute>;
+
+export const ToolAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      serverId: z.string().min(1),
+      /** Exact configured connector for recovery; serverId remains the execution route. */
+      canonicalServerId: z.string().min(1).optional(),
+      /** Scope of the exact failed account, not the canonical catalog default. */
+      connectionSubjectScope: z.enum(["workspace", "subject"]).optional(),
+      toolName: z.string().min(1).nullable().optional(),
+      providerDomain: z.string().min(1),
+      provider: z.string().min(1).max(128).optional(),
+      // Embedded hosts may use an opaque connection identity; never assume an
+      // Opengeni UUID on the public event wire.
+      connectionId: z.string().min(1).nullable().optional(),
+      /** The failed binding is owned by the embedding host, not Opengeni's connection broker. */
+      authoritySource: z.literal("host").optional(),
+      /**
+       * Legacy-compatible reason. Host-owned event writers pin this to
+       * unsupported_auth so a pre-host-authority browser cannot launch native
+       * OAuth for the opaque id.
+       */
+      reason: ToolAuthNeededReason,
+      /** Exact host recovery reason consumed by host-aware clients. */
+      hostReason: ToolAuthNeededReason.optional(),
+      scopes: z.array(z.string().min(1)).optional(),
+      resource: z.string().min(1).optional(),
+      selectedResources: McpConnectionResourceScopes.optional(),
+      authorizationUrl: z.string().url().optional(),
+      subjectId: z.string().min(1).nullable().optional(),
+      // A catalog recommendation is still a tool-level authorization condition:
+      // the agent may describe and request it, but only the authenticated host UI
+      // can start setup. Keeping this nested and optional preserves the established
+      // auth-needed event for ordinary failed MCP calls.
+      capability: z
+        .object({
+          id: z.string().min(1).max(512),
+          name: z.string().min(1).max(256),
+          kind: CapabilityKind,
+          source: CapabilitySource,
+          action: z.enum(["connect", "add_credentials", "enable"]),
+          rationale: z.string().min(1).max(2000),
+          requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
+        })
+        .optional(),
+      /** An agent suggestion, not a catalog entry or authority to contact this URL. */
+      setupRequest: CustomMcpSetupRequest.optional(),
+    })
+    .superRefine((payload, context) => {
+      if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {
         context.addIssue({
           code: "custom",
-          message: "host auth-needed events require the legacy-safe unsupported_auth reason",
-          path: ["reason"],
+          message: "A setup proposal cannot carry connection authority",
+          path: ["setupRequest"],
         });
       }
-      if (!payload.hostReason) {
+      if (payload.authoritySource === "host") {
+        if (payload.reason !== "unsupported_auth") {
+          context.addIssue({
+            code: "custom",
+            message: "host auth-needed events require the legacy-safe unsupported_auth reason",
+            path: ["reason"],
+          });
+        }
+        if (!payload.hostReason) {
+          context.addIssue({
+            code: "custom",
+            message: "host auth-needed events require hostReason",
+            path: ["hostReason"],
+          });
+        }
+      } else if (payload.hostReason) {
         context.addIssue({
           code: "custom",
-          message: "host auth-needed events require hostReason",
+          message: "hostReason is reserved for host-owned auth-needed events",
           path: ["hostReason"],
         });
       }
-    } else if (payload.hostReason) {
-      context.addIssue({
-        code: "custom",
-        message: "hostReason is reserved for host-owned auth-needed events",
-        path: ["hostReason"],
-      });
-    }
-  });
+    }),
+);
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
 
 /** A host-owned non-tool credential needed by the active run. */
-export const CredentialAuthNeededPayload = z.object({
-  credentialClass: z.literal("run"),
-  providerDomain: z.string().min(1).optional(),
-  connectionId: z.string().min(1).optional(),
-  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
-  scopes: z.array(z.string().min(1)).optional(),
-  resource: z.string().min(1).optional(),
-  authorizationUrl: z.string().url().optional(),
-  message: z.string().min(1).optional(),
-});
+export const CredentialAuthNeededPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    credentialClass: z.literal("run"),
+    providerDomain: z.string().min(1).optional(),
+    connectionId: z.string().min(1).optional(),
+    reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+    scopes: z.array(z.string().min(1)).optional(),
+    resource: z.string().min(1).optional(),
+    authorizationUrl: z.string().url().optional(),
+    message: z.string().min(1).optional(),
+  }),
+);
 export type CredentialAuthNeededPayload = z.infer<typeof CredentialAuthNeededPayload>;
 
 // Channel-B stream-event payloads (07-channel-b §1.2). SessionEvent.payload is
@@ -14268,38 +16789,46 @@ export type CredentialAuthNeededPayload = z.infer<typeof CredentialAuthNeededPay
 // explicitly at the producer (the API-direct handshake/rotation) and the SDK/
 // React consumer. The rotation payload carries the freshly-minted data-plane URL
 // + the scoped stream token so a connected client hot-swaps its noVNC socket.
-export const StreamUrlRotatedPayload = z.object({
-  url: z.string().url(),
-  token: z.string().nullable(),
-  expiresAt: z.string().datetime().nullable(),
-  // The epoch the new URL was minted under (the box-rollover fence the client
-  // reconciles against). A client must drop a rotation event whose epoch it has
-  // already advanced past.
-  leaseEpoch: z.number().int().nonnegative(),
-  transport: z.literal("vnc-ws"),
-  // The viewer holder this URL is for (so a client filters out other viewers').
-  viewerId: z.string().uuid().nullable().default(null),
-});
+export const StreamUrlRotatedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: z.string().url(),
+    token: z.string().nullable(),
+    expiresAt: z.string().datetime().nullable(),
+    // The epoch the new URL was minted under (the box-rollover fence the client
+    // reconciles against). A client must drop a rotation event whose epoch it has
+    // already advanced past.
+    leaseEpoch: z.number().int().nonnegative(),
+    transport: z.literal("vnc-ws"),
+    // The viewer holder this URL is for (so a client filters out other viewers').
+    viewerId: z.string().uuid().nullable().default(null),
+  }),
+);
 export type StreamUrlRotatedPayload = z.infer<typeof StreamUrlRotatedPayload>;
 
-export const StreamOpenedPayload = z.object({
-  viewerId: z.string().uuid(),
-  shared: z.boolean().default(false),
-  viewerCount: z.number().int().nonnegative(),
-});
+export const StreamOpenedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    viewerId: z.string().uuid(),
+    shared: z.boolean().default(false),
+    viewerCount: z.number().int().nonnegative(),
+  }),
+);
 export type StreamOpenedPayload = z.infer<typeof StreamOpenedPayload>;
 
-export const StreamClosedPayload = z.object({
-  viewerId: z.string().uuid(),
-  reason: z.enum(["client-disconnect", "reaped", "revoked", "box-rollover"]),
-  viewerCount: z.number().int().nonnegative(),
-});
+export const StreamClosedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    viewerId: z.string().uuid(),
+    reason: z.enum(["client-disconnect", "reaped", "revoked", "box-rollover"]),
+    viewerCount: z.number().int().nonnegative(),
+  }),
+);
 export type StreamClosedPayload = z.infer<typeof StreamClosedPayload>;
 
-export const StreamRevokedPayload = z.object({
-  viewerId: z.string().uuid().nullable().default(null),
-  reason: z.enum(["grant-revoked", "session-failed", "admin"]),
-});
+export const StreamRevokedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    viewerId: z.string().uuid().nullable().default(null),
+    reason: z.enum(["grant-revoked", "session-failed", "admin"]),
+  }),
+);
 export type StreamRevokedPayload = z.infer<typeof StreamRevokedPayload>;
 
 // ── Recording payloads (P4.3 / module 05 §3.4) ──────────────────────────────
@@ -14307,61 +16836,73 @@ export type StreamRevokedPayload = z.infer<typeof StreamRevokedPayload>;
 // standalone schemas parsed explicitly at the producer (the recording activity)
 // and the SDK/React consumer. The codec/contentType pair stays consistent
 // (h264-mp4↔video/mp4, vp9-webm↔video/webm).
-export const RecordingMode = z.enum(["manual", "on-turn", "on-verify"]);
+export const RecordingMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["manual", "on-turn", "on-verify"]),
+);
 export type RecordingMode = z.infer<typeof RecordingMode>;
-export const RecordingCodec = z.enum(["h264-mp4", "vp9-webm"]);
+export const RecordingCodec = /* @__PURE__ */ defineSchema(() => z.enum(["h264-mp4", "vp9-webm"]));
 export type RecordingCodec = z.infer<typeof RecordingCodec>;
-export const RecordingContentType = z.enum(["video/mp4", "video/webm"]);
+export const RecordingContentType = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["video/mp4", "video/webm"]),
+);
 export type RecordingContentType = z.infer<typeof RecordingContentType>;
 
-export const RecordingStartedPayload = z.object({
-  recordingId: z.string().uuid(),
-  turnId: z.string().uuid().nullable(),
-  mode: RecordingMode,
-  codec: RecordingCodec,
-  dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
-  framerate: z.number().int().positive(),
-  startedAt: z.string(), // ISO
-  // The verification rationale ("agent-verification: tf apply succeeded"). Agent-
-  // authored free text — the producer caps + scrubs it before emit.
-  reason: z.string().nullable().optional(),
-});
+export const RecordingStartedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    recordingId: z.string().uuid(),
+    turnId: z.string().uuid().nullable(),
+    mode: RecordingMode,
+    codec: RecordingCodec,
+    dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
+    framerate: z.number().int().positive(),
+    startedAt: z.string(), // ISO
+    // The verification rationale ("agent-verification: tf apply succeeded"). Agent-
+    // authored free text — the producer caps + scrubs it before emit.
+    reason: z.string().nullable().optional(),
+  }),
+);
 export type RecordingStartedPayload = z.infer<typeof RecordingStartedPayload>;
 
-export const RecordingAvailablePayload = z.object({
-  recordingId: z.string().uuid(),
-  turnId: z.string().uuid().nullable(),
-  codec: RecordingCodec,
-  contentType: RecordingContentType,
-  // The @opengeni/storage object key. NO long-lived URL in the event — clients
-  // mint a short-TTL signed GET via GET …/recordings/:id/url.
-  storageKey: z.string(),
-  durationSeconds: z.number().nonnegative().nullable(),
-  sizeBytes: z.number().int().nonnegative(),
-  dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
-});
+export const RecordingAvailablePayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    recordingId: z.string().uuid(),
+    turnId: z.string().uuid().nullable(),
+    codec: RecordingCodec,
+    contentType: RecordingContentType,
+    // The @opengeni/storage object key. NO long-lived URL in the event — clients
+    // mint a short-TTL signed GET via GET …/recordings/:id/url.
+    storageKey: z.string(),
+    durationSeconds: z.number().nonnegative().nullable(),
+    sizeBytes: z.number().int().nonnegative(),
+    dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
+  }),
+);
 export type RecordingAvailablePayload = z.infer<typeof RecordingAvailablePayload>;
 
 // `max-bytes-exceeded` is distinct from `timeout` (the -t ceiling hitting is a
 // SUCCESSFUL finalize, never a failure) — the adversarial-review F7 fix.
-export const RecordingFailedReason = z.enum([
-  "ffmpeg-error",
-  "box-death",
-  "box-rollover",
-  "upload-failed",
-  "max-bytes-exceeded",
-  "display-unavailable",
-]);
+export const RecordingFailedReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "ffmpeg-error",
+    "box-death",
+    "box-rollover",
+    "upload-failed",
+    "max-bytes-exceeded",
+    "display-unavailable",
+  ]),
+);
 export type RecordingFailedReason = z.infer<typeof RecordingFailedReason>;
 
-export const RecordingFailedPayload = z.object({
-  recordingId: z.string().uuid(),
-  turnId: z.string().uuid().nullable(),
-  reason: RecordingFailedReason,
-  // Exact ffmpeg stderr/error detail. Event transport limits must reject or
-  // paginate rather than rewriting this canonical diagnostic.
-  detail: z.string().nullable().optional(),
-});
+export const RecordingFailedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    recordingId: z.string().uuid(),
+    turnId: z.string().uuid().nullable(),
+    reason: RecordingFailedReason,
+    // Exact ffmpeg stderr/error detail. Event transport limits must reject or
+    // paginate rather than rewriting this canonical diagnostic.
+    detail: z.string().nullable().optional(),
+  }),
+);
 export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
 
 // ── Structured sandbox services ─────────────────────────────────────────────
@@ -14375,88 +16916,106 @@ export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
 // The agent's command-output firehose, enriched. Backward-compatible widening
 // of the existing sandbox.command.output.delta (consumers read `chunk`); the
 // producer may now also stamp stream/commandId/seq for finer terminal rendering.
-export const SandboxCommandOutputDeltaPayload = z.object({
-  stream: z.enum(["stdout", "stderr"]).default("stdout"),
-  chunk: z.string(), // raw bytes, utf-8 (lossy) — terminal is opaque-ish
-  commandId: z.string().optional(), // groups deltas to one agent command
-  seq: z.number().int().nonnegative().optional(), // intra-command ordering hint
-});
+export const SandboxCommandOutputDeltaPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    stream: z.enum(["stdout", "stderr"]).default("stdout"),
+    chunk: z.string(), // raw bytes, utf-8 (lossy) — terminal is opaque-ish
+    commandId: z.string().optional(), // groups deltas to one agent command
+    seq: z.number().int().nonnegative().optional(), // intra-command ordering hint
+  }),
+);
 export type SandboxCommandOutputDeltaPayload = z.infer<typeof SandboxCommandOutputDeltaPayload>;
 
-export const FsChangeKind = z.enum(["created", "modified", "deleted", "renamed"]);
+export const FsChangeKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["created", "modified", "deleted", "renamed"]),
+);
 export type FsChangeKind = z.infer<typeof FsChangeKind>;
-export const FsChangedPayload = z.object({
-  changes: z
-    .array(
-      z.object({
-        path: z.string(), // workspace-relative POSIX path
-        kind: FsChangeKind,
-        isDir: z.boolean().default(false),
-        sizeBytes: z.number().int().nonnegative().nullable().default(null),
-        oldPath: z.string().optional(), // for "renamed"
-      }),
-    )
-    .min(1),
-  source: z.enum(["write", "watch", "agent"]).default("write"),
-  // Monotonic FS revision (per-lease, paired with leaseEpoch for staleness).
-  revision: z.number().int().nonnegative(),
-  // The lease epoch the revision was minted under: a client invalidates on a
-  // (leaseEpoch, revision) tuple change, never a bare revision compare (H3 —
-  // revision resets to 0 on box re-key, so a bare monotonic compare goes stale).
-  leaseEpoch: z.number().int().nonnegative().default(0),
-});
+export const FsChangedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    changes: z
+      .array(
+        z.object({
+          path: z.string(), // workspace-relative POSIX path
+          kind: FsChangeKind,
+          isDir: z.boolean().default(false),
+          sizeBytes: z.number().int().nonnegative().nullable().default(null),
+          oldPath: z.string().optional(), // for "renamed"
+        }),
+      )
+      .min(1),
+    source: z.enum(["write", "watch", "agent"]).default("write"),
+    // Monotonic FS revision (per-lease, paired with leaseEpoch for staleness).
+    revision: z.number().int().nonnegative(),
+    // The lease epoch the revision was minted under: a client invalidates on a
+    // (leaseEpoch, revision) tuple change, never a bare revision compare (H3 —
+    // revision resets to 0 on box re-key, so a bare monotonic compare goes stale).
+    leaseEpoch: z.number().int().nonnegative().default(0),
+  }),
+);
 export type FsChangedPayload = z.infer<typeof FsChangedPayload>;
 
-export const GitChangedPayload = z.object({
-  head: z.string().nullable(), // current branch or detached SHA
-  dirty: z.boolean(), // working tree has uncommitted changes
-  ahead: z.number().int().nonnegative().default(0),
-  behind: z.number().int().nonnegative().default(0),
-  changedFileCount: z.number().int().nonnegative(),
-  reason: z
-    .enum(["commit", "checkout", "stage", "worktree", "fetch", "unknown"])
-    .default("unknown"),
-  revision: z.number().int().nonnegative().default(0),
-  leaseEpoch: z.number().int().nonnegative().default(0),
-});
+export const GitChangedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    head: z.string().nullable(), // current branch or detached SHA
+    dirty: z.boolean(), // working tree has uncommitted changes
+    ahead: z.number().int().nonnegative().default(0),
+    behind: z.number().int().nonnegative().default(0),
+    changedFileCount: z.number().int().nonnegative(),
+    reason: z
+      .enum(["commit", "checkout", "stage", "worktree", "fetch", "unknown"])
+      .default("unknown"),
+    revision: z.number().int().nonnegative().default(0),
+    leaseEpoch: z.number().int().nonnegative().default(0),
+  }),
+);
 export type GitChangedPayload = z.infer<typeof GitChangedPayload>;
 
-export const TerminalPtyStartedPayload = z.object({
-  ptyId: z.string().uuid(),
-  cols: z.number().int().positive(),
-  rows: z.number().int().positive(),
-  shell: z.string(), // resolved shell, e.g. "/bin/bash"
-  cwd: z.string(),
-});
+export const TerminalPtyStartedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ptyId: z.string().uuid(),
+    cols: z.number().int().positive(),
+    rows: z.number().int().positive(),
+    shell: z.string(), // resolved shell, e.g. "/bin/bash"
+    cwd: z.string(),
+  }),
+);
 export type TerminalPtyStartedPayload = z.infer<typeof TerminalPtyStartedPayload>;
 
-export const TerminalPtyOutputDeltaPayload = z.object({
-  ptyId: z.string().uuid(),
-  stream: z.enum(["stdout", "stderr"]).default("stdout"),
-  chunk: z.string(), // raw terminal bytes (incl. ANSI), utf-8 lossy
-  seq: z.number().int().nonnegative(), // strict per-pty ordering (owner-assigned)
-});
+export const TerminalPtyOutputDeltaPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ptyId: z.string().uuid(),
+    stream: z.enum(["stdout", "stderr"]).default("stdout"),
+    chunk: z.string(), // raw terminal bytes (incl. ANSI), utf-8 lossy
+    seq: z.number().int().nonnegative(), // strict per-pty ordering (owner-assigned)
+  }),
+);
 export type TerminalPtyOutputDeltaPayload = z.infer<typeof TerminalPtyOutputDeltaPayload>;
 
-export const TerminalPtyExitedPayload = z.object({
-  ptyId: z.string().uuid(),
-  exitCode: z.number().int().nullable(),
-  reason: z.enum(["exit", "killed", "owner_gone", "timeout", "lost"]),
-});
+export const TerminalPtyExitedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ptyId: z.string().uuid(),
+    exitCode: z.number().int().nullable(),
+    reason: z.enum(["exit", "killed", "owner_gone", "timeout", "lost"]),
+  }),
+);
 export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 
 // --- A2 FileSystem request/response (NOT events; returned inline) ------------
-export const FsNodeType = z.enum(["file", "dir", "symlink", "other"]);
+export const FsNodeType = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["file", "dir", "symlink", "other"]),
+);
 export type FsNodeType = z.infer<typeof FsNodeType>;
 /** Optional identity copied from one stream-capabilities response. File callers
  * use it to fail with a retryable route conflict instead of reinterpreting a
  * canonical path after the selected sandbox or effective root changes. */
-export const FileSystemRouteIdentity = z
-  .object({
-    epoch: z.number().int().nonnegative(),
-    root: z.string().min(1).max(4_096),
-  })
-  .strict();
+export const FileSystemRouteIdentity = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      epoch: z.number().int().nonnegative(),
+      root: z.string().min(1).max(4_096),
+    })
+    .strict(),
+);
 export type FileSystemRouteIdentity = z.infer<typeof FileSystemRouteIdentity>;
 // The Pierre-tree node. `children` is present only when the dir was listed with
 // depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
@@ -14485,232 +17044,288 @@ export const FsTreeNode: z.ZodType<FsTreeNode> = z.lazy(() =>
   }),
 ) as z.ZodType<FsTreeNode>;
 
-export const FsListRequest = z.object({
-  // "" = workspace root; canonical absolute paths must stay within the
-  // selected target's advertised FileSystem.root.
-  path: z.string().default(""),
-  depth: z.number().int().min(0).max(8).default(1),
-  maxEntries: z.number().int().positive().max(20_000).default(2_000),
-  includeHidden: z.boolean().default(true),
-  route: FileSystemRouteIdentity.optional(),
-});
+export const FsListRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // "" = workspace root; canonical absolute paths must stay within the
+    // selected target's advertised FileSystem.root.
+    path: z.string().default(""),
+    depth: z.number().int().min(0).max(8).default(1),
+    maxEntries: z.number().int().positive().max(20_000).default(2_000),
+    includeHidden: z.boolean().default(true),
+    route: FileSystemRouteIdentity.optional(),
+  }),
+);
 export type FsListRequest = z.infer<typeof FsListRequest>;
-export const FsListResponse = z.object({
-  root: FsTreeNode,
-  revision: z.number().int().nonnegative(),
-  truncated: z.boolean(), // global cap hit
-});
+export const FsListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    root: FsTreeNode,
+    revision: z.number().int().nonnegative(),
+    truncated: z.boolean(), // global cap hit
+  }),
+);
 export type FsListResponse = z.infer<typeof FsListResponse>;
 
 /** Several independent directory listings served behind one Channel-A lease.
  * The response order exactly matches `requests`; callers can paint a root and
  * hydrate a bounded lazy-tree frontier without repeating provider attach work. */
-export const FsListBatchRequest = z.object({
-  requests: z.array(FsListRequest).min(1).max(16),
-});
+export const FsListBatchRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    requests: z.array(FsListRequest).min(1).max(16),
+  }),
+);
 export type FsListBatchRequest = z.infer<typeof FsListBatchRequest>;
-export const FsListBatchResponse = z.object({
-  results: z.array(FsListResponse),
-});
+export const FsListBatchResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    results: z.array(FsListResponse),
+  }),
+);
 export type FsListBatchResponse = z.infer<typeof FsListBatchResponse>;
 
-export const FsEncoding = z.enum(["utf8", "base64"]);
+export const FsEncoding = /* @__PURE__ */ defineSchema(() => z.enum(["utf8", "base64"]));
 export type FsEncoding = z.infer<typeof FsEncoding>;
-export const FsReadRequest = z.object({
-  path: z.string(),
-  /** Narrow this read to the selected working directory without following symlinks. */
-  workspaceOnly: z.boolean().optional(),
-  encoding: FsEncoding.default("utf8"),
-  maxBytes: z
-    .number()
-    .int()
-    .positive()
-    .max(25 * 1024 * 1024)
-    .default(5 * 1024 * 1024),
-  route: FileSystemRouteIdentity.optional(),
-});
+export const FsReadRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    /** Narrow this read to the selected working directory without following symlinks. */
+    workspaceOnly: z.boolean().optional(),
+    encoding: FsEncoding.default("utf8"),
+    maxBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(25 * 1024 * 1024)
+      .default(5 * 1024 * 1024),
+    route: FileSystemRouteIdentity.optional(),
+  }),
+);
 export type FsReadRequest = z.infer<typeof FsReadRequest>;
-export const FsReadResponse = z.object({
-  path: z.string(),
-  encoding: FsEncoding,
-  content: z.string(), // text or base64 per encoding
-  sizeBytes: z.number().int().nonnegative(), // bytes returned (== content size)
-  truncated: z.boolean(), // sizeBytes hit maxBytes; content is the prefix
-  isBinary: z.boolean(), // sniffed NUL byte in first 8KB
-  revision: z.number().int().nonnegative(),
-});
+export const FsReadResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    encoding: FsEncoding,
+    content: z.string(), // text or base64 per encoding
+    sizeBytes: z.number().int().nonnegative(), // bytes returned (== content size)
+    truncated: z.boolean(), // sizeBytes hit maxBytes; content is the prefix
+    isBinary: z.boolean(), // sniffed NUL byte in first 8KB
+    revision: z.number().int().nonnegative(),
+  }),
+);
 export type FsReadResponse = z.infer<typeof FsReadResponse>;
 
-export const FsWriteRequest = z.object({
-  path: z.string(),
-  encoding: FsEncoding.default("utf8"),
-  content: z.string(),
-  overwrite: z.boolean().default(true), // false + existing path => 409
-  createParents: z.boolean().default(true),
-  route: FileSystemRouteIdentity.optional(),
-});
+export const FsWriteRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    encoding: FsEncoding.default("utf8"),
+    content: z.string(),
+    overwrite: z.boolean().default(true), // false + existing path => 409
+    createParents: z.boolean().default(true),
+    route: FileSystemRouteIdentity.optional(),
+  }),
+);
 export type FsWriteRequest = z.infer<typeof FsWriteRequest>;
-export const FsWriteResponse = z.object({
-  path: z.string(),
-  sizeBytes: z.number().int().nonnegative(),
-  revision: z.number().int().nonnegative(), // == the fs.changed revision
-});
+export const FsWriteResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    sizeBytes: z.number().int().nonnegative(),
+    revision: z.number().int().nonnegative(), // == the fs.changed revision
+  }),
+);
 export type FsWriteResponse = z.infer<typeof FsWriteResponse>;
 
-export const FsDeleteRequest = z.object({
-  path: z.string(),
-  recursive: z.boolean().default(false), // required true to delete a non-empty dir
-  route: FileSystemRouteIdentity.optional(),
-});
+export const FsDeleteRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    recursive: z.boolean().default(false), // required true to delete a non-empty dir
+    route: FileSystemRouteIdentity.optional(),
+  }),
+);
 export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
-export const FsDeleteResponse = z.object({
-  revision: z.number().int().nonnegative(),
-});
+export const FsDeleteResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    revision: z.number().int().nonnegative(),
+  }),
+);
 export type FsDeleteResponse = z.infer<typeof FsDeleteResponse>;
 
-export const FsMoveRequest = z.object({
-  path: z.string(),
-  newPath: z.string(),
-  overwrite: z.boolean().default(false), // false + existing destination => 409
-  createParents: z.boolean().default(true),
-  route: FileSystemRouteIdentity.optional(),
-});
+export const FsMoveRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    newPath: z.string(),
+    overwrite: z.boolean().default(false), // false + existing destination => 409
+    createParents: z.boolean().default(true),
+    route: FileSystemRouteIdentity.optional(),
+  }),
+);
 export type FsMoveRequest = z.infer<typeof FsMoveRequest>;
-export const FsMoveResponse = z.object({
-  path: z.string(),
-  newPath: z.string(),
-  revision: z.number().int().nonnegative(), // == the fs.changed revision
-});
+export const FsMoveResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    newPath: z.string(),
+    revision: z.number().int().nonnegative(), // == the fs.changed revision
+  }),
+);
 export type FsMoveResponse = z.infer<typeof FsMoveResponse>;
 
-export const FsMkdirRequest = z.object({
-  path: z.string(),
-  recursive: z.boolean().default(true), // false + existing path => 400
-  route: FileSystemRouteIdentity.optional(),
-});
+export const FsMkdirRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    recursive: z.boolean().default(true), // false + existing path => 400
+    route: FileSystemRouteIdentity.optional(),
+  }),
+);
 export type FsMkdirRequest = z.infer<typeof FsMkdirRequest>;
-export const FsMkdirResponse = z.object({
-  path: z.string(),
-  revision: z.number().int().nonnegative(), // == the fs.changed revision
-});
+export const FsMkdirResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    revision: z.number().int().nonnegative(), // == the fs.changed revision
+  }),
+);
 export type FsMkdirResponse = z.infer<typeof FsMkdirResponse>;
 
 // --- A2 Git request/response (read-only; feeds Pierre diff/tree) -------------
-export const GitFileStatusCode = z.enum([
-  "added",
-  "modified",
-  "deleted",
-  "renamed",
-  "copied",
-  "untracked",
-  "ignored",
-  "conflicted",
-  "typechange",
-]);
+export const GitFileStatusCode = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "added",
+    "modified",
+    "deleted",
+    "renamed",
+    "copied",
+    "untracked",
+    "ignored",
+    "conflicted",
+    "typechange",
+  ]),
+);
 export type GitFileStatusCode = z.infer<typeof GitFileStatusCode>;
-export const GitFileStatus = z.object({
-  path: z.string(),
-  oldPath: z.string().nullable(), // for renamed/copied
-  index: GitFileStatusCode.nullable(), // staged change (X in porcelain XY)
-  worktree: GitFileStatusCode.nullable(), // unstaged change (Y in porcelain XY)
-  isConflicted: z.boolean().default(false),
-});
+export const GitFileStatus = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    oldPath: z.string().nullable(), // for renamed/copied
+    index: GitFileStatusCode.nullable(), // staged change (X in porcelain XY)
+    worktree: GitFileStatusCode.nullable(), // unstaged change (Y in porcelain XY)
+    isConflicted: z.boolean().default(false),
+  }),
+);
 export type GitFileStatus = z.infer<typeof GitFileStatus>;
-export const GitStatusRequest = z.object({
-  path: z.string().default(""), // repo root within workspace (multi-repo support)
-});
+export const GitStatusRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string().default(""), // repo root within workspace (multi-repo support)
+  }),
+);
 export type GitStatusRequest = z.infer<typeof GitStatusRequest>;
-export const GitStatusResponse = z.object({
-  isRepo: z.boolean(),
-  head: z.string().nullable(), // branch name
-  // Exact commit object identity. null for unborn/non-repositories; optional
-  // only so older adapters and serialized captures remain readable.
-  headOid: z.string().nullable().optional(),
-  detached: z.boolean().default(false),
-  upstream: z.string().nullable(),
-  ahead: z.number().int().nonnegative().default(0),
-  behind: z.number().int().nonnegative().default(0),
-  files: z.array(GitFileStatus),
-  revision: z.number().int().nonnegative(),
-});
+export const GitStatusResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    isRepo: z.boolean(),
+    head: z.string().nullable(), // branch name
+    // Exact commit object identity. null for unborn/non-repositories; optional
+    // only so older adapters and serialized captures remain readable.
+    headOid: z.string().nullable().optional(),
+    detached: z.boolean().default(false),
+    upstream: z.string().nullable(),
+    ahead: z.number().int().nonnegative().default(0),
+    behind: z.number().int().nonnegative().default(0),
+    files: z.array(GitFileStatus),
+    revision: z.number().int().nonnegative(),
+  }),
+);
 export type GitStatusResponse = z.infer<typeof GitStatusResponse>;
 
 // The structured hunk shape that feeds Pierre diff — the whole point of Git.
-export const GitDiffLineType = z.enum(["context", "add", "del", "meta"]);
+export const GitDiffLineType = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["context", "add", "del", "meta"]),
+);
 export type GitDiffLineType = z.infer<typeof GitDiffLineType>;
-export const GitDiffLine = z.object({
-  type: GitDiffLineType,
-  // null on the side that doesn't have the line (add => oldNo null; del => newNo null)
-  oldNo: z.number().int().positive().nullable(),
-  newNo: z.number().int().positive().nullable(),
-  text: z.string(), // line WITHOUT leading +/-/space marker
-});
+export const GitDiffLine = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    type: GitDiffLineType,
+    // null on the side that doesn't have the line (add => oldNo null; del => newNo null)
+    oldNo: z.number().int().positive().nullable(),
+    newNo: z.number().int().positive().nullable(),
+    text: z.string(), // line WITHOUT leading +/-/space marker
+  }),
+);
 export type GitDiffLine = z.infer<typeof GitDiffLine>;
-export const GitDiffHunk = z.object({
-  oldStart: z.number().int().nonnegative(),
-  oldLines: z.number().int().nonnegative(),
-  newStart: z.number().int().nonnegative(),
-  newLines: z.number().int().nonnegative(),
-  header: z.string(), // the @@ ... @@ section heading
-  lines: z.array(GitDiffLine),
-});
+export const GitDiffHunk = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    oldStart: z.number().int().nonnegative(),
+    oldLines: z.number().int().nonnegative(),
+    newStart: z.number().int().nonnegative(),
+    newLines: z.number().int().nonnegative(),
+    header: z.string(), // the @@ ... @@ section heading
+    lines: z.array(GitDiffLine),
+  }),
+);
 export type GitDiffHunk = z.infer<typeof GitDiffHunk>;
-export const GitFileDiff = z.object({
-  path: z.string(),
-  oldPath: z.string().nullable(),
-  status: GitFileStatusCode,
-  isBinary: z.boolean().default(false),
-  isImage: z.boolean().default(false),
-  additions: z.number().int().nonnegative(),
-  deletions: z.number().int().nonnegative(),
-  hunks: z.array(GitDiffHunk), // empty if binary or truncated
-  truncated: z.boolean().default(false), // diff exceeded maxBytes; hunks omitted
-});
+export const GitFileDiff = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    oldPath: z.string().nullable(),
+    status: GitFileStatusCode,
+    isBinary: z.boolean().default(false),
+    isImage: z.boolean().default(false),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    hunks: z.array(GitDiffHunk), // empty if binary or truncated
+    truncated: z.boolean().default(false), // diff exceeded maxBytes; hunks omitted
+  }),
+);
 export type GitFileDiff = z.infer<typeof GitFileDiff>;
-export const GitDiffRequest = z.object({
-  path: z.string().default(""), // repo root
-  // diff selectors, mutually exclusive precedence: refs > staged > worktree
-  staged: z.boolean().default(false), // --cached (index vs HEAD)
-  // Workspace review includes after-images that ordinary `git diff` omits.
-  // Explicit so commit/staged consumers keep native Git semantics by default.
-  includeUntracked: z.boolean().default(false),
-  fromRef: z.string().optional(),
-  toRef: z.string().optional(),
-  pathspec: z.array(z.string()).default([]),
-  contextLines: z.number().int().min(0).max(10).default(3),
-  maxBytesPerFile: z
-    .number()
-    .int()
-    .positive()
-    .max(2 * 1024 * 1024)
-    .default(512 * 1024),
-});
+export const GitDiffRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string().default(""), // repo root
+    // diff selectors, mutually exclusive precedence: refs > staged > worktree
+    staged: z.boolean().default(false), // --cached (index vs HEAD)
+    // Workspace review includes after-images that ordinary `git diff` omits.
+    // Explicit so commit/staged consumers keep native Git semantics by default.
+    includeUntracked: z.boolean().default(false),
+    fromRef: z.string().optional(),
+    toRef: z.string().optional(),
+    pathspec: z.array(z.string()).default([]),
+    contextLines: z.number().int().min(0).max(10).default(3),
+    maxBytesPerFile: z
+      .number()
+      .int()
+      .positive()
+      .max(2 * 1024 * 1024)
+      .default(512 * 1024),
+  }),
+);
 export type GitDiffRequest = z.infer<typeof GitDiffRequest>;
-export const GitDiffResponse = z.object({
-  files: z.array(GitFileDiff),
-  revision: z.number().int().nonnegative(),
-});
+export const GitDiffResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    files: z.array(GitFileDiff),
+    revision: z.number().int().nonnegative(),
+  }),
+);
 export type GitDiffResponse = z.infer<typeof GitDiffResponse>;
 
 /** One repository read unit: status metadata plus an optional comparison.
  * Multiple units execute behind one Channel-A lease and preserve input order. */
-export const GitReadBatchItemRequest = z.object({
-  status: GitStatusRequest,
-  diff: GitDiffRequest.optional(),
-});
+export const GitReadBatchItemRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    status: GitStatusRequest,
+    diff: GitDiffRequest.optional(),
+  }),
+);
 export type GitReadBatchItemRequest = z.infer<typeof GitReadBatchItemRequest>;
-export const GitReadBatchRequest = z.object({
-  requests: z.array(GitReadBatchItemRequest).min(1).max(32),
-});
+export const GitReadBatchRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    requests: z.array(GitReadBatchItemRequest).min(1).max(32),
+  }),
+);
 export type GitReadBatchRequest = z.infer<typeof GitReadBatchRequest>;
-export const GitReadBatchItemResponse = z.object({
-  status: GitStatusResponse,
-  diff: GitDiffResponse.optional(),
-});
+export const GitReadBatchItemResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    status: GitStatusResponse,
+    diff: GitDiffResponse.optional(),
+  }),
+);
 export type GitReadBatchItemResponse = z.infer<typeof GitReadBatchItemResponse>;
-export const GitReadBatchResponse = z.object({
-  results: z.array(GitReadBatchItemResponse),
-});
+export const GitReadBatchResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    results: z.array(GitReadBatchItemResponse),
+  }),
+);
 export type GitReadBatchResponse = z.infer<typeof GitReadBatchResponse>;
 
 // ─── Workbench v2 turn-end workspace capture ────────────
@@ -14725,118 +17340,134 @@ export type GitReadBatchResponse = z.infer<typeof GitReadBatchResponse>;
 // key of its after-image blob (shared across revisions → the GC set-difference
 // key). Deleted / binary / >5MB (tooLarge) files carry no contentRef; the UI
 // renders "too large — open live" for tooLarge, and the diff hunks for the rest.
-export const WorkspaceCaptureFile = z.object({
-  path: z.string(),
-  status: GitFileStatusCode,
-  // sha256 of the captured after-image bytes; null when deleted / tooLarge.
-  hash: z.string().nullable(),
-  // git blob sha of the HEAD version — the wake-on-edit flush guard (design
-  // §10.1). null when the path is new/untracked (no HEAD blob).
-  baseHash: z.string().nullable(),
-  // Content-addressed storage key of the after-image; null when deleted /
-  // tooLarge / binary (no inline content captured).
-  contentRef: z.string().nullable(),
-  sizeBytes: z.number().int().nonnegative(),
-  isBinary: z.boolean().default(false),
-  // >5MB per-file content guard tripped: content NOT captured, render "open live".
-  tooLarge: z.boolean().default(false),
-  deleted: z.boolean().default(false),
-});
+export const WorkspaceCaptureFile = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    status: GitFileStatusCode,
+    // sha256 of the captured after-image bytes; null when deleted / tooLarge.
+    hash: z.string().nullable(),
+    // git blob sha of the HEAD version — the wake-on-edit flush guard (design
+    // §10.1). null when the path is new/untracked (no HEAD blob).
+    baseHash: z.string().nullable(),
+    // Content-addressed storage key of the after-image; null when deleted /
+    // tooLarge / binary (no inline content captured).
+    contentRef: z.string().nullable(),
+    sizeBytes: z.number().int().nonnegative(),
+    isBinary: z.boolean().default(false),
+    // >5MB per-file content guard tripped: content NOT captured, render "open live".
+    tooLarge: z.boolean().default(false),
+    deleted: z.boolean().default(false),
+  }),
+);
 export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
 
 // One repo discovered in the workspace. `diff` is the working/index surface vs
 // HEAD; `branchDiff`, when available, is the complete current branch vs the
 // remote default branch and therefore retains committed agent work. `status`
 // is the full porcelain file list. root "" = the workspace root repo.
-export const WorkspaceCaptureRepo = z.object({
-  root: z.string(),
-  head: z.string().nullable(),
-  // Exact HEAD commit object identity. null for unborn repositories; optional
-  // for workspace captures written before commit identity was retained.
-  headOid: z.string().nullable().optional(),
-  detached: z.boolean().default(false),
-  upstream: z.string().nullable(),
-  ahead: z.number().int().nonnegative().default(0),
-  behind: z.number().int().nonnegative().default(0),
-  status: z.array(GitFileStatus),
-  diff: z.array(GitFileDiff),
-  branchDiff: z.array(GitFileDiff).optional(),
-});
+export const WorkspaceCaptureRepo = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    root: z.string(),
+    head: z.string().nullable(),
+    // Exact HEAD commit object identity. null for unborn repositories; optional
+    // for workspace captures written before commit identity was retained.
+    headOid: z.string().nullable().optional(),
+    detached: z.boolean().default(false),
+    upstream: z.string().nullable(),
+    ahead: z.number().int().nonnegative().default(0),
+    behind: z.number().int().nonnegative().default(0),
+    status: z.array(GitFileStatus),
+    diff: z.array(GitFileDiff),
+    branchDiff: z.array(GitFileDiff).optional(),
+  }),
+);
 export type WorkspaceCaptureRepo = z.infer<typeof WorkspaceCaptureRepo>;
 
-export const WorkspaceCaptureDegradedReason = z.enum([
-  "repository_discovery_command_failed",
-  "repository_discovery_timed_out",
-  "repository_discovery_result_limit_exceeded",
-  "repository_read_unavailable",
-]);
+export const WorkspaceCaptureDegradedReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "repository_discovery_command_failed",
+    "repository_discovery_timed_out",
+    "repository_discovery_result_limit_exceeded",
+    "repository_read_unavailable",
+  ]),
+);
 export type WorkspaceCaptureDegradedReason = z.infer<typeof WorkspaceCaptureDegradedReason>;
 
 // Rollup counters — carried on the row (jsonb) and the announce event so the UI
 // can reserve layout (no layout shift) before fetching the manifest.
-export const WorkspaceCaptureStats = z.object({
-  repoCount: z.number().int().nonnegative(),
-  fileCount: z.number().int().nonnegative(),
-  additions: z.number().int().nonnegative(),
-  deletions: z.number().int().nonnegative(),
-  totalBytes: z.number().int().nonnegative(),
-  tooLargeCount: z.number().int().nonnegative(),
-  binaryCount: z.number().int().nonnegative(),
-  treeEntryCount: z.number().int().nonnegative(),
-  treeTruncated: z.boolean().default(false),
-  durationMs: z.number().int().nonnegative(),
-  // sha256 over the change surface (per-file path/hash/status + per-repo diff
-  // summary, tree/mtime excluded). The empty-turn gate skips a capture whose
-  // fingerprint equals the previous revision's — "no new revision when nothing
-  // changed" holds even when the tree stays dirty across read-only turns.
-  fingerprint: z.string().optional(),
-});
+export const WorkspaceCaptureStats = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    repoCount: z.number().int().nonnegative(),
+    fileCount: z.number().int().nonnegative(),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    totalBytes: z.number().int().nonnegative(),
+    tooLargeCount: z.number().int().nonnegative(),
+    binaryCount: z.number().int().nonnegative(),
+    treeEntryCount: z.number().int().nonnegative(),
+    treeTruncated: z.boolean().default(false),
+    durationMs: z.number().int().nonnegative(),
+    // sha256 over the change surface (per-file path/hash/status + per-repo diff
+    // summary, tree/mtime excluded). The empty-turn gate skips a capture whose
+    // fingerprint equals the previous revision's — "no new revision when nothing
+    // changed" holds even when the tree stays dirty across read-only turns.
+    fingerprint: z.string().optional(),
+  }),
+);
 export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
 
 // The single manifest blob (one per revision). Holds everything the workbench
 // needs for a cold paint: the tree index, per-repo status+diff, and the file
 // index (after-image refs). The M2 API serves this inline when small (≤2MB).
-export const WorkspaceCaptureManifest = z.object({
-  version: z.literal(1),
-  revision: z.number().int().nonnegative(),
-  capturedAt: z.string(),
-  turnId: z.string().nullable(),
-  leaseEpoch: z.number().int().nonnegative(),
-  treeIndex: FsTreeNode,
-  treeTruncated: z.boolean().default(false),
-  repos: z.array(WorkspaceCaptureRepo),
-  files: z.array(WorkspaceCaptureFile),
-  stats: WorkspaceCaptureStats,
-});
+export const WorkspaceCaptureManifest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    version: z.literal(1),
+    revision: z.number().int().nonnegative(),
+    capturedAt: z.string(),
+    turnId: z.string().nullable(),
+    leaseEpoch: z.number().int().nonnegative(),
+    treeIndex: FsTreeNode,
+    treeTruncated: z.boolean().default(false),
+    repos: z.array(WorkspaceCaptureRepo),
+    files: z.array(WorkspaceCaptureFile),
+    stats: WorkspaceCaptureStats,
+  }),
+);
 export type WorkspaceCaptureManifest = z.infer<typeof WorkspaceCaptureManifest>;
 
 // Announce-only event payload. Metadata only — never content.
-export const WorkspaceRevisionCapturedPayload = z.object({
-  revision: z.number().int().nonnegative(),
-  turnId: z.string().nullable(),
-  capturedAt: z.string(),
-  leaseEpoch: z.number().int().nonnegative(),
-  stats: WorkspaceCaptureStats,
-});
+export const WorkspaceRevisionCapturedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    revision: z.number().int().nonnegative(),
+    turnId: z.string().nullable(),
+    capturedAt: z.string(),
+    leaseEpoch: z.number().int().nonnegative(),
+    stats: WorkspaceCaptureStats,
+  }),
+);
 export type WorkspaceRevisionCapturedPayload = z.infer<typeof WorkspaceRevisionCapturedPayload>;
 
-export const WorkspaceRevisionDegradedPayload = z.object({
-  revision: z.number().int().nonnegative(),
-  turnId: z.string().nullable(),
-  capturedAt: z.string(),
-  leaseEpoch: z.number().int().nonnegative(),
-  reason: WorkspaceCaptureDegradedReason,
-});
+export const WorkspaceRevisionDegradedPayload = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    revision: z.number().int().nonnegative(),
+    turnId: z.string().nullable(),
+    capturedAt: z.string(),
+    leaseEpoch: z.number().int().nonnegative(),
+    reason: WorkspaceCaptureDegradedReason,
+  }),
+);
 export type WorkspaceRevisionDegradedPayload = z.infer<typeof WorkspaceRevisionDegradedPayload>;
 
 // --- M2 capture READ API -------------------------------------
 // A short-TTL signed GET URL minted PER REQUEST (never stored). The manifest is
 // served inline for the ≤2MB common case (the <200ms one-round-trip paint); a
 // >2MB manifest and a >256KB single-file after-image fall back to one of these.
-export const WorkspaceCaptureSignedUrl = z.object({
-  url: z.string().url(),
-  expiresAt: z.string(),
-});
+export const WorkspaceCaptureSignedUrl = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    url: z.string().url(),
+    expiresAt: z.string(),
+  }),
+);
 export type WorkspaceCaptureSignedUrl = z.infer<typeof WorkspaceCaptureSignedUrl>;
 
 // GET …/sessions/:sid/workspace/capture. `{available:false}` when no capture row
@@ -14845,30 +17476,32 @@ export type WorkspaceCaptureSignedUrl = z.infer<typeof WorkspaceCaptureSignedUrl
 // available: the row metadata (revision/turn/epoch/stats/size) is always inline;
 // the manifest is inline (`manifest`) for the ≤2MB common case and a signed GET
 // URL (`manifestUrl`) above that. Exactly one of manifest/manifestUrl is non-null.
-export const GetWorkspaceCaptureResponse = z.discriminatedUnion("available", [
-  z.object({
-    available: z.literal(false),
-    // Optional for additive compatibility with older servers. New servers set
-    // these fields when the newest durable revision is an explicit degraded
-    // marker rather than "no capture exists yet".
-    degradedReason: WorkspaceCaptureDegradedReason.nullable().optional(),
-    revision: z.number().int().nonnegative().nullable().optional(),
-    capturedAt: z.string().nullable().optional(),
-    turnId: z.string().nullable().optional(),
-    leaseEpoch: z.number().int().nonnegative().nullable().optional(),
-  }),
-  z.object({
-    available: z.literal(true),
-    revision: z.number().int().nonnegative(),
-    capturedAt: z.string(),
-    turnId: z.string().nullable(),
-    leaseEpoch: z.number().int().nonnegative(),
-    sizeBytes: z.number().int().nonnegative(),
-    stats: WorkspaceCaptureStats,
-    manifest: WorkspaceCaptureManifest.nullable().default(null),
-    manifestUrl: WorkspaceCaptureSignedUrl.nullable().default(null),
-  }),
-]);
+export const GetWorkspaceCaptureResponse = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("available", [
+    z.object({
+      available: z.literal(false),
+      // Optional for additive compatibility with older servers. New servers set
+      // these fields when the newest durable revision is an explicit degraded
+      // marker rather than "no capture exists yet".
+      degradedReason: WorkspaceCaptureDegradedReason.nullable().optional(),
+      revision: z.number().int().nonnegative().nullable().optional(),
+      capturedAt: z.string().nullable().optional(),
+      turnId: z.string().nullable().optional(),
+      leaseEpoch: z.number().int().nonnegative().nullable().optional(),
+    }),
+    z.object({
+      available: z.literal(true),
+      revision: z.number().int().nonnegative(),
+      capturedAt: z.string(),
+      turnId: z.string().nullable(),
+      leaseEpoch: z.number().int().nonnegative(),
+      sizeBytes: z.number().int().nonnegative(),
+      stats: WorkspaceCaptureStats,
+      manifest: WorkspaceCaptureManifest.nullable().default(null),
+      manifestUrl: WorkspaceCaptureSignedUrl.nullable().default(null),
+    }),
+  ]),
+);
 export type GetWorkspaceCaptureResponse = z.infer<typeof GetWorkspaceCaptureResponse>;
 
 // GET …/sessions/:sid/workspace/capture/file?path=…&revision=…. A single
@@ -14879,80 +17512,92 @@ export type GetWorkspaceCaptureResponse = z.infer<typeof GetWorkspaceCaptureResp
 // content blob — e.g. the after-image was GC'd) returns metadata only, no
 // content and no URL. Path-not-in-manifest / deleted → 404 at the route (not
 // represented here).
-export const GetWorkspaceCaptureFileResponse = z.object({
-  path: z.string(),
-  revision: z.number().int().nonnegative(),
-  status: GitFileStatusCode,
-  hash: z.string().nullable(),
-  baseHash: z.string().nullable(),
-  sizeBytes: z.number().int().nonnegative(),
-  isBinary: z.boolean(),
-  tooLarge: z.boolean(),
-  encoding: FsEncoding.nullable().default(null), // set iff content is inline
-  content: z.string().nullable().default(null), // inline ≤256KB (per encoding)
-  contentUrl: WorkspaceCaptureSignedUrl.nullable().default(null), // signed >256KB
-});
+export const GetWorkspaceCaptureFileResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string(),
+    revision: z.number().int().nonnegative(),
+    status: GitFileStatusCode,
+    hash: z.string().nullable(),
+    baseHash: z.string().nullable(),
+    sizeBytes: z.number().int().nonnegative(),
+    isBinary: z.boolean(),
+    tooLarge: z.boolean(),
+    encoding: FsEncoding.nullable().default(null), // set iff content is inline
+    content: z.string().nullable().default(null), // inline ≤256KB (per encoding)
+    contentUrl: WorkspaceCaptureSignedUrl.nullable().default(null), // signed >256KB
+  }),
+);
 export type GetWorkspaceCaptureFileResponse = z.infer<typeof GetWorkspaceCaptureFileResponse>;
 
-export const GitLogRequest = z.object({
-  path: z.string().default(""),
-  ref: z.string().default("HEAD"),
-  maxCount: z.number().int().positive().max(1_000).default(100),
-  skip: z.number().int().nonnegative().default(0),
-  pathspec: z.array(z.string()).default([]),
-});
+export const GitLogRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string().default(""),
+    ref: z.string().default("HEAD"),
+    maxCount: z.number().int().positive().max(1_000).default(100),
+    skip: z.number().int().nonnegative().default(0),
+    pathspec: z.array(z.string()).default([]),
+  }),
+);
 export type GitLogRequest = z.infer<typeof GitLogRequest>;
-export const GitCommit = z.object({
-  sha: z.string(),
-  shortSha: z.string(),
-  parents: z.array(z.string()),
-  author: z.object({
-    name: z.string(),
-    email: z.string(),
-    timestamp: z.number().int(),
+export const GitCommit = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sha: z.string(),
+    shortSha: z.string(),
+    parents: z.array(z.string()),
+    author: z.object({
+      name: z.string(),
+      email: z.string(),
+      timestamp: z.number().int(),
+    }),
+    committer: z.object({
+      name: z.string(),
+      email: z.string(),
+      timestamp: z.number().int(),
+    }),
+    subject: z.string(),
+    body: z.string(),
+    refs: z.array(z.string()).default([]), // decorations: branch/tag pointers
   }),
-  committer: z.object({
-    name: z.string(),
-    email: z.string(),
-    timestamp: z.number().int(),
-  }),
-  subject: z.string(),
-  body: z.string(),
-  refs: z.array(z.string()).default([]), // decorations: branch/tag pointers
-});
+);
 export type GitCommit = z.infer<typeof GitCommit>;
-export const GitLogResponse = z.object({
-  commits: z.array(GitCommit),
-  hasMore: z.boolean(),
-});
+export const GitLogResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    commits: z.array(GitCommit),
+    hasMore: z.boolean(),
+  }),
+);
 export type GitLogResponse = z.infer<typeof GitLogResponse>;
 
-export const GitShowRequest = z.object({
-  path: z.string().default(""),
-  ref: z.string(), // a commit/tag/tree-ish
-  filePath: z.string().optional(), // ref + filePath => raw blob ("open file at commit")
-  encoding: FsEncoding.default("utf8"),
-  maxBytesPerFile: z
-    .number()
-    .int()
-    .positive()
-    .max(2 * 1024 * 1024)
-    .default(512 * 1024),
-});
+export const GitShowRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    path: z.string().default(""),
+    ref: z.string(), // a commit/tag/tree-ish
+    filePath: z.string().optional(), // ref + filePath => raw blob ("open file at commit")
+    encoding: FsEncoding.default("utf8"),
+    maxBytesPerFile: z
+      .number()
+      .int()
+      .positive()
+      .max(2 * 1024 * 1024)
+      .default(512 * 1024),
+  }),
+);
 export type GitShowRequest = z.infer<typeof GitShowRequest>;
-export const GitShowResponse = z.object({
-  commit: GitCommit.nullable(), // null when fetching a raw blob
-  files: z.array(GitFileDiff), // commit diff vs first parent
-  blob: z
-    .object({
-      content: z.string(),
-      encoding: FsEncoding,
-      sizeBytes: z.number().int(),
-      truncated: z.boolean(),
-    })
-    .nullable(),
-  revision: z.number().int().nonnegative(),
-});
+export const GitShowResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    commit: GitCommit.nullable(), // null when fetching a raw blob
+    files: z.array(GitFileDiff), // commit diff vs first parent
+    blob: z
+      .object({
+        content: z.string(),
+        encoding: FsEncoding,
+        sizeBytes: z.number().int(),
+        truncated: z.boolean(),
+      })
+      .nullable(),
+    revision: z.number().int().nonnegative(),
+  }),
+);
 export type GitShowResponse = z.infer<typeof GitShowResponse>;
 
 // --- A2 Terminal exec (run a command in-box, stream stdout/stderr) -----------
@@ -14960,93 +17605,111 @@ export type GitShowResponse = z.infer<typeof GitShowResponse>;
 // the SYNCHRONOUS exec: run a bounded command and return its stdout/stderr +
 // exit code inline (the result IS the HTTP response). Full interactive PTY
 // (open/write/resize) layers on top via the pty.* events; exec ships now.
-export const TerminalExecRequest = z.object({
-  command: z.string().min(1),
-  cwd: z.string().default(""), // workspace-relative
-  // Hard wall-clock bound. A timeout response is returned only after the exact
-  // provider process is physically absent and any retained admission settles.
-  timeoutMs: z.number().int().positive().max(120_000).default(30_000),
-  // Stream the deltas onto A1 as the agent firehose (so other viewers see it),
-  // in addition to returning the buffered result inline.
-  emitStream: z.boolean().default(true),
-});
+export const TerminalExecRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    command: z.string().min(1),
+    cwd: z.string().default(""), // workspace-relative
+    // Hard wall-clock bound. A timeout response is returned only after the exact
+    // provider process is physically absent and any retained admission settles.
+    timeoutMs: z.number().int().positive().max(120_000).default(30_000),
+    // Stream the deltas onto A1 as the agent firehose (so other viewers see it),
+    // in addition to returning the buffered result inline.
+    emitStream: z.boolean().default(true),
+  }),
+);
 export type TerminalExecRequest = z.infer<typeof TerminalExecRequest>;
-export const TerminalExecResponse = z.object({
-  stdout: z.string(),
-  stderr: z.string(),
-  exitCode: z.number().int(),
-  // Retained for wire compatibility; synchronous exec never exposes a live
-  // provider process. Interactive work uses the PTY API.
-  running: z.literal(false),
-  wallTimeSeconds: z.number().nonnegative(),
-});
+export const TerminalExecResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    stdout: z.string(),
+    stderr: z.string(),
+    exitCode: z.number().int(),
+    // Retained for wire compatibility; synchronous exec never exposes a live
+    // provider process. Interactive work uses the PTY API.
+    running: z.literal(false),
+    wallTimeSeconds: z.number().nonnegative(),
+  }),
+);
 export type TerminalExecResponse = z.infer<typeof TerminalExecResponse>;
 
 // --- A2 Terminal PTY control (output rides A1) -------------------------------
-export const PtyOpenRequest = z.object({
-  cols: z.number().int().positive().max(500).default(80),
-  rows: z.number().int().positive().max(300).default(24),
-  cwd: z.string().default(""), // workspace-relative
-  shell: z.string().optional(), // default: resolved login shell
-});
+export const PtyOpenRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    cols: z.number().int().positive().max(500).default(80),
+    rows: z.number().int().positive().max(300).default(24),
+    cwd: z.string().default(""), // workspace-relative
+    shell: z.string().optional(), // default: resolved login shell
+  }),
+);
 export type PtyOpenRequest = z.infer<typeof PtyOpenRequest>;
-export const PtyOpenResponse = z.object({
-  ptyId: z.string().uuid(),
-  // output streams as terminal.pty.output.delta on the SSE channel the client holds
-  streamVia: z.literal("sse-events"),
-  supportsInput: z.boolean(), // false on backends without writeStdin
-});
+export const PtyOpenResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ptyId: z.string().uuid(),
+    // output streams as terminal.pty.output.delta on the SSE channel the client holds
+    streamVia: z.literal("sse-events"),
+    supportsInput: z.boolean(), // false on backends without writeStdin
+  }),
+);
 export type PtyOpenResponse = z.infer<typeof PtyOpenResponse>;
-export const PtyWriteRequest = z.object({
-  ptyId: z.string().uuid(),
-  data: z.string(),
-}); // utf-8 stdin
+export const PtyWriteRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ptyId: z.string().uuid(),
+    data: z.string(),
+  }),
+); // utf-8 stdin
 export type PtyWriteRequest = z.infer<typeof PtyWriteRequest>;
-export const PtyResizeRequest = z.object({
-  ptyId: z.string().uuid(),
-  cols: z.number().int().positive(),
-  rows: z.number().int().positive(),
-});
+export const PtyResizeRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    ptyId: z.string().uuid(),
+    cols: z.number().int().positive(),
+    rows: z.number().int().positive(),
+  }),
+);
 export type PtyResizeRequest = z.infer<typeof PtyResizeRequest>;
-export const PtyCloseRequest = z.object({ ptyId: z.string().uuid() });
+export const PtyCloseRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ ptyId: z.string().uuid() }),
+);
 export type PtyCloseRequest = z.infer<typeof PtyCloseRequest>;
 
 // Per-session structured-service capabilities (the Channel-A slice of the
 // negotiation). The full SessionCapabilities doc already carries FileSystem /
 // Terminal / Git blocks (P0.1); this is the compact projection the SDK mirrors.
-export const SessionStructuredCapabilities = z.object({
-  FileSystem: z.object({
-    available: z.boolean(),
-    readOnly: z.boolean(),
-    root: z.string(),
+export const SessionStructuredCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    FileSystem: z.object({
+      available: z.boolean(),
+      readOnly: z.boolean(),
+      root: z.string(),
+    }),
+    Terminal: z.object({
+      events: z.boolean(), // command.output firehose (always on if a box exists)
+      exec: z.boolean(), // synchronous terminal exec
+      pty: z.object({ available: z.boolean() }), // interactive stdin (writeStdin)
+    }),
+    Git: z.object({ available: z.boolean(), repos: z.array(z.string()) }),
   }),
-  Terminal: z.object({
-    events: z.boolean(), // command.output firehose (always on if a box exists)
-    exec: z.boolean(), // synchronous terminal exec
-    pty: z.object({ available: z.boolean() }), // interactive stdin (writeStdin)
-  }),
-  Git: z.object({ available: z.boolean(), repos: z.array(z.string()) }),
-});
+);
 export type SessionStructuredCapabilities = z.infer<typeof SessionStructuredCapabilities>;
 
-export const SessionEvent = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  sequence: z.number().int().positive(),
-  /** Server-owned durable high-water mark for a synthetic compact event. */
-  coveredThrough: z.number().int().positive().optional(),
-  type: SessionEventType,
-  payload: z.unknown().default({}),
-  occurredAt: z.string(),
-  clientEventId: SessionOperationKey.nullable().optional(),
-  turnId: z.string().uuid().nullable().optional(),
-  turnGeneration: z.number().int().nonnegative().nullable().optional(),
-  turnAttemptId: z.string().uuid().nullable().optional(),
-  turnAssociation: z.enum(["current", "late_rejected", "duplicate"]).nullable().optional(),
-  duplicateOfEventId: z.string().uuid().nullable().optional(),
-  duplicateReason: z.string().min(1).max(1024).nullable().optional(),
-});
+export const SessionEvent = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    sequence: z.number().int().positive(),
+    /** Server-owned durable high-water mark for a synthetic compact event. */
+    coveredThrough: z.number().int().positive().optional(),
+    type: SessionEventType,
+    payload: z.unknown().default({}),
+    occurredAt: z.string(),
+    clientEventId: SessionOperationKey.nullable().optional(),
+    turnId: z.string().uuid().nullable().optional(),
+    turnGeneration: z.number().int().nonnegative().nullable().optional(),
+    turnAttemptId: z.string().uuid().nullable().optional(),
+    turnAssociation: z.enum(["current", "late_rejected", "duplicate"]).nullable().optional(),
+    duplicateOfEventId: z.string().uuid().nullable().optional(),
+    duplicateReason: z.string().min(1).max(1024).nullable().optional(),
+  }),
+);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
 export type SessionEventCompactResult = {
@@ -15411,31 +18074,39 @@ export const OPENGENI_HOST_EXPORT_SCHEMA_REVISION = "2026-07-host-export-v1" as 
  * Decimal string rather than a JavaScript number: export cursors are PostgreSQL
  * bigint values and must remain exact beyond Number.MAX_SAFE_INTEGER.
  */
-export const HostExportCursor = z.string().regex(/^(0|[1-9][0-9]*)$/);
+export const HostExportCursor = /* @__PURE__ */ defineSchema(() =>
+  z.string().regex(/^(0|[1-9][0-9]*)$/),
+);
 export type HostExportCursor = z.infer<typeof HostExportCursor>;
 
-export const HostExportConsumerId = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+export const HostExportConsumerId = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+);
 export type HostExportConsumerId = z.infer<typeof HostExportConsumerId>;
 
-export const HostExportInitiator = TurnInitiator.extend({
-  subjectId: z.string().min(1).max(1024),
-  label: z.string().min(1).max(256).optional(),
-});
+export const HostExportInitiator = /* @__PURE__ */ defineSchema(() =>
+  TurnInitiator.extend({
+    subjectId: z.string().min(1).max(1024),
+    label: z.string().min(1).max(256).optional(),
+  }),
+);
 export type HostExportInitiator = z.infer<typeof HostExportInitiator>;
 
-export const HostExportInitiatorContext = TurnInitiatorContext.refine(
-  (value) => {
-    try {
-      return new TextEncoder().encode(JSON.stringify(value)).byteLength <= 4096;
-    } catch {
-      return false;
-    }
-  },
-  { message: "Host export initiator context exceeds 4096 UTF-8 bytes" },
+export const HostExportInitiatorContext = /* @__PURE__ */ defineSchema(() =>
+  TurnInitiatorContext.refine(
+    (value) => {
+      try {
+        return new TextEncoder().encode(JSON.stringify(value)).byteLength <= 4096;
+      } catch {
+        return false;
+      }
+    },
+    { message: "Host export initiator context exceeds 4096 UTF-8 bytes" },
+  ),
 );
 export type HostExportInitiatorContext = z.infer<typeof HostExportInitiatorContext>;
 
@@ -15455,29 +18126,33 @@ const HostExportAttribution = {
 
 /**
  * Host streams are deliberately forward-tolerant across rolling upgrades.
- * OpenGeni's application contract enumerates the event types known to this
+ * Opengeni's application contract enumerates the event types known to this
  * build, while the durable export may be read by an older host consumer after
  * a newer writer has committed a bounded type. The database remains the
  * authority for the byte bounds on these persisted strings.
  */
-export const HostSessionEvent = SessionEvent.extend({
-  type: z.string().min(1).max(256),
-  clientEventId: z.string().max(1024).nullable().optional(),
-  turnAssociation: z.string().min(1).max(64).nullable().optional(),
-  duplicateReason: z.string().max(4096).nullable().optional(),
-});
+export const HostSessionEvent = /* @__PURE__ */ defineSchema(() =>
+  SessionEvent.extend({
+    type: z.string().min(1).max(256),
+    clientEventId: z.string().max(1024).nullable().optional(),
+    turnAssociation: z.string().min(1).max(64).nullable().optional(),
+    duplicateReason: z.string().max(4096).nullable().optional(),
+  }),
+);
 export type HostSessionEvent = z.infer<typeof HostSessionEvent>;
 
 /** Export-bounded usage fact; custom bounded metric names remain supported. */
-export const HostUsageEvent = UsageEvent.extend({
-  subjectId: z.string().max(1024).nullable(),
-  eventType: z.string().min(1).max(256),
-  unit: z.string().min(1).max(128),
-  sourceResourceType: z.string().max(256).nullable(),
-  sourceResourceId: z.string().max(2048).nullable(),
-  idempotencyKey: z.string().min(1).max(2048),
-  billingProviderEventId: z.string().max(2048).nullable(),
-});
+export const HostUsageEvent = /* @__PURE__ */ defineSchema(() =>
+  UsageEvent.extend({
+    subjectId: z.string().max(1024).nullable(),
+    eventType: z.string().min(1).max(256),
+    unit: z.string().min(1).max(128),
+    sourceResourceType: z.string().max(256).nullable(),
+    sourceResourceId: z.string().max(2048).nullable(),
+    idempotencyKey: z.string().min(1).max(2048),
+    billingProviderEventId: z.string().max(2048).nullable(),
+  }),
+);
 export type HostUsageEvent = z.infer<typeof HostUsageEvent>;
 
 /**
@@ -15485,61 +18160,69 @@ export type HostUsageEvent = z.infer<typeof HostUsageEvent>;
  * outbox. Cross-session cursor order is stable but deliberately non-causal;
  * within a session, `event.sequence` remains authoritative and monotonic.
  */
-export const HostEventExport = z.object({
-  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
-  cursor: HostExportCursor,
-  idempotencyKey: z.string().min(1).max(2048),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  /**
-   * Immutable root of event.sessionId's session lineage at capture time. Null
-   * only for an unresolved pre-lineage/legacy export row.
-   */
-  rootSessionId: z.string().uuid().nullable(),
-  ...HostExportAttribution,
-  /**
-   * Content-free family of an `agent.toolCall.created` event's tool (see
-   * `ToolFamily`). Null for every other event type and for older rows.
-   */
-  toolFamily: ToolFamily.nullable().optional(),
-  event: HostSessionEvent,
-});
+export const HostEventExport = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+    cursor: HostExportCursor,
+    idempotencyKey: z.string().min(1).max(2048),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    /**
+     * Immutable root of event.sessionId's session lineage at capture time. Null
+     * only for an unresolved pre-lineage/legacy export row.
+     */
+    rootSessionId: z.string().uuid().nullable(),
+    ...HostExportAttribution,
+    /**
+     * Content-free family of an `agent.toolCall.created` event's tool (see
+     * `ToolFamily`). Null for every other event type and for older rows.
+     */
+    toolFamily: ToolFamily.nullable().optional(),
+    event: HostSessionEvent,
+  }),
+);
 export type HostEventExport = z.infer<typeof HostEventExport>;
 
 /** One exact, idempotency-keyed usage fact from the same ordered outbox. */
-export const HostUsageExport = z.object({
-  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
-  cursor: HostExportCursor,
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid().nullable(),
-  /** Null when sessionId is null or an unresolved pre-lineage legacy row. */
-  rootSessionId: z.string().uuid().nullable(),
-  turnId: z.string().uuid().nullable(),
-  turnAttemptId: z.string().uuid().nullable(),
-  ...HostExportAttribution,
-  usage: HostUsageEvent,
-});
+export const HostUsageExport = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+    cursor: HostExportCursor,
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid().nullable(),
+    /** Null when sessionId is null or an unresolved pre-lineage legacy row. */
+    rootSessionId: z.string().uuid().nullable(),
+    turnId: z.string().uuid().nullable(),
+    turnAttemptId: z.string().uuid().nullable(),
+    ...HostExportAttribution,
+    usage: HostUsageEvent,
+  }),
+);
 export type HostUsageExport = z.infer<typeof HostUsageExport>;
 
-export const HostEventExportBatch = z.object({
-  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
-  consumerId: HostExportConsumerId,
-  leaseToken: z.string().uuid(),
-  checkpoint: HostExportCursor,
-  throughCursor: HostExportCursor,
-  events: z.array(HostEventExport).min(1).max(256),
-});
+export const HostEventExportBatch = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+    consumerId: HostExportConsumerId,
+    leaseToken: z.string().uuid(),
+    checkpoint: HostExportCursor,
+    throughCursor: HostExportCursor,
+    events: z.array(HostEventExport).min(1).max(256),
+  }),
+);
 export type HostEventExportBatch = z.infer<typeof HostEventExportBatch>;
 
-export const HostUsageExportBatch = z.object({
-  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
-  consumerId: HostExportConsumerId,
-  leaseToken: z.string().uuid(),
-  checkpoint: HostExportCursor,
-  throughCursor: HostExportCursor,
-  events: z.array(HostUsageExport).min(1).max(256),
-});
+export const HostUsageExportBatch = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+    consumerId: HostExportConsumerId,
+    leaseToken: z.string().uuid(),
+    checkpoint: HostExportCursor,
+    throughCursor: HostExportCursor,
+    events: z.array(HostUsageExport).min(1).max(256),
+  }),
+);
 export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
 
 /**
@@ -15551,44 +18234,50 @@ export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
  * older consumer can carry a newer writer's fact during a rolling upgrade; the
  * known values are `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES`.
  */
-export const HostLifecycleFact = z.object({
-  id: z.string().uuid(),
-  type: z
-    .string()
-    .max(64)
-    .regex(/^[a-z][a-z_]*\.[a-z][a-z_]*$/),
-  attribute: z
-    .string()
-    .max(64)
-    .regex(/^[a-z][a-z0-9_]*$/)
-    .nullable(),
-  subjectKind: z
-    .string()
-    .max(32)
-    .regex(/^[a-z][a-z_]*$/),
-  subjectId: z.string().regex(PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN).nullable(),
-  occurredAt: z.string(),
-});
+export const HostLifecycleFact = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    type: z
+      .string()
+      .max(64)
+      .regex(/^[a-z][a-z_]*\.[a-z][a-z_]*$/),
+    attribute: z
+      .string()
+      .max(64)
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .nullable(),
+    subjectKind: z
+      .string()
+      .max(32)
+      .regex(/^[a-z][a-z_]*$/),
+    subjectId: z.string().regex(PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN).nullable(),
+    occurredAt: z.string(),
+  }),
+);
 export type HostLifecycleFact = z.infer<typeof HostLifecycleFact>;
 
-export const HostLifecycleFactExport = z.object({
-  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
-  cursor: HostExportCursor,
-  idempotencyKey: z.string().min(1).max(2048),
-  accountId: z.string().uuid().nullable(),
-  workspaceId: z.string().uuid().nullable(),
-  fact: HostLifecycleFact,
-});
+export const HostLifecycleFactExport = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+    cursor: HostExportCursor,
+    idempotencyKey: z.string().min(1).max(2048),
+    accountId: z.string().uuid().nullable(),
+    workspaceId: z.string().uuid().nullable(),
+    fact: HostLifecycleFact,
+  }),
+);
 export type HostLifecycleFactExport = z.infer<typeof HostLifecycleFactExport>;
 
-export const HostLifecycleFactExportBatch = z.object({
-  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
-  consumerId: HostExportConsumerId,
-  leaseToken: z.string().uuid(),
-  checkpoint: HostExportCursor,
-  throughCursor: HostExportCursor,
-  events: z.array(HostLifecycleFactExport).min(1).max(256),
-});
+export const HostLifecycleFactExportBatch = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+    consumerId: HostExportConsumerId,
+    leaseToken: z.string().uuid(),
+    checkpoint: HostExportCursor,
+    throughCursor: HostExportCursor,
+    events: z.array(HostLifecycleFactExport).min(1).max(256),
+  }),
+);
 export type HostLifecycleFactExportBatch = z.infer<typeof HostLifecycleFactExportBatch>;
 
 /**
@@ -16090,21 +18779,25 @@ function sessionEventUtf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
-export const SessionQueueMutationResponse = z.object({
-  receipt: SessionCommandReceipt,
-  snapshot: SessionQueueSnapshot,
-  draft: ComposerDraft.optional(),
-});
+export const SessionQueueMutationResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receipt: SessionCommandReceipt,
+    snapshot: SessionQueueSnapshot,
+    draft: ComposerDraft.optional(),
+  }),
+);
 export type SessionQueueMutationResponse = z.infer<typeof SessionQueueMutationResponse>;
 
-export const SessionControlResponse = z.object({
-  receipt: SessionCommandReceipt,
-  effectiveControl: EffectiveSessionControl,
-  interruptionCount: z.number().int().nonnegative(),
-  wakeCount: z.number().int().nonnegative(),
-  cancelledSessionCount: z.number().int().nonnegative(),
-  cancelledTurnCount: z.number().int().nonnegative(),
-});
+export const SessionControlResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    receipt: SessionCommandReceipt,
+    effectiveControl: EffectiveSessionControl,
+    interruptionCount: z.number().int().nonnegative(),
+    wakeCount: z.number().int().nonnegative(),
+    cancelledSessionCount: z.number().int().nonnegative(),
+    cancelledTurnCount: z.number().int().nonnegative(),
+  }),
+);
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
@@ -16116,11 +18809,20 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       bundledSkillIds: BundledSkillSelection.optional(),
       /**
        * Optional UUID preallocated by an embedding host. This lets the host durably
-       * link its own projection before OpenGeni admits the initial turn. Replays
-       * must pair it with the same idempotency key; OpenGeni never derives host
+       * link its own projection before Opengeni admits the initial turn. Replays
+       * must pair it with the same idempotency key; Opengeni never derives host
        * identity or authorization from the UUID.
        */
       requestedSessionId: z.string().uuid().optional(),
+      /**
+       * Optional usage limit for a new root task, in USD micros of API-equivalent
+       * model usage; null or omission means no limit and zero stops before the
+       * first model request. Only a person or trusted host may set it: agent
+       * callers and child sessions are rejected. Servers without usage limits
+       * strip unknown fields, so confirm `usageLimit.limitMicros` in the
+       * response before relying on it.
+       */
+      usageLimitMicros: SessionUsageLimitMicros.nullable().optional(),
       /** Explicit external-owner grants for the direct initial turn only. */
 
       /** Top-level omission is workspace-visible. Agent-child omission inherits
@@ -16141,10 +18843,17 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * inherit omission and may only narrow (workspace > user > off). */
       memoryScope: SessionMemoryScope.default("workspace"),
       initialMessage: z.string().min(1).optional(),
+      /** Exempt the new session from the idle-session archive (for persistent agents). */
+      keepLive: z.boolean().optional(),
       // Creates the durable session shell without fabricating a user message or
       // starting an underlying agent turn. Realtime can then become the first
       // interaction and use the ordinary Send/Steer path when it delegates.
-      startMode: z.literal("realtime").optional(),
+      // `standard` is the explicit spelling of the default (omitted) mode. A
+      // client that sends a task usage limit also sends `standard`, so an
+      // older server that predates usage limits (and accepts only
+      // `realtime`) rejects the whole create before creating or starting
+      // anything, instead of silently starting uncapped work.
+      startMode: z.enum(["realtime", "standard"]).optional(),
       // Model-visible application context attached to the initial user message.
       // Standard timeline rendering omits it, while full event/audit reads retain
       // it. This is ordinary user-role content, not secret or privileged input.
@@ -16185,7 +18894,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         .optional(),
       // The same child omission rule applies to selected MCP tool refs. Top-level
       // omission still applies workspace-default capability MCP tools; explicit []
-      // suppresses those defaults (the first-party OpenGeni server remains added).
+      // suppresses those defaults (the first-party Opengeni server remains added).
       // Servers attached in this request's `mcpServers` are selected either way.
       tools: z.array(ToolRef).default([]),
       excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
@@ -16246,15 +18955,20 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // A goal-bearing session whose explicit/effective set omits goals:manage is
       // rejected; creation never silently expands a child beyond that set.
       firstPartyMcpPermissions: z.array(Permission).optional(),
-      // Exact model-visible selection from the broad first-party OpenGeni MCP
+      // Exact model-visible selection from the broad first-party Opengeni MCP
       // catalog. Omission selects the safe non-connector default; [] intentionally
       // exposes none.
       // This does not grant authority: every registered tool is permission-gated.
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
       // One agent configuration: capabilities, identity, instructions alias and
       // renderer. Omission keeps today's behavior (or inherits a configured
-      // parent). Children may only narrow. Behind the admission switch.
+      // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
+      // Which vaults this session's agent may resolve secret references from.
+      // Intersected with `agent.vaultPolicy`; a child is further narrowed by
+      // its ancestors' policies whenever it resolves. The task vault is always
+      // included. Omission adds no narrowing.
+      vaultPolicy: VaultPolicy.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
       // policies, connection refs, and encrypted credentials. Explicit arrays,
@@ -16355,25 +19069,101 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
 );
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
-export const SessionTenancyCreateCapabilities = z.object({
-  activated: z.boolean(),
-  canCreatePrivate: z.boolean(),
-  reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
-});
+export const SessionTenancyCreateCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    activated: z.boolean(),
+    canCreatePrivate: z.boolean(),
+    reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
+    /**
+     * Who sees a new chat or schedule unless the person picks otherwise: the
+     * organization's default, and always "workspace" when Only me isn't
+     * available here.
+     */
+    defaultVisibility: z.enum(["private", "workspace"]).default("workspace"),
+  }),
+);
 export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;
 
 // Generic, host-neutral structured human input. One model tool call creates one
 // request containing one or more questions; the durable response resumes that
 // exact call. This is deliberately distinct from tool approval: an answer,
 // skip, or expiry is structured tool output, never an approve/reject decision.
-export const HumanInputQuestionKind = z.enum(["text", "single_select", "multi_select"]);
+export const HumanInputQuestionKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["text", "single_select", "multi_select", "secret"]),
+);
 export type HumanInputQuestionKind = z.infer<typeof HumanInputQuestionKind>;
 
-export const HumanInputOption = z.object({
-  id: z.string().min(1).max(64),
-  label: z.string().min(1).max(256),
-  description: z.string().max(2048).nullable().optional(),
-});
+/**
+ * A secret question (`kind: "secret"`). The value is written to a hosted
+ * vault atomically with the response and never stored in events or the
+ * response; the agent receives a reference instead (D8).
+ */
+export const HumanInputSecretSpec = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      item: VaultName,
+      field: VaultFieldName.default("password"),
+      fieldKind: z.enum(["concealed", "totp", "text"]).default("concealed"),
+      itemType: z.enum(["login", "api_key", "note"]).default("login"),
+      username: z
+        .object({ prompt: z.string().max(200), value: z.string().max(512).nullable().optional() })
+        .strict()
+        .nullable()
+        .optional(),
+      website: z.string().max(2_048).nullable().optional(),
+      looksLike: z.string().max(80).nullable().optional(),
+      /** Soft client-side warning only. */
+      pattern: z.string().max(200).nullable().optional(),
+      saveTo: z.enum(["user", "task", "workspace"]).default("user"),
+      /** Hosted vault in the saveTo scope (Q-05). */
+      vault: VaultName.nullable().optional(),
+      allowGenerate: z.boolean().default(false),
+      generate: GeneratePasswordSpec.nullable().optional(),
+      autocomplete: z
+        .enum(["current-password", "new-password", "one-time-code", "off"])
+        .default("current-password"),
+    })
+    .strict(),
+);
+export type HumanInputSecretSpec = z.infer<typeof HumanInputSecretSpec>;
+
+/** Write-only: submitted with an answered response, stripped before any event is built. */
+export const HumanInputSecretAnswer = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      questionId: z.string(),
+      value: z.string().max(65_536).optional(),
+      generate: GeneratePasswordSpec.optional(),
+      username: z.string().max(512).optional(),
+      saveTo: z.enum(["user", "task", "workspace"]),
+      vaultId: z.string().uuid().optional(),
+    })
+    .strict()
+    .refine((answer) => (answer.value === undefined) !== (answer.generate === undefined), {
+      message: "value xor generate",
+    }),
+);
+export type HumanInputSecretAnswer = z.infer<typeof HumanInputSecretAnswer>;
+
+/** What the agent and the timeline see for an answered secret question. */
+export const HumanInputSecretAnswerResult = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    reference: z.string(),
+    username: z.string().nullable(),
+    vaultName: z.string(),
+    itemName: z.string(),
+    saveTo: z.enum(["user", "task", "workspace"]),
+  }),
+);
+export type HumanInputSecretAnswerResult = z.infer<typeof HumanInputSecretAnswerResult>;
+
+export const HumanInputOption = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1).max(64),
+    label: z.string().min(1).max(256),
+    description: z.string().max(2048).nullable().optional(),
+  }),
+);
 export type HumanInputOption = z.infer<typeof HumanInputOption>;
 
 export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -16388,8 +19178,10 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
       // A real review reference still requires every authority-bearing field.
       skillReview: SkillReviewReference.nullable().optional(),
       options: z.array(HumanInputOption).max(20).default([]),
+      /** Required exactly when `kind` is "secret"; null otherwise (strict tool schemas). */
+      secret: HumanInputSecretSpec.nullable().optional(),
       required: z.boolean().default(true),
-      // Retained on the wire for older hosts. OpenGeni's stock runtime and
+      // Retained on the wire for older hosts. Opengeni's stock runtime and
       // surfaces always expose Other for choice questions, including requests
       // that were persisted before that became the default behavior.
       allowOther: z.boolean().default(false),
@@ -16412,7 +19204,28 @@ export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =
           message: "option ids must be unique",
         });
       }
-      if (question.kind === "text") {
+      if (question.kind === "secret") {
+        if (question.secret == null) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["secret"],
+            message: "secret questions require a secret spec",
+          });
+        }
+        // Options and Other mean nothing for a secret. Strict tool schemas make
+        // models send them anyway, so they are tolerated here and dropped when
+        // the request is persisted (`normalizeSecretQuestion`), never failing
+        // the turn.
+      } else if (question.secret != null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["secret"],
+          message: "only secret questions take a secret spec",
+        });
+      }
+      if (question.kind === "secret") {
+        // Validated above.
+      } else if (question.kind === "text") {
         if (question.options.length > 0) {
           ctx.addIssue({
             code: "custom",
@@ -16485,13 +19298,9 @@ export function canonicalSkillReviewQuestion(
   return stableJson(normalized) === stableJson(canonical) ? canonical : null;
 }
 
-export const HumanInputRequestStatus = z.enum([
-  "pending",
-  "answered",
-  "skipped",
-  "expired",
-  "cancelled",
-]);
+export const HumanInputRequestStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["pending", "answered", "skipped", "expired", "cancelled"]),
+);
 export type HumanInputRequestStatus = z.infer<typeof HumanInputRequestStatus>;
 
 export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -16509,31 +19318,48 @@ export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSch
 );
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
 
-export const HumanInputAnswer = z.object({
-  questionId: z.string().min(1).max(64),
-  values: z.array(z.string().max(8192)).max(20),
-  other: z.string().max(8192).nullable().optional(),
-});
+/** Secret questions never carry options or Other; drop what a model sent. */
+export function normalizeSecretQuestion<
+  T extends { kind: string; options: unknown[]; allowOther: boolean },
+>(question: T): T {
+  return question.kind === "secret" ? { ...question, options: [], allowOther: false } : question;
+}
+
+export const HumanInputAnswer = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    questionId: z.string().min(1).max(64),
+    values: z.array(z.string().max(8192)).max(20),
+    other: z.string().max(8192).nullable().optional(),
+    /** Secret questions: the saved reference, never the value. */
+    secret: HumanInputSecretAnswerResult.optional(),
+  }),
+);
 export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
 
-export const HumanInputResponse = z.discriminatedUnion("outcome", [
-  z.object({
-    outcome: z.literal("answered"),
-    answers: z.array(HumanInputAnswer).max(20),
-  }),
-  z.object({ outcome: z.literal("skipped") }),
-  z.object({ outcome: z.literal("expired") }),
-  z.object({ outcome: z.literal("cancelled") }),
-]);
+export const HumanInputResponse = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({
+      outcome: z.literal("answered"),
+      answers: z.array(HumanInputAnswer).max(20),
+    }),
+    z.object({ outcome: z.literal("skipped") }),
+    z.object({ outcome: z.literal("expired") }),
+    z.object({ outcome: z.literal("cancelled") }),
+  ]),
+);
 export type HumanInputResponse = z.infer<typeof HumanInputResponse>;
 
-export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
-  z.object({
-    outcome: z.literal("answered"),
-    answers: z.array(HumanInputAnswer).max(20),
-  }),
-  z.object({ outcome: z.literal("skipped") }),
-]);
+export const SubmitHumanInputResponseRequest = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({
+      outcome: z.literal("answered"),
+      answers: z.array(HumanInputAnswer).max(20),
+      /** Write-only secret values; the API strips them before building any event. */
+      secretAnswers: z.array(HumanInputSecretAnswer).max(20).optional(),
+    }),
+    z.object({ outcome: z.literal("skipped") }),
+  ]),
+);
 export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;
 
 export const SessionHumanInputRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
@@ -16621,247 +19447,292 @@ function requireMessageTextOrAnnotations(
   }
 }
 
-export const SessionUserMessagePayload = z
-  .object({
-    text: z.string().default(""),
-    annotations: SubmittedTimelineAnnotations.default([]),
-    // Model-visible application context attached to this exact user message.
-    // It is retained in full event/history data but omitted by standard UI.
-    modelContext: z.string().trim().min(1).max(32768).optional(),
-    resources: z.array(ResourceRef).default([]),
-    model: z.string().min(1).optional(),
-    reasoningEffort: ReasoningEffort.optional(),
-    latencyMode: LatencyMode.optional(),
-    controlEtag: z.string().min(1).optional(),
-    expectedDraftRevision: z.number().int().nonnegative().optional(),
-    // Header-value rotation only. URL/name/tool settings are immutable after
-    // session create; persisted events expose metadata, never header values.
-    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    /** Optional choices among the authenticated sender’s own accounts. */
-    connectionAuthorities: z.never().optional(),
-    connectionAccounts: McpConnectionAccountSelections.default([]),
-    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
-  })
-  .strict()
-  .superRefine(requireMessageTextOrAnnotations)
-  .superRefine(requireEstablishedPersonalResourceEpoch);
+export const SessionUserMessagePayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      text: z.string().default(""),
+      annotations: SubmittedTimelineAnnotations.default([]),
+      // Model-visible application context attached to this exact user message.
+      // It is retained in full event/history data but omitted by standard UI.
+      modelContext: z.string().trim().min(1).max(32768).optional(),
+      resources: z.array(ResourceRef).default([]),
+      model: z.string().min(1).optional(),
+      reasoningEffort: ReasoningEffort.optional(),
+      latencyMode: LatencyMode.optional(),
+      controlEtag: z.string().min(1).optional(),
+      expectedDraftRevision: z.number().int().nonnegative().optional(),
+      // Header-value rotation only. URL/name/tool settings are immutable after
+      // session create; persisted events expose metadata, never header values.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      /** Optional choices among the authenticated sender’s own accounts. */
+      connectionAuthorities: z.never().optional(),
+      connectionAccounts: McpConnectionAccountSelections.default([]),
+      personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+    })
+    .strict()
+    .superRefine(requireMessageTextOrAnnotations)
+    .superRefine(requireEstablishedPersonalResourceEpoch),
+);
 export type SessionUserMessagePayload = z.infer<typeof SessionUserMessagePayload>;
 
-export const ClientSessionEvent = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("user.message"),
-    clientEventId: SessionOperationKey.optional(),
-    payload: SessionUserMessagePayload,
-  }),
-  z.object({
-    type: z.literal("user.approvalDecision"),
-    clientEventId: SessionOperationKey.optional(),
-    payload: z.object({
-      approvalId: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
-      decision: z.enum(["approve", "reject"]),
-      message: z.string().optional(),
-      // Write-only header rotation committed with the response before resume.
-      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+export const ClientSessionEvent = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("user.message"),
+      clientEventId: SessionOperationKey.optional(),
+      payload: SessionUserMessagePayload,
     }),
-  }),
-  z.object({
-    type: z.literal("user.humanInputResponse"),
-    clientEventId: SessionOperationKey.optional(),
-    payload: z.object({
-      requestId: z.string().uuid(),
-      response: SubmitHumanInputResponseRequest,
-      // Write-only header rotation committed with the response before resume.
-      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    z.object({
+      type: z.literal("user.approvalDecision"),
+      clientEventId: SessionOperationKey.optional(),
+      payload: z.object({
+        approvalId: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
+        decision: z.enum(["approve", "reject"]),
+        message: z.string().optional(),
+        // Write-only header rotation committed with the response before resume.
+        mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      }),
     }),
-  }),
-]);
+    z.object({
+      type: z.literal("user.humanInputResponse"),
+      clientEventId: SessionOperationKey.optional(),
+      payload: z.object({
+        requestId: z.string().uuid(),
+        response: SubmitHumanInputResponseRequest,
+        // Write-only header rotation committed with the response before resume.
+        mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+        // Write-only secret values committed to vaults with the response.
+        secretAnswers: z.array(HumanInputSecretAnswer).max(20).optional(),
+      }),
+    }),
+  ]),
+);
 export type ClientSessionEvent = z.infer<typeof ClientSessionEvent>;
 
-export const SteerSessionMessageRequest = z
-  .object({
-    text: z.string().default(""),
-    annotations: SubmittedTimelineAnnotations.default([]),
-    // Same model-visible message context as a queued user.message.
-    modelContext: z.string().trim().min(1).max(32768).optional(),
-    resources: z.array(ResourceRef).default([]),
-    model: z.string().min(1).optional(),
-    reasoningEffort: ReasoningEffort.optional(),
-    latencyMode: LatencyMode.optional(),
-    clientEventId: SessionOperationKey.optional(),
-    controlEtag: z.string().min(1).optional(),
-    expectedDraftRevision: z.number().int().nonnegative().optional(),
-    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    /** Optional choices among the authenticated sender’s own accounts. */
-    connectionAuthorities: z.never().optional(),
-    connectionAccounts: McpConnectionAccountSelections.default([]),
-    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
-  })
-  .strict()
-  .superRefine(requireMessageTextOrAnnotations)
-  .superRefine(requireEstablishedPersonalResourceEpoch);
+export const SteerSessionMessageRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      text: z.string().default(""),
+      annotations: SubmittedTimelineAnnotations.default([]),
+      // Same model-visible message context as a queued user.message.
+      modelContext: z.string().trim().min(1).max(32768).optional(),
+      resources: z.array(ResourceRef).default([]),
+      model: z.string().min(1).optional(),
+      reasoningEffort: ReasoningEffort.optional(),
+      latencyMode: LatencyMode.optional(),
+      clientEventId: SessionOperationKey.optional(),
+      controlEtag: z.string().min(1).optional(),
+      expectedDraftRevision: z.number().int().nonnegative().optional(),
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      /** Optional choices among the authenticated sender’s own accounts. */
+      connectionAuthorities: z.never().optional(),
+      connectionAccounts: McpConnectionAccountSelections.default([]),
+      personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+    })
+    .strict()
+    .superRefine(requireMessageTextOrAnnotations)
+    .superRefine(requireEstablishedPersonalResourceEpoch),
+);
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
-export const SteerSessionMessageResponse = z.object({
-  accepted: SessionEvent,
-  turn: SessionTurn,
-  receipt: SessionCommandReceipt,
-  routing: SessionPromptRouting,
-  interruptionCount: z.number().int().nonnegative(),
-  replay: z.boolean(),
-});
+export const SteerSessionMessageResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accepted: SessionEvent,
+    turn: SessionTurn,
+    receipt: SessionCommandReceipt,
+    routing: SessionPromptRouting,
+    interruptionCount: z.number().int().nonnegative(),
+    replay: z.boolean(),
+  }),
+);
 export type SteerSessionMessageResponse = z.infer<typeof SteerSessionMessageResponse>;
 
-export const SubmitComposerDraftResponse = z.object({
-  accepted: SessionEvent,
-  turn: SessionTurn,
-  draft: ComposerDraft,
-  receipt: SessionCommandReceipt,
-  routing: SessionPromptRouting,
-  interruptionCount: z.number().int().nonnegative(),
-  replay: z.boolean(),
-});
+export const SubmitComposerDraftResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    accepted: SessionEvent,
+    turn: SessionTurn,
+    draft: ComposerDraft,
+    receipt: SessionCommandReceipt,
+    routing: SessionPromptRouting,
+    interruptionCount: z.number().int().nonnegative(),
+    replay: z.boolean(),
+  }),
+);
 export type SubmitComposerDraftResponse = z.infer<typeof SubmitComposerDraftResponse>;
 
-export const SessionBusMessage = z.object({
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  events: z.array(SessionEvent).min(1),
-});
+export const SessionBusMessage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    events: z.array(SessionEvent).min(1),
+  }),
+);
 export type SessionBusMessage = z.infer<typeof SessionBusMessage>;
 
-export const GitHubAppManifestCreate = z.object({
-  appName: z.string().optional(),
-  organization: z.string().optional(),
-  public: z.boolean().default(false),
-  includeCiPermissions: z.boolean().default(true),
-});
+export const GitHubAppManifestCreate = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    appName: z.string().optional(),
+    organization: z.string().optional(),
+    public: z.boolean().default(false),
+    includeCiPermissions: z.boolean().default(true),
+  }),
+);
 export type GitHubAppManifestCreate = z.infer<typeof GitHubAppManifestCreate>;
 
-export const GitHubRepository = z.object({
-  id: z.number().int(),
-  installationId: z.number().int(),
-  fullName: z.string(),
-  name: z.string(),
-  private: z.boolean(),
-  htmlUrl: z.string(),
-  cloneUrl: z.string(),
-  defaultBranch: z.string(),
-  accountLogin: z.string(),
-  accountType: z.string().nullable(),
-  /** GitHub's archived flag, when the provider reported it. */
-  archived: z.boolean().optional(),
-  /**
-   * GitHub's reported repository size in kilobytes, when the provider
-   * reported it. Zero means GitHub considers the repository empty.
-   */
-  sizeKb: z.number().int().nonnegative().optional(),
-});
+export const GitHubRepository = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.number().int(),
+    installationId: z.number().int(),
+    fullName: z.string(),
+    name: z.string(),
+    private: z.boolean(),
+    htmlUrl: z.string(),
+    cloneUrl: z.string(),
+    defaultBranch: z.string(),
+    accountLogin: z.string(),
+    accountType: z.string().nullable(),
+    /** GitHub's archived flag, when the provider reported it. */
+    archived: z.boolean().optional(),
+    /**
+     * GitHub's reported repository size in kilobytes, when the provider
+     * reported it. Zero means GitHub considers the repository empty.
+     */
+    sizeKb: z.number().int().nonnegative().optional(),
+  }),
+);
 export type GitHubRepository = z.infer<typeof GitHubRepository>;
 
-export const GitHubRepositoryScope = z.enum(["all", "selected"]);
+export const GitHubRepositoryScope = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["all", "selected"]),
+);
 export type GitHubRepositoryScope = z.infer<typeof GitHubRepositoryScope>;
 
-export const GitHubBindingStatus = z.enum(["disabled", "unbound", "bound"]);
+export const GitHubBindingStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["disabled", "unbound", "bound"]),
+);
 export type GitHubBindingStatus = z.infer<typeof GitHubBindingStatus>;
 
-export const GitHubAppSetupMode = z.enum(["platform", "operator"]);
+export const GitHubAppSetupMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["platform", "operator"]),
+);
 export type GitHubAppSetupMode = z.infer<typeof GitHubAppSetupMode>;
 
-export const GitHubInstallationLifecycle = z.enum(["active", "suspended", "deleted", "unverified"]);
+export const GitHubInstallationLifecycle = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["active", "suspended", "deleted", "unverified"]),
+);
 export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
 
-export const GitHubInstallationBinding = z.object({
-  installationId: z.number().int().positive(),
-  githubAccountId: z.number().int().positive().nullable(),
-  accountLogin: z.string().nullable(),
-  accountType: z.string().nullable(),
-  lifecycle: GitHubInstallationLifecycle,
-  repositoryScope: GitHubRepositoryScope,
-  repositoryCount: z.number().int().nonnegative(),
-  configureUrl: z.string().url().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    installationId: z.number().int().positive(),
+    githubAccountId: z.number().int().positive().nullable(),
+    accountLogin: z.string().nullable(),
+    accountType: z.string().nullable(),
+    lifecycle: GitHubInstallationLifecycle,
+    repositoryScope: GitHubRepositoryScope,
+    repositoryCount: z.number().int().nonnegative(),
+    configureUrl: z.string().url().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type GitHubInstallationBinding = z.infer<typeof GitHubInstallationBinding>;
 
-export const GitHubAppInfo = z.object({
-  configured: z.boolean(),
-  status: GitHubBindingStatus,
-  setupMode: GitHubAppSetupMode,
-  appId: z.string().nullable(),
-  clientId: z.string().nullable(),
-  appSlug: z.string().nullable(),
-  installUrl: z.string().nullable(),
-  linkUrl: z.string().nullable(),
-  installations: z.array(GitHubInstallationBinding),
-  missing: z.array(z.string()),
-});
+export const GitHubAppInfo = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    configured: z.boolean(),
+    status: GitHubBindingStatus,
+    setupMode: GitHubAppSetupMode,
+    appId: z.string().nullable(),
+    clientId: z.string().nullable(),
+    appSlug: z.string().nullable(),
+    installUrl: z.string().nullable(),
+    linkUrl: z.string().nullable(),
+    installations: z.array(GitHubInstallationBinding),
+    missing: z.array(z.string()),
+  }),
+);
 export type GitHubAppInfo = z.infer<typeof GitHubAppInfo>;
 
-export const GitHubRepositoriesResponse = z.object({
-  repositories: z.array(GitHubRepository),
-});
+export const GitHubRepositoriesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    repositories: z.array(GitHubRepository),
+  }),
+);
 export type GitHubRepositoriesResponse = z.infer<typeof GitHubRepositoriesResponse>;
 
-export const GitHubActionPolicyDecision = z.enum(["allow", "ask", "block"]);
+export const GitHubActionPolicyDecision = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["allow", "ask", "block"]),
+);
 export type GitHubActionPolicyDecision = z.infer<typeof GitHubActionPolicyDecision>;
 
-export const GitHubActionPolicyEffectiveDecision = z.enum([
-  ...GitHubActionPolicyDecision.options,
-  "mixed",
-]);
+export const GitHubActionPolicyEffectiveDecision = /* @__PURE__ */ defineSchema(() =>
+  z.enum([...GitHubActionPolicyDecision.options, "mixed"]),
+);
 export type GitHubActionPolicyEffectiveDecision = z.infer<
   typeof GitHubActionPolicyEffectiveDecision
 >;
 
-export const GitHubActionPolicyGroup = z.enum(["routine", "review", "merge"]);
+export const GitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["routine", "review", "merge"]),
+);
 export type GitHubActionPolicyGroup = z.infer<typeof GitHubActionPolicyGroup>;
 
-export const GitHubActionPolicyActor = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("workspace_app"),
-    installationId: z.number().int().positive(),
-  }),
-  z.object({
-    kind: z.literal("personal"),
-    connectionId: z.string().trim().min(1).max(512),
-  }),
-]);
+export const GitHubActionPolicyActor = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("workspace_app"),
+      installationId: z.number().int().positive(),
+    }),
+    z.object({
+      kind: z.literal("personal"),
+      connectionId: z.string().trim().min(1).max(512),
+    }),
+  ]),
+);
 export type GitHubActionPolicyActor = z.infer<typeof GitHubActionPolicyActor>;
 
-const GitHubActionPolicyGroups = z.object({
-  routine: GitHubActionPolicyEffectiveDecision,
-  review: GitHubActionPolicyEffectiveDecision,
-  merge: GitHubActionPolicyEffectiveDecision,
-});
+const GitHubActionPolicyGroups = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    routine: GitHubActionPolicyEffectiveDecision,
+    review: GitHubActionPolicyEffectiveDecision,
+    merge: GitHubActionPolicyEffectiveDecision,
+  }),
+);
 
-export const GitHubActionPolicyActorState = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("workspace_app"),
-    installationId: z.number().int().positive(),
-    label: z.string().min(1).max(256),
-    groups: GitHubActionPolicyGroups,
-  }),
-  z.object({
-    kind: z.literal("personal"),
-    connectionId: z.string().trim().min(1).max(512),
-    label: z.string().min(1).max(256),
-    groups: GitHubActionPolicyGroups,
-  }),
-]);
+export const GitHubActionPolicyActorState = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("workspace_app"),
+      installationId: z.number().int().positive(),
+      label: z.string().min(1).max(256),
+      groups: GitHubActionPolicyGroups,
+    }),
+    z.object({
+      kind: z.literal("personal"),
+      connectionId: z.string().trim().min(1).max(512),
+      label: z.string().min(1).max(256),
+      groups: GitHubActionPolicyGroups,
+    }),
+  ]),
+);
 export type GitHubActionPolicyActorState = z.infer<typeof GitHubActionPolicyActorState>;
 
-export const GitHubActionPoliciesResponse = z.object({
-  enabled: z.boolean(),
-  actors: z.array(GitHubActionPolicyActorState).max(128),
-});
+export const GitHubActionPoliciesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    enabled: z.boolean(),
+    actors: z.array(GitHubActionPolicyActorState).max(128),
+  }),
+);
 export type GitHubActionPoliciesResponse = z.infer<typeof GitHubActionPoliciesResponse>;
 
-export const UpdateGitHubActionPolicyRequest = z.object({
-  actor: GitHubActionPolicyActor,
-  group: GitHubActionPolicyGroup,
-  decision: GitHubActionPolicyDecision,
-});
+export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    actor: GitHubActionPolicyActor,
+    group: GitHubActionPolicyGroup,
+    decision: GitHubActionPolicyDecision,
+  }),
+);
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
 export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -16905,20 +19776,22 @@ export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE = "NEW_SIGNUPS_PAUSED" as cons
 // collapses the parallel per-module definitions. A capability cell is always
 // present with `available`/`transport` + a `reason` when unavailable — never
 // absent.
-export const CapabilityUnavailableReason = z.enum([
-  "backend_unsupported",
-  "os_unsupported",
-  "not_provisioned",
-  "disabled_by_policy",
-  "lease_cold",
-  "tier_headless",
-  // Selfhosted (bring-your-own-compute) negotiation states (M1 additive; the
-  // selfhosted negotiation in select.ts wires them in M3):
-  "agent_offline", // the enrolled agent process is not running / unreachable
-  "agent_reconnecting", // a transient blip — the agent is reconnecting (warmable)
-  "consent_required", // whole-machine / screen-control consent not yet acknowledged
-  "display_unavailable", // headless machine with no display stack (no DesktopStream)
-]);
+export const CapabilityUnavailableReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "backend_unsupported",
+    "os_unsupported",
+    "not_provisioned",
+    "disabled_by_policy",
+    "lease_cold",
+    "tier_headless",
+    // Selfhosted (bring-your-own-compute) negotiation states (M1 additive; the
+    // selfhosted negotiation in select.ts wires them in M3):
+    "agent_offline", // the enrolled agent process is not running / unreachable
+    "agent_reconnecting", // a transient blip — the agent is reconnecting (warmable)
+    "consent_required", // whole-machine / screen-control consent not yet acknowledged
+    "display_unavailable", // headless machine with no display stack (no DesktopStream)
+  ]),
+);
 export type CapabilityUnavailableReason = z.infer<typeof CapabilityUnavailableReason>;
 
 export const SessionCapabilities = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -17025,43 +19898,49 @@ export type SessionCapabilities = z.infer<typeof SessionCapabilities>;
 // consent gate, `terminal` carries terminal:attach, and `files` carries
 // files:write. For compatibility, an entirely omitted plane set retains the old
 // terminal-only meaning; new clients always send all three flags explicitly.
-export const AttachViewerRequest = /* @__PURE__ */ z.object({
-  viewerId: z.string().uuid().optional(),
-  desktop: z.boolean().optional(),
-  terminal: z.boolean().optional(),
-  files: z.boolean().optional(),
-});
+export const AttachViewerRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    viewerId: z.string().uuid().optional(),
+    desktop: z.boolean().optional(),
+    terminal: z.boolean().optional(),
+    files: z.boolean().optional(),
+  }),
+);
 export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;
 
-export const ViewerHolder = /* @__PURE__ */ z.object({
-  viewerId: z.string().uuid(),
-  sandboxGroupId: z.string().uuid(),
-  liveness: z.enum(["cold", "warming", "warm", "draining"]),
-  // The epoch the viewer is fenced on; echoed back on heartbeats.
-  leaseEpoch: z.number().int().nonnegative(),
-  workspaceGeneration: z.number().int().nonnegative().nullable(),
-  archiveGeneration: z.number().int().nonnegative().nullable(),
-  archiveComplete: z.boolean(),
-  viewerHeartbeatIntervalMs: z.number().int().positive(),
-  // The desktop pixel tunnel URL the viewer connects to directly; null until
-  // a viewer grant is minted (gated until then).
-  dataPlaneUrl: z.string().nullable(),
-});
+export const ViewerHolder = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    viewerId: z.string().uuid(),
+    sandboxGroupId: z.string().uuid(),
+    liveness: z.enum(["cold", "warming", "warm", "draining"]),
+    // The epoch the viewer is fenced on; echoed back on heartbeats.
+    leaseEpoch: z.number().int().nonnegative(),
+    workspaceGeneration: z.number().int().nonnegative().nullable(),
+    archiveGeneration: z.number().int().nonnegative().nullable(),
+    archiveComplete: z.boolean(),
+    viewerHeartbeatIntervalMs: z.number().int().positive(),
+    // The desktop pixel tunnel URL the viewer connects to directly; null until
+    // a viewer grant is minted (gated until then).
+    dataPlaneUrl: z.string().nullable(),
+  }),
+);
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
 
 /** Exact POST /viewers response. Keep the credential cells in the contracts
  * package so API and zero-runtime SDK mirrors cannot silently drift. */
-export const AttachViewerResponse = /* @__PURE__ */ ViewerHolder.extend({
-  streamToken: z.string().nullable(),
-  streamExpiresAt: z.string().nullable(),
-  resolution: z.tuple([z.number().int().positive(), z.number().int().positive()]).nullable(),
-  transport: z.enum(["vnc-ws", "relay-frames"]).nullable(),
-  client: z.enum(["novnc", "frames"]).nullable(),
-  terminalUrl: z.string().nullable(),
-  terminalToken: z.string().nullable(),
-  terminalExpiresAt: z.string().nullable(),
-  terminalTransport: z.enum(["pty-ws", "relay-pty"]).nullable(),
-});
+export const AttachViewerResponse = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  ViewerHolder.extend({
+    streamToken: z.string().nullable(),
+    streamExpiresAt: z.string().nullable(),
+    resolution: z.tuple([z.number().int().positive(), z.number().int().positive()]).nullable(),
+    transport: z.enum(["vnc-ws", "relay-frames"]).nullable(),
+    client: z.enum(["novnc", "frames"]).nullable(),
+    terminalUrl: z.string().nullable(),
+    terminalToken: z.string().nullable(),
+    terminalExpiresAt: z.string().nullable(),
+    terminalTransport: z.enum(["pty-ws", "relay-pty"]).nullable(),
+  }),
+);
 export type AttachViewerResponse = z.infer<typeof AttachViewerResponse>;
 
 // POST .../stream-capabilities/acknowledge — record the calling principal's
@@ -17073,34 +19952,42 @@ export type AttachViewerResponse = z.infer<typeof AttachViewerResponse>;
 // session): the un-redacted desktop path returns 409 shared_acknowledgment_required
 // until a shared box is acknowledged WITH the shared-exposure consent. For a
 // solo box `acknowledgeShared` is irrelevant (the un-redacted ack alone gates).
-export const AcknowledgeStreamRequest = /* @__PURE__ */ z.object({
-  // The principal accepts that the desktop pixel plane is un-redacted (can show
-  // cloud creds the agent cat's into a terminal). Always true to record consent;
-  // present for self-documentation + a future explicit withdraw.
-  acknowledgeUnredacted: z.boolean().default(true),
-  // The principal accepts the shared-exposure disclosure: watching this desktop
-  // also shows sibling sessions' agents on the one framebuffer.
-  acknowledgeShared: z.boolean().default(false),
-});
+export const AcknowledgeStreamRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // The principal accepts that the desktop pixel plane is un-redacted (can show
+    // cloud creds the agent cat's into a terminal). Always true to record consent;
+    // present for self-documentation + a future explicit withdraw.
+    acknowledgeUnredacted: z.boolean().default(true),
+    // The principal accepts the shared-exposure disclosure: watching this desktop
+    // also shows sibling sessions' agents on the one framebuffer.
+    acknowledgeShared: z.boolean().default(false),
+  }),
+);
 export type AcknowledgeStreamRequest = z.infer<typeof AcknowledgeStreamRequest>;
 
-export const AcknowledgeStreamResponse = /* @__PURE__ */ z.object({
-  acknowledged: z.boolean(),
-  acknowledgedShared: z.boolean(),
-});
+export const AcknowledgeStreamResponse = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    acknowledged: z.boolean(),
+    acknowledgedShared: z.boolean(),
+  }),
+);
 export type AcknowledgeStreamResponse = z.infer<typeof AcknowledgeStreamResponse>;
 
 // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
 // a stale-epoch beat (a box re-established under a newer epoch) is rejected.
-export const ViewerHeartbeatRequest = /* @__PURE__ */ z.object({
-  leaseEpoch: z.number().int().nonnegative(),
-});
+export const ViewerHeartbeatRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    leaseEpoch: z.number().int().nonnegative(),
+  }),
+);
 export type ViewerHeartbeatRequest = z.infer<typeof ViewerHeartbeatRequest>;
 
-export const ViewerHeartbeatResponse = /* @__PURE__ */ z.object({
-  // false ⇒ the holder was reaped or the epoch is stale; the client re-attaches.
-  alive: z.boolean(),
-});
+export const ViewerHeartbeatResponse = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // false ⇒ the holder was reaped or the epoch is stale; the client re-attaches.
+    alive: z.boolean(),
+  }),
+);
 export type ViewerHeartbeatResponse = z.infer<typeof ViewerHeartbeatResponse>;
 
 // =============================================================================
@@ -17114,204 +20001,226 @@ export type ViewerHeartbeatResponse = z.infer<typeof ViewerHeartbeatResponse>;
 // mandates (the agent ed25519 pubkey + can-offer-display + requests-screen-control).
 // =============================================================================
 
-export const EnrollmentOs = z.enum(["linux", "macos", "windows"]);
+export const EnrollmentOs = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["linux", "macos", "windows"]),
+);
 export type EnrollmentOs = z.infer<typeof EnrollmentOs>;
-export const EnrollmentArch = z.enum(["x86_64", "aarch64"]);
+export const EnrollmentArch = /* @__PURE__ */ defineSchema(() => z.enum(["x86_64", "aarch64"]));
 export type EnrollmentArch = z.infer<typeof EnrollmentArch>;
 
 // POST /enrollments/device/start (agent-side, unauthenticated-at-the-user-level,
 // rate-limited). The agent presents its ed25519 public key + os/arch + the
 // requested whole-machine exposure + whether it can offer a display + whether it
 // requests screen control.
-export const DeviceEnrollmentStartRequest = z.object({
-  // The agent's ed25519 public key (the machine identity the enrollment binds to).
-  publicKey: z.string().min(1).max(1024),
-  os: EnrollmentOs.default("linux"),
-  arch: EnrollmentArch.default("x86_64"),
-  // Human-friendly machine name (hostname by default).
-  machineName: z.string().min(1).max(256).optional(),
-  // v1 only supports whole-machine; kept explicit so the consent is recorded.
-  exposure: z.literal("whole-machine").default("whole-machine"),
-  // The agent can offer a display (a real screen / Xvfb is available).
-  canOfferDisplay: z.boolean().default(false),
-  // The agent requests screen control (computer-use); the user's allow_screen_control
-  // at approve is the AUTHORITATIVE consent.
-  requestsScreenControl: z.boolean().default(false),
-  // The workspace this machine is enrolling into. The agent is told this at install
-  // (the user picks the workspace, or the install/enroll token carries it). The user
-  // who approves must hold a grant in THIS workspace — that binding is what makes
-  // the (user-unauthenticated) start safe: it cannot grant access to a workspace no
-  // authorized user later approves in.
-  workspaceId: z.string().uuid(),
-});
+export const DeviceEnrollmentStartRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // The agent's ed25519 public key (the machine identity the enrollment binds to).
+    publicKey: z.string().min(1).max(1024),
+    os: EnrollmentOs.default("linux"),
+    arch: EnrollmentArch.default("x86_64"),
+    // Human-friendly machine name (hostname by default).
+    machineName: z.string().min(1).max(256).optional(),
+    // v1 only supports whole-machine; kept explicit so the consent is recorded.
+    exposure: z.literal("whole-machine").default("whole-machine"),
+    // The agent can offer a display (a real screen / Xvfb is available).
+    canOfferDisplay: z.boolean().default(false),
+    // The agent requests screen control (computer-use); the user's allow_screen_control
+    // at approve is the AUTHORITATIVE consent.
+    requestsScreenControl: z.boolean().default(false),
+    // The workspace this machine is enrolling into. The agent is told this at install
+    // (the user picks the workspace, or the install/enroll token carries it). The user
+    // who approves must hold a grant in THIS workspace — that binding is what makes
+    // the (user-unauthenticated) start safe: it cannot grant access to a workspace no
+    // authorized user later approves in.
+    workspaceId: z.string().uuid(),
+  }),
+);
 export type DeviceEnrollmentStartRequest = z.infer<typeof DeviceEnrollmentStartRequest>;
 
 // The DeviceAuthStart response (field names match the proto's JSON).
-export const DeviceEnrollmentStartResponse = z.object({
-  deviceCode: z.string(),
-  userCode: z.string(),
-  verificationUri: z.string(),
-  verificationUriComplete: z.string(),
-  intervalSeconds: z.number().int().positive(),
-  expiresInSeconds: z.number().int().positive(),
-});
+export const DeviceEnrollmentStartResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    deviceCode: z.string(),
+    userCode: z.string(),
+    verificationUri: z.string(),
+    verificationUriComplete: z.string(),
+    intervalSeconds: z.number().int().positive(),
+    expiresInSeconds: z.number().int().positive(),
+  }),
+);
 export type DeviceEnrollmentStartResponse = z.infer<typeof DeviceEnrollmentStartResponse>;
 
 // POST /enrollments/device/approve (USER-authenticated, workspace-gated). The
 // LOUD CONSENT step. whole-machine is mandatory (implicit); screen-control is
 // opt-in per allow_screen_control.
-export const DeviceEnrollmentApproveRequest = z.object({
-  userCode: z.string().min(1).max(64),
-  allowScreenControl: z.boolean().default(false),
-  // Human-approved machines are private by default. Workspace/organization
-  // publication is an explicit consent choice at this same loud boundary.
-  scope: ResourceAuthorityScope.default("user"),
-});
+export const DeviceEnrollmentApproveRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    userCode: z.string().min(1).max(64),
+    allowScreenControl: z.boolean().default(false),
+    // Human-approved machines are private by default. Workspace/organization
+    // publication is an explicit consent choice at this same loud boundary.
+    scope: ResourceAuthorityScope.default("user"),
+  }),
+);
 export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
 
 // Machine-authenticated renewal: possession of a bearer alone is insufficient.
 // The existing install key signs this exact, bounded request. No consent/scope
 // fields are accepted; the server retains the current enrollment authority.
-export const RenewEnrollmentRequest = z
-  .object({
-    bearer: z.string().min(1).max(4096),
-    signedAt: z.number().int().positive(),
-    signature: z.string().min(1).max(128),
-  })
-  .strict();
+export const RenewEnrollmentRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      bearer: z.string().min(1).max(4096),
+      signedAt: z.number().int().positive(),
+      signature: z.string().min(1).max(128),
+    })
+    .strict(),
+);
 export type RenewEnrollmentRequest = z.infer<typeof RenewEnrollmentRequest>;
 
 export function enrollmentRenewalProof(bearer: string, signedAt: number): string {
   return `opengeni:enrollment-renew:v1\n${signedAt}\n${bearer}`;
 }
 
-export const DeviceEnrollmentApproveResponse = z.object({
-  approved: z.boolean(),
-  enrollmentId: z.string().uuid(),
-  sandboxId: z.string().uuid(),
-  allowScreenControl: z.boolean(),
-});
+export const DeviceEnrollmentApproveResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    approved: z.boolean(),
+    enrollmentId: z.string().uuid(),
+    sandboxId: z.string().uuid(),
+    allowScreenControl: z.boolean(),
+  }),
+);
 export type DeviceEnrollmentApproveResponse = z.infer<typeof DeviceEnrollmentApproveResponse>;
 
 // POST /enrollments/device/poll (agent-side). The poll state machine.
-export const DeviceEnrollmentPollRequest = z.object({
-  deviceCode: z.string().min(1).max(256),
-});
+export const DeviceEnrollmentPollRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    deviceCode: z.string().min(1).max(256),
+  }),
+);
 export type DeviceEnrollmentPollRequest = z.infer<typeof DeviceEnrollmentPollRequest>;
 
-export const DeviceEnrollmentState = z.enum([
-  "pending",
-  "authorized",
-  "denied",
-  "expired",
-  "disabled",
-]);
+export const DeviceEnrollmentState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["pending", "authorized", "denied", "expired", "disabled"]),
+);
 export type DeviceEnrollmentState = z.infer<typeof DeviceEnrollmentState>;
 
 // The EnrollmentCredentials (field names match the proto's JSON). natsAccountCreds
 // is a PLACEHOLDER — the real per-workspace NATS Account creds binding is
 // infra-deferred (M4/relay); the bearer + subjectPrefix are the application-tier
 // identity the agent presents today.
-export const EnrollmentCredentialsResponse = z.object({
-  agentId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  // The signed bearer the agent presents to the control plane (the `oge_` token).
-  bearer: z.string(),
-  // The Account-scoped control-plane subject prefix the agent subscribes to:
-  // agent.<workspaceId>.<agentId>.
-  subjectPrefix: z.string(),
-  // Connect info for the control plane + stream relay (may be empty when not yet
-  // configured for this deployment — the agent surfaces "control plane unconfigured").
-  natsUrls: z.array(z.string()),
-  relayUrl: z.string(),
-  // The agent's PRODUCER token for the relay edge (the `ogr_` token; M8b). Presented
-  // as StreamOpen.token when the agent registers a pty/desktop channel; the relay
-  // verifies it then pairs the producer with the viewer (whose `ogs_` token the
-  // relay also verifies). Empty when the relay-token plane is unconfigured for this
-  // deployment (graceful degrade — the agent then presents an empty token the relay
-  // rejects, surfacing the gap loudly rather than silently producing a dead stream).
-  relayToken: z.string(),
-  // VESTIGIAL (M-AUTH): there is no per-machine NATS Account creds file. The agent
-  // presents the `bearer` above as the NATS connect AUTH-TOKEN; the server's
-  // auth-callout responder validates it and mints a workspace-scoped user JWT. This
-  // field echoes the bearer so a consumer reading it as the connect credential still
-  // works; new consumers should read `bearer` directly.
-  natsAccountCreds: z.string(),
-  // The minisign public key the agent pins for self-update verification.
-  updatePublicKey: z.string(),
-  consentedWholeMachine: z.boolean(),
-  consentedScreenControl: z.boolean(),
-});
+export const EnrollmentCredentialsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    agentId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    // The signed bearer the agent presents to the control plane (the `oge_` token).
+    bearer: z.string(),
+    // The Account-scoped control-plane subject prefix the agent subscribes to:
+    // agent.<workspaceId>.<agentId>.
+    subjectPrefix: z.string(),
+    // Connect info for the control plane + stream relay (may be empty when not yet
+    // configured for this deployment — the agent surfaces "control plane unconfigured").
+    natsUrls: z.array(z.string()),
+    relayUrl: z.string(),
+    // The agent's PRODUCER token for the relay edge (the `ogr_` token; M8b). Presented
+    // as StreamOpen.token when the agent registers a pty/desktop channel; the relay
+    // verifies it then pairs the producer with the viewer (whose `ogs_` token the
+    // relay also verifies). Empty when the relay-token plane is unconfigured for this
+    // deployment (graceful degrade — the agent then presents an empty token the relay
+    // rejects, surfacing the gap loudly rather than silently producing a dead stream).
+    relayToken: z.string(),
+    // VESTIGIAL (M-AUTH): there is no per-machine NATS Account creds file. The agent
+    // presents the `bearer` above as the NATS connect AUTH-TOKEN; the server's
+    // auth-callout responder validates it and mints a workspace-scoped user JWT. This
+    // field echoes the bearer so a consumer reading it as the connect credential still
+    // works; new consumers should read `bearer` directly.
+    natsAccountCreds: z.string(),
+    // The minisign public key the agent pins for self-update verification.
+    updatePublicKey: z.string(),
+    consentedWholeMachine: z.boolean(),
+    consentedScreenControl: z.boolean(),
+  }),
+);
 export type EnrollmentCredentialsResponse = z.infer<typeof EnrollmentCredentialsResponse>;
 
-export const DeviceEnrollmentPollResponse = z.object({
-  state: DeviceEnrollmentState,
-  // Present only when state === "authorized".
-  credentials: EnrollmentCredentialsResponse.optional(),
-});
+export const DeviceEnrollmentPollResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    state: DeviceEnrollmentState,
+    // Present only when state === "authorized".
+    credentials: EnrollmentCredentialsResponse.optional(),
+  }),
+);
 export type DeviceEnrollmentPollResponse = z.infer<typeof DeviceEnrollmentPollResponse>;
 
 // GET /enrollments — a workspace's machines (the Machines dashboard surface).
-export const EnrollmentSummary = z.object({
-  id: z.string().uuid(),
-  scope: ResourceAuthorityScope,
-  generation: z.number().int().positive(),
-  pubkey: z.string(),
-  exposure: z.literal("whole-machine"),
-  hasDisplay: z.boolean(),
-  // Present (non-null) only when a display EXISTS but capture is blocked (macOS
-  // Screen Recording / TCC not granted): a human, actionable reason so the UI can
-  // show "display: capture not granted" instead of a bare "headless". null == capture
-  // permitted OR genuinely headless.
-  desktopUnavailableReason: z.string().nullish(),
-  allowScreenControl: z.boolean(),
-  status: z.enum(["active", "revoked"]),
-  os: EnrollmentOs,
-  arch: z.string(),
-  lastSeenAt: z.string().nullable(),
-  createdAt: z.string(),
-  revokedAt: z.string().nullable(),
-});
+export const EnrollmentSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    scope: ResourceAuthorityScope,
+    generation: z.number().int().positive(),
+    pubkey: z.string(),
+    exposure: z.literal("whole-machine"),
+    hasDisplay: z.boolean(),
+    // Present (non-null) only when a display EXISTS but capture is blocked (macOS
+    // Screen Recording / TCC not granted): a human, actionable reason so the UI can
+    // show "display: capture not granted" instead of a bare "headless". null == capture
+    // permitted OR genuinely headless.
+    desktopUnavailableReason: z.string().nullish(),
+    allowScreenControl: z.boolean(),
+    status: z.enum(["active", "revoked"]),
+    os: EnrollmentOs,
+    arch: z.string(),
+    lastSeenAt: z.string().nullable(),
+    createdAt: z.string(),
+    revokedAt: z.string().nullable(),
+  }),
+);
 export type EnrollmentSummary = z.infer<typeof EnrollmentSummary>;
 
-export const ListEnrollmentsResponse = z.object({
-  enrollments: z.array(EnrollmentSummary),
-});
+export const ListEnrollmentsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    enrollments: z.array(EnrollmentSummary),
+  }),
+);
 export type ListEnrollmentsResponse = z.infer<typeof ListEnrollmentsResponse>;
 
-export const RevokeEnrollmentResponse = z.object({
-  revoked: z.boolean(),
-  outcome: z.enum(["removed", "already_removed", "blocked"]),
-  enrollmentId: z.string().uuid(),
-  machineName: z.string().nullable(),
-  lastSeenAt: z.string().datetime({ offset: true }).nullable(),
-  revokedAt: z.string().datetime({ offset: true }).nullable(),
-  code: z
-    .enum([
-      "active_route",
-      "active_commands",
-      "machine_home",
-      "active_lease",
-      "recovery_pending",
-      "not_selfhosted",
-    ])
-    .nullable(),
-  message: z.string(),
-  action: z.string(),
-  dependentSessions: z.array(
-    z.object({
-      id: z.string().uuid(),
-      title: z.string().nullable(),
-    }),
-  ),
-});
+export const RevokeEnrollmentResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    revoked: z.boolean(),
+    outcome: z.enum(["removed", "already_removed", "blocked"]),
+    enrollmentId: z.string().uuid(),
+    machineName: z.string().nullable(),
+    lastSeenAt: z.string().datetime({ offset: true }).nullable(),
+    revokedAt: z.string().datetime({ offset: true }).nullable(),
+    code: z
+      .enum([
+        "active_route",
+        "active_commands",
+        "machine_home",
+        "active_lease",
+        "recovery_pending",
+        "not_selfhosted",
+      ])
+      .nullable(),
+    message: z.string(),
+    action: z.string(),
+    dependentSessions: z.array(
+      z.object({
+        id: z.string().uuid(),
+        title: z.string().nullable(),
+      }),
+    ),
+  }),
+);
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
 
 /** POST /v1/workspaces/:workspaceId/enrollments/:id/revoke body. */
-export const RemoveEnrollmentRequest = z.object({
-  expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
-  idempotencyKey: z.string().trim().min(1).max(200).optional(),
-});
+export const RemoveEnrollmentRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
+    idempotencyKey: z.string().trim().min(1).max(200).optional(),
+  }),
+);
 export type RemoveEnrollmentRequest = z.infer<typeof RemoveEnrollmentRequest>;
 
 // =============================================================================
@@ -17327,56 +20236,80 @@ export type RemoveEnrollmentRequest = z.infer<typeof RemoveEnrollmentRequest>;
 // pending rows; the route resolves its workspace, authorizes (enrollments:read),
 // and returns the machine details — or 404 (never revealing cross-workspace
 // existence) when the grant check fails or no live pending row matches.
-export const DeviceEnrollmentLookupRequest = z.object({
-  userCode: z.string().min(1).max(64),
-});
+export const DeviceEnrollmentLookupRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    userCode: z.string().min(1).max(64),
+  }),
+);
 export type DeviceEnrollmentLookupRequest = z.infer<typeof DeviceEnrollmentLookupRequest>;
 
 // The presentational machine details the consent screen renders (a subset of the
 // pending request — NO secrets, NO device_code).
-export const DeviceEnrollmentLookupMachine = z.object({
-  machineName: z.string().nullable(),
-  os: EnrollmentOs,
-  arch: z.string(),
-  canOfferDisplay: z.boolean(),
-  requestsScreenControl: z.boolean(),
-});
+export const DeviceEnrollmentLookupMachine = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    machineName: z.string().nullable(),
+    os: EnrollmentOs,
+    arch: z.string(),
+    canOfferDisplay: z.boolean(),
+    requestsScreenControl: z.boolean(),
+  }),
+);
 export type DeviceEnrollmentLookupMachine = z.infer<typeof DeviceEnrollmentLookupMachine>;
 
-export const DeviceEnrollmentLookupResponse = z.object({
-  workspaceId: z.string().uuid(),
-  userCode: z.string(),
-  machine: DeviceEnrollmentLookupMachine,
-  expiresAt: z.string(),
-});
+export const DeviceEnrollmentLookupResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    userCode: z.string(),
+    machine: DeviceEnrollmentLookupMachine,
+    expiresAt: z.string(),
+  }),
+);
 export type DeviceEnrollmentLookupResponse = z.infer<typeof DeviceEnrollmentLookupResponse>;
 
 // POST /v1/workspaces/:workspaceId/enrollments/device/deny (USER-authenticated,
 // enrollments:manage). The explicit "no" at the approve page — mirrors approve.
-export const DeviceEnrollmentDenyRequest = z.object({
-  userCode: z.string().min(1).max(64),
-});
+export const DeviceEnrollmentDenyRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    userCode: z.string().min(1).max(64),
+  }),
+);
 export type DeviceEnrollmentDenyRequest = z.infer<typeof DeviceEnrollmentDenyRequest>;
 
-export const DeviceEnrollmentDenyResponse = z.object({
-  denied: z.boolean(),
-});
+export const DeviceEnrollmentDenyResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    denied: z.boolean(),
+  }),
+);
 export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyResponse>;
 
 // POST /v1/workspaces/:workspaceId/enrollments/token (USER-authenticated,
 // enrollments:manage). Mints the short-TTL headless enroll token (the `oget_`
 // token). allowScreenControl bakes the screen-control consent into the token.
-export const MintEnrollTokenRequest = z.object({
-  allowScreenControl: z.boolean().default(false),
-});
+// `scope: "user"` makes the machine the caller's own; it requires a verified
+// person: someone signed in, or a credential acting as them (a personal API
+// key, or an organization key or organization MCP client acting as that
+// person). A key, service or agent acting as itself gets 422. Omitted keeps the
+// original workspace-shared token for existing integrations.
+export const MintEnrollTokenRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    allowScreenControl: z.boolean().default(false),
+    scope: EnrollTokenScope.optional(),
+  }),
+);
 export type MintEnrollTokenRequest = z.infer<typeof MintEnrollTokenRequest>;
 
-export const MintEnrollTokenResponse = z.object({
-  // The `oget_` token. SECRET — the UI shows it once with a copy-now warning.
-  token: z.string(),
-  expiresAt: z.string(),
-  expiresInSeconds: z.number().int().positive(),
-});
+export const MintEnrollTokenResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // The `oget_` token. SECRET — the UI shows it once with a copy-now warning.
+    token: z.string(),
+    expiresAt: z.string(),
+    expiresInSeconds: z.number().int().positive(),
+    // What the token grants, echoed so a client only shows a command that
+    // matches the person's current choices.
+    scope: EnrollTokenScope,
+    allowScreenControl: z.boolean(),
+  }),
+);
 export type MintEnrollTokenResponse = z.infer<typeof MintEnrollTokenResponse>;
 
 // POST /v1/enrollments/token/exchange (UNAUTHENTICATED — the token IS the auth).
@@ -17384,27 +20317,31 @@ export type MintEnrollTokenResponse = z.infer<typeof MintEnrollTokenResponse>;
 // enroll token. On a valid token the control plane performs the SAME finalize as
 // approve and returns the IDENTICAL EnrollmentCredentialsResponse shape (so the
 // agent's existing credential parsing is reused).
-export const EnrollTokenExchangeRequest = z.object({
-  // The `oget_` enroll token (the auth + the workspace/account/consent grant).
-  token: z.string().min(1),
-  // The agent's ed25519 public key (the machine identity the enrollment binds to).
-  publicKey: z.string().min(1).max(1024),
-  os: EnrollmentOs.default("linux"),
-  arch: EnrollmentArch.default("x86_64"),
-  machineName: z.string().min(1).max(256).optional(),
-  // v1 only supports whole-machine; kept explicit so the consent is recorded.
-  exposure: z.literal("whole-machine").default("whole-machine"),
-  canOfferDisplay: z.boolean().default(false),
-  // The agent's REQUEST; the token's allowScreenControl is the AUTHORITATIVE consent.
-  requestsScreenControl: z.boolean().default(false),
-});
+export const EnrollTokenExchangeRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    // The `oget_` enroll token (the auth + the workspace/account/consent grant).
+    token: z.string().min(1),
+    // The agent's ed25519 public key (the machine identity the enrollment binds to).
+    publicKey: z.string().min(1).max(1024),
+    os: EnrollmentOs.default("linux"),
+    arch: EnrollmentArch.default("x86_64"),
+    machineName: z.string().min(1).max(256).optional(),
+    // v1 only supports whole-machine; kept explicit so the consent is recorded.
+    exposure: z.literal("whole-machine").default("whole-machine"),
+    canOfferDisplay: z.boolean().default(false),
+    // The agent's REQUEST; the token's allowScreenControl is the AUTHORITATIVE consent.
+    requestsScreenControl: z.boolean().default(false),
+  }),
+);
 export type EnrollTokenExchangeRequest = z.infer<typeof EnrollTokenExchangeRequest>;
 
 // The exchange wraps the EXISTING EnrollmentCredentialsResponse — IDENTICAL to the
 // poll authorized branch's `credentials` (NOT a redefined credential shape).
-export const EnrollTokenExchangeResponse = z.object({
-  credentials: EnrollmentCredentialsResponse,
-});
+export const EnrollTokenExchangeResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    credentials: EnrollmentCredentialsResponse,
+  }),
+);
 export type EnrollTokenExchangeResponse = z.infer<typeof EnrollTokenExchangeResponse>;
 
 // ── Machines dashboard + per-machine metrics (M10) ────────────
@@ -17422,133 +20359,329 @@ export type EnrollTokenExchangeResponse = z.infer<typeof EnrollTokenExchangeResp
  * contract: absence == not-reported, NEVER a real zero). `runQueue` is the
  * runnable-count contention signal. `sampledAt` is an ISO-8601 instant.
  */
-export const MetricSample = z.object({
-  cpuPct: z.number(),
-  load1: z.number(),
-  load5: z.number(),
-  load15: z.number(),
-  memUsedBytes: z.number().int(),
-  memTotalBytes: z.number().int(),
-  diskUsedBytes: z.number().int(),
-  diskTotalBytes: z.number().int(),
-  gpuUtilPct: z.number().nullable(),
-  gpuMemBytes: z.number().int().nullable(),
-  runQueue: z.number(),
-  sampledAt: z.string(),
-});
+export const MetricSample = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    cpuPct: z.number(),
+    load1: z.number(),
+    load5: z.number(),
+    load15: z.number(),
+    memUsedBytes: z.number().int(),
+    memTotalBytes: z.number().int(),
+    diskUsedBytes: z.number().int(),
+    diskTotalBytes: z.number().int(),
+    gpuUtilPct: z.number().nullable(),
+    gpuMemBytes: z.number().int().nullable(),
+    runQueue: z.number(),
+    sampledAt: z.string(),
+  }),
+);
 export type MetricSample = z.infer<typeof MetricSample>;
 
 /** The derived dashboard state of a machine. The M3 liveness
  *  (online/reconnecting/offline) plus the enrollment-derived consent/display
  *  reasons (consent_required / display_unavailable) and the in-flight device-flow
  *  (enrolling). */
-export const MachineState = z.enum([
-  "online",
-  "reconnecting",
-  "offline",
-  "consent_required",
-  "display_unavailable",
-  "enrolling",
-]);
+export const MachineState = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "online",
+    "reconnecting",
+    "offline",
+    "consent_required",
+    "display_unavailable",
+    "enrolling",
+  ]),
+);
 export type MachineState = z.infer<typeof MachineState>;
 
-export const MachineKind = z.enum([
-  "docker",
-  "modal",
-  "local",
-  "daytona",
-  "runloop",
-  "e2b",
-  "blaxel",
-  "cloudflare",
-  "vercel",
-  "selfhosted",
-  "opensandbox",
-]);
+export const MachineKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "docker",
+    "modal",
+    "local",
+    "daytona",
+    "runloop",
+    "e2b",
+    "blaxel",
+    "cloudflare",
+    "vercel",
+    "selfhosted",
+    "opensandbox",
+  ]),
+);
 export type MachineKind = z.infer<typeof MachineKind>;
 
 /** Diagnostic projection of the single live Connected-Machine runner authority.
  * It contains no bearer or NATS subject material. `supersededCount` is derived
  * from the monotonic generation; duplicate-denial evidence records valid
  * competing processes that were prevented from receiving work. */
-export const MachineConnectionAuthority = z.object({
-  state: z.enum(["not_applicable", "unclaimed", "active", "expired"]),
-  generation: z.number().int().nonnegative(),
-  supersededCount: z.number().int().nonnegative(),
-  leaseExpiresAt: z.string().nullable(),
-  duplicateRunnerDeniedCount: z.number().int().nonnegative(),
-  duplicateRunnerDeniedAt: z.string().nullable(),
-});
+export const MachineConnectionAuthority = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    state: z.enum(["not_applicable", "unclaimed", "active", "expired"]),
+    generation: z.number().int().nonnegative(),
+    supersededCount: z.number().int().nonnegative(),
+    leaseExpiresAt: z.string().nullable(),
+    duplicateRunnerDeniedCount: z.number().int().nonnegative(),
+    duplicateRunnerDeniedAt: z.string().nullable(),
+  }),
+);
 export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
 
-export const MachineRuntimeCapabilities = z.object({
-  exec: z.boolean(),
-  filesystem: z.boolean(),
-  git: z.boolean(),
-  pty: z.boolean(),
-  desktop: z.boolean(),
-  opStream: z.boolean(),
-  browserBridge: z.boolean(),
-  operationResourcePolicy: z.boolean(),
-  operationCpuQuota: z.boolean(),
-  transactionalFsWrite: z.boolean().default(false),
-});
+export const MachineRuntimeCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    exec: z.boolean(),
+    filesystem: z.boolean(),
+    git: z.boolean(),
+    pty: z.boolean(),
+    desktop: z.boolean(),
+    opStream: z.boolean(),
+    browserBridge: z.boolean(),
+    operationResourcePolicy: z.boolean(),
+    operationCpuQuota: z.boolean(),
+    transactionalFsWrite: z.boolean().default(false),
+    // The agent renews its credentials on request, so consent changes (screen
+    // control turned on) apply in place without reconnecting.
+    credentialRenew: z.boolean().default(false),
+    // Whether the live agent's credentials carry screen-control consent, from its
+    // Hello. Null when not reported since this field shipped (unknown).
+    screenControl: z.boolean().nullable().default(null),
+  }),
+);
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
-export const MachineUpdateStatus = z.enum([
-  "requested",
-  "accepted",
-  "waiting_for_idle",
-  "downloading",
-  "verifying",
-  "applying",
-  "restarting",
-  "succeeded",
-  "failed",
-]);
+export const MachineUpdateStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "requested",
+    "accepted",
+    "waiting_for_idle",
+    "downloading",
+    "verifying",
+    "applying",
+    "restarting",
+    "succeeded",
+    "failed",
+  ]),
+);
 export type MachineUpdateStatus = z.infer<typeof MachineUpdateStatus>;
 
-export const MachineUpdateState = z.object({
-  operationId: z.string().uuid(),
-  status: MachineUpdateStatus,
-  targetVersion: z.string(),
-  expectedBinarySha256: z
-    .string()
-    .regex(/^[0-9a-f]{64}$/)
-    .nullable(),
-  errorCode: z.string().nullable(),
-  retryable: z.boolean(),
-  rolledBack: z.boolean(),
-  requestedAt: z.string(),
-  updatedAt: z.string(),
-  completedAt: z.string().nullable(),
-});
+export const MachineUpdateState = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    operationId: z.string().uuid(),
+    status: MachineUpdateStatus,
+    targetVersion: z.string(),
+    expectedBinarySha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    errorCode: z.string().nullable(),
+    retryable: z.boolean(),
+    rolledBack: z.boolean(),
+    requestedAt: z.string(),
+    updatedAt: z.string(),
+    completedAt: z.string().nullable(),
+  }),
+);
 export type MachineUpdateState = z.infer<typeof MachineUpdateState>;
 
-export const MachineRuntime = z.object({
-  installedVersion: z.string().nullable(),
-  binarySha256: z
-    .string()
-    .regex(/^[0-9a-f]{64}$/)
-    .nullable(),
-  updateChannel: z.enum(["stable", "beta"]).nullable(),
-  desiredVersion: z.string().nullable(),
-  versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
-  updateBlockedReason: z.string().nullable().optional(),
-  capabilities: MachineRuntimeCapabilities,
-  update: MachineUpdateState.nullable(),
-});
+/** The three macOS Privacy & Security grants desktop capture and input need. */
+export const MachineMacPermissions = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    screenRecording: z.boolean(),
+    accessibility: z.boolean(),
+    inputMonitoring: z.boolean(),
+  }),
+);
+export type MachineMacPermissions = z.infer<typeof MachineMacPermissions>;
+
+export const MachineRuntime = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    installedVersion: z.string().nullable(),
+    binarySha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    updateChannel: z.enum(["stable", "beta"]).nullable(),
+    desiredVersion: z.string().nullable(),
+    versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+    updateBlockedReason: z.string().nullable().optional(),
+    capabilities: MachineRuntimeCapabilities,
+    update: MachineUpdateState.nullable(),
+    // Live macOS desktop permissions; null off macOS or when the agent does not
+    // report them (unknown, not denied).
+    macPermissions: MachineMacPermissions.nullable().default(null),
+  }),
+);
 export type MachineRuntime = z.infer<typeof MachineRuntime>;
 
-export const UpdateMachineAgentResponse = z.object({
-  operationId: z.string().uuid(),
-  accepted: z.boolean(),
-  targetVersion: z.string(),
-});
+export const UpdateMachineAgentResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    operationId: z.string().uuid(),
+    accepted: z.boolean(),
+    targetVersion: z.string(),
+  }),
+);
 export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
 
-const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
-const OperationCpuMillicores = z.number().int().positive().max(0xffff_ffff).nullable();
+/** Turn screen control on for one connected machine, in place. The consent is
+ * recorded on the machine's enrollment and the live agent renews its
+ * credentials to carry it. active: the machine now holds screen-control
+ * credentials. pending: allowed, and applies by itself when the machine next
+ * connects (offline) or once its agent is updated (agent_update_required);
+ * renewal_failed: retry the call; reconnect_required: the machine's connection
+ * predates in-place renewal, so run the connect command on it again. */
+export const EnableMachineScreenControlResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    status: z.enum(["active", "pending"]),
+    reason: z
+      .enum(["offline", "agent_update_required", "renewal_failed", "reconnect_required"])
+      .nullable(),
+    message: z.string().nullable(),
+  }),
+);
+export type EnableMachineScreenControlResponse = z.infer<typeof EnableMachineScreenControlResponse>;
+
+/** Who can use a Connected Machine: everyone in its workspace, or one person. */
+export const MachineAudience = /* @__PURE__ */ defineSchema(() => z.enum(["workspace", "only_me"]));
+export type MachineAudience = z.infer<typeof MachineAudience>;
+
+/**
+ * POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview. The plan for
+ * changing who can use the machine: everything one confirmation will do.
+ * `ownerSubjectId` names who owns the machine as Only me (defaults to the
+ * caller; naming someone else needs workspace admin).
+ */
+export const MachineAudiencePreviewRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    audience: MachineAudience,
+    ownerSubjectId: z.string().min(1).max(512).optional(),
+  }),
+);
+export type MachineAudiencePreviewRequest = z.infer<typeof MachineAudiencePreviewRequest>;
+
+/** PUT /v1/workspaces/:ws/machines/:enrollmentId/audience applies the plan.
+ * `expectedGeneration` is the machine generation the preview was read at. */
+export const ChangeMachineAudienceRequest = /* @__PURE__ */ defineSchema(() =>
+  MachineAudiencePreviewRequest.extend({
+    expectedGeneration: z.number().int().positive(),
+  }),
+);
+export type ChangeMachineAudienceRequest = z.infer<typeof ChangeMachineAudienceRequest>;
+
+/**
+ * What the change does to one thing on the machine. `move_off`: the chat
+ * leaves the machine (its history and files stay). `keep`: the owner's chat
+ * stays and keeps its audience. `make_only_me` / `pause`: a schedule that runs
+ * on the machine. `remove_first`: the same computer is connected a second
+ * time; remove that copy before switching.
+ */
+export const MachineAudienceAction = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["move_off", "keep", "make_only_me", "pause", "remove_first"]),
+);
+export type MachineAudienceAction = z.infer<typeof MachineAudienceAction>;
+
+/**
+ * One thing an audience change affects. Another member's private chat or
+ * schedule is listed without its title or owner. `stopsTurn`: a running turn
+ * there stops for good. `stopsCommands`: the agent's commands still running
+ * there that stop.
+ */
+export const MachineAudienceItem = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: z.enum(["chat", "schedule", "duplicate_connection"]),
+    action: MachineAudienceAction,
+    sessionId: z.string().nullable().default(null),
+    scheduledTaskId: z.string().nullable().default(null),
+    enrollmentId: z.string().nullable().default(null),
+    workspaceId: z.string().nullable().default(null),
+    relation: z
+      .enum(["other_member", "owner_shared", "owner_private", "other_workspace"])
+      .nullable()
+      .default(null),
+    visibility: z.enum(["user_private", "workspace_shared"]).nullable().default(null),
+    title: z.string().nullable().default(null),
+    ownerSubjectId: z.string().nullable().default(null),
+    stopsTurn: z.boolean().default(false),
+    stopsCommands: z.number().int().nonnegative().default(0),
+  }),
+);
+export type MachineAudienceItem = z.infer<typeof MachineAudienceItem>;
+
+/** Counts of what one change does. */
+export const MachineAudienceSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The owner's chats that keep working with no change. */
+    keptChats: z.number().int().nonnegative(),
+    /** The owner's shared chats that stay on the machine and stay shared. */
+    keptSharedChats: z.number().int().nonnegative(),
+    movedOffChats: z.number().int().nonnegative(),
+    schedulesMadeOnlyMe: z.number().int().nonnegative(),
+    schedulesPaused: z.number().int().nonnegative(),
+    stoppedTurns: z.number().int().nonnegative(),
+    stoppedCommands: z.number().int().nonnegative(),
+    /** People who get one inbox notice each. */
+    notifiedPeople: z.number().int().nonnegative(),
+  }),
+);
+export type MachineAudienceSummary = z.infer<typeof MachineAudienceSummary>;
+
+/** The plan. `ready` is false only while the same computer is also connected
+ * as a separate machine (`remove_first`). Apply it at `generation`. */
+export const MachineAudiencePreview = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    enrollmentId: z.string(),
+    sandboxId: z.string(),
+    machineName: z.string(),
+    currentAudience: MachineAudience,
+    targetAudience: MachineAudience,
+    generation: z.number().int().positive(),
+    ownerSubjectId: z.string().nullable(),
+    summary: MachineAudienceSummary,
+    items: z.array(MachineAudienceItem),
+    ready: z.boolean(),
+  }),
+);
+export type MachineAudiencePreview = z.infer<typeof MachineAudiencePreview>;
+
+/** The applied change. The machine keeps its sandbox ID and connection. */
+export const ChangeMachineAudienceResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    enrollmentId: z.string(),
+    sandboxId: z.string(),
+    previousAudience: MachineAudience,
+    audience: MachineAudience,
+    ownerSubjectId: z.string().nullable(),
+    generation: z.number().int().positive(),
+    summary: MachineAudienceSummary,
+    detachedSessionIds: z.array(z.string()),
+    keptSessionIds: z.array(z.string()),
+  }),
+);
+export type ChangeMachineAudienceResponse = z.infer<typeof ChangeMachineAudienceResponse>;
+
+/** macOS Privacy & Security panes the agent needs for desktop capture/input. */
+export const MachinePrivacySettingsPane = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["screen_recording", "accessibility", "input_monitoring"]),
+);
+export type MachinePrivacySettingsPane = z.infer<typeof MachinePrivacySettingsPane>;
+
+export const OpenMachinePrivacySettingsRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ pane: MachinePrivacySettingsPane }),
+);
+export type OpenMachinePrivacySettingsRequest = z.infer<typeof OpenMachinePrivacySettingsRequest>;
+
+export const OpenMachinePrivacySettingsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    opened: z.boolean(),
+    message: z.string().nullable(),
+  }),
+);
+export type OpenMachinePrivacySettingsResponse = z.infer<typeof OpenMachinePrivacySettingsResponse>;
+
+const OperationMemoryBytes = /* @__PURE__ */ defineSchema(() =>
+  z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+);
+const OperationCpuMillicores = /* @__PURE__ */ defineSchema(() =>
+  z.number().int().positive().max(0xffff_ffff).nullable(),
+);
 
 function operationPolicyShape(
   value: {
@@ -17574,25 +20707,29 @@ function operationPolicyShape(
 /** Optional per-connection command resource policy. CPU is a period-independent
  * millicore ratio; runners choose a documented representable cgroup period. Null
  * values are unrestricted; revision is the optimistic concurrency fence. */
-export const MachineOperationPolicy = z
-  .object({
-    memoryMaxBytes: OperationMemoryBytes,
-    memoryHighBytes: OperationMemoryBytes,
-    cpuMaxMillicores: OperationCpuMillicores,
-    revision: z.number().int().nonnegative(),
-    updatedAt: z.string().nullable(),
-  })
-  .superRefine(operationPolicyShape);
+export const MachineOperationPolicy = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      memoryMaxBytes: OperationMemoryBytes,
+      memoryHighBytes: OperationMemoryBytes,
+      cpuMaxMillicores: OperationCpuMillicores,
+      revision: z.number().int().nonnegative(),
+      updatedAt: z.string().nullable(),
+    })
+    .superRefine(operationPolicyShape),
+);
 export type MachineOperationPolicy = z.infer<typeof MachineOperationPolicy>;
 
-export const UpdateMachineOperationPolicyRequest = z
-  .object({
-    memoryMaxBytes: OperationMemoryBytes,
-    memoryHighBytes: OperationMemoryBytes,
-    cpuMaxMillicores: OperationCpuMillicores.optional(),
-    expectedRevision: z.number().int().nonnegative(),
-  })
-  .superRefine(operationPolicyShape);
+export const UpdateMachineOperationPolicyRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      memoryMaxBytes: OperationMemoryBytes,
+      memoryHighBytes: OperationMemoryBytes,
+      cpuMaxMillicores: OperationCpuMillicores.optional(),
+      expectedRevision: z.number().int().nonnegative(),
+    })
+    .superRefine(operationPolicyShape),
+);
 export type UpdateMachineOperationPolicyRequest = z.infer<
   typeof UpdateMachineOperationPolicyRequest
 >;
@@ -17605,37 +20742,39 @@ export type UpdateMachineOperationPolicyRequest = z.infer<
  * share this whole machine). `metrics` is the latest sample, or null when none
  * has landed yet (just enrolled / offline before a first heartbeat).
  */
-export const MachineView = z.object({
-  sandboxId: z.string(),
-  enrollmentId: z.string().nullable(),
-  scope: ResourceAuthorityScope.default("workspace"),
-  generation: z.number().int().positive().default(1),
-  name: z.string(),
-  kind: MachineKind,
-  state: MachineState,
-  active: z.boolean(),
-  isSessionGroup: z.boolean(),
-  workspaceGeneration: z.number().int().nonnegative().nullable(),
-  archiveGeneration: z.number().int().nonnegative().nullable(),
-  archiveComplete: z.boolean(),
-  os: z.string(),
-  arch: z.string(),
-  hasDisplay: z.boolean(),
-  // Non-null only when a display exists but capture is blocked (macOS Screen
-  // Recording / TCC not granted) — the UI can surface "display: capture not granted".
-  // null == capture permitted OR headless.
-  desktopUnavailableReason: z.string().nullish(),
-  allowScreenControl: z.boolean(),
-  sharedSessionCount: z.number().int(),
-  lastSeenAt: z.string().nullable(),
-  connectionAuthority: MachineConnectionAuthority,
-  // Exact connected-agent build/capabilities and current update operation. Null
-  // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
-  runtime: MachineRuntime.nullable().default(null),
-  // Per-enrollment desired policy. Null for managed/session sandboxes.
-  operationPolicy: MachineOperationPolicy.nullable().default(null),
-  metrics: MetricSample.nullable(),
-});
+export const MachineView = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    sandboxId: z.string(),
+    enrollmentId: z.string().nullable(),
+    scope: ResourceAuthorityScope.default("workspace"),
+    generation: z.number().int().positive().default(1),
+    name: z.string(),
+    kind: MachineKind,
+    state: MachineState,
+    active: z.boolean(),
+    isSessionGroup: z.boolean(),
+    workspaceGeneration: z.number().int().nonnegative().nullable(),
+    archiveGeneration: z.number().int().nonnegative().nullable(),
+    archiveComplete: z.boolean(),
+    os: z.string(),
+    arch: z.string(),
+    hasDisplay: z.boolean(),
+    // Non-null only when a display exists but capture is blocked (macOS Screen
+    // Recording / TCC not granted) — the UI can surface "display: capture not granted".
+    // null == capture permitted OR headless.
+    desktopUnavailableReason: z.string().nullish(),
+    allowScreenControl: z.boolean(),
+    sharedSessionCount: z.number().int(),
+    lastSeenAt: z.string().nullable(),
+    connectionAuthority: MachineConnectionAuthority,
+    // Exact connected-agent build/capabilities and current update operation. Null
+    // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
+    runtime: MachineRuntime.nullable().default(null),
+    // Per-enrollment desired policy. Null for managed/session sandboxes.
+    operationPolicy: MachineOperationPolicy.nullable().default(null),
+    metrics: MetricSample.nullable(),
+  }),
+);
 export type MachineView = z.infer<typeof MachineView>;
 
 /**
@@ -17643,11 +20782,13 @@ export type MachineView = z.infer<typeof MachineView>;
  * `activeEpoch` echo the session's epoch-fenced active-sandbox pointer (null
  * activeSandboxId == the session's own group box is active).
  */
-export const MachinesResponse = z.object({
-  activeSandboxId: z.string().nullable(),
-  activeEpoch: z.number().int(),
-  machines: z.array(MachineView),
-});
+export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    activeSandboxId: z.string().nullable(),
+    activeEpoch: z.number().int(),
+    machines: z.array(MachineView),
+  }),
+);
 export type MachinesResponse = z.infer<typeof MachinesResponse>;
 
 /**
@@ -17657,9 +20798,11 @@ export type MachinesResponse = z.infer<typeof MachinesResponse>;
  * `MachinesResponse` machine's `sandboxId`, or "session"/"default" to swap back
  * to the session's own group box.
  */
-export const SwapActiveSandboxRequest = z.object({
-  target: z.string().min(1),
-});
+export const SwapActiveSandboxRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    target: z.string().min(1),
+  }),
+);
 export type SwapActiveSandboxRequest = z.infer<typeof SwapActiveSandboxRequest>;
 
 /**
@@ -17667,37 +20810,41 @@ export type SwapActiveSandboxRequest = z.infer<typeof SwapActiveSandboxRequest>;
  * successful repoint OR a no-op (already pointed there); `reason` carries the
  * failure detail (unowned/offline target, or a lost epoch fence) when false.
  */
-export const SwapActiveSandboxResponse = z.object({
-  swapped: z.boolean(),
-  activeSandboxId: z.string().nullable(),
-  activeEpoch: z.number().int(),
-  reason: z.string().optional(),
-  // Typed rejection discriminant (issue #341). Present only when swapped is false,
-  // so a client distinguishes a deleted/absent target from an unaddressable
-  // enrollment from a backend the turn cannot establish from a lost epoch race —
-  // without parsing the human reason string.
-  code: z
-    .enum([
-      "stale_pointer",
-      "offline_enrollment",
-      "unsupported_backend_context",
-      "transient_establishment",
-      "concurrent_swap",
-      "recovery_in_progress",
-      "recovery_degraded",
-      "recovery_unrecoverable",
-    ])
-    .optional(),
-});
+export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    swapped: z.boolean(),
+    activeSandboxId: z.string().nullable(),
+    activeEpoch: z.number().int(),
+    reason: z.string().optional(),
+    // Typed rejection discriminant (issue #341). Present only when swapped is false,
+    // so a client distinguishes a deleted/absent target from an unaddressable
+    // enrollment from a backend the turn cannot establish from a lost epoch race —
+    // without parsing the human reason string.
+    code: z
+      .enum([
+        "stale_pointer",
+        "offline_enrollment",
+        "unsupported_backend_context",
+        "transient_establishment",
+        "concurrent_swap",
+        "recovery_in_progress",
+        "recovery_degraded",
+        "recovery_unrecoverable",
+      ])
+      .optional(),
+  }),
+);
 export type SwapActiveSandboxResponse = z.infer<typeof SwapActiveSandboxResponse>;
 
 /**
  * GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h — the
  * downsampled (~1/min) history the dashboard time-range reads.
  */
-export const MachineMetricsSeriesResponse = z.object({
-  samples: z.array(MetricSample),
-});
+export const MachineMetricsSeriesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    samples: z.array(MetricSample),
+  }),
+);
 export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesResponse>;
 
 /**
@@ -17790,15 +20937,17 @@ export const ModelCredentialSourceV1 =
   );
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
 
-const TurnExecutionCredentialSourceV1 = z.union([
-  ModelCredentialSourceV1,
-  z
-    .object({
-      kind: z.literal("deployment"),
-      mechanism: z.literal("none"),
-    })
-    .strict(),
-]);
+const TurnExecutionCredentialSourceV1 = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    ModelCredentialSourceV1,
+    z
+      .object({
+        kind: z.literal("deployment"),
+        mechanism: z.literal("none"),
+      })
+      .strict(),
+  ]),
+);
 
 export const ModelBillingAttributionV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
@@ -18094,6 +21243,10 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     label: z.string(),
     /** Optional curated compact label for dense UI (e.g. mobile composer). */
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: z
+      .string()
+      .refine((value) => modelLogoUrl({ id: "", logoUrl: value }) !== null)
+      .optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat", "anthropic-messages"]),
@@ -18203,6 +21356,8 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
         "provider_unhealthy",
         "policy_blocked",
         "unsupported",
+        // The workspace turned Opengeni credits off and this model spends them.
+        "credits_disabled",
       ])
       .nullable(),
     checkedAt: z.string().datetime().nullable(),
@@ -18214,8 +21369,12 @@ export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
+      /** Current funding status, without exposing the organization's balance. */
+      creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
       /** Exact workspace-policy verdict without exposing provider identity. */
       policyAllowed: z.boolean().optional(),
+      /** Workspace preference, separate from immutable model execution limits. */
+      compactionPolicy: ModelCompactionPolicy.optional(),
       availability: ModelAvailabilityV1,
     }),
   );
@@ -18223,12 +21382,13 @@ export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogMod
 
 /**
  * Why a new chat or scheduled task without an explicit model gets its default:
- * a saved workspace default, the first usable connected subscription model, the
- * configured OpenGeni credits model while the organization holds a credit
- * balance, or the deployment default.
+ * a saved workspace default, the organization's default the workspace follows,
+ * the first usable connected subscription model, the configured Opengeni
+ * credits model while the organization holds a credit balance, or the
+ * deployment default.
  */
 export const DefaultModelSelectionSource = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["workspace", "subscription", "credits", "deployment"]),
+  z.enum(["workspace", "organization", "subscription", "credits", "deployment"]),
 );
 export type DefaultModelSelectionSource = z.infer<typeof DefaultModelSelectionSource>;
 
@@ -18249,7 +21409,7 @@ export const WorkspaceModelCatalogResponse =
       defaultSelection: DefaultModelSelection.optional(),
       /**
        * The default this workspace would use once its organization holds an
-       * OpenGeni credit balance. Null when this deployment does not bill
+       * Opengeni credit balance. Null when this deployment does not bill
        * credits.
        */
       creditsSelection: DefaultModelSelection.nullable().optional(),
@@ -18270,7 +21430,7 @@ export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 
-/** Public OpenGeni documentation linked from the web console's Help menu by default. */
+/** Public Opengeni documentation linked from the web console's Help menu by default. */
 export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
 /** An absolute http(s) URL the console may render as a plain link. */
@@ -18291,6 +21451,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
+    // Whether people can connect their own computers to this deployment. Absent
+    // on older servers: clients then treat it as unknown.
+    connectedMachines: z.boolean().optional(),
     defaultModel: z.string(),
     // Legacy parsers require a nonempty list. If models is empty, this contains
     // only the explicitly unavailable legacyModelFallback hint, not admission.
@@ -18369,6 +21532,17 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       defaultForNewSessions: false,
       capabilities: [],
     }),
+    /** Idle-session archive, present only when this deployment archives idle sessions. */
+    sessionArchive: z
+      .object({ enabled: z.literal(true), idleDays: z.number().int().positive() })
+      .optional(),
+    /**
+     * Present when this server records and enforces per-task usage limits.
+     * `enabled` is the producer gate: when false, new non-null limits are
+     * refused while existing limits are still enforced and can be cleared.
+     * Omitted by older servers, which ignore `usageLimitMicros` on create.
+     */
+    sessionUsageLimits: z.object({ enabled: z.boolean() }).strict().optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z
@@ -18497,18 +21671,33 @@ export type HealthResponse = {
 export type WorkspaceModelPolicyContract = {
   allowedProviders: string[] | null;
   allowedModels: string[] | null;
+  /**
+   * False blocks every model whose workspace-facing cost is Opengeni credits
+   * (`cost: "credits"`), whatever the two allowlists say, so credit models
+   * added to the catalog later stay blocked too. Omitted reads as true.
+   */
+  allowCreditModels?: boolean;
 };
 
 export type WorkspaceModelPolicyVerdict =
   | { allowed: true }
-  | { allowed: false; reason: "provider" | "model" };
+  | { allowed: false; reason: "provider" | "model" | "credits" };
 
+/**
+ * `chargesCredits` is required on purpose: every enforcement point must say
+ * whether the candidate spends Opengeni credits (its configured `cost` is
+ * "credits"), so the credit switch cannot be skipped by a caller that only
+ * knows the provider and model ids.
+ */
 export function evaluateWorkspaceModelPolicy(
   policy: WorkspaceModelPolicyContract | null | undefined,
-  candidate: { providerId: string; modelId: string },
+  candidate: { providerId: string; modelId: string; chargesCredits: boolean },
 ): WorkspaceModelPolicyVerdict {
   if (!policy) {
     return { allowed: true };
+  }
+  if (policy.allowCreditModels === false && candidate.chargesCredits) {
+    return { allowed: false, reason: "credits" };
   }
   if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
     return { allowed: false, reason: "provider" };
@@ -18522,6 +21711,7 @@ export function evaluateWorkspaceModelPolicy(
 export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./claude-provider-account-authority";
+export * from "./subscription-personal-authority-v2";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";
@@ -18551,8 +21741,13 @@ export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discover
 export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
+export * from "./session-mcp-tool-permissions";
 export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";
+export { toolPolicyActionName, executableToolSchema } from "./tool-policy";
+export * from "./tool-action-review";
+
+export * from "./cua-desktop-tools";

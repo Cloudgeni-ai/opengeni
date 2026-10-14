@@ -686,7 +686,7 @@ describe("durable video generation operation", () => {
         recoveryDeadlineAt: new Date(Date.now() + 60_000),
         references: [],
       }),
-    ).rejects.toThrow("insufficient OpenGeni credits");
+    ).rejects.toThrow("insufficient Opengeni credits");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(100_000);
   }, 60_000);
 });

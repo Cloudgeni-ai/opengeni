@@ -1,6 +1,6 @@
 // An environment at a glance: the active version's health checks and their
-// last run, its setup script, and the variable sets it adds by default.
-import { Loader2Icon, RotateCwIcon, VariableIcon } from "lucide-react";
+// last run and its setup script.
+import { Loader2Icon, RotateCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { rigHealth } from "@/components/rigs/rig-health";
@@ -8,8 +8,6 @@ import { CheckList, SetupScript } from "@/components/rigs/rig-versions-timeline"
 import { VerificationLog } from "@/components/rigs/verification-log";
 import { Button } from "@/components/ui/button";
 import { DetailSection } from "@/components/ui/detail-sheet";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
 import { StatusDot } from "@/components/ui/status-dot";
 import { versionHasChecks } from "@/lib/rig-status";
 import type { Rig, RigChange, RigChangeVerification } from "@/types";
@@ -17,19 +15,15 @@ import type { Rig, RigChange, RigChangeVerification } from "@/types";
 export function RigOverview({
   rig,
   changes,
-  variableSetName,
   canUse,
   mutating,
   onVerify,
-  onOpenVariableSet,
 }: {
   rig: Rig;
   changes: RigChange[];
-  variableSetName: (id: string) => string;
   canUse: boolean;
   mutating: boolean;
   onVerify: () => Promise<{ ok: boolean; versionId: string } | null>;
-  onOpenVariableSet: (id: string) => void;
 }) {
   const active = rig.activeVersion;
   if (!active) {
@@ -107,27 +101,6 @@ export function RigOverview({
 
       <DetailSection title="Setup script" description="Runs once when a sandbox starts.">
         <SetupScript script={active.setupScript} />
-      </DetailSection>
-
-      <DetailSection
-        title="Default variable sets"
-        description="Added to new sessions that use this environment."
-      >
-        {active.defaultVariableSetIds.length === 0 ? (
-          <p className="text-sm leading-5 text-fg-muted">None. Sessions pick their own.</p>
-        ) : (
-          <RowList label="Default variable sets" flush>
-            {active.defaultVariableSetIds.map((id) => (
-              <ListRow
-                key={id}
-                leading={<LogoTile icon={<VariableIcon />} />}
-                title={variableSetName(id)}
-                indicator="open"
-                onOpen={() => onOpenVariableSet(id)}
-              />
-            ))}
-          </RowList>
-        )}
       </DetailSection>
     </>
   );

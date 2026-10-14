@@ -3,7 +3,11 @@ import {
   CODEX_REALTIME_INITIAL_ITEMS_MAX_COUNT,
   CODEX_REALTIME_INITIAL_ITEMS_MAX_TOKENS,
 } from "@opengeni/codex";
-import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
+import {
+  MODEL_CONTEXT_LABEL,
+  SESSION_GOAL_CONTEXT_LABEL,
+  renderMessageSentAtForModel,
+} from "@opengeni/contracts";
 import { projectSessionRealtimeInitialItems } from "../src/session-realtime-context";
 
 describe("ordinary-session realtime context projection", () => {
@@ -80,7 +84,7 @@ describe("ordinary-session realtime context projection", () => {
     ).toEqual([{ role: "user", text: "visible text" }]);
   });
 
-  test("keeps separate user message parts on separate lines", () => {
+  test("replays only the person's words, never user-message metadata", () => {
     const sentAt = renderMessageSentAtForModel("2026-09-26T07:51:30.000Z");
     expect(
       projectSessionRealtimeInitialItems([
@@ -90,22 +94,48 @@ describe("ordinary-session realtime context projection", () => {
             type: "message",
             role: "user",
             content: [
+              { type: "input_text", text: `${SESSION_GOAL_CONTEXT_LABEL}\nStanding session goal` },
               { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nPage: Users` },
               { type: "input_text", text: sentAt },
               { type: "input_text", text: "Which users signed up today?" },
+              { type: "input_text", text: "Only this week." },
+            ],
+          },
+        },
+        {
+          position: 1,
+          item: {
+            type: "message",
+            role: "developer",
+            content: [
+              { type: "input_text", text: "Developer block one" },
+              { type: "input_text", text: "Developer block two" },
             ],
           },
         },
       ]),
     ).toEqual([
-      {
-        role: "user",
-        text: `${MODEL_CONTEXT_LABEL}\nPage: Users\n${sentAt}\nWhich users signed up today?`,
-      },
+      { role: "user", text: "Which users signed up today?\nOnly this week." },
+      { role: "developer", text: "Developer block one\nDeveloper block two" },
     ]);
   });
 
-  test("adds prior voice continuity as inert role-labeled context", () => {
+  test("drops a user message that carries only metadata", () => {
+    expect(
+      projectSessionRealtimeInitialItems([
+        {
+          position: 0,
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nPage: Users` }],
+          },
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("adds prior voice continuity as inert developer context, never as user speech", () => {
     const projected = projectSessionRealtimeInitialItems(
       [{ position: 0, item: { type: "message", role: "user", content: "Durable request." } }],
       [
@@ -114,7 +144,8 @@ describe("ordinary-session realtime context projection", () => {
       ],
     );
     expect(projected[0]).toEqual({ role: "user", text: "Durable request." });
-    expect(projected[1]).toMatchObject({ role: "user" });
+    // A user-role item is speech the provider may delegate to the agent.
+    expect(projected[1]).toMatchObject({ role: "developer" });
     expect(projected[1]?.text).toContain("Remain completely silent when this session starts.");
     expect(projected[1]?.text).toContain("USER: What happened?");
     expect(projected[1]?.text).toContain("ASSISTANT: I delegated the check.");

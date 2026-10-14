@@ -1,0 +1,401 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+
+import {
+  BaseWindow,
+  clipboard,
+  Menu,
+  nativeTheme,
+  screen,
+  shell,
+  WebContentsView,
+  type ContextMenuParams,
+  type Rectangle,
+  type WebContents,
+} from "electron";
+
+import type { DesktopAppConfig } from "./config";
+import { LOCAL_ORIGIN, localPageUrl } from "./local-pages";
+
+const MIN_SIZE = { width: 720, height: 520 };
+const DEFAULT_SIZE = { width: 1280, height: 860 };
+
+export interface AccountTarget {
+  id: string;
+  baseUrl: string;
+  /** The page to open when the account's view is created. */
+  initialPath: string;
+}
+
+export interface WindowEvents {
+  /** An in-window navigation, for remembering where each account was. */
+  navigated(accountId: string, url: string): void;
+  /** The view's renderer went away; the shell decides whether to reload. */
+  crashed(accountId: string): void;
+  /** The window was closed by the person. */
+  closed(): void;
+  focused(): void;
+}
+
+/** Opens only web pages in the browser; anything else is ignored. */
+export function openExternalSafely(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol === "https:" ||
+      parsed.protocol === "http:" ||
+      parsed.protocol === "mailto:"
+    ) {
+      void shell.openExternal(parsed.toString());
+    }
+  } catch {
+    // Not a URL.
+  }
+}
+
+function sameOrigin(url: string, baseUrl: string): boolean {
+  try {
+    return new URL(url).origin === new URL(baseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The one main window. Each account's web app lives in its own view with its
+ * own persistent browser session, so switching accounts is instant and
+ * cookies never mix. The window paints the theme background immediately, so
+ * there is never a white flash while the web app loads.
+ */
+export class MainWindow {
+  readonly window: BaseWindow;
+  private readonly views = new Map<string, { view: WebContentsView; baseUrl: string }>();
+  private welcome: WebContentsView | null = null;
+  private shown: WebContentsView | null = null;
+  private shownAccountId: string | null = null;
+  private saveTimer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly config: DesktopAppConfig,
+    private readonly stateDirectory: string,
+    private readonly events: WindowEvents,
+  ) {
+    const bounds = this.restoreBounds();
+    const mac = process.platform === "darwin";
+    const dark = nativeTheme.shouldUseDarkColors;
+    this.window = new BaseWindow({
+      ...bounds,
+      minWidth: MIN_SIZE.width,
+      minHeight: MIN_SIZE.height,
+      title: config.productName,
+      show: false,
+      backgroundColor: mac ? "#00000000" : dark ? config.background.dark : config.background.light,
+      // macOS: the page runs under an inset title bar with sidebar material.
+      // Windows and Linux keep the system title bar, so the window follows the
+      // desktop's own theme and controls.
+      ...(mac
+        ? {
+            titleBarStyle: "hiddenInset" as const,
+            // Centred on the 56px title row: the rail's top row and every
+            // page's header share that centre line.
+            trafficLightPosition: { x: 18, y: 21 },
+            vibrancy: "sidebar" as const,
+            visualEffectState: "followWindow" as const,
+          }
+        : { autoHideMenuBar: true }),
+    });
+    this.window.on("resize", () => {
+      this.layout();
+      this.scheduleSave();
+    });
+    this.window.on("move", () => this.scheduleSave());
+    this.window.on("focus", () => this.events.focused());
+    this.window.on("closed", () => this.events.closed());
+  }
+
+  /** Show the window right away; the theme background is already painted. */
+  reveal(): void {
+    if (this.window.isDestroyed()) return;
+    if (this.window.isMinimized()) this.window.restore();
+    if (!this.window.isVisible()) this.window.show();
+    this.window.focus();
+  }
+
+  get accountId(): string | null {
+    return this.shownAccountId;
+  }
+
+  /** The account a renderer belongs to, if it is one of this window's account views. */
+  accountFor(contents: WebContents): string | null {
+    for (const [id, entry] of this.views) {
+      if (entry.view.webContents === contents) return id;
+    }
+    return null;
+  }
+
+  isWelcome(contents: WebContents): boolean {
+    return this.welcome?.webContents === contents;
+  }
+
+  welcomeContents(): WebContents | null {
+    return this.welcome?.webContents ?? null;
+  }
+
+  contentsFor(accountId: string): WebContents | null {
+    return this.views.get(accountId)?.view.webContents ?? null;
+  }
+
+  allAccountContents(): WebContents[] {
+    return [...this.views.values()].map((entry) => entry.view.webContents);
+  }
+
+  /** Show an account's web app, creating its view on first use. */
+  showAccount(target: AccountTarget, path?: string): WebContents {
+    let entry = this.views.get(target.id);
+    if (!entry) {
+      entry = { view: this.createAccountView(target), baseUrl: target.baseUrl };
+      this.views.set(target.id, entry);
+      void entry.view.webContents.loadURL(
+        new URL(path ?? target.initialPath, target.baseUrl).toString(),
+      );
+    } else if (path) {
+      this.navigate(target.id, path);
+    }
+    this.present(entry.view);
+    this.shownAccountId = target.id;
+    return entry.view.webContents;
+  }
+
+  /** Go to a path inside an account's web app without reloading it. */
+  navigate(accountId: string, path: string): void {
+    const entry = this.views.get(accountId);
+    if (!entry) return;
+    const url = new URL(path, entry.baseUrl).toString();
+    const contents = entry.view.webContents;
+    // The web app routes client-side: ask it first, load as a fallback.
+    void contents
+      .executeJavaScript(
+        `(() => { const f = window.__opengeniDesktopNavigate; if (typeof f !== "function") return false; f(${JSON.stringify(path)}); return true; })()`,
+        true,
+      )
+      .then((handled: unknown) => {
+        if (handled !== true) void contents.loadURL(url);
+      })
+      .catch(() => void contents.loadURL(url));
+  }
+
+  reload(accountId: string, path?: string): void {
+    const entry = this.views.get(accountId);
+    if (!entry) return;
+    if (path) void entry.view.webContents.loadURL(new URL(path, entry.baseUrl).toString());
+    else entry.view.webContents.reload();
+  }
+
+  removeAccount(accountId: string): void {
+    const entry = this.views.get(accountId);
+    if (!entry) return;
+    this.views.delete(accountId);
+    if (this.shown === entry.view) {
+      this.window.contentView.removeChildView(entry.view);
+      this.shown = null;
+      this.shownAccountId = null;
+    }
+    entry.view.webContents.close();
+  }
+
+  /** Show the first-run page (sign in, or add another account). */
+  showWelcome(): WebContents {
+    if (!this.welcome) {
+      this.welcome = new WebContentsView({
+        webPreferences: {
+          preload: this.config.welcomePreloadPath,
+          sandbox: true,
+          contextIsolation: true,
+          nodeIntegration: false,
+          spellcheck: false,
+        },
+      });
+      this.welcome.setBackgroundColor("#00000000");
+      this.guardNavigation(this.welcome.webContents, null);
+      void this.welcome.webContents.loadURL(localPageUrl(basename(this.config.welcomePagePath)));
+    }
+    this.present(this.welcome);
+    this.shownAccountId = null;
+    return this.welcome.webContents;
+  }
+
+  closeWelcome(): void {
+    if (!this.welcome) return;
+    if (this.shown === this.welcome) {
+      this.window.contentView.removeChildView(this.welcome);
+      this.shown = null;
+    }
+    this.welcome.webContents.close();
+    this.welcome = null;
+  }
+
+  private present(view: WebContentsView): void {
+    if (this.shown === view) return;
+    if (this.shown) this.window.contentView.removeChildView(this.shown);
+    this.window.contentView.addChildView(view);
+    this.shown = view;
+    this.layout();
+    view.webContents.focus();
+  }
+
+  private layout(): void {
+    if (!this.shown || this.window.isDestroyed()) return;
+    const { width, height } = this.window.getContentBounds();
+    this.shown.setBounds({ x: 0, y: 0, width, height });
+  }
+
+  private createAccountView(target: AccountTarget): WebContentsView {
+    const view = new WebContentsView({
+      webPreferences: {
+        preload: this.config.preloadPath,
+        partition: `persist:account-${target.id}`,
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        spellcheck: true,
+        additionalArguments: [
+          `--opengeni-origin=${new URL(target.baseUrl).origin}`,
+          `--opengeni-product=${this.config.productName}`,
+        ],
+      },
+    });
+    // Transparent where the web app is, so macOS sidebar vibrancy shows through.
+    if (process.platform === "darwin") view.setBackgroundColor("#00000000");
+    const contents = view.webContents;
+    this.guardNavigation(contents, target.baseUrl);
+    contents.on("did-navigate", (_event, url) => this.events.navigated(target.id, url));
+    contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+      if (isMainFrame) this.events.navigated(target.id, url);
+    });
+    contents.on("render-process-gone", (_event, details) => {
+      if (details.reason !== "clean-exit") this.events.crashed(target.id);
+    });
+    contents.on("context-menu", (_event, params) => this.contextMenu(contents, params));
+    contents.session.setPermissionRequestHandler((requester, permission, callback, details) => {
+      const trusted = sameOrigin(details.requestingUrl, target.baseUrl) && requester === contents;
+      callback(
+        trusted &&
+          [
+            "media",
+            "clipboard-sanitized-write",
+            "clipboard-read",
+            "fullscreen",
+            "pointerLock",
+          ].includes(permission),
+      );
+    });
+    contents.session.setPermissionCheckHandler(
+      (_requester, permission, origin) =>
+        sameOrigin(origin, target.baseUrl) &&
+        ["media", "clipboard-sanitized-write", "clipboard-read", "fullscreen"].includes(permission),
+    );
+    return view;
+  }
+
+  /** Only the account's own server loads in its view; everything else opens in the browser. */
+  private guardNavigation(contents: WebContents, baseUrl: string | null): void {
+    const stays = (url: string) =>
+      baseUrl ? sameOrigin(url, baseUrl) : url.startsWith(`${LOCAL_ORIGIN}/`);
+    contents.on("will-navigate", (event, url) => {
+      if (stays(url)) return;
+      event.preventDefault();
+      openExternalSafely(url);
+    });
+    contents.on("will-redirect", (event, url) => {
+      if (stays(url)) return;
+      event.preventDefault();
+      openExternalSafely(url);
+    });
+    contents.setWindowOpenHandler(({ url }) => {
+      openExternalSafely(url);
+      return { action: "deny" };
+    });
+    contents.on("will-attach-webview", (event) => event.preventDefault());
+  }
+
+  private contextMenu(contents: WebContents, params: ContextMenuParams): void {
+    const template: Electron.MenuItemConstructorOptions[] = [];
+    for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
+      template.push({ label: suggestion, click: () => contents.replaceMisspelling(suggestion) });
+    }
+    if (params.misspelledWord) {
+      template.push(
+        {
+          label: "Add to Dictionary",
+          click: () => contents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+        },
+        { type: "separator" },
+      );
+    }
+    if (params.linkURL && /^https?:/u.test(params.linkURL)) {
+      template.push(
+        { label: "Open Link in Browser", click: () => openExternalSafely(params.linkURL) },
+        { label: "Copy Link", click: () => clipboard.writeText(params.linkURL) },
+        { type: "separator" },
+      );
+    }
+    if (params.isEditable) {
+      template.push(
+        { role: "undo", enabled: params.editFlags.canUndo },
+        { role: "redo", enabled: params.editFlags.canRedo },
+        { type: "separator" },
+        { role: "cut", enabled: params.editFlags.canCut },
+        { role: "copy", enabled: params.editFlags.canCopy },
+        { role: "paste", enabled: params.editFlags.canPaste },
+        { role: "selectAll" },
+      );
+    } else if (params.selectionText.trim()) {
+      template.push({ role: "copy" });
+    } else if (params.mediaType === "image" && params.srcURL) {
+      template.push({ label: "Copy Image", click: () => contents.copyImageAt(params.x, params.y) });
+    }
+    while (template.at(-1)?.type === "separator") template.pop();
+    if (template.length > 0) Menu.buildFromTemplate(template).popup();
+  }
+
+  private boundsFile(): string {
+    return join(this.stateDirectory, "window.json");
+  }
+
+  private restoreBounds(): Partial<Rectangle> & { width: number; height: number } {
+    try {
+      const saved = JSON.parse(readFileSync(this.boundsFile(), "utf8")) as Rectangle;
+      const visible = screen
+        .getAllDisplays()
+        .some(
+          (display) =>
+            saved.x < display.workArea.x + display.workArea.width - 80 &&
+            saved.x + saved.width > display.workArea.x + 80 &&
+            saved.y >= display.workArea.y - 10 &&
+            saved.y < display.workArea.y + display.workArea.height - 80,
+        );
+      if (visible && saved.width >= MIN_SIZE.width && saved.height >= MIN_SIZE.height) return saved;
+    } catch {
+      // First launch, or the file is unreadable.
+    }
+    const area = screen.getPrimaryDisplay().workAreaSize;
+    return {
+      width: Math.min(DEFAULT_SIZE.width, area.width - 80),
+      height: Math.min(DEFAULT_SIZE.height, area.height - 80),
+    };
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      if (this.window.isDestroyed() || this.window.isMinimized() || this.window.isFullScreen())
+        return;
+      try {
+        writeFileSync(this.boundsFile(), JSON.stringify(this.window.getNormalBounds()));
+      } catch {
+        // Remembering the size is best effort.
+      }
+    }, 500);
+  }
+}

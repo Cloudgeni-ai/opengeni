@@ -23,10 +23,27 @@ export function KnowledgeIndexNotice({
 }) {
   const context = useAppContext();
   if (!status) return null;
-  const accountId = context.workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
+  const accountId = workspace?.accountId;
   const canBuy = Boolean(
     accountId && hasAccountPermission(context.accessContext, accountId, "billing:manage"),
   );
+  // The worker parks paid indexing the same way when the workspace turned
+  // credits off; adding credits would not resume it then. This reads the
+  // viewed workspace's switch, which is the billed one for workspace entries
+  // (personal and organization entries bill their own workspace).
+  if (status === "awaiting_funding" && workspace?.settings?.allowCreditModels === false) {
+    return (
+      <div role="status" className="text-sm text-fg-muted">
+        <span>Saved · indexing paused while Opengeni credits are off.</span>
+        <span>
+          {" "}
+          The original and keyword search remain available. Indexing resumes automatically when
+          Opengeni credits are turned back on for this workspace.
+        </span>
+      </div>
+    );
+  }
   return (
     <div role="status" className="text-sm text-fg-muted">
       <span>{labels[status]}.</span>
@@ -40,7 +57,7 @@ export function KnowledgeIndexNotice({
               to="/workspaces/$workspaceId/organization"
               params={{ workspaceId }}
               search={{ section: "billing" }}
-              className="inline-flex min-h-10 items-center font-medium text-brand underline-offset-2 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+              className="inline-flex min-h-10 items-center font-medium og-link focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
             >
               Add credits
             </Link>
@@ -77,6 +94,8 @@ export function KnowledgeSearchFallback({
   const message = {
     awaiting_funding:
       "Semantic search needs credits. Showing keyword results; saved sources remain available.",
+    credits_disabled:
+      "Semantic search uses Opengeni credits, which are off in this workspace. Showing keyword results.",
     quota: "Semantic search quota reached. Showing keyword results.",
     provider_unavailable: "Semantic search provider unavailable. Showing keyword results.",
     query_limit: "Query exceeds the semantic search limit. Showing keyword results.",
@@ -90,7 +109,7 @@ export function KnowledgeSearchFallback({
             to="/workspaces/$workspaceId/organization"
             params={{ workspaceId }}
             search={{ section: "billing" }}
-            className="font-medium text-brand underline-offset-2 hover:underline focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            className="font-medium og-link focus-visible:rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
           >
             Add credits
           </Link>

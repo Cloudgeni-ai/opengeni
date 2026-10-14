@@ -90,7 +90,12 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
       sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
         client: client as any,
       }),
-    ).resolves.toEqual({ examined: 0, terminated: [], skipped: 0 });
+    ).resolves.toEqual({
+      examined: 0,
+      terminated: [],
+      skipped: 0,
+      inventory: { complete: true, running: 0, unterminated: [], missingLiveLeaseInstanceIds: [] },
+    });
   });
 
   test("does not hide unrelated app lookup failures", async () => {
@@ -290,5 +295,60 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
     expect(terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
     expect(result.skipped).toBe(1);
+  });
+
+  test("reports running boxes, unterminated orphans, and missing live-lease instances", async () => {
+    const zombie: LiveModalSandboxLeaseAttribution = {
+      leaseId: "lease-z",
+      workspaceId: "ws-z",
+      sandboxGroupId: "grp-z",
+      instanceId: "sb-gone",
+      liveness: "draining",
+    };
+    const warming: LiveModalSandboxLeaseAttribution = {
+      leaseId: "lease-w",
+      workspaceId: "ws-w",
+      sandboxGroupId: "grp-w",
+      instanceId: null,
+      liveness: "warming",
+    };
+    const { client, terminated } = fakeModalClient([
+      { id: "sb-live", createdAt: 1_000, tags: attributionTags(LIVE_LEASE) },
+      { id: "sb-derelict", createdAt: 1_000, tags: [] },
+      { id: "sb-survivor", createdAt: 1_000, tags: [] },
+      { id: "sb-pending", createdAt: 1_000, tags: attributionTags(warming) },
+    ]);
+    const result = await sweepModalOrphanSandboxes(
+      testSettings(MODAL_SETTINGS),
+      [LIVE_LEASE, zombie, warming],
+      {
+        client: client as any,
+        now: new Date(1_000_000 + 60 * 60_000),
+        // A box whose termination is postponed is still unleased.
+        revalidateTermination: async (candidate) => candidate.sandboxId !== "sb-survivor",
+      },
+    );
+    expect(terminated).toEqual(["sb-derelict"]);
+    expect(result.inventory).toEqual({
+      complete: true,
+      running: 4,
+      unterminated: [{ sandboxId: "sb-survivor", reason: "unattributed", tags: {} }],
+      missingLiveLeaseInstanceIds: ["sb-gone"],
+    });
+  });
+
+  test("an inventory cut short by the termination budget is marked incomplete", async () => {
+    const { client } = fakeModalClient([
+      { id: "sb-a", createdAt: 1_000, tags: [] },
+      { id: "sb-b", createdAt: 1_000, tags: [] },
+    ]);
+    const result = await sweepModalOrphanSandboxes(
+      testSettings(MODAL_SETTINGS),
+      [{ ...LIVE_LEASE, instanceId: "sb-elsewhere" }],
+      { client: client as any, now: new Date(1_000_000 + 60 * 60_000), maxTerminations: 1 },
+    );
+    expect(result.terminated).toHaveLength(1);
+    expect(result.inventory.complete).toBe(false);
+    expect(result.inventory.missingLiveLeaseInstanceIds).toEqual([]);
   });
 });

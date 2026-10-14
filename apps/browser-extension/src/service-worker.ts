@@ -5,6 +5,7 @@ import {
   browserProduct,
   extensionArchitecture,
   extensionPlatform,
+  isAllowedDebuggerMethod,
   parseExtensionCommand,
   parseExtensionReady,
   type AttachedTab,
@@ -23,15 +24,6 @@ const INVENTORY_DEBOUNCE_MS = 100;
 const MAX_DEBUGGER_EVENTS = 10_000;
 const MAX_DEBUGGER_EVENT_BYTES = 512 * 1024;
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
-const ALLOWED_DEBUGGER_DOMAINS = new Set([
-  "Accessibility",
-  "DOM",
-  "Input",
-  "Log",
-  "Network",
-  "Page",
-  "Runtime",
-]);
 
 type StoredState = {
   deviceId?: string;
@@ -46,12 +38,19 @@ let reconnectDelayMs = 500;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
 let inventoryTimer: ReturnType<typeof setTimeout> | null = null;
+let inventoryPublication: Promise<void> = Promise.resolve();
 let currentDeviceId: string | null = null;
 let currentProfileLabel: string | null = null;
 let lastError: string | null = null;
 let debuggerSequence = 0;
 const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Set<number>();
+// Tab ids, debugger attachments and the event buffer above live exactly as long
+// as this worker. Every native reconnect in that lifetime reports the same
+// state generation, so the agent can keep sessions bound across agent or
+// native-host restarts while the per-port connection generation still fences
+// each transport.
+const STATE_GENERATION = crypto.randomUUID();
 
 async function storedState(): Promise<Required<StoredState>> {
   const stored = (await chrome.storage.local.get([
@@ -62,7 +61,9 @@ async function storedState(): Promise<Required<StoredState>> {
   const deviceId = stored.deviceId ?? crypto.randomUUID();
   const profileLabel = normalizeProfileLabel(stored.profileLabel ?? null);
   const inventoryRevision = safeRevision(stored.inventoryRevision ?? 0);
-  await chrome.storage.local.set({ deviceId, profileLabel, inventoryRevision });
+  // Reading inventory must not write a stale label back over a concurrent
+  // rename. Only the first device identity needs initializing here.
+  if (!stored.deviceId) await chrome.storage.local.set({ deviceId });
   return { deviceId, profileLabel, inventoryRevision };
 }
 
@@ -105,6 +106,7 @@ async function device(revision: number, generation: string): Promise<ExtensionDe
     platform: extensionPlatform(platform),
     architecture: extensionArchitecture(platform),
     connectionGeneration: generation,
+    stateGeneration: STATE_GENERATION,
     inventoryRevision: revision,
     capabilities: {
       tabInventory: true,
@@ -222,6 +224,8 @@ function handleNativeMessage(message: unknown): void {
       reconnectDelayMs = 500;
       lastError = null;
       void setBadge(true);
+      // Catch changes made during the handshake on the accepted generation.
+      void sendInventory();
     } catch (error) {
       disconnectPort(port, error instanceof Error ? error.message : String(error));
     }
@@ -375,8 +379,7 @@ function numericTabId(value: string): number {
 }
 
 function assertAllowedDebuggerMethod(method: string): void {
-  const domain = method.slice(0, method.indexOf("."));
-  if (!ALLOWED_DEBUGGER_DOMAINS.has(domain)) {
+  if (!isAllowedDebuggerMethod(method)) {
     throw new BridgeCommandError(
       "invalid_request",
       "debugger method is outside the browser driver surface",
@@ -422,16 +425,25 @@ function scheduleInventory(): void {
   }, INVENTORY_DEBOUNCE_MS);
 }
 
-async function sendInventory(): Promise<void> {
+function sendInventory(): Promise<void> {
+  // One ordered publication stream keeps storage-backed revisions unique and
+  // prevents an older tab/label snapshot from overtaking a newer one.
+  const publication = inventoryPublication.then(publishInventory);
+  inventoryPublication = publication.catch(() => undefined);
+  return publication;
+}
+
+async function publishInventory(): Promise<void> {
   const port = nativePort;
   const generation = connectionGeneration;
   const state = await storedState();
-  if (!port || !generation) return;
+  if (!port || !generation || readyGeneration !== generation) return;
   const message: ExtensionInventory = {
     type: "inventory",
     deviceId: state.deviceId,
     connectionGeneration: generation,
     inventoryRevision: await nextInventoryRevision(),
+    profile: { profileLabel: state.profileLabel },
     tabs: await tabs(),
   };
   if (nativePort === port && connectionGeneration === generation) port.postMessage(message);
@@ -532,13 +544,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
     );
     void chrome.storage.local.set({ profileLabel }).then(() => {
       currentProfileLabel = profileLabel;
-      clearHandshakeTimer();
-      const previous = nativePort;
-      nativePort = null;
-      connectionGeneration = null;
-      readyGeneration = null;
-      previous?.disconnect();
-      void connect();
+      // A label is inventory metadata, not a new connection authority. Keep
+      // active debuggers and pending command replies on the same native port.
+      void sendInventory();
       respond({ saved: true, profileLabel });
     });
     return true;

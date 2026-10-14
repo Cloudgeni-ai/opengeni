@@ -92,8 +92,46 @@ describe("client error report contract", () => {
       JSON.stringify({ ...validReport, revision: "r".repeat(65) }),
       JSON.stringify({ kind: "route_error", route: "/" }),
       JSON.stringify({ ...validReport, route: `/${"a".repeat(CLIENT_ERROR_REPORT_MAX_BYTES)}` }),
+      JSON.stringify({ ...validReport, error: { message: "x", url: "https://a.test/" } }),
+      JSON.stringify({ ...validReport, error: { message: 42 } }),
+      JSON.stringify({ ...validReport, error: "TypeError: x" }),
+      JSON.stringify({
+        ...validReport,
+        error: { stack: "x".repeat(CLIENT_ERROR_REPORT_MAX_BYTES) },
+      }),
     ];
     for (const body of rejected) expect(parseClientErrorReport(body)).toBeNull();
+  });
+
+  test("re-projects error diagnostics: scrubbed, bounded, and dropped when empty", () => {
+    const report = parseClientErrorReport(
+      JSON.stringify({
+        ...validReport,
+        kind: "route_error",
+        error: {
+          name: "Error",
+          message: "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+          stack: `Error\n    at load (https://app.example.test/a.js?token=abc:1:2)\n${"    at x (b.js:1:1)\n".repeat(400)}`,
+          componentStack: "    at ArtifactPageChrome\n    at Bearer abcdef123456",
+        },
+      }),
+    );
+    expect(report?.error?.name).toBe("Error");
+    expect(report?.error?.message).toBe(
+      "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+    );
+    expect(
+      report?.error?.stack?.startsWith("Error\n    at load (https://app.example.test/a.js:1:2)"),
+    ).toBe(true);
+    expect(report?.error?.stack?.endsWith("…[truncated]")).toBe(true);
+    expect(new TextEncoder().encode(report!.error!.stack!).byteLength).toBeLessThanOrEqual(4096);
+    expect(report?.error?.componentStack).toBe("at ArtifactPageChrome\n    at Bearer [redacted]");
+
+    const blank = parseClientErrorReport(
+      JSON.stringify({ ...validReport, error: { message: " " } }),
+    );
+    expect(blank).toEqual(validReport as never);
+    expect(blank).not.toHaveProperty("error");
   });
 
   test("admission is a per-kind token bucket that refills over time", () => {
@@ -141,6 +179,44 @@ describe("POST /v1/client-errors", () => {
       reason: "chunk_load",
       clientRoute: validReport.route,
       clientRevision: validReport.revision,
+    });
+  });
+
+  test("logs the scrubbed error diagnostics of a detailed report", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+
+    const { result: response, lines } = await captureWarnings(() =>
+      post(
+        app,
+        JSON.stringify({
+          kind: "route_error",
+          route: "/workspaces/$workspaceId/artifacts",
+          revision: validReport.revision,
+          error: {
+            name: "Error",
+            message:
+              "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+            stack: "Error\n    at Kc (https://app.opengeni.test/assets/index-B3c4SELv.js:9:41)",
+            componentStack: "at ArtifactPageChrome\n    at Suspense\n    password=hunter2",
+          },
+        }),
+        { origin: "https://app.opengeni.test" },
+      ),
+    );
+    expect(response.status).toBe(204);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      message: "Web client error reported",
+      reason: "route_error",
+      clientRoute: "/workspaces/$workspaceId/artifacts",
+      clientErrorName: "Error",
+      clientErrorMessage:
+        "Minified React error #130; visit https://react.dev/errors/130?args[]=undefined",
+      clientErrorStack:
+        "Error\n    at Kc (https://app.opengeni.test/assets/index-B3c4SELv.js:9:41)",
+      clientComponentStack: "at ArtifactPageChrome\n    at Suspense\n    password=[redacted]",
     });
   });
 
@@ -198,12 +274,13 @@ describe("POST /v1/client-errors", () => {
       observability,
     });
     let pulledChunks = 0;
-    const chunk = new TextEncoder().encode("x".repeat(256));
+    const chunkBytes = 4096;
+    const chunk = new TextEncoder().encode("x".repeat(chunkBytes));
     // No Content-Length: the declared-length check cannot see this body.
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
         pulledChunks += 1;
-        if (pulledChunks > 64) controller.close();
+        if (pulledChunks > 256) controller.close();
         else controller.enqueue(chunk);
       },
     });
@@ -216,8 +293,8 @@ describe("POST /v1/client-errors", () => {
       } as RequestInit),
     );
     expect(response.status).toBe(413);
-    // Refused after the third 256-byte chunk, not after reading all 16 KiB.
-    expect(pulledChunks).toBeLessThan(8);
+    // Refused just past the limit, not after reading all 1 MiB.
+    expect(pulledChunks).toBeLessThan(CLIENT_ERROR_REPORT_MAX_BYTES / chunkBytes + 4);
     const metrics = await observability.prometheusMetrics();
     expect(
       metricValue(
@@ -324,7 +401,12 @@ const webVital = { signal: "web_vital", metric: "lcp", page: "sessions", value: 
 
 describe("client signal report contract", () => {
   test("accepts closed request-failure, stream and web-vital reports", () => {
-    for (const report of [requestFailure, streamEvent, webVital]) {
+    for (const report of [
+      requestFailure,
+      streamEvent,
+      webVital,
+      { ...webVital, page: "read-only-chats" },
+    ]) {
       expect(parseClientBeaconReport(JSON.stringify(report))).toEqual(report as never);
       // A signal report is never mistaken for an error report.
       expect(parseClientErrorReport(JSON.stringify(report))).toBeNull();
@@ -357,6 +439,27 @@ describe("client signal report contract", () => {
 });
 
 describe("POST /v1/client-errors signal reports", () => {
+  test("records read-only chats web vitals using the closed page label", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, { observability, settings: originSettings });
+    const response = await post(app, JSON.stringify({ ...webVital, page: "read-only-chats" }), {
+      origin: "https://app.opengeni.test",
+    });
+    expect(response.status).toBe(204);
+    const metrics = await observability.prometheusMetrics();
+    expect(
+      metricValue(
+        metrics,
+        "opengeni_client_web_vital_count",
+        'metric="lcp",page="read-only-chats"',
+      ),
+    ).toBe(1);
+    expect(
+      metricValue(metrics, "opengeni_client_web_vital_sum", 'metric="lcp",page="read-only-chats"'),
+    ).toBe(2.4);
+  });
+
   test("increments the closed signal series and the web-vital histogram", async () => {
     const observability = createObservability(observabilitySettings, { component: "api" });
     const app = new Hono();

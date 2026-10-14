@@ -5,10 +5,10 @@ import { join, resolve } from "node:path";
 
 // Kubernetes injects `<SERVICE>_PORT=tcp://<ip>:<port>` style variables into
 // every pod for each Service in the namespace unless enableServiceLinks is
-// false. OpenGeni reads its settings from OPENGENI_* variables, so a Service
+// false. Opengeni reads its settings from OPENGENI_* variables, so a Service
 // such as `opengeni-api-metrics` becomes OPENGENI_API_METRICS_PORT=tcp://...
 // in every pod that does not set it explicitly, and settings parsing fails at
-// startup. OpenGeni pods resolve services through DNS and never read the
+// startup. Opengeni pods resolve services through DNS and never read the
 // injected variables.
 
 type Manifest = { kind: string; metadata: { name: string }; spec?: any };
@@ -42,7 +42,7 @@ async function render(values: Record<string, unknown>): Promise<Manifest[]> {
 }
 
 describe("Kubernetes service links", () => {
-  test("every OpenGeni pod disables service-link environment variables", async () => {
+  test("every Opengeni pod disables service-link environment variables", async () => {
     const manifests = await render({
       relay: { enabled: true },
       artifactMaterializer: { enabled: true },

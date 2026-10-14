@@ -463,7 +463,7 @@ export function ReviewList({
               onClick={onOpenLearning}
               className="pointer-coarse:h-11"
             >
-              Learning settings
+              Agent learning
             </Button>
           ) : undefined
         }

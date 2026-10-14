@@ -4,7 +4,7 @@
  * Catalog ids carry routing facts (`codex/`, `organization-claude-subscription/`,
  * `workspace-openrouter/anthropic/...`) and custom models may have no curated
  * label. People should only ever see the model itself: `GPT-6.1 Sol`,
- * `Claude Opus 5.5`. The same upstream model therefore renders identically
+ * `Opus 5.5`. The same upstream model therefore renders identically
  * whether an organization or a workspace connection serves it.
  *
  * Pure and dependency-free so the API, SDK, React package and web app share it.
@@ -28,9 +28,22 @@ export type ModelDisplayInput =
   | {
       id: string;
       label?: string | null | undefined;
+      logoUrl?: string | null | undefined;
       upstreamModelId?: string | null | undefined;
       deployment?: { upstreamModelId?: string | null | undefined } | null | undefined;
     };
+
+/** Catalog maker logo; remote images must use HTTPS without embedded credentials. */
+export function modelLogoUrl(input: ModelDisplayInput): string | null {
+  const value = typeof input === "string" ? undefined : input.logoUrl;
+  if (!value || value.length > 2048 || value !== value.trim()) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 const WORDS: Readonly<Record<string, string>> = {
   gpt: "GPT",
@@ -50,6 +63,8 @@ const WORDS: Readonly<Record<string, string>> = {
   magistral: "Magistral",
   nemotron: "Nemotron",
   oss: "OSS",
+  // Region-pinned gateway routes (Opper `aws/claude-sonnet-4-6-eu`).
+  eu: "EU",
 };
 
 /** The upstream model slug without routing prefixes or `:variant` suffixes. */
@@ -127,17 +142,28 @@ export function isRawModelLabel(
 /**
  * The clean name to show for a model: its curated catalog label when it has
  * one, otherwise a readable form of the upstream model id. Never a routing
- * prefix, connection id or connection scope.
+ * prefix, connection id or connection scope. Anthropic's Opus, Sonnet and
+ * Haiku families drop the redundant `Claude` word (the maker mark already says
+ * it): `Opus 5.5`, `Sonnet 4.6 EU`.
  */
 export function modelDisplayName(input: ModelDisplayInput): string {
   if (typeof input === "string") {
     // A bare id is humanized; text with spaces is already a name ("Workspace default").
-    return input.trim() && !/\s/.test(input.trim()) ? humanizeModelSlug(input) : input;
+    return input.trim() && !/\s/.test(input.trim())
+      ? withoutClaudeFamilyPrefix(humanizeModelSlug(input))
+      : input;
   }
   const upstream = upstreamOf(input);
   const label = input.label?.trim();
-  if (label && !isRawModelLabel(label, [input.id, upstream])) return label;
-  return humanizeModelSlug(upstream ?? label ?? input.id);
+  if (label && !isRawModelLabel(label, [input.id, upstream])) {
+    return withoutClaudeFamilyPrefix(label);
+  }
+  return withoutClaudeFamilyPrefix(humanizeModelSlug(upstream ?? label ?? input.id));
+}
+
+/** `Claude Opus 5.5` → `Opus 5.5`; other names (`Claude 3.5 Sonnet`) unchanged. */
+function withoutClaudeFamilyPrefix(name: string): string {
+  return name.replace(/^Claude\s+(?=(?:Opus|Sonnet|Haiku)\b)/, "");
 }
 
 const VENDOR_PATTERNS: ReadonlyArray<readonly [ModelVendor, RegExp]> = [

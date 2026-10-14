@@ -1,15 +1,14 @@
-// Usage allowances in the OpenGeni console. Budgets here are paid from the
+// Usage allowances in the Opengeni console. Budgets here are paid from the
 // organization's credit balance, which the console already shows in dollars
 // (balance, top-ups, usage dashboard), so budgets and limits use the same unit:
 // an owner compares "$500 a month" with "$1,240 available" without converting.
 // Members still see shares first ("38% left"), with the amount alongside.
 import type { UsageAmountFormat } from "@opengeni/react/usage";
 
+import { MICROS_PER_DOLLAR, parseDollars } from "@/lib/dollars";
 import { formatMoneyMicros } from "@/lib/format";
 
-const MICROS_PER_DOLLAR = 1_000_000;
-/** The largest budget the console accepts: $10M, far inside safe integers. */
-export const MAX_BUDGET_MICROS = 10_000_000 * MICROS_PER_DOLLAR;
+export { MAX_BUDGET_MICROS, parseDollars } from "@/lib/dollars";
 
 export function formatCredits(micros: number): string {
   return formatMoneyMicros(micros, "usd");
@@ -25,14 +24,6 @@ export function formatBudget(micros: number): string {
     }).format(micros / MICROS_PER_DOLLAR);
   }
   return formatCredits(micros);
-}
-
-/** Dollars typed by a person ("500", "83.33", "$1,200") to integer micros, or null. */
-export function parseDollars(text: string): number | null {
-  const cleaned = text.replace(/[\s$,]/g, "");
-  if (!/^\d+(?:\.\d{0,2})?$/.test(cleaned)) return null;
-  const micros = Math.round(Number(cleaned) * MICROS_PER_DOLLAR);
-  return Number.isSafeInteger(micros) && micros <= MAX_BUDGET_MICROS ? micros : null;
 }
 
 /** Plain dollars for an input's value ("500", "83.33"), no symbol or grouping. */

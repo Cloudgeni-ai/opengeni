@@ -15,6 +15,12 @@ import {
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
+type SpreadsheetUxWindow = typeof globalThis & {
+  __ogSpreadsheetUx: ReturnType<
+    typeof import("../../packages/react/demo/artifact-spreadsheet-ux-fixture").mountSpreadsheetUxFixture
+  >;
+  __ogResizeFrames: { frames: number; changedPixels: number; blankLabels: number; active: boolean };
+};
 type EngineId = "chromium" | "firefox" | "webkit";
 type Engine = readonly [
   EngineId,
@@ -74,6 +80,144 @@ describe("artifact spreadsheet retained canvas", () => {
   }, 60_000);
 
   for (const [, engineName, engine] of engines) {
+    test(`${engineName}: spreadsheet boundaries, live resize, committed inputs, and canonical rename`, async () => {
+      const browser = await engine.launch({ headless: true });
+      try {
+        const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+        await page.goto(`${baseUrl}/artifact-spreadsheet-test.html`);
+        await page.evaluate(async () => {
+          await import(/* @vite-ignore */ "/styles.css");
+          const fixture = await import(/* @vite-ignore */ "/artifact-spreadsheet-ux-fixture.tsx");
+          const target = document.createElement("div");
+          target.className = "og-root";
+          target.id = "root";
+          document.body.append(target);
+          (globalThis as SpreadsheetUxWindow).__ogSpreadsheetUx =
+            fixture.mountSpreadsheetUxFixture(target);
+        });
+        const grid = page.getByRole("grid");
+        await grid.waitFor();
+        await page.waitForFunction(
+          () => document.querySelector('[data-og-cell="A1"]')?.textContent === "Period",
+        );
+        await page.evaluate(() => document.fonts.ready);
+        const header = page.getByRole("columnheader").first();
+        const handle = page.getByRole("separator", { name: "Resize column A", exact: true });
+        const border = (await header.boundingBox())!;
+        const hit = (await handle.boundingBox())!;
+        expect(Math.abs(hit.x + hit.width / 2 - (border.x + border.width))).toBeLessThanOrEqual(1);
+        // Both halves of the centered target must be clickable, not clipped or occluded.
+        for (const offset of [-2, 2]) {
+          expect(
+            await page.evaluate(
+              ({ x, y }) => document.elementFromPoint(x, y)?.getAttribute("aria-label"),
+              { x: hit.x + hit.width / 2 + offset, y: hit.y + hit.height / 2 },
+            ),
+          ).toBe("Resize column A");
+        }
+        await handle.hover();
+        const previewDir = process.env.OPENGENI_SPREADSHEET_UX_PREVIEW_DIR;
+        const screenshot = async (state: string) => {
+          if (engineName === "Chromium" && previewDir)
+            await page.screenshot({ path: `${previewDir}/${state}.png` });
+        };
+        await screenshot("desktop-hover");
+        // Sample real painted cell pixels on every animation frame during resize/query replacement.
+        await page.evaluate(() => {
+          const canvas = document.querySelector<HTMLCanvasElement>(
+            "canvas[data-og-spreadsheet-canvas]",
+          )!;
+          const context = canvas.getContext("2d")!;
+          const sample = () => Array.from(context.getImageData(54, 33, 48, 14).data).join(",");
+          const baseline = sample();
+          const stats = { frames: 0, changedPixels: 0, blankLabels: 0, active: true };
+          (globalThis as SpreadsheetUxWindow).__ogResizeFrames = stats;
+          const frame = () => {
+            if (!stats.active) return;
+            stats.frames++;
+            if (sample() !== baseline) stats.changedPixels++;
+            if (document.querySelector('[data-og-cell="A1"]')?.textContent !== "Period")
+              stats.blankLabels++;
+            requestAnimationFrame(frame);
+          };
+          requestAnimationFrame(frame);
+        });
+        await page.mouse.move(hit.x + hit.width / 2, hit.y + hit.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(hit.x + hit.width / 2 + 56, hit.y + hit.height / 2, { steps: 15 });
+        await screenshot("desktop-resizing");
+        await page.mouse.up();
+        await page.waitForFunction(
+          () => (globalThis as SpreadsheetUxWindow).__ogSpreadsheetUx.calls.length === 1,
+        );
+        await handle.press("ArrowRight");
+        await page.waitForFunction(
+          () => (globalThis as SpreadsheetUxWindow).__ogSpreadsheetUx.calls.length === 2,
+        );
+        expect(await handle.evaluate((element) => getComputedStyle(element).boxShadow)).not.toBe(
+          "none",
+        );
+        await screenshot("desktop-resize-keyboard");
+        const frames = await page.evaluate(() => {
+          const stats = (globalThis as SpreadsheetUxWindow).__ogResizeFrames;
+          stats.active = false;
+          return stats;
+        });
+        expect(frames.frames).toBeGreaterThan(0);
+        expect(frames.blankLabels).toBe(0);
+        expect(frames.changedPixels).toBe(0);
+        const formula = page.getByLabel("Formula or value");
+        await formula.fill("Updated period");
+        await formula.press("Enter");
+        expect(await page.locator('[data-og-cell="A1"]').textContent()).toBe("Updated period");
+        expect(
+          await page.locator('[data-og-cell="A1"]').getAttribute("data-og-pending-input"),
+        ).toBe("true");
+        await screenshot("desktop-committed-input");
+        await page.waitForFunction(
+          () =>
+            (globalThis as SpreadsheetUxWindow).__ogSpreadsheetUx.values.get("0:0") ===
+            "Updated period",
+        );
+        await page.getByRole("tab", { name: "Forecast", exact: true }).dblclick();
+        const name = page.getByLabel("Worksheet name");
+        await name.fill("Q4 forecast");
+        await screenshot("desktop-rename");
+        await name.press("Enter");
+        expect(await name.isDisabled()).toBe(true);
+        await screenshot("desktop-rename-pending");
+        await page.getByRole("tab", { name: "Q4 forecast", exact: true }).waitFor();
+        const command = await page.evaluate(
+          () => (globalThis as SpreadsheetUxWindow).__ogSpreadsheetUx.calls.at(-1)?.commands[0],
+        );
+        expect(command).toMatchObject({
+          kind: "sheet.rename",
+          name: "Q4 forecast",
+          sheet: { kind: "generation", creationOperationId: "11111111111111111111111111111111" },
+        });
+        await page.setViewportSize({ width: 390, height: 760 });
+        await page.getByRole("tab", { name: "Q4 forecast", exact: true }).focus();
+        await page.keyboard.press("F2");
+        await name.fill("Narrow rename");
+        await screenshot("narrow-rename");
+        await name.press("Escape");
+        expect(await page.getByRole("tab", { name: "Q4 forecast", exact: true }).count()).toBe(1);
+        await screenshot("narrow-saved");
+        await page.getByRole("tab", { name: "Q4 forecast", exact: true }).press("F2");
+        await name.fill("Retry this name");
+        await page.evaluate(() => (globalThis as SpreadsheetUxWindow).__ogSpreadsheetUx.failNext());
+        await name.press("Enter");
+        await page.getByRole("alert").waitFor();
+        expect(await name.inputValue()).toBe("Retry this name");
+        expect(await name.isDisabled()).toBe(false);
+        await screenshot("narrow-rename-failure");
+        await name.press("Enter");
+        await page.getByRole("tab", { name: "Retry this name", exact: true }).waitFor();
+      } finally {
+        await browser.close();
+      }
+    }, 60_000);
+
     test(`${engineName}: paints a Retina 1px-dense viewport with bounded semantic DOM`, async () => {
       const browser = await engine.launch({ headless: true });
       let context: BrowserContext | undefined;
@@ -422,6 +566,60 @@ describe("artifact spreadsheet retained canvas", () => {
         expect(await readMountedDocumentText(page)).toBe("hello");
       } finally {
         await context?.close();
+        await browser.close();
+      }
+    }, 60_000);
+
+    test(`${engineName}: spreadsheet resize previews, cancellation and keyboard reset use native input`, async () => {
+      const browser = await engine.launch({ headless: true });
+      const context = await browser.newContext({ viewport: { width: 1_200, height: 800 } });
+      try {
+        const page = await context.newPage();
+        await mountGeneralDisplayFixture(page, baseUrl);
+        const grid = page.getByRole("grid", { name: "General spreadsheet" });
+        await grid.focus();
+        const boundary = page.getByRole("separator", { name: "Resize column A", exact: true });
+        const box = await boundary.boundingBox();
+        if (!box) throw new Error("Column resize boundary is not visible");
+        const before = await readGeneralDisplayProof(page);
+        const x = box.x + box.width / 2;
+        const y = box.y + box.height / 2;
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + 48, y, { steps: 6 });
+        await page.waitForFunction(
+          () =>
+            document
+              .querySelector('[aria-label="Resize column A"]')
+              ?.getAttribute("aria-valuenow") === "144",
+          undefined,
+          { timeout: 2_000 },
+        );
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("144");
+        expect((await readGeneralDisplayProof(page)).revision).toBe(before.revision);
+        await page.keyboard.press("Escape");
+        await page.mouse.up();
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("96");
+        expect(await readGeneralDisplayProof(page)).toEqual(before);
+
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + 48, y, { steps: 6 });
+        await page.mouse.up();
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("144");
+        expect((await readGeneralDisplayProof(page)).revision).not.toBe(before.revision);
+        await boundary.focus();
+        await boundary.press("Home");
+        expect(await boundary.getAttribute("aria-valuenow")).toBe("96");
+        const row = page.getByRole("separator", { name: "Resize row 1", exact: true });
+        await row.focus();
+        await row.press("Shift+ArrowDown");
+        expect(await row.getAttribute("aria-valuenow")).toBe("25");
+        await row.press("Home");
+        expect(await row.getAttribute("aria-valuenow")).toBe("24");
+        expect((await readGeneralDisplayProof(page)).a1Value).toBe(before.a1Value);
+      } finally {
+        await context.close();
         await browser.close();
       }
     }, 60_000);

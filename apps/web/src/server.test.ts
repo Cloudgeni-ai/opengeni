@@ -110,6 +110,19 @@ describe("production web handler", () => {
     expect((await handler(new Request("https://example.test/%2e%2e%2fsecret"))).status).toBe(400);
   });
 
+  test("answers unknown well-known discovery paths with 404, never the SPA shell", async () => {
+    const handler = createWebHandler(await fixture());
+    for (const path of [
+      "/.well-known/openid-configuration",
+      "/.well-known/oauth-authorization-server/tenant/unknown",
+      "/.well-known/security.txt",
+    ]) {
+      const missing = await handler(new Request(`https://example.test${path}`));
+      expect(missing.status).toBe(404);
+      expect(missing.headers.get("content-type") ?? "").not.toContain("text/html");
+    }
+  });
+
   test("answers missing top-level static files with 404 instead of the SPA shell", async () => {
     const root = await fixture();
     await Bun.write(join(root, "favicon.ico"), new Uint8Array([0, 0, 1, 0]));

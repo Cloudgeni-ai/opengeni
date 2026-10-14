@@ -77,7 +77,7 @@ export function localConnectedAtlassianPreview(
       sites: [
         {
           cloudId: "preview-cloud",
-          name: "OpenGeni Integration Lab",
+          name: "Opengeni Integration Lab",
           url: "https://opengeni-lab.atlassian.net",
           products: ["jira", "confluence"],
         },
@@ -89,11 +89,11 @@ export function localConnectedAtlassianPreview(
         {
           id: "jira_project:preview-cloud:10000",
           cloudId: "preview-cloud",
-          siteName: "OpenGeni Integration Lab",
+          siteName: "Opengeni Integration Lab",
           siteUrl: "https://opengeni-lab.atlassian.net",
           resourceId: "10000",
           key: "KAN",
-          name: "OpenGeni Product Lab",
+          name: "Opengeni Product Lab",
           kind: "jira_project",
           syncCadence: "hourly",
           syncEnabled: true,
@@ -104,7 +104,7 @@ export function localConnectedAtlassianPreview(
         {
           id: "confluence_space:preview-cloud:20000",
           cloudId: "preview-cloud",
-          siteName: "OpenGeni Integration Lab",
+          siteName: "Opengeni Integration Lab",
           siteUrl: "https://opengeni-lab.atlassian.net",
           resourceId: "20000",
           key: "SD",

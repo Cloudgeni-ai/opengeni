@@ -49,7 +49,7 @@ use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobP
 pub const LEGACY_ORIGIN: &str = "legacy";
 
 /// Builds the process-internal operation identity. The wire id remains unchanged;
-/// the local connection scope prevents unrelated OpenGeni deployments from
+/// the local connection scope prevents unrelated Opengeni deployments from
 /// colliding in the shared registry/admission/router.
 #[must_use]
 pub fn scoped_op_id(scope: &str, wire_op_id: &str) -> OpId {
@@ -137,6 +137,35 @@ pub struct OpHandles {
     /// Set (once) if post-exit replay failed: the terminal record survives,
     /// the retained frames do not — status answers carry it typed.
     pub collection_failure: Arc<OnceLock<crate::job::JobFailure>>,
+    /// Where the op's frames go, set when the op can be handed to a
+    /// successor process image across an in-place update.
+    pub handover: Arc<OnceLock<OpHandoverTag>>,
+}
+
+/// What a successor process image needs, besides the job itself, to keep
+/// serving an op: which link owns it and where its frames are published.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OpHandoverTag {
+    /// The owning link's local scope.
+    pub scope: String,
+    /// The wire op id.
+    pub request_id: String,
+    /// The op's frame subject (stable: the successor keeps the connection
+    /// instance).
+    pub subject: String,
+    /// The send window granted at OpStart.
+    #[serde(default)]
+    pub window_bytes: u64,
+}
+
+/// One op handed to a successor process image.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HandedOverOp {
+    /// Where its frames go.
+    pub tag: OpHandoverTag,
+    /// The job.
+    pub job: crate::job::JobHandover,
 }
 
 /// Outcome of [`Engine::start_job`].
@@ -211,6 +240,11 @@ impl Drop for JobCleanup {
             .lock()
             .expect("routes lock")
             .remove(&self.op_id);
+        self.engine
+            .handover_ops
+            .lock()
+            .expect("handover ops lock")
+            .remove(&self.op_id);
     }
 }
 
@@ -224,6 +258,9 @@ pub struct Engine {
     /// are inserted at job start and removed when the pump task ends; registry
     /// GC also clears entries for ops it evicts (which ends their linger).
     routes: Mutex<HashMap<OpId, mpsc::Sender<JobCommand>>>,
+    /// Live jobs (running or lingering) that an in-place update can hand to
+    /// its successor, with their handles.
+    handover_ops: Mutex<HashMap<OpId, OpHandles>>,
     budgets: RwLock<EngineBudgets>,
     capacity: RwLock<HostCapacity>,
     spool_root: PathBuf,
@@ -300,6 +337,7 @@ impl Engine {
             admission: Mutex::new(AdmissionState::new(admission)),
             waiters: Mutex::new(HashMap::new()),
             routes: Mutex::new(HashMap::new()),
+            handover_ops: Mutex::new(HashMap::new()),
             budgets: RwLock::new(budgets),
             capacity: RwLock::new(capacity),
             spool_root,
@@ -606,7 +644,7 @@ impl Engine {
             engine: self.clone(),
             op_id: op_id.clone(),
         };
-        tokio::spawn(async move {
+        opengeni_agent_platform::spawn_reserved(async move {
             // Owned here so a PANIC in the pump still removes the route. The
             // RetentionLog drop separately releases actual spool bytes.
             let cleanup = cleanup;
@@ -628,6 +666,237 @@ impl Engine {
             mailbox: mailbox_tx,
             handles,
         })
+    }
+
+    /// Marks a started job as one an in-place update may hand to its
+    /// successor, with where its frames go. A job that already ended is not
+    /// marked.
+    pub fn mark_handover_capable(&self, op_id: &OpId, handles: &OpHandles, tag: OpHandoverTag) {
+        let _ = handles.handover.set(tag);
+        if self.routes.lock().expect("routes lock").contains_key(op_id) {
+            self.handover_ops
+                .lock()
+                .expect("handover ops lock")
+                .insert(op_id.clone(), handles.clone());
+        }
+    }
+
+    /// Live jobs an in-place update can hand over, and how many of them are
+    /// still running (the rest linger for result collection).
+    #[must_use]
+    pub fn handover_counts(&self) -> (usize, usize) {
+        let ops = self.handover_ops.lock().expect("handover ops lock");
+        let running = ops
+            .values()
+            .filter(|handles| handles.exit.get().is_none())
+            .count();
+        (ops.len(), running)
+    }
+
+    /// Hands every live job to a successor process image (see
+    /// [`JobCommand::Handover`]). All or nothing: if any live job cannot be
+    /// handed over, `Err` returns the ones that were, for
+    /// [`Engine::adopt_job`] to take back in this process.
+    ///
+    /// # Errors
+    ///
+    /// A live job is not handover-capable or refused.
+    #[cfg(unix)]
+    pub async fn handover_all(&self) -> Result<Vec<HandedOverOp>, Vec<HandedOverOp>> {
+        let live: Vec<(OpId, mpsc::Sender<JobCommand>)> = self
+            .routes
+            .lock()
+            .expect("routes lock")
+            .iter()
+            .map(|(op, sender)| (op.clone(), sender.clone()))
+            .collect();
+        let tags = self.handover_ops.lock().expect("handover ops lock").clone();
+        let mut handed = Vec::with_capacity(live.len());
+        let mut complete = true;
+        for (op_id, sender) in live {
+            let Some(handles) = tags.get(&op_id) else {
+                warn!(op = %op_id, "a live job cannot be handed over");
+                complete = false;
+                continue;
+            };
+            let Some(mut tag) = handles.handover.get().cloned() else {
+                complete = false;
+                continue;
+            };
+            tag.window_bytes = handles.window_bytes.load(Ordering::Relaxed);
+            let (reply, receipt) = oneshot::channel();
+            if sender.send(JobCommand::Handover { reply }).await.is_err() {
+                // It ended meanwhile; nothing is left to carry.
+                continue;
+            }
+            match receipt.await {
+                Ok(Some(job)) => handed.push(HandedOverOp { tag, job: *job }),
+                Ok(None) => complete = false,
+                // The pump ended before answering.
+                Err(_) => {}
+            }
+        }
+        if complete {
+            Ok(handed)
+        } else {
+            Err(handed)
+        }
+    }
+
+    /// Continues a job handed over by [`Engine::handover_all`], in this
+    /// process or a successor process image, with `child` adopted by the
+    /// platform (`Err` when its process could not be adopted). A job whose
+    /// process or state cannot be restored ends as a typed failure, and its
+    /// adopted process is killed.
+    #[cfg(unix)]
+    #[allow(clippy::too_many_lines)] // one restore sequence: registry, admission, route, pump
+    pub fn adopt_job(
+        self: &Arc<Self>,
+        handed: HandedOverOp,
+        child: Result<Option<ContainedExec>, String>,
+        emit: impl Fn(Frame) + Send + 'static,
+        encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
+    ) {
+        let HandedOverOp { tag, job } = handed;
+        let op_id = scoped_op_id(&tag.scope, &tag.request_id);
+        let carried_exit = match job.state.exit() {
+            Ok(carried) => carried,
+            Err(error) => {
+                warn!(op = %op_id, %error, "a handed-over job's terminal record is unreadable");
+                None
+            }
+        };
+        let handles = {
+            let mut registry = self.registry.lock().expect("registry lock");
+            let existing = match registry.get_mut(&op_id) {
+                Some(
+                    opengeni_agent_engine::registry::OpEntry::Running { state, .. }
+                    | opengeni_agent_engine::registry::OpEntry::Complete { state, .. },
+                ) => Some(state.clone()),
+                None => None,
+            };
+            existing.unwrap_or_else(|| {
+                let handles = OpHandles::default();
+                let _ = registry.begin(&op_id, handles.clone(), self.now_ms());
+                if let Some((exit_seq, exit)) = &carried_exit {
+                    let _ = handles.exit.set(exit.clone());
+                    registry.complete(
+                        &op_id,
+                        exit_seq.unwrap_or_else(|| job.state.high()),
+                        self.now_ms(),
+                    );
+                }
+                handles
+            })
+        };
+        handles
+            .window_bytes
+            .store(tag.window_bytes, Ordering::Relaxed);
+        handles.watermark.store(job.state.high(), Ordering::Relaxed);
+        let _ = handles.handover.set(tag.clone());
+        let ticket = carried_exit.is_none().then(|| {
+            self.admission
+                .lock()
+                .expect("admission lock")
+                .adopt_running(JobClass::Heavy);
+            self.ticket(JobClass::Heavy)
+        });
+        let hooks = {
+            let engine = self.clone();
+            let id = op_id.clone();
+            let exit_stash = handles.exit.clone();
+            let watermark = handles.watermark.clone();
+            JobHooks::new(emit, encode_exit, move |exit_seq, exit: &JobExit| {
+                let _ = exit_stash.set(exit.clone());
+                engine.registry.lock().expect("registry lock").complete(
+                    &id,
+                    exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed)),
+                    engine.now_ms(),
+                );
+                drop(ticket);
+            })
+        };
+        let (mailbox_tx, mailbox_rx) = mpsc::channel(JOB_MAILBOX_DEPTH);
+        self.routes
+            .lock()
+            .expect("routes lock")
+            .insert(op_id.clone(), mailbox_tx);
+        self.handover_ops
+            .lock()
+            .expect("handover ops lock")
+            .insert(op_id.clone(), handles.clone());
+        let (child, adoption_error) = match child {
+            Ok(child) => (child, None),
+            Err(error) => (None, Some(error)),
+        };
+        let params = crate::job::ResumeParams {
+            state: job.state,
+            child,
+            retention: self.budgets().retention_per_op,
+            spool_budget: self.spool_budget.clone(),
+            memory_budget: self.memory_budget.clone(),
+            spool_dir: self.spool_root.join(op_dir_name(&op_id)),
+            config: JobConfig {
+                max_frame_bytes: self.max_frame_bytes(),
+                ..JobConfig::default()
+            },
+            watermark: handles.watermark.clone(),
+            collection_failure: handles.collection_failure.clone(),
+        };
+        let cleanup = JobCleanup {
+            engine: self.clone(),
+            op_id,
+        };
+        opengeni_agent_platform::spawn_reserved(async move {
+            let cleanup = cleanup;
+            let resumed = match adoption_error {
+                None => crate::job::run_job_resumed(params, mailbox_rx, hooks).await,
+                Some(error) => {
+                    let _ = std::fs::remove_file(params.state.frames_path());
+                    Err((None, error))
+                }
+            };
+            match resumed {
+                Ok(JobEnd::FinalAcked) => {
+                    cleanup
+                        .engine
+                        .registry
+                        .lock()
+                        .expect("registry lock")
+                        .final_ack(&cleanup.op_id);
+                }
+                Ok(_) => {}
+                Err((child, error)) => {
+                    warn!(op = %cleanup.op_id, %error, "could not resume a handed-over job; it ends as failed");
+                    // Dropping the adopted exec kills its whole group.
+                    drop(child);
+                    let _ = handles.exit.set(JobExit {
+                        outcome: crate::job::JobOutcome::Failed(crate::job::JobFailure::PipeIo {
+                            detail: format!("resume after agent update failed: {error}"),
+                        }),
+                        duration_ms: 0,
+                        stdout: crate::job::ChannelStats {
+                            total_bytes: 0,
+                            digest: blake3::hash(&[]),
+                        },
+                        stderr: crate::job::ChannelStats {
+                            total_bytes: 0,
+                            digest: blake3::hash(&[]),
+                        },
+                    });
+                    cleanup
+                        .engine
+                        .registry
+                        .lock()
+                        .expect("registry lock")
+                        .complete(
+                            &cleanup.op_id,
+                            handles.watermark.load(Ordering::Relaxed),
+                            cleanup.engine.now_ms(),
+                        );
+                }
+            }
+        });
     }
 
     /// Delivers a wire command to a job's mailbox without blocking. `false`

@@ -8,7 +8,10 @@ import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+  ComputerNativeCommand,
+  ComputerNativeCallRequest,
   ComputerActionCommand,
+  computerActionSecretTexts,
   ComputerActionRequest,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
@@ -119,6 +122,12 @@ import {
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { wrongInteractionPlacementMessage } from "./interaction-placement-message";
+import {
+  collectStringsDeep,
+  resolveInteractionSecretValues,
+  type InteractionSecretsPort,
+} from "../interaction-secrets";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -202,7 +211,12 @@ export function computerScreenshotResponse(
 /** Public ComputerSession resource surface. Physical app/window authority stays
  * in the same placement controller used by BrowserSession; this route owns only
  * durable authorization, placement fencing, lifecycle receipts, and routing. */
-export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
+export function registerComputerSessionRoutes(
+  app: Hono,
+  deps: ApiRouteDeps,
+  options: { interactionSecrets?: InteractionSecretsPort | null } = {},
+): void {
+  const interactionSecrets = options.interactionSecrets ?? null;
   const channelServices = {
     db: deps.db,
     settings: deps.settings,
@@ -574,6 +588,62 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   );
 
   app.post(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/native-calls",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:control",
+      );
+      if (grant.principalKind === "agent_attempt") {
+        const selected = grant.metadata?.firstPartyMcpTools;
+        if (!Array.isArray(selected) || !selected.includes("computer_act"))
+          throw new HTTPException(403, {
+            message: "Computer control is not selected for this attempt",
+          });
+      }
+      const request = await parseJsonBody(context, ComputerNativeCallRequest);
+      const result = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.control",
+        "computer.action",
+        async ({ sessionClient, binding, record }) => {
+          if (
+            record.session.placement.kind === "sandbox_group" &&
+            deps.settings.sandboxDesktopInteractive === false &&
+            grant.principalKind !== "agent_attempt"
+          )
+            throw new HTTPException(403, { message: "Human desktop input is disabled" });
+          const commandFields = {
+            ...request,
+            protocolVersion: INTERACTION_PROTOCOL_VERSION,
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId: null,
+            actor: interactionActorForGrant(grant),
+          };
+          ComputerNativeCommand.parse(commandFields);
+          const secretValues = await resolveInteractionSecretValues({
+            port: interactionSecrets,
+            grant,
+            texts: collectStringsDeep(request.arguments),
+            use: { surface: "desktop", toolName: request.tool, operationId: request.operationId },
+          });
+          return await sessionClient.nativeCall(
+            ComputerNativeCommand.parse({
+              ...commandFields,
+              ...(secretValues === undefined ? {} : { secretValues }),
+            }),
+          );
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions",
     async (context) => {
       const { workspaceId, grant, computerSessionId } = await routePreamble(
@@ -597,18 +667,29 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           ) {
             throw new HTTPException(403, { message: "Human desktop input is disabled" });
           }
+          const commandFields = {
+            protocolVersion: INTERACTION_PROTOCOL_VERSION,
+            operationId: request.operationId,
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId: request.targetId,
+            expectedTargetGeneration: request.expectedTargetGeneration,
+            expectedObservationId: request.expectedObservationId,
+            expectedFrameId: request.expectedFrameId,
+            actor: interactionActorForGrant(grant),
+            action: request.action,
+          };
+          ComputerActionCommand.parse(commandFields);
+          const secretValues = await resolveInteractionSecretValues({
+            port: interactionSecrets,
+            grant,
+            texts: computerActionSecretTexts(request.action),
+            use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
+          });
           return await sessionClient.action(
             ComputerActionCommand.parse({
-              protocolVersion: INTERACTION_PROTOCOL_VERSION,
-              operationId: request.operationId,
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId: request.targetId,
-              expectedTargetGeneration: request.expectedTargetGeneration,
-              expectedObservationId: request.expectedObservationId,
-              expectedFrameId: request.expectedFrameId,
-              actor: interactionActorForGrant(grant),
-              action: request.action,
+              ...commandFields,
+              ...(secretValues === undefined ? {} : { secretValues }),
             }),
           );
         },
@@ -1112,6 +1193,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         workspaceId: sourceSession.workspaceId,
         session: sourceSession,
         subjectId: grant.subjectId,
+        grant,
         waitSignal,
         operation,
         retryControllerTransport: operation === "computer.read" || operation === "computer.action",
@@ -1161,8 +1243,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           ) {
             if (operation === "computer.create") {
               throw new HTTPException(422, {
-                message:
-                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+                message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
               });
             }
             return await throwComputerSourcePlacementChanged(
@@ -1522,6 +1603,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       deps.db,
       deps.settings,
       sourceSession,
+      { grant },
     );
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,

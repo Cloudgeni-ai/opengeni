@@ -7,8 +7,8 @@ use super::{
     MAX_CELLS_PER_TRANSACTION, MAX_OPERATIONS_PER_TRANSACTION, MAX_RETAINED_TRANSACTIONS,
 };
 use crate::{
-    AuthoredCellContent, CellBlock, CellCoord, CellRange, CellValue, DateValue, FormulaError,
-    Number, StableId, ValueError,
+    AuthoredCellContent, CellBlock, CellCoord, CellRange, CellValue, DateValue, DimensionAxis,
+    FormulaError, Number, StableId, ValueError,
 };
 
 const MAGIC: [u8; 8] = *b"OGACRD02";
@@ -580,6 +580,17 @@ impl Encoder {
                     self.u8(5);
                     self.id(target.stable_id());
                 }
+                CollaborationCommand::SetDimension {
+                    sheet,
+                    axis,
+                    index,
+                    pixels,
+                } => {
+                    self.u8(if *axis == DimensionAxis::Row { 6 } else { 7 });
+                    self.generation(*sheet);
+                    self.u32(*index);
+                    self.u32(pixels.unwrap_or(0));
+                }
             }
         }
         Ok(())
@@ -781,7 +792,8 @@ impl<'a> Decoder<'a> {
             .map_err(|_| CollaborationSnapshotError::SizeLimit)?;
         for _ in 0..operation_count {
             let operation_id = OperationId::from_stable_id(self.id()?);
-            let command = match self.u8()? {
+            let tag = self.u8()?;
+            let command = match tag {
                 0 => {
                     let sheet_id = self.id()?;
                     let name = self.string()?;
@@ -851,6 +863,28 @@ impl<'a> Decoder<'a> {
                 5 => CollaborationCommand::Undo {
                     target: OperationId::from_stable_id(self.id()?),
                 },
+                6 | 7 => {
+                    let sheet = self.generation()?;
+                    let axis = if tag == 6 {
+                        DimensionAxis::Row
+                    } else {
+                        DimensionAxis::Column
+                    };
+                    let index = self.u32()?;
+                    let raw = self.u32()?;
+                    let pixels = (raw != 0).then_some(raw);
+                    if !axis.valid_pixels(pixels) || pixels == Some(axis.default_pixels()) {
+                        return Err(CollaborationSnapshotError::NonCanonical(
+                            "invalid dimension pixels",
+                        ));
+                    }
+                    CollaborationCommand::SetDimension {
+                        sheet,
+                        axis,
+                        index,
+                        pixels,
+                    }
+                }
                 tag => return Err(CollaborationSnapshotError::InvalidTag(tag)),
             };
             operations.push(CollaborationOperation::new(operation_id, command));

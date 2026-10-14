@@ -226,7 +226,7 @@ describe("personal GitHub Git broker", () => {
     );
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toBe(
-      'Basic realm="OpenGeni Git broker", charset="UTF-8"',
+      'Basic realm="Opengeni Git broker", charset="UTF-8"',
     );
   });
 

@@ -8,13 +8,14 @@
 // the compute target and everything it gates live in one consistent state.
 //
 // Wire fields are unchanged (PR-1, no contract change): a managed sandbox still
-// sends `sandboxBackend`/`variableSetId`; a connected machine still sends the
+// sends `sandboxBackend`/`rigId`; a connected machine still sends the
 // top-level `targetSandboxId` (+ Stage A's `workingDir`). Only the form shape and
 // the gating change.
 import {
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
+  isDerivedAgentToolOwner,
   mergeResourceRefs,
   Permission,
   stableJson,
@@ -106,11 +107,6 @@ export type SessionDraft = {
   visibility: "private" | "workspace";
   // PROMOTED — the parent that gates the compute-dependent band.
   compute: ComputeTarget;
-  // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
-  // (a connected machine uses its own variable set & git credentials — D2).
-  variableSetIds: string[];
-  /** @deprecated local compatibility alias for older saved drafts/tests. */
-  variableSetId: string;
   // The rig the session materializes (managed sandbox only; a connected machine
   // is the user's own box, so it never rides a rig). "" ⇒ the workspace default
   // rig, resolved server-side.
@@ -126,12 +122,22 @@ export type SessionDraft = {
    * defaults and sends no `agent` at all.
    */
   agentCapabilities?: AgentCapabilities;
+  /**
+   * This chat's own instructions, from a draft another page prepared (the
+   * signup setup chat). Not edited in the composer; sent as `agent.instructions`.
+   */
+  agentInstructions?: string;
+  /**
+   * The chat's "+" > Secrets choice. Undefined means every vault the person
+   * can reach (no narrowing); sent as `agent.vaultPolicy`.
+   */
+  vaultPolicy?: import("@opengeni/sdk").VaultPolicy;
 };
 
 /**
  * Label for the composer's empty Sandbox Environment choice. The empty choice
- * sends no rigId, so the server binds the workspace default and the default
- * Variable Sets it carries. Name that default so people can see what they
+ * sends no rigId, so the server binds the workspace default. Name that
+ * default so people can see what they
  * would replace by picking another environment; say "None" when the
  * workspace has no default, because the empty choice then means no
  * environment at all.
@@ -155,8 +161,6 @@ export function emptySessionDraft(
       defaultSandboxBackend === "selfhosted"
         ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
         : { kind: "sandbox", backend: "" },
-    variableSetIds: [],
-    variableSetId: "",
     rigId: "",
     goalText: "",
     goalSuccessCriteria: "",
@@ -186,7 +190,7 @@ function explicitFirstPartyTools(
   return {
     firstPartyMcpTools: selected.filter((tool) => {
       const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-      return owner === "runtime" || capabilityOn(values, owner);
+      return isDerivedAgentToolOwner(owner) || capabilityOn(values, owner);
     }),
   };
 }
@@ -276,6 +280,12 @@ export type BuildCreateSessionRequestInput = {
   channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
   agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
+  /**
+   * Per-task usage limit in USD micros. Only sent when the server advertises
+   * `sessionUsageLimits.enabled` and a limit was chosen; null or omitted sends
+   * nothing (no limit), so older servers never see the field.
+   */
+  usageLimitMicros?: number | null;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
   /** Prevent a partially hydrated capability catalog from becoming a pin. */
@@ -375,14 +385,6 @@ export function buildCreateSessionRequest(
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
     ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
-    ...(input.submission.variableSetIds?.length
-      ? {
-          variableSetIds: input.submission.variableSetIds,
-          variableSetId: input.submission.variableSetIds.at(-1),
-        }
-      : input.submission.variableSetId
-        ? { variableSetId: input.submission.variableSetId }
-        : {}),
     ...(input.submission.rigId ? { rigId: input.submission.rigId } : {}),
     ...(input.submission.goal ? { goal: input.submission.goal } : {}),
     ...(input.submission.firstPartyMcpPermissions
@@ -405,6 +407,9 @@ export function buildCreateSessionRequest(
     ...(input.channelId ? { channelId: input.channelId } : {}),
     ...(input.agentLearning && Object.keys(input.agentLearning).length
       ? { agentLearning: input.agentLearning }
+      : {}),
+    ...(typeof input.usageLimitMicros === "number"
+      ? { usageLimitMicros: input.usageLimitMicros }
       : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
@@ -473,8 +478,8 @@ export function submissionFromSessionDraft(
 
   if (draft.compute.kind === "machine") {
     return {
-      // No sandboxBackend (forced `selfhosted` server-side) and no variable set
-      // injection — the machine's own env & git auth apply (D2).
+      // No sandboxBackend (forced `selfhosted` server-side); the machine's own
+      // env and git auth apply (D2). Secrets arrive per command by reference.
       extras: {
         ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
         ...(goal ? { goal } : {}),
@@ -494,14 +499,6 @@ export function submissionFromSessionDraft(
   return {
     extras: {
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-      ...(draft.variableSetIds.length
-        ? {
-            variableSetIds: draft.variableSetIds,
-            variableSetId: draft.variableSetIds.at(-1),
-          }
-        : draft.variableSetId
-          ? { variableSetId: draft.variableSetId }
-          : {}),
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
       ...(goal ? { goal } : {}),
@@ -556,14 +553,6 @@ export function newSessionDraftOptionsFromSessionDraft(
     visibility: effectiveVisibility,
     ...(draft.agentLearning ? { agentLearning: draft.agentLearning } : {}),
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-    ...(draft.variableSetIds.length
-      ? {
-          variableSetIds: draft.variableSetIds,
-          variableSetId: draft.variableSetIds.at(-1),
-        }
-      : draft.variableSetId
-        ? { variableSetId: draft.variableSetId }
-        : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
     ...(goal ? { goal } : {}),
     ...permissions,
@@ -573,9 +562,21 @@ export function newSessionDraftOptionsFromSessionDraft(
 }
 
 function agentExtras(draft: SessionDraft): { agent?: AgentConfigRequest } {
-  return draft.agentCapabilities === undefined
-    ? {}
-    : { agent: { capabilities: draft.agentCapabilities } };
+  const vaultPolicy = draft.vaultPolicy?.mode === "selected" ? draft.vaultPolicy : undefined;
+  if (
+    draft.agentCapabilities === undefined &&
+    draft.agentInstructions === undefined &&
+    vaultPolicy === undefined
+  ) {
+    return {};
+  }
+  return {
+    agent: {
+      ...(draft.agentCapabilities !== undefined ? { capabilities: draft.agentCapabilities } : {}),
+      ...(draft.agentInstructions !== undefined ? { instructions: draft.agentInstructions } : {}),
+      ...(vaultPolicy !== undefined ? { vaultPolicy } : {}),
+    },
+  };
 }
 
 /** Restore server-authoritative create options into the single UI draft form. */
@@ -609,9 +610,6 @@ export function sessionDraftFromNewSessionDraftOptions(
           // offers that control; always use the deployment default.
           backend: "",
         },
-    variableSetIds:
-      options.variableSetIds ?? (options.variableSetId ? [options.variableSetId] : []),
-    variableSetId: options.variableSetId ?? options.variableSetIds?.at(-1) ?? "",
     rigId: options.rigId ?? "",
     goalText: options.goal?.text ?? "",
     goalSuccessCriteria: options.goal?.successCriteria ?? "",
@@ -630,6 +628,12 @@ export function sessionDraftFromNewSessionDraftOptions(
         : new Set(options.firstPartyMcpTools),
     ...(options.agent?.capabilities !== undefined
       ? { agentCapabilities: options.agent.capabilities }
+      : {}),
+    ...(options.agent?.instructions !== undefined
+      ? { agentInstructions: options.agent.instructions }
+      : {}),
+    ...(options.agent?.vaultPolicy?.mode === "selected"
+      ? { vaultPolicy: options.agent.vaultPolicy }
       : {}),
   };
 }

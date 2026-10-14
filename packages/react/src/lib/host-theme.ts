@@ -310,8 +310,21 @@ export function resolveHostTheme(element: Element): ResolvedHostTheme {
   return "light";
 }
 
-function normalizeToken(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
+/**
+ * Canonical text for comparing a token value with the stock one. The
+ * published `compiled.css` is minified (`#333`, `oklch(.52 .16 22)`), so the
+ * same color must compare equal in short and long form; otherwise every stock
+ * token reads as a host customization and dark values leak into light themes.
+ */
+export function normalizeToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/#([\da-f])([\da-f])([\da-f])(?![\da-f])/g, "#$1$1$2$2$3$3")
+    .replace(/(^|[\s(,/])0+(\.\d)/g, "$1$2")
+    .replace(/(\.\d*?)0+(?=[\s),/%]|$)/g, "$1")
+    .replace(/\.(?=[\s),/%]|$)/g, "");
 }
 
 /**

@@ -31,15 +31,19 @@ export function getSessionProxyWorkspaceGrant(
   );
 }
 
-/** Exact association read. The API reauthorizes the source session on every call. */
+/**
+ * Exact association read. The API reauthorizes the source session on every
+ * call. `retained` proves a generated image or video, or a published sandbox
+ * file, originated in that session.
+ */
 export function getSessionProxyArtifactAssociation(
   client: Pick<OpenGeniEmbeddingClient, "requestJson">,
   workspaceId: string,
   sessionId: string,
-  kind: "editable" | "site",
+  kind: "editable" | "site" | "retained",
   artifactId: string,
   options: OpenGeniRequestOptions = {},
-): Promise<{ sessionId: string; artifactId: string; kind: "editable" | "site" }> {
+): Promise<{ sessionId: string; artifactId: string; kind: "editable" | "site" | "retained" }> {
   return client.requestJson(
     "GET",
     `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/artifact-associations/${encodeURIComponent(artifactId)}`,

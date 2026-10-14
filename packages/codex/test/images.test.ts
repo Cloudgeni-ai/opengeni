@@ -5,6 +5,8 @@ import {
   CodexImageRequestTimeoutError,
   generateCodexSubscriptionImage,
   type CodexTokenSnapshot,
+  type CodexProviderRequestIdentity,
+  type CodexProviderRequestSettlement,
 } from "../src";
 
 const token = (accessToken: string): CodexTokenSnapshot => ({
@@ -14,6 +16,164 @@ const token = (accessToken: string): CodexTokenSnapshot => ({
 });
 
 describe("generateCodexSubscriptionImage", () => {
+  test("physical image auth retries reserve separately and settle only full responses", async () => {
+    const reservations: CodexProviderRequestIdentity[] = [];
+    const settlements: CodexProviderRequestSettlement[] = [];
+    const auth: string[] = [];
+    await generateCodexSubscriptionImage({
+      prompt: "fixture",
+      turnId: "turn",
+      context: {
+        clientVersion: "test",
+        nextRequestId: () => "image-request",
+        getToken: async () => token("old"),
+        refresh: async () => token("new"),
+        beforeProviderDispatch: (value) => {
+          reservations.push(value!);
+        },
+        onProviderRequestSettled: (value) => {
+          settlements.push(value);
+        },
+      },
+      fetch: async (_url, init) => {
+        auth.push(new Headers(init?.headers).get("authorization")!);
+        expect(reservations).toHaveLength(auth.length);
+        return auth.length === 1
+          ? Response.json({}, { status: 401 })
+          : Response.json({ data: [{ b64_json: "aW1hZ2U=" }] });
+      },
+    });
+    expect(reservations).toEqual([
+      { requestId: "image-request", transportAttempt: 1 },
+      { requestId: "image-request", transportAttempt: 2 },
+    ]);
+    expect(settlements.map((value) => value.outcome)).toEqual(["refused", "response_received"]);
+    expect(auth).toEqual(["Bearer old", "Bearer new"]);
+  });
+
+  test("image body custody survives disconnect and settles only after EOF", async () => {
+    let disconnected = false;
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let dispatched!: () => void;
+    const started = new Promise<void>((yes) => {
+      dispatched = yes;
+    });
+    const outcomes: string[] = [];
+    let fetches = 0;
+    const context = {
+      clientVersion: "test",
+      getToken: async () => token("loaded"),
+      refresh: async () => {
+        throw new Error("source disconnected");
+      },
+      beforeProviderDispatch: () => {
+        if (disconnected) throw new Error("source disconnected");
+      },
+      onProviderRequestSettled: (value: CodexProviderRequestSettlement) => {
+        outcomes.push(value.outcome);
+      },
+    };
+    const fetch: Parameters<typeof generateCodexSubscriptionImage>[0]["fetch"] = async () => {
+      fetches++;
+      const response = new Response(
+        new ReadableStream({
+          start(value) {
+            controller = value;
+          },
+        }),
+      );
+      dispatched();
+      return response;
+    };
+    const pending = generateCodexSubscriptionImage({
+      prompt: "fixture",
+      turnId: "turn",
+      context,
+      fetch,
+    });
+    await started;
+    disconnected = true;
+    controller.enqueue(new TextEncoder().encode('{"data":[{"b64_json":"aW1hZ2U="}]}'));
+    await Bun.sleep(1);
+    expect(outcomes).toEqual([]);
+    controller.close();
+    expect((await pending).bytes).toEqual(new TextEncoder().encode("image"));
+    expect(outcomes).toEqual(["response_received"]);
+    await expect(
+      generateCodexSubscriptionImage({ prompt: "fixture", turnId: "turn", context, fetch }),
+    ).rejects.toThrow("source disconnected");
+    expect(fetches).toBe(1);
+  });
+
+  test("ignored image abort remains unknown after a late complete body and is never retried", async () => {
+    const outcomes: string[] = [];
+    let resolve!: (value: Response) => void;
+    let fetches = 0;
+    await expect(
+      generateCodexSubscriptionImage({
+        prompt: "fixture",
+        turnId: "turn",
+        requestTimeoutMs: 10,
+        context: {
+          clientVersion: "test",
+          getToken: async () => token("old"),
+          refresh: async () => token("new"),
+          onProviderRequestSettled: (value) => {
+            outcomes.push(value.outcome);
+          },
+        },
+        fetch: async () => {
+          fetches++;
+          return await new Promise<Response>((yes) => {
+            resolve = yes;
+          });
+        },
+      }),
+    ).rejects.toBeInstanceOf(CodexImageRequestTimeoutError);
+    resolve(Response.json({ data: [{ b64_json: "aW1hZ2U=" }] }));
+    await Bun.sleep(1);
+    expect(outcomes).toEqual(["unknown"]);
+    expect(fetches).toBe(1);
+  });
+
+  test("a decoded image field with a stalled trailing body times out as unknown", async () => {
+    const outcomes: string[] = [];
+    let fetches = 0;
+    let cancellations = 0;
+    await expect(
+      generateCodexSubscriptionImage({
+        prompt: "fixture",
+        turnId: "turn",
+        requestTimeoutMs: 10,
+        context: {
+          clientVersion: "test",
+          getToken: async () => token("loaded"),
+          refresh: async () => token("unused"),
+          onProviderRequestSettled: (value) => {
+            outcomes.push(value.outcome);
+          },
+        },
+        fetch: async () => {
+          fetches++;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"data":[{"b64_json":"aW1hZ2U="}]}'));
+              },
+              cancel() {
+                cancellations++;
+              },
+            }),
+          );
+        },
+      }),
+    ).rejects.toBeInstanceOf(CodexImageRequestTimeoutError);
+    await Bun.sleep(1);
+    expect(outcomes).toEqual(["unknown"]);
+    expect(fetches).toBe(1);
+    expect(cancellations).toBe(1);
+  });
+
   test("uses the subscription Images endpoint and exact Codex request shape", async () => {
     let captured: { url: string; init: RequestInit | undefined } | undefined;
     const result = await generateCodexSubscriptionImage({

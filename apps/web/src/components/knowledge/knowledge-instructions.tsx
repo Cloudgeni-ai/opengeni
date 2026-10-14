@@ -214,8 +214,7 @@ export function InstructionsTab({
   onOpenIdentity,
   onGoToLibrary,
 }: InstructionsTabProps) {
-  const { client, clientConfig } = useAppContext();
-  const agentSettings = clientConfig.agentConfig?.enabled === true;
+  const { client } = useAppContext();
   const identity = useCompanyProfileInventory(client, workspaceId);
   const profile = identity.response?.activeRevision?.profile ?? null;
   const { loading, error, content, configured, head } = instructions;
@@ -224,7 +223,7 @@ export function InstructionsTab({
   return (
     <div className="flex min-w-0 flex-col gap-4 pt-6">
       <RowList label="Always applied to every agent" columns={INSTRUCTION_COLUMNS} flush>
-        {agentSettings ? <AgentIdentityRow workspaceId={workspaceId} /> : null}
+        <AgentIdentityRow workspaceId={workspaceId} />
         <ListRow
           leading={<LogoTile icon={<ScrollTextIcon />} />}
           title={personal ? "Instructions for your Personal workspace" : "Workspace instructions"}
@@ -257,18 +256,15 @@ export function InstructionsTab({
           onOpen={onOpenIdentity}
         />
       </RowList>
-      {agentSettings ? (
-        <InlineHelp>
-          Every prompt in {workspaceName} starts with who the agent is, then your organization, then
-          these instructions, then anything set for one chat. Instructions take priority over
-          OpenGeni's default way of working, but never over its safety rules or how it runs tools.
-        </InlineHelp>
-      ) : null}
       <InlineHelp>
-        {agentSettings ? "These are" : "Both are"} added to every chat and schedule in{" "}
-        {workspaceName}, before anything agents look up. Facts go in the{" "}
-        <HelpLink onClick={onGoToLibrary}>Library</HelpLink>, and step-by-step procedures in Skills,
-        in{" "}
+        Every prompt in {workspaceName} starts with who the agent is, then your organization, then
+        these instructions, then anything set for one chat. Instructions take priority over
+        Opengeni's default way of working, but never over its safety rules or how it runs tools.
+      </InlineHelp>
+      <InlineHelp>
+        These are added to every chat and schedule in {workspaceName}, before anything agents look
+        up. Facts go in the <HelpLink onClick={onGoToLibrary}>Library</HelpLink>, and step-by-step
+        procedures in Skills, in{" "}
         <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
           Capabilities
         </InAppHelpLink>
@@ -421,7 +417,7 @@ export function IdentityPage({
   const navigate = useNavigate();
   const identity = useCompanyProfileInventory(client, workspaceId);
   const profile = identity.response?.activeRevision?.profile ?? null;
-  const settings = `/workspaces/${workspaceId}/organization?section=knowledge`;
+  const settings = `/workspaces/${workspaceId}/organization?section=identity`;
   return (
     <DetailPage back={{ label: "Instructions", onClick: onBack }}>
       <DetailPageHeader
@@ -515,7 +511,7 @@ function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
       meta={[
         resolved.identity
           ? firstLine(resolved.identity)
-          : "OpenGeni's general assistant (the default)",
+          : "Opengeni's general assistant (the default)",
         resolved.source === "legacy_agent_instructions"
           ? "from this workspace's earlier custom persona"
           : null,
@@ -536,7 +532,7 @@ function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/** "Ask OpenGeni…": starts a chat that proposes the change, on the workspace's model. */
+/** "Ask Opengeni…": starts a chat that proposes the change, on the workspace's model. */
 function AskOpenGeniDialog({
   open,
   onOpenChange,

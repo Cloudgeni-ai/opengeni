@@ -7,6 +7,8 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { compactProtectedIndexHtml } from "./vite-index-html";
+import { chunkEvaluationOrderPlugin } from "./vite-chunk-evaluation-order";
+import { eagerGraphPlugin } from "./vite-eager-graph";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -42,6 +44,25 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // Session status badges read this presentation table at module
+              // load. It is pure data; keep it in a leaf chunk so entry-aware
+              // merging cannot place it behind a reciprocal session chunk.
+              name: "session-status-model",
+              test: /packages[\\/]react[\\/]src[\\/]session-status-model\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // The usage meter and limit notice spread these default words
+              // into their own defaults at module load. They are dependency-
+              // free; keep them in a leaf chunk so the session chunks that
+              // import each other cannot run those defaults first.
+              name: "usage-allowance-copy",
+              test: /packages[\\/]react[\\/]src[\\/]usage[\\/]allowance-copy\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Session routes register optional peers during module evaluation.
               // Their callbacks are assigned from state objects, not hoisted
               // declarations. Keep this dependency-free state in a leaf chunk
@@ -68,6 +89,21 @@ export default defineConfig({
               // lazy imports instead of recursively merging them into chat.
               name: "session-conditional-panels",
               test: /(?:packages[\\/]react[\\/]src[\\/](?:components[\\/](?:human-input-(?:form|surface)|session-commands(?:-panel)?)\.tsx|hooks[\\/]use-session-background-commands\.ts)$|apps[\\/]web[\\/]src[\\/]components[\\/]session[\\/]commands\.tsx$)/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // The playground is a lazy page around the packaged embedded chat.
+              // Only modules nothing else in the app imports belong here (the
+              // app's rail has its own session list; the provider, the
+              // workspace sessions hook and the approval surface stay with the
+              // eager workspace shell). Public conversation state hooks stay
+              // outside this presentation chunk so headless consumers never
+              // load the embedded view and its conditional panels.
+              // Left floating, these presentation modules merge into the
+              // shared chunks every workspace and direct session loads.
+              name: "embedded-chat",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:lib[\\/]host-theme\.ts|components[\\/](?:open-geni-chat|new-conversation|session-conversation|session-list|session-proxy-scope)\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 21,
             },
@@ -272,8 +308,11 @@ export default defineConfig({
               // List sort arrows are shared by the direct session graph and
               // the lazy conversation cards' repository list; keep them here
               // instead of in their own tiny direct-session chunk.
+              // The dollar-input parser is shared by the chat's usage-limit
+              // editor and the lazy budget pages; keep it here so the session
+              // graph never loads the usage-allowances chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:dollars|format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -308,8 +347,12 @@ export default defineConfig({
               // draws the settings RowSelect; left to entry-aware merging it
               // lands in a chunk the workspace route imports and pulls this
               // whole surface into a sessions load.
+              // The sandbox image row (Workspace settings only) draws the
+              // settings Select. Left to entry-aware merging it joined a chunk
+              // shared with the session route, so every direct chat load
+              // fetched the management UI primitives chunk through it.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control|workspace-sandbox-image-row)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -376,8 +419,11 @@ export default defineConfig({
               // Diff/revision history imports ErrorMessage; leaving either
               // unpinned co-locates it with shared session glyphs and drags this
               // entire group plus management Radix controls into sessions.
+              // Relative time, setting rows, switches and disabled reasons are
+              // rendered by the session retention control, so they stay out of
+              // this group; pinning them here loads the whole group with chats.
               name: "management-ui-primitives",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|diff-view|disabled-reason|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|relative-time|revision-history|role-select|secret-field|section|segmented-control|select|select-menu|setting-row|settings-nav|sheet|status-badge|switch|usage-meter)\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|diff-view|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|revision-history|role-select|secret-field|section|segmented-control|select|select-menu|settings-nav|sheet|status-badge|usage-meter)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 19,
             },
@@ -441,11 +487,15 @@ export default defineConfig({
               // and modality runtimes behind their one direct route. Like the
               // session group, entriesAware preserves genuinely shared shell
               // code without folding route-only dependencies into startup.
+              // Do not merge entry-aware subgroups: any merge threshold folds
+              // small modules a chat needs (artifact catalog, artifact client,
+              // shared icons) into the editor subgroup, so every chat would
+              // download the editors.
               name: "editable-artifact",
               test: /src[\\/]routes[\\/]editable-artifact\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 128 * 1024,
+              entriesAwareMergeThreshold: 0,
               priority: 3,
             },
             {
@@ -527,6 +577,10 @@ export default defineConfig({
     viteReact(),
     tailwindcss(),
     safeReactHmrPlugin(),
+    chunkEvaluationOrderPlugin(),
+    // Chats are opened directly from links and reloads. Allow a little
+    // coalesced shell code, but fail when lazy-only code rides along.
+    eagerGraphPlugin({ directRoutes: ["src/routes/session.tsx"], allowanceBytes: 32 * 1024 }),
     {
       name: "opengeni-browser-extension-archive",
       configureServer(server) {
@@ -543,7 +597,7 @@ export default defineConfig({
             response.end(archive);
           } catch {
             response.statusCode = 503;
-            response.end("OpenGeni Browser extension is not built yet.");
+            response.end("Opengeni Browser extension is not built yet.");
           }
         });
       },

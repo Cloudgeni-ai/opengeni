@@ -106,43 +106,42 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
-  "packages/db/src/archived-session-imports.ts#appendTimeline": {
-    inserts: 1,
-    contract: "owned_suffix",
-  },
-  "packages/db/src/index.ts#switchSessionCodexAccount": {
-    inserts: 1,
-    contract: "canonical",
-  },
-  "packages/db/src/index.ts#armCodexCapacityWait": {
+  "packages/db/src/unstarted-queue-retirement.ts#retireUnstartedSessionQueue": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#supersedeCodexCapacityWaitInTransaction": {
+  "packages/db/src/empty-session-queue.ts#repairEmptyQueuedSessionProjection": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/archived-session-imports.ts#appendTimeline": {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#reconcileCodexCapacityWait": {
+  // Provider-neutral account choice uses the same preference-write lock contract.
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  // The shared-core waiter (M3 PR 2a; any provider since SuperGrok X1b)
+  // mirrors the legacy Codex arm, reconcile and supersession lock contracts
+  // exactly.
+  "packages/db/src/index.ts#armSubscriptionCoreCapacityWait": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
+  "packages/db/src/index.ts#supersedeSubscriptionCoreCodexCapacityWaitInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
+  "packages/db/src/index.ts#reconcileSubscriptionCoreCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#reconcileCompletedSandboxSetup": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
-  "packages/db/src/index.ts#armXaiCapacityWait": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
-  "packages/db/src/index.ts#supersedeXaiCapacityWaitInTransaction": {
-    inserts: 1,
-    contract: "owned_suffix",
-  },
-  "packages/db/src/index.ts#reconcileXaiCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -177,10 +176,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   },
   "packages/db/src/index.ts#updateSessionGoalWithEvent": {
     inserts: 3,
-    contract: "canonical",
-  },
-  "packages/db/src/index.ts#updateSessionVariableSets": {
-    inserts: 1,
     contract: "canonical",
   },
   "packages/db/src/index.ts#updateSessionTitleWithEvent": {
@@ -228,10 +223,14 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#failSessionWorkBeforeAttemptClaim": {
+  "packages/db/src/index.ts#settleSessionWorkBeforeAttemptClaim": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
+  },
+  "packages/db/src/index.ts#recordRetiredChildNotice": {
+    inserts: 1,
+    contract: "canonical",
   },
   "packages/db/src/index.ts#recoverSessionWorkFailedBeforeAttemptClaim": {
     inserts: 1,
@@ -256,14 +255,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   },
   "packages/db/src/index.ts#applySessionTurnSettlement": {
     inserts: 1,
-    contract: "canonical",
-  },
-  "packages/db/src/index.ts#settleCodexCredentialLeaseLoss": {
-    inserts: 2,
-    contract: "canonical",
-  },
-  "packages/db/src/index.ts#settleCodexCredentialFailover": {
-    inserts: 2,
     contract: "canonical",
   },
   "packages/db/src/index.ts#requestSessionTurnRecovery": {
@@ -326,6 +317,12 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // A person's or host's change to a root's usage limit records
+  // session.usage_limit.updated under the canonical control-share locks.
+  "packages/db/src/session-usage-limits.ts#setSessionUsageLimitInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-control.ts#cancelSessionSubtreeInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
@@ -370,11 +367,17 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
+  // The visibility settlement's local append helper; its enclosing settlement
+  // takes the canonical event-write locks before any call.
+  "packages/db/src/session-visibility-work.ts#insertEvents": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
 };
 
 const genericControlWriters = new Set([
   // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
-  "packages/db/src/index.ts#switchSessionCodexAccount",
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
   "packages/db/src/index.ts#appendSessionEvents",
@@ -390,8 +393,9 @@ const callerOwnedControlWriters = new Set([
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
-  supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
-  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
+  supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
+    "reconcileSubscriptionCoreCapacityWait",
+  ],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
   recordSessionAttemptQuiescenceInTransaction: [
     "commitSessionAttemptQuiescence",
@@ -402,18 +406,17 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "steerQueuedTurnInTransaction",
     "submitHumanPromptInTransaction",
   ],
+  insertEvents: ["settleSessionVisibilityWorkInTransaction"],
   closePendingSessionToolCallsInTransaction: [
-    "armCodexCapacityWait",
-    "armXaiCapacityWait",
+    "armSubscriptionCoreCapacityWait",
     "cancelSessionSubtreeInTransaction",
-    "failSessionWorkBeforeAttemptClaim",
+    "settleSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",
     "applySessionTurnSettlement",
-    "settleCodexCredentialLeaseLoss",
-    "settleCodexCredentialFailover",
     "requestSessionTurnRecovery",
     "recoverSessionOwner",
+    "settleSessionVisibilityWorkInTransaction",
   ],
 };
 
@@ -444,10 +447,9 @@ const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
   // arm owns the canonical child-lifecycle prefix (including parent session)
   // before atomically emitting a false-capacity-recovery terminal boundary.
-  "armCodexCapacityWait",
-  "failSessionWorkBeforeAttemptClaim",
+  "armSubscriptionCoreCapacityWait",
+  "settleSessionWorkBeforeAttemptClaim",
   "recoverSessionOwner",
-  "settleCodexCredentialFailover",
 ];
 const expectedSharedFailedChildOutboxCallers = [
   "enqueueFailedChildOutboxForTurnTx",
@@ -476,9 +478,9 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "acceptSessionApprovalDecision",
     "acceptSessionHumanInputResponse",
     "applySessionTurnSettlement",
-    "failSessionWorkBeforeAttemptClaim",
+    "settleSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armCodexCapacityWait", "armXaiCapacityWait"],
+  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
@@ -665,7 +667,80 @@ const sessionActivityGateWrappers = [
   "withWorkspaceSessionEventActivityRls",
   "retryWorkspaceSessionEventActivityPersistence",
   "withSessionCodexCapacityMutation",
+  "withScopedCapacityWaiterRls",
 ];
+
+function expectScopedCapacityWaiterActivityBoundary(source: string): string {
+  const sourceFile = parseSourceFile("capacity-waiter.ts", source);
+  const wrappers: t.Function[] = [];
+  const visit = (node: t.Node): void => {
+    if (isFunctionDeclaration(node) && node.id?.name === "withScopedCapacityWaiterRls") {
+      wrappers.push(node);
+    }
+    forEachChild(node, visit);
+  };
+  visit(sourceFile.program);
+  expect(wrappers).toHaveLength(1);
+  const wrapper = wrappers[0]!;
+  expect(namedEnclosingFunction(wrapper, true)?.name).toBe(
+    "createScopedSubscriptionCapacityWaiters",
+  );
+  expect(source.slice(wrapper.start, wrapper.body!.start)).toContain(
+    "fn: (db: SessionActivityDatabase) => Promise<T>",
+  );
+  expect(wrapper.body!.body).toHaveLength(2);
+  const [guard, dispatch] = wrapper.body!.body;
+  expect(guard).toMatchObject({
+    type: "IfStatement",
+    test: {
+      type: "UnaryExpression",
+      operator: "!",
+      argument: {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          object: { type: "Identifier", name: "subjectId" },
+          property: { type: "Identifier", name: "trim" },
+        },
+        arguments: [],
+      },
+    },
+    consequent: { type: "BlockStatement", body: [{ type: "ThrowStatement" }] },
+    alternate: null,
+  });
+  const gatedBranch = (name: string, args: string[]) => ({
+    type: "AwaitExpression",
+    argument: {
+      type: "CallExpression",
+      callee: { type: "Identifier", name },
+      arguments: args.map((argument) => ({ type: "Identifier", name: argument })),
+    },
+  });
+  expect(dispatch).toMatchObject({
+    type: "ReturnStatement",
+    argument: {
+      type: "ConditionalExpression",
+      test: {
+        type: "BinaryExpression",
+        operator: "===",
+        left: {
+          type: "MemberExpression",
+          object: { type: "Identifier", name: "snapshot" },
+          property: { type: "Identifier", name: "scope" },
+        },
+        right: { type: "Literal", value: "user" },
+      },
+      consequent: gatedBranch("withWorkspaceSubjectSessionActivityRls", [
+        "db",
+        "workspaceId",
+        "subjectId",
+        "fn",
+      ]),
+      alternate: gatedBranch("withWorkspaceSessionActivityRls", ["db", "workspaceId", "fn"]),
+    },
+  });
+  return source.slice(wrapper.start, wrapper.end);
+}
 
 function hasSessionActivityBoundary(node: t.Node, source: string): boolean {
   let ancestor = parentNodes.get(node);
@@ -831,7 +906,9 @@ function subscriptionWaiterBindings(): Map<string, string[]> {
     visit(sourceFile.program);
   }
   for (const [factory, tables] of factories) {
-    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters", "xai_capacity_waiters"]);
+    // All providers use shared-core waiters. Reintroducing a legacy runtime
+    // factory is forbidden even if its old lock contract would still pass.
+    expect(tables.sort(), factory).toEqual([]);
   }
   return factories;
 }
@@ -996,6 +1073,62 @@ function callPositionsWithStringArgument(
   return positions.sort((left, right) => left - right);
 }
 
+const VISIBILITY_SETTLEMENT = "settleSessionVisibilityWorkInTransaction";
+
+/**
+ * The visibility settlement locks its event-write rows with controlLock
+ * "already_locked": each caller first runs lockSessionForVisibilityWork, which
+ * takes the workspace control share before the canonical event-write rows. Pin
+ * that exact chain and its closed caller set instead of widening the generic
+ * prefix rule.
+ */
+function visibilitySettlementPrefixIsPinned(): boolean {
+  const callers = new Set<string>();
+  const definitions = new Map<string, FunctionLikeDeclaration[]>();
+  for (const path of productionTypeScriptFiles()) {
+    const source = readFileSync(path, "utf8");
+    if (!source.includes(VISIBILITY_SETTLEMENT)) continue;
+    const visit = (node: t.Node): void => {
+      if (isNamedFunctionNode(node)) {
+        const named = namedEnclosingFunction(node);
+        if (named)
+          definitions.set(named.name, [...(definitions.get(named.name) ?? []), named.node]);
+      }
+      if (isCallExpression(node) && callName(node) === VISIBILITY_SETTLEMENT) {
+        const enclosing = namedEnclosingFunction(node);
+        if (enclosing) callers.add(enclosing.name);
+      }
+      forEachChild(node, visit);
+    };
+    visit(parseSourceFile(path, source).program);
+  }
+  const only = (name: string): FunctionLikeDeclaration => {
+    const found = definitions.get(name) ?? [];
+    expect(found, name).toHaveLength(1);
+    return found[0]!;
+  };
+  const lock = only("lockSessionForVisibilityWork");
+  const controlShare = callPositionsWithStringArgument(
+    lock,
+    "lockWorkspaceInferenceControl",
+    2,
+    "share",
+  )[0];
+  expect(controlShare).toBeDefined();
+  expect(controlShare!).toBeLessThan(callPositions(lock, "lockSessionEventWriteRows")[0]!);
+  expect([...callers].sort()).toEqual([
+    "settleWorkBeforePrivateTransition",
+    "stopSessionWorkForVisibilityChange",
+  ]);
+  for (const caller of callers) {
+    const node = only(caller);
+    const prefix = callPositions(node, "lockSessionForVisibilityWork")[0];
+    expect(prefix, caller).toBeDefined();
+    expect(prefix!, caller).toBeLessThan(callPositions(node, VISIBILITY_SETTLEMENT)[0]!);
+  }
+  return true;
+}
+
 function controlAwarePrefixPositions(functionNode: FunctionLikeDeclaration): number[] {
   return [
     ...callPositionsWithStringProperty(
@@ -1059,6 +1192,28 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
+  test("the historical scoped-waiter fixture proves activity-gate detection in both branches", () => {
+    const source = readFileSync(
+      join(repoRoot, "packages/db/test/fixtures/legacy-codex.ts"),
+      "utf8",
+    );
+    const wrapper = expectScopedCapacityWaiterActivityBoundary(source);
+    const fixture = `function createScopedSubscriptionCapacityWaiters() { ${wrapper} }`;
+    for (const [gated, ungated] of [
+      ["withWorkspaceSubjectSessionActivityRls", "withWorkspaceSubjectRls"],
+      ["withWorkspaceSessionActivityRls", "withWorkspaceRls"],
+    ]) {
+      expect(() =>
+        expectScopedCapacityWaiterActivityBoundary(fixture.replaceAll(gated!, ungated!)),
+      ).toThrow();
+    }
+    expect(() =>
+      expectScopedCapacityWaiterActivityBoundary(
+        fixture.replace("if (!subjectId.trim())", "if (false)"),
+      ),
+    ).toThrow();
+  });
+
   test("nested factory writers cannot borrow sibling lock or gate evidence", () => {
     const sourceFile = parseSourceFile(
       "factory.ts",
@@ -1083,10 +1238,7 @@ describe("session_events writer inventory", () => {
     const violations: string[] = [];
     const aliasedWriters: Record<string, string[]> = {};
     const bindings = new Map([
-      [
-        "createScopedSubscriptionCapacityWaiters",
-        ["claude_capacity_waiters", "xai_capacity_waiters"],
-      ],
+      ["createScopedSubscriptionCapacityWaiters", ["xai_capacity_waiters"]],
     ]);
     const visit = (node: t.Node): void => {
       if (isCallExpression(node) && insertsSessionEvents(node)) {
@@ -1104,8 +1256,8 @@ describe("session_events writer inventory", () => {
     visit(sourceFile.program);
     expect(violations).toEqual(["unprotectedWriter"]);
     expect(aliasedWriters).toEqual({
-      protectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
-      unprotectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+      protectedWriter: ["xai_capacity_waiters"],
+      unprotectedWriter: ["xai_capacity_waiters"],
     });
     expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
     const factory = sourceFile.program.body[0]!;
@@ -1203,7 +1355,18 @@ describe("session_events writer inventory", () => {
       };
       visit(sourceFile.program);
     }
-    expect([...discovered].sort()).toEqual([...Object.values(tenancyQuiescenceTables)].sort());
+    // All legacy provider waiter tables stay fenced in the database,
+    // but the retired runtimes no longer write them from TypeScript.
+    const retiredTables = new Set<string>([
+      tenancyQuiescenceTables.codexCapacityWaiters,
+      tenancyQuiescenceTables.xaiCapacityWaiters,
+      tenancyQuiescenceTables.claudeCapacityWaiters,
+    ]);
+    expect([...discovered].sort()).toEqual(
+      Object.values(tenancyQuiescenceTables)
+        .filter((table) => !retiredTables.has(table))
+        .sort(),
+    );
     expect(writers.size).toBeGreaterThanOrEqual(61);
     const database = readFileSync(join(repoRoot, "packages/db/src/database.ts"), "utf8");
     expect(database).toMatch(
@@ -1461,7 +1624,9 @@ describe("session_events writer inventory", () => {
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
+      const file = relative(repoRoot, path).replaceAll("\\", "/");
       if (
+        file !== "packages/db/src/session-attempt-fence.ts" &&
         !source.includes("sessionEvents") &&
         !source.includes("session_events") &&
         !source.includes("sessionSystemUpdateOutbox") &&
@@ -1469,7 +1634,6 @@ describe("session_events writer inventory", () => {
       ) {
         continue;
       }
-      const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const visit = (node: t.Node): void => {
         if (isNamedFunctionNode(node)) {
@@ -1609,7 +1773,8 @@ describe("session_events writer inventory", () => {
         expect(
           controlAwarePrefixPositions(callerNode).length > 0 ||
             genericPrefixPositions(callerNode).length > 0 ||
-            Object.hasOwn(expectedOwnedSuffixCallers, caller),
+            Object.hasOwn(expectedOwnedSuffixCallers, caller) ||
+            (caller === VISIBILITY_SETTLEMENT && visibilitySettlementPrefixIsPinned()),
         ).toBe(true);
         const firstLock = canonicalLocks[0];
         const delegatedCalls = [...ownedSuffixCallers.keys()].flatMap((ownedWriter) =>

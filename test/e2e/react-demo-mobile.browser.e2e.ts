@@ -76,10 +76,10 @@ describe("public React demo mobile product acceptance", () => {
       const page = await context.newPage();
       const failures = observePageFailures(page);
       await page.goto(baseUrl, { waitUntil: "networkidle" });
-      await page.getByRole("heading", { name: "OpenGeni React demo" }).waitFor();
+      await page.getByRole("heading", { name: "Opengeni React demo" }).waitFor();
       await page.getByRole("heading", { name: "Staging operations" }).waitFor();
 
-      expect(await page.title()).toBe("OpenGeni React demo — durable agent sessions");
+      expect(await page.title()).toBe("Opengeni React demo — durable agent sessions");
       expect(await page.locator('meta[name="viewport"]').getAttribute("content")).toContain(
         "viewport-fit=cover",
       );
@@ -312,11 +312,11 @@ describe("public React demo mobile product acceptance", () => {
     const bootOnlyHtml = html.replace('<script type="module" src="/main.tsx"></script>', "");
     expect(bootOnlyHtml).not.toBe(html);
     await page.setContent(bootOnlyHtml, { waitUntil: "domcontentloaded" });
-    await page.getByRole("main", { name: "Loading OpenGeni React demo" }).waitFor();
+    await page.getByRole("main", { name: "Loading Opengeni React demo" }).waitFor();
     expect(await page.getByText("Loading the scripted manager session…").count()).toBe(1);
     expect(
       await page
-        .getByRole("main", { name: "Loading OpenGeni React demo" })
+        .getByRole("main", { name: "Loading Opengeni React demo" })
         .getAttribute("aria-busy"),
     ).toBe("true");
     await expectNoHorizontalOverflow(page);
@@ -325,7 +325,7 @@ describe("public React demo mobile product acceptance", () => {
 
     await page.goto(baseUrl, { waitUntil: "networkidle" });
     await page.getByRole("heading", { name: "Staging operations" }).waitFor();
-    expect(await page.getByRole("main", { name: "Loading OpenGeni React demo" }).count()).toBe(0);
+    expect(await page.getByRole("main", { name: "Loading Opengeni React demo" }).count()).toBe(0);
     await expectNoHorizontalOverflow(page);
     await context.close();
   }, 45_000);

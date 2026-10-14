@@ -232,6 +232,9 @@ describe("scheduled task Slack channel", () => {
       withScheduledSlackBotPostingTools(base, { slackBotConnectionId: connectionId }, allowed),
     ).toEqual(["goal_set"]);
     expect(
+      withScheduledSlackBotPostingTools(allowed, { slackBotConnectionId: connectionId }, allowed),
+    ).toEqual(["goal_set"]);
+    expect(
       withScheduledSlackBotPostingTools(
         base,
         { slackBotConnectionId: connectionId, slackBotChannelId: "C0SCHED01" },

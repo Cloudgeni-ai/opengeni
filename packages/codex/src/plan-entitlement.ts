@@ -1,6 +1,6 @@
 // ChatGPT plan entitlement evidence for Codex model requests.
 //
-// A ChatGPT account can change plan (for example Pro to Free) while OpenGeni
+// A ChatGPT account can change plan (for example Pro to Free) while Opengeni
 // keeps its refresh token. The Codex backend then rejects requests for models
 // the new plan does not include. It sometimes says so explicitly, and it has
 // also been observed to answer with an HTTP 400 and an empty body. Neither is

@@ -1,7 +1,7 @@
 # Dependency Upgrade Log
 
 **Date:** 2026-07-14 (updated 2026-08-08)
-**Project:** OpenGeni  
+**Project:** Opengeni  
 **Language:** TypeScript  
 **Manifests:** `package.json`, `packages/runtime/package.json`,
 `packages/testing/package.json`, `apps/worker/package.json`
@@ -24,7 +24,7 @@ does not ship advisories hidden behind older dependency trees.
   Changesets too; npm remains only as the provenance-capable registry
   transport. TypeScript keeps its existing Node process boundary because the
   Bun-native variants produced no repeatable benchmark benefit.
-- Audited the Bun 1.4 migration guide against OpenGeni's runtime surfaces and
+- Audited the Bun 1.4 migration guide against Opengeni's runtime surfaces and
   revalidated the affected lockfile, environment, worker-termination, fetch,
   `Bun.serve`, `Bun.spawn`, SQLite, tests, bundling, compiled executables, and
   cross-platform artifact runtimes.
@@ -40,7 +40,7 @@ does not ship advisories hidden behind older dependency trees.
   `@openai/agents-extensions` declaration together. The resolved
   `@openai/agents-openai` and `@openai/agents-realtime` packages are also
   0.14.3; the runtime keeps the compatible OpenAI client at 6.47.0.
-- Rebased OpenGeni's exact-resume sandbox patch without widening it: Blaxel,
+- Rebased Opengeni's exact-resume sandbox patch without widening it: Blaxel,
   Daytona, E2B, and Runloop still expose `resumeExact()` and never silently
   replace a missing provider sandbox on that path.
 - Upstream source: `openai/openai-agents-js` tag `v0.14.3`, commit
@@ -64,10 +64,10 @@ does not ship advisories hidden behind older dependency trees.
 
 ### Modal JS: 0.7.4 → 0.9.0
 
-- Pinned Modal 0.9.0 globally so the Agents Extensions adapter and OpenGeni's
+- Pinned Modal 0.9.0 globally so the Agents Extensions adapter and Opengeni's
   direct lifecycle operators cannot resolve different SDK implementations.
 - Modal 0.8 changed native snapshot calls to options objects and changed both
-  snapshot kinds to a 30-day default Image lifetime. OpenGeni's adapter
+  snapshot kinds to a 30-day default Image lifetime. Opengeni's adapter
   translates the still-positional Agents Extensions 0.13.3 call, passes the
   configured timeout through the new API, and explicitly sends `ttlMs: null`.
   The provider-bound checkpoint artifact ledger—not an implicit provider
@@ -82,11 +82,11 @@ does not ship advisories hidden behind older dependency trees.
 
 ### OpenAI Node: 6.36.0 → 6.47.0
 
-- Aligned OpenGeni's direct runtime dependency with the current client required
+- Aligned Opengeni's direct runtime dependency with the current client required
   by Agents JS 0.13.3. Keeping 6.36.0 installed a second `OpenAI` class whose
   private identity was incompatible with the Agents SDK's 6.47.0 types.
 - The upstream changelog from 6.37.0 through 6.47.0 contains additive API work
-  and bug fixes; no OpenGeni call-site migration was required.
+  and bug fixes; no Opengeni call-site migration was required.
 
 ### Compatible workspace updates
 

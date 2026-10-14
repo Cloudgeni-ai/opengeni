@@ -14,7 +14,9 @@ import {
 } from "@opengeni/react/artifacts";
 import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { SiteData } from "@/components/artifacts/site-data";
+import { useSiteAudience } from "@/components/artifacts/site-audience";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -32,8 +34,9 @@ import {
   ArtifactKindTile,
   useArtifactsBackLink,
 } from "@/components/artifacts/artifact-page-chrome";
-import { artifactKinds, defaultArtifactFilters, type ArtifactKind } from "@/lib/artifact-catalog";
+import { artifactKinds, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
+import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -57,9 +60,32 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
+import {
+  artifactLibraryFilters,
+  artifactLibraryPositionKey,
+  artifactLibrarySearch,
+  readArtifactLibraryPosition,
+  useArtifactLibraryPosition,
+} from "@/lib/artifact-library-navigation";
+import type { ArtifactCatalogFilters } from "@/lib/artifact-catalog";
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
+// Stands in for the Site while it loads so the audience hook keeps its order.
+const PLACEHOLDER_SITE: WorkspaceArtifactDetailResponse["artifact"] = {
+  id: "00000000-0000-4000-8000-000000000000",
+  accountId: "00000000-0000-4000-8000-000000000000",
+  workspaceId: "00000000-0000-4000-8000-000000000000",
+  slug: "loading",
+  title: "Site",
+  description: null,
+  status: "active",
+  currentVersion: null,
+  createdBySubjectId: "loading",
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString(),
+};
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -109,7 +135,11 @@ export function ArtifactsRoute({
   fromSession?: string | undefined;
 }) {
   return artifactId ? (
-    <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
+    <ArtifactSessionPage
+      workspaceId={workspaceId}
+      artifactId={artifactId}
+      fromSession={fromSession}
+    >
       <ArtifactDetailRoute
         key={`${workspaceId}:${artifactId}`}
         workspaceId={workspaceId}
@@ -119,23 +149,71 @@ export function ArtifactsRoute({
     </ArtifactSessionPage>
   ) : (
     <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
-      <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} />
+      <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} fromSession={fromSession} />
     </ArtifactSessionPage>
   );
 }
 
-function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
+function ArtifactListRoute({
+  workspaceId,
+  fromSession,
+}: {
+  workspaceId: string;
+  fromSession?: string;
+}) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const [filters, setFilters] = useState(defaultArtifactFilters);
+  const search = useSearch({ strict: false });
+  const filters = artifactLibraryFilters(search);
+  const setFilters = (next: ArtifactCatalogFilters) => {
+    void navigate({
+      to: "/workspaces/$workspaceId/artifacts",
+      params: { workspaceId },
+      search: artifactLibrarySearch(next, fromSession),
+      replace: true,
+      resetScroll: false,
+    });
+  };
+  const positionKey = artifactLibraryPositionKey(workspaceId, context.accessKeyVersion, filters);
+  // Freeze the restore count for this query; loading another page must not
+  // recreate the catalog's request lifecycle.
+  const retained = useRef({
+    key: positionKey,
+    client: context.client,
+    pages: readArtifactLibraryPosition(context.client, positionKey).pages,
+  });
+  if (retained.current.key !== positionKey || retained.current.client !== context.client)
+    retained.current = {
+      key: positionKey,
+      client: context.client,
+      pages: readArtifactLibraryPosition(context.client, positionKey).pages,
+    };
   const [empty, setEmpty] = useState(false);
   const catalog = useArtifactCatalog(
     context.client,
     workspaceId,
     filters,
     context.accessKeyVersion,
+    retained.current.pages,
+  );
+  const position = useArtifactLibraryPosition(
+    context.client,
+    positionKey,
+    // The viewer may have repopulated an invalidated cache with only its first
+    // page. Do not consume scroll restoration before the retained pages reload.
+    catalog.loading ||
+      Boolean(catalog.error) ||
+      Boolean(catalog.nextCursor && catalog.pages < retained.current.pages),
+    catalog.items.length,
+    catalog.pages,
+  );
+  const invalidateAfterMutation = useArtifactCatalogMutationInvalidation(
+    context.client,
+    workspaceId,
+    invalidateArtifactCatalog,
   );
   const canCreate = hasWorkspacePermission(context.accessContext, workspaceId, "sessions:create");
+  const canPin = hasWorkspacePermission(context.accessContext, workspaceId, "artifacts:publish");
   // The catalog quietly omits Sites and editable artifacts without `artifacts:read`.
   const artifactKindsHidden = lacksWorkspacePermission(
     context.accessContext,
@@ -167,7 +245,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     </Button>
   ) : null;
   return (
-    <ContentPage width="standard" className="pt-6">
+    <ContentPage width="standard" className="pt-6" {...position}>
       <LineTabs
         value={filters.kind}
         onValueChange={(kind) => setFilters({ ...filters, kind: kind as ArtifactKind | "all" })}
@@ -191,6 +269,8 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
         <LineTabsContent value={filters.kind} className="pt-6">
           <ArtifactLibrary
             workspaceId={workspaceId}
+            sessionId={fromSession}
+            browseSearch={artifactLibrarySearch(filters, fromSession, true)}
             items={catalog.items}
             filters={filters}
             onFiltersChange={setFilters}
@@ -202,6 +282,15 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
             emptyAction={newArtifact}
             onEmptyChange={setEmpty}
             artifactKindsHidden={artifactKindsHidden}
+            onPin={
+              canPin
+                ? async (item, pinned) => {
+                    await context.client.updateArtifactPin(workspaceId, item.kind, item.id, pinned);
+                    invalidateAfterMutation();
+                    await catalog.refresh();
+                  }
+                : undefined
+            }
           />
         </LineTabsContent>
       </LineTabs>
@@ -209,7 +298,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-type SiteTab = "site" | "versions" | "conversations";
+type SiteTab = "site" | "versions" | "conversations" | "data";
 
 export function ArtifactDetailRoute({
   embedded = false,
@@ -391,6 +480,33 @@ function ArtifactDetailPage({
     }
   };
   const archived = detail?.artifact.status === "archived";
+  // Site Data is for the people who manage the Site: its owner and workspace
+  // admins. The API decides; an ownerless Site shows the tab and its answer.
+  const manageData = Boolean(
+    canPublish &&
+    detail &&
+    (hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin") ||
+      !detail.artifact.ownerSubjectId ||
+      detail.artifact.ownerSubjectId === context.accessContext.subjectId),
+  );
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  // A Personal workspace has nobody to share with, so there is no audience.
+  const showAudience = !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const audience = useSiteAudience({
+    client: context.client,
+    workspaceId,
+    workspaceName: workspace?.name ?? "this workspace",
+    artifact: detail?.artifact ?? PLACEHOLDER_SITE,
+    ownedByCurrentUser: Boolean(
+      canPublish &&
+      detail?.artifact.ownerSubjectId &&
+      detail.artifact.ownerSubjectId === context.accessContext.subjectId,
+    ),
+    onChanged: (artifact) => {
+      setDetail((current) => (current ? { ...current, artifact } : current));
+      invalidateArtifactCatalog(context.client, workspaceId);
+    },
+  });
   if (error) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
@@ -404,7 +520,9 @@ function ArtifactDetailPage({
       </ContentPage>
     );
   }
-  if (!detail || !content) {
+  // Content is null once loaded when the Site has no version this person can
+  // open; that is a final state, not a reason to keep showing the skeleton.
+  if (!detail) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
         <DetailPage back={back}>
@@ -425,7 +543,7 @@ function ArtifactDetailPage({
   }
 
   const artifact = detail.artifact;
-  const toolCount = content.requestedTools.length;
+  const toolCount = content?.requestedTools.length ?? 0;
   return (
     <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
       <DetailPage back={back}>
@@ -434,10 +552,15 @@ function ArtifactDetailPage({
             leading={<ArtifactKindTile kind="site" />}
             title={artifact.title}
             chips={
-              archived ? (
-                <StatusBadge tone="neutral" icon="auto">
-                  Archived
-                </StatusBadge>
+              showAudience || archived ? (
+                <>
+                  {showAudience ? audience.chip : null}
+                  {archived ? (
+                    <StatusBadge tone="neutral" icon="auto">
+                      Archived
+                    </StatusBadge>
+                  ) : null}
+                </>
               ) : null
             }
             meta={[
@@ -448,6 +571,7 @@ function ArtifactDetailPage({
             actions={
               canPublish ? (
                 <>
+                  {showAudience ? audience.shareButton : null}
                   {archived ? (
                     <Button
                       type="button"
@@ -492,6 +616,7 @@ function ArtifactDetailPage({
                   Versions
                 </LineTabsTrigger>
                 <LineTabsTrigger value="conversations">Conversations</LineTabsTrigger>
+                {manageData ? <LineTabsTrigger value="data">Data</LineTabsTrigger> : null}
               </LineTabsList>
             }
           />
@@ -506,17 +631,34 @@ function ArtifactDetailPage({
                   back an earlier version.
                 </Notice>
               ) : null}
-              <ArtifactSandbox
-                html={content.html}
-                title={artifact.title}
-                versionLabel={
-                  artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
-                }
-                editDisabled={context.busy || archived}
-                onEdit={canPublish ? () => void startEditSession() : undefined}
-                toolBridge={archived ? undefined : siteToolBridge}
-                connectedToolCount={toolCount}
-              />
+              {content ? (
+                <ArtifactSandbox
+                  html={content.html}
+                  title={artifact.title}
+                  versionLabel={
+                    artifact.currentVersion ? `v${artifact.currentVersion.revision}` : undefined
+                  }
+                  editDisabled={context.busy || archived}
+                  onEdit={canPublish ? () => void startEditSession() : undefined}
+                  toolBridge={archived ? undefined : siteToolBridge}
+                  connectedToolCount={toolCount}
+                />
+              ) : (
+                <Notice
+                  tone="failed"
+                  title="There's nothing to show for this Site"
+                  actionLayout="responsive"
+                  action={
+                    <Button type="button" size="sm" variant="outline" onClick={() => void load()}>
+                      <RotateCcwIcon aria-hidden="true" />
+                      Retry
+                    </Button>
+                  }
+                >
+                  It has no published version you can open. Try again, or ask whoever published it
+                  to publish it again.
+                </Notice>
+              )}
             </div>
           </LineTabsContent>
           <LineTabsContent value="versions">
@@ -544,7 +686,7 @@ function ArtifactDetailPage({
                                 workspaceId,
                                 sessionId: version.sourceSessionId,
                               }}
-                              className="relative z-10 font-medium text-fg-muted underline-offset-2 hover:text-fg hover:underline"
+                              className="relative z-10 font-medium og-link text-fg-muted hover:text-fg"
                             >
                               {version.revision === 1 ? "Creation session" : "Publishing session"}
                             </Link>
@@ -576,8 +718,19 @@ function ArtifactDetailPage({
               title={artifact.title}
             />
           </LineTabsContent>
+          {manageData ? (
+            <LineTabsContent value="data" className="pt-6">
+              <SiteData
+                key={artifactId}
+                workspaceId={workspaceId}
+                siteId={artifactId}
+                title={artifact.title}
+              />
+            </LineTabsContent>
+          ) : null}
         </LineTabs>
       </DetailPage>
+      {showAudience ? audience.dialog : null}
       <ConfirmDialog
         open={archiveDialogOpen}
         onOpenChange={setArchiveDialogOpen}

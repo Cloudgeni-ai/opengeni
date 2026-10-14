@@ -35,6 +35,7 @@ import { toast } from "sonner";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -49,11 +50,13 @@ import { useRail } from "@/components/rail/rail-context";
 import {
   ActiveWorkMark,
   RailTrailingMetadata,
-  SessionRowHoverDetails,
   SessionRowContent,
   sessionRowAccessibleName,
 } from "@/components/rail/session-row-content";
+import { SessionRowHoverDetails } from "@/components/rail/session-row-hover-details";
 export { RailTrailingMetadata } from "@/components/rail/session-row-content";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { sessionHoverDescription, sessionHoverFacts } from "@/lib/session-hover-facts";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -99,9 +102,17 @@ import {
 } from "@/lib/session-group-pagination";
 import {
   SESSION_GROUP_VISIBLE_STEP,
+  planSessionGroupFill,
+  sameSessionGroupFill,
   sessionGroupDisclosurePlan,
   sessionGroupWindowNodes,
+  type SessionGroupFillCandidate,
 } from "@/lib/session-group-window";
+import {
+  readSessionGroupWindows,
+  sessionGroupWindowMemoryId,
+  writeSessionGroupWindows,
+} from "@/lib/session-group-window-memory";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { analyticsAction } from "@/lib/analytics-actions";
 import { countNeedsYou, filterNeedsYou } from "@/lib/needs-you";
@@ -340,7 +351,8 @@ export function SessionList() {
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
   const openSearchDialog = useCallback(
-    () => requestSessionSearch(rail.workspaceId),
+    (event: MouseEvent<HTMLButtonElement>) =>
+      requestSessionSearch(rail.workspaceId, event.currentTarget),
     [rail.workspaceId],
   );
   const [search, setSearch] = useState("");
@@ -494,15 +506,48 @@ export function SessionList() {
     paginationKey,
   );
   const pageGeneration = paginationIdentity.current.generation;
+  // Manual Show more windows survive leaving the rail (for example Settings)
+  // in this tab. Each person/workspace remembers the current view only.
+  const groupWindowMemoryId = sessionGroupWindowMemoryId(
+    context.accessContext.subjectId,
+    rail.workspaceId,
+  );
+  const restoredGroupWindows = useMemo(
+    () => readSessionGroupWindows(groupWindowMemoryId, paginationKey),
+    [groupWindowMemoryId, paginationKey],
+  );
   const [groupWindows, setGroupWindows] = useState<{
+    generation: number;
+    memoryId: string;
+    counts: ReadonlyMap<string, number>;
+  }>(() => ({ generation: -1, memoryId: "", counts: new Map() }));
+  const activeGroupWindows =
+    groupWindows.generation === pageGeneration && groupWindows.memoryId === groupWindowMemoryId
+      ? groupWindows.counts
+      : restoredGroupWindows;
+  useEffect(() => {
+    if (groupWindows.generation !== pageGeneration) return;
+    if (groupWindows.memoryId !== groupWindowMemoryId) return;
+    writeSessionGroupWindows(groupWindowMemoryId, paginationKey, groupWindows.counts);
+  }, [groupWindowMemoryId, groupWindows, pageGeneration, paginationKey]);
+  // Extra rows that use spare rail height, planned from measured layout.
+  // Manual disclosure (groupWindows) stacks on top of this fill.
+  const [groupFill, setGroupFill] = useState<{
     generation: number;
     counts: ReadonlyMap<string, number>;
   }>(() => ({ generation: pageGeneration, counts: new Map() }));
-  const visibleCountForGroup = useCallback(
+  const fillCountForGroup = useCallback(
     (key: string) =>
-      (groupWindows.generation === pageGeneration ? groupWindows.counts.get(key) : undefined) ??
-      SESSION_GROUP_VISIBLE_STEP,
-    [groupWindows, pageGeneration],
+      (groupFill.generation === pageGeneration ? groupFill.counts.get(key) : undefined) ?? 0,
+    [groupFill, pageGeneration],
+  );
+  const baseCountForGroup = useCallback(
+    (key: string) => activeGroupWindows.get(key) ?? SESSION_GROUP_VISIBLE_STEP,
+    [activeGroupWindows],
+  );
+  const visibleCountForGroup = useCallback(
+    (key: string) => baseCountForGroup(key) + fillCountForGroup(key),
+    [baseCountForGroup, fillCountForGroup],
   );
   const visibleNodesForGroup = useCallback(
     (key: string, nodes: SessionTreeNode[]) =>
@@ -1755,7 +1800,11 @@ export function SessionList() {
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
     try {
-      const result = await context.client.deleteSession(rail.workspaceId, sessionPendingDelete.id);
+      const result = await deleteStoppingIfRunning(
+        context.client,
+        rail.workspaceId,
+        sessionPendingDelete.id,
+      );
       deletedRootIds.current.add(sessionPendingDelete.id);
       setArchiveOverrides((current) => {
         if (!current.has(sessionPendingDelete.id)) return current;
@@ -1803,12 +1852,12 @@ export function SessionList() {
       await refreshSessionPages();
       toast.success(
         result.deletedSessionCount === 1
-          ? "Session deleted"
-          : `${result.deletedSessionCount} sessions deleted`,
+          ? "Chat deleted"
+          : `${result.deletedSessionCount} chats deleted`,
       );
       return true;
     } catch (deleteError) {
-      toast.error("Couldn't delete the workstream.", {
+      toast.error("Couldn't delete the chat.", {
         description: deleteError instanceof Error ? deleteError.message : String(deleteError),
       });
       return false;
@@ -2268,7 +2317,13 @@ export function SessionList() {
   );
   loadedSessionIdsRef.current = new Set(allSessions.map((session) => session.id));
   const loadMoreInGroup = useCallback(
-    async (group: SessionPaginationGroup, refreshWindow = false, minimumAdditional = 0) => {
+    async (
+      group: SessionPaginationGroup,
+      refreshWindow = false,
+      minimumAdditional = 0,
+      // Automatic fill loads are layout, not a reader action: keep them quiet.
+      announce = true,
+    ) => {
       const requestGeneration = pageGeneration;
       const current = activeSessionContinuation(
         groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(requestGeneration),
@@ -2304,6 +2359,9 @@ export function SessionList() {
         groupLoadAttempts.current.get(group.key) === attempt;
 
       const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;
+      // A request for more rows than one step (automatic fill) reads them in
+      // one bounded page instead of a chain of four-row requests.
+      const continuationLimit = Math.min(50, Math.max(pageSize, minimumAdditional));
       const listPage = async (pageCursor?: string, limit = pageSize) => {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
         const page = await context.client.listSessionSummaryPage(rail.workspaceId, {
@@ -2390,12 +2448,12 @@ export function SessionList() {
         let pageRead;
         let rebased = false;
         try {
-          pageRead = await listPage(current.nextCursor ?? undefined);
+          pageRead = await listPage(current.nextCursor ?? undefined, continuationLimit);
         } catch (cursorError) {
           if (!current.nextCursor || !(cursorError instanceof OpenGeniSessionListCursorError)) {
             throw cursorError;
           }
-          pageRead = await listPage();
+          pageRead = await listPage(undefined, continuationLimit);
           rebased = true;
         }
         if (!requestIsCurrent()) return;
@@ -2409,7 +2467,7 @@ export function SessionList() {
         // discovery pages can contain no new matches. One disclosure action
         // continues until its small display step is filled or the cursor ends.
         while (reads.at(-1)!.page.nextCursor && newlyLoadedCount() < minimumAdditional) {
-          const read = await listPage(reads.at(-1)!.page.nextCursor!);
+          const read = await listPage(reads.at(-1)!.page.nextCursor!, continuationLimit);
           if (!requestIsCurrent()) return;
           reads.push(read);
           for (const session of filterPage(read.page).sessions) receivedIds.add(session.id);
@@ -2473,13 +2531,14 @@ export function SessionList() {
             ),
           });
         });
-        setAnnouncement(
-          newlyLoaded > 0
-            ? `More sessions are available in ${group.label}.`
-            : page.nextCursor
-              ? `No additional older sessions in ${group.label} yet.`
-              : `No more older sessions in ${group.label}.`,
-        );
+        if (announce)
+          setAnnouncement(
+            newlyLoaded > 0
+              ? `More sessions are available in ${group.label}.`
+              : page.nextCursor
+                ? `No additional older sessions in ${group.label} yet.`
+                : `No more older sessions in ${group.label}.`,
+          );
         return { exhausted: page.nextCursor === null, added: newlyLoaded, failed: false };
       } catch {
         if (!requestIsCurrent()) return;
@@ -2492,7 +2551,8 @@ export function SessionList() {
           );
           return new Map(states).set(group.key, { ...latest, failed: true });
         });
-        setAnnouncement(`Older sessions in ${group.label} did not load. Retry is available.`);
+        if (announce)
+          setAnnouncement(`Older sessions in ${group.label} did not load. Retry is available.`);
         return { exhausted: false, added: 0, failed: true };
       } finally {
         if (requestIsCurrent()) {
@@ -2580,22 +2640,38 @@ export function SessionList() {
     }
   }, [rootReadRevision, pageGeneration]);
 
+  const groupPageState = (
+    group: SessionPaginationGroup,
+    initialNextCursor: string | null,
+    independentlyPaged: boolean,
+  ) => {
+    const continuation = activeSessionContinuation(
+      groupContinuations.get(group.key) ?? emptySessionContinuation(pageGeneration),
+      pageGeneration,
+    );
+    return {
+      continuation,
+      loading: groupLoadingGenerations.get(group.key) === pageGeneration,
+      hasMore:
+        continuation.nextCursor === undefined
+          ? independentlyPaged || initialNextCursor !== null
+          : continuation.nextCursor !== null,
+    };
+  };
+
   const paginationForGroup = (
     group: SessionPaginationGroup,
     initialNextCursor: string | null,
     independentlyPaged = false,
     nodes?: SessionTreeNode[],
   ): SessionGroupPaginationProps | undefined => {
-    const continuation = activeSessionContinuation(
-      groupContinuations.get(group.key) ?? emptySessionContinuation(pageGeneration),
-      pageGeneration,
-    );
-    const groupLoading = groupLoadingGenerations.get(group.key) === pageGeneration;
-    const hasMore =
-      continuation.nextCursor === undefined
-        ? independentlyPaged || initialNextCursor !== null
-        : continuation.nextCursor !== null;
+    const {
+      continuation,
+      loading: groupLoading,
+      hasMore,
+    } = groupPageState(group, initialNextCursor, independentlyPaged);
     const visibleCount = visibleCountForGroup(group.key);
+    const fillCount = fillCountForGroup(group.key);
     const hiddenLocally = !search && nodes !== undefined && nodes.length > visibleCount;
     if (!hasMore && !hiddenLocally && !continuation.failed && !groupLoading) return undefined;
     return {
@@ -2630,12 +2706,15 @@ export function SessionList() {
         // A current failure keeps its Retry control, but never advances the
         // disclosure window. Stale/no-op loads still return no focus outcome.
         if (result.failed) return false;
+        // Manual disclosure stacks on the automatic fill shown when clicked.
         setGroupWindows((current) => ({
           generation: pageGeneration,
-          counts: new Map(current.generation === pageGeneration ? current.counts : []).set(
-            group.key,
-            nextCount,
-          ),
+          memoryId: groupWindowMemoryId,
+          counts: new Map(
+            current.generation === pageGeneration && current.memoryId === groupWindowMemoryId
+              ? current.counts
+              : restoredGroupWindows,
+          ).set(group.key, Math.max(SESSION_GROUP_VISIBLE_STEP, nextCount - fillCount)),
         }));
         setAnnouncement(`Showing up to ${nextCount} sessions in ${group.label}.`);
         return result.exhausted && nodes.length + result.added <= nextCount;
@@ -2708,6 +2787,161 @@ export function SessionList() {
           };
           return showEmptyGroups ? [bucket] : [];
         });
+
+  // Expanded, windowed groups in rendered (top-down) order. Spare rail height
+  // fills these before any "Show more" control is needed.
+  const fillTargets: (SessionGroupFillCandidate & {
+    group: SessionPaginationGroup | null;
+    loading: boolean;
+  })[] = [];
+  const addFillTarget = (
+    key: string,
+    nodes: readonly SessionTreeNode[],
+    group: SessionPaginationGroup | null,
+    initialNextCursor: string | null,
+    independentlyPaged: boolean,
+  ) => {
+    const state = group ? groupPageState(group, initialNextCursor, independentlyPaged) : null;
+    fillTargets.push({
+      key,
+      group,
+      loaded: nodes.length,
+      base: baseCountForGroup(key),
+      // Failed pages keep their Retry control. Active sessions are filtered
+      // client-side across the whole workspace, so fill uses only loaded rows.
+      hasMore:
+        state !== null &&
+        state.hasMore &&
+        !state.continuation.failed &&
+        !(group?.kind === "activity" && group.group === "active"),
+      loading: state?.loading ?? false,
+    });
+  };
+  if (!search) {
+    if (browseStatus !== "archived" && channelMode) {
+      for (const section of renderedChannelSections) {
+        if (collapsedChannelSections.has(section.key)) continue;
+        const group = sessionPaginationProjectGroup(section.channelId, section.name);
+        addFillTarget(group.key, section.sessions, group, null, true);
+      }
+    } else if (browseStatus !== "archived") {
+      if (browseGroupBy !== "none" && forest.running.length > 0) {
+        addFillTarget(
+          "activity:active",
+          forest.running,
+          { key: "activity:active", label: "Active", kind: "activity", group: "active" },
+          nextCursor,
+          false,
+        );
+      }
+      for (const bucket of renderedGroupedBuckets) {
+        const group = paginationGroupForBucket(bucket);
+        addFillTarget(
+          group?.key ?? bucket.group,
+          bucket.sessions,
+          group,
+          nextCursor,
+          browseGroupBy === "creator",
+        );
+      }
+    }
+    if (browseStatus !== "active" && archiveExpanded) {
+      addFillTarget("archived", archivedNodes, ARCHIVED_SESSION_GROUP, null, true);
+    }
+  }
+  const fillTargetsRef = useRef(fillTargets);
+  fillTargetsRef.current = fillTargets;
+  const fillGenerationRef = useRef(pageGeneration);
+  fillGenerationRef.current = pageGeneration;
+  const lastFillViewportHeight = useRef<number | null>(null);
+  const measureFill = useCallback(() => {
+    const list = listRef.current;
+    const viewport = list?.closest<HTMLElement>("[data-rail-scroll-viewport]");
+    if (!list || !viewport) return;
+    // Row pitch comes from the rendered rows, so density and coarse-pointer
+    // sizing need no constants here.
+    const rows = [...list.querySelectorAll<HTMLElement>("[data-session-row]")].map((row) =>
+      (row.parentElement ?? row).getBoundingClientRect(),
+    );
+    const first = rows[0];
+    if (!first || first.height <= 0) return;
+    const gap = rows[1] ? rows[1].top - first.top : 0;
+    const rowHeight = gap > first.height && gap < first.height * 2 ? gap : first.height;
+    const viewportHeight = viewport.clientHeight;
+    const previousHeight = lastFillViewportHeight.current;
+    lastFillViewportHeight.current = viewportHeight;
+    const contentBottom =
+      list.getBoundingClientRect().bottom -
+      viewport.getBoundingClientRect().top +
+      viewport.scrollTop;
+    const free = viewportHeight - contentBottom;
+    const freeRows = free >= 0 ? Math.floor(free / rowHeight) : -Math.ceil(-free / rowHeight);
+    // Only a shorter viewport takes rows back. Manual disclosure, expanded
+    // branches and new sessions scroll instead of retracting visible rows.
+    const shrink = previousHeight !== null && viewportHeight < previousHeight;
+    const generation = fillGenerationRef.current;
+    setGroupFill((current) => {
+      const counts = current.generation === generation ? current.counts : new Map<string, number>();
+      const next = planSessionGroupFill(fillTargetsRef.current, counts, freeRows, shrink);
+      return current.generation === generation && sameSessionGroupFill(counts, next)
+        ? current
+        : { generation, counts: next };
+    });
+  }, []);
+  useEffect(() => {
+    const list = listRef.current;
+    const viewport = list?.closest<HTMLElement>("[data-rail-scroll-viewport]");
+    if (!list || !viewport || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measureFill();
+      });
+    };
+    // The viewport resizes with the window and rail chrome; the list resizes
+    // when groups collapse, rows load or the selected row changes.
+    const observer = new ResizeObserver(schedule);
+    observer.observe(viewport);
+    observer.observe(list);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [measureFill]);
+  const fillSignature = fillTargets
+    .map(
+      (target) =>
+        `${target.key}:${target.loaded}:${target.base}:${target.hasMore ? 1 : 0}:${
+          target.loading ? 1 : 0
+        }:${fillCountForGroup(target.key)}`,
+    )
+    .join("|");
+  // Membership or paging can change without resizing the list (for example a
+  // group becoming exhausted). Re-plan on those transitions too.
+  useEffect(() => {
+    const frame = requestAnimationFrame(measureFill);
+    return () => cancelAnimationFrame(frame);
+  }, [fillSignature, measureFill, pageGeneration]);
+  // Load rows that the fill plan shows but no page holds yet. Each request is
+  // keyed by what it asks for, so a page with no new rows is not retried.
+  const fillRequests = useRef(new Map<string, string>());
+  useEffect(() => {
+    for (const target of fillTargetsRef.current) {
+      const fill = fillCountForGroup(target.key);
+      const visible = target.base + fill;
+      // Restored manual windows load too, after the rail returns from Settings.
+      const restored = target.base > SESSION_GROUP_VISIBLE_STEP;
+      if (!target.group || !target.hasMore || target.loading || (fill === 0 && !restored)) continue;
+      if (visible <= target.loaded) continue;
+      const request = `${pageGeneration}:${target.loaded}:${visible}`;
+      if (fillRequests.current.get(target.key) === request) continue;
+      fillRequests.current.set(target.key, request);
+      void loadMoreInGroup(target.group, false, visible - target.loaded, false);
+    }
+  }, [fillCountForGroup, fillSignature, loadMoreInGroup, pageGeneration]);
+
   // The discovery cursor is workspace-wide, so it cannot prove that any
   // individual project contains older rows. Keep its control outside projects.
   const workspacePagination = paginationForGroup(
@@ -2949,6 +3183,21 @@ export function SessionList() {
               showEmptyGroups={showEmptyGroups}
               onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
             />
+            {context.clientConfig.sessionArchive ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/read-only-chats",
+                      params: { workspaceId: rail.workspaceId },
+                    })
+                  }
+                >
+                  Read-only chats
+                </DropdownMenuItem>
+              </>
+            ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -3307,10 +3556,10 @@ export function SessionList() {
         }
         description={
           sessionPendingDelete?.treeStats?.totalDescendants
-            ? `This permanently deletes the complete workstream and its ${sessionPendingDelete.treeStats.totalDescendants} spawned sessions. This cannot be undone.`
-            : "This permanently deletes the session and its history. This cannot be undone."
+            ? `This permanently deletes the chat and its ${sessionPendingDelete.treeStats.totalDescendants} sub-chats. A running chat is stopped first. This cannot be undone.`
+            : "This permanently deletes the chat and its history. A running chat is stopped first. This cannot be undone."
         }
-        confirmLabel="Delete workstream"
+        confirmLabel="Delete"
         cancelAutoFocus
         onConfirm={onDeleteSession}
       />
@@ -3993,7 +4242,24 @@ function SessionRow(props: {
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
   const creator = railRowCreator(props.session);
+  // Who started a session only adds information where other people work too.
+  const personalWorkspace = isPersonalWorkspace(
+    context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
+    null,
+  );
   const stateLabel = sessionStateLabel(props.session);
+  const hoverDescendantCount = props.session.treeStats?.totalDescendants ?? props.childCount;
+  const hoverDescendantCountTruncated =
+    props.session.treeStats?.truncated ?? props.childCountTruncated;
+  // The hover card is pointer/focus-only and not announced, so the row also
+  // describes the same facts to assistive technology.
+  const hoverDescriptionId = `session-hover-${useId().replaceAll(":", "")}`;
+  const hoverDescription = sessionHoverDescription(
+    sessionHoverFacts(props.session, {
+      descendantCount: hoverDescendantCount,
+      descendantCountTruncated: hoverDescendantCountTruncated,
+    }),
+  );
   const waiting = Boolean(sessionInputWait(props.session));
   const [, refreshWaitClock] = useState(0);
   useEffect(() => {
@@ -4123,6 +4389,7 @@ function SessionRow(props: {
                     : null,
                   creator,
                 })}
+                aria-describedby={hoverDescription ? hoverDescriptionId : undefined}
                 onFocus={props.onFocus}
                 onClick={(event) => {
                   if (isModifiedNavigationClick(event)) return;
@@ -4201,18 +4468,26 @@ function SessionRow(props: {
                 />
               </Link>
             </HoverCardTrigger>
-            <HoverCardContent side="right" collisionPadding={8}>
+            <HoverCardContent
+              // The narrow rail fills the screen, so there is no room beside it.
+              side={rail.isMobile ? "bottom" : "right"}
+              collisionPadding={8}
+              className="w-80 max-w-[calc(100vw-16px)] p-3.5"
+            >
               <SessionRowHoverDetails
+                session={props.session}
                 title={title}
-                createdAt={props.session.createdAt}
-                createdBy={props.session.createdBy}
-                descendantCount={props.session.treeStats?.totalDescendants ?? props.childCount}
-                descendantCountTruncated={
-                  props.session.treeStats?.truncated ?? props.childCountTruncated
-                }
+                descendantCount={hoverDescendantCount}
+                descendantCountTruncated={hoverDescendantCountTruncated}
+                showCreator={!personalWorkspace}
               />
             </HoverCardContent>
           </HoverCard>
+          {hoverDescription ? (
+            <span id={hoverDescriptionId} hidden>
+              {hoverDescription}
+            </span>
+          ) : null}
           <RowQuickActions
             session={props.session}
             onPin={props.onPin}
@@ -4294,7 +4569,7 @@ function SessionRow(props: {
             onSelect={() => props.onRequestDelete(props.session)}
           >
             <Trash2Icon className="size-4" />
-            Delete workstream
+            Delete chat
           </ContextMenuItem>
         ) : null}
         {props.channels.length > 0 &&
@@ -4521,7 +4796,7 @@ function RowActionsMenu({
             onClick={(event) => event.stopPropagation()}
           >
             <Trash2Icon className="size-4" />
-            Delete workstream
+            Delete chat
           </DropdownMenuItem>
         ) : null}
         {canMove ? (
@@ -4602,7 +4877,7 @@ export function CollapsedSessionsButton() {
             variant="ghost"
             size="icon-sm"
             aria-label="Search sessions"
-            onClick={() => requestSessionSearch(rail.workspaceId)}
+            onClick={(event) => requestSessionSearch(rail.workspaceId, event.currentTarget)}
             className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
@@ -4660,4 +4935,51 @@ function SessionListSkeleton() {
       ))}
     </div>
   );
+}
+
+/**
+ * Delete a chat, stopping it first when it is still running. The API refuses
+ * to delete a chat with an active turn (409), so the person's "Delete" stops
+ * the chat (terminal cancel) and retries until its turn has wound down. Every
+ * other 409 (saved outputs or forks depend on it, background commands, a
+ * sub-chat) is permanent: surface it as-is and never cancel the chat for it.
+ */
+async function deleteStoppingIfRunning(
+  client: {
+    deleteSession(workspaceId: string, sessionId: string): Promise<{ deletedSessionCount: number }>;
+    cancelSession(
+      workspaceId: string,
+      sessionId: string,
+      options: { reason?: string },
+    ): Promise<unknown>;
+  },
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ deletedSessionCount: number }> {
+  try {
+    return await client.deleteSession(workspaceId, sessionId);
+  } catch (error) {
+    if (!isStillRunningDeleteRefusal(error)) throw error;
+  }
+  await client.cancelSession(workspaceId, sessionId, { reason: "Deleted by user" });
+  const deadline = Date.now() + 30_000;
+  for (let delay = 500; ; delay = Math.min(delay * 2, 4_000)) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      return await client.deleteSession(workspaceId, sessionId);
+    } catch (error) {
+      if (!isStillRunningDeleteRefusal(error) || Date.now() > deadline) throw error;
+    }
+  }
+}
+
+/** Only "still running" (or a box still shutting down) is worth stopping the chat and retrying for. */
+export function isStillRunningDeleteRefusal(error: unknown): boolean {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 409) return false;
+  const code = error.details?.code;
+  if (typeof code === "string") {
+    return code === "session_delete_active_sessions" || code === "session_delete_live_sandboxes";
+  }
+  // Servers before structured refusal codes: keep the old behaviour only for the running case.
+  return /still running|still shutting down/i.test(error.message);
 }

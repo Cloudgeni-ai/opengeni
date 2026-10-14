@@ -172,13 +172,16 @@ export function PrReviewSetupCard(props: {
     ? `Deployment default · ${defaultModelRow.label} · ${defaultModelRow.billingClassLabel}`
     : `Deployment default · ${defaultModel}`;
 
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 rounded-xl border border-border bg-surface/50 p-4 text-xs text-fg-muted">
-        <Loader2Icon className="size-4 animate-spin" /> Loading Opengeni Review Bot setup…
-      </div>
-    );
-  }
+  // Without the deployment's Lens app, end users get no dead-end card. An
+  // admin still sees what the operator must configure (self-hosted only; a
+  // managed deployment reports no missing settings), and a workspace that
+  // already has review setup keeps managing it. Nothing renders while loading,
+  // so the card never flashes in before it is known to be useful.
+  const lensUnavailable = managedGitHub?.status === "unavailable";
+  const operatorHint =
+    lensUnavailable && props.canManage && (managedGitHub?.missing.length ?? 0) > 0;
+  const hasExistingSetup = registrations.length > 0 || repositories.length > 0;
+  if (loading || (lensUnavailable && !operatorHint && !hasExistingSetup)) return null;
 
   return (
     <section className="grid gap-4 rounded-xl border border-brand/30 bg-brand/5 p-4">
@@ -189,8 +192,11 @@ export function PrReviewSetupCard(props: {
         <div>
           <h3 className="text-sm font-semibold">Configure Opengeni Review Bot</h3>
           <p className="mt-1 text-xs leading-5 text-fg-muted">
-            Install Opengeni Lens on the repositories you want reviewed. Pull-request events start
-            ordinary exact-head agent sessions through the generic trigger system.
+            {lensUnavailable
+              ? "Review pull requests with your own provider app or token."
+              : "Install Opengeni Lens on the repositories you want reviewed."}{" "}
+            Pull-request events start ordinary exact-head agent sessions through the generic trigger
+            system.
           </p>
         </div>
       </div>
@@ -202,74 +208,78 @@ export function PrReviewSetupCard(props: {
         </Notice>
       ) : null}
 
-      <div className="grid gap-3 rounded-lg border border-border bg-surface/70 p-3">
-        <div>
-          <div className="text-xs font-medium">GitHub · Opengeni Lens</div>
-          <p className="mt-1 text-xs leading-5 text-fg-muted">
-            GitHub handles account authorization and repository selection. Opengeni stores no App
-            private key in this workspace.
-          </p>
-        </div>
-        {managedGitHub?.status === "connected" ? (
-          <div className="grid gap-2">
-            {managedGitHub.installations.map((installation) => (
-              <div
-                key={installation.registrationId}
-                className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-xs"
-              >
-                <CheckCircle2Icon className="size-4 text-status-completed" />
-                <span className="font-medium">
-                  {installation.accountLogin ?? `Installation ${installation.installationId}`}
-                </span>
-                <MetaChip>
-                  {installation.repositoryCount} repositor
-                  {installation.repositoryCount === 1 ? "y" : "ies"}
-                </MetaChip>
-                {installation.configureUrl ? (
-                  <Button
-                    className="ml-auto"
-                    variant="ghost"
-                    size="sm"
-                    disabled={busy || !props.canManage}
-                    onClick={() => window.location.assign(installation.configureUrl!)}
-                  >
-                    Change repositories
-                  </Button>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {managedGitHub?.status === "unavailable" ? (
+      {lensUnavailable ? (
+        operatorHint ? (
           <Notice>
-            Opengeni Lens is not configured for this deployment.
-            {managedGitHub.missing.length > 0
-              ? ` Missing: ${managedGitHub.missing.join(", ")}.`
-              : " Contact the deployment operator."}
+            Opengeni Lens is not configured for this deployment. Missing:{" "}
+            {managedGitHub!.missing.join(", ")}.
           </Notice>
-        ) : null}
-        <div>
-          <Button
-            size="sm"
-            disabled={busy || !props.canManage || !managedGitHub?.connectUrl}
-            onClick={() =>
-              setConnectRequest({
-                scope: { workspaceId: props.workspaceId, transport: connectTransport },
-                providerId: "github-lens",
-                ownership: "workspace",
-                displayName: "Opengeni Lens",
-                returnUrl: window.location.href,
-                idempotencyKey: crypto.randomUUID(),
-              })
-            }
-          >
-            <BotIcon />
-            {managedGitHub?.status === "connected"
-              ? "Connect another account"
-              : "Install on GitHub"}
-          </Button>
+        ) : null
+      ) : (
+        <div className="grid gap-3 rounded-lg border border-border bg-surface/70 p-3">
+          <div>
+            <div className="text-xs font-medium">GitHub · Opengeni Lens</div>
+            <p className="mt-1 text-xs leading-5 text-fg-muted">
+              GitHub handles account authorization and repository selection. Opengeni stores no App
+              private key in this workspace.
+            </p>
+          </div>
+          {managedGitHub?.status === "connected" ? (
+            <div className="grid gap-2">
+              {managedGitHub.installations.map((installation) => (
+                <div
+                  key={installation.registrationId}
+                  className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-xs"
+                >
+                  <CheckCircle2Icon className="size-4 text-status-completed" />
+                  <span className="font-medium">
+                    {installation.accountLogin ?? `Installation ${installation.installationId}`}
+                  </span>
+                  <MetaChip>
+                    {installation.repositoryCount} repositor
+                    {installation.repositoryCount === 1 ? "y" : "ies"}
+                  </MetaChip>
+                  {installation.configureUrl ? (
+                    <Button
+                      className="ml-auto"
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy || !props.canManage}
+                      onClick={() => window.location.assign(installation.configureUrl!)}
+                    >
+                      Change repositories
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div>
+            <Button
+              size="sm"
+              disabled={busy || !props.canManage || !managedGitHub?.connectUrl}
+              onClick={() =>
+                setConnectRequest({
+                  scope: {
+                    workspaceId: props.workspaceId,
+                    transport: connectTransport,
+                  },
+                  providerId: "github-lens",
+                  ownership: "workspace",
+                  displayName: "Opengeni Lens",
+                  returnUrl: window.location.href,
+                  idempotencyKey: crypto.randomUUID(),
+                })
+              }
+            >
+              <BotIcon />
+              {managedGitHub?.status === "connected"
+                ? "Connect another account"
+                : "Install on GitHub"}
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
 
       <details className="rounded-lg border border-border bg-surface/70 p-3">
         <summary className="cursor-pointer text-xs font-medium">
@@ -578,7 +588,7 @@ function ReviewModelSelect(props: {
   );
 }
 
-/** What failed, then what to do: never the raw "OpenGeni API 4xx ... Reference" string. */
+/** What failed, then what to do: never the raw "Opengeni API 4xx ... Reference" string. */
 function messageForError(what: string, reason: unknown): string {
   return `${what}. ${userErrorText(reason)}`;
 }

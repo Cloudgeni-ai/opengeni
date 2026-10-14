@@ -1,5 +1,9 @@
 import { configuredStaticUsageLimits } from "@opengeni/config";
-import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "@opengeni/core";
+import {
+  documentEmbeddingCostMicros,
+  paidDocumentEmbedding,
+  workspaceCreditsDisabled,
+} from "@opengeni/core";
 import {
   applyCreditDebitAfterUse,
   appendKnowledgeIndexChunks,
@@ -10,7 +14,7 @@ import {
   creditDebitAttributionMetadata,
   deferKnowledgeIndexJob,
   freezeKnowledgeIndexBillingMode,
-  getBillingBalance,
+  getSpendableCreditBalance,
   guardPaidKnowledgeIndexPublication,
   knowledgeIndexBillingActivationTime,
   readKnowledgeIndexSource,
@@ -136,6 +140,9 @@ export function createKnowledgeIndexingActivities(
         policyActivatedAt = await activationTime;
       }
       const { embedder } = await resolveDocumentServices();
+      // A claim would only record a failure and push the job's retry out; an
+      // embedder that cannot make any request leaves the queue untouched.
+      if (embedder.available === false) return result;
       const { knowledgeIndexChunks } = await import("@opengeni/documents");
       const claims = await claimKnowledgeIndexJobs(db, {
         model: embedder.model,
@@ -210,8 +217,17 @@ export function createKnowledgeIndexingActivities(
                 result.deferred++;
                 return;
               }
+              // A workspace that turned Opengeni credits off is never debited.
+              // Wait like an unfunded generation (no provider call, checkpoint
+              // kept); the job re-checks each minute and resumes once credits
+              // are turned back on.
+              if (paid && (await workspaceCreditsDisabled(lockedDb, current.billingWorkspaceId))) {
+                await waitKnowledgeIndexForFunding(lockedDb, claim);
+                result.deferred++;
+                return;
+              }
               if (paid && current.nextIndex === 0) {
-                const balance = await getBillingBalance(lockedDb, claim.accountId);
+                const balance = await getSpendableCreditBalance(lockedDb, claim.accountId);
                 if (balance.balanceMicros <= 0) {
                   await waitKnowledgeIndexForFunding(lockedDb, claim);
                   result.deferred++;

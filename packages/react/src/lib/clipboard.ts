@@ -35,6 +35,35 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
   }
 }
 
+/**
+ * Copy text that is still being prepared, such as a command around a freshly
+ * minted URL. Safari only allows a clipboard write during the click itself, so
+ * hand the pending text to a `ClipboardItem` where supported; otherwise wait
+ * for it and copy. Resolves false when the text failed or nothing was copied.
+ */
+export async function copyPendingTextToClipboard(text: Promise<string>): Promise<boolean> {
+  if (
+    typeof ClipboardItem !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.clipboard?.write === "function"
+  ) {
+    const blob = text.then((value) => new Blob([value], { type: "text/plain" }));
+    // The caller observes a failed `text`; never leave this copy unhandled.
+    blob.catch(() => {});
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+      return true;
+    } catch {
+      // Fall through: some browsers reject promised clipboard items.
+    }
+  }
+  try {
+    return await copyTextToClipboard(await text);
+  } catch {
+    return false;
+  }
+}
+
 /** Serialize an HTML table to tab-separated values (spreadsheet-friendly). */
 export function tableElementToTsv(table: HTMLTableElement | null | undefined): string {
   if (!table) {

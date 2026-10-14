@@ -98,6 +98,16 @@ describe("host surfaces", () => {
     expect(hostTokenOverrides(embed)).toEqual({ "--og-color-accent": "#7c3aed" });
   });
 
+  test("stock tokens rewritten by a host CSS minifier are not customizations", () => {
+    // Next.js minifies an imported compiled.css: #333333 -> #333,
+    // oklch(0.52 0.16 22) -> oklch(.52 .16 22). These are still the stock
+    // dark values and must not be re-applied on a light theme.
+    const embed = mount(
+      `<div style="--og-color-surface-1: #333; --og-color-border-strong: #555; --og-color-primary-fg: #eee; --og-color-danger-fill: oklch(.52 .16 22); --og-color-status-failed: oklch(.77 .12 22); --og-color-accent: #7c3aed"><div data-embed></div></div>`,
+    );
+    expect(hostTokenOverrides(embed)).toEqual({ "--og-color-accent": "#7c3aed" });
+  });
+
   test("the stock token table mirrors styles/tokens.css", () => {
     const css = readFileSync(join(import.meta.dir, "../styles/tokens.css"), "utf8");
     const block = (start: string) => {

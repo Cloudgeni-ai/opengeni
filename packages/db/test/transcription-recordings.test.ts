@@ -212,7 +212,7 @@ describe("resumable transcription recording persistence", () => {
         { segmentNumber: 1, transcriptText: "  ", languages: ["de", "fr"] },
       ]),
     ).toEqual({
-      text: "first\n\nthird",
+      text: "first third",
       languages: ["en", "de", "fr"],
     });
   });

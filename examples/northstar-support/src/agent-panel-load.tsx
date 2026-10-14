@@ -194,7 +194,7 @@ export function AgentPanelLoadError() {
       role="alert"
     >
       <div className="flex h-[72px] items-center border-b border-[#302a40] bg-[#252131] px-5 text-sm font-semibold text-white">
-        OpenGeni panel unavailable
+        Opengeni panel unavailable
       </div>
       <div className="m-auto max-w-sm px-8 text-center">
         <p className="text-sm font-semibold text-[#30332f]">The agent panel could not be loaded.</p>

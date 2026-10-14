@@ -13,6 +13,10 @@ import {
   type ManagedAuthSessionSetProjection,
 } from "@opengeni/contracts/managed-auth-session-sets";
 import { createDb, provisionRoles, type DbClient } from "@opengeni/db";
+import {
+  acquireManagedAuthActorMutationLease,
+  releaseManagedAuthActorMutationLease,
+} from "@opengeni/db/managed-auth-session-sets";
 import { migrate } from "@opengeni/db/migrate";
 import { OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -37,6 +41,10 @@ import {
 import { createApp } from "../../apps/api/src/app";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import {
+  createFiniteReviewReadDiagnostics,
+  type FiniteReviewDiagnosticsWindow,
+} from "./browser-account-finite-review-diagnostics";
 import { observeReloadCapabilities } from "./browser-account-reload-barrier";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
@@ -105,6 +113,8 @@ type PendingFiniteRead = {
 type BrowserProblems = {
   capabilityDiagnostics: ReturnType<typeof createCapabilityDiagnostics>;
   crossTabReloadStartedAt?: number;
+  /** Receipt times of top-level document commits (Playwright `framenavigated`). */
+  mainFrameCommits: number[];
   acceptedRequestTerminals: Array<{
     observedAt: number;
     origin?: string | undefined;
@@ -447,6 +457,8 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
         pathname === "/v1/auth/session-set" ||
         pathname === "/v1/workspaces" ||
         pathname === "/v1/organization-invitations" ||
+        // The person's own inbox; a session page reads it again as it unmounts.
+        pathname === "/v1/inbox" ||
         (pathname === "/v1/billing" &&
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
             requestUrl.searchParams.get("accountId") ?? "",
@@ -873,6 +885,7 @@ async function authSessionCount(email: string): Promise<number> {
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
     capabilityDiagnostics: createCapabilityDiagnostics(),
+    mainFrameCommits: [],
     acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
@@ -1074,6 +1087,9 @@ function observeBrowser(page: Page): BrowserProblems {
         problems.capabilityDiagnostics.console(problems.phase, source, message.text());
       }
     }
+  });
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) problems.mainFrameCommits.push(performance.now());
   });
   page.on("pageerror", (error) => {
     const message = `[${problems.phase}] ${error.message}`;
@@ -1975,8 +1991,14 @@ function minimumCostTerminalAssignment(
   return { cost, terminalIndexes };
 }
 
+// The SDK live stream never reopens sooner than its minimum jittered reconnect
+// delay (500 ms base, 20% jitter). Two outgoing-document refusals closer than
+// that cannot both be the single stream's sequential reconnect attempts.
+const WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS = 400;
+
 function webKitLiveEventsPageErrorsForValidatedRace(
-  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
+  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence"> &
+    Partial<Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">>,
   engine: EngineName,
   input: { acceptedAt: number; origin: string; pathname: string; settledAt: number },
 ): string[] {
@@ -1988,11 +2010,40 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   ) {
     return [];
   }
+  // The explicit reload starts a navigation, and WebKit cancels the outgoing
+  // alpha document's in-flight loads at that point but keeps the document
+  // running until the replacement commits. The SDK live stream treats that
+  // cancellation (or its ordinary finite-batch close) as a reason to reopen
+  // after its backoff. When the reopen lands before the commit, WebKit refuses
+  // the load locally: the request never reaches the network, Playwright emits
+  // no request or terminal for it, and the console reports it as an
+  // access-control error, which Playwright surfaces as a pageerror. Accept only
+  // that exact shape: the old workspace's exact bounded live-events URL,
+  // observed after this page's reload started and no later than this page's
+  // first subsequent top-level commit, which itself precedes settlement, with
+  // sequential-reconnect spacing. Such errors consume no request terminal.
+  const reloadStartedAt = problems.crossTabReloadStartedAt;
+  const outgoingDocumentCommitAt =
+    reloadStartedAt === undefined
+      ? undefined
+      : problems.mainFrameCommits?.find((commitAt) => commitAt >= reloadStartedAt);
+  const outgoingDocumentWindow =
+    reloadStartedAt !== undefined &&
+    outgoingDocumentCommitAt !== undefined &&
+    Number.isFinite(reloadStartedAt) &&
+    Number.isFinite(outgoingDocumentCommitAt) &&
+    reloadStartedAt >= input.acceptedAt &&
+    outgoingDocumentCommitAt <= input.settledAt
+      ? { startedAt: reloadStartedAt, committedAt: outgoingDocumentCommitAt }
+      : null;
+  const outgoingDocumentRefusals: string[] = [];
+  let previousOutgoingDocumentRefusalAt = Number.NEGATIVE_INFINITY;
   // WebKit may additionally report an accepted old-document cancellation as
   // an access-control pageerror. Never infer cancellation from that text: the direct-race
-  // gate has already validated the actor transition, and every callback must
-  // consume a distinct, exact-URL failed terminal accepted by the strict
-  // request-failure ledger within that race's acceptance/settlement window.
+  // gate has already validated the actor transition, and every remaining
+  // callback must consume a distinct, exact-URL failed terminal accepted by
+  // the strict request-failure ledger within that race's acceptance/settlement
+  // window.
   const candidates: Array<{
     pageError: BrowserProblems["pageErrorEvidence"][number];
     matches: Array<{ distance: number; index: number }>;
@@ -2014,6 +2065,21 @@ function webKitLiveEventsPageErrorsForValidatedRace(
       pageError.observedAt < input.acceptedAt
     ) {
       return [];
+    }
+    if (
+      outgoingDocumentWindow !== null &&
+      pageError.observedAt >= outgoingDocumentWindow.startedAt &&
+      pageError.observedAt <= outgoingDocumentWindow.committedAt
+    ) {
+      if (
+        pageError.observedAt - previousOutgoingDocumentRefusalAt <
+        WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS
+      ) {
+        return [];
+      }
+      previousOutgoingDocumentRefusalAt = pageError.observedAt;
+      outgoingDocumentRefusals.push(pageError.message);
+      continue;
     }
     const matches = problems.acceptedRequestTerminals
       .flatMap((terminal, index) => {
@@ -2064,7 +2130,7 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   for (const index of [...best.terminalIndexes].sort((a, b) => b - a)) {
     problems.acceptedRequestTerminals.splice(index, 1);
   }
-  return candidates.map(({ pageError }) => pageError.message);
+  return [...outgoingDocumentRefusals, ...candidates.map(({ pageError }) => pageError.message)];
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -2393,12 +2459,42 @@ async function closeResponsiveAccountMenu(page: Page, width: number): Promise<vo
 }
 
 async function expectActiveAccountAnnouncement(page: Page, account: AccountFixture): Promise<void> {
-  await page
-    .locator('span[aria-live="polite"][aria-atomic="true"]')
-    .filter({
-      hasText: `Active account: ${account.displayName}, ${account.email}`,
-    })
-    .waitFor();
+  const liveRegions = page.locator('span[aria-live="polite"][aria-atomic="true"]');
+  try {
+    await liveRegions
+      .filter({
+        hasText: `Active account: ${account.displayName}, ${account.email}`,
+      })
+      .waitFor();
+  } catch (error) {
+    // The announcement is driven by the account provider's `ready` phase, while
+    // the trigger label can fall back to the host auth session. Record which
+    // account surface is actually rendered so a timeout distinguishes a
+    // provider stuck in loading/error from a stale or missing selection.
+    const evidence = await page
+      .evaluate(() => ({
+        url: location.pathname,
+        liveRegions: [
+          ...document.querySelectorAll('span[aria-live="polite"][aria-atomic="true"]'),
+        ].map((element) => element.textContent ?? ""),
+        accountTriggers: [...document.querySelectorAll('button[aria-label^="Account menu"]')].map(
+          (element) => ({
+            label: element.getAttribute("aria-label"),
+            // The trigger renders a spinner while the provider is loading or committing.
+            busy: element.querySelector(".animate-spin") !== null,
+          }),
+        ),
+        headings: [...document.querySelectorAll("h1, h2, [role=alert]")]
+          .map((element) => element.textContent?.trim() ?? "")
+          .filter(Boolean)
+          .slice(0, 8),
+      }))
+      .catch((evidenceError: unknown) => ({ unavailable: String(evidenceError) }));
+    throw new Error(
+      `active account announcement for ${account.displayName} did not appear: ${JSON.stringify(evidence)}`,
+      { cause: error },
+    );
+  }
 }
 
 async function expectAccountMenuEvidenceVisible(page: Page, displayName: string): Promise<void> {
@@ -2682,6 +2778,62 @@ const selectAdmissionDiagnostics: Array<{
   }>;
 }> = [];
 
+type SelectionRaceSearchScope = {
+  authorityHash: string;
+  actorEpoch: string;
+  pathname: string;
+};
+type SelectionRaceSearchBoundary = SelectionRaceSearchScope & {
+  released: Promise<void>;
+  release: () => void;
+  deferred: Set<Promise<void>>;
+};
+let selectionRaceSearchBoundary: SelectionRaceSearchBoundary | null = null;
+
+function isSelectionRaceSearch(request: Request, scope: SelectionRaceSearchScope): boolean {
+  return (
+    request.method === "POST" &&
+    new URL(request.url).pathname === scope.pathname &&
+    /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(scope.pathname) &&
+    request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER) === scope.actorEpoch &&
+    sessionSetAuthorityHash(request.headers.get("cookie")) === scope.authorityHash
+  );
+}
+
+async function withSelectionRaceSearchBoundary<T>(
+  scope: SelectionRaceSearchScope,
+  race: () => Promise<T>,
+): Promise<T> {
+  if (selectionRaceSearchBoundary) throw new Error("selection race boundary already active");
+  const { promise: released, resolve: release } = Promise.withResolvers<void>();
+  const boundary: SelectionRaceSearchBoundary = {
+    ...scope,
+    released,
+    release,
+    deferred: new Set(),
+  };
+  selectionRaceSearchBoundary = boundary;
+  try {
+    // Browser request terminals do not prove the outer API handler released its
+    // actor lease. Include already-admitted searches from responsive contexts,
+    // and defer new exact-scope searches before they acquire a production lease.
+    const deadline = Date.now() + 30_000;
+    while (
+      [...pendingAccountApiRequests.keys()].some((request) => isSelectionRaceSearch(request, scope))
+    ) {
+      if (Date.now() >= deadline) throw new Error("selection race companion search did not settle");
+      await Bun.sleep(25);
+    }
+    return await race();
+  } finally {
+    selectionRaceSearchBoundary = null;
+    boundary.release();
+    // Forward every deferred request unchanged, including its original actor.
+    // Its real stale-actor response remains subject to the strict browser ledger.
+    await Promise.all(boundary.deferred);
+  }
+}
+
 async function observeAccountApiRequest(
   request: Request,
   dispatch: () => Response | Promise<Response>,
@@ -2694,6 +2846,13 @@ async function observeAccountApiRequest(
     actorEpoch: request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
     authorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
   });
+  const boundary = selectionRaceSearchBoundary;
+  const deferred =
+    boundary && isSelectionRaceSearch(request, boundary) ? Promise.withResolvers<void>() : null;
+  if (deferred) {
+    boundary!.deferred.add(deferred.promise);
+    await boundary!.released;
+  }
   if (metadata.pathname === "/v1/auth/session-set/select") {
     selectAdmissionDiagnostics.push({
       authorityHash: metadata.authorityHash,
@@ -2711,6 +2870,7 @@ async function observeAccountApiRequest(
     throw failure;
   } finally {
     pendingAccountApiRequests.delete(request);
+    deferred?.resolve();
   }
 }
 
@@ -3214,6 +3374,75 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("selection race admission defers only the exact actor's knowledge search and forwards on failure", async () => {
+    const authority = "a".repeat(43);
+    const scope: SelectionRaceSearchScope = {
+      authorityHash: managedAuthSha256(authority),
+      actorEpoch: "2",
+      pathname: "/v1/workspaces/workspace/knowledge/entries/search",
+    };
+    const request = (
+      method = "POST",
+      pathname = scope.pathname,
+      actorEpoch = scope.actorEpoch,
+      cookie = authority,
+    ) =>
+      new Request(`${publicOrigin}${pathname}`, {
+        method,
+        headers: {
+          cookie: `${MANAGED_AUTH_SESSION_SET_COOKIE}=${cookie}`,
+          [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: actorEpoch,
+        },
+      });
+    expect(isSelectionRaceSearch(request(), scope)).toBe(true);
+    for (const other of [
+      request("GET"),
+      request("POST", "/v1/auth/session-set/select"),
+      request("POST", `${scope.pathname}/other`),
+      request("POST", scope.pathname.replace("workspace/", "other/")),
+      request("POST", scope.pathname, "3"),
+      request("POST", scope.pathname, "2", "b".repeat(43)),
+      request("POST", scope.pathname, "2", ""),
+    ])
+      expect(isSelectionRaceSearch(other, scope)).toBe(false);
+
+    const forwarded: string[] = [];
+    const sentinel = new Error("race failed");
+    let companion: Promise<Response> | undefined;
+    await expect(
+      withSelectionRaceSearchBoundary(scope, async () => {
+        companion = observeAccountApiRequest(request(), () => {
+          forwarded.push("companion");
+          return new Response(null, { status: 409 });
+        });
+        await observeAccountApiRequest(request("POST", "/v1/auth/session-set/select"), () => {
+          forwarded.push("select");
+          return new Response(null, { status: 200 });
+        });
+        expect(forwarded).toEqual(["select"]);
+        throw sentinel;
+      }),
+    ).rejects.toBe(sentinel);
+    expect((await companion!).status).toBe(409);
+    expect(forwarded).toEqual(["select", "companion"]);
+    expect(selectionRaceSearchBoundary).toBeNull();
+    expect(pendingAccountApiRequests.size).toBe(0);
+
+    const admitted = Promise.withResolvers<Response>();
+    const oldSearch = observeAccountApiRequest(request(), () => admitted.promise);
+    let raceStarted = false;
+    const race = withSelectionRaceSearchBoundary(scope, async () => {
+      raceStarted = true;
+      expect(pendingAccountApiRequests.size).toBe(0);
+    });
+    expect(raceStarted).toBe(false);
+    admitted.resolve(new Response(null, { status: 200 }));
+    expect((await oldSearch).status).toBe(200);
+    await race;
+    expect(raceStarted).toBe(true);
+    expect(selectionRaceSearchBoundary).toBeNull();
+  });
+
   test("actor transition reads include only the exact read-only POST search", () => {
     const path = "/v1/workspaces/workspace/knowledge/entries/search";
     expect(isActorTransitionRead("POST", path)).toBe(true);
@@ -4584,6 +4813,106 @@ describe("provider-neutral browser account acceptance", () => {
     expect(ambiguousFallback).toEqual(ambiguousOriginal);
   });
 
+  test("the strict browser ledger accepts WebKit's local refusal of an outgoing document's live-events reopen only before its commit", () => {
+    const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathnameAndSearch} due to access control checks.`;
+    const input = { acceptedAt: 100, origin: "http://127.0.0.1:23212", pathname, settledAt: 3_000 };
+    const navigation = { crossTabReloadStartedAt: 110, mainFrameCommits: [50, 900] };
+    const match = (
+      errors: BrowserProblems["pageErrorEvidence"],
+      overrides: Partial<
+        Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">
+      > = {},
+      terminals: BrowserProblems["acceptedRequestTerminals"] = [],
+      engine: EngineName = "webkit",
+      scope = input,
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        {
+          acceptedRequestTerminals: terminals,
+          pageErrorEvidence: errors,
+          ...navigation,
+          ...overrides,
+        },
+        engine,
+        scope,
+      );
+    // The never-dispatched reopen has no request terminal of its own and must
+    // not consume an unrelated one.
+    const unrelatedTerminal = {
+      observedAt: 120,
+      origin: input.origin,
+      pathnameAndSearch,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const preserved = [unrelatedTerminal];
+    expect(match([{ message, observedAt: 600 }], {}, preserved)).toEqual([message]);
+    expect(preserved).toEqual([unrelatedTerminal]);
+    expect(match([{ message, observedAt: 110 }])).toEqual([message]);
+    expect(match([{ message, observedAt: 900 }])).toEqual([message]);
+    // Sequential reconnect attempts are spaced by the SDK's minimum backoff.
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS },
+      ]),
+    ).toEqual([message, message]);
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS - 1 },
+      ]),
+    ).toEqual([]);
+    // Before the reload, after the commit, without an observed commit, with a
+    // commit after settlement, or with a reload preceding acceptance, the
+    // error is not this outgoing-document shape and still needs a terminal.
+    expect(match([{ message, observedAt: 109 }])).toEqual([]);
+    expect(match([{ message, observedAt: 901 }])).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [50] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: undefined })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: Number.NaN })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: 99 })).toEqual([]);
+    expect(
+      match([{ message, observedAt: 600 }], {}, [], "webkit", { ...input, settledAt: 899 }),
+    ).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "chromium")).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "firefox")).toEqual([]);
+    // URL, phase, origin, and cursor exactness are unchanged.
+    for (const changed of [
+      message.replace("cross-tab-select-race", "logout-one"),
+      message.replace(":23212", ":23213"),
+      message.replace("000000000001", "000000000002"),
+      message.replace("http1-bounded", "http1"),
+      message.replace("controlAfter=0", "controlAfter=00"),
+      message.replace("live-events/stream", "sessions"),
+      message.replace("access control checks.", "access control checks. unexpected"),
+    ]) {
+      expect(match([{ message: changed, observedAt: 600 }])).toEqual([]);
+    }
+    // An error outside the window still requires its own exact terminal, and
+    // both shapes may settle together without sharing evidence.
+    const lateTerminal = { ...unrelatedTerminal, observedAt: 950 };
+    const mixed = [lateTerminal];
+    expect(
+      match(
+        [
+          { message, observedAt: 600 },
+          { message, observedAt: 960 },
+        ],
+        {},
+        mixed,
+      ),
+    ).toEqual([message, message]);
+    expect(mixed).toEqual([]);
+  });
+
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
     expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
@@ -4749,9 +5078,13 @@ describe("provider-neutral browser account acceptance", () => {
       organizationName: "Review Reader Organization",
     });
     const browser = await launchAccountBrowser(requestedEngine as EngineName);
+    let diagnostics: ReturnType<typeof createFiniteReviewReadDiagnostics> | undefined;
     try {
       const page = await browser.newPage();
       const problems = observeBrowser(page);
+      diagnostics = createFiniteReviewReadDiagnostics(page);
+      await diagnostics.install();
+      diagnostics.mark(null, "sign-in");
       setBrowserPhase(problems, "primary-set-sign-in");
       await signIn(page, reviewAccount);
       await waitForFiniteReadQuiescence(problems);
@@ -4760,17 +5093,27 @@ describe("provider-neutral browser account acceptance", () => {
       // must reach a native terminal before another poll; no routing, fetch
       // replacement, navigation, or cancellation exemption is involved.
       for (let i = 0; i < 100; i++) {
+        diagnostics.mark(i, "response-wait");
         const pending = page.waitForResponse((response) =>
           response.url().endsWith("/knowledge/entries/search"),
         );
-        await page.evaluate(() =>
-          window.dispatchEvent(new Event("opengeni:knowledge-review-updated")),
-        );
+        await page.evaluate((iteration) => {
+          (
+            window as FiniteReviewDiagnosticsWindow
+          ).__opengeniFiniteReviewReadDiagnostics?.markIteration(iteration);
+          return window.dispatchEvent(new Event("opengeni:knowledge-review-updated"));
+        }, i);
         const response = await pending;
+        diagnostics.mark(i, "response-assertion");
         expect(response.status()).toBe(200);
+        diagnostics.mark(i, "quiescence");
         await waitForFiniteReadQuiescence(problems);
       }
+      diagnostics.mark(null, "browser-assertion");
       await expectNoBrowserProblems(problems);
+    } catch (error) {
+      if (diagnostics) await diagnostics.rethrowFailure(error);
+      throw error;
     } finally {
       await browser.close();
     }
@@ -4910,15 +5253,61 @@ describe("provider-neutral browser account acceptance", () => {
       projection = await sessionSet(page);
       const betaSlot = projection.slots.find((slot) => slot.displayName === beta.displayName);
       if (!betaSlot) throw new Error("Beta slot missing after add");
-      const [pageProjection, tabProjection] = await Promise.all([
-        sessionSet(page),
-        sessionSet(secondTab),
-      ]);
-      selectAdmissionDiagnostics.length = 0;
-      const raced = await Promise.all([
-        raceSelect(page, pageProjection, betaSlot.id),
-        raceSelect(secondTab, tabProjection, betaSlot.id),
-      ]);
+      const authority = (await context.cookies(publicOrigin)).find(
+        (cookie) => cookie.name === MANAGED_AUTH_SESSION_SET_COOKIE,
+      )?.value;
+      if (!authority || !client) throw new Error("selection race authority unavailable");
+      const scope: SelectionRaceSearchScope = {
+        authorityHash: managedAuthSha256(authority),
+        actorEpoch: projection.actorEpoch,
+        pathname: `/v1/workspaces/${alpha.workspaceId}/knowledge/entries/search`,
+      };
+      // The CI double-409 was truthful: a search held this exact actor's lease.
+      // Reproduce that denial through canonical restricted-role lease routines;
+      // failed selects must neither advance the actor nor change the selection.
+      const companionRequestId = crypto.randomUUID();
+      await acquireManagedAuthActorMutationLease(client.db, {
+        authorityHash: scope.authorityHash,
+        actorEpoch: scope.actorEpoch,
+        requestId: companionRequestId,
+        leaseSeconds: 30,
+      });
+      try {
+        const blocked = await Promise.all([
+          raceSelect(page, projection, betaSlot.id),
+          raceSelect(secondTab, projection, betaSlot.id),
+        ]);
+        expect(blocked.map(({ status, managedAuthCode }) => ({ status, managedAuthCode }))).toEqual(
+          [
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+          ],
+        );
+        expect(sanitizeRaceProjection(await sessionSet(page))).toEqual(
+          sanitizeRaceProjection(projection),
+        );
+      } finally {
+        expect(
+          await releaseManagedAuthActorMutationLease(client.db, {
+            authorityHash: scope.authorityHash,
+            requestId: companionRequestId,
+          }),
+        ).toBe(true);
+      }
+      const { raced, pageProjection } = await withSelectionRaceSearchBoundary(scope, async () => {
+        const [primaryProjection, companionProjection] = await Promise.all([
+          sessionSet(page),
+          sessionSet(secondTab),
+        ]);
+        expect(primaryProjection.actorEpoch).toBe(scope.actorEpoch);
+        expect(companionProjection.actorEpoch).toBe(scope.actorEpoch);
+        selectAdmissionDiagnostics.length = 0;
+        const results = await Promise.all([
+          raceSelect(page, primaryProjection, betaSlot.id),
+          raceSelect(secondTab, companionProjection, betaSlot.id),
+        ]);
+        return { raced: results, pageProjection: primaryProjection };
+      });
       const racedStatuses = raced.map(({ status }) => status).sort();
       if (racedStatuses[0] !== 200 || racedStatuses[1] !== 409) {
         const currentProjections = await Promise.all(

@@ -1,0 +1,75 @@
+{
+  "expo": {
+    "name": "Opengeni",
+    "slug": "opengeni",
+    "scheme": "opengeni",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "ai.opengeni.app",
+      "supportsTablet": true,
+      "entitlements": {
+        "com.apple.developer.usernotifications.time-sensitive": true
+      },
+      "infoPlist": {
+        "UIApplicationShortcutItems": [
+          {
+            "UIApplicationShortcutItemType": "ai.opengeni.app.call",
+            "UIApplicationShortcutItemTitle": "Call your agent",
+            "UIApplicationShortcutItemIconSymbolName": "phone.fill"
+          }
+        ]
+      }
+    },
+    "android": {
+      "package": "ai.opengeni.app",
+      "edgeToEdgeEnabled": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Opengeni uses the camera so you can take a photo and send it to your agent.",
+          "photosPermission": "Opengeni lets you pick photos to send to your agent.",
+          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent and to dictate your messages."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "mode": "development"
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Opengeni uses the microphone for voice calls with your agent and to dictate your messages.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "../../packages/react-native/app.plugin.js",
+        {
+          "call": {
+            "title": "Call Opengeni",
+            "description": "Start a voice call with your agent.",
+            "phrases": ["Call {app}", "Start a call with {app}", "Talk to {app}", "Ring {app}"],
+            "control": true
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "tsconfigPaths": false
+    },
+    "icon": "./assets/icon.png"
+  }
+}

@@ -282,7 +282,7 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
       () => embedder,
       settings,
     ),
-  ).rejects.toThrow("Knowledge vector search needs OpenGeni credits");
+  ).rejects.toThrow("Knowledge vector search needs Opengeni credits");
   expect(calls).toBe(0);
   await shared.admin`INSERT INTO credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key) VALUES (${accountId},NULL,'grant',1,'test',${saved.revisionId},${`funded-index:${saved.revisionId}`})`;
   await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${saved.revisionId}`;
@@ -324,6 +324,128 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
     ).searchMode,
   ).toBe("keyword");
   expect(calls).toBe(2);
+});
+
+test("paid indexing in a workspace with Opengeni credits off waits without a provider call or debit", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Credits-off index account')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name,settings) VALUES(${workspaceId},${accountId},'Credits-off index workspace',${shared.admin.json({ allowCreditModels: false })})`;
+  await shared.admin`INSERT INTO credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key) VALUES (${accountId},NULL,'grant',10000000,'test',${workspaceId},${`credits-off-index:${workspaceId}`})`;
+  const context: KnowledgeContext = {
+    accountId,
+    workspaceId,
+    actor: {
+      kind: "human",
+      principalKind: "human_session",
+      subjectId: "user:credits-off-index-owner",
+      writeScopes: ["workspace"],
+      settingsScopes: ["workspace"],
+      review: true,
+    },
+  };
+  let calls = 0;
+  const embedder: DocumentServices["embedder"] = {
+    model: "paid-knowledge-index",
+    dimensions: 3,
+    embedMany: async (inputs) => {
+      calls++;
+      return inputs.map(() => [1, 0, 0]);
+    },
+    embedQuery: async () => {
+      calls++;
+      return [1, 0, 0];
+    },
+  };
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "credits",
+    documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+  } as Settings;
+  const worker = createKnowledgeIndexingActivities(
+    async () =>
+      ({
+        db: client.db,
+        settings,
+        observability: { warn: () => undefined },
+      }) as ControlActivityServices,
+    async () => ({ embedder }) as DocumentServices,
+  );
+  expect((await worker.indexKnowledge()).completed).toBe(0);
+  const saved = await saveKnowledgeEntry(client.db, context, {
+    operationId: crypto.randomUUID(),
+    entryId: crypto.randomUUID(),
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: {
+      kind: "fact",
+      title: "Credits-off contract",
+      content: "Credits-off terms ".repeat(200),
+    },
+  });
+  expect((await worker.indexKnowledge()).deferred).toBe(1);
+  expect(calls).toBe(0);
+  const [waiting] =
+    await shared.admin`SELECT next_index,attempts,last_failure FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+  // Waiting does not burn retry attempts, so the generation resumes intact.
+  expect(waiting).toMatchObject({
+    next_index: 0,
+    attempts: 0,
+    last_failure: "waiting_for_funding",
+  });
+  const hybrid = await searchKnowledgeEntries(
+    client.db,
+    context,
+    { query: "Credits-off" },
+    () => embedder,
+    settings,
+  );
+  expect(hybrid).toMatchObject({ searchMode: "keyword", fallbackReason: "credits_disabled" });
+  expect(hybrid.entries).toHaveLength(1);
+  expect(calls).toBe(0);
+  const [charges] =
+    await shared.admin`SELECT count(*)::int AS n FROM credit_ledger_entries WHERE account_id=${accountId} AND type<>'grant'`;
+  expect(charges?.n).toBe(0);
+  await shared.admin`UPDATE workspaces SET settings = settings || ${shared.admin.json({ allowCreditModels: true })} WHERE id=${workspaceId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${saved.revisionId}`;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  expect(calls).toBeGreaterThan(0);
+  const [ledgers] =
+    await shared.admin`SELECT count(*)::int AS n FROM credit_ledger_entries WHERE source_type='knowledge_revision' AND source_id=${saved.revisionId}`;
+  expect(ledgers?.n).toBe(1);
+
+  // Turning credits off mid-generation parks it at its checkpoint.
+  const large = await saveKnowledgeEntry(client.db, context, {
+    operationId: crypto.randomUUID(),
+    entryId: crypto.randomUUID(),
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: { kind: "fact", title: "Large contract", content: "Large terms ".repeat(4500) },
+  });
+  expect((await worker.indexKnowledge()).advanced).toBe(1);
+  const [partial] =
+    await shared.admin`SELECT next_index FROM knowledge_index_jobs WHERE revision_id=${large.revisionId}`;
+  expect(Number(partial?.next_index)).toBeGreaterThan(0);
+  await shared.admin`UPDATE workspaces SET settings = settings || ${shared.admin.json({ allowCreditModels: false })} WHERE id=${workspaceId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${large.revisionId}`;
+  const callsBeforePause = calls;
+  expect((await worker.indexKnowledge()).deferred).toBe(1);
+  expect(calls).toBe(callsBeforePause);
+  const [paused] =
+    await shared.admin`SELECT next_index,attempts,last_failure FROM knowledge_index_jobs WHERE revision_id=${large.revisionId}`;
+  expect(paused).toMatchObject({ attempts: 0, last_failure: "waiting_for_funding" });
+  expect(Number(paused?.next_index)).toBe(Number(partial?.next_index));
+  await shared.admin`UPDATE workspaces SET settings = settings || ${shared.admin.json({ allowCreditModels: true })} WHERE id=${workspaceId}`;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${large.revisionId}`;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  const [largeLedgers] =
+    await shared.admin`SELECT count(*)::int AS n FROM credit_ledger_entries WHERE source_type='knowledge_revision' AND source_id=${large.revisionId}`;
+  expect(largeLedgers?.n).toBe(2);
 });
 
 test("a frozen paid generation pauses across a billing-mode rollback and resumes at its original tariff", async () => {
@@ -664,6 +786,92 @@ test("deterministic embeddings still index without funds under the credits-mode 
     SELECT billing_mode, state FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
   expect(job).toMatchObject({ billing_mode: "usage_only", state: "ready" });
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(0);
+});
+
+test("an embedder without a credential leaves queued jobs untouched until one is configured", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Unconfigured index')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Unconfigured workspace')`;
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "deterministic",
+    documentEmbeddingBillingMode: "usage_only",
+  } as Settings;
+  let available = false;
+  let calls = 0;
+  const embedder: DocumentServices["embedder"] = {
+    model: "unconfigured-index-test",
+    dimensions: 3,
+    get available() {
+      return available;
+    },
+    embedMany: async (inputs) => {
+      calls += 1;
+      if (!available) throw new Error("OpenAI document embeddings require an API key");
+      return inputs.map(() => [1, 0, 0]);
+    },
+    embedQuery: async () => [1, 0, 0],
+  };
+  const worker = createKnowledgeIndexingActivities(
+    async () =>
+      ({
+        db: client.db,
+        settings,
+        observability: { warn: () => undefined },
+      }) as ControlActivityServices,
+    async () => ({ embedder }) as DocumentServices,
+  );
+  await worker.indexKnowledge();
+  const saved = await saveKnowledgeEntry(
+    client.db,
+    {
+      accountId,
+      workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: "user:unconfigured-owner",
+        writeScopes: ["workspace"],
+        settingsScopes: ["workspace"],
+        review: true,
+      },
+    },
+    {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      scope: "workspace",
+      entry: { kind: "fact", title: "Queued until configured", content: "Waiting for embeddings" },
+    },
+  );
+  const job = async () =>
+    (
+      await shared.admin`
+        SELECT state, attempts, next_attempt_at, last_failure, lease_id
+        FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`
+    )[0];
+  const queued = await job();
+  for (let tick = 0; tick < 3; tick += 1) {
+    expect(await worker.indexKnowledge()).toEqual({
+      completed: 0,
+      advanced: 0,
+      deferred: 0,
+      unavailable: 0,
+    });
+  }
+  // No claim, no recorded failure and no pushed-out retry: the job is exactly
+  // as it was queued.
+  expect(await job()).toEqual(queued);
+  expect(queued).toMatchObject({ state: "pending", last_failure: null, lease_id: null });
+  expect(calls).toBe(0);
+
+  available = true;
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  expect(await job()).toMatchObject({ state: "ready", last_failure: null });
 });
 
 test("shadow indexing records its frozen cost estimate without a credit debit", async () => {

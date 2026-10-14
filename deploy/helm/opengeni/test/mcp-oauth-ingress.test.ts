@@ -22,7 +22,7 @@ type Ingress = {
 };
 
 const protocolRoutes = [
-  ["/.well-known/oauth-authorization-server", "Exact"],
+  ["/.well-known/oauth-authorization-server", "Prefix"],
   ["/.well-known/oauth-protected-resource", "Prefix"],
   ["/oauth/register", "Exact"],
   ["/oauth/authorize", "Exact"],

@@ -61,62 +61,39 @@ export type PersonalResourceAttachmentController = Readonly<{
 }>;
 
 /**
- * Resolve the ordinary catalog scope for an already-fixed session resource
- * without importing the broad @opengeni/react root into the direct-session
- * route. Failure stays unknown: only a positive `user` classification may turn
- * the optional Personal catalog into submission UI.
+ * Resolve the ordinary catalog scope for an already-fixed session Rig without
+ * importing the broad @opengeni/react root into the direct-session route.
+ * Failure stays unknown: only a positive `user` classification may turn the
+ * optional Personal catalog into submission UI.
  */
-export function useFixedResourceScopes(
+export function useFixedRigScope(
   client: OpenGeniBrowserClient,
   workspaceId: string | null,
-  variableSetIds: readonly string[],
   rigId: string | null,
   enabled = true,
-): readonly [readonly (ResourceAuthorityScope | null)[], ResourceAuthorityScope | null] {
-  const variableSetIdsKey = variableSetIds.join("\u0000");
-  const requestedVariableSetIds = useMemo(
-    () => (variableSetIdsKey ? variableSetIdsKey.split("\u0000") : []),
-    [variableSetIdsKey],
-  );
+): ResourceAuthorityScope | null {
   const identity =
-    !enabled || workspaceId === null || (requestedVariableSetIds.length === 0 && rigId === null)
-      ? null
-      : [workspaceId, variableSetIdsKey, rigId ?? ""].join(":");
-  const [resolved, setResolved] = useState<
-    | readonly [string, readonly (ResourceAuthorityScope | null)[], ResourceAuthorityScope | null]
-    | null
-  >(null);
+    !enabled || workspaceId === null || rigId === null ? null : `${workspaceId}:${rigId}`;
+  const [resolved, setResolved] = useState<readonly [string, ResourceAuthorityScope | null] | null>(
+    null,
+  );
 
   useEffect(() => {
-    if (identity === null || workspaceId === null) return;
+    if (identity === null || workspaceId === null || rigId === null) return;
     let current = true;
-    void Promise.all([
-      Promise.all(
-        requestedVariableSetIds.map((variableSetId) =>
-          client
-            .getVariableSet(workspaceId, variableSetId)
-            .then((resource) => resource.scope)
-            .catch(() => null),
-        ),
-      ),
-      rigId
-        ? client
-            .getRig(workspaceId, rigId)
-            .then((resource) => resource.scope)
-            .catch(() => null)
-        : null,
-    ]).then(([variableSetScopes, rigScope]) => {
-      if (!current) return;
-      setResolved([identity, variableSetScopes, rigScope]);
-    });
+    void client
+      .getRig(workspaceId, rigId)
+      .then((resource) => resource.scope)
+      .catch(() => null)
+      .then((rigScope) => {
+        if (current) setResolved([identity, rigScope]);
+      });
     return () => {
       current = false;
     };
-  }, [client, identity, requestedVariableSetIds, rigId, workspaceId]);
+  }, [client, identity, rigId, workspaceId]);
 
-  return resolved?.[0] === identity
-    ? [resolved[1], resolved[2]]
-    : [requestedVariableSetIds.map(() => null), null];
+  return resolved?.[0] === identity ? resolved[1] : null;
 }
 
 export function usePersonalResourceAttachment(input: {
@@ -254,13 +231,6 @@ export function usePersonalResourceAttachment(input: {
   // to clear prior owner state before hiding it from a connected-machine send.
   const selected = personalSelection(scope ? catalog : null, input.fixed);
   const fixedIdentity = [
-    (
-      input.fixed.variableSetIds ??
-      (input.fixed.variableSetId === null ? [] : [input.fixed.variableSetId])
-    ).join(","),
-    (input.fixed.variableSetScopes ?? [input.fixed.variableSetScope ?? null])
-      .map((variableSetScope) => variableSetScope ?? "unknown")
-      .join(","),
     input.fixed.rigId ?? "",
     input.fixed.rigScope ?? "unknown",
     input.fixed.connectedMachine?.enrollmentId ?? "",
@@ -300,14 +270,10 @@ export function usePersonalResourceAttachment(input: {
   const mode: PersonalAttachmentMode | null = selected.resourceCount > 0 ? "session" : null;
   const acknowledged = visibility === "workspace" && selected.resourceCount > 0;
   const fixedResourceCount =
-    (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
-    Number(input.fixed.rigId !== null) +
-    Number(input.fixed.connectedMachine !== null);
+    Number(input.fixed.rigId !== null) + Number(input.fixed.connectedMachine !== null);
   const positivelyPersonal =
     sourceLost ||
     selected.personalResourceCount > 0 ||
-    (input.fixed.variableSetScopes?.some((variableSetScope) => variableSetScope === "user") ??
-      (input.fixed.variableSetId !== null && input.fixed.variableSetScope === "user")) ||
     (input.fixed.rigId !== null && input.fixed.rigScope === "user") ||
     input.fixed.connectedMachine !== null;
   const closureError = selected.closureUnverified

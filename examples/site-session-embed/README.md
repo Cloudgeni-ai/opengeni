@@ -1,4 +1,4 @@
-# Session SDK inside an OpenGeni Site
+# Session SDK inside an Opengeni Site
 
 Uses the normal React provider, timeline and durable composer with
 `createOpenGeniSiteClient().client`. No API URLs or credentials in browser code.

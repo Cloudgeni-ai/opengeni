@@ -66,7 +66,7 @@ body {
   outline-offset: 2px;
 }
 
-/* The embedded agent is deliberately denser than OpenGeni's full-page UI.
+/* The embedded agent is deliberately denser than Opengeni's full-page UI.
    These are host-owned presentation choices; behavior stays in the SDK. */
 
 .northstar-agent-copy p,

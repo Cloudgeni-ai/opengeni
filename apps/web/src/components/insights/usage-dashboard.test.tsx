@@ -143,7 +143,7 @@ describe("Insights usage dashboard", () => {
     try {
       const titles = breakdownTitles(view.container);
       expect(titles).toContain("GPT-6.1 Sol");
-      expect(titles).toContain("Claude Opus 5.5");
+      expect(titles).toContain("Opus 5.5");
       expect(titles).toContain("Grok 4.6");
       const text = view.container.textContent ?? "";
       expect(text).not.toContain("codex/gpt-6.1-sol");
@@ -177,6 +177,29 @@ describe("Insights usage dashboard", () => {
         group: "rootSession",
         model: "codex-subscription/codex/gpt-6.1-sol",
       });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("native session rows drill down using the session UUID", async () => {
+    const sessionId = "33333333-3333-4333-8333-333333333333";
+    nextUsage = fixtureUsage({ groupBy: "rootSession" });
+    nextUsage.groups = [
+      {
+        ...nextUsage.groups.find((group) => group.kind === "item")!,
+        key: `item:${sessionId}`,
+        label: "Example chat",
+      },
+    ];
+    const view = await render({ group: "rootSession" });
+    try {
+      await act(async () => rowAction(view.container, "Example chat")?.click());
+      expect(view.changes.at(-1)).toEqual({ root: sessionId });
+      const menu = view.container.querySelector<HTMLButtonElement>(
+        '[aria-label="More for Example chat"]',
+      );
+      expect(menu).not.toBeNull();
     } finally {
       await view.unmount();
     }
@@ -374,7 +397,7 @@ describe("Insights usage dashboard", () => {
       const chips = [...view.container.querySelectorAll('[aria-label="Active filters"] li')].map(
         (chip) => chip.textContent,
       );
-      expect(chips).toEqual(["Model:Claude Opus 5.5 · Claude plan"]);
+      expect(chips).toEqual(["Model:Opus 5.5 · Claude plan"]);
       await act(async () =>
         view.container
           .querySelector<HTMLButtonElement>('[aria-label^="Remove filter Model"]')
@@ -407,7 +430,7 @@ describe("Insights usage dashboard", () => {
 
   test("falls back to the older Insights endpoint only when the route is missing", async () => {
     // The SDK's error: a display message, with the server's envelope in `body`.
-    nextError = Object.assign(new Error("OpenGeni API 404: Resource not found. Reference: r1."), {
+    nextError = Object.assign(new Error("Opengeni API 404: Resource not found. Reference: r1."), {
       status: 404,
       body: JSON.stringify({
         error: { status: 404, code: "not_found", message: "Resource not found." },
@@ -472,7 +495,7 @@ describe("Insights usage dashboard", () => {
     }
     // A handler's own 404 (an unknown workspace) is an error, not a missing route.
     resetUsageSourceMemo();
-    nextError = Object.assign(new Error("OpenGeni API 404: workspace not found"), {
+    nextError = Object.assign(new Error("Opengeni API 404: workspace not found"), {
       status: 404,
       body: JSON.stringify({
         error: { status: 404, code: "not_found", message: "workspace not found" },

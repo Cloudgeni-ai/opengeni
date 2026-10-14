@@ -5,6 +5,7 @@ FROM scratch AS workspace-manifests
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/desktop/package.json apps/desktop/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
@@ -27,6 +28,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/desktop/package.json packages/desktop/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
@@ -35,12 +37,16 @@ COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
+COPY packages/react-native/package.json packages/react-native/package.json
 COPY packages/react/package.json packages/react/package.json
 COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
+COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
+COPY packages/vaults/package.json packages/vaults/package.json
+COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
@@ -49,13 +55,30 @@ WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 COPY --from=workspace-manifests / /app/
-RUN bun install --frozen-lockfile
+# Retry only this dependency-install boundary, never later builds or doctors.
+# A private retry cache avoids reusing a failed download/extraction without
+# deleting the original cache or changing the frozen dependency selection.
+RUN bun install --frozen-lockfile || { \
+      status=$?; \
+      for attempt in 1 2; do \
+        sleep "$((attempt * 5))" || exit "$?"; \
+        retry_cache="$(mktemp -d)" || exit "$?"; \
+        if BUN_INSTALL_CACHE_DIR="$retry_cache" bun install --frozen-lockfile; then \
+          exit 0; \
+        else \
+          status=$?; \
+        fi; \
+      done; \
+      exit "$status"; \
+    }
 
 COPY --chown=bun:bun . .
 
 ENV NODE_ENV=production
 USER root
-RUN install -d -o bun -g bun -m 0755 /workspace
+# WORKDIR leaves /app root-owned. Build stages run as bun and assemble their
+# runtime closures under /app/.release, which a build context may not contain.
+RUN install -d -o bun -g bun -m 0755 /workspace /app/.release
 USER bun
 
 # Most workloads share the same network/source-control tools. Keep that stable
@@ -70,11 +93,21 @@ USER bun
 
 # Keep worker before artifact-runtime stages so legacy remote Docker builders
 # do not execute unrelated API/materializer prerequisites when targeting it.
-FROM source-base AS worker
+FROM source-base AS worker-build
+RUN bun scripts/build-runtime-processes.ts worker \
+  && bun scripts/assemble-server-runtime.ts worker
+
+FROM oven/bun:${BUN_VERSION}-slim AS worker
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
 # daemon socket. Interactive/cancellable commands use the Agents SDK's
 # host-side Python PTY bridge, so Python must live in this worker image rather
 # than only inside the sandbox. The daemon remains outside this image.
+# Control activities parse Documents with LibreOffice and native OCR data;
+# turn activities validate video with ffprobe (provided by ffmpeg). Desktop
+# recordings execute ffmpeg in the sandbox, not on this worker host.
 USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client python3 tesseract-ocr-eng \
@@ -88,11 +121,12 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
   && /usr/bin/python3 -c 'import pty' \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
 ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3 \
   TESSDATA_PREFIX=/opt/opengeni/tessdata
+COPY --from=worker-build --chown=bun:bun /app/.release/server-runtime/worker/ /app/
 USER bun
-RUN bun scripts/build-runtime-processes.ts worker
 CMD ["bun", "apps/worker/dist/process/index.js"]
 
 FROM base AS northstar-demo-build
@@ -130,16 +164,23 @@ ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
 USER bun
 RUN bun packages/artifact-tool/src/runtime-cli-entry.ts doctor --json
 
-FROM artifact-runtime-base AS api
+FROM artifact-runtime-base AS api-build
+RUN bun scripts/build-runtime-processes.ts api \
+  && bun scripts/assemble-server-runtime.ts api
+
+FROM oven/bun:${BUN_VERSION}-slim AS api
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 # API-owned browser/computer sessions use the Docker sandbox adapter directly,
 # including `docker network connect`. Install only the client; the daemon stays
 # outside this image and is reached through the mounted host socket.
+# Voice normalization/segmentation executes ffmpeg here, without a worker hop.
+# Artifact rasterization needs fonts. Documents upload parsing is queued to the
+# existing control worker, so LibreOffice and OCR data belong only in worker.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client tesseract-ocr-eng \
-  && install -d -o root -g root -m 0555 /opt/opengeni/tessdata \
-  && find /usr/share/tesseract-ocr -name eng.traineddata -exec cp {} /opt/opengeni/tessdata/eng.traineddata \; \
-  && chmod 0444 /opt/opengeni/tessdata/eng.traineddata \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg openssh-client \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -147,14 +188,18 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
   && docker --version \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
+COPY --from=api-build --chown=bun:bun /app/.release/server-runtime/api/ /app/
+COPY --from=api-build --chown=root:root /app/artifact-runtime/ /app/artifact-runtime/
 USER bun
-ENV TESSDATA_PREFIX=/opt/opengeni/tessdata
-RUN bun scripts/build-runtime-processes.ts api
+ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
+RUN bun artifact-runtime-doctor.js doctor --json
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
-# the `COPY --chown=bun:bun . .` above. The API serves them from /agent/* (see
+# the process bundle's assets/agent-install directory. The API serves /agent/* (see
 # apps/api/src/routes/install.ts), so a fresh machine installs an agent that matches
 # THIS control plane exactly. The signing key never enters this build — signing is
 # done in the pre-build CI step. When nothing is baked (a plain `docker build`),
@@ -164,24 +209,30 @@ RUN bun scripts/build-runtime-processes.ts api
 EXPOSE 8000
 CMD ["bun", "apps/api/dist/process/index.js"]
 
+# These sidecar bundles have no runtime npm externals. Keep the full frozen
+# dependency install and source tree in builders, not in deployed images.
+FROM source-base AS artifact-outbox-build
+RUN bun scripts/build-runtime-processes.ts artifact-outbox
+
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact
 # runtime and authenticates with the narrow dispatcher-only PostgreSQL role.
-FROM base AS artifact-outbox-dispatcher
+FROM oven/bun:${BUN_VERSION}-slim AS artifact-outbox-dispatcher
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 ENV OPENGENI_ARTIFACT_OUTBOX_ENABLED=true \
   OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE=opengeni_artifact_outbox_dispatcher \
   OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=9466
-RUN bun scripts/build-runtime-processes.ts artifact-outbox
+COPY --from=artifact-outbox-build --chown=bun:bun /app/apps/worker/dist/process/artifact-outbox/ ./apps/worker/dist/process/artifact-outbox/
+USER bun
 EXPOSE 9466
 CMD ["bun", "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js"]
 
-# Dedicated artifact materializer image. It inherits the same exact runtime
-# authority as API and never compiles, downloads, or substitutes kernel bytes.
-FROM artifact-runtime-base AS artifact-materializer
+# Build against the same verified native runtime authority as API. Compilation
+# of the subprocess stays out of the final image; kernel bytes are never rebuilt.
+FROM artifact-runtime-base AS artifact-materializer-build
 USER root
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux \
-  && rm -rf /var/lib/apt/lists/* \
-  && install -d -o bun -g bun -m 0755 /opt/opengeni/bin
+RUN install -d -o bun -g bun -m 0755 /opt/opengeni/bin
 USER bun
 RUN bun build --compile packages/artifact-tool/src/materializer-cli-entry.ts \
   --outfile /opt/opengeni/bin/opengeni-artifact-materializer
@@ -189,6 +240,25 @@ USER root
 RUN chown root:root /opt/opengeni/bin/opengeni-artifact-materializer \
   && chmod 0555 /opt/opengeni/bin/opengeni-artifact-materializer
 USER bun
+RUN bun scripts/build-runtime-processes.ts artifact-materializer
+
+# The runtime installation includes its own exact file closure. Preserve its
+# root-owned/read-only permissions and recheck its native ABI in the slim image.
+FROM oven/bun:${BUN_VERSION}-slim AS artifact-materializer
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bubblewrap ca-certificates util-linux \
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /workspace
+COPY --from=artifact-materializer-build --chown=root:root /app/artifact-runtime/ ./artifact-runtime/
+COPY --from=artifact-materializer-build --chown=root:root /opt/opengeni/bin/opengeni-artifact-materializer /opt/opengeni/bin/opengeni-artifact-materializer
+COPY --from=artifact-materializer-build --chown=bun:bun /app/apps/worker/dist/process/artifact-materializer/ ./apps/worker/dist/process/artifact-materializer/
+USER bun
+ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
 ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
   OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE=/opt/opengeni/bin/opengeni-artifact-materializer \
   OPENGENI_ARTIFACT_MATERIALIZER_BWRAP=/usr/bin/bwrap \
@@ -197,7 +267,6 @@ ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
   OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=9465
 # Build-time load verifies the complete manifest/file chain and native ABI.
 RUN /opt/opengeni/bin/opengeni-artifact-materializer --opengeni-materializer-identity-v1
-RUN bun scripts/build-runtime-processes.ts artifact-materializer
 EXPOSE 9465
 CMD ["bun", "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js"]
 

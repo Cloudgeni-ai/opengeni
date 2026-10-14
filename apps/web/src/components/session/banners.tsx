@@ -109,7 +109,7 @@ export function UserMessageBody({
       )}
 
       <CollapsibleUserMessageBody messageId={item.id} text={item.text}>
-        <MarkdownText text={item.text} compact searchTarget={searchTarget} />
+        <MarkdownText text={item.text} compact softLineBreaks searchTarget={searchTarget} />
       </CollapsibleUserMessageBody>
 
       {item.presentation ? (

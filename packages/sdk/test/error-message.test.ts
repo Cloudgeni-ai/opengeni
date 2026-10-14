@@ -14,7 +14,7 @@ import {
 
 test("neutral formatter is available through the core and browser entry points", () => {
   expect(coreFormatErrorMessage).toBe(browserFormatErrorMessage);
-  expect(coreFormatErrorMessage(new TypeError("OpenGeni diagnostic"))).toBe(
+  expect(coreFormatErrorMessage(new TypeError("Opengeni diagnostic"))).toBe(
     "The request could not be completed.",
   );
 });
@@ -24,7 +24,7 @@ describe("brand-neutral error presentation", () => {
     const body = JSON.stringify({
       error: {
         code: "permission_denied",
-        message: "OpenGeni rejected this operation.",
+        message: "Opengeni rejected this operation.",
         requestId: "acme-denied-403",
         details: { missingPermission: "sessions:control" },
       },
@@ -33,7 +33,7 @@ describe("brand-neutral error presentation", () => {
     expect(formatErrorMessage(error)).toBe(
       "You don’t have permission to do that. Reference: acme-denied-403.",
     );
-    expect(error.message).toContain("OpenGeni rejected this operation.");
+    expect(error.message).toContain("Opengeni rejected this operation.");
     expect(error.body).toBe(body);
     expect(error.details).toEqual({ missingPermission: "sessions:control" });
     expect(error.code).toBe("permission_denied");
@@ -56,7 +56,7 @@ describe("brand-neutral error presentation", () => {
       JSON.stringify({
         error: {
           code: "allowance_exhausted",
-          message: "OpenGeni allowance reached",
+          message: "Opengeni allowance reached",
           details: { scope: "member", resetsAt: "2026-10-03T00:00:00Z", subjectId: "host-user-1" },
         },
       }),
@@ -78,19 +78,19 @@ describe("brand-neutral error presentation", () => {
       retryable: true,
       outcomeUnknown: true,
       correlationId: "transport-1",
-      displayMessage: "OpenGeni could not confirm delivery",
+      displayMessage: "Opengeni could not confirm delivery",
     });
     expect(formatErrorMessage(error)).toBe(
       "The request could not be confirmed. Check its status before retrying. Reference: transport-1.",
     );
     expect(error).toMatchObject({ code: "network_error", retryable: true, outcomeUnknown: true });
-    expect(error.message).toContain("OpenGeni could not confirm delivery");
+    expect(error.message).toContain("Opengeni could not confirm delivery");
   });
 
   test("retryable and operator-action failures stay distinct", () => {
     const transient = new OpenGeniApiError(
       503,
-      JSON.stringify({ error: { message: "OpenGeni is down", retryable: true } }),
+      JSON.stringify({ error: { message: "Opengeni is down", retryable: true } }),
       { mutation: false },
     );
     const setup = new OpenGeniApiError(
@@ -119,9 +119,9 @@ describe("brand-neutral error presentation", () => {
       new OpenGeniSecureContextRequiredError("insecure_context"),
       new OpenGeniSecureContextRequiredError("web_crypto_unavailable"),
       new OpenGeniApiContractMismatchError("old", "new"),
-      new OpenGeniStreamError("OpenGeni stream failed"),
-      new TypeError("OpenGeni transport failed"),
-      "OpenGeni proxy failed",
+      new OpenGeniStreamError("Opengeni stream failed"),
+      new TypeError("Opengeni transport failed"),
+      "Opengeni proxy failed",
     ]) {
       expect(formatErrorMessage(error)).not.toMatch(/opengeni/i);
       expect(formatErrorMessage(error)).not.toBe("");

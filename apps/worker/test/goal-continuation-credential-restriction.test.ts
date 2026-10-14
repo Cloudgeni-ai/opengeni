@@ -7,6 +7,9 @@ import { testSettings } from "@opengeni/testing";
 import * as admission from "../src/activities/agent-run-admission";
 import { createGoalActivities } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const scope = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -77,8 +80,12 @@ async function continuationFixture(
       metadata: options.sessionMetadata ?? {},
     } as Awaited<ReturnType<typeof db.requireSession>>),
     spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue(null),
-    spyOn(core, "resolveCatalogSettings").mockResolvedValue({ settings } as Awaited<
-      ReturnType<typeof core.resolveCatalogSettings>
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      id: scope.workspaceId,
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
+    spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({ settings } as Awaited<
+      ReturnType<typeof core.resolveWorkspaceCatalogSettings>
     >),
     spyOn(db, "materializeGoalContinuation").mockImplementation(async (_db, input) => {
       // Mirror the production materializer's order: select the locked causal

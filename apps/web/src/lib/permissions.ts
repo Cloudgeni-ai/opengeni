@@ -1,4 +1,5 @@
 import { Permission } from "@opengeni/contracts";
+import { organizationAdministrationAccountIds } from "@opengeni/react/organization-model";
 
 import type { AccessContext } from "@/types";
 import type { Workspace } from "@/types";
@@ -22,17 +23,18 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "documents:search": "Files & documents",
   "scheduled_tasks:manage": "Scheduled tasks",
   "scheduled_tasks:run": "Scheduled tasks",
-  "environments:manage": "Variable sets",
-  "environments:use": "Variable sets",
-  "variable-sets:list": "Variable sets",
-  "variable-sets:read": "Variable sets",
-  "variable-sets:write": "Variable sets",
-  "variable-sets:manage": "Variable sets",
-  "variable-sets:attach": "Variable sets",
-  "variable-sets:use": "Variable sets",
-  "secrets:list": "Variable sets",
-  "secrets:read": "Variable sets",
-  "secrets:write": "Variable sets",
+  "environments:manage": "Secrets",
+  "environments:use": "Secrets",
+  "variable-sets:list": "Secrets",
+  "variable-sets:read": "Secrets",
+  "variable-sets:write": "Secrets",
+  "variable-sets:manage": "Secrets",
+  "variable-sets:attach": "Secrets",
+  "variable-sets:use": "Secrets",
+  "secrets:list": "Secrets",
+  "secrets:read": "Secrets",
+  "secrets:write": "Secrets",
+  "secrets:use": "Secrets",
   "mcp_servers:attach": "Sessions",
   "github:manage": "GitHub",
   "github:use": "GitHub",
@@ -61,7 +63,7 @@ const permissionGroupOrder = [
   "Sessions",
   "Files & documents",
   "Scheduled tasks",
-  "Variable sets",
+  "Secrets",
   "Connections",
   "Machines",
   "GitHub",
@@ -155,9 +157,9 @@ export const defaultApiKeyPermissions = new Set<string>([
 ]);
 
 /**
- * Groups offered for a session's first-party MCP (OpenGeni tool) permission
+ * Groups offered for a session's first-party MCP (Opengeni tool) permission
  * scope — the same grouped idiom as the API key dialog. Account-level scopes
- * are excluded: a session's OpenGeni MCP only ever acts inside its workspace.
+ * are excluded: a session's Opengeni MCP only ever acts inside its workspace.
  */
 export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
   const accountOnly = new Set<string>([
@@ -409,13 +411,24 @@ export function canManageWorkspaceSettings(
   );
 }
 
-export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
-  return accessContext.accountGrants
-    .filter(
-      (grant) =>
-        grant.subjectId === accessContext.subjectId &&
-        (grant.role === "owner" || grant.role === "admin"),
-    )
-    .map((grant) => grant.accountId)
-    .sort();
+/**
+ * A shared workspace's Members surface: the viewer's own members:manage grant,
+ * or (in a managed browser session) an active organization owner or admin of
+ * the workspace's organization, with or without a grant here. The API applies
+ * the same organization authority; Personal workspaces never qualify.
+ */
+export function canManageWorkspaceMembers(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  managedSession: boolean,
+): boolean {
+  if (!context || !workspace) return false;
+  if (hasWorkspacePermission(context, workspace.id, "members:manage")) return true;
+  return (
+    managedSession &&
+    workspace.kind === "shared" &&
+    organizationAdministrationAccountIds(context).includes(workspace.accountId)
+  );
 }
+
+export { organizationAdministrationAccountIds };

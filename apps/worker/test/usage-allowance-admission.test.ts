@@ -85,10 +85,8 @@ describe("worker allowance admission", () => {
     }
   });
 
-  test("externally funded and free calls never read allowance counters", async () => {
-    const check = spyOn(database, "checkWorkspaceAllowance").mockImplementation(async () => {
-      throw new Error("must not read allowance for externally funded calls");
-    });
+  test("externally funded and free calls are checked only as unbilled usage", async () => {
+    const check = spyOn(database, "checkWorkspaceAllowance").mockResolvedValue(null);
     try {
       await ensureRunAllowed(settings, db, accountId, workspaceId, true);
       await ensureRunAllowed(
@@ -102,7 +100,18 @@ describe("worker allowance admission", () => {
         false,
         subjectId,
       );
-      expect(check).not.toHaveBeenCalled();
+      expect(check).toHaveBeenNthCalledWith(1, db, {
+        accountId,
+        workspaceId,
+        subjectId: null,
+        fundedWithoutCredits: true,
+      });
+      expect(check).toHaveBeenNthCalledWith(2, db, {
+        accountId,
+        workspaceId,
+        subjectId,
+        fundedWithoutCredits: true,
+      });
     } finally {
       check.mockRestore();
     }

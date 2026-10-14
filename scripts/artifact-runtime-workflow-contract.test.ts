@@ -88,6 +88,29 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
     );
   });
 
+  test("retains canonical mismatch diagnostics without bypassing the required byte gate", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    const parsed = Bun.YAML.parse(source) as { permissions: unknown; jobs: Record<string, CiJob> };
+    const steps = parsed.jobs["package-contracts"]!.steps!;
+    const rebuildIndex = steps.findIndex(
+      (step) => step.name === "Reproduce committed modality WASM packages from clean Rust sources",
+    );
+    const rebuild = steps[rebuildIndex]!;
+    expect(rebuild.id).toBe("modality-wasm-rebuild");
+    expect(rebuild.run).toContain("scripts/rebuild-artifact-kernel-wasm-packages.ts --check");
+    expect(rebuild.run).toContain("--diagnostic-output .opengeni/ci-canonical-modality-wasm");
+    expect(rebuild["continue-on-error"]).toBeUndefined();
+    expect(rebuild.if).toBeUndefined();
+    const upload = steps[rebuildIndex + 1]!;
+    expect(upload.name).toBe("Retain failed canonical modality WASM rebuild");
+    expect(upload.if).toBe("${{ failure() && steps.modality-wasm-rebuild.outcome == 'failure' }}");
+    expect(upload.uses).toBe("actions/upload-artifact@v7.0.1");
+    expect(upload.with?.path).toBe(".opengeni/ci-canonical-modality-wasm");
+    expect(upload.with?.["include-hidden-files"]).toBe(true);
+    expect(upload.with?.["retention-days"]).toBe(3);
+    expect(upload.with?.name).toContain("github.event.pull_request.head.sha");
+  });
+
   test("aggregates only eight OS-smoked targets and proves both OCI architectures", async () => {
     const source = await readFile(resolve(root, ".github/workflows/artifact-runtime.yml"), "utf8");
     const parsed = Bun.YAML.parse(source) as {

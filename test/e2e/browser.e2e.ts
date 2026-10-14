@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { chromium, type Browser } from "playwright";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
-import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
+import { SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID } from "@opengeni/core";
 import { Client as TemporalClient, Connection as TemporalConnection } from "@temporalio/client";
 import {
   freePort,
@@ -115,7 +115,7 @@ describe("browser e2e", () => {
     } catch (error) {
       browserObservation.stop();
       throw new Error(
-        `OpenGeni home did not become interactive: ${String(error)}\n${await pageDiagnostics(pageA, browserObservation.diagnostics)}\n[web]\n${web.logs()}\n[api]\n${api.logs()}\n[workers]\n${worker.logs()}`,
+        `Opengeni home did not become interactive: ${String(error)}\n${await pageDiagnostics(pageA, browserObservation.diagnostics)}\n[web]\n${web.logs()}\n[api]\n${api.logs()}\n[workers]\n${worker.logs()}`,
         { cause: error },
       );
     }
@@ -499,7 +499,7 @@ describe("browser e2e", () => {
       );
     } catch (error) {
       throw new Error(
-        `${String(error)}\n[wake schedule]\n${await sessionWorkflowWakeScheduleDiagnostics(services.temporalHost)}\n${await pageDiagnostics(page, diagnostics.diagnostics)}\n[command state]\n${await sessionCommandDiagnostics(services.databaseUrl, coordinates)}\n[api]\n${api.logs()}\n[workers]\n${worker.logs()}`,
+        `${String(error)}\n[wake dispatcher]\n${await sessionWorkflowWakeDispatcherDiagnostics(services.temporalHost)}\n${await pageDiagnostics(page, diagnostics.diagnostics)}\n[command state]\n${await sessionCommandDiagnostics(services.databaseUrl, coordinates)}\n[api]\n${api.logs()}\n[workers]\n${worker.logs()}`,
         { cause: error },
       );
     } finally {
@@ -946,25 +946,26 @@ async function workflowWakeRepairProbeDelivered(
   }
 }
 
-async function sessionWorkflowWakeScheduleDiagnostics(temporalHost: string): Promise<string> {
+async function sessionWorkflowWakeDispatcherDiagnostics(temporalHost: string): Promise<string> {
   const connection = await TemporalConnection.connect({ address: temporalHost });
   try {
     const temporal = new TemporalClient({ connection, namespace: "default" });
-    const description = await temporal.schedule
-      .getHandle(SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID)
+    const description = await temporal.workflow
+      .getHandle(SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID)
       .describe();
     return JSON.stringify(
       {
-        state: description.state,
-        spec: description.spec,
-        action: description.action,
-        info: description.info,
+        status: description.status.name,
+        runId: description.runId,
+        startTime: description.startTime,
+        closeTime: description.closeTime,
+        historyLength: description.historyLength,
       },
       null,
       2,
     );
   } catch (error) {
-    return `schedule diagnostic failed: ${String(error)}`;
+    return `wake dispatcher diagnostic failed: ${String(error)}`;
   } finally {
     await connection.close();
   }

@@ -27,11 +27,6 @@ import {
   requireWorkspace,
   createOrganizationModelProviderCustomModel,
   upsertOrganizationModelProviderConnection,
-  createClaudeSubscriptionAccount,
-  upsertClaudeSubscriptionAccount,
-  upsertOrganizationClaudeSubscription,
-  setInitialActiveClaudeCredential,
-  disconnectClaudeSubscriptionAccount,
   getModelConnectionAccess,
   updateModelConnectionAccess,
   getWorkspaceProviderApiKeyConnectionMetadata,
@@ -56,6 +51,9 @@ import {
 } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+
+// Claude accounts and access policies are served by the shared core.
+// Custom-model metadata remains separate from executable connection authority.
 
 const SECRET = "gateway-custom-models-test-secret-at-least-32-bytes";
 
@@ -88,34 +86,6 @@ function automationSessionTemplate(model: string | null) {
     policyRole: null,
     metadata: {},
   };
-}
-
-function claudeSecret() {
-  return {
-    version: 1 as const,
-    token: "sk-ant-oat01-local-fixture",
-    identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
-  };
-}
-
-async function createClaudePoolFixture() {
-  if (!client || !grant) throw new Error("Real database fixture required");
-  const secret = claudeSecret();
-  const input = {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    subjectId: grant.subjectId,
-    encryptionKey: Buffer.from(settings.environmentsEncryptionKey!, "base64"),
-    secret,
-    providerAccountId: secret.identity.accountUuid,
-  };
-  const connected = await createClaudeSubscriptionAccount(client.db, input);
-  await setInitialActiveClaudeCredential(client.db, {
-    ...input,
-    credentialId: connected.account.id,
-    authoritySnapshot: connected.authoritySnapshot,
-  });
-  return { ...connected, input };
 }
 
 async function createAutomationSourceFixture(name: string) {
@@ -298,126 +268,119 @@ describe("workspace Gateway custom model API", () => {
   for (const providerKind of ["anthropic", "claude_subscription"] as const) {
     test(`workspace ${providerKind} models enforce admission, replay, access and retirement`, async () => {
       if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
-      // 0598 forbids fresh Claude credentials in the legacy API-key store;
-      // custom models keep their replay/retirement API but use a pool account.
-      const claude =
-        providerKind === "claude_subscription" ? await createClaudePoolFixture() : null;
-      try {
-        if (providerKind === "anthropic")
-          await createConnection(client.db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            subjectId: null,
-            providerDomain: "api.anthropic.com",
-            kind: "api_key",
-            credentialEncrypted: "metadata-only-fixture",
-            metadata: { credentialRole: providerKind },
-            createdBySubjectId: grant.subjectId,
-          });
-        const path = `/model-providers/${providerKind}/custom-models`;
-        const upstreamModelId = "claude-workspace-fixture";
-        const payload = { operationId: crypto.randomUUID(), upstreamModelId };
-        expect(
-          (
-            await request(
-              path,
-              { method: "POST", permissions: ["workspace:read"], body: payload },
-              publicApp,
-            )
-          ).status,
-        ).toBe(403);
-        const added = await request(path, { method: "POST", body: payload }, publicApp);
-        expect(added.status).toBe(201);
-        const model = await added.json();
-        const replay = await request(path, { method: "POST", body: payload }, publicApp);
-        expect(replay.status).toBe(201);
-        expect((await replay.json()).id).toBe(model.id);
-        expect(
-          (
-            await request(
-              path,
-              { method: "POST", body: { ...payload, upstreamModelId: "other" } },
-              publicApp,
-            )
-          ).status,
-        ).toBe(409);
-        const productId = `workspace-${providerKind === "anthropic" ? "anthropic" : "claude-subscription"}/${upstreamModelId}`;
-        const catalog = await (await request("/model-catalog", {}, publicApp)).json();
-        const initialSelectable = catalog.models.find((row: { id: string }) => row.id === productId)
-          ?.availability.selectable;
-        const accessPath = `/model-connections/${providerKind}/${claude?.account.id ?? "current"}/access`;
-        const access = await request(accessPath, {}, publicApp);
+      const claude = providerKind === "claude_subscription";
+      if (providerKind === "anthropic")
+        await createConnection(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: null,
+          providerDomain: "api.anthropic.com",
+          kind: "api_key",
+          credentialEncrypted: "metadata-only-fixture",
+          metadata: { credentialRole: providerKind },
+          createdBySubjectId: grant.subjectId,
+        });
+      const path = `/model-providers/${providerKind}/custom-models`;
+      const upstreamModelId = "claude-workspace-fixture";
+      const payload = { operationId: crypto.randomUUID(), upstreamModelId };
+      expect(
+        (
+          await request(
+            path,
+            { method: "POST", permissions: ["workspace:read"], body: payload },
+            publicApp,
+          )
+        ).status,
+      ).toBe(403);
+      const added = await request(path, { method: "POST", body: payload }, publicApp);
+      expect(added.status).toBe(201);
+      const model = await added.json();
+      const replay = await request(path, { method: "POST", body: payload }, publicApp);
+      expect(replay.status).toBe(201);
+      expect((await replay.json()).id).toBe(model.id);
+      expect(
+        (
+          await request(
+            path,
+            { method: "POST", body: { ...payload, upstreamModelId: "other" } },
+            publicApp,
+          )
+        ).status,
+      ).toBe(409);
+      const productId = `workspace-${providerKind === "anthropic" ? "anthropic" : "claude-subscription"}/${upstreamModelId}`;
+      const catalog = await (await request("/model-catalog", {}, publicApp)).json();
+      const initialSelectable = catalog.models.find((row: { id: string }) => row.id === productId)
+        ?.availability.selectable;
+      const accessPath = `/model-connections/${providerKind}/${claude ? crypto.randomUUID() : "current"}/access`;
+      const access = await request(accessPath, {}, publicApp);
+      if (claude) {
+        expect(access.status).toBe(404);
+      } else {
         expect(access.status).toBe(200);
         const accessBody = await access.json();
         expect(accessBody.models.some((row: { id: string }) => row.id === productId)).toBe(true);
         expect(
           accessBody.models.every((row: { id: string }) => row.id.startsWith("workspace-")),
         ).toBe(true);
-        const session = await request(
-          "/sessions",
-          {
-            method: "POST",
-            permissions: ["sessions:create"],
-            body: {
-              initialMessage: "Metadata-only admission test",
-              model: productId,
-              sandboxBackend: "none",
-              idempotencyKey: crypto.randomUUID(),
-            },
-          },
-          publicApp,
-        );
-        expect(session.status).toBe(202);
-        expect((await session.json()).model).toBe(productId);
-        const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
-        expect(
-          (
-            await request(
-              `${path}/${model.id}`,
-              { method: "DELETE", body: { ...removal, expectedVersion: model.version + 1 } },
-              publicApp,
-            )
-          ).status,
-        ).toBe(409);
-        expect(
-          (await request(`${path}/${model.id}`, { method: "DELETE", body: removal }, publicApp))
-            .status,
-        ).toBe(204);
-        expect(
-          (await request(`${path}/${model.id}`, { method: "DELETE", body: removal }, publicApp))
-            .status,
-        ).toBe(204);
-        const retired = await request(
-          "/sessions",
-          {
-            method: "POST",
-            permissions: ["sessions:create"],
-            body: {
-              initialMessage: "Cannot admit retired model",
-              model: productId,
-              sandboxBackend: "none",
-              idempotencyKey: crypto.randomUUID(),
-            },
-          },
-          publicApp,
-        );
-        expect(retired.status).toBe(422);
-        // Assert the original pre-admission catalog snapshot as well. Keeping
-        // this last lets the independent admission/retirement checks run when
-        // a readiness regression is present; it does not change the invariant.
-        expect(initialSelectable).toBe(true);
-      } finally {
-        // Pool precedence is intentional: clean up the workspace account before
-        // the independent organization-inheritance test, even on assertion failure.
-        if (claude)
-          expect(
-            await disconnectClaudeSubscriptionAccount(client.db, {
-              ...claude.input,
-              credentialId: claude.account.id,
-              authoritySnapshot: claude.authoritySnapshot,
-            }),
-          ).toBe(true);
       }
+      const session = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Metadata-only admission test",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      // Claude admission comes only from the shared core; this organization
+      // has no serving core connection, so the model is
+      // not selectable (core admission is covered in
+      // packages/db/test/organization-claude-model-admission.test.ts).
+      const admissible = providerKind === "anthropic";
+      expect(session.status).toBe(admissible ? 202 : 422);
+      if (admissible) expect((await session.json()).model).toBe(productId);
+      const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
+      expect(
+        (
+          await request(
+            `${path}/${model.id}`,
+            { method: "DELETE", body: { ...removal, expectedVersion: model.version + 1 } },
+            publicApp,
+          )
+        ).status,
+      ).toBe(409);
+      expect(
+        (await request(`${path}/${model.id}`, { method: "DELETE", body: removal }, publicApp))
+          .status,
+      ).toBe(204);
+      expect(
+        (await request(`${path}/${model.id}`, { method: "DELETE", body: removal }, publicApp))
+          .status,
+      ).toBe(204);
+      const retired = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Cannot admit retired model",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(retired.status).toBe(422);
+      // Assert the original pre-admission catalog snapshot as well. Keeping
+      // this last lets the independent admission/retirement checks run when
+      // a readiness regression is present; it does not change the invariant.
+      expect(initialSelectable).toBe(admissible);
     });
   }
   // Anthropic retains legacy credential rotate/replay. Claude's replacement
@@ -497,132 +460,49 @@ describe("workspace Gateway custom model API", () => {
       ).toBeNull();
     });
   }
-  test("Claude canonical account reconnect preserves access; pool API enforces admin, rotation, stale writes and disconnect", async () => {
-    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
-    const connected = await createClaudePoolFixture();
+  test("Claude core access refuses missing connections and maintenance routes fail closed", async () => {
+    if (!client || !grant || !publicApp || !shared)
+      throw new Error("Real database fixture required");
+    const connectionId = crypto.randomUUID();
     const target = {
-      ...connected.input,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
       kind: "claude_subscription" as const,
-      connectionId: connected.account.id,
+      connectionId,
     };
-    const policy = await updateModelConnectionAccess(client.db, target, {
-      allowedModels: [],
-      allowedWorkspaces: null,
-      allowPersonalWorkspaces: false,
-      version: 1,
-    });
-    expect(policy?.version).toBe(2);
-    const reconnect = {
-      ...connected.input,
-      credentialId: connected.account.id,
-      authoritySnapshot: connected.authoritySnapshot,
-      expectedCredentialVersion: connected.account.version,
-      expectedProviderAccountId: connected.account.providerAccountId,
-      secret: { ...connected.input.secret, token: "sk-ant-oat01-replacement-fixture" },
-    };
-    const replaced = await upsertClaudeSubscriptionAccount(client.db, reconnect);
-    expect(replaced.account.id).toBe(connected.account.id);
-    expect(replaced.account.version).toBe(connected.account.version + 1);
-    await expect(upsertClaudeSubscriptionAccount(client.db, reconnect)).rejects.toThrow("changed");
-    expect(await getModelConnectionAccess(client.db, target)).toEqual(policy);
-    const path = `/claude/accounts/${connected.account.id}`;
-    expect(
-      (
-        await request(
-          `${path}/activate`,
-          {
-            method: "POST",
-            permissions: ["workspace:read"],
-          },
-          publicApp,
-        )
-      ).status,
-    ).toBe(403);
-    expect((await request(`${path}/activate`, { method: "POST" }, publicApp)).status).toBe(200);
-    const pool = await (await request("/claude/accounts", {}, publicApp)).json();
-    expect(pool.source).toBe("workspace");
-    expect(pool.activeAccountId).toBe(connected.account.id);
-    expect(
-      pool.accounts.find((account: { id: string }) => account.id === connected.account.id)?.version,
-    ).toBe(2);
-    expect(JSON.stringify(pool)).not.toContain("local-fixture");
-    expect(JSON.stringify(pool)).not.toContain("replacement-fixture");
-    expect(
-      (
-        await request(
-          "/claude/settings",
-          {
-            method: "PATCH",
-            body: { rotationEnabled: true },
-            permissions: ["workspace:read"],
-          },
-          publicApp,
-        )
-      ).status,
-    ).toBe(403);
-    const rotated = await request(
-      "/claude/settings",
-      {
-        method: "PATCH",
-        body: { rotationEnabled: true },
-      },
-      publicApp,
-    );
-    expect(rotated.status).toBe(200);
-    expect((await rotated.json()).rotationEnabled).toBe(true);
-    const allocator = { enabled: false, expectedVersion: replaced.account.allocatorVersion };
-    const disabled = await request(
-      `${path}/allocator`,
-      { method: "PATCH", body: allocator },
-      publicApp,
-    );
-    expect(disabled.status).toBe(200);
-    expect((await disabled.json()).allocatorEnabled).toBe(false);
-    // Repeating the already-effective value is a no-op; stale opposing intent
-    // must still conflict rather than overwrite the newer allocator revision.
-    const replay = await request(
-      `${path}/allocator`,
-      { method: "PATCH", body: allocator },
-      publicApp,
-    );
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toMatchObject({
-      changed: false,
-      allocatorVersion: allocator.expectedVersion + 1,
-    });
-    expect(
-      (
-        await request(
-          `${path}/allocator`,
-          {
-            method: "PATCH",
-            body: { ...allocator, enabled: true },
-          },
-          publicApp,
-        )
-      ).status,
-    ).toBe(409);
-    expect(await getModelConnectionAccess(client.db, target)).toEqual(policy);
-    const access = await request(
-      `/model-connections/claude_subscription/${connected.account.id}/access`,
-      {},
-      publicApp,
-    );
-    expect(access.status).toBe(200);
-    expect((await access.json()).policy).toMatchObject({
-      allowedModels: [],
-      version: policy!.version,
-    });
-    expect(
-      (await request(path, { method: "DELETE", permissions: ["workspace:read"] }, publicApp))
-        .status,
-    ).toBe(403);
-    expect((await request(path, { method: "DELETE" }, publicApp)).status).toBe(200);
     expect(await getModelConnectionAccess(client.db, target)).toBeNull();
-    const after = await (await request("/claude/accounts", {}, publicApp)).json();
-    expect(
-      after.accounts.some((account: { id: string }) => account.id === connected.account.id),
-    ).toBe(false);
+    await expect(
+      updateModelConnectionAccess(client.db, target, {
+        allowedModels: [],
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: false,
+        version: 1,
+      }),
+    ).resolves.toBeNull();
+    const path = `/claude/accounts/${connectionId}`;
+    const routes: Array<[string, string, unknown?]> = [
+      ["GET", "/claude/accounts"],
+      ["POST", `${path}/activate`],
+      ["PATCH", "/claude/settings", { rotationEnabled: true }],
+      ["PATCH", `${path}/allocator`, { enabled: false, expectedVersion: 1 }],
+      ["PATCH", path, { label: "renamed" }],
+      ["DELETE", path],
+      ["GET", `/model-connections/claude_subscription/${connectionId}/access`],
+    ];
+    await shared.admin`
+      update subscription_provider_cutovers set enabled = false
+      where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
+    try {
+      for (const [method, route, body] of routes) {
+        const response = await request(route, { method, body }, publicApp);
+        expect({ method, route, status: response.status }).toEqual({ method, route, status: 503 });
+      }
+    } finally {
+      await shared.admin`
+        update subscription_provider_cutovers set enabled = true
+        where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
+    }
   });
   test("disabled subscription routes fail closed while Anthropic remains accessible", async () => {
     if (!publicApp) throw new Error("Real database fixture required");
@@ -669,20 +549,11 @@ describe("workspace Gateway custom model API", () => {
   });
 
   for (const providerKind of ["anthropic", "claude_subscription"] as const) {
-    test(`admits an organization ${providerKind} model through the public session boundary`, async () => {
+    test(`organization ${providerKind} model admission at the public session boundary`, async () => {
       if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
-      if (providerKind === "claude_subscription") {
-        // Organization admission resolves the canonical organization pool, not
-        // the retired organization_model_provider_connections credential row.
-        const secret = claudeSecret();
-        await upsertOrganizationClaudeSubscription(client.db, {
-          organizationId: grant.accountId,
-          actorSubjectId: grant.subjectId,
-          encryptionKey: Buffer.from(settings.environmentsEncryptionKey!, "base64"),
-          secret,
-          providerAccountId: secret.identity.accountUuid,
-        });
-      } else
+      // Organization Claude admission comes only from the shared core, never
+      // from the retired organization credential row or legacy pool.
+      if (providerKind === "anthropic")
         await upsertOrganizationModelProviderConnection(client.db, {
           organizationId: grant.accountId,
           actorSubjectId: grant.subjectId,
@@ -714,6 +585,19 @@ describe("workspace Gateway custom model API", () => {
         publicApp,
       );
       const body = await response.json();
+      if (providerKind === "claude_subscription") {
+        // Without a serving shared core connection Claude is not admissible
+        // (fail closed); the core-route admission itself is covered in
+        // packages/db/test/organization-claude-model-admission.test.ts.
+        expect({ status: response.status, body }).toEqual({
+          status: 422,
+          body: {
+            code: "SESSION_CREATE_REJECTED",
+            message: `model is not selectable: ${model}`,
+          },
+        });
+        return;
+      }
       expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
         status: 202,
       });
@@ -835,6 +719,201 @@ describe("workspace Gateway custom model API", () => {
       body: { expectedVersion: gatewayModel.version, operationId: deleteOperationId },
     });
     expect(removedGateway.status).toBe(204);
+  });
+
+  test("Opper workspace rail: connect, curate custom ids, admit sessions and retire", async () => {
+    if (!app || !publicApp || !grant || !client) throw new Error("Real database fixture required");
+    const curatedProductId = "workspace-opper/aws/claude-opus-5-5";
+    const curatedCollision = await request("/opper-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId: "aws/claude-opus-5-5" },
+    });
+    expect(curatedCollision.status).toBe(422);
+    expect(
+      (
+        await request("/opper-custom-models", {
+          method: "POST",
+          permissions: ["workspace:read"],
+          body: { operationId: crypto.randomUUID(), upstreamModelId: "gemini-3.8-flash" },
+        })
+      ).status,
+    ).toBe(403);
+
+    // Custom ids may be prepared while disconnected; they wait for the key.
+    const upstreamModelId = `mistral/mistral-large-eu-${crypto.randomUUID()}`;
+    const productId = `workspace-opper/${upstreamModelId}`;
+    const createBody = { operationId: crypto.randomUUID(), upstreamModelId, label: "Mistral EU" };
+    const created = await request("/opper-custom-models", { method: "POST", body: createBody });
+    expect(created.status).toBe(201);
+    const model = (await created.json()) as { id: string; version: number };
+    const replayed = await request("/opper-custom-models", { method: "POST", body: createBody });
+    expect((await replayed.json()).id).toBe(model.id);
+    const waiting = (await (await request("/model-catalog", {}, publicApp)).json()) as {
+      models: Array<Record<string, any>>;
+    };
+    expect(waiting.models.find((row) => row.id === productId)).toMatchObject({
+      provider: "workspace-opper",
+      providerLabel: "Your Opper",
+      availability: { selectable: false, reason: "needs_reauth" },
+    });
+
+    const permissions: Permission[] = ["connections:read", "connections:write"];
+    const connectBody = (apiKey: string) => ({
+      providerDomain: "api.opper.ai",
+      kind: "api_key",
+      subjectId: null,
+      credential: { apiKey },
+      grantedScopes: [],
+      metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+      operationId: crypto.randomUUID(),
+    });
+    // Opper refuses management keys on inference routes; never store one.
+    const management = await request(
+      "/connections",
+      { method: "POST", permissions, body: connectBody("op-mak-local-fixture") },
+      publicApp,
+    );
+    expect(management.status).toBe(422);
+    expect(JSON.stringify(await management.json())).toContain("management key");
+    const connected = await request(
+      "/connections",
+      {
+        method: "POST",
+        permissions,
+        body: {
+          providerDomain: "api.opper.ai",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "op-workspace-local-fixture" },
+          grantedScopes: [],
+          metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+          operationId: crypto.randomUUID(),
+        },
+      },
+      publicApp,
+    );
+    expect(connected.status).toBe(201);
+    const connectedBody = await connected.json();
+    expect(JSON.stringify(connectedBody)).not.toContain("op-workspace-local-fixture");
+    expect(JSON.stringify(connectedBody)).not.toContain("CredentialOperation");
+    try {
+      expect(
+        await loadWorkspaceProviderApiKey(client.db, settings, grant.workspaceId, "opper"),
+      ).toBe("op-workspace-local-fixture");
+      const catalog = (await (await request("/model-catalog", {}, publicApp)).json()) as {
+        models: Array<Record<string, any>>;
+      };
+      for (const id of [curatedProductId, productId])
+        expect(catalog.models.find((row) => row.id === id)).toMatchObject({
+          provider: "workspace-opper",
+          cost: "workspace",
+          billing: { upstreamPayer: "workspace", metering: "external" },
+          credentialReadiness: { status: "ready", basis: "connection" },
+          availability: { selectable: true },
+        });
+      const access = await request("/model-connections/opper/current/access", {}, publicApp);
+      expect(access.status).toBe(200);
+      const accessModels = ((await access.json()).models as Array<{ id: string }>).map(
+        (row) => row.id,
+      );
+      expect(accessModels).toContain(curatedProductId);
+      expect(accessModels).toContain(productId);
+      expect(accessModels.every((id) => id.startsWith("workspace-opper/"))).toBe(true);
+
+      const session = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Opper admission regression; no inference",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(session.status).toBe(202);
+      expect((await session.json()).model).toBe(productId);
+
+      const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
+      expect(
+        (await request(`/opper-custom-models/${model.id}`, { method: "DELETE", body: removal }))
+          .status,
+      ).toBe(204);
+      expect(await (await request("/opper-custom-models")).json()).toEqual({ models: [] });
+      const retired = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Cannot admit a retired Opper model",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(retired.status).toBe(422);
+    } finally {
+      const live = await getWorkspaceProviderApiKeyConnectionMetadata(
+        client.db,
+        grant.workspaceId,
+        "opper",
+      );
+      if (live)
+        expect(
+          (
+            await request(
+              `/connections/${live.connectionId}?expectedVersion=${live.version}`,
+              { method: "DELETE", permissions },
+              publicApp,
+            )
+          ).status,
+        ).toBe(200);
+    }
+  });
+
+  test("admits an organization Opper model through the public session boundary", async () => {
+    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+    await upsertOrganizationModelProviderConnection(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "opper",
+      credentialEncrypted: "metadata-only-test-credential",
+      credentialDigest: "metadata-only-test-digest",
+      operationId: crypto.randomUUID(),
+    });
+    await createOrganizationModelProviderCustomModel(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "opper",
+      upstreamModelId: "aws/claude-sonnet-4-6-eu",
+      operationId: crypto.randomUUID(),
+    });
+    const model = "organization-opper/aws/claude-sonnet-4-6-eu";
+    const response = await request(
+      "/sessions",
+      {
+        method: "POST",
+        permissions: ["sessions:create"],
+        body: {
+          initialMessage: "Local admission regression; no inference",
+          model,
+          sandboxBackend: "none",
+          idempotencyKey: crypto.randomUUID(),
+        },
+      },
+      publicApp,
+    );
+    const body = await response.json();
+    expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
+      status: 202,
+    });
+    expect(body.model).toBe(model);
   });
 
   test("creates one exact slug, exposes it only to the workspace catalog, and deletes it", async () => {

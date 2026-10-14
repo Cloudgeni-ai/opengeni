@@ -646,7 +646,7 @@ async function exchangePersonalGitHubAuthorizationCode(
       headers: {
         accept: "application/json",
         "content-type": "application/x-www-form-urlencoded",
-        "user-agent": "OpenGeni",
+        "user-agent": "Opengeni",
       },
       body: new URLSearchParams({
         client_id: oauth.clientId,
@@ -705,7 +705,7 @@ async function fetchPersonalGitHubIdentity(
       headers: {
         accept: "application/vnd.github+json",
         authorization: `Bearer ${accessToken}`,
-        "user-agent": "OpenGeni",
+        "user-agent": "Opengeni",
         "x-github-api-version": GITHUB_API_VERSION,
       },
       signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS),

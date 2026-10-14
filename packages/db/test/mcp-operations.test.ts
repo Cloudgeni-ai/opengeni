@@ -878,20 +878,19 @@ test("scheduled cached evidence revalidates the frozen run authority before disc
   await expect(command(scope, "capture", operation())).rejects.toThrow();
 });
 
-test("continuation claim membership prefix cannot invert against a concurrent ledger read", async () => {
+test("a claim-shaped transaction never waits on the membership key a ledger read holds", async () => {
   const scope = await fixture({ human: true });
   const op = operation();
   await command(scope, "capture", op);
   let read: Promise<any> | undefined;
   try {
+    // The claim takes no organization-membership fence. A ledger read holds
+    // membership and waits behind the claim's session lock; the claim must be
+    // able to finish without ever requesting membership, or the two deadlock.
     await retrySessionActivityRls(
       client.db,
       scope.workspaceId,
-      {
-        stage: "test.continuation_membership_prefix",
-        maxAttempts: 1,
-        organizationMembershipFence: true,
-      },
+      { stage: "test.claim_without_membership_prefix", maxAttempts: 1 },
       async (tx) => {
         const rows = await tx.execute(sql`select pg_backend_pid() as pid`);
         const holder = (Array.isArray(rows) ? rows : rows.rows)[0];
@@ -909,12 +908,21 @@ test("continuation claim membership prefix cannot invert against a concurrent le
           await Bun.sleep(20);
         }
         expect(blocked).toBe(true);
-        await tx.execute(sql`set local lock_timeout='500ms'`);
-        // Same lifecycle acquisition as causal host-MCP authority inheritance.
-        // Reentrant only when claim established the canonical prefix up front.
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`},0))`,
-        );
+        // The read holds membership; the claim-shaped holder never does.
+        const membershipHolders = async () =>
+          (
+            await shared.admin<{ pid: number }[]>`
+              with key as (
+                select hashtextextended(${`organization-membership:${scope.accountId}`},0) as k
+              )
+              select l.pid from pg_locks l, key
+              where l.locktype = 'advisory' and l.granted and l.objsubid = 1
+                and l.classid = ((key.k >> 32) & 4294967295)::bigint::oid
+                and l.objid = (key.k & 4294967295)::bigint::oid`
+          ).map((row) => Number(row.pid));
+        const holders = await membershipHolders();
+        expect(holders.length).toBe(1);
+        expect(holders).not.toContain(Number(holder.pid));
       },
     );
   } finally {
@@ -922,39 +930,28 @@ test("continuation claim membership prefix cannot invert against a concurrent le
   }
 });
 
-test("actual attempt claim waits at membership before acquiring tenancy or session locks", async () => {
+test("actual attempt claim completes while a ledger holds the membership key", async () => {
   const scope = await fixture({ human: true });
-  let claim: ReturnType<typeof claimSessionWorkForAttempt> | undefined;
-  try {
-    await shared.admin.begin(async (tx) => {
-      const [holder] = await tx`select pg_backend_pid() as pid`;
-      await tx`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`},0))`;
-      claim = claimSessionWorkForAttempt(client.db, scope.workspaceId, {
-        sessionId: scope.sessionId,
-        workflowId: `session-${scope.sessionId}`,
-        workflowRunId: crypto.randomUUID(),
-        dispatchId: crypto.randomUUID(),
-        attemptId: crypto.randomUUID(),
-        trigger: { kind: "next" },
-      });
-      void claim.catch(() => undefined);
-      let blocked = false;
-      for (let i = 0; i < 100; i++) {
-        const [state] =
-          await shared.admin`select exists(select 1 from pg_stat_activity where ${holder!.pid} = any(pg_blocking_pids(pid))) as blocked`;
-        if (state!.blocked) {
-          blocked = true;
-          break;
-        }
-        await Bun.sleep(20);
-      }
-      expect(blocked).toBe(true);
-      await tx`set local lock_timeout='500ms'`;
-      await tx`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${scope.workspaceId}`},0))`;
-      await tx`select pg_advisory_xact_lock(hashtextextended(${`workspace-control:${scope.workspaceId}`},0))`;
-      await tx`select id from sessions where id=${scope.sessionId} for update`;
+  await shared.admin.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`},0))`;
+    const claim = claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      workflowId: `session-${scope.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
     });
-  } finally {
-    if (claim) await claim;
-  }
+    void claim.catch(() => undefined);
+    const settled = await Promise.race([
+      claim.then(() => true),
+      Bun.sleep(5_000).then(() => false),
+    ]);
+    expect(settled).toBe(true);
+    // The ledger's canonical prefix after membership is now uncontended.
+    await tx`set local lock_timeout='500ms'`;
+    await tx`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${scope.workspaceId}`},0))`;
+    await tx`select pg_advisory_xact_lock(hashtextextended(${`workspace-control:${scope.workspaceId}`},0))`;
+    await tx`select id from sessions where id=${scope.sessionId} for update`;
+  });
 });

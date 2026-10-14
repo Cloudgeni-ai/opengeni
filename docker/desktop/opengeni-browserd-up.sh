@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotently launch the placement-local OpenGeni browser controller. The
+# Idempotently launch the placement-local Opengeni browser controller. The
 # controller token is read from an owner-only file; its value never enters argv,
 # stdout, or the process environment.
 set -euo pipefail

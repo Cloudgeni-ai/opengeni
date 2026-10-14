@@ -67,14 +67,9 @@ test("only pre-execution active admission can be Starting; capacity/recovery/pau
     expect(sessionStartupPhase(session({ dispatchWait: wait }), 0)).toBe("retrying");
 });
 
-test("initial dispatch is compact with discoverable diagnostics, never Working or Queued", () => {
+test("initial dispatch does not flash a status strip above the composer", () => {
   const html = renderToStaticMarkup(<SessionWaitStatus session={session()} />);
-  expect(html).toContain("Starting");
-  expect(html).toContain("Start details");
-  expect(html).not.toContain("<details open");
-  expect(html).not.toContain("Queued");
-  expect(html).not.toContain("Working");
-  expect(html).not.toContain("animate-spin");
+  expect(html).toBe("");
 });
 
 test("accepted idle Send remains in conversation before/after replay, independently of later genuine queued work", () => {
@@ -133,16 +128,14 @@ test("a newly mounted wait surface shares the header's new episode after long id
     await act(async () => root.render(render(oldIdle)));
     await act(async () => root.render(render({ ...oldIdle, status: "queued" })));
     expect(container.querySelector("[data-header]")?.textContent).toBe("starting");
-    expect(container.querySelector('[role="status"]')?.textContent).toBe("Starting");
+    expect(container.querySelector('[role="status"]')).toBeNull();
     await act(async () => root.render(render(session())));
-    expect(container.querySelector('[role="status"]')?.textContent).toBe("Starting");
+    expect(container.querySelector('[role="status"]')).toBeNull();
     await act(async () =>
       root.render(render(session({ workspaceId: "other", updatedAt: "2000-01-01T00:00:00Z" }))),
     );
     expect(container.querySelector("[data-header]")?.textContent).toBe("delayed");
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "Still waiting to start",
-    );
+    expect(container.querySelector('[role="status"]')).toBeNull();
   } finally {
     await act(async () => root.unmount());
   }
@@ -182,7 +175,7 @@ test("polls cannot reset grace; account/session changes and new idle episodes re
   }
 });
 
-test("reopening a stalled queued session immediately exposes the wait", () => {
+test("reopening a stalled queued session keeps the composer strip absent", () => {
   const html = renderToStaticMarkup(
     <SessionWaitStatus
       session={session({
@@ -190,6 +183,5 @@ test("reopening a stalled queued session immediately exposes the wait", () => {
       })}
     />,
   );
-  expect(html).toContain("Still waiting to start");
-  expect(html).toContain("Your messages are saved");
+  expect(html).toBe("");
 });

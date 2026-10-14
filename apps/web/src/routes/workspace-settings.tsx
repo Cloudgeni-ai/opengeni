@@ -47,7 +47,11 @@ import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@/lib/workspace-deletion";
-import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
+import {
+  canManageWorkspaceMembers,
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
 import { hasAccountPermission } from "@/lib/permissions";
@@ -149,10 +153,10 @@ function OperationalWorkspaceSettingsRoute({
     activeWorkspace,
     context.managedSelfContext,
   );
-  const canManageMembers = hasWorkspacePermission(
+  const canManageMembers = canManageWorkspaceMembers(
     context.accessContext,
-    workspaceId,
-    "members:manage",
+    activeWorkspace,
+    context.clientConfig.auth.mode === "managedSession",
   );
   const canAdministerWorkspace = hasWorkspacePermission(
     context.accessContext,
@@ -207,6 +211,12 @@ function OperationalWorkspaceSettingsRoute({
             />
           </Suspense>
         )
+      ) : null}
+
+      {section === "learning" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading agent learning" />}>
+          <LazyAgentLearningSettingsPage key={workspaceId} workspaceId={workspaceId} />
+        </Suspense>
       ) : null}
 
       {section === "usage" ? (
@@ -380,7 +390,7 @@ function WorkspaceGeneralSettings({
                 <Link
                   to="/workspaces/$workspaceId/organization"
                   params={{ workspaceId: organizationSettingsWorkspaceId }}
-                  className="text-brand underline-offset-2 hover:underline"
+                  className="og-link"
                 >
                   {organizationLabel}
                 </Link>
@@ -433,23 +443,21 @@ function WorkspaceGeneralSettings({
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
-        {context.clientConfig.agentConfig?.enabled ? (
-          <SettingNavRow
-            label="Agent"
-            description="What agents can do and who they are."
-            value={workspaceAgentDefaultsSummary(
-              activeWorkspace.settings,
-              context.clientConfig.agentConfig,
-            )}
-            onOpen={() =>
-              void navigate({
-                to: "/workspaces/$workspaceId/settings",
-                params: { workspaceId },
-                search: { section: "general", view: "agent-defaults" },
-              })
-            }
-          />
-        ) : null}
+        <SettingNavRow
+          label="Agent"
+          description="What agents can do and who they are."
+          value={workspaceAgentDefaultsSummary(
+            activeWorkspace.settings,
+            context.clientConfig.agentConfig,
+          )}
+          onOpen={() =>
+            void navigate({
+              to: "/workspaces/$workspaceId/settings",
+              params: { workspaceId },
+              search: { section: "general", view: "agent-defaults" },
+            })
+          }
+        />
         <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
@@ -693,7 +701,7 @@ export function DangerZone(props: {
       title="Delete workspace"
       description={
         disabledReason ??
-        `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, variable sets, knowledge, files and API keys.`
+        `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, secrets, knowledge, files and API keys.`
       }
       action={
         // When something blocks the delete, the description says what and who
@@ -721,7 +729,7 @@ export function DangerZone(props: {
           variant="type-to-confirm"
           title={`Delete ${props.workspaceName}?`}
           consequences={[
-            `Deletes every session, schedule, variable set, knowledge entry, file and API key in ${props.workspaceName}.`,
+            `Deletes every session, schedule, secret, knowledge entry, file and API key in ${props.workspaceName}.`,
             "Everyone loses access to it. Their other workspaces aren't affected.",
             "Running sessions, video generations, background commands and live sandboxes must finish first.",
             "This can't be undone.",
@@ -901,6 +909,11 @@ const LazySessionDefaultsPage = lazy(async () => {
 });
 
 // Usage reads load only on their page, never with the rest of settings.
+const LazyAgentLearningSettingsPage = lazy(async () => {
+  const module = await import("@/components/settings/agent-learning-page");
+  return { default: module.AgentLearningSettingsPage };
+});
+
 const LazyWorkspaceUsagePage = lazy(async () => {
   const module = await import("@/components/usage/workspace-usage-page");
   return { default: module.WorkspaceUsagePage };

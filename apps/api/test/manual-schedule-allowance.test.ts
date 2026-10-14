@@ -36,7 +36,7 @@ describe("manual schedule allowance attribution", () => {
         principalKind: "human_session" as const,
       };
       const access = spyOn(core, "requireAccessGrant").mockResolvedValue(grant);
-      const task = spyOn(core, "requireScheduledTaskForApi").mockResolvedValue({
+      const task = spyOn(core, "requireVisibleScheduledTask").mockResolvedValue({
         id: TASK,
         accountId: ACCOUNT,
         workspaceId: WORKSPACE,
@@ -45,7 +45,7 @@ describe("manual schedule allowance attribution", () => {
         action: { kind: "agent_turn" },
         runMode: "new_session_per_run",
         agentConfig: {},
-      } as Awaited<ReturnType<typeof core.requireScheduledTaskForApi>>);
+      } as Awaited<ReturnType<typeof core.requireVisibleScheduledTask>>);
       const catalog = spyOn(core, "resolveWorkspaceCatalogSettings").mockResolvedValue({
         settings,
       } as Awaited<ReturnType<typeof core.resolveWorkspaceCatalogSettings>>);

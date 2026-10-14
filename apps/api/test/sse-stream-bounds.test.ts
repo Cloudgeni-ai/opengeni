@@ -57,8 +57,23 @@ const realDb = await import("@opengeni/db");
 const realListSessionEventPage = realDb.listSessionEventPage;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
 const realGetWorkspaceInteractionRevisionState = realDb.getWorkspaceInteractionRevisionState;
+const realReadSessionEventStorageGapEnd = realDb.readSessionEventStorageGapEnd;
 mock.module("@opengeni/db", () => ({
   ...realDb,
+  readSessionEventStorageGapEnd: async (
+    db: unknown,
+    workspaceId: string,
+    sessionId: string,
+    after: number,
+  ) => {
+    if (db !== fakeDb) {
+      return await realReadSessionEventStorageGapEnd(db as never, workspaceId, sessionId, after);
+    }
+    // The fake log stores every sequence it has; nothing is omitted.
+    const next = durableEvents.find((candidate) => candidate.sequence > after);
+    const last = durableEvents.at(-1)?.sequence ?? after;
+    return Math.max(after, next ? next.sequence - 1 : last);
+  },
   listSessionEventPage: async (
     db: unknown,
     workspaceId: string,

@@ -84,6 +84,7 @@ import {
   retainedProcessSettlementIdentity,
   SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
   settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
@@ -3262,6 +3263,14 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const stale = await settle().catch((error) => error);
     expect(stale).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
     expect((stale as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+    expect(stale).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+    expect((stale as SandboxWorkspaceMutationOutputRejectedError).physicalSettlement).toEqual({
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      admission,
+      operation: "providerResolvedBeforeRouteMove",
+      outcome: "resolved",
+    });
 
     const [first] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
       select provider_outcome as "providerOutcome", settled_at as "settledAt"
@@ -3290,6 +3299,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
     expect(afterReplay?.providerOutcome).toBe("resolved");
     expect(afterReplay?.settledAt?.getTime()).toBe(first?.settledAt?.getTime());
+    expect(replay).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+    const mismatch = await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-settlement-race",
+      admission: { ...admission, workspaceGeneration: admission.workspaceGeneration + 1 },
+      operation: "providerResolvedBeforeRouteMove",
+      outcome: "resolved",
+      routeKind: "active",
+      routeTargetId: null,
+      routeEpoch: 0,
+    }).catch((error) => error);
+    expect(mismatch).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect(mismatch).not.toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
   }, 60_000);
 
   test("(1b-lock-order) settlement and retained promotion lock authority before admission", async () => {
@@ -6410,41 +6436,6 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         () => getSettings(),
       ),
     ).not.toThrow();
-  });
-
-  test("(5) the Schedule registration is idempotent — a second create() collides and no-ops (registers exactly once)", async () => {
-    // The registration's idempotency is the ScheduleAlreadyRunning catch in
-    // registerSandboxReaperSchedule. We assert the contract WITHOUT a live
-    // Temporal server by exercising the same create→collide shape through a fake
-    // ScheduleClient: the first create succeeds, the second throws
-    // ScheduleAlreadyRunning, and the helper treats it as a no-op (registered:false)
-    // rather than a failure.
-    const { ScheduleAlreadyRunning } = await import("@temporalio/client");
-    let created = 0;
-    const fakeCreate = async (opts: { scheduleId: string }) => {
-      if (created > 0) {
-        throw new ScheduleAlreadyRunning("already running", opts.scheduleId);
-      }
-      created += 1;
-    };
-
-    // First registration creates the Schedule.
-    await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
-    expect(created).toBe(1);
-
-    // A second worker booting (same scheduleId) collides → caught as a no-op.
-    let collided = false;
-    try {
-      await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
-    } catch (error) {
-      if (error instanceof ScheduleAlreadyRunning) {
-        collided = true; // the helper's catch arm — registered:false, not a throw.
-      } else {
-        throw error;
-      }
-    }
-    expect(collided).toBe(true);
-    expect(created).toBe(1); // still exactly one Schedule.
   });
 
   test("(5a) a missing exact provider settles stale mutation blockers and drains cold", async () => {

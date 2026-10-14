@@ -262,7 +262,7 @@ function actualClaimFixture() {
       calls.push("capabilities");
       return (await reads[1]!.promise) as typeof settings;
     }),
-    spyOn(dbPorts, "workspaceCodexSubscriptionActive").mockImplementation(async () => {
+    spyOn(capabilities, "settingsWithCodexCredential").mockImplementation(async () => {
       calls.push("credential_gate");
       throw stop;
     }),

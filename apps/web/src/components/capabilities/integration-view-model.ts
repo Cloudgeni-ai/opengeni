@@ -1,5 +1,5 @@
 /**
- * The one shape every OpenGeni-run integration renders through.
+ * The one shape every Opengeni-run integration renders through.
  *
  * `IntegrationRow` and `IntegrationSheet` know nothing about Slack, GitHub,
  * Google Drive, or Atlassian: each provider has an adapter hook that maps its
@@ -237,6 +237,7 @@ export type IntegrationViewModel = {
   outcomes?: Array<{ title: string; description?: string }>;
   /** The tools this connection actually publishes; omitted when unavailable. */
   tools?: IntegrationToolsBlock;
+  toolPermissions?: { workspaceId: string; capabilityId: string };
   /** Optional plain-language notice shown above the blocks (state explanations). */
   notice?: {
     tone: "muted" | "waiting" | "failed";

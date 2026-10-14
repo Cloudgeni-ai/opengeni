@@ -19,7 +19,7 @@ import { requireSameOriginBrowserMutation } from "./codex";
 import { managedCookieHuman } from "./supergrok";
 
 /** The database rechecks current organization membership/key authority at commit. */
-async function authorizeAdministration(
+export async function authorizeOrganizationIntegrationAdministration(
   context: Context,
   deps: ApiRouteDeps,
   accountId: string,
@@ -81,7 +81,7 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
     // The same live administration check as policy reads, including workspace-free service access.
     await policyResponse(() =>
       getOrganizationIntegrationPolicy(deps.db, { accountId }, () =>
-        authorizeAdministration(context, deps, accountId, false),
+        authorizeOrganizationIntegrationAdministration(context, deps, accountId, false),
       ),
     );
     context.header("cache-control", "private, no-store");
@@ -93,7 +93,7 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
     return context.json(
       await policyResponse(() =>
         getOrganizationIntegrationPolicy(deps.db, { accountId }, () =>
-          authorizeAdministration(context, deps, accountId, false),
+          authorizeOrganizationIntegrationAdministration(context, deps, accountId, false),
         ),
       ),
     );
@@ -108,7 +108,7 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
     return context.json(
       await policyResponse(() =>
         updateOrganizationIntegrationPolicy(deps.db, { accountId }, parsed.data, () =>
-          authorizeAdministration(context, deps, accountId, true),
+          authorizeOrganizationIntegrationAdministration(context, deps, accountId, true),
         ),
       ),
     );

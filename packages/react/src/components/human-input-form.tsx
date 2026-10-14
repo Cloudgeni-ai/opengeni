@@ -1,71 +1,45 @@
 import type {
   HumanInputAnswer,
   HumanInputQuestion,
+  HumanInputSecretAnswer,
+  HumanInputSecretSaveTo,
+  HumanInputSecretSpec,
   SkillRecord,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
+import {
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+  emptyDraft,
+  initialDrafts,
+  secretAnswerFromReading,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
+} from "../human-input-model";
+import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
 
-export type HumanInputAnswerDraft = {
-  values: string[];
-  other: string;
-  otherSelected: boolean;
+export {
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
 };
 
 class SkillReviewVerificationError extends Error {}
-
-export type HumanInputFormMessages = {
-  title: string;
-  description: string;
-  submit: string;
-  skip: string;
-  submitting: string;
-  other: string;
-  deadlineLabel: string;
-  formatDeadline: (value: string) => string;
-  required: string;
-  otherRequired: string;
-  minSelections: (count: number) => string;
-  maxSelections: (count: number) => string;
-  optional: string;
-  /** Shown when the question list overflows the card and more content is below. */
-  moreBelow: string;
-  questionCount: (count: number) => string;
-  collapse: string;
-  expand: string;
-  selectionHint: (min: number | null | undefined, max: number | null | undefined) => string | null;
-};
-
-export const defaultHumanInputFormMessages: HumanInputFormMessages = {
-  title: "Input required",
-  /** Multi-question chrome has no default subtitle; hosts may still override. */
-  description: "",
-  submit: "Send answers",
-  skip: "Skip",
-  submitting: "Submitting…",
-  other: "Other",
-  deadlineLabel: "Expires",
-  formatDeadline,
-  required: "This question is required.",
-  otherRequired: "Enter a value for Other.",
-  minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
-  maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
-  optional: "Optional",
-  moreBelow: "More below",
-  questionCount: (count) => `${count} questions`,
-  collapse: "Collapse",
-  expand: "Expand",
-  selectionHint: (min, max) => {
-    if (min != null && max != null) return `Choose ${min}–${max}.`;
-    if (min != null) return `Choose at least ${min}.`;
-    if (max != null) return `Choose up to ${max}.`;
-    return null;
-  },
-};
 
 export type HumanInputFormProps = {
   /** Scoped immutable revision reader. Saving a Skill fails closed without its full preview. */
@@ -92,6 +66,12 @@ export type HumanInputFormProps = {
    * Off by default; embedded conversations turn it on.
    */
   decisionButtons?: boolean | undefined;
+  /**
+   * Where this person may save an answer to a secret question. A request for
+   * a target outside this list falls back to the most private allowed one,
+   * with a note. Defaults to Only me, This task and This workspace.
+   */
+  allowedSaveTo?: readonly HumanInputSecretSaveTo[] | undefined;
   className?: string | undefined;
 };
 
@@ -124,6 +104,7 @@ function HumanInputRequestForm({
   autoFocus = true,
   defaultCollapsed = false,
   decisionButtons = false,
+  allowedSaveTo,
   className,
 }: HumanInputFormProps) {
   const formatError = useErrorMessage();
@@ -160,6 +141,26 @@ function HumanInputRequestForm({
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
+  // Secret answers stay in their uncontrolled inputs until submit.
+  const secretHandles = useRef(new Map<string, SecretFieldHandle>());
+  const secretRegistrars = useMemo(
+    () => new Map<string, (handle: SecretFieldHandle | null) => void>(),
+    [],
+  );
+  const registerSecret = useCallback(
+    (questionId: string) => {
+      let registrar = secretRegistrars.get(questionId);
+      if (!registrar) {
+        registrar = (handle) => {
+          if (handle) secretHandles.current.set(questionId, handle);
+          else secretHandles.current.delete(questionId);
+        };
+        secretRegistrars.set(questionId, registrar);
+      }
+      return registrar;
+    },
+    [secretRegistrars],
+  );
   const busy = submitting || submittingInternally;
   const reviewIdentity = JSON.stringify(
     request.questions
@@ -331,18 +332,29 @@ function HumanInputRequestForm({
     });
   };
 
-  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<void> => {
-    if (busy || submissionInFlight.current) return;
+  const clearValidationError = (questionId: string): void =>
+    setValidationErrors((current) => {
+      if (!(questionId in current)) return current;
+      const next = { ...current };
+      delete next[questionId];
+      return next;
+    });
+
+  /** Resolves true when the host accepted the response. */
+  const submitResponse = async (response: SubmitHumanInputResponseRequest): Promise<boolean> => {
+    if (busy || submissionInFlight.current) return false;
     const generation = submissionGeneration.current;
     submissionInFlight.current = true;
     setSubmissionError(null);
     setSubmittingInternally(true);
     try {
       await onSubmit(response);
+      return true;
     } catch (cause) {
       if (generation === submissionGeneration.current) {
         setSubmissionError(formatError(cause));
       }
+      return false;
     } finally {
       if (generation === submissionGeneration.current) {
         submissionInFlight.current = false;
@@ -367,6 +379,21 @@ function HumanInputRequestForm({
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const result = answersFromDrafts(request.questions, drafts, messages);
+    const secretAnswers: HumanInputSecretAnswer[] = [];
+    const secretPublicAnswers = new Map<string, HumanInputAnswer>();
+    for (const question of request.questions) {
+      if (question.kind !== "secret") continue;
+      const handle = secretHandles.current.get(question.id);
+      if (!handle) continue;
+      const secret = secretAnswerFromReading(question, handle.read(), messages);
+      if (!secret) continue;
+      if ("error" in secret) {
+        result.errors[question.id] = secret.error;
+        continue;
+      }
+      secretAnswers.push(secret.secretAnswer);
+      secretPublicAnswers.set(question.id, secret.answer);
+    }
     if (Object.keys(result.errors).length > 0) {
       setValidationErrors(result.errors);
       const firstInvalid = request.questions.find((question) => question.id in result.errors);
@@ -392,7 +419,18 @@ function HumanInputRequestForm({
       });
       return;
     }
-    await submitResponse({ outcome: "answered", answers: result.answers });
+    // Keep the request's question order across drafted and secret answers.
+    const drafted = new Map(result.answers.map((answer) => [answer.questionId, answer]));
+    const answers = request.questions.flatMap((question) => {
+      const answer = drafted.get(question.id) ?? secretPublicAnswers.get(question.id);
+      return answer ? [answer] : [];
+    });
+    const accepted = await submitResponse({
+      outcome: "answered",
+      answers,
+      ...(secretAnswers.length > 0 ? { secretAnswers } : {}),
+    });
+    if (accepted) for (const handle of secretHandles.current.values()) handle.clear();
   };
 
   const metaBits = [
@@ -618,6 +656,9 @@ function HumanInputRequestForm({
                           showPromptChrome={false}
                           allowSkip={request.allowSkip}
                           busy={busy}
+                          allowedSaveTo={allowedSaveTo}
+                          registerSecret={registerSecret(question.id)}
+                          onSecretEdited={() => clearValidationError(question.id)}
                           onUpdate={(apply) => update(question.id, apply)}
                         />
                       </div>
@@ -643,6 +684,9 @@ function HumanInputRequestForm({
                         showPromptChrome
                         allowSkip={request.allowSkip}
                         busy={busy}
+                        allowedSaveTo={allowedSaveTo}
+                        registerSecret={registerSecret(question.id)}
+                        onSecretEdited={() => clearValidationError(question.id)}
                         onUpdate={(apply) => update(question.id, apply)}
                       />
                     </div>
@@ -762,6 +806,9 @@ function QuestionControls({
   showPromptChrome,
   allowSkip,
   busy,
+  allowedSaveTo,
+  registerSecret,
+  onSecretEdited,
   onUpdate,
 }: {
   question: HumanInputQuestion;
@@ -776,6 +823,9 @@ function QuestionControls({
   showPromptChrome: boolean;
   allowSkip: boolean;
   busy: boolean;
+  allowedSaveTo: readonly HumanInputSecretSaveTo[] | undefined;
+  registerSecret: (handle: SecretFieldHandle | null) => void;
+  onSecretEdited: () => void;
   onUpdate: (apply: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
 }) {
   const errorId = `${fieldId}-error`;
@@ -868,7 +918,30 @@ function QuestionControls({
         </>
       )}
 
-      {question.kind === "text" ? (
+      {question.kind === "secret" ? (
+        question.secret ? (
+          <SecretQuestionField
+            question={question as HumanInputQuestion & { secret: HumanInputSecretSpec }}
+            fieldId={fieldId}
+            messages={messages}
+            autoFocus={autoFocus}
+            allowedSaveTo={allowedSaveTo}
+            error={error}
+            describedBy={
+              [
+                question.label && showPromptChrome ? promptId : null,
+                question.helpText && showPromptChrome ? helpId : null,
+              ]
+                .filter(Boolean)
+                .join(" ") || undefined
+            }
+            register={registerSecret}
+            onEdited={onSecretEdited}
+          />
+        ) : (
+          <p className="text-og-sm text-og-fg-muted">This question can't be answered here.</p>
+        )
+      ) : question.kind === "text" ? (
         <textarea
           id={fieldId}
           value={draft.values[0] ?? ""}
@@ -998,81 +1071,12 @@ function QuestionControls({
           ) : null}
         </div>
       )}
-      {error ? (
+      {/* A secret field shows its error under the input, above Save to. */}
+      {error && !(question.kind === "secret" && question.secret) ? (
         <p id={errorId} role="alert" className="text-og-xs text-og-status-failed">
           {error}
         </p>
       ) : null}
     </>
   );
-}
-
-export function answersFromDrafts(
-  questions: HumanInputQuestion[],
-  drafts: Record<string, HumanInputAnswerDraft>,
-  messageOverrides: Partial<HumanInputFormMessages> = {},
-): { answers: HumanInputAnswer[]; errors: Record<string, string> } {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
-  const answers: HumanInputAnswer[] = [];
-  const errors: Record<string, string> = {};
-  for (const question of questions) {
-    const draft = drafts[question.id] ?? emptyDraft();
-    const values = question.kind === "text" ? draft.values.filter(Boolean) : draft.values;
-    const other = draft.otherSelected ? draft.other : "";
-    const hasOther = Boolean(other.trim());
-    const supplied = values.length + (hasOther ? 1 : 0);
-
-    // Other-selected-but-empty must win over generic "required" — otherwise the
-    // user sees the wrong diagnosis next to a clearly selected control.
-    if (question.kind !== "text" && draft.otherSelected && !hasOther) {
-      errors[question.id] = messages.otherRequired;
-      continue;
-    }
-
-    if (question.required && supplied === 0) {
-      errors[question.id] = messages.required;
-      continue;
-    }
-    if (question.kind !== "text") {
-      const min = question.validation?.minSelections;
-      const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
-      if (min != null && supplied < min) {
-        errors[question.id] = messages.minSelections(min);
-        continue;
-      }
-      if (max != null && supplied > max) {
-        errors[question.id] = messages.maxSelections(max);
-        continue;
-      }
-    }
-    if (supplied > 0) {
-      answers.push({
-        questionId: question.id,
-        values,
-        ...(hasOther ? { other } : {}),
-      });
-    }
-  }
-  return { answers, errors };
-}
-
-function initialDrafts(questions: HumanInputQuestion[]): Record<string, HumanInputAnswerDraft> {
-  return Object.fromEntries(questions.map((question) => [question.id, emptyDraft()]));
-}
-
-function emptyDraft(): HumanInputAnswerDraft {
-  return { values: [], other: "", otherSelected: false };
-}
-
-function formatDeadline(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const ms = date.getTime() - Date.now();
-  if (ms <= 0) return "deadline passed";
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "in under a minute";
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `in ${hours}h`;
-  return date.toLocaleString();
 }

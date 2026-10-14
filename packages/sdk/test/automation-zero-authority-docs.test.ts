@@ -12,11 +12,6 @@ import { OpenGeniClient } from "../src/index";
 // in isolation, not the full core function, API route, or DB-backed admission.
 // SDK requests use an injected in-memory adapter; no service or global mock.
 const root = new URL("../../../", import.meta.url);
-const recipesPath = new URL(".agents/skills/opengeni-client/references/agent-recipes.md", root);
-const configurationPath = new URL(
-  ".agents/skills/opengeni-client/references/configure-the-agent.md",
-  root,
-);
 const sessionsPath = new URL("packages/core/src/domain/sessions.ts", root);
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const admissionMessage =
@@ -108,39 +103,6 @@ async function fixture() {
   return { client, requests };
 }
 
-test("the actual public SDK background recipe omits permission overrides, not authority", async () => {
-  const markdown = await readFile(recipesPath, "utf8");
-  const snippets = [...markdown.matchAll(/```ts\n([\s\S]*?)\n```/gu)]
-    .map((match) => match[1]!)
-    .filter((snippet) => snippet.includes("acme:reports"));
-  expect(snippets).toHaveLength(1);
-  const recipe = snippets[0]!;
-  expect(parseSync("background-recipe.ts", recipe).errors).toEqual([]);
-  const RecipeFunction = Object.getPrototypeOf(async function () {}).constructor as new (
-    ...argumentsValue: string[]
-  ) => (
-    client: OpenGeniClient,
-    workspaceId: string,
-    job: { id: string },
-    skills: never[],
-    tools: never[],
-  ) => Promise<void>;
-  const run = new RecipeFunction(
-    "og",
-    "workspaceId",
-    "jobRecord",
-    "productSkills",
-    "selectedProductTools",
-    recipe,
-  );
-  const f = await fixture();
-  await run(f.client, workspaceId, { id: "fixture-job" }, [], []);
-  expect(f.requests).toHaveLength(1);
-  expect(f.requests[0]!.service).toBe("acme:reports");
-  expect(f.requests[0]!.body.firstPartyMcpTools).toEqual([]);
-  expect(Object.hasOwn(f.requests[0]!.body, "firstPartyMcpPermissions")).toBe(false);
-});
-
 test.each(["ordinary", "asService"] as const)(
   "%s public SDK [] reaches the unchanged 422 guard",
   async (mode) => {
@@ -190,13 +152,3 @@ test.each(["omitted", "explicit"] as const)(
     expect(template.firstPartyMcpPermissions).toEqual([]);
   },
 );
-
-test("client configuration guidance states the public API limitation and keeps automation scope distinct", async () => {
-  const configuration = (await readFile(configurationPath, "utf8")).replace(/\s+/gu, " ");
-  expect(configuration).toContain(
-    "Public `createSession` rejects `firstPartyMcpPermissions: []` with 422, including `asService` calls.",
-  );
-  expect(configuration).toContain("Omitting permissions is not zero authority");
-  expect(configuration).toContain("Automation session templates");
-  expect(configuration).toContain("already-effective internal or linked permission ceiling");
-});

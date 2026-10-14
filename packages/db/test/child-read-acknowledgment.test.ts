@@ -1,3 +1,4 @@
+import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -23,7 +24,6 @@ import {
   configureChildLifecycleNotices,
   createDb,
   createSession,
-  createVariableSet,
   enqueueSessionTurn,
   ensureManagedAccessForUserWithOrganizationMemberships,
   failSessionWorkBeforeAttemptClaim,
@@ -94,7 +94,7 @@ async function managedWorkspaceWithPersonalVariableSet(): Promise<{
       ${membership.organizationId}, 1, ${"e".repeat(64)}, ${"f".repeat(64)},
       'child-read-acknowledgment'
     ) on conflict (account_id) do nothing`;
-  const variableSet = await createVariableSet(client.db, {
+  const variableSet = await createLegacyVariableSet(client.db, {
     accountId: membership.organizationId,
     workspaceId: membership.personalWorkspaceId,
     scope: "user",
@@ -1786,6 +1786,11 @@ test("commands from separate turns of the same human coalesce during an explicit
   await enqueueHumanTurn(owner, first.session.id);
   const secondClaim = await claim(owner, first.session.id);
   if (secondClaim.action !== "claimed") throw new Error("second turn was not claimed");
+  const frozen = await shared.admin`select subscription_authority from session_turns
+    where id in (${first.turn.id}, ${secondClaim.turn.id}) order by created_at`;
+  expect(frozen).toHaveLength(2);
+  expect(frozen[0]!.subscription_authority).not.toBeNull();
+  expect(frozen[1]!.subscription_authority).toEqual(frozen[0]!.subscription_authority);
   const second = {
     session: first.session,
     turn: secondClaim.turn,

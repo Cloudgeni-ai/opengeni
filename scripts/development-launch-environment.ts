@@ -32,10 +32,10 @@ export function readDevelopmentLaunchEnvironment(repositoryRoot: string): {
 } {
   if (process.platform !== "linux" && process.platform !== "darwin") {
     throw new Error(
-      "The full OpenGeni stack uses Bash and Unix processes. On Windows, run inside WSL2 with the checkout and tools in Linux.",
+      "The full Opengeni stack uses Bash and Unix processes. On Windows, run inside WSL2 with the checkout and tools in Linux.",
     );
   }
-  if (!Bun.which("bash")) throw new Error("Missing bash. Install Bash before running OpenGeni.");
+  if (!Bun.which("bash")) throw new Error("Missing bash. Install Bash before running Opengeni.");
   const result = Bun.spawnSync(
     [
       "bash",

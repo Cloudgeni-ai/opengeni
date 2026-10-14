@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as codex from "@opengeni/codex";
 import { DEFAULT_OPENROUTER_MODEL_ID, type Settings } from "@opengeni/config";
-import {
-  TurnExecutionPolicyV1,
-  type XaiProviderAccountAuthoritySnapshotV1,
-} from "@opengeni/contracts";
+import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { resolveScheduledTaskPreflightModel } from "@opengeni/core";
 import {
   applyCreditLedgerEntry,
@@ -12,16 +9,9 @@ import {
   createDb,
   createScheduledTask,
   getScheduledTask,
-  createXaiSubscriptionCredential,
-  disconnectXaiSubscriptionCredential,
   encryptEnvironmentValue,
-  ensureCodexRotationSettings,
-  ensureXaiRotationSettings,
-  setInitialActiveXaiCredential,
   getScheduledTaskRunAcceptedExecution,
   listScheduledTaskRuns,
-  updateCodexRotationSettings,
-  upsertCodexSubscriptionCredential,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -60,7 +50,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-// Hosted-like deployment: free OpenRouter default, OpenGeni credits billing,
+// Hosted-like deployment: free OpenRouter default, Opengeni credits billing,
 // and the ChatGPT/Codex subscription rail enabled.
 function settings(overrides: Partial<Settings> = {}): Settings {
   return testSettings({
@@ -110,7 +100,6 @@ async function workspace() {
 async function dailyReport(
   grant: Awaited<ReturnType<typeof workspace>>,
   model?: string,
-  xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
 ): Promise<string> {
   const task = await createScheduledTask(client.db, {
     accountId: grant.accountId,
@@ -129,7 +118,6 @@ async function dailyReport(
       tools: [],
       metadata: {},
     },
-    ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
     metadata: {},
   });
   return task.id;
@@ -197,22 +185,23 @@ describe("scheduled occurrences without a model use the resolved default", () =>
     });
 
     const key = Buffer.from(settings().environmentsEncryptionKey!, "base64");
-    await upsertCodexSubscriptionCredential(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      credentialEncrypted: encryptEnvironmentValue(
-        key,
-        JSON.stringify({ access_token: "test", refresh_token: "test", id_token: "test" }),
-      ),
-      chatgptAccountId: `scheduled-default-${grant.workspaceId}`,
-      scopes: null,
-      planType: "pro",
-      isFedramp: false,
-      expiresAt: new Date(Date.now() + 3_600_000),
-      lastRefreshAt: new Date(),
-    });
-    await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-    await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+    // Connected Codex after the drained cutover (0680 seeds every
+    // organization enabled): a shared core connection, never the frozen
+    // legacy tables.
+    const credential = encryptEnvironmentValue(
+      key,
+      JSON.stringify({ access_token: "test", refresh_token: "test", id_token: "test" }),
+    );
+    await shared!.admin`
+      insert into subscription_connections (
+        account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+        provider_account_id, plan_type, provider_state, expires_at, last_refresh_at
+      ) values (
+        ${grant.accountId}::uuid, 'codex', 'subscription', ${credential}, 'shared',
+        'organization', ${`scheduled-default-${grant.workspaceId}`}, 'pro',
+        ${shared!.admin.json({ isFedramp: false })}::jsonb,
+        ${new Date(Date.now() + 3_600_000).toISOString()}::timestamptz, now()
+      )`;
     expect(await occurrence(grant, report)).toMatchObject({
       model: "codex/gpt-6-astra",
       reasoningEffort: "high",
@@ -241,56 +230,6 @@ describe("scheduled occurrences without a model use the resolved default", () =>
     expect(session?.model).toBe(DEFAULT_OPENROUTER_MODEL_ID);
     // The next fresh occurrence uses the credits default.
     expect(await occurrence(grant, report)).toMatchObject({ model: "gpt-6-luna" });
-  }, 120_000);
-
-  test("a stale frozen SuperGrok snapshot still dispatches on the next default", async () => {
-    if (!available) return;
-    const supergrok = { supergrokSubscriptionEnabled: true };
-    const grant = await workspace();
-    const personal = await createXaiSubscriptionCredential(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      scope: "user",
-      encryptionKey: Buffer.from(settings().environmentsEncryptionKey!, "base64"),
-      secret: { version: 1, accessToken: `scheduled-default-${crypto.randomUUID()}` },
-      providerAccountId: `scheduled-default-${crypto.randomUUID()}`,
-      label: "personal SuperGrok",
-    });
-    const authority = {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      authoritySnapshot: personal.authoritySnapshot,
-    };
-    const rotation = await ensureXaiRotationSettings(client.db, authority);
-    if (rotation.activeCredentialId === null) {
-      await setInitialActiveXaiCredential(client.db, {
-        ...authority,
-        credentialId: personal.account.id,
-      });
-    }
-    const report = await dailyReport(grant, undefined, personal.authoritySnapshot);
-    expect(await occurrence(grant, report, { settings: supergrok })).toMatchObject({
-      model: "supergrok/grok-4.7",
-    });
-
-    await disconnectXaiSubscriptionCredential(client.db, {
-      ...grant,
-      credentialId: personal.account.id,
-      authoritySnapshot: personal.authoritySnapshot,
-    });
-    expect(await occurrence(grant, report, { settings: supergrok })).toMatchObject({
-      model: DEFAULT_OPENROUTER_MODEL_ID,
-      policy: { modelSource: "deployment" },
-    });
-    // Also with the SuperGrok rail switched off entirely.
-    expect(await occurrence(grant, report)).toMatchObject({ model: DEFAULT_OPENROUTER_MODEL_ID });
-    await addCredits(grant);
-    expect(await occurrence(grant, report, { settings: supergrok })).toMatchObject({
-      model: "gpt-6-luna",
-      reasoningEffort: "xhigh",
-    });
   }, 120_000);
 
   test("a manual trigger's limit pre-check uses the model the occurrence will run", async () => {

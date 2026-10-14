@@ -9,9 +9,13 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
   createWorkspace,
   ensureExternalIdentity,
   grantWorkspaceAccess,
+  getSessionQueueSnapshot,
+  listSessionSystemUpdatesForTurn,
+  submitHumanPromptInTransaction,
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
@@ -34,6 +38,133 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close();
   await shared?.release();
+}, 60_000);
+
+async function queuedHumanForPreview(f: Fixture) {
+  return withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.human, (tx) =>
+    submitHumanPromptInTransaction(tx, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: f.sessionId,
+      subjectId: f.human,
+      actor: { type: "human", subjectId: f.human },
+      operationKey: crypto.randomUUID(),
+      delivery: "send",
+      text: "Use the pending results",
+      resources: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      reasoningEffortFallback: "medium",
+      source: "user",
+    }),
+  );
+}
+
+async function claimPreviewedHuman(f: Fixture) {
+  const claimed = await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+    sessionId: f.sessionId,
+    workflowId: `session-${f.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("Human queue did not claim");
+  return listSessionSystemUpdatesForTurn(client.db, f.workspaceId, f.sessionId, claimed.turn.id);
+}
+
+test.each(["inactive schedule", "unrecognized payload"])(
+  "preview skips %s before selecting the human turn's actual inputs",
+  async (rejection) => {
+    const f = await fixture();
+    await arrange(f, [{}, {}]);
+    const queued = await queuedHumanForPreview(f);
+    const pending = await shared.admin<{ id: string }[]>`
+      select id from session_system_updates where session_id=${f.sessionId} order by created_at,id`;
+    const rejected = pending[0]!.id;
+    const eligible = pending[1]!.id;
+    // Synthetic already-accepted rows isolate read projection from producer
+    // admission. Preview and claim still run through the ordinary app role.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role=replica`;
+      if (rejection === "inactive schedule") {
+        const runId = crypto.randomUUID(),
+          taskId = crypto.randomUUID();
+        await tx`insert into scheduled_task_runs
+          (id,account_id,workspace_id,task_id,session_id,status,trigger_type,error,
+            accepted_execution_snapshot,accepted_execution_digest)
+          values (${runId},${f.accountId},${f.workspaceId},${taskId},${f.sessionId},
+            'skipped','scheduled','scheduled_task_paused_before_claim','{}'::jsonb,
+            encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'))`;
+        await tx`update session_system_updates set kind='scheduled_occurrence',
+          scheduled_task_run_id=${runId}, payload=${tx.json({
+            type: "scheduled_occurrence",
+            text: "Scheduled work",
+            scheduledTaskId: taskId,
+            scheduledTaskRunId: runId,
+          })} where id=${rejected}`;
+      } else {
+        await tx`update session_system_updates set payload='{"type":"child_paused"}'::jsonb
+          where id=${rejected}`;
+      }
+    });
+    const preview = await getSessionQueueSnapshot(client.db, f.workspaceId, f.sessionId);
+    expect(preview?.pendingInputAttachment).toEqual({
+      turnId: queued.turnId,
+      inputIds: [eligible],
+    });
+    const unchanged =
+      await shared.admin`select state from session_system_updates where id=${rejected}`;
+    expect(unchanged[0]!.state).toBe("pending");
+    expect((await claimPreviewedHuman(f)).map((update) => update.id)).toEqual([eligible]);
+    const settled =
+      await shared.admin`select state from session_system_updates where id=${rejected}`;
+    expect(settled[0]!.state).toBe(rejection === "inactive schedule" ? "cancelled" : "failed");
+  },
+  60_000,
+);
+
+test("preview observes claim's read window before skipping incompatible command results", async () => {
+  const f = await fixture();
+  await arrange(f, [{}, {}]);
+  const queued = await queuedHumanForPreview(f);
+  const pending = await shared.admin<{ id: string }[]>`
+    select id from session_system_updates where session_id=${f.sessionId} order by created_at,id`;
+  const eligible = pending[0]!.id;
+  const commands = Array.from({ length: 101 }, (_, index) => {
+    const commandId = crypto.randomUUID();
+    return {
+      id: crypto.randomUUID(),
+      commandId,
+      createdAt: new Date(Date.now() + index).toISOString(),
+      lineage: { causalTurnId: index === 100 ? f.turns[0]! : crypto.randomUUID() },
+      payload: {
+        type: "background_command_result",
+        commandId,
+        state: "exited",
+        exitCode: 0,
+        reason: "Completed",
+        outputLocator: { eventType: "sandbox.command.output.delta", commandId },
+      },
+    };
+  });
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role=replica`;
+    await tx`update session_system_updates set state='cancelled' where id=${pending[1]!.id}`;
+    await tx`insert into session_system_updates
+      (id,account_id,workspace_id,session_id,kind,classification,source_id,dedupe_key,summary,payload,lineage,created_at)
+      select row.id,${f.accountId}::uuid,${f.workspaceId}::uuid,${f.sessionId}::uuid,
+        'background_command_result','info',row."commandId",row.id::text,'Command completed',
+        row.payload,row.lineage,row."createdAt"
+      from jsonb_to_recordset(${tx.json(commands)}) as row
+        (id uuid,"commandId" text,"createdAt" timestamptz,payload jsonb,lineage jsonb)`;
+  });
+  const preview = await getSessionQueueSnapshot(client.db, f.workspaceId, f.sessionId);
+  expect(preview?.pendingInputAttachment).toEqual({ turnId: queued.turnId, inputIds: [eligible] });
+  expect((await claimPreviewedHuman(f)).map((update) => update.id)).toEqual([eligible]);
+  const deferred =
+    await shared.admin`select state from session_system_updates where id=${commands[100]!.id}`;
+  expect(deferred[0]!.state).toBe("pending");
 }, 60_000);
 
 type UpdateKind = "child_paused" | "child_terminal_result" | "agent_message";
@@ -313,14 +444,18 @@ async function verify(
   const inherited = await shared.admin`
     select canonical_snapshot, source_kind, source_turn_id
     from external_link_turn_authorities where turn_id = ${claim.turn.id}`;
-  const causalIndex = f.kinds.findIndex(
-    (kind, index) => kind !== "agent_message" && (index === 0 || coalesces),
+  const messageIndex = f.kinds.findIndex(
+    (kind, index) => kind === "agent_message" && (index === 0 || coalesces),
   );
+  const causalIndex =
+    messageIndex >= 0
+      ? messageIndex
+      : f.kinds.findIndex((kind, index) => kind !== "agent_message" && (index === 0 || coalesces));
   if (causalIndex >= 0 && authorities[causalIndex]!.external) {
     expect(inherited).toMatchObject([
       {
         canonical_snapshot: authorities[causalIndex]!.external,
-        source_kind: "causal",
+        source_kind: messageIndex >= 0 ? "agent" : "causal",
         source_turn_id: f.turns[causalIndex],
       },
     ]);
@@ -353,10 +488,10 @@ describe("same-human cross-origin inbox authority under app RLS", () => {
     await verify(f, [{}, {}], false);
   });
 
-  test("message batching resolves external and host authority on the sender session", async () => {
+  test("external sender restrictions separate batches; retired host selections do not", async () => {
     for (const kind of ["external", "host"] as const) {
       const f = await fixture(["agent_message", "agent_message"]);
-      await verify(f, [{}, { [kind]: f[kind] }], false);
+      await verify(f, [{}, { [kind]: f[kind] }], kind === "host");
     }
   });
 
@@ -518,10 +653,10 @@ describe("same-human cross-origin inbox authority under app RLS", () => {
   ];
   for (const [name, pair] of differences) {
     for (const reverse of [false, true]) {
-      test(`${name} stays separate (${reverse ? "reverse" : "forward"})`, async () => {
+      test(`${name} uses executable authority (${reverse ? "reverse" : "forward"})`, async () => {
         const f = await fixture();
         const authorities = pair(f);
-        await verify(f, reverse ? authorities.reverse() : authorities, false);
+        await verify(f, reverse ? authorities.reverse() : authorities, name.includes("host"));
       }, 60_000);
     }
   }
@@ -543,3 +678,54 @@ describe("same-human cross-origin inbox authority under app RLS", () => {
     await verify(f, [{}, {}], true);
   }, 60_000);
 });
+
+test("linked goal continuation keeps its explicit causal lane even with a receiving pointer", async () => {
+  const f = await fixture();
+  await arrange(f, [{ external: f.external }, {}]);
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role=replica`;
+    await tx`update sessions set execution_context_turn_id=${f.turns[0]!} where id=${f.sessionId}`;
+    await tx`update session_system_updates set state='cancelled' where session_id=${f.sessionId}`;
+  });
+  const goal = await createSessionGoal(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sessionId: f.sessionId,
+    text: "Continue the request",
+    createdBy: "api",
+  });
+  await addSessionSystemUpdate(client.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspaceId,
+    sessionId: f.sessionId,
+    kind: "goal_continuation",
+    classification: "info",
+    sourceId: goal.id,
+    dedupeKey: crypto.randomUUID(),
+    summary: "Continue",
+    payload: {
+      type: "goal_continuation",
+      goalId: goal.id,
+      goalVersion: goal.version,
+      prompt: "Continue the request",
+    },
+    lineage: { causalTurnId: f.turns[0]! },
+  });
+  const claimed = await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+    sessionId: f.sessionId,
+    workflowId: `session-${f.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(claimed.action).toBe("claimed");
+  if (claimed.action !== "claimed") throw Error("claim failed");
+  expect(claimed.turn.source).toBe("goal");
+  const [row] =
+    await shared.admin`select execution_context_turn_id from session_turns where id=${claimed.turn.id}`;
+  expect(row!.execution_context_turn_id).toBeNull();
+  const [inherited] =
+    await shared.admin`select canonical_snapshot,source_kind from external_link_turn_authorities where turn_id=${claimed.turn.id}`;
+  expect(inherited).toMatchObject({ canonical_snapshot: f.external, source_kind: "causal" });
+}, 60_000);

@@ -15,10 +15,12 @@ export {
   CodexSubscriptionUnavailableError,
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
+  OrganizationOpperUnavailableError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
+  WorkspaceOpperUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";

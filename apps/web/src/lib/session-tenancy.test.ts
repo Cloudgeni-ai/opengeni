@@ -5,8 +5,14 @@ import {
   classifySessionTenancyFailure,
   isCurrentSessionTenancyTarget,
   prepareSessionVisibilityAttempt,
+  privateSessionSandboxNote,
   retryableSessionTenancyReconciliationFailure,
+  isStoppingSessionWorkError,
+  normalizeSessionVisibilityWork,
   sessionTenancyBlockerMessage,
+  sessionVisibilityWorkIsEmpty,
+  sessionVisibilityWorkStopsWork,
+  sessionVisibilityWorkSummary,
   visibilityAttemptReachedAuthoritativeState,
 } from "./session-tenancy";
 
@@ -99,7 +105,17 @@ describe("session tenancy browser operation state", () => {
       retainAttempt: true,
       reconcile: true,
     });
-    expect(sessionTenancyBlockerMessage("shared_sandbox_group")).toContain("own sandbox");
+    expect(sessionTenancyBlockerMessage("shared_sandbox_group")).toBe(
+      "This session shares its sandbox with other sessions. Fork it into a separate session to make this change.",
+    );
+    // Privacy no longer requires an own sandbox: the dialog says what stays shared.
+    expect(privateSessionSandboxNote("selfhosted")).toBe(
+      " Files on its connected machine stay available to whoever can use that machine.",
+    );
+    expect(privateSessionSandboxNote("modal")).toBe(
+      " Files in its sandbox stay available to other sessions that share it.",
+    );
+    expect(privateSessionSandboxNote("none")).toBe("");
 
     const epoch = new OpenGeniApiError(
       409,
@@ -114,6 +130,34 @@ describe("session tenancy browser operation state", () => {
     );
     expect(classifySessionTenancyFailure(epoch).kind).toBe("epoch_conflict");
     expect(classifySessionTenancyFailure(epoch).retainAttempt).toBe(false);
+
+    const forkPoint = (reason: string) =>
+      classifySessionTenancyFailure(
+        new OpenGeniApiError(
+          422,
+          JSON.stringify({
+            error: {
+              code: "validation_failed",
+              message: "This message can't be a fork point.",
+              retryable: false,
+              details: { reason },
+            },
+          }),
+          { mutation: true },
+        ),
+      );
+    expect(forkPoint("fork_point_history_compacted")).toEqual({
+      kind: "fork_point",
+      message:
+        "The conversation up to this message was compacted, so it can't be copied as it was then. Choose a more recent message, or fork the whole session.",
+      retainAttempt: false,
+      reconcile: false,
+    });
+    expect(forkPoint("fork_point_boundary_not_retained").message).toContain(
+      "before the conversation was compacted",
+    );
+    expect(forkPoint("fork_point_unfinished_tool_exchange").message).toContain("tool result");
+    expect(forkPoint("fork_point_new_future_reason").message).toContain("fork point");
   });
 
   test("treats a later matching epoch as authoritative completion", () => {
@@ -162,5 +206,76 @@ describe("session tenancy browser operation state", () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  test("summarizes the work a private change stops and classifies its conflicts", () => {
+    const none = {
+      runningTurnCount: 0,
+      queuedTurnCount: 0,
+      activeGoal: false,
+      liveVoice: false,
+      otherPeoplePendingUpdateCount: 0,
+      otherPeopleAccountChoiceCount: 0,
+    };
+    expect(
+      sessionVisibilityWorkSummary({
+        ...none,
+        runningTurnCount: 1,
+        queuedTurnCount: 1,
+        activeGoal: true,
+        liveVoice: true,
+      }),
+    ).toEqual([
+      "Stop the response that is in progress",
+      "Cancel 1 queued message",
+      "Pause the active goal",
+      "End the live voice conversation",
+    ]);
+    const othersOnly = {
+      ...none,
+      otherPeoplePendingUpdateCount: 3,
+      otherPeopleAccountChoiceCount: 2,
+    };
+    expect(sessionVisibilityWorkSummary(othersOnly)).toEqual([
+      "Drop 3 pending updates that use other people's access",
+      "Stop using other people's accounts in this session",
+    ]);
+    expect(sessionVisibilityWorkIsEmpty(none)).toBe(true);
+    expect(sessionVisibilityWorkIsEmpty(othersOnly)).toBe(false);
+    expect(sessionVisibilityWorkStopsWork(othersOnly)).toBe(false);
+    expect(sessionVisibilityWorkStopsWork({ ...none, liveVoice: true })).toBe(true);
+    // An older server reports only the first three fields.
+    expect(
+      normalizeSessionVisibilityWork({
+        runningTurnCount: 1,
+        queuedTurnCount: 0,
+        activeGoal: false,
+      }),
+    ).toEqual({ ...none, runningTurnCount: 1 });
+    expect(normalizeSessionVisibilityWork({ runningTurnCount: "1" })).toBeNull();
+    const conflict = (reason: string) =>
+      new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            code: "conflict",
+            message: "conflict",
+            retryable: reason === "stopping_active_work",
+            details: { reason, runningTurnCount: 0, queuedTurnCount: 3, activeGoal: false },
+          },
+        }),
+      );
+    expect(classifySessionTenancyFailure(conflict("active_work"))).toMatchObject({
+      kind: "active_work",
+      retainAttempt: true,
+      reconcile: false,
+      work: { runningTurnCount: 0, queuedTurnCount: 3, activeGoal: false },
+    });
+    expect(classifySessionTenancyFailure(conflict("stopping_active_work"))).toMatchObject({
+      kind: "stopping_work",
+      retainAttempt: true,
+    });
+    expect(isStoppingSessionWorkError(conflict("stopping_active_work"))).toBe(true);
+    expect(isStoppingSessionWorkError(conflict("active_work"))).toBe(false);
   });
 });

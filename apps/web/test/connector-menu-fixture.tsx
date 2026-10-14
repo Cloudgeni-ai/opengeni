@@ -88,7 +88,7 @@ function Preview() {
                 },
               }}
             />
-            <span className="text-xs text-fg-muted">OpenGeni</span>
+            <span className="text-xs text-fg-muted">Opengeni</span>
           </div>
         </div>
         <p role="status" className="text-xs text-fg-subtle">

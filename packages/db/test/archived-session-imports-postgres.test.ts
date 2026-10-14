@@ -204,7 +204,6 @@ describe("archived import PostgreSQL persistence", () => {
         expectedRole: "opengeni_app",
         rlsStrategy: "force" as const,
         targetSchema: "public",
-        organizationTenancyCanonicalActivationEnabled: true,
       };
       expect(old.FORCE_RLS_TABLES).not.toContain("session_import_batches");
       // Later maintenance cutovers (Slack quotas, Claude account pools and the

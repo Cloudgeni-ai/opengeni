@@ -119,6 +119,53 @@ test("Runs on as a dialog is named Runs on and uses Tab-reachable radios", async
   expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(0);
 });
 
+test("an existing chat's Chat settings opens its Agent tab instead of a second editor", async () => {
+  const opened: string[] = [];
+  const panels: string[] = [];
+  const openStates: boolean[] = [];
+  await render({
+    ...panelProps("root", false),
+    setPanel: (panel) => panels.push(panel),
+    setOpen: (open) => openStates.push(open),
+    chatSettings: {
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      scope: "workspace",
+      canEdit: true,
+      onOpen: () => opened.push("agent-tab"),
+    },
+  });
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((row) =>
+    row.textContent?.includes("Chat settings"),
+  );
+  if (!item) throw new Error("Missing Chat settings");
+  expect(item.textContent).toContain("Agent tab");
+  await act(async () => item.click());
+  expect(opened).toEqual(["agent-tab"]);
+  expect(openStates).toEqual([false]);
+  expect(panels).not.toContain("settings");
+});
+
+test("a new chat's Chat settings still drills into its draft Agent learning", async () => {
+  const panels: string[] = [];
+  await render({
+    ...panelProps("root", false),
+    setPanel: (panel) => panels.push(panel),
+    draftChatSettings: {
+      workspaceId: "workspace-1",
+      scope: "workspace",
+      value: {},
+      onChange: () => {},
+    },
+  });
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((row) =>
+    row.textContent?.includes("Chat settings"),
+  );
+  if (!item) throw new Error("Missing Chat settings");
+  await act(async () => item.click());
+  expect(panels).toEqual(["settings"]);
+});
+
 test("Runs on and Visibility inside the + menu use menu radios", async () => {
   await render(panelProps("runs-on", false));
   expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(2);

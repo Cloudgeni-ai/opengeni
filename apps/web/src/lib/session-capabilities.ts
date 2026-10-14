@@ -28,7 +28,7 @@ const BUILT_IN_MCP_CAPABILITIES: Record<BuiltInMcpCapability["id"], BuiltInMcpCa
   },
 };
 
-/** MCP transports that are native OpenGeni capabilities, not connected apps. */
+/** MCP transports that are native Opengeni capabilities, not connected apps. */
 export function builtInMcpCapability(
   server: Readonly<{ id: string }>,
 ): BuiltInMcpCapability | null {
@@ -51,8 +51,8 @@ const CONNECTED_APP_GROUPS: CapabilityGroupDefinition[] = [
   },
   {
     id: "slack",
-    name: "Slack",
-    description: "Search workspace conversations and work with messages.",
+    name: "Opengeni Slack bot",
+    description: "Use the installed bot to read conversations and post as Opengeni.",
     kind: "connected_app",
     matches: (tool) => tool.startsWith("slack_bot_"),
   },
@@ -111,6 +111,9 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     matches: (tool) =>
       tool === "set_session_title" ||
       tool === "set_other_session_title" ||
+      tool === "notify_user" ||
+      tool === "notification_withdraw" ||
+      tool === "inbox_tidy" ||
       tool === "wait_for_input" ||
       tool.startsWith("goal_") ||
       tool.startsWith("project_") ||
@@ -129,9 +132,17 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("computer_"),
   },
   {
+    id: "secrets",
+    name: "Secrets",
+    description: "Find saved logins and keys, use them by reference, and save new ones.",
+    kind: "opengeni",
+    matches: (tool) => tool.startsWith("secret_"),
+  },
+  {
     id: "workspace",
     name: "Workspace operations",
-    description: "Use sandboxes, sandbox environments, variables, schedules, and artifacts.",
+    description:
+      "Use sandboxes, sandbox environments, variables, schedules, artifacts, and Site Data.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("sandbox") ||
@@ -144,6 +155,8 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("scheduled_") ||
       tool.startsWith("artifacts_") ||
       tool.startsWith("editable_artifact_") ||
+      tool.startsWith("site_data_") ||
+      tool.startsWith("site_files_") ||
       tool.startsWith("capability_") ||
       tool === "custom_mcp_setup_request",
   },
@@ -152,7 +165,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
 /**
  * Convert the exact first-party catalog into a small, truthful product model.
  * Every visible tool remains represented. Unknown future tools fall into one
- * final OpenGeni group instead of silently disappearing from the picker.
+ * final Opengeni group instead of silently disappearing from the picker.
  */
 export function sessionCapabilityGroupsFor(
   tools: ReadonlyArray<{ id: FirstPartyMcpToolName }>,

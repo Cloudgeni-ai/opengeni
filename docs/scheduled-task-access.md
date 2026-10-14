@@ -1,23 +1,26 @@
 # Scheduled task access: drift, refresh, and failed-access notices
 
-A scheduled task captures its account authority when it is saved. For runs that
-create a chat, it also stores the chat's initial tool selection:
+A scheduled task never saves which connector accounts were connected when it
+was saved. Every fresh occurrence resolves its owner's current accounts. For
+runs that create a chat, the task stores the chat's initial tool selection:
 
 - its connectors (`agentConfig.tools`);
-- the connector accounts it uses (`agentConfig.connectionAccounts`, frozen with
-  `connectionAccountsFrozen`), resolved against its immutable owner at each
-  fresh occurrence;
-- for a task an agent created, the creating session's OpenGeni tools,
+- accounts a person explicitly pinned (`agentConfig.pinnedAccounts`, with
+  `pinnedAccountsRequired` to skip a run instead of going without a pinned
+  account that can no longer be used). A pin narrows only its own connector;
+  every other connector follows the owner's current accounts;
+- for a task an agent created, the creating session's Opengeni tools,
   permissions and access policy (the creator policy, migration 0428).
 
-Later workspace defaults do not widen those saved selections. Existing chats,
-including a reusable schedule's chat after its first run, supply their own
-model, tools and machine. Their scheduled runs still use the schedule's
-captured account authority. A task can therefore fall behind: a
-connector the workspace now gives every new schedule is missing, newer OpenGeni
-tools are absent, or the account it chose was disconnected. This page describes
-how OpenGeni shows that, how the owner refreshes it, and how the owner learns
-that a run could not use a connector.
+Only a person can pin, through the schedule editor or a human API call; agents,
+API keys and services receive 403. A schedule that posts into an existing chat
+stores only its message and timing and has no pins: that chat, including a
+reusable schedule's chat after its first run, supplies its model, tools and
+machine, and each run uses the owner's current accounts. A task can still fall
+behind: a connector the workspace now gives every new schedule is missing,
+newer Opengeni tools are absent, or an account a person pinned was
+disconnected. This page describes how Opengeni shows that, how the owner
+refreshes it, and how the owner learns that a run could not use a connector.
 
 ## Scheduling a message in a chat
 
@@ -60,11 +63,12 @@ on an outdated execution configuration. Merged patches also compare their
 server-read digest under the database write lock, so a concurrent edit returns
 409 instead of being overwritten.
 
-For a task with frozen accounts, an explicit `connectionAccounts` edit replaces
-the complete accepted selection. Include unchanged accounts that should remain;
-an empty array clears the selection. Omitting the field preserves saved choices.
-It never silently fills an omitted connector with newly available accounts.
-Use the access refresh flow below to review and adopt current defaults.
+`pinnedAccounts` on an update replaces the complete set of pins; an empty array
+unpins every connector, so all of them follow the owner's current accounts.
+Omitting the field keeps the pins. Removing a connector also removes its pins.
+Pins supplied by the request must be usable now; retained pins are kept even
+when their account is gone, so an unrelated edit never fails on a stale pin.
+The old `connectionAccounts` field is rejected on schedule requests.
 
 Scheduler synchronization reads the latest saved task while holding a per-task
 lock shared with deletion cleanup. A failed synchronization restores the previous
@@ -73,7 +77,7 @@ newer edit or pause. Compensation commits before releasing the synchronization
 lock, so queued writers observe the restored state. Remote timeouts remain errors with potentially unknown
 outcomes, not confirmation that Temporal accepted the change.
 
-If a move removes Variable Sets or changes the environment, it returns a
+If a move changes the environment, it returns a
 409 with `details.code = scheduled_target_access_change` and the affected
 identifiers. Review the destination's attachments, then retry with
 `adoptSessionSettings: true` and the reviewed `expectedExecutionDigest` to accept
@@ -96,7 +100,7 @@ The server merges against the complete stored configuration. Never reconstruct
 `agentConfig` from `scheduled_tasks_get`: that tool returns bounded text and
 previews, not a lossless replacement document.
 
-The ordinary owner, model-policy, Variable Set and connection-authority checks
+The ordinary owner, model-policy and connection-authority checks
 still apply. A model-only patch does not refresh tool/account selections, rewrite
 prompts or metadata, unpause the task, or change its schedule. A concurrent
 execution-config edit returns 409 instead of overwriting it; read the task again
@@ -126,6 +130,45 @@ Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 (`apps/web/src/components/schedules/`, with the notices in
 `schedule-access-notices.tsx`).
 
+## Who can see a schedule
+
+A schedule has an audience, like a chat: **Workspace** (everyone in the
+workspace, the default) or **Only me**. The form asks "Who can see it" when the
+organization allows Only me chats.
+
+- A Workspace schedule is visible to every member. Only its owner changes or
+  runs it (unchanged).
+- An Only me schedule is visible only to its owner, through every surface: the
+  HTTP API, the agent's schedule tools and Slack all use the one core gate in
+  `packages/core/src/domain/scheduled-task-audience.ts`. To anyone else it is
+  indistinguishable from a schedule that does not exist.
+- Each run of an Only me schedule creates an Only me chat owned by the schedule's
+  owner. The run rechecks that the owner is still an active member who may
+  create Only me chats; if not, the run fails closed instead of creating a
+  shared chat.
+- A schedule that posts into an Only me chat, saves to the owner's personal
+  knowledge, or runs on the owner's own (personal) Connected Machine is always
+  Only me. Widening it is refused while that holds. See
+  [Connected Machines](connected-machines.md) for how each run re-proves the
+  owner's access to the machine.
+- Unless the organization turns it off under Security, workspace admins see
+  other people's Only me schedules only as a summary:
+  the owner, how often it runs, its status, when it last ran and what its runs
+  cost over the last 30 days. Never its name, message, settings or runs. An
+  admin can pause one (`POST
+  /v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause`);
+  only the owner can resume it. The list is
+  `GET /v1/workspaces/:workspaceId/scheduled-tasks/private-summaries`.
+  With admin visibility off the list is empty and admins cannot pause them,
+  exactly like private chats. A deployment can require it to stay on with
+  `OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED=true`.
+
+The audience is not execution configuration: like the name and status it is
+left out of the execution digest, so changing it never invalidates accepted
+runs. Migration 0720 adds it; schedules that already posted into an Only me
+chat or wrote to personal knowledge become Only me, which only narrows who can
+see them. Migration 0721 adds the admin summary read and pause.
+
 ## One plan, two uses
 
 `computeScheduledTaskAccessPlan` answers one question: what would this task's
@@ -137,20 +180,22 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
 
 - **Connectors** (only when runs create sessions from the task's own tools:
   `new_session_per_run`, or `reusable_session` before its session exists).
-  Connectors the task already has are kept. Connectors the workspace no longer
-  sets up are dropped (`unavailableConnectors`). The workspace defaults a new
-  schedule gets (`sessionToolDefaults`, or the enabled capability default) are
-  added (`missingConnectors`). A refresh never removes a connector the owner
+  A task that follows the workspace defaults (`agentConfig.toolPolicy` with
+  mode `workspace_default`) never lacks one: each run gets them as they are
+  then, so it reports no `missingConnectors` and a refresh adds none. For a
+  task with a fixed list, connectors the task already has are kept,
+  connectors the workspace no longer sets up are dropped
+  (`unavailableConnectors`), and the workspace defaults a new schedule gets
+  (`sessionToolDefaults`, or the enabled capability default) are added
+  (`missingConnectors`). A refresh never removes a connector the owner
   deliberately kept.
-- **Connector accounts**, per account-backed connector. Chosen accounts that are
-  still usable are kept exactly. When a chosen account can no longer be used
-  (`unavailableAccounts`), a fresh occurrence of the task is blocked before it
-  creates a run, so the refresh attaches every account the owner can use now.
-  A frozen connector with no account while one is now available is reported as
-  `attachableAccounts`. The Google Drive publication and personal GitHub
-  surfaces keep their own account contract and pass through unchanged; a
-  blocked occurrence caused by one of them is not reported yet.
-- **OpenGeni tools** (agent-created tasks only). A human- or API-created task
+- **Pinned accounts** are reported, never changed. A pin whose account can no
+  longer be used is listed in `unavailableAccounts`; runs go ahead without that
+  connector (or are skipped when the task sets `pinnedAccountsRequired`) until
+  a person pins another account or unpins it. A refresh never adds, replaces or
+  removes pins, because a pin is a person's explicit choice. Unpinned connectors
+  need nothing: each run already uses the owner's current accounts.
+- **Opengeni tools** (agent-created tasks only). A human- or API-created task
   has no creator policy and already follows the deployment default at each run.
   For a frozen creator policy, the default tools it lacks are reported
   (`missingOpenGeniTools`) and added. Permissions stay least-privilege: a
@@ -164,7 +209,7 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   creator session policy (agent access, scope, memory) is never rewritten.
 
 Existing-session tasks, and reusable tasks whose session already exists, follow
-that session's tools, so only their accounts are part of the plan.
+that session's tools, so only a reusable task's pins are part of the plan.
 
 ## Who sees drift
 
@@ -176,6 +221,31 @@ viewers receive the task unchanged. `policyDrift` is `null` when nothing would
 change. It is advisory: a failure to compute it omits the field and never fails
 the read. `canRefresh` is true only for a signed-in person holding
 `scheduled_tasks:manage`.
+
+## Which accounts a run would use
+
+The same reads add a read-only `accountPlan` for the same viewers, so nobody
+else sees the owner's account labels. For each connector that takes a
+connected account (host-supplied connectors and the special first-party
+surfaces are not listed), it says:
+
+- `mode`: `default` (each run uses the owner's current accounts) or `pinned`
+  (a person chose the accounts; runs use only those).
+- `accounts`: the accounts a run would use if it started now, with their label
+  and whether each is the owner's own (`personal`) or a workspace account
+  (`shared`). Empty when none can be used; the run then goes without that
+  connector.
+- `unavailablePins`: pinned accounts that can no longer be used.
+
+It is computed at read time from the owner's live connections with the same
+resolution a run uses, so what it shows is what the next run gets. For a
+schedule that posts into an existing chat it follows that chat's connectors
+and is always `default`. Nothing in it is stored. Like `policyDrift` it is
+advisory: a failure omits the field and never fails the read.
+
+The schedule page shows it as an Accounts section. A pin that can no longer
+be used offers "Use current accounts", which sends the remaining pins with the
+page's `expectedExecutionDigest`; a working pin changes only in the editor.
 
 ## The refresh is a new explicit human action
 
@@ -191,8 +261,7 @@ the read. `canRefresh` is true only for a signed-in person holding
 - A task whose execution digest no longer matches returns 409, checked again
   under the row lock, so a person never re-freezes something they did not
   review.
-- The refresh goes through the ordinary owner update path: Variable Set
-  permission, model policy, target validation, the owner's current accounts,
+- The refresh goes through the ordinary owner update path: model policy, target validation, the owner's current accounts,
   personal-resource re-authorization under that person, and a new authority
   revision and execution digest. It therefore never grants more than the same
   person could by editing the task.
@@ -202,35 +271,83 @@ the read. `canRefresh` is true only for a signed-in person holding
   the creator session policy, which the refresh never changes.
 
 This is the one writer of the creator policy's tools and permissions after
-create. Auto-following workspace defaults at each run was considered and
-rejected: it would conflict with the creator-policy freeze.
+create. Opengeni tools do not follow the workspace defaults at each run: that
+would conflict with the creator-policy freeze. Connectors do (see below); they
+carry no permissions of their own and each run resolves the owner's accounts.
 
 The optional `leaveOut` (`{ connectors?, openGeniTools? }`) names workspace
-default connectors and OpenGeni tools the person wants kept off this schedule.
-The plan then neither adds them nor, for an OpenGeni tool, the permissions it
+default connectors and Opengeni tools the person wants kept off this schedule.
+The plan then neither adds them nor, for an Opengeni tool, the permissions it
 would need. It only narrows what the refresh adds; it never removes anything
 the task already has, and an unknown tool name is refused (400).
 
-## Keeping defaults off
+## Which connectors a run gets
 
-A person may deliberately leave a default connector or OpenGeni tool off a
+A schedule that posts into an existing chat has no connectors of its own: each
+run uses the chat's connectors and the owner's current accounts. A reusable
+schedule whose session exists likewise follows that session.
+
+A schedule that starts its own session follows the workspace's default
+connectors at each run, the way a new chat does, when it is created without
+choosing tools. It stores `agentConfig.toolPolicy`:
+
+```json
+{ "mode": "workspace_default", "excludedMcpServerIds": ["notion"] }
+```
+
+Each run gets the defaults as they are when it starts, minus
+`excludedMcpServerIds`, plus the connectors listed in `agentConfig.tools`.
+Nothing about the defaults is copied into the schedule, so a connector the
+workspace makes a default later reaches the next run, and one it removes stops
+being used. The schedule editor saves a person's choices this way: defaults
+they turn off become exclusions, and connectors outside the defaults become
+`tools`.
+
+Creating a schedule with a list of `tools` and no `toolPolicy` gives it exactly
+that list. An edit that does not name a `toolPolicy` keeps the one the
+schedule has, so replacing `agentConfig` (for example with the tools a read
+returned) never turns the defaults into a fixed list. Agents cannot set
+`toolPolicy`; they omit `tools` to follow the defaults or list them to fix
+them. Knowledge syncs never follow the defaults.
+
+Migration 0754 moved schedules whose list nobody chose to follow the defaults:
+those an agent or a service created, which start their own session. Their
+saved tools stayed as additions, so no run lost a connector. A list a person
+created directly was kept exactly.
+
+## Auditing account and connector choices
+
+Every create, edit or access refresh that changes a schedule's pinned
+accounts, `pinnedAccountsRequired` or connector choices (whether it follows
+the workspace defaults, which defaults it excludes, and its listed connectors)
+writes one `audit_events` row in the same transaction: action
+`scheduled_task.account_choices_changed`, target `scheduled_task`, the acting
+subject, and metadata with the `operation` (`create` or `update`), the
+caller's `principalKind` (a person, an agent, an API key or a service) and,
+for each changed choice, its value before and after. Only server and
+connection ids are recorded, never credentials or account labels. Edits that
+change no choice record nothing.
+
+## Keeping defaults off in the drift view
+
+A person may deliberately leave a default connector or Opengeni tool off a
 schedule, and drift would otherwise name it forever. The schedule's page offers
 "Keep without these" next to missing defaults. It records, in that browser, the
-missing connectors and OpenGeni tools for the task head the person looked at
+missing connectors and Opengeni tools for the task head the person looked at
 (its `executionDigest`); the page then hides them, and "Refresh access" sends
 them as `leaveOut`, carrying the choice to the refreshed head. A new default
 that appears later is shown again, and editing the task any other way (a new
-head) is a fresh look. A chosen account that can no longer be used, a connector
+head) is a fresh look. A pinned account that can no longer be used, a connector
 the workspace removed, and a connector without an account are never hidden.
 
 The choice is a display preference: the server keeps reporting the drift and
-nothing about what a run may use changes. It is per browser because OpenGeni has
+nothing about what a run may use changes. It is per browser because Opengeni has
 no per-person preference store for it; a durable per-person choice would need
 its own column and is left for later.
 
 ## Failed-access notice
 
-OpenGeni has no general notification channel for this. Product email is
+Opengeni has no general notification channel for this. Product email is
 reserved for sign-in, recovery and invitation lifecycles, and the Slack bot can
 only message people who linked their Slack identity. So the owner's signal is
 in-app:
@@ -244,25 +361,21 @@ in-app:
   not a failure and is left out.
 - **Per run.** `GET .../scheduled-tasks/:taskId/runs` adds `accessFailures`
   (connector, reason and count) for a viewer who can act on the task.
-- **Blocked before a run.** When a chosen connector account can no longer be
-  used (for example the owner revoked their personal connection), the
-  scheduler refuses every fresh occurrence before it creates a run, so there is
-  no run and no turn to carry a fact. The same happens to a schedule with an
-  owner whose chosen account belongs to a connector the workspace no longer
-  sets up. The attention list therefore also checks each active agent task
-  that chose accounts with the same account plan the drift uses, and lists it
-  with `unavailableAccounts` (the connectors) and a null `runId`/`firedAt`. It
-  clears once the account is usable again or the owner refreshes or edits the
-  accounts. This is read-time only: no migration, no stored notice. Not
-  reported yet: a reusable-session schedule whose live session no longer uses
-  a connector the schedule chose an account for (for example, someone turned
-  that connector off in the session). The scheduler resolves the reusable
-  session's own tool policy and refuses the leftover choice, while the plan
-  follows the task's frozen tools, so a refresh does not fix it either; turning
-  the connector back on in that session does.
+- **A pinned account is gone.** When an account a person pinned can no longer
+  be used (for example the owner revoked that connection, or the workspace no
+  longer sets up its connector), the run goes ahead without that connector and
+  never substitutes another account. The run records the dropped pins in
+  `degradedAccounts`. A personal GitHub repository pin cannot be dropped
+  without changing the task's repositories, so that occurrence is refused, as
+  is every occurrence of a task with `pinnedAccountsRequired`; a refused
+  occurrence creates no run. The attention list checks each active task with
+  pins using the same account plan the drift uses and lists it with
+  `unavailableAccounts` (the connectors) and a null `runId`/`firedAt`. It
+  clears once the account is usable again or a person pins another account or
+  unpins it. This is read-time only: no stored notice.
 - **Attention list.** `GET .../scheduled-tasks/attention` lists the active
   schedules that need attention, one item per schedule: the latest run with a
-  turn failed closed on access (`runId`, `failures`), a chosen account can no
+  turn failed closed on access (`runId`, `failures`), a pinned account can no
   longer be used (`unavailableAccounts`), or both. Schedules that cannot start
   are listed first. For a person, it lists the schedules they own; for an
   organization key, configured key or service that manages schedules, the

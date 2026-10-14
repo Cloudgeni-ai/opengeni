@@ -84,6 +84,7 @@ export async function completeSelfServiceOrganizationSetup(
     operationId: string;
     requestFingerprint: string;
     trialCreditsEnabled?: boolean;
+    trialCreditModelIds?: string[] | undefined;
   },
 ): Promise<CompleteSelfServiceOrganizationSetupResponseType> {
   return await db.transaction(async (tx) => {
@@ -97,6 +98,13 @@ export async function completeSelfServiceOrganizationSetup(
       sql`select pg_catalog.set_config(
       'opengeni.verified_signup_trial_enabled',
       ${input.trialCreditsEnabled === true ? "on" : "off"}, true
+    )`,
+    );
+    await rawRows(
+      txDb,
+      sql`select pg_catalog.set_config(
+      'opengeni.signup_credit_model_ids',
+      ${input.trialCreditModelIds ? JSON.stringify(input.trialCreditModelIds) : ""}, true
     )`,
     );
     const [row] = await rawRows<{ result: unknown }>(

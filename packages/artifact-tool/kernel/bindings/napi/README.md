@@ -1,4 +1,4 @@
-# OpenGeni artifact kernel: Node-API binding
+# Opengeni artifact kernel: Node-API binding
 
 Thin `napi-rs` adapter over `../protocol`. Every data envelope crosses as an
 owned Node `Buffer`; metadata/lifecycle values use their exact JavaScript scalar

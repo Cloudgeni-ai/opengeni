@@ -24,6 +24,46 @@ export type McpPhaseOutcome = "completed" | "rejected" | "failed" | "cancelled";
 type Context = { observer: Observability; scope: string; callKey?: string; nextRequest: number };
 const storage = new AsyncLocalStorage<Context | undefined>();
 
+const approvalOutcomes = [
+  "allow",
+  "ask",
+  "block",
+  "waiting",
+  "resumed",
+  "stale",
+  "rejected",
+  "completed",
+  "failed",
+  "unknown",
+  "size_rejected",
+] as const;
+const approvalSources = ["explicit", "default", "ambiguous", "continuation"] as const;
+/** Bounded operational evidence only. Never accepts tool names, IDs or content. */
+export function recordToolApproval(
+  outcome: (typeof approvalOutcomes)[number],
+  source: (typeof approvalSources)[number] = "continuation",
+  waitingMs?: number,
+): void {
+  if (!approvalOutcomes.includes(outcome) || !approvalSources.includes(source)) return;
+  const observer = storage.getStore()?.observer;
+  try {
+    observer?.incrementCounter({
+      name: "opengeni_tool_approval_transitions_total",
+      help: "Observed tool approval policy and continuation outcomes.",
+      labels: { outcome, source },
+    });
+    if (waitingMs !== undefined && Number.isFinite(waitingMs) && waitingMs >= 0)
+      observer?.observeHistogram({
+        name: "opengeni_tool_approval_wait_seconds",
+        help: "Time in stored programmatic approval wait before continuation, separate from execution.",
+        labels: { outcome },
+        value: waitingMs / 1000,
+      });
+  } catch {
+    /* Diagnostic failure never changes policy or execution. */
+  }
+}
+
 /** Capture only diagnostic context for callbacks invoked by an external dispatcher. */
 export function bindMcpTelemetry<A extends unknown[], R>(
   run: (...args: A) => R,

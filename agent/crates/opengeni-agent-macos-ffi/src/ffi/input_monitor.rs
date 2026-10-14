@@ -1,7 +1,7 @@
 //! Passive macOS input observation used to keep synthetic fallback subordinate
 //! to the person at the machine.
 //!
-//! Every event OpenGeni posts is tagged with this helper process's private
+//! Every event Opengeni posts is tagged with this helper process's private
 //! marker. A listen-only Session event tap ignores those events and counts
 //! physical input (and input from any other process). The caller can therefore
 //! reject an operation before dispatch, or report an unknown outcome after

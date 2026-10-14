@@ -50,7 +50,7 @@ test("a standalone release bundle reads the client guide and references with no 
       const skills = composeRuntimeSkills([]);
       console.log(JSON.stringify({
         entry: readRuntimeSkill(skills, { skill: "opengeni-client" }),
-        reference: readRuntimeSkill(skills, { skill: "opengeni-client", paths: ["references/discovery-and-autonomy.md"] })
+        reference: readRuntimeSkill(skills, { skill: "opengeni-client", paths: ["references/tools-and-auth.md"] })
       }));
     `,
       ],
@@ -66,7 +66,7 @@ test("a standalone release bundle reads the client guide and references with no 
     const output = JSON.parse(stdout);
     for (const [key, path] of [
       ["entry", "SKILL.md"],
-      ["reference", "references/discovery-and-autonomy.md"],
+      ["reference", "references/tools-and-auth.md"],
     ]) {
       const expected = await readFile(
         new URL(`../.agents/skills/opengeni-client/${path}`, import.meta.url),

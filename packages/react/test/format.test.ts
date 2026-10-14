@@ -131,20 +131,20 @@ describe("tryParseJson", () => {
 
 describe("isCreditExhaustion", () => {
   test("matches the engine error text, bare and wrapped, case-insensitively", () => {
-    expect(isCreditExhaustion("insufficient OpenGeni credits")).toBe(true);
-    expect(isCreditExhaustion("Activity task failed: insufficient OpenGeni credits")).toBe(true);
+    expect(isCreditExhaustion("insufficient Opengeni credits")).toBe(true);
+    expect(isCreditExhaustion("Activity task failed: insufficient Opengeni credits")).toBe(true);
     expect(isCreditExhaustion("INSUFFICIENT OPENGENI CREDITS")).toBe(true);
     expect(
-      isCreditExhaustion({ error: "Activity task failed: insufficient OpenGeni credits" }),
+      isCreditExhaustion({ error: "Activity task failed: insufficient Opengeni credits" }),
     ).toBe(true);
-    expect(isCreditExhaustion({ detail: "insufficient OpenGeni credits" })).toBe(true);
+    expect(isCreditExhaustion({ detail: "insufficient Opengeni credits" })).toBe(true);
   });
 
   test("matches the budget_exhausted segment limit on its own", () => {
     expect(isCreditExhaustion({ segmentLimit: "budget_exhausted" })).toBe(true);
     expect(
       isCreditExhaustion({
-        detail: "insufficient OpenGeni credits",
+        detail: "insufficient Opengeni credits",
         segmentLimit: "budget_exhausted",
       }),
     ).toBe(true);
@@ -166,7 +166,7 @@ describe("composerSubmissionErrorMessage", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient OpenGeni credits",
+          message: "insufficient Opengeni credits",
           retryable: false,
         },
       }),
@@ -206,7 +206,7 @@ describe("composerSubmissionErrorMessage", () => {
     // Only the stored text survives a reload, and older APIs omit the detail code.
     for (const text of [
       COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
-      "OpenGeni API 422: model is not available: gpt-old Reference: abc.",
+      "Opengeni API 422: model is not available: gpt-old Reference: abc.",
     ]) {
       expect(composerSubmissionErrorMessage(new Error(text))).toBe(
         COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
@@ -277,7 +277,7 @@ describe("composerSubmissionErrorMessage", () => {
   });
 
   test("recognizes retained legacy credit errors without their API object", () => {
-    const legacy = new Error("OpenGeni API 402: insufficient OpenGeni credits");
+    const legacy = new Error("Opengeni API 402: insufficient Opengeni credits");
     expect(composerSubmissionErrorMessage(legacy)).toBe(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
     expect(composerSubmissionCanRetry(legacy)).toBe(false);
   });
@@ -298,8 +298,8 @@ describe("composerSubmissionErrorMessage", () => {
 
 describe("humanizeFailureReason", () => {
   test("maps credit exhaustion to the canonical sentence", () => {
-    expect(humanizeFailureReason("insufficient OpenGeni credits")).toBe(CREDIT_EXHAUSTION_MESSAGE);
-    expect(humanizeFailureReason("Activity task failed: insufficient OpenGeni credits")).toBe(
+    expect(humanizeFailureReason("insufficient Opengeni credits")).toBe(CREDIT_EXHAUSTION_MESSAGE);
+    expect(humanizeFailureReason("Activity task failed: insufficient Opengeni credits")).toBe(
       CREDIT_EXHAUSTION_MESSAGE,
     );
   });

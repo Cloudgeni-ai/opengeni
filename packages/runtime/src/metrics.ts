@@ -1,3 +1,5 @@
+import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
+
 export const MCP_TOOL_CALL_OUTCOMES = [
   "success",
   "provider_declared_error",
@@ -10,6 +12,42 @@ export const MCP_TOOL_CALL_OUTCOMES = [
 ] as const;
 
 export type McpToolCallOutcome = (typeof MCP_TOOL_CALL_OUTCOMES)[number];
+
+/**
+ * Fixed `tool` label for every MCP tool call that is not a first-party Opengeni
+ * catalog tool: workspace, connector, API-integration, and Codex Apps tools are
+ * user- or provider-defined names, so they share one bucket instead of becoming
+ * unbounded metric series.
+ */
+export const MCP_TOOL_METRIC_EXTERNAL_LABEL = "external";
+
+/**
+ * Closed set of tool names that may appear as a metric label: the first-party
+ * `opengeni`/`docs` catalog plus the dedicated `files` server tool.
+ */
+const MCP_TOOL_METRIC_FIRST_PARTY_NAMES: ReadonlySet<string> = new Set<string>([
+  ...FIRST_PARTY_MCP_TOOL_NAMES,
+  "files_get_download_url",
+]);
+
+/**
+ * Bounded-cardinality `tool` label for one MCP tool call. A name is kept only
+ * when the call went to a verified first-party server and the name is in the
+ * fixed first-party catalog; everything else collapses to `external`.
+ */
+export function mcpToolMetricLabel(input: { firstParty: boolean; toolName: string }): string {
+  return input.firstParty && MCP_TOOL_METRIC_FIRST_PARTY_NAMES.has(input.toolName)
+    ? input.toolName
+    : MCP_TOOL_METRIC_EXTERNAL_LABEL;
+}
+
+/** True only for a value `mcpToolMetricLabel` can return. */
+export function isMcpToolMetricLabel(value: unknown): value is string {
+  return (
+    value === MCP_TOOL_METRIC_EXTERNAL_LABEL ||
+    (typeof value === "string" && MCP_TOOL_METRIC_FIRST_PARTY_NAMES.has(value))
+  );
+}
 
 export const MCP_LIFECYCLE_PHASES = ["connect", "close"] as const;
 export const MCP_LIFECYCLE_POLICIES = ["strict", "best_effort"] as const;
@@ -31,6 +69,25 @@ export const SANDBOX_READINESS_REPLACEMENT_OUTCOMES = [
 
 export type SandboxReadinessReplacementOutcome =
   (typeof SANDBOX_READINESS_REPLACEMENT_OUTCOMES)[number];
+
+/**
+ * Closed reasons a due warm workspace checkpoint did not start. A capture that
+ * is merely not due yet (the interval throttle) or whose archive already covers
+ * the current generation is normal and never reported.
+ */
+export const WORKSPACE_CAPTURE_SKIP_REASONS = [
+  "no_persist_primitive",
+  "lease_not_warm",
+  "capture_policy",
+  "lease_fenced",
+  "attempt_fenced",
+  "reaper_held",
+  "capture_in_progress",
+  "holder_in_progress",
+  "mutation_in_progress",
+] as const;
+
+export type WorkspaceCaptureSkipReason = (typeof WORKSPACE_CAPTURE_SKIP_REASONS)[number];
 
 export type McpLifecyclePhase = (typeof MCP_LIFECYCLE_PHASES)[number];
 export type McpLifecyclePolicy = (typeof MCP_LIFECYCLE_POLICIES)[number];
@@ -80,11 +137,21 @@ export type RuntimeMetricsHooks = {
     outcome: "completed" | "failed";
     durationSeconds: number;
   }) => void;
+  /** A due warm checkpoint that could not start; see WORKSPACE_CAPTURE_SKIP_REASONS. */
+  onWorkspaceCaptureSkipped?: (input: {
+    backend: string;
+    reason: WorkspaceCaptureSkipReason;
+  }) => void;
   /**
-   * One physical MCP tools/call invocation. The closed outcome enum deliberately
-   * excludes server, tool, tenant, request, and error-content labels.
+   * One physical MCP tools/call invocation. `tool` is the bounded
+   * `mcpToolMetricLabel` value (a first-party catalog name or `external`); server,
+   * raw user-defined tool, tenant, request, and error-content labels stay excluded.
    */
-  onMcpToolCall?: (input: { outcome: McpToolCallOutcome; durationSeconds: number }) => void;
+  onMcpToolCall?: (input: {
+    outcome: McpToolCallOutcome;
+    tool: string;
+    durationSeconds: number;
+  }) => void;
   /**
    * One physical MCP connection lifecycle operation. Labels stay structural:
    * no server, tenant, request, URL, or error-content dimensions are admitted.

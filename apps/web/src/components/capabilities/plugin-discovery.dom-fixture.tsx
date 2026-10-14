@@ -344,7 +344,7 @@ test("an API install failure says what to do instead of the raw API string", asy
   const { api, calls } = client();
   calls.installPlugin.mockImplementation(async () => {
     throw Object.assign(
-      new Error("OpenGeni API 409: plugin_manifest_changed Reference: req-plugin-install."),
+      new Error("Opengeni API 409: plugin_manifest_changed Reference: req-plugin-install."),
       { status: 409 },
     );
   });
@@ -357,7 +357,7 @@ test("an API install failure says what to do instead of the raw API string", asy
     expect(document.querySelector('[data-capability-page] [role="alert"]')?.textContent).toBe(
       "It changed since this page loaded. Reload the page and try again. Reference: req-plugin-install.",
     );
-    expect(document.body.textContent).not.toContain("OpenGeni API");
+    expect(document.body.textContent).not.toContain("Opengeni API");
   } finally {
     await rendered.unmount();
   }

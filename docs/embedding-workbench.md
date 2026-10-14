@@ -1,6 +1,6 @@
-# Embedding the OpenGeni Workbench
+# Embedding the Opengeni Workbench
 
-This guide is for a host app that wants to drop the OpenGeni **session workspace**
+This guide is for a host app that wants to drop the Opengeni **session workspace**
 — the Changes / Files / Terminal / Browser / Computer dock, with instant cold paint and the
 machine-state chip — into its own UI. It is the frontend companion to the
 standalone SDK/proxy integration as well as the advanced in-process path in
@@ -23,7 +23,7 @@ mount one component.
 npm install @opengeni/react @opengeni/sdk react react-dom
 ```
 
-`@opengeni/react` depends only on `@opengeni/sdk` among OpenGeni packages (a
+`@opengeni/react` depends only on `@opengeni/sdk` among Opengeni packages (a
 client-clean closure — no server code is pulled in). `react` and `react-dom`
 (v18 or v19) are required peers.
 
@@ -70,13 +70,13 @@ still work after setup. See the [React peer setup](../packages/react/README.md#o
 
 ## 2. Provider And Trust Boundary
 
-Wrap the tree once in `OpenGeniProvider`, giving it an OpenGeni client and the
+Wrap the tree once in `OpenGeniProvider`, giving it an Opengeni client and the
 workspace id. Every hook and component below reads the client from here (there is
 no app-context coupling — that is what makes the workbench embeddable).
 
-Keep privileged OpenGeni credentials on the host server. The browser client
+Keep privileged Opengeni credentials on the host server. The browser client
 below points at a tenant-scoped, same-origin host proxy that preserves the
-OpenGeni route contract. A host may instead pass any structural client matching
+Opengeni route contract. A host may instead pass any structural client matching
 the methods used by the mounted surfaces.
 
 ```tsx
@@ -165,7 +165,7 @@ Repository discovery walks the workspace filesystem without a fixed nesting
 depth, recognizes both ordinary `.git` directories and linked-worktree `.git`
 files, and prunes dependency/build residue. The walk is still bounded by a
 timeout and repository-count guard. If either guard trips or discovery fails,
-OpenGeni persists and announces an explicit degraded revision instead of an
+Opengeni persists and announces an explicit degraded revision instead of an
 authoritative-looking empty capture; consumers keep live files authoritative.
 
 An embedder can expose only the surfaces that belong in its product. For
@@ -195,6 +195,7 @@ being observed.
 | `sessionId`, `events` | the session and its live event log (from `useSessionEvents`). |
 | `primary` | the pane shown beside the dock (your chat/timeline). |
 | `surfaces` | built-in surface allowlist: `"changes"`, `"files"`, `"terminal"`, `"browser"`, `"desktop"` (`"desktop"` is the stable id of the Computer surface). Omit for all five. |
+| `machinesEnabled` | whether the viewer may read the workspace machine fleet (`enrollments:read`). Default `true`. Pass `false` for viewers without it: the dock never requests `GET /machines` and the machine chip derives from the session's capabilities alone. Independently, a 401/403/404 from that read stops the poll until the read is disabled and re-enabled (a permission or workspace change) or explicitly refreshed. |
 | `onNotify` | host-routed `{ kind: "error" \| "info"; message }` — the package has no toast dependency, so you decide how errors surface. |
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
 | `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench chooses **Changes for reviewable durable capture changes, else Files**. A pending signed capture manifest leaves the initial choice unresolved; metadata arriving before the manifest must not be mistaken for an empty capture. Default selection never triggers live Git work. The choice latches before real content paints, so later edits never steal the current tab. |

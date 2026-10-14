@@ -280,7 +280,7 @@ export function GoogleDriveKnowledgeSourceDialog({
 
   return (
     <Dialog open={entry !== null} onOpenChange={(open) => !open && !busy && onClose()}>
-      <DialogContent className="max-h-[90vh] max-w-xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
+      <DialogContent className="max-h-[90vh] grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Google Drive locations · {instance.displayName}</DialogTitle>
           <DialogDescription>

@@ -31,7 +31,9 @@ import {
   type AccessDeps,
 } from "../access";
 
-/** Explicit host onboarding. Ordinary asUser reads never call this operation.
+/** Explicit host onboarding. Ordinary asUser requests never call this
+ * operation; their first-use membership is `provisionExternalMemberOnFirstUse`
+ * in `../access`, under the same key authority and lifecycle fence.
  * Existing memberships are not overwritten, including reduced permissions. */
 export async function addExternalWorkspaceMemberForRequest(
   c: Context,

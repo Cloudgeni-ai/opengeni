@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   applyModelCatalogDocument,
   assertTurnExecutionPolicyMatchesConfigV1,
+  configuredModelForAcceptedTurnExecutionPolicy,
   configuredModels,
   getSettings,
   resolveTurnExecutionPolicyV1,
@@ -232,7 +233,6 @@ describe("accepted execution policy additive capabilities", () => {
       registrySettings(additive, {}, { upstreamModelId: "other-model" }),
       registrySettings(additive, {}, { contextWindowTokens: 200_000 }),
       registrySettings(additive, {}, { effectiveContextWindowTokens: 180_000 }),
-      registrySettings(additive, {}, { autoCompactTokenLimit: 160_000 }),
       registrySettings(additive, {}, { toolOutputTruncationTokens: 9000 }),
       registrySettings(
         additive,
@@ -305,6 +305,206 @@ describe("accepted execution policy additive capabilities", () => {
         { ...current, modelProvidersJson: JSON.stringify(providers) },
         historical,
         codexInput,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+  });
+});
+
+describe("accepted execution policy hosted web-search enablement", () => {
+  const webSearchOff = { upstream: "unknown", runnable: false } as const;
+  const webSearchOn = { upstream: "supported", runnable: true } as const;
+  const withWebSearch = (
+    capabilities: ModelCapabilitiesV1,
+    webSearch: ModelCapabilitiesV1["hostedTools"]["webSearch"],
+  ): ModelCapabilitiesV1 => ({
+    ...capabilities,
+    hostedTools: { ...capabilities.hostedTools, webSearch },
+  });
+  const disabled = withWebSearch(legacyCapabilities, webSearchOff);
+  const enabled = withWebSearch(legacyCapabilities, webSearchOn);
+
+  test("keeps a turn frozen before enablement runnable, without the new tool", () => {
+    const historical = registrySettings(disabled, {}, { hostedWebSearch: false });
+    const accepted = resolveTurnExecutionPolicyV1(historical, input);
+    const before = structuredClone(accepted);
+    const current = registrySettings(enabled, {}, { hostedWebSearch: true });
+    const newer = resolveTurnExecutionPolicyV1(current, input);
+    expect(newer.definitionVersion).not.toBe(accepted.definitionVersion);
+
+    const verified = assertTurnExecutionPolicyMatchesConfigV1(current, accepted, input);
+    expect(verified.policy).toEqual(before);
+    expect(accepted).toEqual(before);
+    // The accepted turn keeps the exact frozen executable definition.
+    expect(verified.model.hostedWebSearch).toBe(false);
+    expect(verified.model.capabilities.hostedTools.webSearch).toEqual(webSearchOff);
+    expect(verified.model.definitionVersion).toBe(accepted.definitionVersion);
+    const historicalModel = configuredModels(historical).find(
+      (model) => model.id === input.modelId,
+    )!;
+    expect(verified.model.capabilities).toEqual(historicalModel.capabilities);
+
+    // The next accepted logical turn resolves the newly enabled tool.
+    const next = assertTurnExecutionPolicyMatchesConfigV1(current, newer, input);
+    expect(next.model.hostedWebSearch).toBe(true);
+    expect(next.model.capabilities.hostedTools.webSearch).toEqual(webSearchOn);
+    const currentModel = configuredModels(current).find((model) => model.id === input.modelId)!;
+    expect(configuredModelForAcceptedTurnExecutionPolicy(currentModel, next.provider, newer)).toBe(
+      currentModel,
+    );
+  });
+
+  test("accepts enablement of a legacy hostedWebSearch-only registry model", () => {
+    const accepted = resolveTurnExecutionPolicyV1(
+      registrySettings(legacyCapabilities, {}, { capabilities: undefined, hostedWebSearch: false }),
+      input,
+    );
+    const current = registrySettings(
+      legacyCapabilities,
+      {},
+      { capabilities: undefined, hostedWebSearch: true },
+    );
+    expect(resolveTurnExecutionPolicyV1(current, input).definitionVersion).not.toBe(
+      accepted.definitionVersion,
+    );
+    const verified = assertTurnExecutionPolicyMatchesConfigV1(current, accepted, input);
+    expect(verified.model.hostedWebSearch).toBe(false);
+  });
+
+  test("turning web search off still fails closed", () => {
+    const accepted = resolveTurnExecutionPolicyV1(registrySettings(enabled), input);
+    for (const webSearch of [webSearchOff, { upstream: "supported", runnable: false } as const]) {
+      expect(() =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          registrySettings(withWebSearch(legacyCapabilities, webSearch)),
+          accepted,
+          input,
+        ),
+      ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+    }
+  });
+
+  test("tolerates only the exact unknown/off pre-enablement declaration", () => {
+    const accepted = resolveTurnExecutionPolicyV1(
+      registrySettings(
+        withWebSearch(legacyCapabilities, { upstream: "supported", runnable: false }),
+      ),
+      input,
+    );
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(registrySettings(enabled), accepted, input),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+  });
+
+  test("does not mask other drift or compose with the latency/modality exception", () => {
+    const accepted = resolveTurnExecutionPolicyV1(registrySettings(disabled), input);
+    const drifts = [
+      // Composition with the additive latency/input-modality subsets.
+      registrySettings({ ...enabled, latencyModes: [standard, fast] }),
+      registrySettings({ ...enabled, inputModalities: ["text", "image"] }),
+      // Other hosted tools and capabilities.
+      registrySettings({
+        ...enabled,
+        hostedTools: { ...enabled.hostedTools, xSearch: webSearchOn },
+      }),
+      registrySettings({
+        ...enabled,
+        hostedTools: { ...enabled.hostedTools, codeExecution: webSearchOn },
+      }),
+      registrySettings({ ...enabled, functionCalling: { upstream: "unknown", runnable: false } }),
+      // Model routing, limits, and pricing.
+      registrySettings(enabled, {}, { upstreamModelId: "other-model" }),
+      registrySettings(enabled, {}, { contextWindowTokens: 200_000 }),
+      registrySettings(enabled, { baseUrl: "https://other.example/v1" }),
+      registrySettings(
+        enabled,
+        {},
+        {
+          pricing: {
+            inputMicrosPerMillionTokens: 10,
+            cachedInputMicrosPerMillionTokens: 2,
+            outputMicrosPerMillionTokens: 30,
+          },
+        },
+      ),
+    ];
+    for (const [index, current] of drifts.entries()) {
+      expect(
+        () => assertTurnExecutionPolicyMatchesConfigV1(current, accepted, input),
+        `drift ${index}`,
+      ).toThrow();
+    }
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        registrySettings(enabled),
+        { ...accepted, definitionVersion: `sha256:${"f".repeat(64)}` },
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+  });
+});
+
+describe("accepted execution policy structured-output enablement", () => {
+  const off = { upstream: "unknown", runnable: false } as const;
+  const on = { upstream: "supported", runnable: true } as const;
+  const beforeEnablement = { ...legacyCapabilities, structuredOutput: off };
+
+  test("keeps a turn accepted before structured output was declared runnable", () => {
+    const accepted = resolveTurnExecutionPolicyV1(registrySettings(beforeEnablement), input);
+    const current = registrySettings({ ...beforeEnablement, structuredOutput: on });
+    expect(resolveTurnExecutionPolicyV1(current, input).definitionVersion).not.toBe(
+      accepted.definitionVersion,
+    );
+    expect(assertTurnExecutionPolicyMatchesConfigV1(current, accepted, input).policy).toEqual(
+      accepted,
+    );
+  });
+
+  test("composes with an added capability but not with other drift", () => {
+    const accepted = resolveTurnExecutionPolicyV1(registrySettings(beforeEnablement), input);
+    const additive = {
+      ...beforeEnablement,
+      structuredOutput: on,
+      latencyModes: [standard, fast],
+      inputModalities: ["text" as const, "image" as const],
+    };
+    expect(
+      assertTurnExecutionPolicyMatchesConfigV1(registrySettings(additive), accepted, input).policy,
+    ).toEqual(accepted);
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        registrySettings({
+          ...beforeEnablement,
+          structuredOutput: on,
+          functionCalling: { upstream: "unsupported", runnable: false },
+        }),
+        accepted,
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+  });
+
+  test("disabling structured output, or enabling it from another declaration, still fails closed", () => {
+    const acceptedOn = resolveTurnExecutionPolicyV1(
+      registrySettings({ ...beforeEnablement, structuredOutput: on }),
+      input,
+    );
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        registrySettings(beforeEnablement),
+        acceptedOn,
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+    const unsupported = {
+      ...beforeEnablement,
+      structuredOutput: { upstream: "unsupported", runnable: false } as const,
+    };
+    const acceptedUnsupported = resolveTurnExecutionPolicyV1(registrySettings(unsupported), input);
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        registrySettings({ ...beforeEnablement, structuredOutput: on }),
+        acceptedUnsupported,
+        input,
       ),
     ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
   });

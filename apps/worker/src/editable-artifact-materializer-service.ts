@@ -14,6 +14,16 @@ import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { dirname } from "node:path";
 
 import {
+  ReadinessCheckFailedError,
+  UnsafeDatabaseRolePostureError,
+  createReadinessTransitionRecorder,
+  notCheckedReadiness,
+  readinessChecksOk,
+  settleReadinessCheck,
+  type ReadinessChecks,
+} from "./readiness-checks";
+
+import {
   EDITABLE_ARTIFACT_MATERIALIZER_DATABASE_ROLE,
   EDITABLE_ARTIFACT_MATERIALIZER_MAX_OUTPUT_BYTES,
   EDITABLE_ARTIFACT_MATERIALIZER_MAX_SOURCE_BYTES,
@@ -305,8 +315,33 @@ export function createEditableArtifactMaterializerService(
   const abort = new AbortController();
   const readinessTimeoutMs = input.readinessTimeoutMs ?? 2_000;
 
-  const ready = async (): Promise<void> => {
-    await withTimeout(assertDedicatedMaterializerDatabaseRole(input.db), readinessTimeoutMs);
+  let lastReadiness: ReadinessChecks | null = null;
+  const recordReadiness = createReadinessTransitionRecorder("Artifact materializer", {
+    warn: (message) =>
+      input.observability.warn(message, {
+        errorClass: "WorkerOperationError",
+        errorCode: "worker_operation_failed",
+        origin: "worker",
+      }),
+    info: (message) => input.observability.info(message),
+  });
+
+  const ready = async (): Promise<ReadinessChecks> => {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), readinessTimeoutMs);
+    try {
+      const checks: ReadinessChecks = {
+        databaseRole: await settleReadinessCheck(
+          () => assertDedicatedMaterializerDatabaseRole(input.db),
+          timeout.signal,
+        ),
+      };
+      lastReadiness = checks;
+      recordReadiness(checks);
+      return checks;
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   const run = (): Promise<void> => {
@@ -316,7 +351,10 @@ export function createEditableArtifactMaterializerService(
     }
     runPromise = (async () => {
       try {
-        await ready();
+        const checks = await ready();
+        if (!readinessChecksOk(checks)) {
+          throw new ReadinessCheckFailedError("Artifact materializer", checks);
+        }
         if (abort.signal.aborted) {
           state = "stopped";
           return;
@@ -385,27 +423,23 @@ export function createEditableArtifactMaterializerService(
     if (url.pathname === "/readyz") {
       if (state !== "ready") {
         return Response.json(
-          { ok: false, state, checks: { databaseRole: { ok: false } } },
+          { ok: false, state, checks: lastReadiness ?? notCheckedReadiness(["databaseRole"]) },
           { status: 503 },
         );
       }
-      try {
-        await ready();
-        return Response.json({
-          ok: true,
-          state,
-          runtime: input.runtimeCapability ?? {
-            mode: "production",
-            sandboxEnforced: true,
-          },
-          checks: { databaseRole: { ok: true } },
-        });
-      } catch {
-        return Response.json(
-          { ok: false, state, checks: { databaseRole: { ok: false } } },
-          { status: 503 },
-        );
+      const checks = await ready();
+      if (!readinessChecksOk(checks)) {
+        return Response.json({ ok: false, state, checks }, { status: 503 });
       }
+      return Response.json({
+        ok: true,
+        state,
+        runtime: input.runtimeCapability ?? {
+          mode: "production",
+          sandboxEnforced: true,
+        },
+        checks,
+      });
     }
     if (url.pathname === "/metrics") {
       return new Response(await input.observability.prometheusMetrics(), {
@@ -470,15 +504,32 @@ export async function assertDedicatedMaterializerDatabaseRole(db: Database): Pro
         can_delete_jobs?: unknown;
       }
     | undefined;
+  const violations: string[] = [];
   if (
     row?.current_role !== EDITABLE_ARTIFACT_MATERIALIZER_DATABASE_ROLE ||
-    row.session_role !== EDITABLE_ARTIFACT_MATERIALIZER_DATABASE_ROLE ||
-    row.can_select_jobs !== false ||
-    row.can_insert_jobs !== false ||
-    row.can_update_jobs !== false ||
-    row.can_delete_jobs !== false
+    row.session_role !== EDITABLE_ARTIFACT_MATERIALIZER_DATABASE_ROLE
   ) {
-    throw new Error("Artifact materializer database connection has an unsafe role posture");
+    violations.push(
+      `connected as role ${describeRole(row?.current_role)} (session role ${describeRole(row?.session_role)}), expected ${EDITABLE_ARTIFACT_MATERIALIZER_DATABASE_ROLE}`,
+    );
+  }
+  const jobPrivileges = (
+    [
+      ["SELECT", row?.can_select_jobs],
+      ["INSERT", row?.can_insert_jobs],
+      ["UPDATE", row?.can_update_jobs],
+      ["DELETE", row?.can_delete_jobs],
+    ] as const
+  )
+    .filter(([, granted]) => granted !== false)
+    .map(([privilege]) => privilege);
+  if (jobPrivileges.length > 0) {
+    violations.push(
+      `it has direct ${jobPrivileges.join(", ")} on editable_artifact_materialization_jobs; revoke those privileges (including grants to PUBLIC)`,
+    );
+  }
+  if (violations.length > 0) {
+    throw new UnsafeDatabaseRolePostureError("Artifact materializer", violations);
   }
 }
 
@@ -710,18 +761,8 @@ export async function createMaterializerSidecarFromEnvironment(
   });
 }
 
-async function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("readiness check timed out")), milliseconds);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+function describeRole(value: unknown): string {
+  return typeof value === "string" && value.length > 0 ? value : "unknown";
 }
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {

@@ -1,4 +1,5 @@
 import { prepareComputerNativeExecutable } from "./computer-native-executable";
+import { UnsettledCleanupError } from "./cleanup-error";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type {
@@ -125,7 +126,14 @@ export class ComputerNativeClient implements ComputerBackend {
       Object.assign(client.handshake, handshake);
       return client;
     } catch (error) {
-      await client.close();
+      try {
+        await client.close();
+      } catch (cleanupError) {
+        throw new UnsettledCleanupError(
+          [error, cleanupError],
+          "native computer helper startup cleanup failed",
+        );
+      }
       throw error;
     }
   }
@@ -230,6 +238,8 @@ export class ComputerNativeClient implements ComputerBackend {
     this.process.stdin.end();
     if (await waitForProcessClose(this.process, 3_000)) {
       await this.cleanupExecutable();
+      if (this.process.exitCode !== 0 || this.process.signalCode !== null)
+        throw new UnsettledCleanupError([], "native computer helper cleanup was not confirmed");
       return;
     }
     this.process.kill("SIGKILL");
@@ -237,6 +247,7 @@ export class ComputerNativeClient implements ComputerBackend {
       throw new Error("native computer helper did not exit after SIGKILL");
     }
     await this.cleanupExecutable();
+    throw new UnsettledCleanupError([], "native computer helper required forced termination");
   }
 
   private bindProcess(): void {
@@ -477,6 +488,12 @@ function parseCapabilities(value: unknown): ComputerSessionCapabilities {
   for (const key of keys) {
     if (typeof input[key] !== "boolean") throw new Error(`native capability ${key} is invalid`);
     output[key] = input[key];
+  }
+  if (input.pointerClickContinuation !== undefined) {
+    if (typeof input.pointerClickContinuation !== "boolean") {
+      throw new Error("native capability pointerClickContinuation is invalid");
+    }
+    output.pointerClickContinuation = input.pointerClickContinuation;
   }
   return output;
 }

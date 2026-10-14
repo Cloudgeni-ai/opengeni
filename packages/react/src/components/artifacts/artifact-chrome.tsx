@@ -25,7 +25,7 @@ import {
 import { cn } from "../../lib/cn";
 
 /**
- * Shared chrome for artifact surfaces: the OpenGeni console and embedding hosts
+ * Shared chrome for artifact surfaces: the Opengeni console and embedding hosts
  * render the same header, controls, and load states. Class names use the
  * package theme aliases, so the console's own Tailwind build and the compiled
  * `.og-root` stylesheet resolve them identically.
@@ -380,7 +380,7 @@ export type ArtifactLoadErrorView = Readonly<{
   correlationId?: string;
 }>;
 
-/** Site/editor load copy. Never surfaces raw OpenGeni API status text. */
+/** Site/editor load copy. Never surfaces raw Opengeni API status text. */
 export function artifactLoadErrorView(
   error: unknown,
   kind: ArtifactLoadErrorKind,

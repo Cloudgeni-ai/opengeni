@@ -161,7 +161,7 @@ const applicationServiceMonitors = kubectlJson<KubernetesList<{ metadata: Kubern
   "-o",
   "json",
 ]).items;
-assert(applicationServiceMonitors.length > 0, "no OpenGeni ServiceMonitor resources were found");
+assert(applicationServiceMonitors.length > 0, "no Opengeni ServiceMonitor resources were found");
 
 const platformServiceMonitors = kubectlJson<KubernetesList<{ metadata: KubernetesMetadata }>>([
   "-n",
@@ -215,7 +215,7 @@ const prometheusRules = kubectlJson<
   "-o",
   "json",
 ]).items;
-assert(prometheusRules.length > 0, "no OpenGeni PrometheusRule resources were found");
+assert(prometheusRules.length > 0, "no Opengeni PrometheusRule resources were found");
 const declaredRules = new Set(
   prometheusRules.flatMap((rule) =>
     (rule.spec?.groups ?? []).flatMap((group) =>
@@ -583,7 +583,7 @@ function gitHead(): string {
     stderr: "pipe",
   });
   if (result.exitCode !== 0) {
-    throw new Error("--source-revision is required outside an OpenGeni Git checkout");
+    throw new Error("--source-revision is required outside an Opengeni Git checkout");
   }
   return result.stdout.toString().trim();
 }
@@ -600,7 +600,7 @@ function parseArgs(values: string[]): Args {
     grafanaNamespace: "observability",
     grafanaPodSelector: "app.kubernetes.io/name=grafana",
     grafanaSidecarContainer: "grafana",
-    grafanaDashboardDirectory: "/tmp/dashboards/OpenGeni",
+    grafanaDashboardDirectory: "/tmp/dashboards/Opengeni",
     opensandbox: false,
     skipLiveApis: false,
   };

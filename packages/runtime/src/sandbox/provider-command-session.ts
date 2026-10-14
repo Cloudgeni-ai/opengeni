@@ -134,7 +134,7 @@ export type ProviderCommandSession = {
   captureCommandOutput?(result: string): Promise<boolean>;
 };
 
-const admission = new AsyncLocalStorage<number>();
+const admission = new AsyncLocalStorage<number | undefined>();
 export type PendingCommandSupervision = { managed: boolean };
 const pendingSupervision = new AsyncLocalStorage<PendingCommandSupervision>();
 export function withPendingCommandSupervision<T>(
@@ -183,4 +183,10 @@ export function withProviderCommandHandle<T>(handle: number | undefined, fn: () 
 
 export function admittedProviderCommandHandle(): number | undefined {
   return admission.getStore();
+}
+
+/** Private staging and read-only commands are not the surrounding workspace
+ * mutation. Do not lend them its one-shot retained invocation alias. */
+export function withoutProviderCommandHandle<T>(fn: () => T): T {
+  return admission.run(undefined, () => withCommandSupervisionReady(false, fn));
 }

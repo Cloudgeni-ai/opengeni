@@ -61,20 +61,30 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 | `fg-label` | Things you act on in navigation and lists: rail and settings-rail items, session titles, their icons. A hair under `fg`, never muted |
 | `fg-muted` | Descriptions, meta lines, secondary button text, section labels in a rail |
 | `fg-subtle` | Quiet meta, placeholders, separators |
-| `brand` | Neutral grey: icon, link, focus, active tab bar, selected ring. Never blue |
+| `brand` | Neutral grey: icon, focus, active tab bar, selected ring. Never blue. Text links use `og-link`, not `text-brand` |
 | `primary` | The filled primary button only ("teal wash": `primary` fill, `primary-foreground` ink, `primary-border` edge, `primary-hover`) |
 | `switch-track` / `switch-thumb` | A switch that is off |
 | `status-idle` | Green: Connected, Active, Succeeded, Installed |
 | `status-waiting` | Peach: Needs you, Needs reconnect, Pending review |
 | `status-running` | Amber: Running, Syncing |
 | `danger` | Red: Failed, Expired, destructive actions |
+| `session-update` | Teal: unread-chat dots and Following up markers only. Not a lifecycle color or navigation accent |
 
 **Titles are never grey.** Every title, heading, row title, notice title, empty-state title,
 card title, form label and legend is `fg`. `fg-muted` and `fg-subtle` are only for descriptions,
 meta, placeholders and counts.
 
+**Links are underlined.** The palette is grey, so colour alone cannot mark a link. Every text
+link (an anchor, or a button that reads as a link: "Learn more", "Use default", "Reset to
+Member", a link in chat) uses the `og-link` utility from `@opengeni/react`: `accent-strong` ink
+with a resting underline at 45% of the link's own colour, which turns full ink on hover and on
+keyboard focus (plus the focus outline). Never a hover-only underline. A meta link may set
+`text-fg-muted` next to `og-link` and the underline follows it. Row titles that open a page,
+nav items, menu rows, tabs and ghost buttons are not text links and stay un-underlined.
+
 The palette is neutral grey everywhere (no blue or slate tint). Color appears only in the
-primary button's teal wash, the soft teal/peach glow and the status hues.
+primary button's teal wash, the soft teal/peach glow, the status hues, and the
+unread-chat / Following up markers (`session-update`: light `#0f766e`, dark `#5ad4c5`).
 
 | | Light | Dark ("graphite") |
 | --- | --- | --- |
@@ -130,8 +140,8 @@ page footer, or a menu.
 top-left and a peach wash from the bottom-right over `bg`. The signed-out pages use
 `.og-page-glow`, the same two washes down the left edge of the canvas.
 
-Grey (`fg-subtle`) is Paused, Not connected, Revoked, Off. Always a dot plus a sentence-case
-label; never color alone.
+Grey (`fg-subtle`) is Paused, Disabled, Not connected, Revoked, Off. Always a dot plus a
+sentence-case label; never color alone.
 
 **Only states that need attention are shown.** A healthy object carries no status: no green
 "Connected" or "Active" badge on a row or a page header. Show Needs reconnect, Paused, Out of
@@ -318,7 +328,7 @@ Cancel and the action as the primary.
 - No scopes, IDs, UUIDs, enums, tags, endpoints or registry names outside "Technical details" or a
   CopyField.
 - Unavailable: say why and who can fix it, and disable or hide the action.
-- Errors: what happened + what to do. Never a raw `OpenGeni API 404 ... Reference: <uuid>` string;
+- Errors: what happened + what to do. Never a raw `Opengeni API 404 ... Reference: <uuid>` string;
   the reference goes in Technical details. Use `lib/api-error.ts`: `userErrorText` for toasts and
   form errors, `ErrorMessage {...apiErrorDetails(error)}` for a failed section (what happened, the
   advice, Try again, the reference behind Technical details).
@@ -346,7 +356,7 @@ Cancel and the action as the primary.
   "3 days ago" with the exact time on hover; never seconds, never ISO.
 - No ellipsis in button labels: "Delete", "Pause", "Rename", not "Delete...". A button that opens
   a dialog is still named for what it does. Progress labels ("Saving…") and loading text keep it.
-- Back links name the list they return to: "Variable sets", "Models", "Your skills". The arrow is
+- Back links name the list they return to: "Secrets", "Models", "Your skills". The arrow is
   the icon, not a character in the label.
 
 ## 7. Lists and settings on one page
@@ -385,17 +395,38 @@ Learned on Settings > Models, 27 Sep 2026.
   value or none.
 - **One row per provider.** A provider with several connection modes is one row; its page lists
   the modes as outcomes ("Pay with your ChatGPT plan", "Pay per use with an API key").
-- **Every model setting in one place: Organization > Models.** Decided 1 Oct 2026. The page is
-  three parts: **Accounts** (one list of everything that pays: credits, the organization's
-  accounts tagged by where they're available, "Everyone in Acme" or "Selected workspaces", and
-  each workspace's own accounts tagged "Design preview only"), **Workspaces** (one row per
-  workspace with its default model and payer plus its Allowed models, "GPT-6 Astra · Codex · All
-  models", and the person's own Personal workspace last), then the organization-wide Codex and
-  SuperGrok settings. A workspace row opens that workspace's model page (`?workspace=`): Default
-  model (with who pays and the one can't-run warning), Allowed models, the accounts it uses
-  (muted "Not in use" with the reason when one is set aside), its Codex and SuperGrok settings and
-  the Codex Apps row. Pages opened from it go back to it, named ("← Design preview").
-- **Connect is for the organization.** Connect account makes an organization account and asks
+- **Every model setting in one place: Organization > Models, with a scope picker.** Decided 1
+  Oct 2026, reordered 13 Oct 2026, scope picker decided 13 Oct 2026 (Bendik). The page opens with
+  **Models for: [Defaults ▾]**. Its top choice is "Defaults" (never "All workspaces": a workspace
+  that changed a rule doesn't use it), with the hint "Every workspace uses these unless it changes
+  a setting for itself. New workspaces start with them."; the other choices are the workspaces
+  (each with its tile, the Personal workspace last, one the viewer can't manage disabled with the
+  reason). Picking a workspace keeps the same page and section order but puts the picker on a
+  tinted header with a soft "Workspace" chip and "Changes here apply only to Design. Anything not
+  changed comes from the defaults." People who can't edit the defaults start on "Overview" (the
+  providers their workspaces use). Never a back-link drill-in that looks like the same page.
+  Sections, in order: **Model providers** (one list of everything that runs models: credits, the
+  organization's subscriptions and keys tagged by where they're available, "Everyone in Acme",
+  "Selected workspaces" or "Design preview only", each workspace's own tagged "Belongs to Design
+  preview", and a person's own "Only you"; the description says how many need reconnecting; the
+  action is "Connect provider"; rows keep their type: "ChatGPT Pro", "API key"), **New chats**
+  (Default model, Allowed models, Context & compaction), **Sharing subscriptions** (one switch per
+  provider with two or more subscriptions, "Share work between Codex subscriptions", on spreads
+  new chats, off keeps them on the primary; Personal subscriptions with its fallback nested under
+  it; Switch models when subscriptions run out with the fallback order nested under it; and a
+  "What workspaces can change" row opening its own page of checkboxes, never a lock link on each
+  rule). On the Defaults each rule says who uses it: "Used by every workspace" or "Used by 2 of 3
+  workspaces · Research has its own (Off)", counted only when every workspace is read; a kept
+  rule says "Used by every workspace. Workspaces can't change it." On a workspace each rule says
+  where its value comes from, with the value: "Uses the default (On)", or "Changed for Design ·
+  Use the default (On)" (one step back). Owners and admins then see **Workspaces with their own
+  settings** (only workspaces that change something, each saying what in words: "3 models
+  allowed", "Claude sharing: Off", more than two sharing rules counted), or "Every workspace uses
+  the defaults."; others see every workspace they can open. Never show a table of every
+  workspace's rules or raw setting keys. A workspace's settings are edited directly on its scope;
+  its Codex and SuperGrok settings and the Codex Apps row follow the sharing rules. Pages opened
+  from a workspace go back to it, named ("← Design preview").
+- **Connect is for the organization.** Connect provider makes an organization account and asks
   which workspaces use it: all (new ones too) or selected ones, which is its "Available in". An
   account owned by one workspace is offered only to owners and admins, and only where it is
   genuinely needed, with the reason in place: Codex Apps, usage limit resets, an API key in a
@@ -435,8 +466,16 @@ system; a new main-rail page of things follows them.
   outline, Approve (or "Approve and next") as the primary, and a ⋯ for Open entry and Approve all
   from the same chat. A decision moves straight to the next change, and the last one returns to
   the list. Edit replaces the text with the form on the same page. The learning mode is not a
-  line over the list: it lives in the page's ⋯ ("Learning · Automatic"), and an empty Review
-  says in one sentence why nothing waits, with Learning settings as its action.
+  line over the list: the page's ⋯ shows it ("Agent learning · Automatic") and opens Settings >
+  Agent learning, and an empty Review says in one sentence why nothing waits, with Agent learning
+  as its action. Settings > Agent learning links back to Review with what is waiting.
+- **One home per scope for agent settings.** Decided 4 Oct 2026. Agent learning is always
+  "Agent learning" with modes Off / Review first / Automatic. Workspace and private-chat
+  defaults, and (owners only) the organization identity, are rows on Settings > Agent learning
+  (in the Workspace section of the settings rail, Personal workspaces included; Knowledge's ⋯
+  opens it); one chat's identity, capabilities and Agent learning are the session dock's Agent
+  tab (Identity, Capabilities, Agent learning sections, each saying where its default comes
+  from). Anything else that shows one of these settings is a one-line summary linking there.
 
 ### State and truth on a page
 
@@ -512,7 +551,7 @@ account**. Each section starts with a plain text header in 14/500 naming only th
 organization, so headers don't repeat them (only where there is no picker, as for a workspace an
 admin manages without access, does the header add the name as quiet 12px meta). These are the only
 headings. Inside a section, pages fall into at most two groups set apart by space, never by a
-second level of labels: Workspace = its settings and dashboards, then its runtime (Variable sets,
+second level of labels: Workspace = its settings and dashboards, then its runtime (Secrets,
 Sandbox environments, Machines); Organization = the organization and its people (General, People,
 Workspaces, Organization identity), then what it provides, pays for and protects (Models,
 Integrations, Billing & usage, Developer, Security & data). Models is an Organization page only:
@@ -577,10 +616,10 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | Select | Menu select like the composer: title, description, payment source, a check on the selected option. The settings trigger is the 32px "field" style, as wide as its content (at least 180px). |
 | Disclosure | Advanced row: full-width row, rotating chevron, title and a summary of current values. |
 | Status badge | Plain dot + label in rows; the bordered 22px pill with a 6px dot in page headers. |
-| Usage meter | A 4px bar with "22% left" and the reset time on the account page. In an account row, `UsageReadout`: "78% left this week" and a 64px bar, right-aligned against the chevron (words only where the row folds on a phone). |
+| Usage meter | A 4px bar with "22% left" and the reset time on the account page. In an account row, `UsageReadout`: "78% left this week" and a 64px bar, right-aligned against the chevron, with when the limits reset under it in short times ("Resets Mon 09:00 · 5-hour 17:10"; the shown window first). Words only where the row folds on a phone. |
 | Form | **Form page** (section 8) for every create and edit flow; a centered dialog only for one-field prompts. |
 | Destructive confirm | Consequence list by default; type-to-confirm for permanent, wide-impact actions; Undo toast instead of a dialog when reversible; a blocked variant with no destructive button. |
-| Secret values | Write-only: values are never shown after saving; Replace value only. |
+| Secret values | Use = reveal: whoever may use an item may reveal it, one field at a time, on request (Reveal, Copy; hidden again on leave); never shown by default or in lists. Agents get references, not values. |
 | Cadence picker | Sentence builder: [Every weekday] at [08:00] [Oslo time], with a live next-run line. |
 | Access list | Inline role select that saves immediately and a ⋯ menu with Remove, the same rows in every place access is edited. |
 | Foundations | One `LogoTile` (40/32/24px): brand logos on a light tile in both themes, fallback icons on `surface-2`. `RelativeTime` ("3 days ago", exact time on hover), `CopyField` for IDs, `DiffView` with revision history. |

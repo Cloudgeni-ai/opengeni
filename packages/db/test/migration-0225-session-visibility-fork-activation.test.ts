@@ -462,7 +462,7 @@ describe("migration 0303 session tenancy product activation", () => {
     }
   });
 
-  test("adds restrictive visibility policies to every direct session reference", async () => {
+  test("protects session content by visibility and admin grants by organization", async () => {
     if (!shared) return;
     const missing = await shared.admin<Array<{ tableName: string }>>`
       select distinct relation.relname as "tableName"
@@ -489,7 +489,43 @@ describe("migration 0303 session tenancy product activation", () => {
         )
       order by relation.relname
     `;
-    expect(Array.from(missing)).toEqual([]);
+    // Admin grants are organization authority, not conversation content. Their
+    // resolver reads the grant before establishing session visibility. All other
+    // session references still require the restrictive visibility policy,
+    // except published Site versions and events (0731): those belong to the
+    // workspace, and their source chat is only provenance, which the API
+    // redacts for anyone who cannot read that chat. Task vaults (0739) name
+    // their root session, but `vaults` has no direct app DML: every read goes
+    // through vault routines that check the caller's session reach.
+    expect(Array.from(missing)).toEqual([
+      { tableName: "session_admin_access" },
+      { tableName: "vaults" },
+      { tableName: "workspace_artifact_events" },
+      { tableName: "workspace_artifact_versions" },
+    ]);
+    const adminPolicies = await shared.admin<
+      Array<{
+        forced: boolean;
+        name: string;
+        using: string;
+        check: string;
+      }>
+    >`
+      select relation.relforcerowsecurity as forced, policy.polname as name,
+        pg_get_expr(policy.polqual, policy.polrelid) as using,
+        pg_get_expr(policy.polwithcheck, policy.polrelid) as check
+      from pg_class relation
+      join pg_policy policy on policy.polrelid = relation.oid
+      where relation.oid = 'session_admin_access'::regclass
+    `;
+    expect(Array.from(adminPolicies)).toEqual([
+      {
+        forced: true,
+        name: "session_admin_access_account",
+        using: "(account_id = opengeni_private.current_account_id())",
+        check: "(account_id = opengeni_private.current_account_id())",
+      },
+    ]);
     const manualTables = [
       "connector_action_requests",
       "memory_slack_publications",
@@ -1168,7 +1204,7 @@ describe("migration 0303 session tenancy product activation", () => {
     ).toEqual({ ...committed, replay: true });
   }, 180_000);
 
-  test("blocks transition to private while an interaction holder retains sandbox access", async () => {
+  test("an interaction holder on the sandbox blocks forks but not a change to private", async () => {
     if (!shared || !client) return;
     const value = await sessionVisibilityFixture();
     const [sessionRow] = await shared.admin<{ sandboxGroupId: string }[]>`
@@ -1190,6 +1226,16 @@ describe("migration 0303 session tenancy product activation", () => {
         'interaction', ${holderId}, ${value.session.id}
       )`;
 
+    // The full quiescence predicate (whole-session forks) still waits for it.
+    const failure = await shared.admin`select assert_session_tenancy_quiescent(
+        ${value.ownerGrant.accountId}::uuid, ${value.ownerGrant.workspaceId}::uuid,
+        ${value.session.id}::uuid, false)`.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ code: "55P03", detail: "active_sandbox_access" });
+    // Since 0769 it does not refuse Only me: a viewer's stream token carries the
+    // authority epoch it was minted under and is re-authorized on refresh.
     await expect(
       transitionSessionVisibility(client.db, {
         workspaceId: value.ownerGrant.workspaceId,
@@ -1197,26 +1243,7 @@ describe("migration 0303 session tenancy product activation", () => {
         actorSubjectId: value.ownerSubjectId,
         targetVisibility: "user_private",
         expectedAuthorityEpoch: 1,
-        operationKey: `interaction-blocked:${crypto.randomUUID()}`,
-      }),
-    ).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "active_sandbox_access",
-    });
-    const [unchanged] = await shared.admin<{ visibility: string; epoch: number }[]>`
-      select visibility, authority_epoch as epoch from sessions where id = ${value.session.id}`;
-    expect(unchanged).toEqual({ visibility: "workspace_shared", epoch: 1 });
-
-    await shared.admin`delete from sandbox_lease_holders where lease_id = ${lease!.id}`;
-    await expect(
-      transitionSessionVisibility(client.db, {
-        workspaceId: value.ownerGrant.workspaceId,
-        sessionId: value.session.id,
-        actorSubjectId: value.ownerSubjectId,
-        targetVisibility: "user_private",
-        expectedAuthorityEpoch: 1,
-        operationKey: `interaction-released:${crypto.randomUUID()}`,
+        operationKey: `interaction-held:${crypto.randomUUID()}`,
       }),
     ).resolves.toMatchObject({ visibility: "user_private", authorityEpoch: 2 });
   });
@@ -1354,7 +1381,7 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(sharedGoalRevisions[0]?.sessionId).toBe(value.session.id);
   });
 
-  test("returns a typed conflict instead of cancelling a nonquiescent source", async () => {
+  test("returns a typed work conflict and pauses an active goal only with consent", async () => {
     if (!shared || !client) return;
     const value = await sessionVisibilityFixture();
     await shared.admin`
@@ -1370,9 +1397,10 @@ describe("migration 0303 session tenancy product activation", () => {
         operationKey,
       }),
     ).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "active_goal",
+      name: "SessionVisibilityWorkConflictError",
+      reason: "active_work",
+      work: { activeGoal: true },
+      liveAttemptCount: 0,
     });
     const [unchanged] = await shared.admin<
       Array<{ visibility: string; epoch: number; goalStatus: string }>
@@ -1387,8 +1415,6 @@ describe("migration 0303 session tenancy product activation", () => {
       epoch: 1,
       goalStatus: "active",
     });
-    await shared.admin`
-      update session_goals set status = 'completed' where session_id = ${value.session.id}`;
     expect(
       await transitionSessionVisibility(client.db, {
         workspaceId: value.ownerGrant.workspaceId,
@@ -1397,8 +1423,12 @@ describe("migration 0303 session tenancy product activation", () => {
         targetVisibility: "user_private",
         expectedAuthorityEpoch: 1,
         operationKey,
+        stopActiveWork: true,
       }),
     ).toMatchObject({ changed: true, authorityEpoch: 2 });
+    const [paused] = await shared.admin<Array<{ goalStatus: string }>>`
+      select status as "goalStatus" from session_goals where session_id = ${value.session.id}`;
+    expect(paused).toEqual({ goalStatus: "paused" });
   });
 
   test("denies a suspended owner and rejects direct authority writes", async () => {

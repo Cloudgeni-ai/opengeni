@@ -1,7 +1,7 @@
 # `@opengeni/browserd`
 
 Placement-resident browser controller. It hides the pinned native driver, owns
-target generations and operation receipts, and exposes only OpenGeni interaction
+target generations and operation receipts, and exposes only Opengeni interaction
 contracts. Raw driver sockets and CDP endpoints are not product APIs.
 
 The pinned `agent-browser` binary owns Chromium/profile lifecycle only. Browserd
@@ -10,6 +10,21 @@ page target independently, and owns semantic observation, action dispatch,
 screenshots, and live frames. Mutations serialize per target; different targets
 remain concurrent. Live-frame subscribers share one target screencast, receive a
 latest-frame-wins stream, and every upstream frame is acknowledged immediately.
+
+Page-inspection and input CDP command deadlines report `tab_not_responding` with
+close-and-reopen (or manual reload) guidance, not browser loss or a generic network failure. This is a
+definite diagnosis that the tab did not answer in time; it does not prove why
+(a hung renderer and an excessively slow page can both cause it). Reads and
+pre-input failures are non-retryable until explicit recovery. Browserd does not
+reload, close, replace the browser, or replay input automatically. Healthy peer
+tabs remain available. If input was already sent, the receipt retains
+`outcome_unknown` with the same `tab_not_responding` diagnosis and warns not to
+repeat the action. Actual socket loss remains a separate transport failure.
+
+A tab whose renderer has crashed (including a restored tab that crashed before
+anything attached to it) reports `tab_crashed` with open-a-new-tab guidance as
+soon as an operation touches it. It is definite and non-retryable; browserd
+does not close or replace the tab.
 
 Managed Chromium launches request a 64 MiB HTTP disk-cache budget instead of
 Chromium's host-disk-derived default. This bounds disposable response caching,
@@ -35,12 +50,21 @@ proven live process, or launches only after complete proof that the old process
 and other profile writers are absent. Unsettled launch receipts prevent another
 launch. Attached browsers, ephemeral contexts, and unattested directories do not
 enter this path. Accepted interaction commands remain replay-only receipts.
-Live reattachment additionally requires a headless browser's direct lineage to
-the pinned daemon in its exact private socket namespace. Initial headless macOS
-attestation cross-checks the profile lock and CDP browser PID with that lineage,
-process birth and executable. Missing, helper or conflicting daemon lineage is
-refused. Retirement closes both proven processes; uncertain predecessor cleanup
-retains the directory and holder for retry, including after a proved browser stop.
+Graceful controller shutdown suspends an eligible runtime by detaching only its
+own CDP transport: the browser keeps running with its tabs and unsaved page
+state, and the next controller (a restart, or a later release of the agent)
+adopts that same process. Live reattachment works for headed and headless
+browsers. Besides the receipt's process proof, the profile lock must still
+name the browser. If its launcher daemon is still running, it must be the
+browser's direct parent and the only live record in the exact private socket
+namespace; it is recorded by its own running executable, so a launcher from an
+earlier release is adopted too. A launcher that was killed (for example with
+the rest of a stopped service) leaves the proven browser adoptable on its own;
+a stale record whose PID now names an unrelated process is refused. Initial
+headless macOS attestation cross-checks the profile lock and CDP browser PID
+with that lineage, process birth and executable. Retirement closes the proven
+processes; uncertain predecessor cleanup retains the directory and holder for
+retry, including after a proved browser stop.
 Explicit close records retirement before process cleanup. If retirement
 settlement fails, other stores close while the exact directory and cleanup
 holder remain available for retry; removal requires completed retirement and
@@ -142,6 +166,13 @@ authority additionally opens/selects/closes targets and submits the same fenced
 `BrowserActionCommand` used in-process. Admin authority alone creates, rotates,
 lists, and ends sessions. Browser origins are deny-by-default and explicitly
 allowlisted; non-browser placement clients omit `Origin`.
+
+Control clients can explicitly open a tab through
+`POST /v1/browser-sessions/:id/targets/open-with-inventory`. It returns the owned
+tab inventory with session/controller and target/document generations after
+navigation, without collecting an accessibility tree. The ordinary tab-open
+route still returns its page observation. An unsupported controller refuses the
+inventory route; a failed or uncertain open is never replayed on another route.
 
 Both canonical sandbox images compile the service from this package, copy the
 exact `agent-browser` 0.33.2 native binary for the target architecture, verify its

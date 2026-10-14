@@ -16,7 +16,7 @@ Specialized build boundaries remain explicit:
   and React barrels during migration validation, so this stays until that correctness defect is
   fixed and the full external-consumer matrix proves parity;
 - `apps/web` uses Vite/Rolldown because TanStack Router and Tailwind provide supported Vite
-  plugins and OpenGeni's payload budgets depend on custom Rolldown chunk groups;
+  plugins and Opengeni's payload budgets depend on custom Rolldown chunk groups;
 - Temporal owns the deterministic workflow webpack bundle consumed by its Worker API;
 - `packages/ogtool` uses Bun's bundler for its portable all-in-one CommonJS executable.
 

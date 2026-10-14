@@ -13,7 +13,7 @@ import {
 } from "@/lib/composer-connectors";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
-// THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
+// THIS RUN? (when machines exist) → (C) rig or machine fields.
 // Goals are set by the agent (or later surfaces), not at create.
 //
 // "Where should this run?" is a first-class segmented control with two kinds:
@@ -30,9 +30,7 @@ import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
   ModelMark,
-  modelDisplayName,
   useChannels,
-  useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
@@ -44,18 +42,9 @@ import {
   type NewSessionSelectionHistory,
   type Rig,
   type SessionRealtimeModel,
-  type VariableSet,
-  type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import {
-  ChevronDownIcon,
-  CreditCardIcon,
-  FolderIcon,
-  LockIcon,
-  PlusIcon,
-  ServerCogIcon,
-} from "lucide-react";
+import { ChevronDownIcon, CreditCardIcon, FolderIcon, LockIcon, PlusIcon } from "lucide-react";
 import {
   createElement,
   lazy,
@@ -79,6 +68,7 @@ import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/worksp
 import {
   RunsOnMenuBody,
   RunsOnNotice,
+  UsageLimitMenuBody,
   VisibilityMenuBody,
   hasRunsOnChoices,
   runsOnAttention,
@@ -86,12 +76,18 @@ import {
   runsOnSummary,
   visibilitySummary,
 } from "@/components/session/new-session-settings-menu";
+import {
+  NO_SESSION_USAGE_LIMIT,
+  parseSessionUsageLimitDraft,
+  sessionUsageLimitCapability,
+  sessionUsageLimitDraftSummary,
+  type SessionUsageLimitDraft,
+} from "@/lib/session-usage-limit";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
 } from "@/components/repository-picker";
-import { NewSessionVariableSetPicker } from "@/components/session/new-session-variable-set-picker";
 import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
@@ -102,11 +98,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
-import { Select } from "@/components/ui/select";
+import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "@/lib/transient-retry";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
+import { StatusDot } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
@@ -121,6 +116,7 @@ import {
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { composerFallbackModel } from "@/lib/model-access-onboarding";
+import { useForgetLastSession } from "@/lib/last-session-memory";
 import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
@@ -132,7 +128,6 @@ import {
   runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
-import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { attachManualRepository } from "@/lib/manual-repositories";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
@@ -144,17 +139,30 @@ import {
   reconcileNewSessionFixedResources,
   recoverNewSessionPersonalResourceAttachment,
   resolvePersonalResourceOwnerScope,
-  selectableSessionVariableSets,
 } from "@/lib/personal-resource-attachments";
-import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
+import {
+  recentSessionModelPresentation,
+  recentSessionStatus,
+  recentSessionsForHome,
+  relativeTimeLabel,
+  sessionRepoLabel,
+} from "@opengeni/react/session-list-model";
+import { signupStarterSet } from "@/lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
 } from "@/lib/use-workspace-model-catalog";
 import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
 import { ComposerCapabilitiesChip } from "@/components/composer-capabilities-chip";
+import { useVaults } from "@opengeni/react";
+import {
+  SessionSecretsMenuBody,
+  draftSecretsRows,
+  sessionSecretsSummary,
+} from "@/components/secrets/session-secrets-panel";
 import {
   capabilityAvailability,
+  capabilityOn,
   capabilitySummary,
   draftFromRequest,
   requestFromDraft,
@@ -170,7 +178,6 @@ import {
   rememberedMachineFolder,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
-  workspaceDefaultRigOptionLabel,
   type SessionDraft,
 } from "@/lib/session-create";
 import {
@@ -184,7 +191,6 @@ import {
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
 import { userErrorText } from "@/lib/api-error";
-import { cn } from "@/lib/utils";
 import {
   newSessionCreateSnapshot,
   runNewSessionRouteSubmission,
@@ -221,7 +227,8 @@ export function SessionsIndexRoute({
   workspaceId: string;
   launch?: ComposerLaunchSearch;
 }) {
-  const { accessKeyVersion } = useAppContext();
+  const { accessKeyVersion, accessContext } = useAppContext();
+  useForgetLastSession(accessContext.subjectId, workspaceId);
   return (
     <SessionsIndexRouteContent
       key={`${workspaceId}:${accessKeyVersion}`}
@@ -311,7 +318,6 @@ function SessionsIndexRouteContent({
     { panel: "capabilities"; nonce: number } | undefined
   >(undefined);
   // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
-  const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
   const agentAvailability = useMemo(
     () => capabilityAvailability(context.clientConfig.agentConfig),
     [context.clientConfig.agentConfig],
@@ -324,74 +330,67 @@ function SessionsIndexRouteContent({
       }),
     [workspace?.settings],
   );
-  const composerAgentCapabilities = agentConfigEnabled
-    ? {
-        customized: draft.agentCapabilities !== undefined,
-        draft:
-          draft.agentCapabilities !== undefined
-            ? draftFromRequest(draft.agentCapabilities)
-            : workspaceAgentDraft,
-        availability: agentAvailability,
-        onCustomizedChange: (customized: boolean) =>
-          setDraft((current) => {
-            if (!customized) {
-              const { agentCapabilities: _dropped, ...rest } = current;
-              return rest;
-            }
-            return {
-              ...current,
-              agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
-            };
-          }),
-        onChange: (next: AgentCapabilityDraft) =>
-          setDraft((current) => ({
-            ...current,
-            agentCapabilities: requestFromDraft(next, agentAvailability),
-          })),
-      }
-    : undefined;
+  const composerAgentCapabilities = {
+    customized: draft.agentCapabilities !== undefined,
+    draft:
+      draft.agentCapabilities !== undefined
+        ? draftFromRequest(draft.agentCapabilities)
+        : workspaceAgentDraft,
+    availability: agentAvailability,
+    onCustomizedChange: (customized: boolean) =>
+      setDraft((current) => {
+        if (!customized) {
+          const { agentCapabilities: _dropped, ...rest } = current;
+          return rest;
+        }
+        return {
+          ...current,
+          agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+        };
+      }),
+    onChange: (next: AgentCapabilityDraft) =>
+      setDraft((current) => ({
+        ...current,
+        agentCapabilities: requestFromDraft(next, agentAvailability),
+      })),
+  };
+  // "+" > Secrets: which vaults this chat may use. Shown only while its agent
+  // can use secrets (the workspace default or this chat's own capabilities).
+  const draftSecretsOn =
+    agentAvailability.isAvailable("secrets") &&
+    capabilityOn(composerAgentCapabilities.draft.values, "secrets");
+  const canListSecrets =
+    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list") ||
+    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list");
+  const draftVaults = useVaults({
+    client: context.client,
+    workspaceId,
+    enabled: canListSecrets && draftSecretsOn,
+  });
+  const draftVaultPolicy = draft.vaultPolicy ?? { mode: "all" as const };
+  const draftVaultRows = draftVaults.vaults
+    ? draftSecretsRows(draftVaults.vaults, draftVaultPolicy)
+    : null;
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
   );
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
-  const canAttachVariableSets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "variable-sets:attach",
-  );
-  const canUseVariableSets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "variable-sets:use",
-  );
-  const canListVariableSets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "variable-sets:list",
-  );
-  const canListVariableSetSecrets = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "secrets:list",
-  );
-  const canLoadVariableSetCatalog =
-    canAttachVariableSets && canUseVariableSets && canListVariableSets && canListVariableSetSecrets;
-  const canResolveVariableSetAttachments =
-    canAttachVariableSets && canUseVariableSets && !canLoadVariableSetCatalog;
-  const variableSets = useVariableSets({
-    enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
-  });
   const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
   const rigs = useWorkspaceRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
     reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
+    defaultVisibility?: "private" | "workspace";
   } | null>(null);
   const tenancyCapabilityGeneration = useRef(0);
+  // Whether the person picked who can see this new chat. Until they do, it
+  // starts with the organization's default.
+  const visibilityChosenRef = useRef(false);
   useEffect(() => {
     const generation = ++tenancyCapabilityGeneration.current;
+    visibilityChosenRef.current = false;
     setTenancyCapabilities(null);
     void context.client
       .getSessionTenancyCreateCapabilities(workspaceId)
@@ -401,6 +400,10 @@ function SessionsIndexRouteContent({
         if (!capabilities.canCreatePrivate) {
           setDraft((current) =>
             current.visibility === "private" ? { ...current, visibility: "workspace" } : current,
+          );
+        } else if (capabilities.defaultVisibility === "private" && !visibilityChosenRef.current) {
+          setDraft((current) =>
+            current.visibility === "private" ? current : { ...current, visibility: "private" },
           );
         }
       })
@@ -430,114 +433,23 @@ function SessionsIndexRouteContent({
   });
   const personalResourcesAvailable =
     personalOwnerScope !== null && (personalWorkspace || tenancyCapabilities?.activated === true);
-  const selectableVariableSets = canLoadVariableSetCatalog
-    ? selectableSessionVariableSets(variableSets.variableSets, {
-        canAttach: canAttachVariableSets,
-        canUse: canUseVariableSets,
-        personalResourcesAvailable,
-      })
-    : [];
   const personalResourceEligibilitySettled =
     personalWorkspace || personalOwnerScope === null || tenancyCapabilities !== null;
-  const selectableRigs = rigs.rigs.filter(
-    (rig) => rig.scope !== "user" || personalResourcesAvailable,
-  );
+  // Sandbox Environments configure the managed sandbox; a deployment without
+  // one has nothing for them to apply to.
+  const noManagedSandbox = defaultSandboxBackend === "none";
+  const selectableRigs = noManagedSandbox
+    ? []
+    : rigs.rigs.filter((rig) => rig.scope !== "user" || personalResourcesAvailable);
   const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
-  const selectedRigDefaultVariableSetIds = selectedRig?.activeVersion?.defaultVariableSetIds ?? [];
-  const selectedRigDefaultVariableSetIdsKey = selectedRigDefaultVariableSetIds.join("\u0000");
-  const variableSetAttachmentIds = [
-    ...new Set([...draft.variableSetIds, ...selectedRigDefaultVariableSetIds]),
-  ];
-  const variableSetAttachmentIdsKey = variableSetAttachmentIds.join("\u0000");
-  const variableSetAttachmentResolutionGeneration = useRef(0);
-  const [variableSetAttachmentResolution, setVariableSetAttachmentResolution] = useState<{
-    key: string;
-    variableSets: VariableSetAttachmentMetadata[];
-    error: Error | null;
-  }>({ key: "", variableSets: [], error: null });
-  const resolveVariableSetAttachments = useLatestCallback(async (): Promise<void> => {
-    const generation = ++variableSetAttachmentResolutionGeneration.current;
-    if (
-      !fixedResourceCatalogEnabled ||
-      !canResolveVariableSetAttachments ||
-      variableSetAttachmentIds.length === 0
-    ) {
-      setVariableSetAttachmentResolution({
-        key: variableSetAttachmentIdsKey,
-        variableSets: [],
-        error: null,
-      });
-      return;
-    }
-    setVariableSetAttachmentResolution({ key: "", variableSets: [], error: null });
-    try {
-      const result = await context.client.resolveVariableSetAttachments(workspaceId, {
-        variableSetIds: variableSetAttachmentIds,
-      });
-      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
-      setVariableSetAttachmentResolution({
-        key: variableSetAttachmentIdsKey,
-        variableSets: result.variableSets,
-        error: null,
-      });
-    } catch (cause) {
-      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
-      setVariableSetAttachmentResolution({
-        key: variableSetAttachmentIdsKey,
-        variableSets: [],
-        error: cause instanceof Error ? cause : new Error(String(cause)),
-      });
-    }
-  });
-  useEffect(() => {
-    void resolveVariableSetAttachments();
-  }, [
-    resolveVariableSetAttachments,
-    variableSetAttachmentIdsKey,
-    canResolveVariableSetAttachments,
-    fixedResourceCatalogEnabled,
-  ]);
-  const variableSetAttachmentResolutionCurrent =
-    variableSetAttachmentResolution.key === variableSetAttachmentIdsKey;
-  const resolvedVariableSetAttachments = variableSetAttachmentResolutionCurrent
-    ? variableSetAttachmentResolution.variableSets
-    : [];
-  const resolvedVariableSetIds = canLoadVariableSetCatalog
-    ? selectableVariableSets.map((variableSet) => variableSet.id)
-    : canResolveVariableSetAttachments
-      ? resolvedVariableSetAttachments.map((variableSet) => variableSet.id)
-      : [];
-  const resolvedVariableSetIdsKey = resolvedVariableSetIds.join("\u0000");
-  const variableSetResolutionLoading = canLoadVariableSetCatalog
-    ? variableSets.loading
-    : canResolveVariableSetAttachments
-      ? !variableSetAttachmentResolutionCurrent
-      : false;
-  const variableSetResolutionError = canLoadVariableSetCatalog
-    ? variableSets.error
-    : canResolveVariableSetAttachments && variableSetAttachmentResolutionCurrent
-      ? variableSetAttachmentResolution.error
-      : null;
-  const variableSetsSettled =
-    (canLoadVariableSetCatalog || canResolveVariableSetAttachments) &&
-    personalResourceEligibilitySettled &&
-    !variableSetResolutionLoading &&
-    variableSetResolutionError === null;
   const selectableRigIdsKey = selectableRigs.map((rig) => rig.id).join("\u0000");
-  const selectedFixedResourceKey = [...draft.variableSetIds, `rig:${draft.rigId}`].join("\u0000");
   const fixedResourceSelection = reconcileNewSessionFixedResources({
-    selectedVariableSetIds: draft.variableSetIds,
     selectedRigId: draft.rigId,
-    selectedRigDefaultVariableSetIds,
-    selectableVariableSetIds: fixedResourceCatalogEnabled
-      ? resolvedVariableSetIds
-      : draft.variableSetIds,
     selectableRigIds: fixedResourceCatalogEnabled
       ? selectableRigs.map((rig) => rig.id)
       : draft.rigId
         ? [draft.rigId]
         : [],
-    variableSetsSettled: !fixedResourceCatalogEnabled || variableSetsSettled,
     rigsSettled:
       !fixedResourceCatalogEnabled ||
       (personalResourceEligibilitySettled && !rigs.loading && rigs.error === null),
@@ -545,67 +457,27 @@ function SessionsIndexRouteContent({
   const fixedResourceCatalogError =
     draft.compute.kind === "sandbox" &&
     newSessionFixedResourceCatalogFailed({
-      selectedVariableSetIds: draft.variableSetIds,
       selectedRigId: draft.rigId,
       selectionResolved: fixedResourceSelection.selectionResolved,
-      variableSetCatalogFailed: variableSetResolutionError !== null,
       rigCatalogFailed: rigs.error !== null,
     });
   useEffect(() => {
     setDraft((current) => {
       if (current.compute.kind !== "sandbox") return current;
       const reconciled = reconcileNewSessionFixedResources({
-        selectedVariableSetIds: current.variableSetIds,
         selectedRigId: current.rigId,
-        selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey
-          ? selectedRigDefaultVariableSetIdsKey.split("\u0000")
-          : [],
-        selectableVariableSetIds: resolvedVariableSetIdsKey
-          ? resolvedVariableSetIdsKey.split("\u0000")
-          : [],
         selectableRigIds: selectableRigIdsKey ? selectableRigIdsKey.split("\u0000") : [],
-        variableSetsSettled,
         rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
       });
-      if (
-        reconciled.variableSetIds.length === current.variableSetIds.length &&
-        reconciled.variableSetIds.every((id, index) => id === current.variableSetIds[index]) &&
-        reconciled.rigId === current.rigId
-      ) {
-        return current;
-      }
-      return {
-        ...current,
-        variableSetIds: reconciled.variableSetIds,
-        variableSetId: reconciled.variableSetIds.at(-1) ?? "",
-        rigId: reconciled.rigId,
-      };
+      return reconciled.rigId === current.rigId ? current : { ...current, rigId: reconciled.rigId };
     });
   }, [
+    draft.rigId,
     personalResourceEligibilitySettled,
     rigs.error,
     rigs.loading,
-    selectedFixedResourceKey,
-    selectedRigDefaultVariableSetIdsKey,
     selectableRigIdsKey,
-    resolvedVariableSetIdsKey,
-    variableSetsSettled,
   ]);
-  const personalAttachmentVariableSetIds = [
-    ...new Set([
-      ...(selectedRig?.activeVersion?.defaultVariableSetIds ?? []),
-      ...draft.variableSetIds,
-    ]),
-  ];
-  const selectedPersonalVariableSets = personalAttachmentVariableSetIds.flatMap((variableSetId) => {
-    const variableSet = selectableVariableSets.find((candidate) => candidate.id === variableSetId);
-    if (variableSet?.scope === "user") return [{ id: variableSet.id, name: variableSet.name }];
-    return resolvedVariableSetAttachments.some(
-      (candidate) => candidate.id === variableSetId && candidate.scope === "user",
-    )
-      ? [{ id: variableSetId, name: "Personal Variable Set" }]
-      : [];
-  });
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
@@ -616,6 +488,7 @@ function SessionsIndexRouteContent({
     rigs: selectableRigs,
     workspaceDefaultRigId: workspace?.defaultRigId ?? null,
     selfhostedPrimary: defaultSandboxBackend === "selfhosted",
+    noManagedSandbox,
     // A 404 means Connected Machines are off here, not a failure.
     fleetLoadFailed:
       fleet.error != null &&
@@ -638,15 +511,13 @@ function SessionsIndexRouteContent({
   const personalMachineSelected = selectedMachine?.scope === "user";
   const selectedPersonalResourceNames =
     draft.compute.kind === "sandbox"
-      ? [
-          ...selectedPersonalVariableSets.map((variableSet) => variableSet.name),
-          ...(selectedRig?.scope === "user" ? [selectedRig.name] : []),
-        ]
+      ? selectedRig?.scope === "user"
+        ? [selectedRig.name]
+        : []
       : personalMachineSelected && selectedMachine
         ? [selectedMachine.name]
         : [];
   const personalResourceSelectionKey = personalResourceSelectionIdentityKey({
-    variableSetIds: selectedPersonalVariableSets.map((variableSet) => variableSet.id),
     rigId: selectedRig?.scope === "user" ? selectedRig.id : null,
     connectedMachineId:
       personalMachineSelected && selectedMachine ? selectedMachine.enrollmentId : null,
@@ -665,14 +536,7 @@ function SessionsIndexRouteContent({
     const generation = ++personalResourceCatalogRefreshGeneration.current;
     setPersonalResourceCatalogRefreshPending(true);
     try {
-      await Promise.all([
-        canLoadVariableSetCatalog
-          ? variableSets.refresh()
-          : canResolveVariableSetAttachments
-            ? resolveVariableSetAttachments()
-            : Promise.resolve(),
-        canUseRigs ? rigs.refresh() : Promise.resolve(),
-      ]);
+      if (canUseRigs) await rigs.refresh();
     } finally {
       if (personalResourceCatalogRefreshGeneration.current === generation) {
         setPersonalResourceCatalogRefreshPending(false);
@@ -730,6 +594,13 @@ function SessionsIndexRouteContent({
     context.setSelectedCapabilityToolIds(selection.mcpServerIds);
   };
   const [submitting, setSubmitting] = useState(false);
+  // The new chat's usage limit: local to this composer (never the synced
+  // draft or a remembered default), and only offered when the server can
+  // enforce it.
+  const usageLimitCapability = sessionUsageLimitCapability(context.clientConfig);
+  const [usageLimitDraft, setUsageLimitDraft] =
+    useState<SessionUsageLimitDraft>(NO_SESSION_USAGE_LIMIT);
+  const [usageLimitSendBlocked, setUsageLimitSendBlocked] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1198,6 +1069,17 @@ function SessionsIndexRouteContent({
       ) {
         return false;
       }
+      // A chosen limit must be a valid amount; an older server never gets one.
+      const usageLimit =
+        usageLimitCapability === "enabled" ? parseSessionUsageLimitDraft(usageLimitDraft) : null;
+      if (createdSessionAuthority === null && usageLimit && !usageLimit.ok) {
+        setUsageLimitSendBlocked(true);
+        toast.error("Check the usage limit", {
+          description: `${usageLimit.error} Change it under + > Usage limit.`,
+        });
+        return false;
+      }
+      const usageLimitMicros = usageLimit?.ok ? usageLimit.limitMicros : null;
       const model = policy?.model ?? persistedValue.model;
       const reasoningEffort = policy?.effort ?? persistedValue.reasoningEffort;
       const latencyMode = policy?.latency ?? persistedValue.latencyMode;
@@ -1236,9 +1118,7 @@ function SessionsIndexRouteContent({
                 // newer unsent message merely to start a realtime session.
                 const flushed = await newSessionDraft.flush();
                 if (!flushed) {
-                  toast.error("Couldn't save the draft", {
-                    description: draftSaveFailureText(newSessionDraft),
-                  });
+                  reportDraftSaveFailure(newSessionDraft);
                   return null;
                 }
                 const submission = submissionFromSessionDraft(
@@ -1271,6 +1151,7 @@ function SessionsIndexRouteContent({
                     expectedNewSessionDraftRevision: flushed.revision,
                     newSessionDraftToolPolicy: persistedToolPolicy,
                     agentLearning: draft.agentLearning,
+                    usageLimitMicros,
                     visibility: newSessionCreateVisibility(
                       personalWorkspace,
                       submission.options.visibility ?? "workspace",
@@ -1280,7 +1161,8 @@ function SessionsIndexRouteContent({
                       draftConflict = newSessionDraft.captureConflict(error);
                       outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
-                      return draftConflict;
+                      // A brief outage shows the updating notice, not a toast.
+                      return draftConflict || newSessionDraft.reportUnavailable(error);
                     },
                   },
                 );
@@ -1289,13 +1171,16 @@ function SessionsIndexRouteContent({
                   if (!outcomeUnknown) await preserveNewerLocalDraft();
                   return null;
                 }
+                setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+                setUsageLimitSendBlocked(false);
                 return {
                   sessionId: created.id,
                   settleDraft: async () => true,
                 };
               }
               await preserveNewerLocalDraft();
-              toast.error("Couldn't start voice", { description: "Try again." });
+              newSessionDraft.clearError();
+              toast.error("Couldn't start voice", { description: DRAFT_CHANGED_DURING_SEND_TEXT });
               return null;
             }
 
@@ -1303,9 +1188,7 @@ function SessionsIndexRouteContent({
             for (let attempt = 0; attempt < 3; attempt += 1) {
               const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
-                toast.error("Couldn't save the draft", {
-                  description: draftSaveFailureText(newSessionDraft),
-                });
+                reportDraftSaveFailure(newSessionDraft);
                 return null;
               }
               const submission = submissionFromSessionDraft(
@@ -1338,6 +1221,7 @@ function SessionsIndexRouteContent({
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
+                  usageLimitMicros,
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
@@ -1347,7 +1231,10 @@ function SessionsIndexRouteContent({
                     draftConflict = newSessionDraft.captureConflict(error);
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
-                    return draftConflict;
+                    // A brief outage shows the updating notice, not a toast.
+                    // An unconfirmed create keeps its idempotency key, so the
+                    // person's next Send cannot start a second session.
+                    return draftConflict || newSessionDraft.reportUnavailable(error);
                   },
                 },
               );
@@ -1356,6 +1243,9 @@ function SessionsIndexRouteContent({
                 if (!outcomeUnknown) await preserveNewerLocalDraft();
                 return null;
               }
+              // The limit belongs to the chat just created; the next starts with none.
+              setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+              setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
                 settleDraft: async () => {
@@ -1368,7 +1258,15 @@ function SessionsIndexRouteContent({
                     newSessionDraft.isCurrentSignature(visibleSignature)
                   ) {
                     setMessage("");
-                    setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
+                    visibilityChosenRef.current = false;
+                    setDraft({
+                      ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
+                      visibility:
+                        tenancyCapabilities?.canCreatePrivate === true &&
+                        tenancyCapabilities.defaultVisibility === "private"
+                          ? "private"
+                          : "workspace",
+                    });
                     attachments.removeReadyFiles(
                       submittedResources.flatMap((resource) =>
                         resource.kind === "file" ? [resource.fileId] : [],
@@ -1393,8 +1291,11 @@ function SessionsIndexRouteContent({
               };
             }
             await preserveNewerLocalDraft();
+            // Each attempt saved the draft before the create refused it, so the
+            // draft is not unsaved: clear that notice and resume autosave.
+            newSessionDraft.clearError();
             toast.error("Couldn't send", {
-              description: "Your message is still here. Try again.",
+              description: DRAFT_CHANGED_DURING_SEND_TEXT,
             });
             return null;
           },
@@ -1555,7 +1456,9 @@ function SessionsIndexRouteContent({
     resolveDraftConflict: newSessionDraft.resolveConflict,
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: newSessionDraft.conflict ? null : newSessionDraft.error,
+    // A brief outage is explained once by the updating notice below the
+    // composer, never as a red error with a request reference.
+    error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error,
     clearError: newSessionDraft.clearError,
     send: async () => await submitNewSession(null),
     steer: async () => {
@@ -1590,6 +1493,9 @@ function SessionsIndexRouteContent({
         }
       : null;
   });
+
+  // A transient outage is covered by the updating notice instead.
+  const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
 
   return createElement(
     LightboxProvider,
@@ -1645,6 +1551,7 @@ function SessionsIndexRouteContent({
           <div className="mt-6">
             <Suspense fallback={null}>
               <EmptyCreditsNotice
+                creditFunding={selectedPolicyRow?.catalog.creditFunding}
                 workspaceId={workspaceId}
                 accountId={workspace?.accountId ?? null}
                 canBuyCredits={hasAccountPermission(
@@ -1684,14 +1591,10 @@ function SessionsIndexRouteContent({
                     },
                   }}
                   menuSide="bottom"
-                  {...(composerAgentCapabilities
-                    ? {
-                        agentCapabilities: {
-                          ...composerAgentCapabilities,
-                          disabled: busy || newSessionDraft.loading,
-                        },
-                      }
-                    : {})}
+                  agentCapabilities={{
+                    ...composerAgentCapabilities,
+                    disabled: busy || newSessionDraft.loading,
+                  }}
                   draftChatSettings={{
                     workspaceId,
                     scope:
@@ -1749,9 +1652,26 @@ function SessionsIndexRouteContent({
                             <VisibilityMenuBody
                               value={draft.visibility}
                               disabled={busy || newSessionDraft.loading}
-                              onChange={(visibility) =>
-                                setDraft((current) => ({ ...current, visibility }))
-                              }
+                              onChange={(visibility) => {
+                                visibilityChosenRef.current = true;
+                                setDraft((current) => ({ ...current, visibility }));
+                              }}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(usageLimitCapability === "enabled"
+                    ? {
+                        usageLimit: {
+                          summary: sessionUsageLimitDraftSummary(usageLimitDraft),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <UsageLimitMenuBody
+                              value={usageLimitDraft}
+                              disabled={busy || newSessionDraft.loading}
+                              showRequiredError={usageLimitSendBlocked}
+                              onChange={setUsageLimitDraft}
                             />
                           ),
                         },
@@ -1776,37 +1696,42 @@ function SessionsIndexRouteContent({
                         },
                       }
                     : {})}
-                  {...(draft.compute.kind === "sandbox"
+                  {...(draftSecretsOn && canListSecrets
                     ? {
-                        variableSets: {
-                          selectedCount: draft.variableSetIds.length,
+                        secrets: {
+                          summary: sessionSecretsSummary(draftVaultPolicy, draftVaultRows),
+                          disabled: busy || newSessionDraft.loading,
                           panel: (
-                            <ManagedSandboxFields
-                              variableSetsOnly
-                              variableSetWorkspaceId={workspaceId}
-                              canAttachVariableSets={canAttachVariableSets}
-                              canUseVariableSets={canUseVariableSets}
-                              draft={draft}
-                              onChange={setDraft}
+                            <SessionSecretsMenuBody
+                              vaults={draftVaultRows}
+                              policy={draftVaultPolicy}
+                              narrowedByParent={false}
+                              canEdit
                               disabled={busy || newSessionDraft.loading}
-                              variableSets={selectableVariableSets}
-                              rigs={selectableRigs}
-                              personalResourceAccess={{
-                                names: selectedPersonalResourceNames,
-                                visibility: createVisibility,
-                              }}
-                              catalogRecovery={{
-                                error: fixedResourceCatalogError,
-                                refreshing: personalResourceCatalogRefreshPending,
-                                onRetry: () => void refreshPersonalResourceCatalogs(),
-                              }}
+                              loading={draftVaults.loading}
+                              error={draftVaults.error}
+                              onRetry={() => void draftVaults.refresh()}
+                              onPolicyChange={(policy) =>
+                                setDraft((current) => {
+                                  const { vaultPolicy: _previous, ...rest } = current;
+                                  return policy.mode === "all"
+                                    ? rest
+                                    : { ...rest, vaultPolicy: policy };
+                                })
+                              }
+                              onManage={() =>
+                                void navigate({
+                                  to: "/workspaces/$workspaceId/secrets",
+                                  params: { workspaceId },
+                                })
+                              }
                             />
                           ),
                         },
                       }
                     : {})}
                 />
-                {composerAgentCapabilities?.customized ? (
+                {composerAgentCapabilities.customized ? (
                   <ComposerCapabilitiesChip
                     summary={capabilitySummary(
                       composerAgentCapabilities.draft.values,
@@ -1887,14 +1812,24 @@ function SessionsIndexRouteContent({
           {personalWorkspace ? <PrivateWorkspaceNote /> : null}
           {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
 
+          {/* A deploy or restart makes Opengeni unreachable for a few seconds.
+              Reads retry quietly first; if it lasts longer, this one calm line
+              replaces every error, the message stays in the composer, and the
+              hooks reconnect on their own so Send works again. */}
+          {newSessionDraft.unavailable || connectionAccounts.unavailable ? (
+            <div role="status" className="mt-3">
+              <Notice tone="info">{OPENGENI_UPDATING_NOTICE}</Notice>
+            </div>
+          ) : null}
+
           {/* Accounts load quietly with the composer: only a problem shows here,
               never a loading line behind an open menu. */}
-          {connectionAccounts.error || connectionAccounts.accountChoiceMessage ? (
+          {accountsFailure || connectionAccounts.accountChoiceMessage ? (
             <div role="alert" className="mt-3">
               <Notice
                 tone="waiting"
                 action={
-                  connectionAccounts.error && !connectionAccounts.accessDenied ? (
+                  accountsFailure && !connectionAccounts.accessDenied ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -1905,10 +1840,10 @@ function SessionsIndexRouteContent({
                   ) : undefined
                 }
               >
-                {connectionAccounts.error
+                {accountsFailure
                   ? connectionAccounts.accessDenied
                     ? connectionAccounts.error
-                    : "Couldn't check connected accounts. Retry to send your message."
+                    : "Couldn't send your message. Try again."
                   : connectionAccounts.accountChoiceMessage}
               </Notice>
             </div>
@@ -1927,7 +1862,6 @@ function SessionsIndexRouteContent({
             }}
             fleet={fleet}
             machines={machines}
-            variableSets={selectableVariableSets}
             rigs={selectableRigs}
             workspaceDefaultRigId={workspace?.defaultRigId ?? null}
             catalogRecovery={{
@@ -1942,6 +1876,8 @@ function SessionsIndexRouteContent({
 
         <RecentSessions workspaceId={workspaceId} />
         <NewSessionStarters
+          workspaceId={workspaceId}
+          set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
           disabled={busy || newSessionDraft.loading}
           onSelect={(prompt) => {
             setMessage(prompt);
@@ -1964,10 +1900,26 @@ function SessionsIndexRouteContent({
   );
 }
 
+/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
+const DRAFT_CHANGED_DURING_SEND_TEXT =
+  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
+
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
   if (draft.conflict || !draft.error) return "Your message is still here. Try again.";
   return `Your message is still here. ${userErrorText(draft.error)}`;
+}
+
+/** A failed pre-send draft save: a brief outage shows the updating notice instead of a toast. */
+function reportDraftSaveFailure(draft: {
+  conflict: Error | null;
+  currentError: () => Error | null;
+}): void {
+  const error = draft.currentError();
+  if (isTransientServiceFailure(error)) return;
+  toast.error("Couldn't save the draft", {
+    description: draftSaveFailureText({ conflict: draft.conflict, error }),
+  });
 }
 
 // ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
@@ -1978,17 +1930,14 @@ function draftSaveFailureText(draft: { conflict: Error | null; error: Error | nu
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { sessions, pinned } = useWorkspaceSessions({
     limit: 12,
+    // Top-level conversations: sub-agents open from their parent and would
+    // otherwise fill this short page in a workspace that runs many of them.
+    parentSessionId: null,
     pollIntervalMs: 30_000,
   });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const recent = useMemo(() => {
-    const ordinary = sessions.filter((session) => !session.pinned);
-    const { running, grouped } = groupSessionsForRail(ordinary);
-    // Pins are server-authoritative and intentionally sit above ordinary
-    // recency rows here too. `sessions` retains the historical all-visible-row
-    // contract, so remove its pins before recombining the explicit section.
-    return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, 6);
-  }, [pinned, sessions]);
+  // Pins are server-authoritative and sit above running and recency rows.
+  const recent = useMemo(() => recentSessionsForHome(sessions, pinned, 6), [pinned, sessions]);
 
   if (recent.length === 0) {
     return null;
@@ -2015,43 +1964,6 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
-  queued: "queued",
-  running: "running",
-  recovering: "running",
-  waiting_capacity: "waiting",
-  requires_action: "waiting",
-  idle: "idle",
-  failed: "failed",
-  cancelled: "cancelled",
-};
-
-/** A short `owner/repo` label from the session's first repository resource. */
-function sessionRepoLabel(session: Session): string | null {
-  const repo = session.resources.find((resource) => resource.kind === "repository");
-  if (!repo || repo.kind !== "repository") {
-    return null;
-  }
-  const parts = repo.uri
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
-  return parts.length >= 2 ? parts.slice(-2).join("/") : (parts.at(-1) ?? null);
-}
-
-function recentSessionModelPresentation(
-  modelId: string,
-  catalogRows: readonly PickerModelRow[],
-): { label: string; billingClass: PickerModelRow["billingClass"] } {
-  const row = findPickerRow([...catalogRows], modelId);
-  return {
-    label: row?.label ?? modelDisplayName(modelId),
-    billingClass:
-      row?.billingClass ??
-      (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
-  };
-}
-
 function RecentSessionRow({
   workspaceId,
   session,
@@ -2065,7 +1977,7 @@ function RecentSessionRow({
   const model = recentSessionModelPresentation(session.model, catalogRows);
   const repo = sessionRepoLabel(session);
   const metaBits = [model.label, repo].filter(Boolean);
-  const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
+  const status = recentSessionStatus(session);
   return (
     <li className="min-w-0">
       <Link
@@ -2073,16 +1985,13 @@ function RecentSessionRow({
         params={{ workspaceId, sessionId: session.id }}
         className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
       >
-        <StatusDot
-          tone={hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status]}
-          pulse={hasBackgroundCommand || session.status === "running"}
-        />
+        <StatusDot tone={status.tone} pulse={status.pulse} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
               <ModelMark
-                model={session.model}
+                model={{ id: session.model, logoUrl: model.logoUrl }}
                 className="size-3 text-fg-muted"
                 fallback={
                   <BillingClassMark
@@ -2106,7 +2015,7 @@ function RecentSessionRow({
 
 // Setup selections sit above the prompt so the footer remains an action row.
 // Repo stays out of the compute band so that band only shows when rigs /
-// variable sets exist. Tools and repos live under “+” at every width.
+// machines exist. Tools and repos live under “+” at every width.
 function SessionSetupStrip({
   disabled,
   channels,
@@ -2154,6 +2063,9 @@ function SessionModelControl({
   return (
     <ModelPicker
       hasImageAttachments={hasImageAttachments}
+      onOpenChange={(open) => {
+        if (open) void modelCatalog.refresh();
+      }}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}
@@ -2469,7 +2381,6 @@ function ComputeTargetControl(props: {
   personalResourceAccess: NewSessionPersonalResourceAccess;
   fleet: ReturnType<typeof useWorkspaceMachines>;
   machines: MachineView[];
-  variableSets: VariableSet[];
   rigs: Rig[];
   workspaceDefaultRigId: string | null;
   catalogRecovery: FixedResourceCatalogRecovery;
@@ -2631,7 +2542,7 @@ function ComputeTargetControl(props: {
         <div role="alert" className="mt-3">
           <Notice
             tone="failed"
-            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
+            title="Couldn’t verify the selected Sandbox Environment"
             action={
               <Button
                 type="button"
@@ -2652,141 +2563,6 @@ function ComputeTargetControl(props: {
         <PersonalResourceAccessInline access={props.personalResourceAccess} />
       </div>
     </>
-  );
-}
-
-// ── Managed Sandbox extras: rig + variable set only (repos live in the composer pills) ─
-
-function ManagedSandboxFields(props: {
-  variableSetsOnly?: boolean;
-  variableSetWorkspaceId?: string;
-  canAttachVariableSets?: boolean;
-  canUseVariableSets?: boolean;
-  onClose?: () => void;
-  leading?: ReactNode;
-  draft: SessionDraft;
-  onChange: (draft: SessionDraft) => void;
-  disabled: boolean;
-  personalResourceAccess: NewSessionPersonalResourceAccess;
-  variableSets: VariableSet[];
-  rigs: Rig[];
-  workspaceDefaultRigId?: string | null;
-  catalogRecovery: FixedResourceCatalogRecovery;
-}) {
-  const { draft, onChange } = props;
-  const personalRigs = props.rigs.filter((resource) => resource.scope === "user");
-  const workspaceRigs = props.rigs.filter((resource) => resource.scope !== "user");
-  const showRigs = !props.variableSetsOnly && (workspaceRigs.length > 0 || personalRigs.length > 0);
-  const showVariableSets = props.variableSetsOnly === true;
-  if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
-    return null;
-  }
-
-  return (
-    // One flat card: hairline-separated rows, controls right-aligned, no
-    // nested boxes and no restating helper text — the controls speak.
-    <div
-      className={
-        props.variableSetsOnly
-          ? "min-h-0 overflow-y-auto"
-          : "mt-5 overflow-hidden rounded-lg border border-border bg-surface/40"
-      }
-    >
-      {props.leading && !showVariableSets ? (
-        <div className="flex items-center gap-2 px-1 pb-2">
-          {props.leading}
-          <span className="text-sm font-medium">Variable sets</span>
-        </div>
-      ) : null}
-      {props.catalogRecovery.error ? (
-        <div
-          role="alert"
-          className={cn((showRigs || showVariableSets) && "border-b border-border/70", "p-2.5")}
-        >
-          <Notice
-            tone="failed"
-            className="p-2.5 text-xs"
-            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
-            action={
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={props.disabled || props.catalogRecovery.refreshing}
-                onClick={props.catalogRecovery.onRetry}
-              >
-                Retry
-              </Button>
-            }
-          >
-            Retry to reload your available resources before starting this session.
-          </Notice>
-        </div>
-      ) : null}
-      {/* Rig picker — offered only when the workspace has at least one rig.
-          Picking a rig preselects its default variable sets in the control
-          below (still user-overridable). Empty ⇒ the workspace default rig,
-          resolved server-side; its option names that default. */}
-      {showRigs ? (
-        <div className="flex items-center justify-between gap-3 px-3 py-2">
-          <Label className="flex shrink-0 items-center gap-1.5 text-xs">
-            <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
-            Sandbox Environment
-          </Label>
-          <Select
-            value={draft.rigId}
-            disabled={props.disabled}
-            onChange={(event) => {
-              const rigId = event.target.value;
-              onChange({
-                ...draft,
-                rigId,
-              });
-            }}
-            className="h-8 w-auto max-w-56 text-xs"
-          >
-            <option value="">
-              {workspaceDefaultRigOptionLabel(props.workspaceDefaultRigId, props.rigs)}
-            </option>
-            {workspaceRigs.map((rig) => (
-              <option key={rig.id} value={rig.id}>
-                {rig.name}
-                {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
-              </option>
-            ))}
-            {personalRigs.length > 0 ? (
-              <optgroup label="Only me">
-                {personalRigs.map((rig) => (
-                  <option key={rig.id} value={rig.id}>
-                    {rig.name}
-                    {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
-                  </option>
-                ))}
-              </optgroup>
-            ) : null}
-          </Select>
-        </div>
-      ) : null}
-
-      {/* Keep restored selections visible even when the caller may attach/use
-          exact IDs but cannot enumerate the Variable Set catalog. */}
-      {showVariableSets && props.variableSetWorkspaceId ? (
-        <NewSessionVariableSetPicker
-          workspaceId={props.variableSetWorkspaceId}
-          canAttach={props.canAttachVariableSets === true}
-          canUse={props.canUseVariableSets === true}
-          runtimeIds={draft.variableSetIds}
-          variableSets={props.variableSets}
-          disabled={props.disabled}
-          leading={props.leading}
-          onClose={props.onClose}
-          onChange={(variableSetIds) =>
-            onChange({ ...draft, variableSetIds, variableSetId: variableSetIds.at(-1) ?? "" })
-          }
-        />
-      ) : null}
-      <PersonalResourceAccessInline access={props.personalResourceAccess} embedded />
-    </div>
   );
 }
 

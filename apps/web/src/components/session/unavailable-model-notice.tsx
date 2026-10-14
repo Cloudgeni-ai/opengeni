@@ -1,7 +1,5 @@
 import { CircleAlertIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-
 /**
  * Composer line for a chat whose model was retired or removed from the
  * catalog. Earlier turns keep their model; only the next message changes, and
@@ -10,15 +8,11 @@ import { Button } from "@/components/ui/button";
 export function UnavailableModelNotice({
   modelName,
   replacementLabel,
-  canChooseModel,
-  onChooseModel,
 }: {
   /** Readable name of the session's unavailable model. */
   modelName: string;
   /** The model the composer now has selected, or null when none is selected. */
   replacementLabel: string | null;
-  canChooseModel: boolean;
-  onChooseModel: () => void;
 }) {
   return (
     <div
@@ -33,19 +27,8 @@ export function UnavailableModelNotice({
         </span>{" "}
         {replacementLabel
           ? `Your next message will use ${replacementLabel}.`
-          : "Choose another model to continue."}
+          : "Select a different model to continue."}
       </p>
-      {canChooseModel ? (
-        <Button
-          type="button"
-          size="xs"
-          variant={replacementLabel ? "outline" : "default"}
-          className="-mt-0.5 shrink-0"
-          onClick={onChooseModel}
-        >
-          {replacementLabel ? "Change model" : "Choose model"}
-        </Button>
-      ) : null}
     </div>
   );
 }

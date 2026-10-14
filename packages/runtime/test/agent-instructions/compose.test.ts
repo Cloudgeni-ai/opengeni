@@ -28,6 +28,12 @@ import {
 } from "../../src/index";
 import { ALL_RESOURCES } from "./prompt-sentences";
 
+/**
+ * Module ids kept in contracts so stored model-context snapshots still parse,
+ * but no longer rendered: secrets are used by reference, nothing is exported.
+ */
+const RETIRED_MODULE_IDS: readonly string[] = ["workspace_environment"];
+
 const NO_RESOURCES: AgentPromptResources = {
   managedSandbox: false,
   connectedMachine: false,
@@ -82,11 +88,11 @@ const MARKERS: Record<string, RegExp> = {
   repositories: /repos\/<host>|pull request|git reset|dirty worktree|gh, glab/u,
   attachments: /\.opengeni\/files|Attached files/u,
   machines: /Connected Machine|\/home\/u\/proj|C:\/repo/u,
-  admin:
-    /variable_set_list|capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get|Variable Set/u,
+  admin: /capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get/u,
   skills: /# Using skills|Skill index/u,
   media: /# Images and video|generate_image|generate_video|image_generation/u,
   sandbox: /apply_patch|exec_command|rg --files|mktemp|sandbox:\/workspace/u,
+  secrets: /# Secrets|\{\{secret:/u,
 };
 
 describe("modular composer: module selection (AC12)", () => {
@@ -106,9 +112,11 @@ describe("modular composer: module selection (AC12)", () => {
   });
 
   test("all + every resource includes every module", () => {
-    const result = compose(allAgentCapabilities(), ALL_RESOURCES);
+    const result = compose(allAgentCapabilities(), { ...ALL_RESOURCES, secretReferences: true });
     expect(moduleIds(result)).toEqual(
-      AGENT_PROMPT_MODULE_IDS.filter((id) => id !== "renderer_markdown"),
+      AGENT_PROMPT_MODULE_IDS.filter(
+        (id) => id !== "renderer_markdown" && !RETIRED_MODULE_IDS.includes(id),
+      ),
     );
     for (const marker of Object.values(MARKERS)) expect(result.composed).toMatch(marker);
   });
@@ -150,6 +158,21 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
+  test("secrets needs the capability and runtime reference resolution", () => {
+    const wired = { ...NO_RESOURCES, secretReferences: true };
+    const on = { ...noneAgentCapabilities(), skills: false as const, secrets: true };
+    expect(moduleIds(compose(on, wired))).toEqual([
+      "base_behavior",
+      "runtime_mechanics",
+      "secrets",
+    ]);
+    expect(compose(on, NO_RESOURCES).composed).not.toMatch(MARKERS.secrets!);
+    const off = { ...allAgentCapabilities(), secrets: false };
+    expect(compose(off, { ...ALL_RESOURCES, secretReferences: true }).composed).not.toMatch(
+      MARKERS.secrets!,
+    );
+  });
+
   test("skills: read and manage include the skills module; false removes it", () => {
     for (const skills of ["read", "manage"] as const) {
       expect(moduleIds(compose({ ...allAgentCapabilities(), skills }, NO_RESOURCES))).toContain(
@@ -183,6 +206,37 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
+  test("standing session attachments are not presented as new input", () => {
+    const composed = compose(allAgentCapabilities(), {
+      ...NO_RESOURCES,
+      managedSandbox: true,
+      attachments: true,
+    }).composed;
+    expect(composed).toContain(
+      "Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.",
+    );
+  });
+
+  test("background-command guidance needs a sandbox or Connected Machine", () => {
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      const detached = compose(capabilities, NO_RESOURCES).composed;
+      expect(detached).not.toContain("## Background commands");
+      expect(detached).not.toContain("command_wait");
+      expect(detached).not.toContain("command_read");
+      expect(detached).not.toContain("a command");
+      expect(detached).toContain("`wait_for_input`");
+      for (const resources of [
+        { ...NO_RESOURCES, managedSandbox: true },
+        { ...NO_RESOURCES, connectedMachine: true },
+      ]) {
+        const attached = compose(capabilities, resources).composed;
+        expect(attached).toContain("## Background commands");
+        expect(attached).toContain("`command_read`");
+        expect(attached).toContain("`command_wait`");
+      }
+    }
+  });
+
   test("sandbox guidance appears for a Connected Machine alone", () => {
     const result = compose(allAgentCapabilities(), { ...NO_RESOURCES, connectedMachine: true });
     expect(moduleIds(result)).toEqual(expect.arrayContaining(["sandbox", "connected_machine"]));
@@ -191,9 +245,12 @@ describe("modular composer: module selection (AC12)", () => {
     expect(result.composed).not.toContain("Repository resources are mounted");
   });
 
-  test("the workspace environment and rig blocks follow their resources", () => {
+  test("the rig block follows its resource; a workspace environment never renders", () => {
     const withBoth = compose(allAgentCapabilities(), ALL_RESOURCES).composed;
-    expect(withBoth).toContain('A workspace environment named "prod" is attached');
+    expect(withBoth).not.toContain("workspace environment named");
+    expect(withBoth).not.toContain("exported in the sandbox shell environment");
+    expect(withBoth).not.toContain("DEPLOY_KEY");
+    expect(withBoth).not.toContain("# Workspace environment");
     expect(withBoth).toContain("rig_propose_change");
     const noAdmin = compose(
       { ...allAgentCapabilities(), workspaceAdmin: false },
@@ -211,7 +268,138 @@ describe("modular composer: module selection (AC12)", () => {
       "base_behavior",
       "runtime_mechanics",
       ...AGENT_PROMPT_MODULES.map((m) => m.id),
-    ]).toEqual([...AGENT_PROMPT_MODULE_IDS]);
+    ]).toEqual(AGENT_PROMPT_MODULE_IDS.filter((id) => !RETIRED_MODULE_IDS.includes(id)));
+  });
+});
+
+describe("modular composer: secrets module (AG-2)", () => {
+  const WIRED: AgentPromptResources = { ...NO_RESOURCES, secretReferences: true };
+  const SECRETS_ONLY = {
+    ...noneAgentCapabilities(),
+    skills: "read" as const,
+    humanInput: true,
+    secrets: true,
+  };
+
+  function secretsSection(
+    capabilities: ResolvedAgentCapabilities,
+    unavailable: readonly string[] = [],
+  ): string | undefined {
+    const composed = composeModularAgentInstructions({
+      capabilities,
+      renderer: "opengeni",
+      identity: DEFAULT_AGENT_IDENTITY,
+      resources: WIRED,
+      toolAvailability: { unavailable: unavailable as never },
+    }).composed;
+    const start = composed.indexOf("# Secrets\n");
+    if (start === -1) return undefined;
+    const end = composed.indexOf("\n\n# ", start + 1);
+    return composed.slice(start, end === -1 ? undefined : end);
+  }
+
+  test("renders the exact text: a heading and at most six lines", () => {
+    const section = secretsSection(SECRETS_ONLY)!;
+    expect(section).toBe(
+      [
+        "# Secrets",
+        "",
+        "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value wherever you write it: shell commands, files, browser typing and every tool call. To pass one on unresolved (a schedule prompt, a message to another agent, a goal, a note or comment), write `\\{{secret:Item}}`; it arrives as `{{secret:Item}}` and resolves when that work uses it. Find saved items and their ready references with `secret_search`.",
+        "- Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.",
+        "- Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+        '- Never ask for passwords, keys or codes in chat or in a plain text question. Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.',
+        "- Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.",
+        "- For playbooks, read the `opengeni-secrets` skill.",
+      ].join("\n"),
+    );
+    const lines = section.split("\n").filter((line) => line.trim().length > 0);
+    expect(lines[0]).toBe("# Secrets");
+    expect(lines.length - 1).toBeLessThanOrEqual(6);
+  });
+
+  test("stays within six lines for every capability and tool combination", () => {
+    for (const humanInput of [false, true])
+      for (const skills of [false, "read"] as const)
+        for (const unavailable of [[], ["secret_search", "secret_save"]]) {
+          const section = secretsSection({ ...SECRETS_ONLY, humanInput, skills }, unavailable)!;
+          const lines = section.split("\n").filter((line) => line.trim().length > 0);
+          expect(lines.length - 1).toBeLessThanOrEqual(6);
+          expect(section).toContain("Never ask for passwords, keys or codes in chat");
+          expect(section).toContain("Solve CAPTCHAs");
+        }
+  });
+
+  test("is absent without the capability or without runtime reference resolution", () => {
+    expect(secretsSection({ ...SECRETS_ONLY, secrets: false })).toBeUndefined();
+    const unwired = compose(SECRETS_ONLY, NO_RESOURCES).composed;
+    expect(unwired).not.toContain("# Secrets");
+    expect(unwired).not.toContain("{{secret:");
+    const off = compose({ ...allAgentCapabilities(), secrets: false }, ALL_RESOURCES).composed;
+    expect(off).not.toMatch(MARKERS.secrets!);
+    expect(off).not.toContain('`kind: "secret"`');
+  });
+
+  test("each tool-naming clause follows its tool", () => {
+    const noSearch = secretsSection(SECRETS_ONLY, ["secret_search"])!;
+    expect(noSearch).not.toContain("secret_search");
+    expect(noSearch).not.toContain("opengeni-secrets");
+    expect(noSearch).toContain("{{secret:Item}}");
+
+    const noSave = secretsSection(SECRETS_ONLY, ["secret_save"])!;
+    expect(noSave).not.toContain("secret_save");
+    expect(noSave).not.toContain("create the account");
+    expect(noSave).not.toContain("enroll your own 2FA");
+    expect(noSave).toContain(
+      "Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; get email or SMS codes through connected tools.",
+    );
+
+    const noHandoff = secretsSection(SECRETS_ONLY, ["interaction_request_human"])!;
+    expect(noHandoff).not.toContain("interaction_request_human");
+    expect(noHandoff).not.toContain("Hand the browser");
+
+    const noHumanInput = secretsSection({ ...SECRETS_ONLY, humanInput: false })!;
+    expect(noHumanInput).not.toContain("request_human_input");
+    expect(noHumanInput).toContain(
+      "Never ask for passwords, keys or codes in chat or in a plain text question.",
+    );
+
+    const noSkills = secretsSection({ ...SECRETS_ONLY, skills: false })!;
+    expect(noSkills).not.toContain("opengeni-secrets");
+  });
+
+  test("integration setup points to the secret question only with secrets and human input", () => {
+    const sentence =
+      'For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.';
+    const admin = { ...noneAgentCapabilities(), skills: false as const, workspaceAdmin: true };
+    const both = compose({ ...admin, secrets: true, humanInput: true }, NO_RESOURCES).composed;
+    expect(both).toContain(`Never invent URLs or request credentials in chat. ${sentence}`);
+    expect(
+      compose({ ...admin, secrets: true, humanInput: false }, NO_RESOURCES).composed,
+    ).not.toContain(sentence);
+    expect(
+      compose({ ...admin, secrets: false, humanInput: true }, NO_RESOURCES).composed,
+    ).not.toContain(sentence);
+  });
+
+  test("the secrets section is session-stable and changes nothing else", () => {
+    const settings = testSettings();
+    const options = {
+      agentConfig: config(allAgentCapabilities()),
+      codemodeAvailable: true,
+      agentPromptResources: { ...ALL_RESOURCES, attachments: false },
+    };
+    const first = inspectPersistentAgentInstructions(settings, options).composed;
+    expect(inspectPersistentAgentInstructions(settings, options).composed).toBe(first);
+    expect(first).toContain("# Secrets");
+    const unwired = inspectPersistentAgentInstructions(settings, {
+      ...options,
+      agentPromptResources: { ...options.agentPromptResources, secretReferences: false },
+    }).composed;
+    const section = first.slice(
+      first.indexOf("# Secrets"),
+      first.indexOf("\n\n# ", first.indexOf("# Secrets")) + 2,
+    );
+    expect(unwired).toBe(first.replace(section, ""));
   });
 });
 
@@ -272,7 +460,7 @@ describe("modular composer: identity and precedence (AC12, AC14)", () => {
       agentConfig: { ...base, identity: "You are Acme Assistant." },
     });
     expect(custom.layers[0]).toMatchObject({ id: "identity", content: "You are Acme Assistant." });
-    expect(custom.composed).not.toContain("OpenGeni workspace agent");
+    expect(custom.composed).not.toContain("Opengeni workspace agent");
     expect(custom.layers.slice(1)).toEqual(standard.layers.slice(1));
   });
 
@@ -392,8 +580,12 @@ describe("modular composer: prompt-cache stability", () => {
     expect(String(modular.instructions)).toStartWith(DEFAULT_AGENT_IDENTITY);
     expect(String(modular.instructions)).toContain("# Links and rendering");
     expect(String(modular.instructions)).not.toMatch(MARKERS.knowledge!);
+    // A capability-free modular prompt is a little over half the legacy one
+    // (17.1k vs 34.2k chars). The bound was "< half" until the secrets overhaul
+    // trimmed 329 chars of retired Variable Set text from the legacy prompt
+    // alone; the modular prompt did not grow.
     expect(String(modular.instructions).length).toBeLessThan(
-      String(legacy.instructions).length / 2,
+      String(legacy.instructions).length * 0.55,
     );
   });
 });

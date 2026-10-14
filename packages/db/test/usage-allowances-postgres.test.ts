@@ -30,6 +30,7 @@ import {
   maintainWorkspaceAllowances,
   migrate,
   provisionRoles,
+  recordModelCallFact,
   recordUsageEvent,
   nestedPostgresSqlState,
   setMemberAllowance,
@@ -903,6 +904,179 @@ describe("usage allowance DB lifecycle", () => {
     const historical = await getWorkspaceUsage(app.db, { ...scope, period: "2000-01" });
     expect(historical.workspace.used).toBe(0);
     expect(historical.workspace.grantsRemaining).toBe(0);
+  });
+});
+
+describe("usage that spends no Opengeni credits", () => {
+  async function sessionTurn(scope: Awaited<ReturnType<typeof fixture>>) {
+    const session = await createSession(app.db, {
+      ...scope,
+      initialMessage: "test",
+      resources: [],
+      metadata: {},
+      model: "scripted",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      createdByContext: {},
+    });
+    await initializeSessionStartAtomically(app.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const [turn] =
+      await shared.admin`select id from session_turns where session_id=${session.id} order by created_at limit 1`;
+    return { sessionId: session.id, turnId: String(turn!.id) };
+  }
+
+  async function unbilledCall(
+    scope: { accountId: string; workspaceId: string },
+    turn: { sessionId: string; turnId: string },
+    input: {
+      sourceKey?: string;
+      listMicros: number | null;
+      pricedCostMicros?: number;
+      billingPath?: "external" | "opengeni_credits";
+    },
+  ) {
+    return await recordModelCallFact(app.db, {
+      ...scope,
+      ...turn,
+      sourceKey: input.sourceKey ?? crypto.randomUUID(),
+      provider: "subscription-provider",
+      providerApi: "responses",
+      model: "listed-model",
+      billingPath: input.billingPath ?? "external",
+      pricedCostMicros: input.pricedCostMicros ?? 0,
+      estimatedProviderCostMicros: input.listMicros,
+      pricingSource: input.listMicros === null ? null : "configured_list_price",
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+    });
+  }
+
+  test("is ignored by default and never admits or refuses that work", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 100,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    await unbilledCall(scope, turn, { listMicros: 500 });
+    expect((await getWorkspaceUsage(app.db, scope)).workspace.used).toBe(0);
+    await charge(scope, 100);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toMatchObject({ scope: "workspace" });
+    expect(
+      await checkWorkspaceAllowance(app.db, { ...scope, fundedWithoutCredits: true }),
+    ).toBeNull();
+  });
+
+  test("list_price counts each unbilled call once, at list price, for the turn's human", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 100,
+      period: "monthly",
+      memberDefault: "equal_share",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    expect((await getWorkspaceAllowance(app.db, scope))?.unbilledUsage).toBe("list_price");
+    await unbilledCall(scope, turn, { sourceKey: "first", listMicros: 40 });
+    // An exact replay of the same fact is idempotent and never recounts.
+    await unbilledCall(scope, turn, { sourceKey: "first", listMicros: 40 });
+    // A credit-funded call is counted from its ledger debit, never from the fact.
+    await unbilledCall(scope, turn, {
+      sourceKey: "credited",
+      listMicros: 30,
+      pricedCostMicros: 31,
+      billingPath: "opengeni_credits",
+    });
+    // A call without list pricing is not counted.
+    await unbilledCall(scope, turn, { sourceKey: "unpriced", listMicros: null });
+    let usage = await getWorkspaceUsage(app.db, scope);
+    expect(usage.workspace.used).toBe(40);
+    expect(usage.members.find((m) => m.subjectId === scope.subjectId)!.used).toBe(40);
+    expect(
+      await checkWorkspaceAllowance(app.db, {
+        ...scope,
+        subjectId: scope.subjectId,
+        fundedWithoutCredits: true,
+      }),
+    ).toBeNull();
+
+    await unbilledCall(scope, turn, { sourceKey: "second", listMicros: 70 });
+    usage = await getWorkspaceUsage(app.db, scope);
+    expect(usage.workspace.used).toBe(110);
+    expect(
+      await checkWorkspaceAllowance(app.db, {
+        ...scope,
+        subjectId: scope.subjectId,
+        fundedWithoutCredits: true,
+      }),
+    ).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
+  });
+
+  test("list_price spends persistent grants after the included pool", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 50,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    await grantWorkspaceCredits(app.db, { ...scope, operationId: "topup", credits: 100 });
+    await unbilledCall(scope, turn, { listMicros: 80 });
+    const usage = await getWorkspaceUsage(app.db, scope);
+    expect(usage.workspace.used).toBe(80);
+    expect(usage.workspace.grantsRemaining).toBe(70);
+    expect(
+      await checkWorkspaceAllowance(app.db, { ...scope, fundedWithoutCredits: true }),
+    ).toBeNull();
+  });
+
+  test("a late list-price fill-in counts once", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 1000,
+      period: "none",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    await unbilledCall(scope, turn, { sourceKey: "late", listMicros: null });
+    expect((await getWorkspaceUsage(app.db, scope)).workspace.used).toBe(0);
+    await unbilledCall(scope, turn, { sourceKey: "late", listMicros: 25 });
+    await unbilledCall(scope, turn, { sourceKey: "late", listMicros: 25 });
+    expect((await getWorkspaceUsage(app.db, scope)).workspace.used).toBe(25);
+  });
+
+  test("rejects an unknown unbilledUsage mode", async () => {
+    const scope = await fixture();
+    await expect(
+      setWorkspaceAllowance(app.db, {
+        ...scope,
+        includedCredits: 10,
+        period: "monthly",
+        unbilledUsage: "always" as "list_price",
+        expectedVersion: 0,
+      }),
+    ).rejects.toThrow("unbilledUsage");
+    const [valid] = await shared.admin`select
+      validate_usage_allowance_config('{"includedCredits":1,"period":"none","unbilledUsage":"always"}'::jsonb) as bad,
+      validate_usage_allowance_config('{"includedCredits":1,"period":"none","unbilledUsage":"list_price"}'::jsonb) as good`;
+    expect(valid).toEqual({ bad: false, good: true });
   });
 });
 

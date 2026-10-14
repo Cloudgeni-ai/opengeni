@@ -73,7 +73,7 @@ describe("drafts and requests", () => {
     const draft = withCapability(draftFromRequest("none"), "webSearch", true);
     expect(requestFromDraft(draft, availability)).toBe("none");
     expect(capabilitySummary(draftFromRequest("all").values, availability)).toBe(
-      "All 12 available capabilities",
+      "All 13 available capabilities",
     );
   });
 
@@ -86,14 +86,14 @@ describe("drafts and requests", () => {
         .humanInput,
     ).toBe(true);
     expect(workspaceAgentDefaultsSummary({ agentHumanInputEnabled: false }, null)).toBe(
-      "12 of 13 capabilities",
+      "13 of 14 capabilities",
     );
   });
 
   test("summaries count what is on", () => {
     expect(capabilitySummary(draftFromRequest("all").values, everything)).toBe("All capabilities");
     expect(capabilitySummary(draftFromRequest("none").values, everything)).toBe(
-      "2 of 13 capabilities",
+      "2 of 14 capabilities",
     );
   });
 });
@@ -113,6 +113,25 @@ describe("new chat with its own capabilities", () => {
     expect(sessionDraftFromNewSessionDraftOptions(options).agentCapabilities).toEqual({
       from: "none",
       knowledge: true,
+    });
+  });
+
+  test("a draft's own instructions survive restore and save, and are sent with the chat", () => {
+    const restored = sessionDraftFromNewSessionDraftOptions({
+      agent: { instructions: "Ask about the product first." },
+    });
+    expect(restored.agentInstructions).toBe("Ask about the product first.");
+    expect(restored.agentCapabilities).toBeUndefined();
+    expect(newSessionDraftOptionsFromSessionDraft(restored).agent).toEqual({
+      instructions: "Ask about the product first.",
+    });
+    expect(submissionFromSessionDraft(restored).extras.agent).toEqual({
+      instructions: "Ask about the product first.",
+    });
+    const both = { ...restored, agentCapabilities: { from: "none", knowledge: true } as const };
+    expect(submissionFromSessionDraft(both).extras.agent).toEqual({
+      capabilities: { from: "none", knowledge: true },
+      instructions: "Ask about the product first.",
     });
   });
 
@@ -196,7 +215,7 @@ describe("error copy", () => {
         "fallback",
       ),
     ).toBe("Browser and computer isn't enabled on this server. Turn it off and save again.");
-    expect(agentConfigErrorText(new Error("OpenGeni API 500: boom"), "Couldn't save.")).toBe(
+    expect(agentConfigErrorText(new Error("Opengeni API 500: boom"), "Couldn't save.")).toBe(
       "Couldn't save.",
     );
   });

@@ -21,6 +21,7 @@
 
 import type { Settings } from "@opengeni/config";
 import {
+  enrollmentMacPermissions,
   getSession,
   getLiveEnrollmentConnection,
   listEnrollments,
@@ -32,7 +33,12 @@ import {
   type EnrollmentRecord,
   type MachineMetricsRow,
 } from "@opengeni/db";
-import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
+import {
+  MachineView,
+  MetricSample,
+  type MachineRuntime,
+  type MachinesResponse,
+} from "@opengeni/contracts";
 import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "@opengeni/core";
 import { selfhostedHeartbeatLiveness } from "@opengeni/runtime/sandbox";
 
@@ -41,7 +47,7 @@ export type MachinesServices = {
   settings: Settings;
 };
 
-const ACTIVE_UPDATE_STATUSES = new Set([
+export const ACTIVE_UPDATE_STATUSES: ReadonlySet<string> = new Set([
   "requested",
   "accepted",
   "waiting_for_idle",
@@ -51,7 +57,7 @@ const ACTIVE_UPDATE_STATUSES = new Set([
   "restarting",
 ]);
 
-function compareAgentVersions(left: string, right: string): number | null {
+export function compareAgentVersions(left: string, right: string): number | null {
   const parse = (value: string): { core: number[]; prerelease: string | null } | null => {
     const match = /^(?:v)?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(value.trim());
     if (!match) return null;
@@ -73,6 +79,16 @@ function compareAgentVersions(left: string, right: string): number | null {
   return a.prerelease.localeCompare(b.prerelease);
 }
 
+/** The build the operator promoted for a machine's update channel. */
+export function promotedAgentVersion(
+  settings: Pick<Settings, "agentStableVersion" | "agentBetaVersion">,
+  channel: string | null,
+): string {
+  return channel === "beta"
+    ? (settings.agentBetaVersion ?? settings.agentStableVersion)
+    : settings.agentStableVersion;
+}
+
 /** Older Mac updaters replace a single file inside a sealed app. They must
  * bootstrap once through the official whole-app installer, never an RPC swap. */
 export function machineUpdateBlockedReason(os: string, version: string | null): string | null {
@@ -80,31 +96,40 @@ export function machineUpdateBlockedReason(os: string, version: string | null): 
   const order = version ? compareAgentVersions(version, "0.1.29") : null;
   return order !== null && order >= 0
     ? null
-    : "Install OpenGeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
+    : "Install Opengeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
+}
+
+type AgentUpdateRecord = EnrollmentRecord["agentUpdate"];
+
+/** Where the installed agent stands against the promoted build. A failed update
+ * stops mattering once its target (or newer) is installed, and a busy machine
+ * postponing an update (`update_busy_*`) has not failed: it is still outdated. */
+export function agentVersionState(
+  installedVersion: string | null,
+  desiredVersion: string | null,
+  update: AgentUpdateRecord,
+): MachineRuntime["versionState"] {
+  if (update && ACTIVE_UPDATE_STATUSES.has(update.status)) return "updating";
+  if (
+    update?.status === "failed" &&
+    !update.errorCode?.startsWith("update_busy") &&
+    !(installedVersion && (compareAgentVersions(installedVersion, update.targetVersion) ?? -1) >= 0)
+  ) {
+    return "update_failed";
+  }
+  const order =
+    installedVersion && desiredVersion
+      ? compareAgentVersions(installedVersion, desiredVersion)
+      : null;
+  if (order === null) return "unknown";
+  if (order === 0) return "current";
+  return order < 0 ? "outdated" : "ahead";
 }
 
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
-  const desiredVersion =
-    enrollment.agentUpdateChannel === "beta"
-      ? (settings.agentBetaVersion ?? settings.agentStableVersion)
-      : settings.agentStableVersion;
+  const desiredVersion = promotedAgentVersion(settings, enrollment.agentUpdateChannel);
   const update = enrollment.agentUpdate;
-  const activeUpdate = update ? ACTIVE_UPDATE_STATUSES.has(update.status) : false;
-  const order =
-    enrollment.agentVersion && desiredVersion
-      ? compareAgentVersions(enrollment.agentVersion, desiredVersion)
-      : null;
-  const versionState = activeUpdate
-    ? "updating"
-    : update?.status === "failed"
-      ? "update_failed"
-      : order === null
-        ? "unknown"
-        : order === 0
-          ? "current"
-          : order < 0
-            ? "outdated"
-            : "ahead";
+  const versionState = agentVersionState(enrollment.agentVersion, desiredVersion, update);
   const capability = (name: string): boolean => enrollment.agentCapabilities[name] === true;
   return {
     installedVersion: enrollment.agentVersion,
@@ -124,8 +149,15 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       operationResourcePolicy: capability("operationResourcePolicy"),
       operationCpuQuota: capability("operationCpuQuota"),
       transactionalFsWrite: capability("transactionalFsWrite"),
+      credentialRenew: capability("credentialRenew"),
+      screenControl:
+        typeof enrollment.agentCapabilities.screenControl === "boolean"
+          ? enrollment.agentCapabilities.screenControl
+          : null,
     },
     update,
+    macPermissions:
+      enrollment.os === "macos" ? enrollmentMacPermissions(enrollment.agentCapabilities) : null,
   };
 }
 

@@ -7,7 +7,11 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
+import {
+  findIntegrationsOauthClient,
+  parseIntegrationsOauthClientsJson,
+  type Settings,
+} from "@opengeni/config";
 import {
   OAuthStartResponse,
   selectCanonicalPersonalSlackConnection,
@@ -59,6 +63,7 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import { observeOAuthStart } from "../integration-connect-metrics";
 import {
   assertConnectionOwnershipAllowedForPrincipal,
   personalOwnerStateAccepted,
@@ -468,13 +473,21 @@ export async function startMcpOAuth(
   );
   const deadline = new OAuthStartDeadline(deps.oauthStartDeadlineMs ?? OAUTH_START_DEADLINE_MS);
   try {
-    return await startMcpOAuthWithinDeadline(deps, context, deadline);
+    const started = await startMcpOAuthWithinDeadline(deps, context, deadline);
+    observeOAuthStart(deps.observability, { flow: "mcp_oauth", outcome: "success" });
+    return started;
   } catch (error) {
     const staged =
       error instanceof OAuthStartStageError
         ? error
         : new OAuthStartStageError("connection_lookup", oauthStartFailureReason(error), error);
     logOAuthStartFailure(deps.observability, staged);
+    observeOAuthStart(deps.observability, {
+      flow: "mcp_oauth",
+      outcome: "failure",
+      stage: staged.stage,
+      reason: staged.reason,
+    });
     throw oauthStartApiError(staged);
   } finally {
     deadline.dispose();
@@ -544,6 +557,7 @@ async function startMcpOAuthWithinDeadline(
       connectionSelection: profile.connectionSelection,
       exactMcpBinding: profile.exactMcpBinding,
       connectionId: context.payload.connectionId,
+      newAccount: context.payload.newAccount === true,
       requestedOwnership: context.payload.ownership,
       newConnectionOwnership: requestedOwnership,
     }),
@@ -658,28 +672,27 @@ async function startMcpOAuthWithinDeadline(
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const expiresAt = new Date(Date.now() + oauthStateTtlMs);
-  let state = fullState;
-  if (settings.integrationsOauthShortStateEnabled) {
-    const stateId = randomUUID();
-    state = createSignedState(requireIntegrationsStateSecret(settings), {
-      kind: "mcp_oauth_reference",
+  // Providers cap `state` length (Stripe at 1024 characters), so only a short
+  // signed reference leaves; the full context waits encrypted at rest.
+  const stateId = randomUUID();
+  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    kind: "mcp_oauth_reference",
+    id: stateId,
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+  });
+  if (state.length > 512) {
+    throw new Error("MCP OAuth reference state exceeded its provider-safe length");
+  }
+  await deadline.run("state_persist", async () =>
+    storeIntegrationOAuthPendingState(db, {
       id: stateId,
       accountId: context.accountId,
       workspaceId: context.workspaceId,
-    });
-    if (state.length > 512) {
-      throw new Error("MCP OAuth reference state exceeded its provider-safe length");
-    }
-    await deadline.run("state_persist", async () =>
-      storeIntegrationOAuthPendingState(db, {
-        id: stateId,
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        stateEncrypted: encryptEnvironmentValue(key, fullState),
-        expiresAt,
-      }),
-    );
-  }
+      stateEncrypted: encryptEnvironmentValue(key, fullState),
+      expiresAt,
+    }),
+  );
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
     settings,
@@ -1244,7 +1257,7 @@ export async function inspectMcpAuthentication(
           params: {
             protocolVersion: "2025-03-26",
             capabilities: {},
-            clientInfo: { name: "OpenGeni", version: "1.0" },
+            clientInfo: { name: "Opengeni", version: "1.0" },
           },
         }),
         signal,
@@ -1799,7 +1812,6 @@ function operatorClientEntryFor(
   settings: Settings,
   candidates: string[],
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
-  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
   const candidateOrigins = candidates.flatMap((candidate) => {
     try {
       return [new URL(candidate).origin];
@@ -1816,22 +1828,10 @@ function operatorClientEntryFor(
       return resolved;
     }
   }
-  const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
-  const exactKeys = uniqueStrings(
-    candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]),
+  return findIntegrationsOauthClient(
+    parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson),
+    candidates,
   );
-  for (const key of exactKeys) {
-    const entry = configured[key];
-    if (entry) {
-      return entry;
-    }
-  }
-  for (const [key, entry] of Object.entries(configured)) {
-    if (normalizedCandidates.has(normalizedIssuerKey(key))) {
-      return entry;
-    }
-  }
-  return null;
 }
 
 /** Secret-free readiness for the exact registered client used by Gmail setup. */
@@ -1881,7 +1881,7 @@ async function dynamicClientRegistration(
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
-      client_name: "OpenGeni",
+      client_name: "Opengeni",
       redirect_uris: [redirectUri],
       token_endpoint_auth_method: "none",
       grant_types: ["authorization_code", "refresh_token"],
@@ -1932,10 +1932,21 @@ async function existingOAuthConnectionForStart(
     connectionSelection: OAuthProviderProfile["connectionSelection"];
     exactMcpBinding: boolean;
     connectionId?: string | undefined;
+    newAccount?: boolean;
     requestedOwnership?: ConnectionOwnership | undefined;
     newConnectionOwnership: ConnectionOwnership;
   },
 ) {
+  if (input.newAccount) {
+    // A further account always mints its own row; it never refreshes (and so
+    // never replaces) an account the caller already holds for this provider.
+    if (input.connectionSelection === "canonical_personal") {
+      throw new HTTPException(409, {
+        message: "this connector supports one account per person; reconnect it instead",
+      });
+    }
+    return null;
+  }
   if (input.connectionId) {
     const connection = await getConnectionMetadata(
       db,
@@ -2708,6 +2719,7 @@ async function verifyMcpToolsListNonFatal(
       providerIdentity = local.validateIdentity(payload);
       const verifiedTools = local.toolsForScopes(
         grantedScopes(token.scopeText, state.authorizeScopes, profile),
+        settings,
       );
       if (local.required && verifiedTools.length === 0)
         throw new Error("Connector verification did not report an authorized tool scope");

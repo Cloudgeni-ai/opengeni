@@ -50,7 +50,12 @@ async function tokenFile(value = "test-bearer"): Promise<{ root: string; path: s
 type RecordedRequest = { method: string; path: string; authorization: string | null };
 
 function codemodeServer(
-  options: { failStatus?: number; outcomeUnknown?: boolean; loseFirstPostResponse?: boolean } = {},
+  options: {
+    failStatus?: number;
+    outcomeUnknown?: boolean;
+    loseFirstPostResponse?: boolean;
+    result?: Record<string, unknown>;
+  } = {},
 ) {
   const requests: RecordedRequest[] = [];
   const operationId = "66666666-6666-4666-8666-666666666666";
@@ -98,7 +103,9 @@ function codemodeServer(
       state: terminalState,
       result:
         terminalState === "completed"
-          ? { content: [{ type: "text", text: JSON.stringify(argumentsValue) }] }
+          ? (options.result ?? {
+              content: [{ type: "text", text: JSON.stringify(argumentsValue) }],
+            })
           : null,
       errorCode: terminalState === "outcome_unknown" ? "tool_outcome_unknown" : null,
       errorMessage:
@@ -247,6 +254,82 @@ describe("ogtool CLI", () => {
         }
       } finally {
         mock.server.stop(true);
+      }
+    },
+    30_000,
+  );
+
+  const duplicatedStructuredContent = { items: [{ id: 1, title: 'Bug "quoted"' }], total: 1 };
+  const duplicatedResult = {
+    content: [
+      { type: "text", text: JSON.stringify(duplicatedStructuredContent, null, 2) },
+      { type: "text", text: "Found 1 issue." },
+      {
+        type: "text",
+        text: JSON.stringify(duplicatedStructuredContent),
+        annotations: { audience: ["user"] },
+      },
+    ],
+    structuredContent: duplicatedStructuredContent,
+    isError: false,
+  };
+
+  test("call prints the payload once by default and the exact result with --full", async () => {
+    const mock = codemodeServer({ result: duplicatedResult });
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    try {
+      const printed = await run(["call", "docs.search", "{}"], environment);
+      expect(printed.exitCode).toBe(0);
+      expect(printed.stdout).toBe(
+        `${JSON.stringify({ ...duplicatedResult, content: duplicatedResult.content.slice(1) }, null, 2)}\n`,
+      );
+      for (const args of [
+        ["call", "docs.search", "{}", "--full"],
+        ["call", "--full", "docs.search", "{}"],
+      ]) {
+        const full = await run(args, environment);
+        expect(full.exitCode).toBe(0);
+        expect(full.stdout).toBe(`${JSON.stringify(duplicatedResult, null, 2)}\n`);
+      }
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
+  test.skipIf(!process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT)(
+    "built native call prints the same result as ogtool call",
+    async () => {
+      const native = [process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT!, "codemode"];
+      for (const result of [
+        duplicatedResult,
+        {
+          content: [{ type: "text", text: '{"total":1.0,"big":12345678901234567000}' }],
+          structuredContent: { total: 1, big: 12345678901234567000 },
+        },
+        {
+          content: [{ type: "text", text: '{"total":1.0,"ratio":0.50}' }],
+          structuredContent: { total: 1, ratio: 0.5 },
+        },
+      ]) {
+        const mock = codemodeServer({ result });
+        const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+        try {
+          for (const args of [
+            ["call", "docs.search", "{}"],
+            ["call", "docs.search", "{}", "--full"],
+          ]) {
+            const [js, rust] = await Promise.all([
+              run(args, environment),
+              run(args, environment, native),
+            ]);
+            expect(js.exitCode).toBe(0);
+            expect(rust.exitCode).toBe(0);
+            // serde_json orders object keys; the printed JSON values are equal.
+            expect(JSON.parse(rust.stdout)).toEqual(JSON.parse(js.stdout));
+          }
+        } finally {
+          mock.server.stop(true);
+        }
       }
     },
     30_000,

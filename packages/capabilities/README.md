@@ -1,13 +1,13 @@
 # `@opengeni/capabilities`
 
-Protocol-neutral integration compilation for OpenGeni. Immutable OpenAPI and
+Protocol-neutral integration compilation for Opengeni. Immutable OpenAPI and
 GraphQL revisions are compiled into local `MCPServer` implementations so they
 use the existing lazy tool router, session policy, approval, auth-needed,
 Toolspace, child-session, and scheduled-task paths.
 
 The package owns protocol parsing and invocation only. Connection persistence,
 credential encryption, tenant authority, operation receipts, and catalog
-lifecycle stay in OpenGeni's core/database layers.
+lifecycle stay in Opengeni's core/database layers.
 
 Security defaults:
 

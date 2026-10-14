@@ -49,6 +49,7 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
   expect(new Headers(requests[0]!.init.headers).get("accept")).toBe("text/event-stream");
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-id")).toBe("site");
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-version")).toBe("version");
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-frame")).toBe("1");
   await bridge.fetch!(
     { ...message, path: "/v1/workspaces/site-host/sessions?originSiteId=current" },
     new AbortController().signal,
@@ -142,6 +143,7 @@ test("public Site bridge rejects another workspace before a tool call", async ()
 test("base SDK sends pinned Site calls through the actor-scoped gateway", async () => {
   let observed: { path: string; actor: string | null; body: unknown } | undefined;
   const client = new OpenGeniClient({
+    toolGatewayMode: "catalog",
     baseUrl: "https://example.invalid",
     apiKey: "synthetic",
     fetch: async (url, init) => {
@@ -191,4 +193,38 @@ test("inline HTML reuses the bridge without inventing a saved Site identity", as
     ),
   ).rejects.toThrow("not enabled");
   expect(calls).toHaveLength(1);
+});
+
+test("an unpinned host (inline HTML) forwards no Site Data and marks its requests as framed", async () => {
+  const requests: Array<{ path: string; init: RequestInit }> = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async () => {
+      throw new Error("unexpected tool call");
+    },
+    fetchResponse: async (path: string, init: RequestInit) => {
+      requests.push({ path, init });
+      return new Response("ok");
+    },
+  } as unknown as Parameters<typeof createSiteToolBridge>[0]);
+  const base = {
+    type: "opengeni.site.http" as const,
+    requestId: "request",
+    method: "POST",
+    headers: [["x-opengeni-site-frame", "0"]] as [string, string][],
+  };
+  for (const path of [
+    "/v1/workspaces/site-host/published-artifacts/current/data/query",
+    "/v1/workspaces/site-host/published-artifacts/11111111-2222-4333-8444-555555555555/data/query",
+    "/v1/workspaces/site-host/published-artifacts/11111111-2222-4333-8444-555555555555/files",
+  ])
+    await expect(bridge.fetch!({ ...base, path }, new AbortController().signal)).rejects.toThrow();
+  expect(requests).toHaveLength(0);
+  await bridge.fetch!(
+    { ...base, path: "/v1/workspaces/site-host/sessions" },
+    new AbortController().signal,
+  );
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-frame")).toBe("1");
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-id")).toBeNull();
 });

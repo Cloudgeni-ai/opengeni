@@ -8,7 +8,13 @@ administer native users, or reactivate suspended identities.
 
 Derive the external identity on the server. `service.asUser(externalId, { source })`
 followed by `getAccessContext()` may provision the identity anchor, but never grants
-shared-workspace membership. Retain its subject before starting onboarding.
+shared-workspace membership. An `asUser` request to a shared workspace does: when
+the key holds `members:manage` plus the default conversation permissions, a
+missing membership is created once with those defaults (never changing an
+existing one, re-checking the identity as active under the same lock, and
+re-created after a workspace removal; never for SDK per-user workspaces; see
+[product integration](product-integration.md)). Use explicit onboarding to choose
+permissions before that first request. Retain its subject before starting onboarding.
 
 `service.lookupExternalIdentity(organizationId, { source, externalId })` requires
 the organization's service key with `members:manage` (or `workspace:admin`). It is

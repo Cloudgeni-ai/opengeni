@@ -1,22 +1,22 @@
 ---
 name: opengeni-sites
-description: Build, edit, and publish OpenGeni Sites. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider Sites only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
+description: Build, edit, and publish Opengeni Sites. Use when the user asks for a site, dashboard, explorable report, landing page, demo, tracker, portal, directory, calculator, form, or custom agent interface, or when a saved interactive page clearly serves a deliverable they asked for. When working on an existing application, follow its established architecture and workflow; consider Sites only when relevant to the requested outcome, not as an automatic conversion. Respect explicit format and platform choices.
 ---
 
-# OpenGeni Sites
+# Opengeni Sites
 
-An OpenGeni Site is an ordinary Bun web application with retained editable
+An Opengeni Site is an ordinary Bun web application with retained editable
 source (when supplied) and one published runtime file. React is the default,
 not a requirement: a plain HTML-only Site is valid. Build and test in the
 sandbox, then upload the self-contained HTML and optional source.
 
 Do not invent a Site framework, deployment service, App Host, wildcard domain,
-provider-specific API wrapper, or OpenGeni-only build CLI.
+provider-specific API wrapper, or Opengeni-only build CLI.
 
 ## Sites have no server; AI comes from the host
 
 A Site never needs its own server, API key, or hosting provider to reach
-OpenGeni. Model access, agent conversations, and workspace tools all come from
+Opengeni. Model access, agent conversations, and workspace tools all come from
 the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site` plus the
 `@opengeni/react/session-ui` conversation surface. The parent page owns the
 credentials and workspace identity; Site code receives neither, so "keep
@@ -24,13 +24,16 @@ credentials server-side" is already satisfied by that bridge.
 
 When the user asks for AI, chat, an assistant, "Ask the data", or a "backend"
 inside a Site, that bridge is the design. Do not propose Vercel, another
-server, a tunnel, or a Connected Machine for OpenGeni access, do not spawn a
+server, a tunnel, or a Connected Machine for Opengeni access, do not spawn a
 child to build a separate backend, and do not post a Connect card for a
-hosting provider the user did not name. A separate server is only relevant for
-a genuinely non-OpenGeni need: a third-party API that requires a secret the
-viewer's browser must not hold, a persistent database, or scheduled jobs. If
-the request seems to need one of those, or you cannot tell where the user
-wants the AI to run, say which designs are possible and ask before building.
+hosting provider the user did not name. Saved data needs no server either:
+Site Data (below) gives every published Site persistent collections and files,
+and scheduled tasks feed them through agent tools. A separate server is only
+relevant for a genuinely non-Opengeni need: a third-party API that requires a
+secret the viewer's browser must not hold, relational queries or volumes Site
+Data cannot serve, or live server-side compute. If the request seems to need
+one of those, or you cannot tell where the user wants the AI to run,
+say which designs are possible and ask before building.
 
 ## Start from the durable Site
 
@@ -39,7 +42,7 @@ wants the AI to run, say which designs are possible and ask before building.
   packaged as self-contained HTML, preserve its design and behavior, and retain
   editable source when available. A local preview alone is still appropriate
   when that is all the user requests. Explain workspace access for the published
-  link; do not imply it is public to anyone. OpenGeni AI and tool access are
+  link; do not imply it is public to anyone. Opengeni AI and tool access are
   never such a backend (see above). If the app genuinely requires server-side
   compute that Sites cannot host, explain that constraint and ask how the user
   wants to proceed instead of dropping functionality or choosing a host.
@@ -54,7 +57,7 @@ wants the AI to run, say which designs are possible and ask before building.
   optimistic-concurrency fence for the next publish.
 - Treat retained source as the editable truth and the compiled HTML as the
   runtime projection. Never edit only the generated HTML when source exists.
-- Keep secrets, OpenGeni access keys, OAuth tokens, workspace ids, API base
+- Keep secrets, Opengeni access keys, OAuth tokens, workspace ids, API base
   URLs, and signed URLs out of the source and generated HTML.
 
 ## Use normal Bun + React
@@ -69,7 +72,7 @@ bun test
 bun build --compile --target=browser ./index.html --outdir=dist
 ```
 
-Install OpenGeni packages from the npm registry using the exact versions in
+Install Opengeni packages from the npm registry using the exact versions in
 this Skill's `package-versions.json`. With `skill_read`, request
 `{"skill":"opengeni-sites","paths":["package-versions.json"]}` and use the
 returned package/version pairs in `bun add --exact package@version ...`.
@@ -83,10 +86,10 @@ The pins include `@opengeni/ogtool`. Run `bun run ogtool ...` from this
 project for discovery and calls; a sandbox-global CLI can predate the deployment.
 
 Local development only: if `/opt/opengeni/site-packages/sdk.tgz` exists, these
-are unreleased checkout packages. Skip the registry command above for OpenGeni.
+are unreleased checkout packages. Skip the registry command above for Opengeni.
 After ordinary dependencies, install these packages with
 `bun add --no-save /opt/opengeni/site-packages/sdk.tgz /opt/opengeni/site-packages/react.tgz /opt/opengeni/site-packages/codemode.tgz`.
-Remove stale OpenGeni overrides; repeat this step after `bun install`. Do not
+Remove stale Opengeni overrides; repeat this step after `bun install`. Do not
 save sandbox archive paths in published source. In this local-development
 exception, use the image's `ogtool` directly: it is built from the same checkout.
 
@@ -143,7 +146,7 @@ Site complete from compilation alone.
 ## Plain HTML without a browser build
 
 For a small HTML-only Site, use ordinary HTML, CSS, and JavaScript. If it calls
-OpenGeni tools or SDK methods, place this exact optional tag before your own
+Opengeni tools or SDK methods, place this exact optional tag before your own
 scripts (without async, defer, or type="module"):
 
 ```html
@@ -172,12 +175,12 @@ paths in one document.
 Publish the original HTML containing the tag, not the served client script or
 transformed viewer document. For this path, upload `index.html` wherever the
 publishing instructions below use `dist/index.html`. Inline ordinary styles,
-scripts, and assets as usual; the OpenGeni client tag is resolved by the host.
+scripts, and assets as usual; the Opengeni client tag is resolved by the host.
 An HTML-only Site can be a small widget; it does not require a full-page layout.
 
-## Prefer OpenGeni's UI and typed client
+## Prefer Opengeni's UI and typed client
 
-- Prefer `@opengeni/react` components and compiled CSS for OpenGeni-native
+- Prefer `@opengeni/react` components and compiled CSS for Opengeni-native
   session, timeline, composer, queue, approval, and human-input experiences.
 - Use custom React only where the Site has a genuinely different product need.
 - Inside the published opaque-origin iframe, create the workspace-bound client
@@ -185,9 +188,9 @@ An HTML-only Site can be a small widget; it does not require a full-page layout.
   identity; Site code receives neither.
 
 Published Sites have no browser localStorage/sessionStorage. Do not rely on
-them for startup or session selection; use React state and the SDK's durable
-session/draft APIs. A sandbox-local page having storage does not prove the
-published iframe does.
+them for startup or session selection; use React state, Site Data for anything
+that must persist, and the SDK's durable session/draft APIs. A sandbox-local
+page having storage does not prove the published iframe does.
 
 ```ts
 import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
@@ -196,7 +199,7 @@ const client = createOpenGeniSiteClient();
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
-For embedded conversations, `site.client` is the ordinary OpenGeni SDK client;
+For embedded conversations, `site.client` is the ordinary Opengeni SDK client;
 `site.workspaceId` is a host-resolved routing alias. Use the normal React
 complete conversation surface—do not implement session REST or SSE yourself:
 
@@ -247,7 +250,7 @@ Use the lower-level hooks/components only for intentionally custom behavior.
 The host owns the chat's available space; `SessionConversation` fills it.
 The SDK defaults to dark colors. On a light panel, set `data-og-theme="light"`
 on its wrapper; changing the Site's body background does not select the SDK
-theme, and the outer OpenGeni app's theme does not cross the iframe. Keep
+theme, and the outer Opengeni app's theme does not cross the iframe. Keep
 foreground and background on the same SDK tokens rather than overriding
 message/button colors individually. Check a real assistant reply, expanded
 steps, composer and menus for readable contrast in the chosen theme.
@@ -274,11 +277,114 @@ The optional `@pierre/diffs` peer brings a large syntax-language bundle. For
 a small self-contained Site that does not need highlighted diffs, exclude
 `@pierre/diffs` and `@pierre/diffs/react` with Bun's `--external` build flags;
 the React renderer already provides a plain-diff fallback. Do not externalize
-the OpenGeni SDK, React, or other required runtime imports.
+the Opengeni SDK, React, or other required runtime imports.
 
 The generated tool declarations make exact tool paths typed during authoring.
 The runtime proxy resolves those paths to opaque `{serverId, toolName}`
 identities. Friendly names are never authority.
+
+## Save data with Site Data
+
+Every published Site can keep persistent JSON records and files in Opengeni.
+Data belongs to the Site, not a version: it survives new versions and
+rollbacks. An archived Site keeps its data but its page cannot reach it. There
+is no live push; read on load or when the viewer refreshes.
+
+Define collections with agent tools, never from Site HTML. Use
+`opengeni__site_data_define_collection` after the first publish (it needs the
+Site id), choosing an access mode for viewers (people who can open the Site):
+
+| Access mode | Viewers can | Use for |
+| --- | --- | --- |
+| `shared` | read and write every record | a team CRM, a shared board |
+| `shared_read` | read; only managers and agents write | dashboards fed by a schedule |
+| `per_viewer` | read and write only their own records | personal trackers, settings |
+| `append_only` | add records, read only their own | forms, feedback, sign-ups |
+
+Managers (the Site's owner, workspace admins, and agents acting for them) read,
+change and delete every record through the Data tab and agent tools; set
+`privateRecords: true` on a `per_viewer` collection to keep records private
+even from managers. The Site page itself always acts as a viewer, even for its
+owner: it sees only that person's `per_viewer` records and cannot write
+`shared_read` collections, so feed those with agent tools. Add `uniqueFields`
+(for example `[["email"]]`) to reject duplicates, `jsonSchema` to validate
+writes, and `indexedFields` for numeric range filters you use often. Schemas
+use only `type`, `properties`, `required`, `additionalProperties`, `items` (one
+schema), `enum` (up to 100 scalars), `const`, numeric and length bounds
+(`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
+`minLength`, `maxLength`, `minItems`, `maxItems`, `minProperties`,
+`maxProperties`), `format`, `title`, `description`, `allOf`/`anyOf`/`oneOf`,
+and `uniqueItems` when `items` has a scalar `type`; no `$ref`, `$defs`,
+`pattern`, `default` or conditionals; at most 1,000 properties per object, 16
+levels, 16 branches per `anyOf`/`oneOf`/`allOf` and 500 `enum` values in
+total. Wide objects are fine; keep schemas under `items` and
+`additionalProperties` simple (few branches and enum values), since they run
+on every element: a schema too costly per element is refused at definition.
+Expect `rate_limited` if writes spend too long validating (each Site has 5 s
+of schema checking a minute); removing the schema always works. Field
+paths cannot use `__proto__`, `prototype` or `constructor`. An Only me Site's data is reachable only by its owner.
+
+In the Site, use the same client:
+
+```ts
+import { createOpenGeniSiteClient, OpenGeniSiteDataError } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+const contacts = site.data.collection<{ name: string; email: string }>("contacts");
+const page = await contacts.list({
+  where: [{ field: "name", op: "contains", value: "acme" }],
+  sort: [{ field: "$updatedAt", direction: "desc" }],
+  limit: 50,
+});
+const created = await contacts.insert({ name: "Ada", email: "ada@example.com" });
+try {
+  await contacts.patch({ id: created.id }, { name: "Ada L." }, { expectedVersion: created.version });
+} catch (error) {
+  if (error instanceof OpenGeniSiteDataError && error.code === "conflict") {
+    // Someone else changed it: reload and let the viewer retry.
+  }
+}
+await site.data.batch([...]); // up to 100 operations, all or nothing
+const file = await site.files.upload(input.files[0], { scope: "private" });
+const { url } = await site.files.url(file.id); // short-lived; fetch a new one when needed
+```
+
+Also available: `get` (by id or key; resolves null when missing), `put` (create
+or replace by key), `delete`, `increment` (atomic numeric add), `count`, and
+`list({ cursor })` with `nextCursor` for paging (up to 200 a page). Filters:
+`eq`, `ne`, `in`, `gt`, `gte`, `lt`, `lte`, `contains`, `exists` on dotted
+data paths or `$id`, `$key`, `$owner` (`"me"`), `$createdAt`, `$updatedAt`,
+`$version`. Files accept images, PDF, text, CSV, JSON, audio, video, Office
+and zip files up to 10 MB;
+`private` files are visible only to the uploader and managers.
+
+Stored records and file names are untrusted input written by any viewer.
+Render them with `textContent` or React text, never `innerHTML`,
+`dangerouslySetInnerHTML`, or string-built HTML, and never `eval` them.
+
+Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
+schema), `conflict` (stale `expectedVersion`, a duplicate unique value, or a
+schema changed or record grew mid-request: send it again),
+`not_found`, `forbidden` (the access mode does not allow it),
+`quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
+and 100,000 per collection; at most 4 MB of records per request; files 10 MB
+each and 1 GB per Site, by default), `rate_limited` (retry later), and
+`site_data_unsupported` (a host or local preview without Site Data). Local
+sandbox previews have no Site Data; test the published Site.
+
+Agents and scheduled tasks use the tools: `opengeni__site_data_describe`,
+`site_data_query`, `site_data_write` (batches of up to 100), `site_data_import`
+and `site_data_export` (JSON or CSV), `site_data_reset` (needs
+`confirm: true`), and `site_files_list` / `site_files_upload` /
+`site_files_delete`. For a dashboard fed on a schedule, define a `shared_read`
+collection, then have the scheduled task upsert records with `put` keyed by a
+stable id, so reruns replace instead of duplicating. A person-less scheduled
+task owns `per_viewer` records as the schedule, so each run sees the last
+run's. An agent session started from the Site page acts like the page: only
+that Site's data with viewer rights, and no managing collections, for the
+session's whole life (even when its owner later chats in it from the
+console), so do management from your authoring session or a schedule. The Site page's Data tab
+lets the Site's managers browse, export and delete records.
 
 ## Authoring, preview, and viewer access
 
@@ -291,7 +397,7 @@ There are two client surfaces:
 - `site.tools.*` calls workspace tools. Published direct calls must appear in
   `requestedTools` and are checked against the viewer's live tool access.
   Preview calls use your attempt's available tool catalog.
-- `site.client.*` calls the ordinary OpenGeni REST SDK, including the React
+- `site.client.*` calls the ordinary Opengeni REST SDK, including the React
   conversation components. These calls are not entries in `requestedTools`.
   Published calls use the viewer's authorization; sandbox previews use your
   agent proxy's narrower permissions. The preview currently supports workspace
@@ -407,6 +513,8 @@ immutable versions and retained source. There is no hard-delete workflow.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.
+- Site Data collections exist with the intended access modes, the page renders
+  stored values as text, and quota, conflict and access errors are handled.
 - The durable Site contains final HTML and any editable source used to build it.
   Plain HTML-only Sites are valid; their HTML is the editable source.
 - The completion reply contains the working Markdown link returned from the

@@ -127,7 +127,7 @@ export function compileGraphqlRevision(
       const description = [
         field.description?.trim(),
         kind === "mutation"
-          ? "Changes external state and requires approval."
+          ? "Changes external state. Your tool permissions determine whether review is needed."
           : "Read-only GraphQL query.",
       ]
         .filter(Boolean)

@@ -40,11 +40,39 @@ describe("pre-knowledge Memory storage compatibility", () => {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
       // These later migrations require the post-0461 Knowledge/file policies.
       await owner`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
       for (const name of allowanceMigrationTail)
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
+      // Resolves knowledge_index_claim from the withheld 0461 migration.
+      await owner`INSERT INTO schema_migrations(name) VALUES('0730_maintenance_work_probes.sql')`;
+      // Rewrites the visibility transition installed by the withheld 0501 migration.
+      await owner`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;
       // The import migration extends the withheld 0499 attachment helper.
       await owner`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
+      // The session storage lifecycle extends the withheld 0560 import guards.
+      for (const name of [
+        "0649_session_content_archive.sql",
+        "0650_session_archive_activity.sql",
+        "0651_session_event_delta_folding.sql",
+        "0652_session_archive_guard_search_path.sql",
+        "0653_session_archive_tenancy_fence.sql",
+        "0657_session_archive_purge_retained_evidence.sql",
+        "0660_session_archive_preference_snapshot_export.sql",
+        // The drained SuperGrok cutover reads the withheld 0560 import column.
+        "0747_subscription_core_xai_cutover.sql",
+        "0748_subscription_core_claude_cutover.sql",
+        // The retirement requires both cutovers.
+        "0751_subscription_core_legacy_retirement.sql",
+        "0752_subscription_personal_sharing.sql",
+        // A one-time data repair that also reads the withheld 0560 import column.
+        "0763_queue_steer_admission_recheck_repair.sql",
+        // Rewrites the current quiescence function body, which the withheld
+        // migrations shape differently here; it adds no storage this test reads.
+        "0768_private_visibility_ignores_leftovers.sql",
+        // Rewrites the same routines again; no storage this test reads.
+        "0769_private_visibility_never_blocks.sql",
+      ])
+        await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);
     } finally {
       await owner.end();

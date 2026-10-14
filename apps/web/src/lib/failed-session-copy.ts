@@ -1,3 +1,4 @@
+import { providerRecoverySubject } from "@opengeni/react";
 import type { SessionFailureSummary } from "./events";
 
 /**
@@ -16,6 +17,12 @@ type KnownFailure = {
   message: string;
   retryUnhelpful: boolean;
   suggestModel: boolean;
+  /**
+   * Whole headline when another model can be chosen, for transient refusals
+   * whose remedy reads as a choice. Otherwise " Choose another model below."
+   * is appended to `message`.
+   */
+  chooseModelMessage?: string;
 };
 export type KnownFailureKind =
   | "provider_credentials"
@@ -71,20 +78,26 @@ const QUOTA: KnownFailure = {
 };
 const RATE_LIMITED: KnownFailure = {
   kind: "rate_limited",
-  message: "The model provider is rate limiting requests. Try again in a minute.",
+  message: "This model is throttled due to high demand. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 const PROVIDER_ERROR: KnownFailure = {
   kind: "provider_error",
-  message: "The model provider had a temporary error.",
+  message: "This model is temporarily unavailable. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is temporarily unavailable. Select a different model, or try again in a few minutes.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
 const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution environment.";
 const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
+const COMPACTION_FAILURE =
+  "Couldn’t compact conversation history. If the next message fails too, start a new session.";
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
@@ -131,7 +144,7 @@ export function classifyProviderFailure(
     "Claude credentials expired or were revoked. Replace the key or setup token in Models."
   )
     return CREDENTIALS;
-  // OpenGeni's own credit exhaustion has a dedicated billing remedy upstream.
+  // Opengeni's own credit exhaustion has a dedicated billing remedy upstream.
   if (text.includes("opengeni credits")) return null;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
   // status alone classifies only 401/402/403/429; other statuses do not prove
@@ -191,6 +204,8 @@ export function failedSessionCopy(
   detail?: string;
   /** A daily allowance is spent; the banner may name the deployment's free model. */
   dailyLimit?: true;
+  /** The compaction-failure headline; the timeline's own landmark can carry it instead. */
+  compaction?: true;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -217,6 +232,29 @@ export function failedSessionCopy(
       ...(detail && detail !== recorded ? { detail } : {}),
     };
   }
+  // Spent automatic recovery on a recorded model route: name the model and the
+  // provider condition. Legacy events without the route keep the classified
+  // copy below; the exact recorded text stays behind Details either way.
+  const recovery = failure.providerRecovery;
+  if (
+    recovery?.modelRoute &&
+    recovery.modelLabel &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !failure.quotaScope
+  ) {
+    const subject = providerRecoverySubject(recovery);
+    return {
+      reason: modelChanged
+        ? `${subject}. Retry to continue with the selected model.`
+        : canChooseModel
+          ? `${subject}. Select a different model, or try again in a few minutes.`
+          : `${subject}. Try again in a few minutes.`,
+      unavailableModel: false,
+      retryUnhelpful: false,
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
   // Require an explicit claim about the model itself, not e.g. its connection
   // or service being unavailable.
   const unavailableModel =
@@ -226,18 +264,26 @@ export function failedSessionCopy(
   const known =
     creditExhausted || failure.safetyRefusal || unavailableModel
       ? null
-      : classifyProviderFailure(
-          failure.recordedDetail ?? recorded ?? "",
-          failure.failureCode,
-          failure.quotaScope,
-        );
+      : (quotaScopeFailure(failure.quotaScope) ??
+        // A recorded recovery streak proves the worker paced this transient
+        // refusal. Provider quota wording alone must not override that typed
+        // decision (e.g. Gemini's per-minute quota); legacy failures with an
+        // unknown streak retain their existing text fallback.
+        (failure.failureCode === "provider_rate_limited" &&
+        failure.consecutiveRecoveryCount !== null
+          ? RATE_LIMITED
+          : classifyProviderFailure(
+              failure.recordedDetail ?? recorded ?? "",
+              failure.failureCode,
+              failure.quotaScope,
+            )));
   if (known) {
     const detail = diagnostic;
+    const suggest = known.suggestModel && canChooseModel && !modelChanged;
     return {
-      reason:
-        known.suggestModel && canChooseModel && !modelChanged
-          ? `${known.message} Choose another model below.`
-          : known.message,
+      reason: suggest
+        ? (known.chooseModelMessage ?? `${known.message} Choose another model below.`)
+        : known.message,
       unavailableModel: false,
       retryUnhelpful: known.retryUnhelpful,
       ...(detail && detail !== known.message ? { detail } : {}),
@@ -265,6 +311,21 @@ export function failedSessionCopy(
           : UNKNOWN_FAILURE,
       unavailableModel: false,
       ...(detail ? { detail } : {}),
+    };
+  }
+  // The recorded compaction text is the provider's raw rejection: name the
+  // outcome and keep the exact text behind Details.
+  if (
+    code === "context_compaction_failed" &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !unavailableModel
+  ) {
+    return {
+      reason: COMPACTION_FAILURE,
+      unavailableModel: false,
+      compaction: true,
+      ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
   const reason = creditExhausted
