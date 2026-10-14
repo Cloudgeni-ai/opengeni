@@ -91,7 +91,7 @@ function focusIfIdle(card: HTMLElement | null, target: HTMLElement | null = card
  * The Connected Machine card in a conversation. The agent can post it, but only
  * the person can connect a machine (the command is minted in their browser and
  * never enters the transcript) or move this chat onto one. Once a machine with a
- * screen is reachable, the card offers the OpenGeni Browser extension for it.
+ * screen is reachable, the card offers the Opengeni Browser extension for it.
  */
 export function SessionMachineCapabilityCard({
   item,
@@ -449,7 +449,7 @@ type ChromeState = {
 };
 
 /**
- * Whether the OpenGeni Browser extension linked a Chrome profile on this exact
+ * Whether the Opengeni Browser extension linked a Chrome profile on this exact
  * machine. Reads once; polls only after the person opens the store, stops once
  * linked, after a bounded time, or when the inventory is not available to them.
  */
@@ -715,10 +715,10 @@ function ScreenControlStep({
     // The row stays short at any width; the hint names the permission.
     description = "Mac permission needed";
     hint = shown
-      ? `On the Mac, switch on OpenGeni under ${missing.label}.${
+      ? `On the Mac, switch on Opengeni under ${missing.label}.${
           missing.pane === "screen_recording" ? " Choose Quit & Reopen if macOS asks." : ""
         }`
-      : `Allow ${missing.label} for OpenGeni on this Mac.`;
+      : `Allow ${missing.label} for Opengeni on this Mac.`;
     if (canManage && online) {
       control = button(shown ? "Open again" : "Open settings", () => void openPane(missing.pane));
     }
@@ -762,7 +762,7 @@ function ChromeStep({ chrome, machineName }: { chrome: ChromeState; machineName:
           description={
             chrome.connected
               ? `${chrome.connected.name} on ${machineName}`
-              : `Add OpenGeni Browser on ${machineName}`
+              : `Add Opengeni Browser on ${machineName}`
           }
           control={
             chrome.connected ? (

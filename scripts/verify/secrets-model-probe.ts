@@ -15,9 +15,9 @@
  * 2. Credits: reads the Gateway balance in a subshell (the key never enters this
  *    process). Without credit, every run is recorded as blocked.
  * 3. Runs: for each --models product id, real turns through the stack's public
- *    API exercising OpenGeni's own tools:
+ *    API exercising Opengeni's own tools:
  *      exec      exec_command, answer carries the output
- *      patch     apply_patch (OpenGeni's patch grammar), then cat the file
+ *      patch     apply_patch (Opengeni's patch grammar), then cat the file
  *      discover  deferred tools: tool_search / tool_list, then call a found tool
  *      login     a multi-step credential task against the fake-login suite: read a
  *                password from a file, POST it, report /whoami, never echo it

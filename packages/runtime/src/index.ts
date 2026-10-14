@@ -8839,7 +8839,7 @@ export async function restoreInterruptedRunState(
   });
 }
 
-export const TURN_OPERATIONAL_NOTICE_PREFIX = "[OpenGeni turn-scoped operational notice]\n";
+export const TURN_OPERATIONAL_NOTICE_PREFIX = "[Opengeni turn-scoped operational notice]\n";
 
 export async function prepareRunInput(
   agent: Agent<any, any>,
@@ -8975,7 +8975,7 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
-  // OpenGeni-minted Codemode token renewal registration. Called only after the
+  // Opengeni-minted Codemode token renewal registration. Called only after the
   // initial token file reached the real sandbox session.
   onCodemodeTokenSessionReady?: (session: CodemodeTokenWriterSession) => Promise<void> | void;
   // Host-owned run material is seeded off-manifest before setup and every

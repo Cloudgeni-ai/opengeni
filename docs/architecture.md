@@ -431,7 +431,7 @@ and provenance never imply human authority. Turns freeze initiating principals
 and execution/recovery authority snapshots.
 
 An effective first-party permission ceiling of `[]` remains zero delegated
-Opengeni authority. Runtime skips only remote OpenGeni-delegated MCP preparation,
+Opengeni authority. Runtime skips only remote Opengeni-delegated MCP preparation,
 never pads a grant or signs an empty token; external-host, host-local,
 connection-backed and already-authorized native paths keep their own authority.
 See [automation defaults](automations.md#empty-first-party-authority).

@@ -9,7 +9,7 @@ on macOS and for explicitly selected isolated Linux desktops. Linux host desktop
 and Windows retain the native default.
 
 `ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
-continues to handle OpenGeni sessions, operation receipts and frame streaming.
+continues to handle Opengeni sessions, operation receipts and frame streaming.
 There is no second authorization system or operation journal. Structured browser
 control, attached Chrome and browser profiles are unchanged.
 

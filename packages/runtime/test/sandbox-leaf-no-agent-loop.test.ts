@@ -63,9 +63,9 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
     }
   });
 
-  test("leaf's transitive OpenGeni-authored import graph reaches no agent-loop entrypoint", () => {
+  test("leaf's transitive Opengeni-authored import graph reaches no agent-loop entrypoint", () => {
     // Crawl the resolved transitive import set of the leaf, following only the
-    // OpenGeni-authored source (relative `./` imports + workspace `@opengeni/*`
+    // Opengeni-authored source (relative `./` imports + workspace `@opengeni/*`
     // packages). Third-party packages are inspected as leaves but not recursed.
     // If ANY reachable source file imports a forbidden agent-loop entrypoint —
     // including the runtime barrel (packages/runtime/src/index.ts, whose markers

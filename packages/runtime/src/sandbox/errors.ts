@@ -30,7 +30,7 @@ export class SandboxResumeStateUnavailableError extends Error {
   }
 }
 
-/** The OpenGeni-owned envelope identity and the SDK's resumed live handle name
+/** The Opengeni-owned envelope identity and the SDK's resumed live handle name
  * different physical providers. Neither address may be guessed away: callers
  * must fail closed before issuing a command or publishing readiness. */
 export class SandboxResumeIdentityMismatchError extends Error {

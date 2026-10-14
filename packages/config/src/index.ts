@@ -682,7 +682,7 @@ const SettingsSchema = z.object({
   openaiBaseUrl: z.string().optional(),
   openaiModel: z.string().default("gpt-6-astra"),
   openaiAllowedModels: z.string().default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
-  // OpenGeni-managed Vercel AI Gateway. When configured, the two reviewed
+  // Opengeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
   vercelAiGatewayApiKey: z.string().optional(),
