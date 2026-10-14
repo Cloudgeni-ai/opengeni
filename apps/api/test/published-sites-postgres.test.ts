@@ -1370,6 +1370,72 @@ test("takedown suspends at once, syncs the edge, actions reports and is audited"
   );
 }, 60_000);
 
+test("edge writes hold no database lock and catch up with changes made meanwhile", async () => {
+  const kv = new Map<string, string>();
+  let gate: Promise<void> | null = null;
+  let openGate = () => {};
+  let writeStarted = () => {};
+  const writing = new Promise<void>((resolve) => {
+    writeStarted = resolve;
+  });
+  const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const key = url.split("?")[0]!;
+    if (!url.includes("/storage/kv/")) return new Response("{}", { status: 200 });
+    if (method === "GET")
+      return kv.has(key) ? new Response(kv.get(key)) : new Response("", { status: 404 });
+    if (gate) {
+      writeStarted();
+      await gate;
+    }
+    kv.set(key, typeof init?.body === "string" ? init.body : "");
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const f = await fixture({
+    sitesCloudflareApiToken: "cf-token",
+    sitesCloudflareAccountId: "cf-account",
+    sitesCloudflareKvNamespaceId: "cf-namespace",
+  });
+  const effects = configureSitePublishingEffects(f.settings, { fetch: fakeFetch, backoffMs: 0 });
+  const site = await f.live("Edge lock", { access: "public" });
+  await effects.flush();
+  const generations = async () => {
+    const [row] = await shared.admin`select generation, edge_synced_generation
+      from site_publications where site_id = ${site.id}`;
+    return { generation: Number(row!.generation), synced: Number(row!.edge_synced_generation) };
+  };
+  expect((await generations()).synced).toBe((await generations()).generation);
+
+  // The next edge write hangs on Cloudflare.
+  gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  expect((await f.publication(f.owner, site.id, "PUT", { access: "members" })).status).toBe(200);
+  await writing;
+  // Another change to the same hostname commits while that write is in flight.
+  const changed = await Promise.race([
+    f.publication(f.owner, site.id, "PUT", { access: "public" }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("publication update waited on the edge write")), 10_000),
+    ),
+  ]);
+  expect(changed.status).toBe(200);
+  gate = null;
+  openGate();
+  await effects.flush();
+  // The edge ends on the newest generation, and the database records it.
+  const latest = await generations();
+  expect(latest.synced).toBe(latest.generation);
+  const [record] = [...kv.values()].map((value) => JSON.parse(value));
+  expect(kv.size).toBe(1);
+  expect(record).toMatchObject({
+    siteId: site.id,
+    generation: latest.generation,
+    access: "public",
+  });
+}, 60_000);
+
 test("Site budgets hold across rotated visitors and addresses; requests are capped", async () => {
   const f = await fixture();
   const site = await f.live("Rotated", { access: "public", agent: { enabled: true } });

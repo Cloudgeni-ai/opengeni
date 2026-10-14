@@ -894,17 +894,18 @@ export type SiteHostnameEdgeState = {
 };
 
 /**
- * Run `fn` with the edge state of one hostname while holding that hostname's
- * advisory lock, so edge writes for a hostname land in generation order:
- * a claim, release, takedown or another sync waits until `fn` returns. The
- * live Site is read in the workspace that owns the label, wherever it moved.
- * `fn` must not write to the database through another connection.
+ * Read the edge state of one hostname under that hostname's advisory lock,
+ * allocate a fresh tombstone generation when no Site is live on it, and
+ * commit. The caller writes the edge after this returns, outside any
+ * transaction: the lock orders the reads (and generations) against claims,
+ * releases and takedowns, and the edge writer never replaces a newer
+ * generation. The live Site is read in the workspace that owns the label,
+ * wherever it moved.
  */
-export async function withSiteHostnameEdgeState<T>(
+export async function readSiteHostnameEdgeState(
   db: Database,
   label: string,
-  fn: (state: SiteHostnameEdgeState) => Promise<T>,
-): Promise<T> {
+): Promise<SiteHostnameEdgeState> {
   if (!LABEL.test(label)) throw new SitePublishingError("validation", "Invalid hostname label");
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
@@ -935,8 +936,44 @@ export async function withSiteHostnameEdgeState<T>(
       );
       tombstoneGeneration = Number(next!.generation);
     }
-    return await fn({ label, hostname, hold, live, tombstoneGeneration });
+    return { label, hostname, hold, live, tombstoneGeneration };
   });
+}
+
+/**
+ * Cheap re-read after an edge write: the generation of the Site live on the
+ * label now (null when none is), with no lock and no new generation. The
+ * writer compares it with what it wrote and syncs again when it moved.
+ */
+export async function readSiteHostnameLiveGeneration(
+  db: Database,
+  label: string,
+): Promise<{ siteId: string; generation: number } | null> {
+  if (!LABEL.test(label)) return null;
+  return await db.transaction(async (raw) => {
+    const tx = raw as unknown as Database;
+    await setHostnameLane(tx, label);
+    const { hostname } = await laneState(tx, label);
+    await setHostnameLane(tx, "");
+    if (!hostname || hostname.releasedAt !== null) return null;
+    const scope = { accountId: hostname.accountId, workspaceId: hostname.workspaceId };
+    return await withRlsContext(
+      tx,
+      scope,
+      async (scoped) => {
+        const [row] = await rawRows<{ generation: string | number; label: string }>(
+          scoped,
+          sql`select generation, label from site_publications
+            where workspace_id = ${scope.workspaceId} and site_id = ${hostname.siteId}`,
+        );
+        return row && row.label === label
+          ? { siteId: hostname.siteId, generation: Number(row.generation) }
+          : null;
+      },
+      undefined,
+      "none",
+    );
+  }, READ_ONLY);
 }
 
 export async function recordSitePublicationScan(

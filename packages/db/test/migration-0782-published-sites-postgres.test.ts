@@ -38,7 +38,7 @@ import {
   revokeSiteViewerSessions,
   settleSiteRuntimeConversationSpend,
   createSiteAbuseReport,
-  withSiteHostnameEdgeState,
+  readSiteHostnameEdgeState,
   type SiteRuntimeBudgetLimits,
   SiteDataError,
   SitePublishingError,
@@ -496,13 +496,13 @@ test("edge state is the live Site or a tombstone, with generations rising across
   const siteId = await site(a);
   const first = label("edge");
   const published = await publish(a, siteId, first);
-  const live = await withSiteHostnameEdgeState(client.db, first, async (state) => state);
+  const live = await readSiteHostnameEdgeState(client.db, first);
   expect(live.live?.publication.siteId).toBe(siteId);
   expect(live.tombstoneGeneration).toBeNull();
   const moved = await publish(a, siteId, label("moved"));
   expect(moved.publication.generation).toBeGreaterThan(published.publication.generation);
   // The released label gets a tombstone newer than anything written for the Site so far.
-  const old = await withSiteHostnameEdgeState(client.db, first, async (state) => state);
+  const old = await readSiteHostnameEdgeState(client.db, first);
   expect(old.live).toBeNull();
   expect(old.hostname?.releasedAt).not.toBeNull();
   expect(old.tombstoneGeneration!).toBeGreaterThan(moved.publication.generation);
