@@ -4,7 +4,9 @@ import {
   bootstrapWorkspace,
   createDb,
   createConnection,
+  decryptEnvironmentValue,
   getConnectionMetadata,
+  loadIntegrationOAuthPendingState,
   loadConnectionCredentialForBroker,
   refreshOAuthConnectionCredential,
   ConnectionRefreshHttpError,
@@ -286,7 +288,20 @@ test.each(["personal"] as const)(
       setGrantFailure();
       const initialExchanges = exchanges;
       const { attempt, state } = await begin();
-      const payload = readSignedState(state, secret) as Record<string, unknown>;
+      // The provider only sees a short signed reference; the full signed
+      // context waits encrypted at rest and is what the fixtures alter below.
+      const reference = readSignedState(state, secret) as Record<string, unknown>;
+      expect(reference).toMatchObject({ kind: "mcp_oauth_reference" });
+      const encryptedFullState = await loadIntegrationOAuthPendingState(client.db, {
+        id: reference.id as string,
+        accountId: reference.accountId as string,
+        workspaceId: reference.workspaceId as string,
+      });
+      if (!encryptedFullState) throw new Error("pending MCP OAuth state missing");
+      const payload = readSignedState(
+        decryptEnvironmentValue(Buffer.from(encryptionKey, "base64"), encryptedFullState),
+        secret,
+      ) as Record<string, unknown>;
       expect(payload).toMatchObject({
         discoveryMode: "provider_oauth_metadata",
         authorizationServerMetadataUrl:
