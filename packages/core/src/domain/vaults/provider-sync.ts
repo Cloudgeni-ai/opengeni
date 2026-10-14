@@ -491,9 +491,7 @@ export async function refreshStaleLinkedVaults(input: {
   now?: () => Date;
 }): Promise<string[]> {
   const now = (input.now ?? (() => new Date()))();
-  const stale = input.vaults.filter((vault) =>
-    linkedVaultNeedsRefresh(vault, input.maxAgeMs, now),
-  );
+  const stale = input.vaults.filter((vault) => linkedVaultNeedsRefresh(vault, input.maxAgeMs, now));
   if (stale.length === 0) return [];
   const changed: string[] = [];
   const runs = stale.map((vault) => {
