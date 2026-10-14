@@ -31,6 +31,12 @@ export class AppUpdates {
     private readonly feed: DesktopUpdateFeed,
     private readonly currentVersion: string,
     private readonly onChange: () => void,
+    /**
+     * Called just before restarting into an update. On macOS the restart
+     * closes every window before `before-quit`, so a shell that hides its
+     * window on close has to know the quit is real.
+     */
+    private readonly beforeRestart: () => void,
   ) {}
 
   start(): void {
@@ -47,7 +53,7 @@ export class AppUpdates {
   /** The menu action: restart into a downloaded update, or check now and say what happened. */
   menuAction(): void {
     if (this.state.kind === "ready") {
-      this.updater?.quitAndInstall();
+      this.restart();
       return;
     }
     if (this.state.kind === "idle") void this.check(true);
@@ -129,8 +135,14 @@ export class AppUpdates {
       title: `${this.productName} ${version} is ready`,
       body: "Restart to update. It also installs the next time you quit.",
     });
-    notification.on("click", () => this.updater?.quitAndInstall());
+    notification.on("click", () => this.restart());
     notification.show();
+  }
+
+  private restart(): void {
+    if (!this.updater) return;
+    this.beforeRestart();
+    this.updater.quitAndInstall();
   }
 
   /** Read through a call: events change the state while a check awaits. */
