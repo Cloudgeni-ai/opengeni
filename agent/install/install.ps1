@@ -117,6 +117,10 @@ function Get-AssetUrl($name) {
 }
 
 function Test-ReleaseAssetAvailable($name, $tmp) {
+  # Windows PowerShell 5.1 redraws its progress bar for every chunk, which
+  # slows downloads to a crawl. Local to this function, so a shell that runs
+  # the script through `iex` keeps its own preference.
+  $ProgressPreference = 'SilentlyContinue'
   $url = "$(Get-AssetUrl $name).sha256"
   try {
     if ($url -like 'file://*') {
@@ -130,6 +134,8 @@ function Test-ReleaseAssetAvailable($name, $tmp) {
 }
 
 function Invoke-Download($url, $out) {
+  # See Test-ReleaseAssetAvailable: without this a ~100 MB agent takes minutes.
+  $ProgressPreference = 'SilentlyContinue'
   try {
     # Support file:// (used by the install smoke test + air-gapped mirrors); the
     # built-in Invoke-WebRequest rejects the file scheme, unlike curl on Unix.
@@ -149,14 +155,248 @@ function Get-Sha256($file) {
   return (Get-FileHash -Algorithm SHA256 -Path $file).Hash.ToLowerInvariant()
 }
 
-# Verify the minisign signature against the pinned key. Prefer the minisign.exe if
-# present; otherwise a self-contained .NET ed25519 verify is NOT available on
-# Windows PowerShell 5.1 (no Ed25519 in legacy .NET Framework), so we require
-# minisign.exe OR a checksum-only fallback with a loud warning is NOT permitted —
-# instead we fail closed asking the user to install minisign. On PowerShell 7+ we
-# can use the .NET 5+ Ed25519... but to keep the contract simple + identical we
-# standardize on the minisign binary when openssl is unavailable.
+# A self-contained minisign verifier, so a stock Windows machine (no minisign,
+# no OpenSSL) can verify the agent. Neither .NET Framework nor modern .NET ships
+# Ed25519 or BLAKE2b, so both are implemented here from RFC 8032 and RFC 7693 and
+# compiled at run time. It checks the key id, the file signature (prehashed "ED"
+# or legacy "Ed") and the trusted-comment signature, exactly like `minisign -V`.
+$OpengeniMinisignVerifierSource = @'
+using System;
+using System.IO;
+using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace OpengeniInstall {
+  public static class Minisign {
+    static readonly BigInteger P = BigInteger.Pow(2, 255) - 19;
+    static readonly BigInteger L = BigInteger.Pow(2, 252) + BigInteger.Parse("27742317777372353535851937790883648493");
+    static readonly BigInteger D = Mod(-121665 * Inv(121666));
+    static readonly BigInteger SqrtM1 = BigInteger.ModPow(2, (P - 1) / 4, P);
+    static readonly BigInteger[] Base = BasePoint();
+
+    static BigInteger Mod(BigInteger x) { BigInteger r = x % P; return r.Sign < 0 ? r + P : r; }
+    static BigInteger Inv(BigInteger x) { return BigInteger.ModPow(Mod(x), P - 2, P); }
+
+    static BigInteger[] BasePoint() {
+      BigInteger y = Mod(4 * Inv(5));
+      BigInteger x;
+      RecoverX(y, 0, out x);
+      return new BigInteger[] { x, y, BigInteger.One, Mod(x * y) };
+    }
+
+    static bool RecoverX(BigInteger y, int sign, out BigInteger x) {
+      x = BigInteger.Zero;
+      if (y >= P) return false;
+      BigInteger x2 = Mod((y * y - 1) * Inv(D * y * y + 1));
+      if (x2.IsZero) return sign == 0;
+      x = BigInteger.ModPow(x2, (P + 3) / 8, P);
+      if (!Mod(x * x - x2).IsZero) x = Mod(x * SqrtM1);
+      if (!Mod(x * x - x2).IsZero) return false;
+      if ((int)(x & 1) != sign) x = P - x;
+      return true;
+    }
+
+    static BigInteger Le(byte[] bytes, int offset, int count) {
+      byte[] le = new byte[count + 1];
+      Array.Copy(bytes, offset, le, 0, count);
+      return new BigInteger(le);
+    }
+
+    static BigInteger[] Decode(byte[] bytes, int offset) {
+      byte[] copy = new byte[32];
+      Array.Copy(bytes, offset, copy, 0, 32);
+      int sign = copy[31] >> 7;
+      copy[31] &= 0x7f;
+      BigInteger y = Le(copy, 0, 32);
+      BigInteger x;
+      if (!RecoverX(y, sign, out x)) return null;
+      return new BigInteger[] { x, y, BigInteger.One, Mod(x * y) };
+    }
+
+    static BigInteger[] Add(BigInteger[] p, BigInteger[] q) {
+      BigInteger a = Mod((p[1] - p[0]) * (q[1] - q[0]));
+      BigInteger b = Mod((p[1] + p[0]) * (q[1] + q[0]));
+      BigInteger c = Mod(p[3] * 2 * D * q[3]);
+      BigInteger d = Mod(p[2] * 2 * q[2]);
+      BigInteger e = b - a, f = d - c, g = d + c, h = b + a;
+      return new BigInteger[] { Mod(e * f), Mod(g * h), Mod(f * g), Mod(e * h) };
+    }
+
+    static BigInteger[] Multiply(BigInteger s, BigInteger[] p) {
+      BigInteger[] q = new BigInteger[] { BigInteger.Zero, BigInteger.One, BigInteger.One, BigInteger.Zero };
+      while (s.Sign > 0) {
+        if (!s.IsEven) q = Add(q, p);
+        p = Add(p, p);
+        s >>= 1;
+      }
+      return q;
+    }
+
+    static bool SamePoint(BigInteger[] p, BigInteger[] q) {
+      return Mod(p[0] * q[2] - q[0] * p[2]).IsZero && Mod(p[1] * q[2] - q[1] * p[2]).IsZero;
+    }
+
+    /// RFC 8032 Ed25519 verification of a 64-byte signature by a 32-byte key.
+    public static bool VerifyEd25519(byte[] key, byte[] message, byte[] signature) {
+      if (key.Length != 32 || signature.Length != 64) return false;
+      BigInteger[] a = Decode(key, 0);
+      BigInteger[] r = Decode(signature, 0);
+      if (a == null || r == null) return false;
+      BigInteger s = Le(signature, 32, 32);
+      if (s >= L) return false;
+      byte[] digest;
+      using (SHA512 sha = SHA512.Create()) {
+        sha.TransformBlock(signature, 0, 32, null, 0);
+        sha.TransformBlock(key, 0, 32, null, 0);
+        sha.TransformFinalBlock(message, 0, message.Length);
+        digest = sha.Hash;
+      }
+      BigInteger k = Le(digest, 0, 64) % L;
+      return SamePoint(Multiply(s, Base), Add(r, Multiply(k, a)));
+    }
+
+    static readonly ulong[] Iv = {
+      0x6a09e667f3bcc908UL, 0xbb67ae8584caa73bUL, 0x3c6ef372fe94f82bUL, 0xa54ff53a5f1d36f1UL,
+      0x510e527fade682d1UL, 0x9b05688c2b3e6c1fUL, 0x1f83d9abfb41bd6bUL, 0x5be0cd19137e2179UL };
+    static readonly byte[,] Sigma = {
+      { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+      { 14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3 },
+      { 11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4 },
+      { 7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8 },
+      { 9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13 },
+      { 2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9 },
+      { 12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11 },
+      { 13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10 },
+      { 6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5 },
+      { 10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0 } };
+
+    static ulong Rotr(ulong x, int n) { return (x >> n) | (x << (64 - n)); }
+
+    static void Compress(ulong[] h, byte[] block, ulong t0, ulong t1, bool last) {
+      ulong[] v = new ulong[16];
+      ulong[] m = new ulong[16];
+      for (int i = 0; i < 8; i++) { v[i] = h[i]; v[i + 8] = Iv[i]; }
+      v[12] ^= t0;
+      v[13] ^= t1;
+      if (last) v[14] = ~v[14];
+      for (int i = 0; i < 16; i++) m[i] = BitConverter.ToUInt64(block, i * 8);
+      for (int round = 0; round < 12; round++) {
+        int s = round % 10;
+        Mix(v, 0, 4, 8, 12, m[Sigma[s, 0]], m[Sigma[s, 1]]);
+        Mix(v, 1, 5, 9, 13, m[Sigma[s, 2]], m[Sigma[s, 3]]);
+        Mix(v, 2, 6, 10, 14, m[Sigma[s, 4]], m[Sigma[s, 5]]);
+        Mix(v, 3, 7, 11, 15, m[Sigma[s, 6]], m[Sigma[s, 7]]);
+        Mix(v, 0, 5, 10, 15, m[Sigma[s, 8]], m[Sigma[s, 9]]);
+        Mix(v, 1, 6, 11, 12, m[Sigma[s, 10]], m[Sigma[s, 11]]);
+        Mix(v, 2, 7, 8, 13, m[Sigma[s, 12]], m[Sigma[s, 13]]);
+        Mix(v, 3, 4, 9, 14, m[Sigma[s, 14]], m[Sigma[s, 15]]);
+      }
+      for (int i = 0; i < 8; i++) h[i] ^= v[i] ^ v[i + 8];
+    }
+
+    static void Mix(ulong[] v, int a, int b, int c, int d, ulong x, ulong y) {
+      v[a] = v[a] + v[b] + x; v[d] = Rotr(v[d] ^ v[a], 32);
+      v[c] = v[c] + v[d]; v[b] = Rotr(v[b] ^ v[c], 24);
+      v[a] = v[a] + v[b] + y; v[d] = Rotr(v[d] ^ v[a], 16);
+      v[c] = v[c] + v[d]; v[b] = Rotr(v[b] ^ v[c], 63);
+    }
+
+    /// RFC 7693 BLAKE2b with a 64-byte digest and no key, over a whole stream.
+    public static byte[] Blake2b512(Stream input) {
+      ulong[] h = (ulong[])Iv.Clone();
+      h[0] ^= 0x01010040UL;
+      byte[] block = new byte[128];
+      int filled = 0;
+      ulong t0 = 0, t1 = 0;
+      byte[] chunk = new byte[1 << 16];
+      int read;
+      while ((read = input.Read(chunk, 0, chunk.Length)) > 0) {
+        int offset = 0;
+        while (offset < read) {
+          if (filled == 128) {
+            t0 += 128; if (t0 < 128) t1++;
+            Compress(h, block, t0, t1, false);
+            filled = 0;
+          }
+          int take = Math.Min(128 - filled, read - offset);
+          Array.Copy(chunk, offset, block, filled, take);
+          filled += take;
+          offset += take;
+        }
+      }
+      t0 += (ulong)filled; if (t0 < (ulong)filled) t1++;
+      Array.Clear(block, filled, 128 - filled);
+      Compress(h, block, t0, t1, true);
+      byte[] digest = new byte[64];
+      for (int i = 0; i < 8; i++) Array.Copy(BitConverter.GetBytes(h[i]), 0, digest, i * 8, 8);
+      return digest;
+    }
+
+    /// Returns null when the file verifies, otherwise the reason it does not.
+    public static string Verify(string file, string signatureFile, string publicKey) {
+      if (!BitConverter.IsLittleEndian) return "unsupported byte order";
+      byte[] pk = Convert.FromBase64String(publicKey.Trim());
+      if (pk.Length != 42 || pk[0] != (byte)'E' || pk[1] != (byte)'d') return "the pinned public key is malformed";
+      string[] lines = File.ReadAllLines(signatureFile);
+      if (lines.Length < 4) return "the signature file is incomplete";
+      byte[] sig = Convert.FromBase64String(lines[1].Trim());
+      if (sig.Length != 74) return "the signature is malformed";
+      for (int i = 2; i < 10; i++) if (sig[i] != pk[i]) return "the signature was made with a different key";
+      byte[] key = new byte[32];
+      Array.Copy(pk, 10, key, 0, 32);
+      byte[] signature = new byte[64];
+      Array.Copy(sig, 10, signature, 0, 64);
+      byte[] message;
+      if (sig[0] == (byte)'E' && sig[1] == (byte)'D') {
+        using (FileStream stream = File.OpenRead(file)) message = Blake2b512(stream);
+      } else if (sig[0] == (byte)'E' && sig[1] == (byte)'d') {
+        message = File.ReadAllBytes(file);
+      } else {
+        return "the signature algorithm is not supported";
+      }
+      if (!VerifyEd25519(key, message, signature)) return "the signature does not match";
+      const string prefix = "trusted comment: ";
+      if (!lines[2].StartsWith(prefix, StringComparison.Ordinal)) return "the trusted comment is missing";
+      byte[] comment = Encoding.UTF8.GetBytes(lines[2].Substring(prefix.Length));
+      byte[] globalSignature = Convert.FromBase64String(lines[3].Trim());
+      byte[] signedComment = new byte[64 + comment.Length];
+      Array.Copy(signature, 0, signedComment, 0, 64);
+      Array.Copy(comment, 0, signedComment, 64, comment.Length);
+      if (!VerifyEd25519(key, signedComment, globalSignature)) return "the trusted comment signature does not match";
+      return null;
+    }
+  }
+}
+'@
+
+# Compiles the verifier once per session; $false where compiling is not
+# allowed (for example PowerShell's constrained language mode).
+function Initialize-MinisignVerifier {
+  if ('OpengeniInstall.Minisign' -as [type]) { return $true }
+  foreach ($references in @(@('System.Numerics'), @())) {
+    try {
+      if ($references.Count -gt 0) {
+        Add-Type -TypeDefinition $OpengeniMinisignVerifierSource -ReferencedAssemblies $references -ErrorAction Stop
+      } else {
+        Add-Type -TypeDefinition $OpengeniMinisignVerifierSource -ErrorAction Stop
+      }
+      return $true
+    } catch { }
+  }
+  return $false
+}
+
+# Verify the minisign signature against the pinned key, failing closed. The
+# built-in verifier needs nothing installed; minisign.exe or OpenSSL are used
+# only where PowerShell cannot compile it.
 function Test-Signature($file, $sig) {
+  if (Initialize-MinisignVerifier) {
+    $problem = [OpengeniInstall.Minisign]::Verify($file, $sig, $OPENGENI_MINISIGN_PUBKEY)
+    if ($null -ne $problem) { Fail 5 "minisign signature verification FAILED for $(Split-Path $file -Leaf): $problem" }
+    Log "minisign signature verified"
+    return
+  }
   $minisign = Get-Command minisign -ErrorAction SilentlyContinue
   if ($minisign) {
     & minisign -Vm $file -x $sig -P $OPENGENI_MINISIGN_PUBKEY 2>$null

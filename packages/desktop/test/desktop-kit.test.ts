@@ -12,6 +12,7 @@ import {
   lastErrorLine,
   parseConnections,
   parseServiceRunning,
+  windowsInstallCommand,
 } from "../src/main/agent-cli";
 import { diffInbox, inboxItemPath, notificationPlan, plainText } from "../src/main/inbox-model";
 import { localFile, localPageUrl } from "../src/main/local-pages";
@@ -199,6 +200,20 @@ describe("agent command line", () => {
       "enroll token expired",
     );
     expect(lastErrorLine("   \n")).toBeNull();
+    expect(
+      lastErrorLine(
+        "opengeni-install: installing x (version: latest)\nopengeni-install: ERROR: failed to download https://h/a : timed out\nopengeni-install: cleaning up\n",
+      ),
+    ).toBe("failed to download https://h/a : timed out");
+    expect(lastErrorLine("opengeni-install: downloading binary + checksum + signature\n")).toBe(
+      "downloading binary + checksum + signature",
+    );
+  });
+
+  test("runs the Windows installer without a progress bar and keeps its exit code", () => {
+    expect(windowsInstallCommand("C:\\Users\\o'brien\\AppData\\Local\\Temp\\x\\install.ps1")).toBe(
+      "$ProgressPreference = 'SilentlyContinue'; & 'C:\\Users\\o''brien\\AppData\\Local\\Temp\\x\\install.ps1'; exit $LASTEXITCODE",
+    );
   });
 });
 

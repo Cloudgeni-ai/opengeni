@@ -82,12 +82,34 @@ export function connectionFor(
   );
 }
 
-/** The last meaningful line of a failed command, for a plain error message. */
+/**
+ * The reason a command failed, for a plain error message: the line the
+ * installer or agent marked as an error, else the last thing it printed, without
+ * its tool prefix.
+ */
 export function lastErrorLine(output: string): string | null {
   const lines = output
     .split(/\r?\n/u)
     .map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "").trim())
     .filter(Boolean);
-  const line = lines.at(-1);
-  return line ? line.replace(/^(?:error|opengeni-agent install):\s*/iu, "").slice(0, 300) : null;
+  const line =
+    [...lines].reverse().find((candidate) => /\berror:/iu.test(candidate)) ?? lines.at(-1);
+  return line
+    ? line
+        .replace(/^(?:opengeni-install|opengeni-agent install):\s*/iu, "")
+        .replace(/^error:\s*/iu, "")
+        .slice(0, 300)
+    : null;
+}
+
+/**
+ * The PowerShell command that runs a server's installer script. Windows
+ * PowerShell 5.1 redraws a progress bar for every downloaded chunk, which
+ * turns a minute-long agent download into many minutes; the preference is
+ * inherited by the script, including from servers whose script predates its
+ * own fix. The script's exit code is passed through.
+ */
+export function windowsInstallCommand(scriptPath: string): string {
+  const quoted = scriptPath.replaceAll("'", "''");
+  return `$ProgressPreference = 'SilentlyContinue'; & '${quoted}'; exit $LASTEXITCODE`;
 }

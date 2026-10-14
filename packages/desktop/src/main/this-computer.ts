@@ -10,6 +10,7 @@ import {
   lastErrorLine,
   parseConnections,
   parseServiceRunning,
+  windowsInstallCommand,
   type AgentConnection,
   type AgentPlatform,
 } from "./agent-cli";
@@ -18,6 +19,8 @@ import { computerName } from "./computer-name";
 interface RunResult {
   code: number;
   output: string;
+  /** Killed for running past its time limit. */
+  timedOut: boolean;
 }
 
 function run(
@@ -37,7 +40,8 @@ function run(
       },
       (error, stdout, stderr) => {
         const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
-        resolve({ code, output: `${stdout}\n${stderr}` });
+        const timedOut = Boolean(error?.killed);
+        resolve({ code, output: `${stdout}\n${stderr}`, timedOut });
       },
     );
   });
@@ -127,11 +131,11 @@ export class ThisComputer {
             env,
             timeoutMs: 120_000,
           }),
-          "couldn't connect this computer",
+          "Couldn't connect this computer",
         );
         await this.expect(
           run(binary, ["start"], { timeoutMs: 60_000 }),
-          "couldn't start the agent",
+          "Couldn't start the agent",
         );
         return;
       }
@@ -143,7 +147,8 @@ export class ThisComputer {
   async pause(): Promise<void> {
     await this.act(async () => {
       const binary = this.binaryPath();
-      if (binary) await this.expect(run(binary, ["stop"], { timeoutMs: 60_000 }), "couldn't pause");
+      if (binary)
+        await this.expect(run(binary, ["stop"], { timeoutMs: 60_000 }), "Couldn't pause the agent");
     });
   }
 
@@ -151,7 +156,10 @@ export class ThisComputer {
     await this.act(async () => {
       const binary = this.binaryPath();
       if (binary)
-        await this.expect(run(binary, ["start"], { timeoutMs: 60_000 }), "couldn't resume");
+        await this.expect(
+          run(binary, ["start"], { timeoutMs: 60_000 }),
+          "Couldn't resume the agent",
+        );
     });
   }
 
@@ -170,11 +178,18 @@ export class ThisComputer {
       const result = windows
         ? run(
             "powershell.exe",
-            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path],
+            [
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-Command",
+              windowsInstallCommand(path),
+            ],
             { env, timeoutMs: 600_000 },
           )
         : run("/bin/sh", [path], { env, timeoutMs: 600_000 });
-      await this.expect(result, "couldn't install the agent");
+      await this.expect(result, "Couldn't install the agent");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -183,8 +198,7 @@ export class ThisComputer {
   private async expect(pending: Promise<RunResult>, failure: string): Promise<RunResult> {
     const result = await pending;
     if (result.code !== 0) {
-      const detail = lastErrorLine(result.output);
-      throw new Error(detail ? `The agent ${failure}: ${detail}` : `The agent ${failure}.`);
+      throw new Error(failureMessage(failure, result));
     }
     return result;
   }
@@ -234,4 +248,11 @@ export class ThisComputer {
     };
     return this.snapshotCache;
   }
+}
+
+/** A plain sentence for a failed agent command: what failed, then why. */
+function failureMessage(failure: string, result: RunResult): string {
+  if (result.timedOut) return `${failure}: it took too long. Check your connection and try again.`;
+  const detail = lastErrorLine(result.output);
+  return detail ? `${failure}: ${detail}` : `${failure}.`;
 }
