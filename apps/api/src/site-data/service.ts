@@ -410,6 +410,41 @@ export const SITE_DATA_MAX_REQUEST_RECORD_BYTES = 4 * 1024 * 1024;
  */
 export const SITE_DATA_VALIDATION_BUDGET_MS = 250;
 
+/** Validation time every validating request reserves at admission. */
+export const SITE_DATA_VALIDATION_RESERVE_BASE_MS = 25;
+/** Additional reservation per byte of JSON the request validates (1 µs). */
+export const SITE_DATA_VALIDATION_RESERVE_MS_PER_BYTE = 0.001;
+
+/**
+ * The validation time a request reserves at admission: a base plus a little
+ * per byte it will validate, capped at the request budget. Small requests
+ * reserve little, so many can run at once; an overrun is charged when the
+ * request settles.
+ */
+export function siteDataValidationReservationMs(bytes: number): number {
+  const sized =
+    SITE_DATA_VALIDATION_RESERVE_BASE_MS +
+    Math.max(0, bytes) * SITE_DATA_VALIDATION_RESERVE_MS_PER_BYTE;
+  return Math.min(SITE_DATA_VALIDATION_BUDGET_MS, sized);
+}
+
+/**
+ * Bytes of JSON in these values, counting only until the reservation would
+ * reach the budget (larger requests reserve the whole budget anyway).
+ */
+export function siteDataValidationBytes(values: Iterable<unknown>): number {
+  const enough =
+    (SITE_DATA_VALIDATION_BUDGET_MS - SITE_DATA_VALIDATION_RESERVE_BASE_MS) /
+    SITE_DATA_VALIDATION_RESERVE_MS_PER_BYTE;
+  let bytes = 0;
+  for (const value of values) {
+    if (value === undefined) continue;
+    bytes += jsonBytes(value);
+    if (bytes >= enough) break;
+  }
+  return bytes;
+}
+
 /** The clock validation time is measured with; tests replace `now`. */
 export const siteDataValidationClock = { now: (): number => performance.now() };
 

@@ -11,6 +11,7 @@ import {
   createWorkspace,
   ensureExternalIdentity,
   getSiteDataAgentSession,
+  SiteDataError,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -2027,7 +2028,7 @@ test("the workspace validation window is a ceiling across its Sites", async () =
   expect(result.elsewhere.status).toBe(200);
 });
 
-test("admission reserves the budget, so concurrent requests cannot overshoot", async () => {
+test("admission reserves time, so concurrent large requests cannot overshoot", async () => {
   const { resolveSiteDataAccess } = await import("../src/site-data/service");
   await withinOneMinute(async () => {
     const f = await fixture({ siteDataSiteValidationMsPerMinute: 1_000 });
@@ -2044,22 +2045,28 @@ test("admission reserves the budget, so concurrent requests cannot overshoot", a
       },
     );
     const access = await resolveSiteDataAccess(f.deps as never, f.owner.grant, created.id);
+    let windowStartedAt: number | null = null;
+    // Large requests reserve the whole 250 ms budget.
     const admit = (collections: string[] = ["rows"]) =>
       access.store
         .consumeRate(access.caller, "write", 1, access.limits, { collections, reserveMs: 250 })
         .then(
-          (admitted) => admitted.reservedMs,
+          (admitted) => {
+            if (admitted.reservedMs > 0) windowStartedAt = admitted.windowStartedAt;
+            return admitted.reservedMs;
+          },
           (error: any) => error.code as string,
         );
     // Six requests in flight at once: four reservations of 250 ms fill the 1 s window.
     const results = await Promise.all(Array.from({ length: 6 }, () => admit()));
+    expect(windowStartedAt).not.toBeNull();
     expect(results.filter((reserved) => reserved === 250)).toHaveLength(4);
     expect(results.filter((reserved) => reserved === "rate_limited")).toHaveLength(2);
     expect(await validationMicros(f, created.id)).toBe(1_000_000);
     // Settling charges what was spent, to the microsecond...
     await access.store.settleValidation(
       access.caller,
-      { reservedMs: 250, spentMs: 0.5 },
+      { reservedMs: 250, windowStartedAt, spentMs: 0.5 },
       access.limits,
     );
     expect(await validationMicros(f, created.id)).toBe(750_500);
@@ -2068,7 +2075,7 @@ test("admission reserves the budget, so concurrent requests cannot overshoot", a
     // A request that spent nothing refunds its whole reservation.
     await access.store.settleValidation(
       access.caller,
-      { reservedMs: 250, spentMs: 0 },
+      { reservedMs: 250, windowStartedAt, spentMs: 0 },
       access.limits,
     );
     expect(await validationMicros(f, created.id)).toBe(500_500);
@@ -2078,6 +2085,106 @@ test("admission reserves the budget, so concurrent requests cannot overshoot", a
     // Collections without a schema reserve nothing.
     expect(await admit(["plain"])).toBe(0);
   });
+});
+
+test("small validating requests reserve little, so many run at once", async () => {
+  const { siteDataValidationReservationMs, siteDataValidationBytes } =
+    await import("../src/site-data/service");
+  // 25 ms plus 1 µs per byte, capped at the 250 ms budget.
+  expect(siteDataValidationReservationMs(0)).toBe(25);
+  expect(siteDataValidationReservationMs(10_000)).toBe(35);
+  expect(siteDataValidationReservationMs(225_000)).toBe(250);
+  expect(siteDataValidationReservationMs(4 * 1024 * 1024)).toBe(250);
+  expect(siteDataValidationBytes([{ n: 1 }, undefined, "ab"])).toBe(7 + 4);
+  // Counting stops once the reservation reaches the budget.
+  expect(siteDataValidationBytes([{ big: "x".repeat(300_000) }, { more: 1 }])).toBeLessThan(
+    300_100,
+  );
+  // With the default limits, a page inserting 25 items at once with
+  // Promise.all succeeds: a fixed 250 ms reservation would have let only 20
+  // in.
+  const f = await fixture();
+  const s = f.site((await f.publish("Burst")).id);
+  await s.define(f.owner, "items", {
+    accessMode: "shared",
+    jsonSchema: { type: "object", properties: { n: { type: "number" } } },
+  });
+  const writes = await Promise.all(
+    Array.from({ length: 25 }, (_, n) =>
+      s.write(f.member, [{ op: "insert", collection: "items", data: { n } }]),
+    ),
+  );
+  expect(writes.map((write) => write.status)).toEqual(Array.from({ length: 25 }, () => 200));
+  expect((await s.query(f.member, { collection: "items", limit: 100 })).json.records).toHaveLength(
+    25,
+  );
+});
+
+test("a reservation is refunded only in the minute it was taken from", async () => {
+  const { resolveSiteDataAccess } = await import("../src/site-data/service");
+  await withinOneMinute(async () => {
+    const f = await fixture();
+    const created = await f.publish("Boundary");
+    const s = f.site(created.id);
+    await withValidationClock(
+      () => 0,
+      async () =>
+        s.define(f.owner, "rows", {
+          accessMode: "shared",
+          jsonSchema: { type: "object", properties: { n: { type: "number" } } },
+        }),
+    );
+    const access = await resolveSiteDataAccess(f.deps as never, f.owner.grant, created.id);
+    const reservation = await access.store.consumeRate(access.caller, "write", 1, access.limits, {
+      collections: ["rows"],
+      reserveMs: 250,
+    });
+    const [{ m }] = await shared.admin<{ m: string }[]>`
+      select extract(epoch from date_trunc('minute', now()))::bigint::text as m`;
+    expect(reservation).toEqual({ reservedMs: 250, windowStartedAt: Number(m) });
+    expect(await validationMicros(f, created.id)).toBe(250_000);
+    const settle = (windowStartedAt: number | null, spentMs: number) =>
+      access.store.settleValidation(
+        access.caller,
+        { reservedMs: 250, windowStartedAt, spentMs },
+        access.limits,
+      );
+    // Reserved in the previous minute: its refund must not come out of this one...
+    await settle(reservation.windowStartedAt! - 60, 0);
+    expect(await validationMicros(f, created.id)).toBe(250_000);
+    // ...and only time spent beyond the reservation is charged here.
+    await settle(reservation.windowStartedAt! - 60, 400);
+    expect(await validationMicros(f, created.id)).toBe(400_000);
+    await settle(null, 300);
+    expect(await validationMicros(f, created.id)).toBe(450_000);
+    // In the same minute, the whole difference applies.
+    await settle(reservation.windowStartedAt, 0);
+    expect(await validationMicros(f, created.id)).toBe(200_000);
+  });
+});
+
+test("an import that committed batches is not retryable", async () => {
+  const { siteDataImportFailure } = await import("../src/site-data/operations");
+  const { siteDataHttpError } = await import("../src/routes/site-data");
+  const changed = new SiteDataError(
+    "conflict",
+    "The collection's schema changed while this request was being checked; send it again",
+    { reason: "schema_changed", retryable: true },
+  );
+  // Nothing imported yet: sending it again is safe.
+  const before = siteDataImportFailure(changed, 0) as SiteDataError;
+  expect(before.details).toEqual({ reason: "schema_changed", retryable: true, imported: 0 });
+  expect(siteDataHttpError(before).retryable).toBe(true);
+  // After a committed batch, a retry would duplicate it.
+  const after = siteDataImportFailure(changed, 100) as SiteDataError;
+  expect(after.code).toBe("conflict");
+  expect(after.details).toEqual({ reason: "schema_changed", imported: 100 });
+  expect(after.message).toContain("100 records were imported before this failure");
+  expect(after.message).not.toContain("send it again");
+  const http = siteDataHttpError(after);
+  expect(http.status).toBe(409);
+  expect(http.retryable).toBe(false);
+  expect(siteDataImportFailure(new Error("other"), 100)).toBeInstanceOf(Error);
 });
 
 test("writes without a schema touch no validation window", async () => {

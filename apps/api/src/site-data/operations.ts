@@ -15,6 +15,7 @@ import {
   SITE_DATA_MAX_BATCH,
   type SiteDataFile,
   type SiteDataRecord,
+  type SiteDataValidationReservation,
   type SiteDataWriteOp,
 } from "@opengeni/db";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
@@ -28,8 +29,9 @@ import {
   siteDataFileContentType,
   siteDataFileName,
   siteDataObjectKey,
+  siteDataValidationBytes,
   siteDataValidationClock,
-  SITE_DATA_VALIDATION_BUDGET_MS,
+  siteDataValidationReservationMs,
   type SiteDataAccess,
   type SiteDataDeps,
   type SiteDataSurface,
@@ -55,25 +57,44 @@ const FILE_URL_SECONDS = 300;
  * count only for Site frames.
  *
  * A write that will validate (`validates`: the collections whose records it
- * checks, or a schema it defines) also reserves the request's validation
- * budget on the Site's and workspace's validation windows in the same
- * transaction; it returns what was reserved, for meteredWrite to settle.
+ * checks, or a schema it defines, and the bytes of JSON it will check) also
+ * reserves validation time sized to those bytes, capped at the request
+ * budget, on the Site's and workspace's validation windows in the same
+ * transaction; it returns the reservation, for meteredWrite to settle.
  */
 async function consume(
   access: SiteDataAccess,
   kind: "write" | "read",
   operations: number,
-  validates?: { collections?: readonly string[]; schema?: boolean },
-): Promise<number> {
-  if (kind === "read" && !access.caller.framed) return 0;
-  const admitted = await access.store.consumeRate(
+  validates?: { collections?: readonly string[]; schema?: boolean; bytes: number },
+): Promise<SiteDataValidationReservation> {
+  if (kind === "read" && !access.caller.framed) return NOTHING_RESERVED;
+  return access.store.consumeRate(
     access.caller,
     kind,
     Math.max(1, operations),
     access.limits,
-    validates ? { ...validates, reserveMs: SITE_DATA_VALIDATION_BUDGET_MS } : undefined,
+    validates
+      ? {
+          ...(validates.collections ? { collections: validates.collections } : {}),
+          ...(validates.schema !== undefined ? { schema: validates.schema } : {}),
+          reserveMs: siteDataValidationReservationMs(validates.bytes),
+        }
+      : undefined,
   );
-  return admitted.reservedMs;
+}
+
+const NOTHING_RESERVED: SiteDataValidationReservation = { reservedMs: 0, windowStartedAt: null };
+
+/** The record data these operations carry to be validated. */
+function* validatedData(operations: readonly unknown[]): Iterable<unknown> {
+  for (const op of operations)
+    if (
+      op !== null &&
+      typeof op === "object" &&
+      ["insert", "put", "patch"].includes(String((op as { op?: unknown }).op))
+    )
+      yield (op as { data?: unknown }).data;
 }
 
 /** Collections whose records these operations validate. */
@@ -99,20 +120,20 @@ function validatedCollections(operations: readonly unknown[]): string[] {
  */
 async function settleValidation(
   access: SiteDataAccess,
-  reservedMs: number,
+  reservation: SiteDataValidationReservation,
   meter: SiteDataValidationMeter,
 ) {
-  if (!(reservedMs > 0) && !(meter.ms > 0)) return;
+  if (!(reservation.reservedMs > 0) && !(meter.ms > 0)) return;
   try {
     await access.store.settleValidation(
       access.caller,
-      { reservedMs, spentMs: meter.ms },
+      { ...reservation, spentMs: meter.ms },
       access.limits,
     );
   } catch (error) {
     console.warn("[site-data] could not settle validation time", {
       siteId: access.caller.siteId,
-      reservedMs,
+      reservedMs: reservation.reservedMs,
       validationMs: meter.ms,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -125,14 +146,14 @@ async function settleValidation(
  */
 async function meteredWrite<T>(
   access: SiteDataAccess,
-  reservedMs: number,
+  reservation: SiteDataValidationReservation,
   run: (meter: SiteDataValidationMeter) => Promise<T>,
 ): Promise<T> {
   const meter: SiteDataValidationMeter = { ms: 0 };
   try {
     return await run(meter);
   } finally {
-    await settleValidation(access, reservedMs, meter);
+    await settleValidation(access, reservation, meter);
   }
 }
 
@@ -162,7 +183,10 @@ export async function defineSiteDataCollection(
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
   const hasSchema = definition.jsonSchema !== undefined && definition.jsonSchema !== null;
-  const reserved = await consume(access, "write", 1, { schema: hasSchema });
+  const reserved = await consume(access, "write", 1, {
+    schema: hasSchema,
+    bytes: hasSchema ? siteDataValidationBytes([definition.jsonSchema]) : 0,
+  });
   // Only a schema is checked and metered; defining without one touches no
   // validation window.
   if (hasSchema)
@@ -258,6 +282,7 @@ export async function writeSiteData(
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),
+    bytes: siteDataValidationBytes(validatedData(operations)),
   });
   return meteredWrite(access, reserved, async (meter) => {
     const options = await prevalidateSiteDataWrite(access, operations, { meter });
@@ -400,16 +425,18 @@ export async function importSiteData(
     request.format === "csv"
       ? Math.min(SITE_DATA_IMPORT_MAX_RECORDS, csvLineBreaks(request.csv ?? ""))
       : Math.min(SITE_DATA_IMPORT_MAX_RECORDS, request.records?.length ?? 0),
-    { collections: [collection] },
+    {
+      collections: [collection],
+      // The text to parse and check: CSV characters or the records' JSON.
+      bytes:
+        request.format === "csv"
+          ? (request.csv ?? "").length
+          : siteDataValidationBytes(request.records ?? []),
+    },
   );
   const imported = { count: 0 };
   const failed = (error: unknown): never => {
-    if (error instanceof SiteDataError)
-      throw new SiteDataError(error.code, error.message, {
-        ...error.details,
-        imported: imported.count,
-      });
-    throw error;
+    throw siteDataImportFailure(error, imported.count);
   };
   // Everything after admission settles the reservation, including parse errors.
   return meteredWrite(access, reserved, async (meter) => {
@@ -449,6 +476,23 @@ export async function importSiteData(
     }
     return { imported: imported.count };
   });
+}
+
+/**
+ * An import's error, with how many records it had already imported. Once a
+ * batch committed, sending the same import again would duplicate it, so the
+ * error is no longer retryable and its message says what was imported.
+ */
+export function siteDataImportFailure(error: unknown, imported: number): unknown {
+  if (!(error instanceof SiteDataError)) return error;
+  if (imported === 0)
+    return new SiteDataError(error.code, error.message, { ...error.details, imported });
+  const { retryable: _retryable, ...details } = error.details;
+  return new SiteDataError(
+    error.code,
+    `${error.message.replace(/; send it again$/, "")}. ${imported} ${imported === 1 ? "record was" : "records were"} imported before this failure; import only the rest`,
+    { ...details, imported },
+  );
 }
 
 /** Line breaks in CSV text: an upper bound on its records after the header. */
