@@ -440,7 +440,8 @@ const { rows, truncated } = await site.sql.run<{ choice: string; votes: number }
 Rows are untrusted input: render them as text. Handle `OpenGeniSiteSqlError`
 codes: `forbidden` (audience; `details.reason: "sign_in_required"` for guests),
 `not_found` (no such query), `validation` (missing or unknown params),
-`conflict` (a unique, not-null or foreign-key constraint), `sql_error`,
+`conflict` (a unique or primary key already taken), `sql_error` (also NOT
+NULL, CHECK and foreign-key failures),
 `rate_limited`, `quota_exceeded`,
 `disabled` (the owner turned the database off), `unavailable` and
 `site_sql_unsupported` (a host or local preview without Site SQL; test the
@@ -458,8 +459,11 @@ into an existing table, at most 2 MB per call; import the pieces of a large
 SQL export in order; triggers are added after the rows), and `site_sql_reset`
 (`confirm: true`;
 `schema: "keep"` empties and rebuilds from the migrations, `"drop"` forgets
-everything). Export before a reset when the data matters; SQL is the lossless
-format (CSV turns values into text). Keep migrations to schema: a Site's
+everything; a failed keep-reset reports `partialRebuild: true`: run it again).
+Export before a reset when the data matters; SQL is the lossless format (CSV
+turns values into text). An export is read piece by piece, not as one
+snapshot: turn Site SQL off first for a consistent copy. To restore a SQL
+export, reset with `schema: "drop"`, then import its pieces in order. Keep migrations to schema: a Site's
 migrations hold at most 6 MB of SQL, so load data with `site_sql_import`.
 Statements may not
 use ATTACH, VACUUM, load_extension, transactions or PRAGMA writes, or name

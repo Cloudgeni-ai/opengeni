@@ -408,12 +408,21 @@ The store is `packages/db/src/site-sql.ts`; `withSiteSqlDatabaseLock`
 serializes migrations and resets per Site. A migration first asks the
 Durable Object which migrations it has and sends only the missing ones, in
 calls of at most 4 MiB; a keep-reset sends every migration in calls of at
-most 4 MiB, emptying the database only on the first.
+most 4 MiB, emptying the database only on the first. When a keep-reset fails
+part way the database may be empty or partly rebuilt: the error carries
+`details.partialRebuild: true` and says to run the reset again, which
+finishes the rebuild from the migrations.
 
 The Postgres rows cascade with their workspace. The Durable Objects do not:
 deleting a workspace notes its Site SQL databases first and then drops each
-one through the gateway (`reset`), best effort. A failure is logged with the
-Site id and the data stays in its Durable Object (see Follow-ups).
+one through the gateway (`reset`) after the deletion commits, best effort:
+four at a time, each call bounded to 5 seconds, none started after 20
+seconds, so a large workspace cannot hold the request. Site ids that failed
+or were not tried are logged in one structured line (`[site-sql] Site
+databases left in Durable Objects after workspace deletion`, with
+`workspaceId`, `failedSiteIds`, `skippedSiteIds` and the errors) and their
+data stays in its Durable Object. Durable, retried cleanup like the
+scheduled-task cleanup outbox is a follow-up.
 
 ### Statements
 
@@ -504,9 +513,9 @@ cuts results at the row and response-size limits in UTF-8 bytes
 (`truncated: true`; a write with `RETURNING` still runs to completion and
 only the extra rows are dropped), and reports rows read, rows written and the
 database size, which the API meters. Repeated result column names come back
-as `a`, `a_2`, `a_3` ... Constraint failures (unique, not null, foreign key,
-`RAISE`) are `conflict`; other SQLite errors in the statement are
-`sql_error`; busy, I/O or corruption failures are internal errors the API
+as `a`, `a_2`, `a_3` ... A unique or primary-key violation is `conflict`;
+other SQLite errors in the statement, including NOT NULL, CHECK,
+foreign-key and `RAISE` failures, are `sql_error`; busy, I/O or corruption failures are internal errors the API
 reports as `unavailable`.
 
 Its own bookkeeping (request ids seen in the last few minutes, migrations
@@ -539,8 +548,10 @@ Every route and tool needs the manager role on the Site; read tools also
 need `artifacts:read` and the rest `artifacts:publish`. The tools are only
 registered when the gateway origin and secret are configured.
 
-Exports come in pieces: one response holds at most `maxBytes` (16 MiB at
-most; the agent tool defaults to 512 KB and allows 2 MB). When there is more,
+Exports come in pieces: one response holds about `maxBytes` (16 MiB at most;
+the HTTP route defaults to 1 MiB for SQL, so every piece re-imports in one
+call, and 16 MiB for CSV and JSON; the agent tool defaults to 512 KB and
+allows 2 MB). When there is more,
 the HTTP route sets `X-OpenGeni-Export-Next-Cursor` (and
 `X-OpenGeni-Export-Truncated: true`), JSON exports also carry `nextCursor`,
 and the tool returns `nextCursor`: pass it back as `cursor` and append the
@@ -554,6 +565,17 @@ value into text (an empty cell imports as NULL) and blobs into base64. SQL
 dumps write up to 500 rows per INSERT and
 keep each statement under the Durable Object's 100 KB statement limit; a
 single row larger than that needs a JSON export and import.
+
+An export is not a point-in-time snapshot: each piece reads the database as
+it is then, so writes between pieces can show up in later pieces only. For a
+consistent copy, turn Site SQL off (`site_sql_enable` with `enabled: false`;
+export keeps working) before a full export and back on afterwards.
+
+To restore a SQL export into the same or another Site, reset with `schema:
+"drop"` (or start from a Site without a database), then import the pieces in
+order: the first piece's `CREATE TABLE` statements become a migration and
+would fail against tables that already exist. After a keep-reset, which
+rebuilds the schema, import only the data (`INSERT`) statements.
 
 SQL imports record their schema statements as a migration before the data
 (so a rebuild keeps them), run the data statements in batches, and record
@@ -661,5 +683,5 @@ answered; a metering failure is logged and does not fail the call.
   queries); custom limit profiles have no Site SQL fields; a Postgres commit
   failure after a migration applied leaves the database one migration ahead
   until the next reset; blobs cannot be imported from JSON; a console view
-  of the database; retry or sweep Durable Objects whose drop after
-  workspace deletion failed (today they are only logged).
+  of the database; durable, retried drops of Durable Objects after workspace
+  deletion through a cleanup outbox (today failures are only logged).
