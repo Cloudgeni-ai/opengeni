@@ -715,6 +715,12 @@ export const SITE_OPERATIONS: readonly SiteOperation[] = Object.freeze([
   { id: "data.put", method: "PUT", pattern: new RegExp(`^${DATA}$`, "u") },
   { id: "data.patch", method: "PATCH", pattern: new RegExp(`^${DATA}$`, "u") },
   { id: "data.delete", method: "DELETE", pattern: new RegExp(`^${DATA}$`, "u") },
+  // Site SQL (PR B): run one named query the owner defined; never raw SQL.
+  {
+    id: "sql.run",
+    method: "POST",
+    pattern: /^\/published-artifacts\/current\/sql\/queries\/[A-Za-z][A-Za-z0-9_-]{0,63}$/u,
+  },
   { id: "site.report", method: "POST", pattern: /^\/site\/reports$/u },
 ] satisfies SiteOperation[]);
 

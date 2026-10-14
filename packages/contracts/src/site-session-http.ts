@@ -1,9 +1,9 @@
 import { matchSiteOperation, type SiteOperation } from "./site-publishing";
 
 const SITE_WORKSPACE_PREFIX = "/v1/workspaces/site-host";
-/** Site Data routes under any published Site: `<prefix>/published-artifacts/<id>/data|files`. */
+/** Site Data and Site SQL routes under any published Site: `<prefix>/published-artifacts/<id>/data|files|sql`. */
 const SITE_DATA_PATH =
-  /^\/v1\/workspaces\/site-host\/published-artifacts\/([^/]+)\/(?:data|files)(?:\/|$)/u;
+  /^\/v1\/workspaces\/site-host\/published-artifacts\/([^/]+)\/(?:data|files|sql)(?:\/|$)/u;
 /** The list filter a frame without a published Site gets: it names no Site, so lists nothing. */
 export const SITE_NO_ORIGIN_ID = "00000000-0000-0000-0000-000000000000";
 
