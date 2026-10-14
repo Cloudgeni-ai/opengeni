@@ -433,6 +433,12 @@ export const LINKED_VAULT_SEARCH_MAX_AGE_MS = 10 * 60_000;
 export const LINKED_VAULT_MISS_MAX_AGE_MS = 2 * 60_000;
 /** How long a search or resolution waits for refreshes before answering. */
 export const LINKED_VAULT_REFRESH_WAIT_MS = 8_000;
+/**
+ * How long a person opening a linked vault waits for its stale mirror to
+ * refresh before the page shows what is mirrored; a slower refresh finishes in
+ * the background and the next load shows it.
+ */
+export const LINKED_VAULT_OPEN_WAIT_MS = 3_000;
 
 /** The vault fields a freshness check needs (a `VaultRow` has them all). */
 export type LinkedVaultFreshness = {

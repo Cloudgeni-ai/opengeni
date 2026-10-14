@@ -227,7 +227,13 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       return c.json(
-        await vaults().listItems(actor, workspaceId, c.req.param("vaultId")!, parsed.data),
+        // Providers let opening a linked vault refresh a stale mirror first.
+        await vaultsWithProviders(actor, workspaceId).listItems(
+          actor,
+          workspaceId,
+          c.req.param("vaultId")!,
+          parsed.data,
+        ),
       );
     }),
   );
