@@ -113,8 +113,9 @@ pages or guarantee graceful completion for a permanently stuck controller.
   `opengeni-agent run` remains the explicit foreground mode.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
-  (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows
-  Authenticode are guarded creds-drop-ins that skip cleanly when absent).
+  (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize and Windows
+  Authenticode through Azure Artifact Signing, signed in with GitHub OIDC, are guarded
+  drop-ins that skip cleanly when their credentials or `AZURE_SIGNING_*` variables are absent).
 
 ## One agent, many Opengeni deployments
 

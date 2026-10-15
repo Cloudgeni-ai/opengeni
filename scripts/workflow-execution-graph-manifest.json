@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "1473b4d70dbc6bef260bd16749cd6447d27d30836c5a1832b03574e9c08d208b"
+      "sha256": "5d9bc01143fd10aa7826eeda0bca6bf7d853b579db98c3a0b0f87b344fb13eb3"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "cb4eadea4cb681ddbc540e7e2ec5d1dd91ff86eb2bb4acd62b55c386ab83481b"
+      "sha256": "52c9133f8a808d5a5a79d9f0cf19de2117c306ee039e452a26f9901950f9855d"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -323,7 +323,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Detect signing creds",
-      "sha256": "361786f3ad958c06709a22cd6fc6a1b3493ba614e94fad9fe4b09f4929378eff"
+      "sha256": "8a4a312b0319d719c79b02fd218665d6251987716c6903868e0d24908c6e89a0"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -342,6 +342,12 @@
       "job": "build",
       "step": "Intel cargo test (macOS coverage)",
       "sha256": "fd05d9ba821478e273f62c755c4a70dbf21f49e1b5e8b727a5cef441997bcfb2"
+    },
+    {
+      "workflow": ".github/workflows/agent-release.yml",
+      "job": "build",
+      "step": "List the Windows binaries to sign",
+      "sha256": "99d4d833e422dc4107dcb217861051c5c380173249d638a4ccaeade642493e33"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -376,14 +382,14 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
-      "step": "Windows Authenticode (if cert present)",
-      "sha256": "db7fb389f907959e01aaaaa62498f2acefd3eb6556df714dd35eef889ec56779"
+      "step": "Verify Windows signatures",
+      "sha256": "7a5d4a936a93e8263af14abce2cd8c30453672122fbe56e0d52d1aa59c882797"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Windows unsigned note (no cert)",
-      "sha256": "704096f4d643358ca1200e07fabae60d6862764f321582099054cdf76b26f270"
+      "sha256": "6818438c0af31c1a501282efde21a9428735b639fd16a1201f2ba61ba278829e"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -983,7 +989,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "publish",
       "step": "Publish",
-      "sha256": "24d3b578d74bdca9748338ed8540a0cd867880e778050c34fb008b0f81435027"
+      "sha256": "c51511ac30340952b300fbaafc3f6b418dbaa9371b3243e4a9a070ce2e36586f"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -995,7 +1001,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "windows",
       "step": "Build",
-      "sha256": "6900a898855f2935f91e189713a30a96032da5de7af4c00c4ab56959b48994d6"
+      "sha256": "e0070949250ad2b2f24caa96dfeeaac3724c438f1382aa0cbcc043165f1ea67f"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -1014,6 +1020,12 @@
       "job": "windows",
       "step": "Verify",
       "sha256": "e558a14395a7534bb9328c859d9bf44b1847aff3d029f3db9131f90e904e4f6e"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Verify signatures",
+      "sha256": "d73b2a3f71269a8e9e55e8bff0dce531b6f9b46a15b9d4db0b9390ebabcd5bbf"
     },
     {
       "workflow": ".github/workflows/desktop-e2e.yml",
