@@ -115,10 +115,11 @@ The pin includes the focused X11 coordinate correction proposed in
 The release catalog comes from the bundled worker's `listToolsJson()` via
 `bun packages/browserd/scripts/generate-cua-desktop-tools.ts`. It admits desktop
 workflow tools; lifecycle, escalation, configuration, updates and browser tools
-stay outside this interface. macOS and Linux each have a generated catalog;
-agent schemas preserve the union of their native variants, and the selected
-runtime checks its exact platform schema. Other platforms must supply their own
-qualified schemas before native admission.
+stay outside this interface. macOS, Linux and Windows each have a generated
+catalog, produced by running the script on that platform after every CUA pin
+change; macOS defines the admitted set, and Windows omits `run_actions`, which
+its driver does not implement. Agent schemas preserve the union of the native
+variants, and the selected runtime checks its exact platform schema.
 Each admitted tool's input/output schemas are checked against the running worker.
 
 Agents use `interaction__cua_<upstream_name>` or Code Mode
