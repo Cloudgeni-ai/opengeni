@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use compute_pager::{Profile, linux::Pager};
+    use compute_pager::{MappedFile, Profile, linux::Pager};
     use std::{
         fs::{self, File},
         os::unix::net::UnixListener,
@@ -40,7 +40,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let record_ms = args.get(6).map_or(Ok(5000), |s| s.parse::<u64>())?;
     // SAFETY: the supervisor contract requires an immutable snapshot.
-    let mut pager = unsafe { Pager::new(peer, &snapshot, Duration::from_millis(record_ms))? };
+    let source = unsafe { MappedFile::new(&snapshot)? };
+    let mut pager = Pager::new(peer, source, Duration::from_millis(record_ms))?;
     let mode = args.get(5).map_or("lazy", String::as_str);
     let mut plan = match mode {
         "lazy" => Vec::new(),
@@ -67,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     pager.prefetch(&plan, 2_097_152)?;
     fs::write(format!("{}.ready", args[4]), b"ready\n")?;
-    let result = pager.run(&stopped);
+    let result = pager.run(&stopped, |_| {});
     fs::write(
         format!("{}.profile.json", args[4]),
         serde_json::to_vec(&pager.profile(args[3].clone()))?,
