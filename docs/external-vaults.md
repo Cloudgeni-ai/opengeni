@@ -135,13 +135,16 @@ listing can still finish last; a later sync checks the provider again.
 Copying requires the destination to support the item's type and fields.
 Moving also requires recoverable removal at the source. These operations
 are not a transaction across providers. For a versioned connected source,
-Opengeni checks its version before reading values and again after saving the
-copy, before archiving the original. A changed version or failed recheck
+Opengeni first checks that its synced field list matches the provider's current
+item version; otherwise nothing is moved, and the vault must be synced before
+trying again. It checks the version again after saving the copy, before
+archiving the original. A changed version or failed recheck
 keeps the original and reports `saved: true`, `sourceArchived: false`; compare
 the two items rather than repeat the move. Providers without item versions
 cannot offer this check, and an edit after the final check remains a race
 because the archive operation is not conditional. The original is recoverable
-in its provider's archive or Trash.
+in its provider's archive or Trash. These checks are not an atomic read and
+depend on the provider reporting fresh versions for every field change.
 
 ## A product that owns its users' passwords
 

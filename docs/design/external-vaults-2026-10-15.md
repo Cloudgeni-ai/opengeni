@@ -318,9 +318,12 @@ Move/copy does have a core cross-provider implementation despite stale docs:
 keep supported copies, gate moves by recoverable source removal and valid
 destination create capabilities, and correct the docs.
 Cross-provider moves are not atomic: the original's provider version is read
-fresh before its values are copied and checked again just before the
-recoverable archive; a change, a missing item or a failed check keeps the
-original (`saved: true`, `sourceArchived: false`). Without a provider
+fresh and compared with its mirrored version before anything is copied. A
+mismatch refuses the move with sync-and-retry guidance and no target write.
+The version is checked again just before the recoverable archive; a change,
+a missing item or a failed recheck keeps the original (`saved: true`,
+`sourceArchived: false`). The reads are not a versioned snapshot and depend
+on fresh provider versions covering every field change. Without a provider
 conditional archive, an edit between that check and the archive remains
 possible, and unversioned providers get no check.
 
