@@ -509,6 +509,66 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test.each(["initial-url", "selected", "failed"] as const)(
+    "browser_open returns a compact observation of the primary tab (%s)",
+    async (scenario) => {
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const selected = browserTarget();
+      const requested = {
+        ...browserTarget(),
+        id: "tab-2",
+        url: "https://requested.example.test/",
+        selected: false,
+      };
+      const observed: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => session,
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [selected, requested],
+          }),
+          observeBrowserTarget: async (_workspace, _id, targetId) => {
+            observed.push(targetId ?? "default");
+            if (scenario === "failed") throw new Error("synthetic observation failure");
+            return browserObservation(targetId === requested.id ? requested : selected);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        {
+          browserSessionId,
+          ...(scenario === "selected" ? {} : { initialUrl: requested.url }),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      const primary = scenario === "selected" ? selected : requested;
+      expect(observed).toEqual([primary.id]);
+      const content = result.structuredContent as Record<string, unknown>;
+      expect(content.targets).toEqual([selected, requested]);
+      if (scenario === "failed") {
+        expect(content).not.toHaveProperty("observation");
+      } else {
+        expect(content.observation).toMatchObject({
+          target: { id: primary.id },
+          semantic: null,
+          agentView: { kind: "compact" },
+        });
+      }
+    },
+  );
+
   test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
     "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
     async (scenario) => {
