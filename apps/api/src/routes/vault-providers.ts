@@ -1241,6 +1241,7 @@ export function registerVaultProviderRoutes(
     let connection = input.connection;
     let saved = false;
     let hasPending = Boolean(input.pendingCredentials);
+    let rejectedAccount: VaultProviderError | undefined;
     let storedBundle: unknown = input.pendingCredentials
       ? pendingVaultCredentialBundle(input.currentCredentials, input.pendingCredentials)
       : (input.currentCredentials ?? {});
@@ -1318,11 +1319,13 @@ export function registerVaultProviderRoutes(
             linked.every((row) =>
               checked.vaults.some((vault) => vault.externalVaultId === row.providerVaultRef),
             );
-      if (!sameAccount)
-        throw new VaultProviderError(
+      if (!sameAccount) {
+        rejectedAccount = new VaultProviderError(
           "provider_conflict",
           "These credentials do not reach the same account and linked vaults. Connect them separately instead.",
         );
+        throw rejectedAccount;
+      }
       const ready: ExternalVaultConnectionDetails = {
         ...details,
         accountId: checked.accountId ?? details.accountId,
@@ -1356,7 +1359,10 @@ export function registerVaultProviderRoutes(
         }),
       };
     } catch (error) {
-      if (isVaultProviderError(error) && error.code === "provider_conflict" && hasPending) {
+      // Only our explicit identity rejection discards the candidate. An
+      // adapter conflict during discovery can happen after a one-time bind;
+      // preserve that bound key so verification can finish without rebinding.
+      if (rejectedAccount && error === rejectedAccount && hasPending) {
         if (input.currentCredentials) {
           // Reject the candidate, not the working connection. CAS prevents this
           // rollback from overwriting a concurrent reconnect or disconnect.

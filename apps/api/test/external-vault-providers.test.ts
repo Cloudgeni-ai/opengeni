@@ -83,12 +83,15 @@ function fixture(useDefaultProviders = false) {
   const calls: unknown[] = [];
   let accountId = "upstream-account-a";
   let externalFailure: "provider_unavailable" | "provider_conflict" | null = null;
-  let keeperUnavailable = true;
+  let externalFactoryFailure: "provider_conflict" | null = null;
+  let keeperFailure: "provider_unavailable" | "provider_conflict" | null = "provider_unavailable";
   let bootstrapCount = 0;
   const boundConfig = { appKey: "bound-fixture-key", clientId: "keeper-fixture-client" };
   const factories: ExternalVaultProviderFactories = {
     external: async ({ credentials }) => {
       calls.push("factory");
+      if (externalFactoryFailure)
+        throw new VaultProviderError(externalFactoryFailure, "Fixture setup refusal");
       const fake = createFakeVaultProvider({
         vaults: [{ externalVaultId: "remote-vault", name: "Remote" }],
       });
@@ -118,11 +121,7 @@ function fixture(useDefaultProviders = false) {
           ...fake,
           id: "keeper" as const,
           validate: async () => {
-            if (keeperUnavailable)
-              throw new VaultProviderError(
-                "provider_unavailable",
-                "Provider temporarily unavailable",
-              );
+            if (keeperFailure) throw new VaultProviderError(keeperFailure, "Fixture refusal");
             return { accountId: "keeper-account", accountName: "Keeper" };
           },
         },
@@ -179,11 +178,17 @@ function fixture(useDefaultProviders = false) {
     failExternal: (failure: typeof externalFailure) => {
       externalFailure = failure;
     },
+    failExternalFactory: (failure: typeof externalFactoryFailure) => {
+      externalFactoryFailure = failure;
+    },
     switchAccount: () => {
       accountId = "upstream-account-b";
     },
     recoverKeeper: () => {
-      keeperUnavailable = false;
+      keeperFailure = null;
+    },
+    failKeeper: (failure: typeof keeperFailure) => {
+      keeperFailure = failure;
     },
     bootstrapCount: () => bootstrapCount,
   };
@@ -266,11 +271,11 @@ describe("generic external vault connection lifecycle", () => {
     ).rejects.toMatchObject({ code: "provider_conflict" });
   }, 30_000);
 
-  test("a definitively refused initial setup revokes its reservation", async () => {
+  test("an initial setup refused before binding credentials revokes its reservation", async () => {
     if (!shared) return;
     const native = await scope();
     const f = fixture();
-    f.failExternal("provider_conflict");
+    f.failExternalFactory("provider_conflict");
     expect(
       (await f.request(native, "/vault-providers/connections", "POST", installBody())).status,
     ).toBe(409);
@@ -660,6 +665,60 @@ describe("generic external vault connection lifecycle", () => {
         ?.status,
     ).toBe("active");
   }, 30_000);
+
+  test.each(["new setup", "pending verification"] as const)(
+    "retains a consumed Keeper binding after an adapter conflict during %s",
+    async (stage) => {
+      if (!shared) return;
+      const native = await scope();
+      const f = fixture();
+      if (stage === "new setup") f.failKeeper("provider_conflict");
+      const oneTimeToken = randomBytes(32).toString("hex");
+      const installed = await f.request(native, "/vault-providers/connections", "POST", {
+        ownership: "workspace",
+        credentials: { provider: "keeper", oneTimeToken },
+      });
+      expect(installed.status).toBe(202);
+      const body = (await installed.json()) as { connectionId: string };
+      f.failKeeper("provider_conflict");
+      const failedVerify = await f.request(
+        native,
+        `/vault-providers/connections/${body.connectionId}/verify`,
+        "POST",
+        {},
+      );
+      expect(failedVerify.status).toBe(202);
+      expect(await failedVerify.json()).toMatchObject({
+        connectionId: body.connectionId,
+        discoveryPending: true,
+        errorCode: "provider_conflict",
+      });
+      const recoverable = await loadExternalVaultConnection(client.db, settings, {
+        workspaceId: native.workspaceId,
+        connectionId: body.connectionId,
+        subjectId: "person-a",
+        provider: "keeper",
+        allowPendingVerification: true,
+      });
+      expect(recoverable.connection.status).toBe("needs_reauth");
+      expect(recoverable.pendingCredentials).toMatchObject({
+        provider: "keeper",
+        configuration: { appKey: "bound-fixture-key" },
+      });
+      expect(JSON.stringify(recoverable.pendingCredentials)).not.toContain(oneTimeToken);
+      expect(f.bootstrapCount()).toBe(1);
+      f.recoverKeeper();
+      const recovered = await f.request(
+        native,
+        `/vault-providers/connections/${body.connectionId}/verify`,
+        "POST",
+        {},
+      );
+      expect(recovered.status).toBe(200);
+      expect(f.bootstrapCount()).toBe(1);
+    },
+    30_000,
+  );
 
   test("stores credentials encrypted and lists metadata without resolving upstream", async () => {
     if (!shared) return;
