@@ -203,6 +203,10 @@ export type ChannelAHandle = {
    * active-sandbox pointer and is safe for placement-bound controllers. */
   homeSession: ChannelASession;
   routingSession: RoutingSandboxSession;
+  /** Whose access this request uses to reach a Connected Machine: the person
+   * who started an agent's turn, or the calling person. Routes that look up
+   * the routed machine again must use it rather than the raw caller grant. */
+  machineAuthority: () => Promise<ChannelAMachineAuthority>;
   requestId: string;
 };
 
@@ -596,6 +600,9 @@ async function withChannelAOperation<T>(
   const operationStartedAt = performance.now();
   const operation = ctx.operation ?? (readOnly ? "read" : "mutation");
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
+  let machineAuthorityResult: Promise<ChannelAMachineAuthority> | undefined;
+  const machineAuthority = (): Promise<ChannelAMachineAuthority> =>
+    (machineAuthorityResult ??= channelAMachineAuthority(db, ctx));
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below. Constants
@@ -653,6 +660,7 @@ async function withChannelAOperation<T>(
       lease,
       homeSession,
       routingSession,
+      machineAuthority,
       requestId,
     });
     // The direct request has accepted the result in memory. Finalize every
@@ -697,10 +705,10 @@ async function withChannelAOperation<T>(
           message: "machine-home session has no active Connected Machine or managed sandbox",
         });
       }
-      const machineAuthority = await channelAMachineAuthority(db, ctx);
+      const requestMachineAuthority = await machineAuthority();
       const sandbox = await getSandbox(
         db,
-        { accountId: ctx.accountId, workspaceId, subjectId: machineAuthority.subjectId },
+        { accountId: ctx.accountId, workspaceId, subjectId: requestMachineAuthority.subjectId },
         pointer.activeSandboxId,
       );
       if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
@@ -718,7 +726,7 @@ async function withChannelAOperation<T>(
           machineWorkspaceId: originWorkspaceId,
           enrollmentId: sandbox.enrollmentId,
         },
-        machineAuthority,
+        requestMachineAuthority,
       );
       if (!enrollment?.connectionInstanceId) {
         // Preserve causal machine liveness through Channel-A. Generic callers
@@ -786,7 +794,7 @@ async function withChannelAOperation<T>(
           workspaceId,
           sessionId: session.id,
           resourceSubjectId: ctx.subjectId,
-          machineAuthority: async () => machineAuthority,
+          machineAuthority,
           pinnedSelfhosted: {
             sandboxId: sandbox.id,
             epoch: pointer.activeEpoch,
@@ -1106,7 +1114,7 @@ async function withChannelAOperation<T>(
           workspaceId,
           sessionId: session.id,
           resourceSubjectId: ctx.subjectId,
-          machineAuthority: () => channelAMachineAuthority(db, ctx),
+          machineAuthority,
           homeLease: {
             sandboxGroupId,
             leaseEpoch: leaseSnapshot.leaseEpoch,
