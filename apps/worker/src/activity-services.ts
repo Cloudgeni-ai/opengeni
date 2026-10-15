@@ -19,6 +19,7 @@ import { observabilityEventBusOptions } from "./observability-metrics";
 import { buildPersonalGitHubGitCredentials } from "./personal-github-git-credentials";
 import { createStandaloneConnectionCredentialsPort } from "./pr-review-credentials";
 import { loadOnePasswordVaultProvider } from "./onepassword-vault-provider";
+import { createNativeExternalVaultFactories } from "./external-vault-providers";
 
 /**
  * Build the dependency graph common to both worker roles exactly once.
@@ -94,7 +95,10 @@ export function createSharedActivityServices(
             : dependencies.onePasswordVaultProvider,
         externalVaultProviders:
           dependencies.externalVaultProviders === undefined
-            ? createRemoteExternalVaultFactories(settings)
+            ? {
+                ...createRemoteExternalVaultFactories(settings),
+                ...createNativeExternalVaultFactories(settings),
+              }
             : dependencies.externalVaultProviders,
       };
     })();

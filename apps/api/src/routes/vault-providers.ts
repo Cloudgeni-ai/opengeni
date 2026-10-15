@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { createNativeExternalVaultFactories } from "../integrations/external-vault-providers";
 import {
   CreateManagedProviderVaultRequest,
   DisconnectOnePasswordResponse,
@@ -179,10 +180,19 @@ export function vaultProviderRegistryFor(
   });
 }
 
+const defaultExternalVaultFactories = new WeakMap<ApiRouteDeps, ExternalVaultProviderFactories>();
+
 export function externalVaultFactoriesFor(deps: ApiRouteDeps): ExternalVaultProviderFactories {
-  return deps.externalVaultProviders === undefined
-    ? createRemoteExternalVaultFactories(deps.settings)
-    : (deps.externalVaultProviders ?? {});
+  if (deps.externalVaultProviders !== undefined) return deps.externalVaultProviders ?? {};
+  let factories = defaultExternalVaultFactories.get(deps);
+  if (!factories) {
+    factories = {
+      ...createRemoteExternalVaultFactories(deps.settings),
+      ...createNativeExternalVaultFactories(deps.settings),
+    };
+    defaultExternalVaultFactories.set(deps, factories);
+  }
+  return factories;
 }
 
 /** Both native 1Password and the generic connection lifecycle use this catalog. */
@@ -1341,8 +1351,11 @@ export function registerVaultProviderRoutes(
         "This vault provider is not available in this deployment.",
       );
     let rotated: StoredVaultProviderCredentials | undefined;
+    const signal = AbortSignal.timeout(30_000);
     const prepared = await factory({
       credentials,
+      ...(connectionId ? { connectionId } : {}),
+      signal,
       persistCredentials: async (next) => {
         const parsed = StoredVaultProviderCredentials.safeParse(next);
         if (!parsed.success || parsed.data.provider !== credentials.provider)
@@ -1369,7 +1382,7 @@ export function registerVaultProviderRoutes(
     const ctx: VaultProviderContext = {
       connectionId,
       budget: createProviderCallBudget(50),
-      signal: AbortSignal.timeout(30_000),
+      signal,
       forceRefresh: true,
       authority: {
         accountId: authorization.grant.accountId,

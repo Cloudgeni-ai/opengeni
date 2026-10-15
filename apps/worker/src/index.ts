@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import type { createControlActivities } from "./activities-control";
 import type { createTurnActivities } from "./activities-turn";
 import type { ActivityDependencies } from "./activities/types";
+import { closeNativeExternalVaultProviders } from "./external-vault-providers";
 import type {
   InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
@@ -1129,7 +1130,12 @@ export async function startWorker() {
       },
     });
   } finally {
-    await Promise.allSettled([bus?.close(), readinessDbClient.close(), dbClient.close()]);
+    await Promise.allSettled([
+      closeNativeExternalVaultProviders(),
+      bus?.close(),
+      readinessDbClient.close(),
+      dbClient.close(),
+    ]);
     disposeUnhandledRejectionBoundary();
   }
 }

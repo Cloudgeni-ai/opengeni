@@ -96,6 +96,10 @@ export function pendingVaultCredentialBundle(
 
 export type ExternalVaultProviderFactory = (input: {
   credentials: VaultProviderCredentials | StoredVaultProviderCredentials;
+  /** Stable native connection identity; adapter sessions must not cross it. */
+  connectionId?: string;
+  /** Includes credential binding and setup, before ordinary provider calls. */
+  signal?: AbortSignal;
   /** Persist any later SDK key rotation before reporting successful readiness. */
   persistCredentials?: (credentials: StoredVaultProviderCredentials) => Promise<void>;
   /** Verified setup capabilities; the adapter may narrow, never widen them. */
@@ -277,6 +281,8 @@ export async function externalVaultProviderForConnection(input: {
   let connection = loaded.connection;
   const prepared = await input.factory({
     credentials: loaded.credentials,
+    connectionId: connection.id,
+    signal: AbortSignal.timeout(30_000),
     operations: loaded.details.operations,
     persistCredentials: async (next) => {
       const parsed = StoredVaultProviderCredentials.safeParse(next);

@@ -197,6 +197,16 @@ describe("generic external vault connection lifecycle", () => {
     if (!shared) return;
     const native = await scope();
     const f = fixture(true);
+    const availability = await f.request(native, "/vault-providers/connections");
+    expect(await availability.json()).toMatchObject({
+      connections: [],
+      providers: expect.arrayContaining([
+        { provider: "external", available: true, reason: null },
+        { provider: "bitwarden", available: true, reason: null },
+        { provider: "keeper", available: true, reason: null },
+        { provider: "protonpass", available: false, reason: "not_enabled" },
+      ]),
+    });
     let registeredId: string | null = null;
     let authorizedCalls = 0;
     const receiver = createExternalVaultReceiver({

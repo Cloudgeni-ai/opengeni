@@ -52,6 +52,7 @@ import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { closeNativeExternalVaultProviders } from "./integrations/external-vault-providers";
 import { startScheduledTaskLifecyclePump } from "./scheduled-task-lifecycle";
 import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startNativePushDispatchPump } from "./native-push-dispatch";
@@ -601,6 +602,7 @@ export async function startApi(
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([
+        closeNativeExternalVaultProviders(),
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
         bus.close(),
