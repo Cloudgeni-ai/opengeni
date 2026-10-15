@@ -893,7 +893,7 @@ function routes(state: MockState): Route[] {
         const connectionId = mockId(`${provider}-connection-${state.connections.length}`);
         const accountName =
           provider === "protonpass"
-            ? "you@proton.me"
+            ? "pass@example.com"
             : provider === "keeper"
               ? "Opengeni agents"
               : provider === "bitwarden"

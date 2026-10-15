@@ -71,7 +71,7 @@ export function BitwardenMark({ className }: { className?: string }) {
         strokeWidth="1.6"
         strokeLinejoin="round"
       />
-      <path d="M12 7.2h3.8v5c0 2.3-1.8 3.8-3.8 4.7z" fill="#fff" />
+      <path d="M 12 7.2h3.8v5c0 2.3-1.8 3.8-3.8 4.7z" fill="#fff" />
     </svg>
   );
 }
