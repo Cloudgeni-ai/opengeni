@@ -315,6 +315,7 @@ import {
   isPersonalGitHubGitBrokerRequest,
   registerPersonalGitHubGitBrokerRoutes,
 } from "./routes/personal-github-git-broker";
+import { registerDesktopDistributionRoutes } from "./routes/desktop-distribution";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
@@ -2201,6 +2202,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerKnowledgeRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
+  registerDesktopDistributionRoutes(app, routeDeps);
   registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerUsageAllowanceRoutes(app, routeDeps);

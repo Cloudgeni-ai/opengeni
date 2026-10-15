@@ -4,6 +4,7 @@ import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import type { Context, MiddlewareHandler } from "hono";
 import { ANALYTICS_CONSENT_PATH } from "../routes/analytics-consent";
 import { CLIENT_ERRORS_PATH } from "../routes/client-errors";
+import { isDesktopDistributionPath } from "../routes/desktop-distribution";
 import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 import {
   isMcpOAuthPublicProtocolPath,
@@ -149,9 +150,13 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   // The get.<domain> install-serving routes (install.sh/.ps1/uninstall.sh/
-  // minisign pub + the release-binary redirects). Reached by a fresh machine
-  // with no credentials; the bodies carry no secrets.
-  if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
+  // minisign pub + the release-binary redirects) and the desktop app downloads.
+  // Reached by a fresh machine with no credentials; the bodies carry no secrets.
+  if (
+    installExactPaths.has(path) ||
+    isInstallRedirectPath(path) ||
+    isDesktopDistributionPath(path)
+  ) {
     return true;
   }
   // Without this a key-protected deployment could never enroll or renew a

@@ -14,7 +14,7 @@ beforeEach(() => {
 const docs = "https://docs.example.test/";
 
 describe("rail footer account menu", () => {
-  test("is identity, Appearance, Help & feedback, then the account action", async () => {
+  test("is identity, Appearance, Help & feedback, Desktop app, then the account action", async () => {
     const unmount = await renderOpenAccountMenu({
       managed: false,
       analytics: true,
@@ -23,12 +23,13 @@ describe("rail footer account menu", () => {
     try {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
-      expect(sequence).toHaveLength(6);
+      expect(sequence).toHaveLength(7);
       expect(sequence[1]).toBe("|");
       expect(sequence[2]).toContain("Appearance");
       expect(sequence[3]).toContain("Help & feedback");
-      expect(sequence[4]).toBe("|");
-      expect(sequence[5]).toContain("access");
+      expect(sequence[4]).toContain("Desktop app");
+      expect(sequence[5]).toBe("|");
+      expect(sequence[6]).toContain("access");
     } finally {
       await unmount();
     }
@@ -110,6 +111,31 @@ describe("rail footer account menu", () => {
       const link = document.body.querySelector<HTMLAnchorElement>(`a[href="${docs}"]`);
       expect(link?.target).toBe("_blank");
       expect(link?.rel).toBe("noopener noreferrer");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("Desktop app offers this computer's downloads, the install command and every platform", async () => {
+    const unmount = await renderOpenAccountMenu({
+      managed: false,
+      analytics: false,
+      documentationUrl: docs,
+    });
+    try {
+      const rows = await openSubmenu("Desktop app");
+      // The test browser reports Linux, which gets every package format.
+      expect(rows).toEqual([
+        "Download .deb",
+        "Download .rpm",
+        "Download AppImage",
+        "Copy install command",
+        expect.stringContaining("All downloads"),
+      ]);
+      const deb = Array.from(document.body.querySelectorAll<HTMLAnchorElement>("a")).find(
+        (link) => link.textContent === "Download .deb",
+      );
+      expect(deb?.href).toEndWith("/desktop/latest/Opengeni-linux-amd64.deb");
     } finally {
       await unmount();
     }

@@ -419,6 +419,12 @@ const SettingsSchema = z.object({
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .default("0.1.54"),
+  // Optional pin for the desktop app served by /desktop/latest/*. When unset,
+  // the newest desktop-v release on the agent release repository is served.
+  desktopStableVersion: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .optional(),
   // Optional independent beta-channel pointer. When unset, the beta update
   // manifest route is unavailable rather than silently serving stable.
   agentBetaVersion: z
@@ -4607,6 +4613,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
+    desktopStableVersion: optional("OPENGENI_DESKTOP_STABLE_VERSION"),
     agentAutoUpdate: optional("OPENGENI_AGENT_AUTO_UPDATE"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),

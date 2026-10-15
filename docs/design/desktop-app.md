@@ -187,6 +187,34 @@ apps look up the newest stable `desktop-v` tag and read that release's update
 files. Products configure their own feed (a fixed URL or a repository and tag
 prefix). The signing identity is a release-time setting.
 
+### Distribution
+
+People get the app four ways, all from the same releases:
+
+- **From the web app.** The account menu's "Desktop app" row offers the
+  download for the browser's platform, the install command, and the release
+  page with every platform. It is hidden inside the desktop app and on phones.
+- **From any Opengeni server.** `GET /desktop/latest/<file>` redirects a
+  version-less file name (`Opengeni-mac.dmg`, `Opengeni-windows.exe`,
+  `Opengeni-linux-amd64.deb`, `SHA256SUMS`, ...) to that file on the current
+  release, and `GET /desktop/latest` to the release page. The current release
+  is the newest stable `desktop-v` tag, looked up on GitHub and cached for ten
+  minutes, unless the operator pins `OPENGENI_DESKTOP_STABLE_VERSION`. GitHub's
+  own "latest release" can't be used: agent and package releases share the
+  repository.
+- **With one command.** `curl -fsSL https://<server>/desktop/install.sh | sh`
+  installs or updates the app on macOS (into `/Applications`, after checking
+  the checksum, signature and notarization) and Linux (deb through apt, rpm
+  through dnf, yum or zypper, else the AppImage). The served script resolves
+  the release through its server, so a pin applies; a copy run from the
+  repository asks GitHub.
+- **With Homebrew.** `brew install --cask cloudgeni-ai/tap/opengeni`. The
+  release workflow writes the cask (`apps/desktop/homebrew/opengeni.rb`) to the
+  tap for every stable release. The cask declares `auto_updates`, since the
+  app updates itself.
+
+winget follows once the Windows installer is Authenticode-signed.
+
 ### Linux notes
 
 - The window class (Wayland app id and X11 `WM_CLASS`) is the executable

@@ -247,7 +247,8 @@ opacity-muted text.
   only while some are pending; New organization only for people who can create one; then
   Appearance (a submenu: Light, Dark, System, the chosen one checked) and Help & feedback (a
   submenu: Documentation when the deployment publishes a link, Send feedback when the person may
-  send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
+  send it) and Desktop app (a submenu: the download for this computer, Copy install command on
+  Mac and Linux, and All downloads; hidden inside the desktop app and on phones); then Sign out. It has no Settings row (the footer gear is that) and no Personal
   settings or Privacy preferences: both live in Settings > Your account (Privacy preferences only
   where analytics consent is configured). Deployments with browser accounts keep the same footer
   and put their account list and "Add another account" first in the same menu.

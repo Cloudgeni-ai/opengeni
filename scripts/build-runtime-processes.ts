@@ -97,6 +97,10 @@ async function buildApi(): Promise<void> {
     ],
   });
   await copyDirectory(join(repositoryRoot, "agent/install"), join(outdir, "assets/agent-install"));
+  await copyDirectory(
+    join(repositoryRoot, "apps/desktop/install"),
+    join(outdir, "assets/desktop-install"),
+  );
   await copyRuntimeSkillAssets(repositoryRoot, outdir);
 }
 

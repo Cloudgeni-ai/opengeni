@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "a5ab25e03f662f3c3149969f549e42ff1689f1a8f33928efc542d16da02d84d1"
+      "sha256": "cb4eadea4cb681ddbc540e7e2ec5d1dd91ff86eb2bb4acd62b55c386ab83481b"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -915,6 +915,12 @@
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "homebrew",
+      "step": "Update the cask",
+      "sha256": "0b233c70c48becd900e0b18680a4b8aaee8116194cf376275cfd5ccede05e986"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "linux",
       "step": "Build",
       "sha256": "b8abe2668e6b9ac43ae93007e748eadeba5d114143cc73491a6db2ea25a26ea6"
@@ -977,7 +983,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "publish",
       "step": "Publish",
-      "sha256": "0501f67601a2b188d07165038cb1c606cad4f67ca0177391203043f7bd53c3a1"
+      "sha256": "24d3b578d74bdca9748338ed8540a0cd867880e778050c34fb008b0f81435027"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
