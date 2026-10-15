@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { agentAssetName, verifyAgentSignature } from "../src/main/agent-download";
+import { agentAssetName, signedHash, verifyAgentSignature } from "../src/main/agent-download";
 
 /** A minisign key pair and signer, the way the release signs agent files. */
 function signer() {
@@ -65,6 +65,20 @@ describe("agent download", () => {
     expect(() =>
       verifyAgentSignature(publicLine, edited, hashOf(file), "opengeni-agent-y"),
     ).toThrow("comment was changed");
+  });
+
+  test("hashes a streamed download the way minisign prehashes it", () => {
+    const { publicLine, signFile } = signer();
+    const file = Buffer.alloc(3 * 1024 * 1024 + 17, 7);
+    file.write("agent", 1000);
+    const signature = signFile(file, "timestamp:1\tfile:opengeni-agent-x\tprehashed");
+    const hash = signedHash();
+    for (let at = 0; at < file.length; at += 65_536) hash.update(file.subarray(at, at + 65_536));
+    const digest = hash.digest();
+    expect(Buffer.from(digest).equals(hashOf(file))).toBe(true);
+    expect(() =>
+      verifyAgentSignature(publicLine, signature, digest, "opengeni-agent-x"),
+    ).not.toThrow();
   });
 
   test("the app pins the key the agent releases are signed with", () => {
