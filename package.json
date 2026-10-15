@@ -153,6 +153,7 @@
     "check:migration-ordinals": "bun scripts/check-migration-ordinals.ts",
     "check:migration-rls-backfills": "bun scripts/check-migration-rls-backfills.ts",
     "check:migration-lock-order": "bun scripts/check-migration-lock-order.ts",
+    "check:migration-deployment-mode": "bun scripts/check-migration-deployment-mode.ts",
     "check:migration-schema-contract": "bun scripts/check-migration-schema-contract.ts",
     "check:migration-test-budgets": "bun scripts/check-migration-test-budgets.ts",
     "check:public-api": "bun scripts/public-api/check.ts",
