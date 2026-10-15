@@ -47,6 +47,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
+  errorCauseAttributes,
   recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
@@ -1487,6 +1488,9 @@ export function observeChannelAOperationFailure(
     errorClass: "SandboxChannelAOperationError",
     errorCode: diagnostic.errorCode,
     origin: "api",
+    // Which component refused it (controller, machine, database), as reviewed
+    // closed values only; "unexpected" alone cannot be diagnosed after the fact.
+    ...errorCauseAttributes(input.error),
   } as const;
   try {
     services.observability.incrementCounter({
