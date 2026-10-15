@@ -26,6 +26,12 @@ live Bitwarden account.
 
 ## Setup
 
+This first-wave bridge is source-distributed, not a published npm command.
+Use a checkout of the Opengeni revision containing this package and the
+repository's pinned Bun version, then run `bun install --frozen-lockfile`
+from the repository root. Install the official Bitwarden CLI separately;
+the bridge does not install or redistribute it.
+
 1. Create private directories for this account (all `0700`, owned by the
    bridge user):
 
@@ -48,8 +54,19 @@ live Bitwarden account.
    `--disable-origin-protection`). If you pass `--port` to `bw serve`, set the
    same value as `bwServePort` so the bridge sends the matching `Host` header.
 
-3. Create the connection in Opengeni (provider: Bitwarden). Store the signing
-   secret Opengeni shows in a `0600` file on this machine.
+3. Generate a dedicated signing key locally and keep it in a `0600` file:
+
+   ```sh
+   (umask 077; openssl rand -hex 32 > /srv/opengeni-bw/signing-secret)
+   ```
+
+   Create the connection in Opengeni (provider: Bitwarden), entering the
+   bridge's HTTPS endpoint and this signing key. Opengeni does not generate
+   or return the key. Until the bridge is configured, setup is saved as
+   pending and returns its connection ID. SDK integrators use
+   `vaultsApi(client, workspaceId).installVaultProvider`; its response includes
+   `connectionId` and `discoveryPending`. Use your native Opengeni account
+   and workspace IDs in the next step, not Bitwarden's organization ID.
 
 4. Write the bridge config (no secrets in the JSON):
 
@@ -86,13 +103,19 @@ live Bitwarden account.
    `POST /opengeni/vault` unchanged (the signature covers the exact body):
 
    ```sh
-   opengeni-bitwarden-bridge --config /srv/opengeni-bw/bridge.json
+   bun packages/vaults-bitwarden-bridge/src/cli.ts --config /srv/opengeni-bw/bridge.json
    ```
 
    The listener accepts only loopback addresses (or `listen.path` for a Unix
    socket) unless you set `allowNonLoopback`. Every request is authenticated
    by its signature, never by network position. There is no unauthenticated
    health, unlock or command route; `bridge.health()` is for local use only.
+
+6. Choose **Finish connecting** in Opengeni, or call
+   `verifyVaultProviderConnection(connectionId)` from the SDK, then link the
+   vaults you want. Verification reuses the saved signing key. Keep the bridge
+   and `bw serve` under your own process supervisor; Opengeni does not start,
+   unlock or restart them remotely.
 
 ## Scope and authorization
 

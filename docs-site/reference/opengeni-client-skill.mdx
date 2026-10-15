@@ -793,13 +793,27 @@ An embedding product can expose multiple remote vaults through a signed
 above unchanged unless the product actually needs this optional capability.
 
 Configure remote connections on the server with `vaultsApi(client, workspaceId)`
-from `@opengeni/sdk`: `installVaultProvider`, `listVaultProviderConnections`,
+from `@opengeni/sdk`: `installVaultProvider`, `getVaultProviderCatalog`,
 `listProviderVaults`, and `linkProviderVault`. Never put provider tokens or the
 signing secret in browser code, model context, or URL parameters. Verify each
 request's raw-body signature and map its native account/workspace/subject to
 the host's actual tenant/user before authorizing it. A shared connection must
 not return a different user's inventory into the same metadata mirror; use
 separate user-owned connections for user-specific stores.
+
+`getVaultProviderCatalog` includes deployment availability even before anyone
+connects; disable unavailable setup choices instead of collecting credentials
+that this deployment cannot use. `listVaultProviderConnections` remains a
+metadata-only convenience when only existing connections are needed.
+
+For a remote host, use `createExternalVaultReceiver` from the server-only
+`@opengeni/sdk/external-vault-receiver` subpath and a durable atomic replay and
+mutation store. The in-memory store is only for local tests. Its
+`resolveConnection` binds the native connection to one fixed host inventory;
+`authorize` checks the mapped person on every operation. If the host must
+register the native connection ID first, install returns saved/pending setup;
+register that ID, then verify. Never accept all unknown connections into one
+default tenant to avoid this registration step.
 
 Provider capabilities are granular: do not assume every read-write vault can
 update TOTP, upload files, restore history or archive items. Distinguish cached

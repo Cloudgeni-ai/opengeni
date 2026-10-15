@@ -3,8 +3,10 @@
 Connected vaults use the [native secrets model](secrets.md): the same ownership,
 availability, references, paginated discovery and execution-time resolution.
 They are not a second environment-variable system. Opengeni mirrors names,
-websites and field metadata; it reads values only when an authorized action
-needs them. Connection credentials are encrypted separately from that mirror.
+websites and field metadata, never item values. Some providers require a full
+item fetch/decryption to discover its fields; those values stay inside the
+adapter, not in the mirror or listing result. References resolve values at
+execution time. Connection credentials are encrypted separately from the mirror.
 
 ## Choose the connection
 
@@ -77,8 +79,11 @@ to continue with the saved credentials. Pending initial connections cannot
 resolve values or be linked. A pending reconnect preserves the previously
 working credential until the new one has been checked.
 
-`listVaultProviderConnections()` is metadata-only and includes 1Password. It
-does not resolve item values or refresh the providers. `listProviderVaults()`
+`getVaultProviderCatalog()` adds deployment availability for every provider,
+including when no connections exist yet. Use it to disable unsupported setup
+choices before collecting credentials. `listVaultProviderConnections()` is
+metadata-only and includes 1Password. It does not resolve item values or
+refresh the providers. `listProviderVaults()`
 contacts the connection to discover its available vaults. Link the chosen
 vaults with `linkProviderVault()`; each link keeps the existing availability
 controls. A reconnect refuses an unexpected upstream account change.
