@@ -1070,6 +1070,11 @@ export async function runSiteSqlQuery(
  * go through migrations so the database can be rebuilt. Management calls
  * are metered but do not count toward (or stop at) the monthly caps of the
  * Site's pages; the managers' call rate and the storage cap bound them.
+ *
+ * `asSiteMember`: a published Site's agent in a workspace member's
+ * conversation reads (never writes) the Site's database as that member,
+ * framed to that one Site. The caller checks the viewer is a member; this
+ * refuses guests and anyone without a person, and counts like page calls.
  */
 export async function runSiteSqlStatement(
   deps: SiteSqlDeps,
@@ -1081,11 +1086,22 @@ export async function runSiteSqlStatement(
     maxRows?: number | undefined;
   },
   mode: "read" | "write",
+  options: { asSiteMember?: boolean } = {},
 ): Promise<SiteSqlRunResponse> {
   return guarded(async () => {
-    const resolved = await resolve(deps, authority, siteId, { management: true });
+    const asSiteMember = options.asSiteMember === true;
+    if (asSiteMember && mode !== "read")
+      throw new SiteSqlError("forbidden", "Only the Site's managers can change its data with SQL");
+    const resolved = await resolve(
+      deps,
+      authority,
+      siteId,
+      asSiteMember ? { frameSiteId: siteId, management: false } : { management: true },
+    );
+    if (asSiteMember && (resolved.guest || resolved.access.subjectId === null))
+      throw new SiteSqlError("forbidden", "Only workspace members can query this Site's database");
     const gateway = requireGateway(resolved);
-    await requireDatabase(deps, resolved, { enabled: true });
+    const database = await requireDatabase(deps, resolved, { enabled: true });
     const compiled = compileOrThrow(request.sql, "agent");
     const statement = compiled.statements[0]!;
     if (statement.kind === "schema")
@@ -1095,13 +1111,19 @@ export async function runSiteSqlStatement(
         { problem: "statement_not_allowed" },
       );
     if (mode === "read" && statement.kind === "write")
-      throw new SiteSqlError("validation", "This statement writes; use site_sql_execute", {
-        problem: "statement_not_allowed",
-      });
+      throw new SiteSqlError(
+        "validation",
+        asSiteMember
+          ? "This statement writes; this Site's assistant can only read with SQL"
+          : "This statement writes; use site_sql_execute",
+        { problem: "statement_not_allowed" },
+      );
     if (statement.kind === "write") await requireSitePlatformOpen(deps, "sql_write");
     await requirePlatformQuota(deps, resolved, statement.kind === "write");
     const limits = await limitsFor(deps, resolved.scope);
     await consume(deps, resolved, limits);
+    // A member's reads through the Site's agent count like the page's calls.
+    if (asSiteMember) checkMonthly(database, limits, { read: true, write: false });
     const bound = bindParams(
       compiled.paramNames,
       request.params ?? {},
@@ -1125,7 +1147,7 @@ export async function runSiteSqlStatement(
     );
     const usage = newUsage();
     addUsage(usage, response);
-    await meter(deps, resolved, usage, { countTowardCaps: false });
+    await meter(deps, resolved, usage, { countTowardCaps: asSiteMember });
     return runResponse(response);
   });
 }

@@ -4,6 +4,7 @@ import {
   parseSiteHostname,
   siteHostname,
   SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE,
+  type Permission,
   type SiteLimitProfileKind,
   type SiteLimits,
   type SiteViewerCapabilities,
@@ -703,7 +704,13 @@ export async function siteRuntimeSessionRequest(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost & { versionId: string },
   viewer: SiteRuntimeViewer,
-  input: { origin: string; method: string; path: string; body?: unknown },
+  input: {
+    origin: string;
+    method: string;
+    path: string;
+    body?: unknown;
+    extraPermissions?: readonly Permission[];
+  },
 ): Promise<Request> {
   return await siteServiceSessionRequest(
     deps,

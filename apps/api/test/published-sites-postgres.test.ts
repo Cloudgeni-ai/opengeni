@@ -2512,13 +2512,26 @@ test("members are never capped by a Site; people outside the workspace meet its 
   const [memberRow] = await shared.admin`select viewer_kind, budget_key
     from site_runtime_conversations where session_id = ${asMember.json.id}`;
   expect(memberRow).toMatchObject({ viewer_kind: "member", budget_key: "*members" });
-  const inspected = await f.api(
-    f.owner,
-    "GET",
-    `/v1/workspaces/${f.workspace.id}/sessions/${asMember.json.id}`,
-  );
-  // No Site-imposed per-conversation cap on a member's conversation.
-  expect(inspected.json.usageLimit?.limitMicros ?? null).not.toBe(0);
+  // No Site budget and no session usage limit on a member's conversation:
+  // only the workspace's normal limits apply. Also for the next one, after a
+  // previous conversation exists.
+  const memberUncapped = async (sessionId: string) => {
+    const inspected = await f.api(
+      f.owner,
+      "GET",
+      `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`,
+    );
+    expect(inspected.status, JSON.stringify(inspected.json)).toBe(200);
+    expect(inspected.json.usageLimit?.limitMicros ?? null).toBeNull();
+    expect(inspected.json.usageLimit?.status ?? "unlimited").toBe("unlimited");
+    const [row] = await shared.admin`select limit_micros from site_runtime_conversations
+      where session_id = ${sessionId}`;
+    expect(row!.limit_micros).toBeNull();
+  };
+  await memberUncapped(String(asMember.json.id));
+  const memberAgain = await start(site.host, { session: memberSession });
+  expect(memberAgain.status, JSON.stringify(memberAgain.json)).toBe(202);
+  await memberUncapped(String(memberAgain.json.id));
 
   // The per-person limit refuses a signed-in outsider with its own budget code.
   await setLimits(site.id, { agentMicrosPerVisitorPerDay: 0 });
@@ -2539,7 +2552,17 @@ test("members are never capped by a Site; people outside the workspace meet its 
   });
   // ...but a signed-in outsider does not.
   expect((await start(site.host, { session: userSession })).status).toBe(202);
-  expect((await start(site.host, { session: userSession })).status).toBe(202);
+  const outsiderStarted = await start(site.host, { session: userSession });
+  expect(outsiderStarted.status).toBe(202);
+  // People outside the workspace keep their caps, stamped on the session:
+  // signed-in outsiders the per-conversation flood brake, guests the guard.
+  const usageLimitOf = async (sessionId: string) =>
+    (await f.api(f.owner, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`)).json
+      .usageLimit?.limitMicros ?? null;
+  expect(await usageLimitOf(String(outsiderStarted.json.id))).toBe(5_000_000);
+  const guestStarted = await start(site.host, { visitor: visitorId() });
+  expect(guestStarted.status).toBe(202);
+  expect(await usageLimitOf(String(guestStarted.json.id))).toBe(1_000_000);
 
   // Invited people: the same Site limit; switching the agent off for people
   // outside the workspace leaves members theirs.
@@ -2586,6 +2609,24 @@ test("members are never capped by a Site; people outside the workspace meet its 
   expect(reported.json.usage).toMatchObject({ agentMicrosThisMonth: 0, agentMicrosToday: 0 });
   expect(reported.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(1);
 }, 90_000);
+
+test("Site agent sessions run without a sandbox, whatever the deployment default", async () => {
+  const f = await fixture({ sandboxBackend: "docker" });
+  const site = await f.live("No shell", { access: "public", agent: { enabled: true } });
+  const memberSession = await f.signIn(f.member, site.host);
+  for (const who of [{ visitor: visitorId() }, { session: memberSession }]) {
+    const created = await f.gateway(site.host, "POST", "/sessions", {
+      ...who,
+      body: { initialMessage: "Hi" },
+    });
+    expect(created.status, JSON.stringify(created.json)).toBe(202);
+    const [row] = await shared.admin`select sandbox_backend, first_party_mcp_tools
+      from sessions where id = ${created.json.id}`;
+    expect(row!.sandbox_backend).toBe("none");
+    // Only this Site's own data tools (Site SQL is off here), no management tools.
+    expect([...row!.first_party_mcp_tools].sort()).toEqual(["site_data_query", "site_data_write"]);
+  }
+});
 
 test("view as visitor shows a member less, never anyone more", async () => {
   const f = await fixture();

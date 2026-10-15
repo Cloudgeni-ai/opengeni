@@ -20,6 +20,7 @@ import {
   SITE_TOOL_METHODS,
   SteerSessionQueueItemRequest,
   SubmitComposerDraftRequest,
+  type Permission,
   type SiteAuthExchangeResponse,
   type SiteEmbeddedAgent,
   type SiteRuntimeConfig,
@@ -51,6 +52,12 @@ import {
   SITE_RUNTIME_SITE_PRINCIPAL,
   type SiteRuntimeReservation,
 } from "@opengeni/db";
+import {
+  SITE_AGENT_DATA_TOOL_PERMISSIONS,
+  siteAgentDataToolsForStart,
+  siteAgentInstructions,
+  sitePublishedDataViewer,
+} from "../site-publishing/agent-data-tools";
 import { isSubscriptionBilledModel, resolveSiteOutsideModel } from "../site-publishing/agent-model";
 import { afterSitePlatformUsage, requireSitePlatformOpen } from "../site-publishing/platform-usage";
 import { SiteSqlError } from "../site-sql/service";
@@ -899,21 +906,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const publishedViewer = (
     host: SiteRuntimeHost & { versionId: string },
     viewer: SiteRuntimeViewer,
-  ): PublishedSiteDataViewer => ({
-    kind: "published_viewer",
-    accountId: host.scope.accountId,
-    workspaceId: host.scope.workspaceId,
-    site: {
-      id: host.site.id,
-      title: host.site.title,
-      status: host.site.status,
-      visibility: host.site.visibility,
-      ownerSubjectId: host.site.ownerSubjectId,
-      createdBySubjectId: host.site.createdBySubjectId,
-    },
-    principal: viewer.principal,
-    guest: viewer.kind === "guest",
-  });
+  ): PublishedSiteDataViewer =>
+    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest");
 
   /**
    * Site SQL: run one named query of this Site as the viewer. The query's
@@ -1094,7 +1088,12 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // carries the Site and version headers the API's Site frame guard
     // validates; sessions and turns it starts record this Site and version.
     const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };
-    const send = async (method: string, path: string, body?: unknown) =>
+    const send = async (
+      method: string,
+      path: string,
+      body?: unknown,
+      extraPermissions?: readonly Permission[],
+    ) =>
       await withSiteSessionOrigin(siteOrigin, async () =>
         dispatch(
           await siteRuntimeSessionRequest(deps, host, viewer, {
@@ -1102,6 +1101,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             method,
             path,
             ...(body === undefined ? {} : { body }),
+            ...(extraPermissions ? { extraPermissions } : {}),
           }),
         ),
       );
@@ -1206,6 +1206,14 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
           : null;
       const mcpTools = siteAgentToolRefs(agent, viewer, memberPermissions);
+      // Every conversation gets this Site's own data tools, pinned to this
+      // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      const dataTools = await siteAgentDataToolsForStart(
+        deps,
+        host.scope,
+        host.site.id,
+        viewer.kind,
+      );
       // One transaction counts the start and reserves the conversation's whole
       // cap against the visitor's day and the Site's day and month; the cap
       // becomes the session's usage limit, set in the create transaction. The
@@ -1230,10 +1238,24 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         agentAccess: "session",
         memoryScope: "off",
         rigId: null,
-        firstPartyMcpTools: [],
-        agent: { capabilities: { from: "none", humanInput: false, skills: false } },
+        // Only this Site's data tools; never management or workspace tools.
+        firstPartyMcpTools: dataTools,
+        ...(dataTools.length > 0
+          ? { firstPartyMcpPermissions: [...SITE_AGENT_DATA_TOOL_PERMISSIONS] }
+          : {}),
+        agent: {
+          capabilities: {
+            from: "none",
+            humanInput: false,
+            skills: false,
+            ...(dataTools.length > 0 ? { artifacts: true } : {}),
+          },
+        },
+        // No sandbox: a Site's agent answers from the page and the Site's
+        // data, with no shell or workspace files.
+        sandboxBackend: "none",
         ...(models.default ? { model: models.default } : {}),
-        ...(agent.instructions?.trim() ? { instructions: agent.instructions.trim() } : {}),
+        instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions),
         // Always explicit: an empty list means no workspace tools at all.
         tools: mcpTools,
         metadata: {
@@ -1245,14 +1267,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         ...(input.idempotencyKey ? { idempotencyKey: `site-runtime:${requestedSessionId}` } : {}),
       };
-      const start = () => send("POST", base, body);
+      const start = () =>
+        send("POST", base, body, dataTools.length > 0 ? SITE_AGENT_DATA_TOOL_PERMISSIONS : []);
+      // Workspace members get no Site budget at all: their conversation is an
+      // ordinary session under the workspace's normal limits, so no session
+      // usage limit is stamped on it, whatever the Site's limits say.
+      const usageLimitMicros = viewer.kind === "member" ? null : reservation.limitMicros;
       let created: Response;
       try {
         created =
-          reservation.limitMicros === null
+          usageLimitMicros === null
             ? await start()
             : await withHostSessionUsageLimit(
-                { subjectId: `site:${host.site.id}`, limitMicros: reservation.limitMicros },
+                { subjectId: `site:${host.site.id}`, limitMicros: usageLimitMicros },
                 start,
               );
       } catch (error) {
@@ -1371,8 +1398,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
       // A per-conversation limit lowered since the start lowers the session's
-      // own usage limit too, before the work runs.
-      if (admitted.limitMicros !== null)
+      // own usage limit too, before the work runs. Members' conversations
+      // never carry a Site-imposed usage limit.
+      if (admitted.limitMicros !== null && viewer.kind !== "member")
         await capSiteConversationUsageLimit(
           deps,
           host,

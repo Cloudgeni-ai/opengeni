@@ -1438,6 +1438,44 @@ export async function getOwnedSiteRuntimeConversation(
   });
 }
 
+/**
+ * Whether an agent session belongs to a published Site's agent, and which
+ * conversation (Site and viewer) it serves. A session tree whose root was
+ * started by a Site's service principal (`site:<siteId>`) is a Site agent;
+ * its conversation row names the viewer. `siteAgent` without a conversation
+ * (a row that is gone or never written) must fail closed. A session that
+ * cannot be read is reported as a Site agent without a conversation too.
+ */
+export async function findSiteRuntimeAgentConversation(
+  db: Database,
+  scope: SitePublishingScope,
+  sessionId: string,
+): Promise<{ siteAgent: boolean; conversation: SiteRuntimeConversationRecord | null }> {
+  if (!UUID.test(sessionId)) return { siteAgent: true, conversation: null };
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<
+      { root_creator: string | null; root_id: string | null } & Partial<ConversationRow>
+    >(
+      tx,
+      sql`select r.created_by_subject_id as root_creator, r.id as root_id,
+            c.session_id, c.site_id, c.viewer_principal, c.viewer_kind, c.tool_ids,
+            c.budget_key, c.version_id, c.turns, c.metered_micros, c.limit_micros,
+            c.reserved_micros, c.reserved_day::text as reserved_day,
+            c.reserved_month::text as reserved_month, c.admissions, c.created_at, c.updated_at
+          from sessions s
+          left join sessions r on r.workspace_id = s.workspace_id
+            and r.id = coalesce(s.root_session_id, s.id)
+          left join site_runtime_conversations c on c.workspace_id = s.workspace_id
+            and c.session_id = r.id
+          where s.workspace_id = ${scope.workspaceId} and s.id = ${sessionId}`,
+    );
+    if (!row || !row.root_id) return { siteAgent: true, conversation: null };
+    const conversation = row.session_id ? toConversation(row as ConversationRow) : null;
+    const siteAgent = conversation !== null || (row.root_creator ?? "").startsWith("site:");
+    return { siteAgent, conversation };
+  });
+}
+
 export async function listOwnedSiteRuntimeConversations(
   db: Database,
   scope: SitePublishingScope,

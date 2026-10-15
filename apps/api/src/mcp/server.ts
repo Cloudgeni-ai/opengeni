@@ -179,6 +179,10 @@ import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
 import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import {
+  resolveSiteAgentDataContext,
+  type SiteAgentDataResolution,
+} from "../site-publishing/agent-data-tools";
+import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
   scheduledTaskCreateToolValidation,
@@ -1157,6 +1161,16 @@ export function buildOpenGeniMcpServer(
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
+    // A published Site's own agent: its Site Data and Site SQL tools are
+    // pinned to that Site and act as the conversation's viewer (resolved
+    // once per server, on first use).
+    let siteAgentResolution: Promise<SiteAgentDataResolution> | undefined;
+    const siteAgent = () =>
+      (siteAgentResolution ??= resolveSiteAgentDataContext(
+        deps,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        sessionId,
+      ));
     registerSiteDataTools(
       server,
       deps,
@@ -1165,6 +1179,7 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       json,
+      siteAgent,
     );
     // Site SQL tools need a configured gateway (they also reach databases
     // that already exist after the deployment stops offering Site SQL).
@@ -1177,6 +1192,7 @@ export function buildOpenGeniMcpServer(
           await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
         },
         json,
+        siteAgent,
       );
     registerSitePublicationTools(
       server,

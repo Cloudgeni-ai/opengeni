@@ -600,12 +600,21 @@ export const SITE_RUNTIME_AGENT_PERMISSIONS: readonly Permission[] = Object.free
  * (`site:<siteId>`), with a 60-second delegated token carrying only session
  * permissions, for in-process dispatch. The Site headers ride along so the
  * API's Site frame guard and provenance see which Site acts.
+ * `extraPermissions` adds what one request must delegate onward (a
+ * conversation start delegates its Site data tools' permissions).
  */
 export async function siteServiceSessionRequest(
   deps: Pick<SitePublishingDeps, "settings">,
   scope: SitePublishingScope,
   site: { id: string; versionId: string | null },
-  input: { origin: string; method: string; path: string; body?: unknown; label: string },
+  input: {
+    origin: string;
+    method: string;
+    path: string;
+    body?: unknown;
+    label: string;
+    extraPermissions?: readonly Permission[];
+  },
 ): Promise<Request> {
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
   if (!secret)
@@ -621,7 +630,9 @@ export async function siteServiceSessionRequest(
     workspaceId: scope.workspaceId,
     subjectId: `site:${site.id}`,
     subjectLabel: input.label.slice(0, 250),
-    permissions: [...SITE_RUNTIME_AGENT_PERMISSIONS],
+    permissions: [
+      ...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])]),
+    ],
     principalKind: "service",
     exp: Math.floor(Date.now() / 1000) + 60,
   });
