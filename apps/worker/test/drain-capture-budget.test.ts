@@ -468,7 +468,7 @@ function fileObjectStorage(directory: string): ObjectStorage {
  * before durable publication. */
 function slowDockerHost(captureMs: number) {
   const stats = { started: 0, reading: 0, peakReading: 0, deletes: [] as boolean[] };
-  const client = {
+  const dockerClient = {
     backendId: "docker",
     async deserializeSessionState(state: Record<string, unknown>) {
       return { ...state };
@@ -507,7 +507,7 @@ function slowDockerHost(captureMs: number) {
       };
     },
   };
-  return { client, stats };
+  return { client: dockerClient, stats };
 }
 
 function spoolDirs(base: string): number {
@@ -573,7 +573,7 @@ async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
     });
     const storage = fileObjectStorage(join(runDir, "objects"));
     const docker = slowDockerHost(DOCKER_CAPTURE_MS);
-    const services = async () =>
+    const dockerServices = async () =>
       ({
         settings,
         db,
@@ -596,7 +596,7 @@ async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
       factories.push(second.createSandboxLeaseActivities);
     }
     const workers = factories.map((create) =>
-      create(services, {
+      create(dockerServices, {
         probeDrainableProvider: async () => "ready",
         createClientForBackend: (() => docker.client) as never,
       }),
