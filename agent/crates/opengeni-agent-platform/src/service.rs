@@ -382,7 +382,11 @@ pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformRes
     let environment = format!(
         "  <key>EnvironmentVariables</key>\n  <dict>\n{path}    <key>{AGENT_STDERR_LOG_ENV}</key>\n    <string>off</string>\n  </dict>\n"
     );
-    let stderr_log = xml_escape(&launchd_stderr_log_path(Path::new(user_home)).to_string_lossy());
+    // Joined as a POSIX path on every build host, like the home it extends.
+    let stderr_log = xml_escape(&format!(
+        "{}/.config/opengeni/agent/logs/agent.stderr.log",
+        user_home.trim_end_matches('/')
+    ));
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\

@@ -1577,28 +1577,34 @@ mod tests {
 
     #[test]
     fn workspace_root_keeps_a_chosen_directory_and_replaces_a_filesystem_root() {
-        let home = Path::new("/Users/me");
+        // Host-native absolute paths: a Windows path needs its drive.
+        let (root, home, work) = if cfg!(windows) {
+            (r"C:\", r"C:\Users\me", r"C:\srv\work")
+        } else {
+            ("/", "/Users/me", "/srv/work")
+        };
+        let home = Path::new(home);
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/srv/work")), Some(home)),
-            PathBuf::from("/srv/work")
+            resolve_workspace_root(Some(PathBuf::from(work)), Some(home)),
+            PathBuf::from(work)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), Some(home)),
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(home)),
             home.to_path_buf()
         );
         assert_eq!(resolve_workspace_root(None, Some(home)), home.to_path_buf());
         // Without a usable home there is nothing better than the directory we have.
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), None),
-            PathBuf::from("/")
+            resolve_workspace_root(Some(PathBuf::from(root)), None),
+            PathBuf::from(root)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), Some(Path::new("/"))),
-            PathBuf::from("/")
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new(root))),
+            PathBuf::from(root)
         );
         assert_eq!(
-            resolve_workspace_root(Some(PathBuf::from("/")), Some(Path::new("relative"))),
-            PathBuf::from("/")
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new("relative"))),
+            PathBuf::from(root)
         );
     }
 
