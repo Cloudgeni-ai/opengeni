@@ -1461,6 +1461,10 @@ export function browserLaunchArguments(
     // Chromium's free-disk-derived default can retain gigabytes per actor.
     // Bound disposable HTTP caching without limiting cookies or site storage.
     "--disk-cache-size=67108864",
+    // Chromium reports navigator.webdriver=true whenever it is remotely
+    // debugged. Managed browsers act for a signed-in person, and sites treat
+    // that flag as a bot signal (rate-limited or refused logins).
+    "--disable-blink-features=AutomationControlled",
     // Chromium's presentation-fenced screenshot path can wait indefinitely for
     // hidden headed tabs. Copy a freshly repainted surface without raising the
     // browser or changing the shared desktop's active tab.
