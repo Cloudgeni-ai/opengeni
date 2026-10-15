@@ -154,10 +154,12 @@ running, and two programs updated on their own schedules.
 
 - To run while the person works, including with the window closed, and again
   after they log in.
-- On macOS, the Screen Recording and Accessibility permissions. macOS charges
-  them to the *responsible* process: the app that started the process tree. A
-  launchd job is its own responsible process, so a separate agent service is
-  always asked about under its own name.
+- On macOS, the Screen Recording, Accessibility and Input Monitoring
+  permissions. Input Monitoring lets the agent notice the person's own mouse
+  and keyboard so it never races them. macOS charges these permissions to the
+  *responsible* process: the app that started the process tree. A launchd job
+  is its own responsible process, so a separate agent service is always asked
+  about under its own name.
 - On Windows, the person's interactive desktop session, where CUA sees and
   drives their windows.
 - To stay compatible with every server it serves, which may run different
@@ -205,6 +207,8 @@ Screen control is a switch in the Connect dialog.
 
 The menu bar / tray item shows whether the computer is connected and offers
 Open, Pause this computer, Resume and Quit.
+On macOS it also lists any permission the agent still lacks and opens that
+pane of System Settings; a grant takes effect without restarting the app.
 
 Headless machines keep the one-line installer (`install.sh`, `install.ps1`)
 and its background service, and need no desktop app.
