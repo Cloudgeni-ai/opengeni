@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, chmod, mkdir, rm, stat } from "node:fs/promises";
 import { connect, createServer } from "node:net";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { Readable } from "node:stream";
 import { InteractionControllerError } from "@opengeni/interaction";
 import { readWindowsSeat } from "./cua/windows-seat";
@@ -76,6 +77,10 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
         "isolated virtual ComputerSessions require Linux",
       );
     }
+    await assertDesktopProgramsInstalled(
+      ["Xvfb", "dbus-daemon", this.windowManagerBinary, "xterm", "x11vnc"],
+      context.baseEnvironment.PATH,
+    );
     const environmentDigest = createHash("sha256")
       .update(`${context.computerSessionId}\0${context.controllerGeneration}`)
       .digest("hex")
@@ -332,6 +337,59 @@ async function removeDirectories(directories: readonly string[]): Promise<unknow
     }
   }
   return failures;
+}
+
+/** The Debian and Ubuntu package that provides each program the virtual desktop runs. */
+const DESKTOP_PROGRAM_PACKAGES: Readonly<Record<string, string>> = {
+  Xvfb: "xvfb",
+  "dbus-daemon": "dbus",
+  xfwm4: "xfwm4",
+  xterm: "xterm",
+  x11vnc: "x11vnc",
+};
+
+/**
+ * Starting a program that isn't installed only fails once the seat is half
+ * built, as an opaque startup error. Check every program first, so the person
+ * and the agent learn exactly what to install.
+ */
+async function assertDesktopProgramsInstalled(
+  programs: readonly (string | null)[],
+  searchPath: string | undefined,
+): Promise<void> {
+  const missing: string[] = [];
+  for (const program of programs) {
+    if (program && !(await findExecutable(program, searchPath))) missing.push(program);
+  }
+  if (missing.length === 0) return;
+  const names = missing.map((program) => program.split("/").pop() ?? program);
+  const packages = [...new Set(names.map((name) => DESKTOP_PROGRAM_PACKAGES[name] ?? name))];
+  const listed =
+    names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  throw new InteractionControllerError(
+    "resource_unavailable",
+    `this machine can't start a virtual desktop because ${listed} ${
+      names.length === 1 ? "isn't" : "aren't"
+    } installed. On Debian or Ubuntu, install with: sudo apt install ${packages.join(" ")}`,
+  );
+}
+
+async function findExecutable(program: string, searchPath: string | undefined): Promise<boolean> {
+  const candidates = program.includes("/")
+    ? [program]
+    : (searchPath ?? "")
+        .split(delimiter)
+        .filter((directory) => directory.length > 0)
+        .map((directory) => join(directory, program));
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.X_OK);
+      if ((await stat(candidate)).isFile()) return true;
+    } catch {
+      // Not here; keep looking.
+    }
+  }
+  return false;
 }
 
 /** Existing physical/login seat used by connected machines and macOS. */
