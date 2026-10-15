@@ -12,6 +12,7 @@ import { withRlsContext, withSessionActivityRlsContext } from "./database";
 import * as schema from "./schema";
 import { lockSessionEventWriteRows } from "./session-control";
 import { fromPostgresLosslessJson } from "./lossless-json";
+import { commandOutputClientEventIdPrefix } from "./session-command-output";
 
 export type ConnectedMachineBackgroundCommandProof = {
   outcome: "exited" | "lost";
@@ -1386,6 +1387,47 @@ export function projectCommandOutputPage(input: {
   };
 }
 
+/** One page of a command's retained output rows, from the cursor sequence on. */
+export function commandOutputPageQuery(
+  tx: Database,
+  input: SessionCommandIdentity,
+  fromSequence: number,
+) {
+  // Bound the scan by the command's client event id prefix in byte order: under
+  // row-level security only leakproof comparisons narrow an index scan, and the
+  // JSON `commandId` key is not one, so filtering on it alone walked every
+  // output chunk of the whole session on each read. ";" is the byte after ":".
+  // The type stays a literal so cached generic plans can still prove the
+  // partial index predicate.
+  const clientIdFrom = commandOutputClientEventIdPrefix(input.commandId);
+  const clientIdBefore = `${clientIdFrom.slice(0, -1)};`;
+  return tx
+    .select({
+      sequence: schema.sessionEvents.sequence,
+      // Bound legacy payloads in SQL too: LIMIT alone cannot bound one old event.
+      // Oversized historical rows carry explicit loss rather than allocating an
+      // unbounded JSON value in the API process.
+      payload: sql<unknown>`case when octet_length(${schema.sessionEvents.payload}::text) <= 262144
+      then ${schema.sessionEvents.payload}
+      else jsonb_build_object('commandReadProjectionGap', true) end`,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        sql`${schema.sessionEvents.type} = 'sandbox.command.output.delta'`,
+        sql`${schema.sessionEvents.clientEventId} collate "C" >= ${clientIdFrom}`,
+        sql`${schema.sessionEvents.clientEventId} collate "C" < ${clientIdBefore}`,
+        sql`${schema.sessionEvents.payload} ->> 'commandId' = ${input.commandId}`,
+        gte(schema.sessionEvents.sequence, fromSequence),
+      ),
+    )
+    .orderBy(asc(schema.sessionEvents.sequence))
+    .limit(COMMAND_OUTPUT_PAGE_ROWS + 1);
+}
+
 export async function readSessionBackgroundCommandOutput(
   db: Database,
   input: SessionCommandIdentity & {
@@ -1401,30 +1443,7 @@ export async function readSessionBackgroundCommandOutput(
   const rows = await withRlsContext(
     db,
     input,
-    async (tx) =>
-      await tx
-        .select({
-          sequence: schema.sessionEvents.sequence,
-          // Bound legacy payloads in SQL too: LIMIT alone cannot bound one old event.
-          // Oversized historical rows carry explicit loss rather than allocating an
-          // unbounded JSON value in the API process.
-          payload: sql<unknown>`case when octet_length(${schema.sessionEvents.payload}::text) <= 262144
-      then ${schema.sessionEvents.payload}
-      else jsonb_build_object('commandReadProjectionGap', true) end`,
-          payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
-        })
-        .from(schema.sessionEvents)
-        .where(
-          and(
-            eq(schema.sessionEvents.workspaceId, input.workspaceId),
-            eq(schema.sessionEvents.sessionId, input.sessionId),
-            eq(schema.sessionEvents.type, "sandbox.command.output.delta"),
-            sql`${schema.sessionEvents.payload} ->> 'commandId' = ${input.commandId}`,
-            gte(schema.sessionEvents.sequence, cursor.sequence),
-          ),
-        )
-        .orderBy(asc(schema.sessionEvents.sequence))
-        .limit(COMMAND_OUTPUT_PAGE_ROWS + 1),
+    async (tx) => await commandOutputPageQuery(tx, input, cursor.sequence),
   );
   const page = projectCommandOutputPage({ ...input, rows });
   // Only observe the terminal state actually used by this read. A finish racing

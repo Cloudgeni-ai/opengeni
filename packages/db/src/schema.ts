@@ -9683,6 +9683,19 @@ export const sessionEvents = pgTable(
         table.sequence,
       )
       .where(sql`${table.type} = 'sandbox.command.output.delta'`),
+    // Command output paging under row-level security (migration 0788). Every
+    // output chunk's client event id starts with `command-output:<commandId>:`;
+    // byte-order text comparisons are leakproof, so a policy-bound reader can
+    // bound the scan to one command and the cursor. The JSON key above cannot:
+    // `->>` is not leakproof, so policies demote it to a per-row filter.
+    commandOutputClient: index("session_events_command_output_client_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        sql`${table.clientEventId} collate "C"`,
+        table.sequence,
+      )
+      .where(sql`${table.type} = 'sandbox.command.output.delta'`),
     monitoringTail: index("session_events_workspace_session_monitoring_tail_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(
