@@ -366,12 +366,16 @@ export async function externalVaultProviderForConnection(input: {
         !live ||
         !isExternalVaultConnection(live) ||
         live.status !== "active" ||
-        live.version !== connection.version ||
         live.accountId !== connection.accountId ||
         live.subjectId !== connection.subjectId ||
         live.providerDomain !== connection.providerDomain
       )
         throw unavailable();
+      if (live.version !== connection.version)
+        throw new VaultProviderError(
+          "provider_conflict",
+          "This vault connection changed. Reload it before starting another operation.",
+        );
     },
   });
 }

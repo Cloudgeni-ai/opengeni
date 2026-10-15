@@ -139,6 +139,16 @@ HTTPS, pinned outbound DNS, bounded requests and responses, and no redirects.
 Private targets require an explicit operator policy, not an agent-provided URL.
 Do not blindly retry a timed-out write: the provider may have completed it.
 Use operation identity and durable idempotency/reconciliation at the host.
+The receiver deduplicates repeated mutation keys, not separate user or agent
+save requests. Ordinary new save requests currently get new keys; after an
+unknown outcome, inspect the vault before issuing another save. This is not
+an exactly-once guarantee across separate API calls.
+
+Connection managers with the existing connection and secret write permissions
+may replace remote endpoints and signing keys. A receiver's account ID is
+self-reported continuity metadata, not independent proof of who operates the
+endpoint. Treat connection-management authority as authority to choose the
+service that receives writes and supplies values.
 
 ### Implement the receiver
 
@@ -162,6 +172,11 @@ Provide three pieces:
   with optional `refresh`, `writeItem` and `archiveItem`. Return bounded pages
   and explicit capabilities. Use `ExternalVaultReceiverError` for safe,
   structured refusals; raw backend errors are not sent to Opengeni.
+
+For a multi-page inventory, return the same non-null snapshot token on every
+page and keep the traversal consistent with that snapshot. A single page may
+omit it. Un-snapshotted multi-page discovery remains enumerable, but Opengeni
+refuses to replace its mirror from it and reports an incomplete inventory.
 
 Mount `receiver.fetch(request)` in your server route, or pass the untouched
 body and headers to `receiver.handle`. Choose a durable implementation of

@@ -1,4 +1,5 @@
 import type { Context, Hono } from "hono";
+import { isDeepStrictEqual } from "node:util";
 import { HTTPException } from "hono/http-exception";
 import { createNativeExternalVaultFactories } from "../integrations/external-vault-providers";
 import {
@@ -88,7 +89,6 @@ import {
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { parseRequestJson } from "../http/request-body";
 import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
-import { isIntegrationAgent } from "./workspace-integrations";
 import {
   loadOnePasswordModule,
   loadOnePasswordVaultProvider,
@@ -1038,6 +1038,7 @@ export function registerVaultProviderRoutes(
           connection: loaded.connection,
           credentials: payload.credentials,
           currentCredentials: loaded.currentCredentials,
+          pendingCredentials: loaded.pendingCredentials,
           isNew: false,
         });
         return c.json(result.body, result.status);
@@ -1079,6 +1080,7 @@ export function registerVaultProviderRoutes(
           connection: loaded.connection,
           credentials: loaded.credentials,
           currentCredentials: loaded.currentCredentials,
+          pendingCredentials: loaded.pendingCredentials,
           isNew: false,
         });
         return c.json(result.body, result.status);
@@ -1155,10 +1157,6 @@ export function registerVaultProviderRoutes(
       "connections:write",
     );
     requirePermission(authorization.grant, "secrets:write");
-    if (isIntegrationAgent(authorization.grant))
-      throw new HTTPException(403, {
-        message: "Agent attempts cannot change vault connection credentials or endpoints",
-      });
     return authorization;
   }
 
@@ -1181,7 +1179,6 @@ export function registerVaultProviderRoutes(
   ): boolean {
     const grant = authorization.grant;
     return (
-      !isIntegrationAgent(grant) &&
       hasPermission(grant.permissions, "connections:write", grant.permissionMode) &&
       hasPermission(grant.permissions, "secrets:write", grant.permissionMode) &&
       (connection.subjectId !== null
@@ -1212,6 +1209,7 @@ export function registerVaultProviderRoutes(
     connection: ConnectionMetadata;
     credentials: VaultProviderCredentials | StoredVaultProviderCredentials;
     currentCredentials: StoredVaultProviderCredentials | null;
+    pendingCredentials?: StoredVaultProviderCredentials | null;
     isNew: boolean;
   }): Promise<{ body: InstallVaultProviderResponse; status: 200 | 201 | 202 }> {
     const { authorization, workspaceId } = input;
@@ -1222,12 +1220,39 @@ export function registerVaultProviderRoutes(
     const linked = await linkedVaultRows(context, workspaceId, input.connection.id);
     let connection = input.connection;
     let saved = false;
+    let hasPending = Boolean(input.pendingCredentials);
+    let storedBundle: unknown = input.pendingCredentials
+      ? pendingVaultCredentialBundle(input.currentCredentials, input.pendingCredentials)
+      : (input.currentCredentials ?? {});
     const continuation = externalActorContinuationForAuthorization(authorization);
     const persist = async (
       credentials: StoredVaultProviderCredentials,
       ready?: ExternalVaultConnectionDetails,
     ) => {
-      const nextMetadata = ready ?? { ...details, verificationStatus: "pending" as const };
+      const unchangedCurrent =
+        input.currentCredentials !== null &&
+        isDeepStrictEqual(credentials, input.currentCredentials);
+      const pending = !ready && !unchangedCurrent;
+      const nextMetadata = ready ?? {
+        ...details,
+        verificationStatus: pending ? ("pending" as const) : ("ready" as const),
+      };
+      const nextBundle = pending
+        ? pendingVaultCredentialBundle(input.currentCredentials, credentials)
+        : credentials;
+      const nextStatus = pending ? connection.status : ("active" as const);
+      const previousDetails = externalVaultConnectionDetails(connection.metadata);
+      // A read-only verification must not invalidate in-flight provider calls.
+      // Actual credential, status or capability changes still advance the fence.
+      const generationChanged =
+        !isDeepStrictEqual(nextBundle, storedBundle) ||
+        nextStatus !== connection.status ||
+        !isDeepStrictEqual(previousDetails?.operations, nextMetadata.operations);
+      if (!generationChanged && isDeepStrictEqual(previousDetails, nextMetadata)) {
+        saved = true;
+        hasPending = pending;
+        return;
+      }
       const updated = await db.transaction(async (tx) => {
         await requireConnectOwnerAuthority(tx, {
           accountId: grant.accountId,
@@ -1241,15 +1266,10 @@ export function registerVaultProviderRoutes(
           connectionId: connection.id,
           visibleToSubjectId: grant.subjectId,
           expectedVersion: connection.version,
-          ...(ready ? { status: "active" as const } : {}),
-          credentialEncrypted: encryptEnvironmentValue(
-            key,
-            JSON.stringify(
-              ready
-                ? credentials
-                : pendingVaultCredentialBundle(input.currentCredentials, credentials),
-            ),
-          ),
+          status: nextStatus,
+          ...(generationChanged
+            ? { credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(nextBundle)) }
+            : {}),
           metadata: { ...connection.metadata, ...externalVaultConnectionMetadata(nextMetadata) },
           updatedBySubjectId: grant.subjectId,
         });
@@ -1260,6 +1280,8 @@ export function registerVaultProviderRoutes(
         });
       connection = updated;
       saved = true;
+      hasPending = pending;
+      storedBundle = nextBundle;
     };
     try {
       const checked = await prepareExternal(
@@ -1314,9 +1336,25 @@ export function registerVaultProviderRoutes(
         }),
       };
     } catch (error) {
+      if (isVaultProviderError(error) && error.code === "provider_conflict" && hasPending) {
+        if (input.currentCredentials) {
+          // Reject the candidate, not the working connection. CAS prevents this
+          // rollback from overwriting a concurrent reconnect or disconnect.
+          await persist(input.currentCredentials, { ...details, verificationStatus: "ready" });
+        } else {
+          await revokeConnection(
+            db,
+            workspaceId,
+            connection.id,
+            grant.subjectId,
+            connection.version,
+          );
+        }
+        throw error;
+      }
       // A bound key is durable even if later discovery fails. Never tell the
       // person to repeat a consumed bootstrap token or overwrite working keys.
-      if (saved && isVaultProviderError(error) && error.code !== "provider_conflict") {
+      if (saved && hasPending && isVaultProviderError(error)) {
         return {
           status: 202,
           body: InstallVaultProviderResponse.parse({

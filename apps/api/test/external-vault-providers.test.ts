@@ -15,6 +15,9 @@ import {
 } from "@opengeni/core";
 import {
   createDb,
+  createSession,
+  initializeSessionStartAtomically,
+  claimSessionWorkForAttempt,
   decryptEnvironmentValue,
   getConnectionMetadata,
   transitionConnectionState,
@@ -79,6 +82,7 @@ async function scope(): Promise<Scope> {
 function fixture(useDefaultProviders = false) {
   const calls: unknown[] = [];
   let accountId = "upstream-account-a";
+  let externalFailure: "provider_unavailable" | "provider_conflict" | null = null;
   let keeperUnavailable = true;
   let bootstrapCount = 0;
   const boundConfig = { appKey: "bound-fixture-key", clientId: "keeper-fixture-client" };
@@ -92,7 +96,10 @@ function fixture(useDefaultProviders = false) {
         provider: {
           ...fake,
           id: "external" as const,
-          validate: async () => ({ accountId, accountName: "Example" }),
+          validate: async () => {
+            if (externalFailure) throw new VaultProviderError(externalFailure, "Fixture refusal");
+            return { accountId, accountName: "Example" };
+          },
         },
         credentials: credentials as Extract<VaultProviderCredentials, { provider: "external" }>,
       };
@@ -136,7 +143,12 @@ function fixture(useDefaultProviders = false) {
     path: string,
     method = "GET",
     body?: unknown,
-    options: { person?: string; permissions?: Permission[]; machine?: boolean } = {},
+    options: {
+      person?: string;
+      permissions?: Permission[];
+      machine?: boolean;
+      agent?: { sessionId: string; turnId: string; attemptId: string; executionGeneration: number };
+    } = {},
   ) {
     const token = await signDelegatedAccessToken(delegationSecret, {
       ...nativeScope,
@@ -147,7 +159,12 @@ function fixture(useDefaultProviders = false) {
         "secrets:list",
         "secrets:write",
       ],
-      principalKind: options.machine ? "service" : "human_session",
+      principalKind: options.agent
+        ? "agent_attempt"
+        : options.machine
+          ? "service"
+          : "human_session",
+      ...options.agent,
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
     return app.request(`/v1/workspaces/${nativeScope.workspaceId}${path}`, {
@@ -159,6 +176,9 @@ function fixture(useDefaultProviders = false) {
   return {
     request,
     calls,
+    failExternal: (failure: typeof externalFailure) => {
+      externalFailure = failure;
+    },
     switchAccount: () => {
       accountId = "upstream-account-b";
     },
@@ -178,6 +198,176 @@ const installBody = (ownership = "workspace") => ({
 });
 
 describe("generic external vault connection lifecycle", () => {
+  test("healthy verification never stages unchanged keys or invalidates in-flight providers", async () => {
+    if (!shared) return;
+    const native = await scope();
+    const f = fixture();
+    const installed = await f.request(
+      native,
+      "/vault-providers/connections",
+      "POST",
+      installBody(),
+    );
+    const { connectionId } = (await installed.json()) as { connectionId: string };
+    const before = await loadExternalVaultConnection(client.db, settings, {
+      workspaceId: native.workspaceId,
+      connectionId,
+      subjectId: "person-a",
+      provider: "external",
+    });
+    const inFlight = await externalVaultProviderForConnection({
+      db: client.db,
+      settings,
+      workspaceId: native.workspaceId,
+      connectionId,
+      subjectId: "person-a",
+      provider: "external",
+      factory: async ({ credentials }) => ({
+        credentials: credentials as StoredVaultProviderCredentials,
+        provider: { ...createFakeVaultProvider(), id: "external" },
+      }),
+    });
+    for (const failure of ["provider_unavailable", null] as const) {
+      f.failExternal(failure);
+      const response = await f.request(
+        native,
+        `/vault-providers/connections/${connectionId}/verify`,
+        "POST",
+        {},
+      );
+      expect(response.status).toBe(failure ? 503 : 200);
+      const after = await loadExternalVaultConnection(client.db, settings, {
+        workspaceId: native.workspaceId,
+        connectionId,
+        subjectId: "person-a",
+        provider: "external",
+      });
+      expect(after.connection.version).toBe(before.connection.version);
+      expect(after.details.verificationStatus).toBe("ready");
+      expect(after.pendingCredentials).toBeNull();
+      await expect(
+        inFlight.listVaults({ connectionId, budget: createProviderCallBudget(10) }),
+      ).resolves.toEqual([]);
+    }
+    const replaced = await f.request(
+      native,
+      `/vault-providers/connections/${connectionId}/credentials`,
+      "PUT",
+      {
+        credentials: {
+          ...installBody().credentials,
+          signingSecret: randomBytes(32).toString("hex"),
+        },
+      },
+    );
+    expect(replaced.status).toBe(200);
+    await expect(
+      inFlight.listVaults({ connectionId, budget: createProviderCallBudget(10) }),
+    ).rejects.toMatchObject({ code: "provider_conflict" });
+  }, 30_000);
+
+  test("a definitively refused initial setup revokes its reservation", async () => {
+    if (!shared) return;
+    const native = await scope();
+    const f = fixture();
+    f.failExternal("provider_conflict");
+    expect(
+      (await f.request(native, "/vault-providers/connections", "POST", installBody())).status,
+    ).toBe(409);
+    expect(await (await f.request(native, "/vault-providers/connections")).json()).toMatchObject({
+      connections: [],
+    });
+    const rows = await shared.admin<
+      { status: string }[]
+    >`select status from connections where workspace_id = ${native.workspaceId}`;
+    expect(rows).toEqual([{ status: "revoked" }]);
+  }, 30_000);
+
+  test("authorized agent setup uses the existing permission and ownership gates", async () => {
+    if (!shared) return;
+    const native = await scope();
+    const f = fixture();
+    const session = await createSession(client.db, {
+      ...native,
+      initialMessage: "Connect the fixture vault",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: "person-a" },
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(client.db, {
+      ...native,
+      sessionId: session.id,
+      reasoningEffortFallback: "high",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, native.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("Fixture attempt was not claimed");
+    const options = {
+      agent: {
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+      },
+    };
+    expect(
+      (
+        await f.request(native, "/vault-providers/connections", "POST", installBody(), {
+          ...options,
+          permissions: ["connections:write"],
+        })
+      ).status,
+    ).toBe(403);
+    const installed = await f.request(
+      native,
+      "/vault-providers/connections",
+      "POST",
+      installBody(),
+      options,
+    );
+    expect(installed.status).toBe(201);
+    const { connectionId } = (await installed.json()) as { connectionId: string };
+    expect(
+      await (
+        await f.request(native, "/vault-providers/connections", "GET", undefined, options)
+      ).json(),
+    ).toMatchObject({ connections: [{ id: connectionId, canManage: true }] });
+    expect(
+      (
+        await f.request(
+          native,
+          `/vault-providers/connections/${connectionId}/verify`,
+          "POST",
+          {},
+          options,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await f.request(
+          native,
+          `/vault-providers/connections/${connectionId}`,
+          "DELETE",
+          undefined,
+          options,
+        )
+      ).status,
+    ).toBe(200);
+  }, 30_000);
+
   test("identical concurrent key rotations reconcile, but changed keys or metadata do not", async () => {
     if (!shared) return;
     const native = await scope();
@@ -615,7 +805,8 @@ describe("generic external vault connection lifecycle", () => {
       provider: "external",
     });
     expect(stillWorking.credentials).toEqual(installBody().credentials);
-    expect(stillWorking.pendingCredentials).toMatchObject({ signingSecret: replacementSecret });
+    expect(stillWorking.pendingCredentials).toBeNull();
+    expect(stillWorking.details.verificationStatus).toBe("ready");
     const calls = f.calls.length;
     const disconnected = await f.request(
       native,

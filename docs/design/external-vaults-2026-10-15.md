@@ -1,7 +1,7 @@
 # External vaults: first-wave implementation design
 
-Status: implementation design, recorded before product code. OPE-809.
-Owner: session f5980f29. Baseline: `1c1aa30a5b164cf532c558489bd91ec1a8cbfe41`.
+Status: implementation design, recorded before product code.
+Baseline: `1c1aa30a5b164cf532c558489bd91ec1a8cbfe41`.
 Authorized October 15, 2026; no merge, deployment or paid-provider commitment.
 
 ## 1. Outcome and scope
@@ -9,7 +9,7 @@ Authorized October 15, 2026; no merge, deployment or paid-provider commitment.
 Add a remotely callable external-vault interface for embedding products,
 Proton Pass, Keeper Secrets Manager and a customer-controlled Bitwarden
 Password Manager bridge. Reuse native vault reach, secret references, item
-editing, search and pagination. Preserve Jørgen's current vault polish,
+editing, search and pagination. Preserve the current vault design,
 especially Only-me availability, stable references and connection management.
 The existing 1Password integration remains supported unchanged at its public
 entry points. Other password managers are out of scope.
@@ -97,6 +97,12 @@ connections cannot resolve secrets or be linked. The connection list exposes
 using the saved configuration, never the consumed one-time token. If no usable
 credential was produced, revoke the reservation. Return saved-but-pending
 explicitly rather than telling the person to repeat a destructive bootstrap.
+
+Verifying unchanged working credentials does not stage them again or advance
+their generation. A transient verification error leaves their ready state
+intact; a rejected reconnect clears its candidate and restores the working
+state. Real credential and capability changes still fence in-flight adapters,
+which report a conflict rather than incorrectly demanding reauthentication.
 
 ## 7. Remote protocol and authority
 
