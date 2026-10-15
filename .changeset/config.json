@@ -34,7 +34,9 @@
       "@opengeni/subscriptions",
       "@opengeni/tool-gateway",
       "@opengeni/vaults",
+      "@opengeni/vaults-keeper",
       "@opengeni/vaults-onepassword",
+      "@opengeni/vaults-protonpass",
       "@opengeni/worker-bundle",
       "@opengeni/xai-subscription"
     ]
