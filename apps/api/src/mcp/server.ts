@@ -381,9 +381,11 @@ import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnost
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 import {
   afterSiteArtifactMutation,
+  requireSiteVersionPublishOpen,
   SITE_AGENT_OTHER_SITE_MESSAGE,
   siteAgentMayChangeArtifact,
 } from "../site-publishing/service";
+import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
 import {
   siteAgentClampRefusal,
   siteAgentClampedToolResult,
@@ -3619,6 +3621,14 @@ function registerWorkspaceArtifactTools(
       await authorize();
       const refused = await otherSiteRefusal(artifactId);
       if (refused) return refused;
+      const braked = await sitePlatformBrakeToolRefusal(() =>
+        requireSiteVersionPublishOpen(
+          deps,
+          { accountId: grant.accountId, workspaceId: grant.workspaceId },
+          artifactId,
+        ),
+      );
+      if (braked) return braked;
       return json(
         await siteMutation(
           await publishWorkspaceArtifactVersion(deps.db, {

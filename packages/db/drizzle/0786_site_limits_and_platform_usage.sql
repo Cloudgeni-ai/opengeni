@@ -24,7 +24,8 @@
 --    (the hostname-lane pattern of 0782), so ordinary tenant transactions
 --    never touch them by accident. Writers lock a workspace row before a
 --    shard row.
--- New tables and one added column (constant default, no rewrite); the
+-- 4. site_viewer_sessions.view_as: the owner's "View as visitor" preview role.
+-- New tables and two added columns (no rewrite); the
 -- constraint swaps take a brief lock on the two profile tables.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -49,6 +50,13 @@ ALTER TABLE site_publications FORCE ROW LEVEL SECURITY;
 ALTER TABLE site_limit_profiles FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE site_runtime_conversations ADD COLUMN budget_key text NOT NULL DEFAULT '*';
+
+-- "View as visitor": the role a workspace member previews the Site as on
+-- this viewer session. The API applies it only to see less.
+ALTER TABLE site_viewer_sessions ADD COLUMN view_as text;
+ALTER TABLE site_viewer_sessions
+  ADD CONSTRAINT site_viewer_sessions_view_as_check
+  CHECK (view_as IS NULL OR view_as IN ('invited', 'public')) NOT VALID;
 ALTER TABLE site_runtime_conversations
   ADD CONSTRAINT site_runtime_conversations_budget_key_check
   CHECK (budget_key IN ('*', '*members')) NOT VALID;

@@ -1652,14 +1652,13 @@ const SettingsSchema = z.object({
   sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
   sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
   sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
-  // Standard model-spend caps (micro-USD) by access mode. Members-only Sites
-  // have none: members use the workspace's normal session limits.
-  sitesInvitedAgentMicrosPerPersonPerDay: z.coerce.number().int().nonnegative().default(1_000_000),
-  sitesInvitedAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().default(10_000_000),
-  // Unset: the deprecated free setting, else $0.20 a visitor a day and $10 a Site a month.
-  sitesPublicAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
-  sitesPublicAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
-  // Internal guards for public visitors (not shown to Site owners). Unset:
+  // Standard model-spend limits (micro-USD) for people outside the workspace
+  // (invited and public alike). Members are never limited by Site limits:
+  // they use the workspace's normal session limits. Unset: the deprecated
+  // free setting, else $10 per Site per month and no per-person limit.
+  sitesAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  sitesAgentMicrosPerPersonPerDay: z.coerce.number().int().nonnegative().optional(),
+  // Internal guards for anonymous public visitors (not shown to Site owners). Unset:
   // the deprecated free setting, else 20, 500, 50 and $1.
   sitesGuestConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
   sitesGuestConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
@@ -5118,18 +5117,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH",
     ),
     sitesCreditsLimitMultiplier: optional("OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER"),
-    sitesInvitedAgentMicrosPerPersonPerDay: optional(
-      "OPENGENI_SITES_INVITED_AGENT_MICROS_PER_PERSON_PER_DAY",
-    ),
-    sitesInvitedAgentMicrosPerSitePerMonth: optional(
-      "OPENGENI_SITES_INVITED_AGENT_MICROS_PER_SITE_PER_MONTH",
-    ),
-    sitesPublicAgentMicrosPerVisitorPerDay: optional(
-      "OPENGENI_SITES_PUBLIC_AGENT_MICROS_PER_VISITOR_PER_DAY",
-    ),
-    sitesPublicAgentMicrosPerSitePerMonth: optional(
-      "OPENGENI_SITES_PUBLIC_AGENT_MICROS_PER_SITE_PER_MONTH",
-    ),
+    sitesAgentMicrosPerSitePerMonth: optional("OPENGENI_SITES_AGENT_MICROS_PER_SITE_PER_MONTH"),
+    sitesAgentMicrosPerPersonPerDay: optional("OPENGENI_SITES_AGENT_MICROS_PER_PERSON_PER_DAY"),
     sitesGuestConversationsPerVisitorPerDay: optional(
       "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_VISITOR_PER_DAY",
     ),

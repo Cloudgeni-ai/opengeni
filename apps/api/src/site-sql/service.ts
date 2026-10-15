@@ -43,6 +43,7 @@ import {
   listSiteSqlQueries,
   listSiteSqlSiteIds,
   markSiteSqlRebuilt,
+  recordSitePlatformUsageInTransaction,
   recordSiteSqlUsage,
   recordUsageEvent,
   setSiteSqlEnabled,
@@ -53,6 +54,7 @@ import {
   upsertSiteSqlQuery,
   withSiteSqlDatabaseLock,
   type Database,
+  type SitePlatformUsageRecord,
   type SiteSqlDatabase,
   type SiteSqlScope,
   type SiteSqlStoredMigration,
@@ -60,6 +62,11 @@ import {
 } from "@opengeni/db";
 import { parseSiteDataCsv } from "../site-data/operations";
 import { sourceSiteLimitProfile } from "../site-publishing/limits";
+import {
+  afterSitePlatformUsage,
+  requireSitePlatformOpen,
+  requireSitePlatformQuota,
+} from "../site-publishing/platform-usage";
 import {
   resolveSiteDataAccess,
   type SiteDataAccess,
@@ -208,16 +215,20 @@ export const SITE_SQL_FLOOD_BRAKES = Object.freeze({
 });
 
 /**
- * Site SQL limits for a limit profile: free and custom use the free settings
+ * Site SQL limits for a limit profile: standard and custom use the settings
  * (custom overrides carry no SQL fields yet), credits multiplies the storage,
  * monthly row and per-viewer caps, and unlimited removes the monthly caps but
  * keeps the hard storage ceiling and the flood brakes. Rows per call and
- * response size are the same everywhere.
+ * response size are the same everywhere. The per-Site monthly row quotas are
+ * off unless configured (platform usage is metered per workspace instead),
+ * and storage per Site defaults to the hard ceiling.
  */
 export function siteSqlLimits(
   settings: SiteSqlLimitSettings,
-  kind: SiteSqlProfileKind = "free",
+  kind: SiteSqlProfileKind = "standard",
 ): SiteSqlLimits {
+  const rowsRead = settings.sitesSqlFreeRowsReadPerMonth ?? null;
+  const rowsWritten = settings.sitesSqlFreeRowsWrittenPerMonth ?? null;
   const brake = (value: number, ceiling: number) => Math.min(value, ceiling);
   const common = {
     maxRowsPerCall: brake(settings.sitesSqlMaxRowsPerCall, SITE_SQL_HARD_LIMITS.maxRowsPerCall),
@@ -231,8 +242,8 @@ export function siteSqlLimits(
       settings.sitesSqlFreeStorageBytes,
       SITE_SQL_HARD_LIMITS.storageBytesPerSite,
     ),
-    rowsReadPerSitePerMonth: settings.sitesSqlFreeRowsReadPerMonth,
-    rowsWrittenPerSitePerMonth: settings.sitesSqlFreeRowsWrittenPerMonth,
+    rowsReadPerSitePerMonth: rowsRead,
+    rowsWrittenPerSitePerMonth: rowsWritten,
     callsPerMinutePerViewer: brake(
       settings.sitesSqlFreeCallsPerMinutePerViewer,
       SITE_SQL_FLOOD_BRAKES.callsPerMinutePerViewer,
@@ -251,8 +262,8 @@ export function siteSqlLimits(
         settings.sitesSqlFreeStorageBytes * factor,
         SITE_SQL_HARD_LIMITS.storageBytesPerSite,
       ),
-      rowsReadPerSitePerMonth: settings.sitesSqlFreeRowsReadPerMonth * factor,
-      rowsWrittenPerSitePerMonth: settings.sitesSqlFreeRowsWrittenPerMonth * factor,
+      rowsReadPerSitePerMonth: rowsRead === null ? null : rowsRead * factor,
+      rowsWrittenPerSitePerMonth: rowsWritten === null ? null : rowsWritten * factor,
       callsPerMinutePerViewer: brake(
         settings.sitesSqlFreeCallsPerMinutePerViewer * factor,
         SITE_SQL_FLOOD_BRAKES.callsPerMinutePerViewer,
@@ -277,7 +288,7 @@ export function siteSqlLimits(
 
 /**
  * The limit profile in force for a Site, the same one published Sites use:
- * the Site's own profile, else the workspace default, else free. Sites that
+ * the Site's own profile, else the workspace default, else standard. Sites that
  * were never published have no profile of their own.
  */
 export async function siteSqlProfileKind(
@@ -428,14 +439,16 @@ function addUsage(usage: Usage, call: SiteDbMeter): void {
 }
 
 /**
- * Usage metering in `usage_only` mode (docs/credit-boundaries-rollout.md): the
- * workspace pays for viewer-triggered usage; events are recorded with the
- * Site's usage row and never debit credits until a reviewed rate is enabled.
+ * Usage metering (docs/credit-boundaries-rollout.md): the workspace pays for
+ * viewer-triggered usage; events are recorded with the Site's usage row.
  * Only Site page calls (`countTowardCaps`) add to the monthly counters the
- * caps read; management (export, inspect, migrations, resets, imports and
- * ad hoc statements) is recorded as events only. Metering runs after the
- * Durable Object answered, so a failure here is logged and never turns a
- * call that happened into an error.
+ * optional per-Site caps read; management (export, inspect, migrations,
+ * resets, imports and ad hoc statements) is recorded as events only. Every
+ * call's rows and the storage level also go to the workspace's platform
+ * usage in the same transaction (site_platform_usage; charged only in the
+ * credits platform billing mode). Metering runs after the Durable Object
+ * answered, so a failure here is logged and never turns a call that
+ * happened into an error.
  */
 async function meter(
   deps: SiteSqlDeps,
@@ -452,10 +465,20 @@ async function meter(
     sourceResourceType: "site",
     sourceResourceId: resolved.scope.siteId,
   };
+  const workspace = {
+    accountId: resolved.scope.accountId,
+    workspaceId: resolved.scope.workspaceId,
+  };
+  let platform: SitePlatformUsageRecord | null = null;
   try {
     await recordSiteSqlUsage(deps.db, resolved.scope, usage, {
       countTowardCaps: options.countTowardCaps,
       meter: async (tx: Database, change) => {
+        platform = await recordSitePlatformUsageInTransaction(tx, workspace, {
+          sqlRowsRead: usage.rowsRead,
+          sqlRowsWritten: usage.rowsWritten,
+          refreshStorage: true,
+        });
         const events: Array<[string, number, string]> = [
           ["site_sql.rows_read", usage.rowsRead, "row"],
           ["site_sql.rows_written", usage.rowsWritten, "row"],
@@ -481,6 +504,23 @@ async function meter(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+  if (platform) await afterSitePlatformUsage(deps, workspace, platform);
+}
+
+/**
+ * Credits platform billing only: refuse a call whose platform meters this
+ * workspace can no longer pay for (402 site_platform_quota_exhausted).
+ */
+async function requirePlatformQuota(
+  deps: SiteSqlDeps,
+  resolved: Resolved,
+  write: boolean,
+): Promise<void> {
+  await requireSitePlatformQuota(
+    deps,
+    { accountId: resolved.scope.accountId, workspaceId: resolved.scope.workspaceId },
+    write ? ["sql_rows_read", "sql_rows_written", "storage_bytes"] : ["sql_rows_read"],
+  );
 }
 
 /**
@@ -723,6 +763,8 @@ export async function migrateSiteSql(
     const compiled = compileOrThrow(request.sql, "script");
     if (compiled.paramNames.length > 0)
       throw new SiteSqlError("validation", "Migrations cannot use :parameters");
+    await requireSitePlatformOpen(deps, "sql_write");
+    await requirePlatformQuota(deps, resolved, true);
     const limits = await limitsFor(deps, resolved.scope, options.profileKind);
     await consume(deps, resolved, limits);
     const checksum = siteSqlChecksum(request.sql);
@@ -984,7 +1026,12 @@ export async function runSiteSqlQuery(
       person: !resolved.guest && resolved.access.subjectId !== null,
     });
     if (refusal) throw refusal;
-    if (query.mode === "write" && options.beforeWrite) await options.beforeWrite();
+    if (query.mode === "write") {
+      // The Opengeni-wide platform brake stops new writes (reads go on).
+      await requireSitePlatformOpen(deps, "sql_write");
+      if (options.beforeWrite) await options.beforeWrite();
+    }
+    await requirePlatformQuota(deps, resolved, query.mode === "write");
     const limits = await limitsFor(deps, resolved.scope, options.profileKind);
     await consume(deps, resolved, limits);
     checkMonthly(database, limits, { read: true, write: query.mode === "write" });
@@ -1051,6 +1098,8 @@ export async function runSiteSqlStatement(
       throw new SiteSqlError("validation", "This statement writes; use site_sql_execute", {
         problem: "statement_not_allowed",
       });
+    if (statement.kind === "write") await requireSitePlatformOpen(deps, "sql_write");
+    await requirePlatformQuota(deps, resolved, statement.kind === "write");
     const limits = await limitsFor(deps, resolved.scope);
     await consume(deps, resolved, limits);
     const bound = bindParams(
@@ -1327,6 +1376,8 @@ export async function importSiteSql(
   request: SiteSqlImportRequest,
 ): Promise<SiteSqlImportResponse> {
   const resolved = await guarded(() => resolve(deps, authority, siteId, { management: true }));
+  // An import writes: refused up front while the platform brake is engaged.
+  await requireSitePlatformOpen(deps, "sql_write");
   if (request.format === "sql") {
     const compiled = await guarded(async () => {
       requireGateway(resolved);

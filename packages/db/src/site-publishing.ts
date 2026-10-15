@@ -519,6 +519,7 @@ export async function getPublishedSiteVersion(
   contentKey: string;
   contentSha256: string | null;
   sizeBytes: number;
+  requestedTools: Array<{ serverId: string; toolName: string }>;
 } | null> {
   if (!UUID.test(siteId) || !UUID.test(versionId)) return null;
   return await withRlsContext(db, scope, async (tx) => {
@@ -527,9 +528,11 @@ export async function getPublishedSiteVersion(
       content_key: string;
       content_sha256: string | null;
       size_bytes: string | number;
+      requested_tools: unknown;
     }>(
       tx,
-      sql`select id, content_key, content_sha256, size_bytes from workspace_artifact_versions
+      sql`select id, content_key, content_sha256, size_bytes, requested_tools
+        from workspace_artifact_versions
         where workspace_id = ${scope.workspaceId} and artifact_id = ${siteId} and id = ${versionId}`,
     );
     return row
@@ -538,6 +541,9 @@ export async function getPublishedSiteVersion(
           contentKey: row.content_key,
           contentSha256: row.content_sha256,
           sizeBytes: Number(row.size_bytes),
+          requestedTools: Array.isArray(row.requested_tools)
+            ? (row.requested_tools as Array<{ serverId: string; toolName: string }>)
+            : [],
         }
       : null;
   });
@@ -558,6 +564,7 @@ export async function getServableSiteVersion(
   contentKey: string;
   contentSha256: string | null;
   sizeBytes: number;
+  requestedTools: Array<{ serverId: string; toolName: string }>;
 } | null> {
   if (!UUID.test(input.siteId) || !UUID.test(input.versionId)) return null;
   if (input.versionId !== input.currentVersionId) {
@@ -1114,7 +1121,11 @@ export type SiteViewerSessionRecord = SiteViewerIdentity & {
   id: string;
   siteId: string;
   expiresAt: Date;
+  /** The role the owner previews the Site as ("View as visitor"); null when not previewing. */
+  viewAs?: SiteViewAsValue | null;
 };
+
+export type SiteViewAsValue = "invited" | "public";
 
 export async function createSiteViewerSession(
   db: Database,
@@ -1170,10 +1181,11 @@ export async function findSiteViewerSession(
       email: string | null;
       display_name: string | null;
       expires_at: unknown;
+      view_as: SiteViewAsValue | null;
       stale: boolean;
     }>(
       tx,
-      sql`select id, site_id, subject_id, viewer_kind, email, display_name, expires_at,
+      sql`select id, site_id, subject_id, viewer_kind, email, display_name, expires_at, view_as,
           last_used_at < now() - interval '1 minute' as stale
         from site_viewer_sessions
         where workspace_id = ${scope.workspaceId} and token_hash = ${input.tokenHash}
@@ -1194,7 +1206,31 @@ export async function findSiteViewerSession(
       email: row.email,
       displayName: row.display_name,
       expiresAt: date(row.expires_at),
+      viewAs: row.view_as ?? null,
     };
+  });
+}
+
+/**
+ * Start (`invited`, `public`) or end (null) previewing a Site as another
+ * role on one live viewer session. The API applies it only while the
+ * session's person is a workspace member, and only to see less.
+ */
+export async function setSiteViewerSessionViewAs(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { siteId: string; sessionId: string; viewAs: SiteViewAsValue | null },
+): Promise<boolean> {
+  if (!UUID.test(input.siteId) || !UUID.test(input.sessionId)) return false;
+  return await withRlsContext(db, scope, async (tx) => {
+    const rows = await rawRows<{ id: string }>(
+      tx,
+      sql`update site_viewer_sessions set view_as = ${input.viewAs}
+        where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+          and id = ${input.sessionId} and revoked_at is null
+        returning id`,
+    );
+    return rows.length > 0;
   });
 }
 
@@ -1535,6 +1571,7 @@ export async function listActiveSiteRuntimeConversations(
 
 export type SiteRuntimeUsageSnapshot = {
   visitorDay: { conversations: number; agentMicros: number; reservedMicros: number };
+  visitorMonth: { conversations: number; agentMicros: number; reservedMicros: number };
   siteDay: { conversations: number; agentMicros: number; reservedMicros: number };
   siteMonth: { conversations: number; agentMicros: number; reservedMicros: number };
 };
@@ -1587,6 +1624,7 @@ export async function readSiteRuntimeUsage(
     };
     return {
       visitorDay: pick(input.viewerPrincipal, "day"),
+      visitorMonth: pick(input.viewerPrincipal, "month"),
       siteDay: pick(sitePrincipal, "day"),
       siteMonth: pick(sitePrincipal, "month"),
     };
@@ -1612,7 +1650,8 @@ type UsageWindow = {
 /**
  * Lock one usage window row for this transaction, creating it or rolling it
  * to the current period first (a new period starts from zero, reservations
- * included). Locks are always taken visitor-day, Site-day, Site-month.
+ * included). Locks are always taken visitor-day, visitor-month, Site-day,
+ * Site-month (lockConversationWindows).
  */
 async function lockUsageWindow(
   tx: Database,
@@ -1673,6 +1712,65 @@ async function adjustUsageWindow(
   );
 }
 
+type ConversationWindows = {
+  visitorDay: UsageWindow;
+  visitorMonth: UsageWindow;
+  siteDay: UsageWindow;
+  siteMonth: UsageWindow;
+};
+
+/** Lock a conversation's four usage windows in the one fixed order. */
+async function lockConversationWindows(
+  tx: Database,
+  scope: SitePublishingScope,
+  siteId: string,
+  viewerPrincipal: string,
+  budgetKey: string,
+  periods: { day: string; month: string },
+): Promise<ConversationWindows> {
+  const visitorDay = await lockUsageWindow(tx, scope, siteId, viewerPrincipal, "day", periods.day);
+  const visitorMonth = await lockUsageWindow(
+    tx,
+    scope,
+    siteId,
+    viewerPrincipal,
+    "month",
+    periods.month,
+  );
+  const siteDay = await lockUsageWindow(tx, scope, siteId, budgetKey, "day", periods.day);
+  const siteMonth = await lockUsageWindow(tx, scope, siteId, budgetKey, "month", periods.month);
+  return { visitorDay, visitorMonth, siteDay, siteMonth };
+}
+
+/** The spend budgets with the window each one is counted in, in check order. */
+function spendBudgets(
+  limits: SiteRuntimeBudgetLimits,
+  windows: ConversationWindows,
+): Array<{ budget: SiteRuntimeBudget; limit: number | null; window: UsageWindow }> {
+  return [
+    {
+      budget: "agent_micros_per_visitor_per_day",
+      limit: limits.agentMicrosPerVisitorPerDay,
+      window: windows.visitorDay,
+    },
+    {
+      budget: "agent_micros_per_visitor_per_month",
+      limit: limits.agentMicrosPerVisitorPerMonth ?? null,
+      window: windows.visitorMonth,
+    },
+    {
+      budget: "agent_micros_per_site_per_day",
+      limit: limits.agentMicrosPerSitePerDay ?? null,
+      window: windows.siteDay,
+    },
+    {
+      budget: "agent_micros_per_site_per_month",
+      limit: limits.agentMicrosPerSitePerMonth,
+      window: windows.siteMonth,
+    },
+  ];
+}
+
 /** The budgets a reservation is checked against (the Site's effective limits). */
 export type SiteRuntimeBudgetLimits = {
   conversationsPerVisitorPerDay: number | null;
@@ -1680,6 +1778,8 @@ export type SiteRuntimeBudgetLimits = {
   turnsPerConversation: number | null;
   agentMicrosPerConversation: number | null;
   agentMicrosPerVisitorPerDay: number | null;
+  agentMicrosPerVisitorPerMonth?: number | null;
+  agentMicrosPerSitePerDay?: number | null;
   agentMicrosPerSitePerMonth: number | null;
 };
 
@@ -1689,6 +1789,8 @@ export type SiteRuntimeBudget =
   | "turns_per_conversation"
   | "agent_micros_per_conversation"
   | "agent_micros_per_visitor_per_day"
+  | "agent_micros_per_visitor_per_month"
+  | "agent_micros_per_site_per_day"
   | "agent_micros_per_site_per_month";
 
 export type SiteRuntimeReservation =
@@ -1733,50 +1835,34 @@ export async function reserveSiteRuntimeConversationStart(
   const { limits } = input;
   const budgetKey = input.budgetKey ?? SITE_RUNTIME_SITE_PRINCIPAL;
   return await withRlsContext(db, scope, async (tx) => {
-    const visitorDay = await lockUsageWindow(
+    const windows = await lockConversationWindows(
       tx,
       scope,
       input.siteId,
       input.viewerPrincipal,
-      "day",
-      periods.day,
-    );
-    const siteDay = await lockUsageWindow(
-      tx,
-      scope,
-      input.siteId,
       budgetKey,
-      "day",
-      periods.day,
-    );
-    const siteMonth = await lockUsageWindow(
-      tx,
-      scope,
-      input.siteId,
-      budgetKey,
-      "month",
-      periods.month,
+      periods,
     );
     if (
       limits.conversationsPerVisitorPerDay !== null &&
-      visitorDay.conversations >= limits.conversationsPerVisitorPerDay
+      windows.visitorDay.conversations >= limits.conversationsPerVisitorPerDay
     )
       return { ok: false, budget: "conversations_per_visitor_per_day" } as const;
     if (
       limits.conversationsPerSitePerDay !== null &&
-      siteDay.conversations >= limits.conversationsPerSitePerDay
+      windows.siteDay.conversations >= limits.conversationsPerSitePerDay
     )
       return { ok: false, budget: "conversations_per_site_per_day" } as const;
     const cap = limits.agentMicrosPerConversation;
     const floor =
       cap === null ? 1 : Math.max(1, Math.min(cap, SITE_RUNTIME_MIN_RESERVATION_MICROS));
-    const visitorLeft = remaining(limits.agentMicrosPerVisitorPerDay, visitorDay);
-    if (visitorLeft < floor)
-      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
-    const siteLeft = remaining(limits.agentMicrosPerSitePerMonth, siteMonth);
-    if (siteLeft < floor) return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
-    const reserve =
-      cap === null ? 0 : Math.max(0, Math.floor(Math.min(cap, visitorLeft, siteLeft)));
+    let left = Number.POSITIVE_INFINITY;
+    for (const budget of spendBudgets(limits, windows)) {
+      const budgetLeft = remaining(budget.limit, budget.window);
+      if (budgetLeft < floor) return { ok: false, budget: budget.budget } as const;
+      left = Math.min(left, budgetLeft);
+    }
+    const reserve = cap === null ? 0 : Math.max(0, Math.floor(Math.min(cap, left)));
     const limitMicros = cap === null ? null : reserve;
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
@@ -1787,7 +1873,7 @@ export async function reserveSiteRuntimeConversationStart(
           ${budgetKey}, ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
           ${periods.month}::date, 1)`,
     );
-    for (const window of [visitorDay, siteDay, siteMonth])
+    for (const window of Object.values(windows))
       await adjustUsageWindow(tx, scope, input.siteId, window, {
         conversations: 1,
         reservedMicros: reserve,
@@ -1829,6 +1915,7 @@ export async function releaseSiteRuntimeConversationStart(
     const budgetKey = row.budget_key ?? SITE_RUNTIME_SITE_PRINCIPAL;
     const windows = [
       { principal: row.viewer_principal, period: "day" as const, periodStart: day },
+      { principal: row.viewer_principal, period: "month" as const, periodStart: month },
       { principal: budgetKey, period: "day" as const, periodStart: day },
       { principal: budgetKey, period: "month" as const, periodStart: month },
     ];
@@ -1882,58 +1969,34 @@ export async function reserveSiteRuntimeConversationWork(
     if (cap !== null && conversation.meteredMicros >= cap)
       return { ok: false, budget: "agent_micros_per_conversation" } as const;
     const target = cap === null ? 0 : cap - conversation.meteredMicros;
-    const visitorDay = await lockUsageWindow(
+    const windows = await lockConversationWindows(
       tx,
       scope,
       conversation.siteId,
       conversation.viewerPrincipal,
-      "day",
-      periods.day,
-    );
-    const siteDay = await lockUsageWindow(
-      tx,
-      scope,
-      conversation.siteId,
       conversation.budgetKey,
-      "day",
-      periods.day,
-    );
-    const siteMonth = await lockUsageWindow(
-      tx,
-      scope,
-      conversation.siteId,
-      conversation.budgetKey,
-      "month",
-      periods.month,
+      periods,
     );
     const reservedDay = String(row.reserved_day ?? "").slice(0, 10);
     const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
     // A reservation counted in an earlier period vanished when that window rolled.
     const dayDelta = target - (reservedDay === periods.day ? conversation.reservedMicros : 0);
     const monthDelta = target - (reservedMonth === periods.month ? conversation.reservedMicros : 0);
+    const budgets = spendBudgets(limits, windows);
     // A message spends at least something: an exhausted budget refuses it even
     // when this conversation's reservation already covers it.
-    if (remaining(limits.agentMicrosPerVisitorPerDay, visitorDay) - Math.max(0, dayDelta) < 0)
-      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
-    if (remaining(limits.agentMicrosPerSitePerMonth, siteMonth) - Math.max(0, monthDelta) < 0)
-      return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
-    if (
-      limits.agentMicrosPerVisitorPerDay !== null &&
-      visitorDay.agentMicros >= limits.agentMicrosPerVisitorPerDay
-    )
-      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
-    if (
-      limits.agentMicrosPerSitePerMonth !== null &&
-      siteMonth.agentMicros >= limits.agentMicrosPerSitePerMonth
-    )
-      return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
-    await adjustUsageWindow(tx, scope, conversation.siteId, visitorDay, {
-      reservedMicros: dayDelta,
-    });
-    await adjustUsageWindow(tx, scope, conversation.siteId, siteDay, { reservedMicros: dayDelta });
-    await adjustUsageWindow(tx, scope, conversation.siteId, siteMonth, {
-      reservedMicros: monthDelta,
-    });
+    for (const budget of budgets) {
+      const delta = budget.window.period === "day" ? dayDelta : monthDelta;
+      if (remaining(budget.limit, budget.window) - Math.max(0, delta) < 0)
+        return { ok: false, budget: budget.budget } as const;
+    }
+    for (const budget of budgets)
+      if (budget.limit !== null && budget.window.agentMicros >= budget.limit)
+        return { ok: false, budget: budget.budget } as const;
+    for (const window of Object.values(windows))
+      await adjustUsageWindow(tx, scope, conversation.siteId, window, {
+        reservedMicros: window.period === "day" ? dayDelta : monthDelta,
+      });
     await tx.execute(
       sql`update site_runtime_conversations set reserved_micros = ${target},
           reserved_day = ${periods.day}::date, reserved_month = ${periods.month}::date,
@@ -1991,6 +2054,11 @@ export async function settleSiteRuntimeConversationSpend(
     const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
     const windows = [
       { principal: conversation.viewerPrincipal, period: "day" as const, reservedIn: reservedDay },
+      {
+        principal: conversation.viewerPrincipal,
+        period: "month" as const,
+        reservedIn: reservedMonth,
+      },
       { principal: conversation.budgetKey, period: "day" as const, reservedIn: reservedDay },
       {
         principal: conversation.budgetKey,

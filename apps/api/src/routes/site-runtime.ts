@@ -13,6 +13,7 @@ import {
   SiteDataQueryRequest,
   SiteDataWriteRequest,
   SiteSqlRunRequest,
+  SiteViewAs,
   type SiteLimitProfileKind,
   SITE_GATEWAY_CALLBACK_PATH,
   SITE_RUNTIME_API_PREFIX,
@@ -32,6 +33,10 @@ import {
 import {
   consumeSiteAuthCode,
   createSiteAbuseReport,
+  getSiteWorkspaceMemberPermissions,
+  readSitePlatformUsage,
+  recordSitePlatformRequests,
+  setSiteViewerSessionViewAs,
   createSiteViewerSession,
   getOwnedSiteRuntimeConversation,
   getServableSiteVersion,
@@ -46,6 +51,9 @@ import {
   SITE_RUNTIME_SITE_PRINCIPAL,
   type SiteRuntimeReservation,
 } from "@opengeni/db";
+import { isSubscriptionBilledModel, resolveSiteOutsideModel } from "../site-publishing/agent-model";
+import { afterSitePlatformUsage, requireSitePlatformOpen } from "../site-publishing/platform-usage";
+import { SiteSqlError } from "../site-sql/service";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { markLocalInternalDispatch } from "../http/local-browser-boundary";
@@ -79,7 +87,10 @@ import {
   siteAgentRefusal,
   siteBudgetExhausted,
   siteClientAddressPrincipal,
+  siteNotAvailableForViewer,
+  siteRuntimeBudgetKey,
   siteRuntimeBudgetLimits,
+  siteViewerCapabilities,
   siteRuntimeForwardedResponse,
   siteRuntimeLimitProfile,
   siteRuntimeSessionRequest,
@@ -206,14 +217,43 @@ function parseJson<S extends z.ZodType>(bytes: Uint8Array, schema: S): z.infer<S
   return parsed.data;
 }
 
+/** Site Data for a viewer: refusals for this viewer answer `not_available_for_viewer`. */
 async function runSiteData<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
+    if (error instanceof SiteDataError && error.code === "forbidden")
+      throw siteNotAvailableForViewer("site_data", error.message, error.details);
     if (error instanceof SiteDataError) throw siteDataHttpError(error);
     throw error;
   }
 }
+
+/** Site SQL for a viewer: refusals for this viewer answer `not_available_for_viewer`. */
+async function runSiteSqlForViewer<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof SiteSqlError && error.code === "forbidden")
+      throw siteNotAvailableForViewer("site_sql", error.message, error.details);
+    throw error;
+  }
+}
+
+/** POST /v1/site-runtime/platform/requests (gateway only, signed on the Sites apex). */
+const SitePlatformRequestReport = z.object({
+  v: z.literal(1),
+  reportId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u),
+  hosts: z
+    .array(
+      z.object({
+        host: z.string().min(1).max(253),
+        requests: z.number().int().positive().max(1_000_000_000),
+      }),
+    )
+    .min(1)
+    .max(500),
+});
 
 function sameText(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");
@@ -350,29 +390,37 @@ function allowedQuery(url: URL, names: readonly string[], extra: Record<string, 
 }
 
 /**
- * The workspace tools a Site conversation gets: the Site's admin-chosen MCP
- * connections for workspace members and invited viewers. Everyone else
- * (signed-in people outside the workspace on a public Site, and anonymous
- * guests) gets them only when an admin opted them in (`guestTools`). Optional
- * references: a connection the workspace does not have is skipped rather
- * than failing the conversation.
+ * The workspace tools a Site conversation gets: the OVERLAP of what the Site
+ * declares (its admin-chosen MCP connections) and what the viewer may do in
+ * the workspace. Only workspace members who may attach MCP connections to
+ * their own sessions (`mcp_servers:attach`, or workspace admins) get them.
+ * People outside the workspace (invited people and public visitors, signed in
+ * or anonymous) never get workspace tools: only the Site's own data and the
+ * page. There is no setting that changes this; `guestTools` is ignored.
+ * Optional references: a connection the workspace does not have is skipped
+ * rather than failing the conversation.
  */
 export function siteAgentToolRefs(
-  agent: Pick<SiteEmbeddedAgent, "tools" | "guestTools">,
+  agent: Pick<SiteEmbeddedAgent, "tools">,
   viewer: Pick<SiteRuntimeViewer, "kind">,
+  memberPermissions: readonly string[] | null = null,
 ): ToolRef[] {
-  const toolIds = siteViewerGetsTools(agent, viewer) ? (agent.tools ?? []) : [];
+  const toolIds = siteViewerGetsTools(viewer, memberPermissions) ? (agent.tools ?? []) : [];
   return toolIds
     .filter((tool) => SessionMcpServerIdPattern.test(tool))
     .map((tool) => ({ kind: "mcp", id: tool, optional: true }));
 }
 
-/** Members and invited viewers get the Site's tools; everyone else only with `guestTools`. */
+/** Only workspace members who may use MCP connections get the Site's tools. */
 export function siteViewerGetsTools(
-  agent: Pick<SiteEmbeddedAgent, "guestTools">,
   viewer: Pick<SiteRuntimeViewer, "kind">,
+  memberPermissions: readonly string[] | null,
 ): boolean {
-  return viewer.kind === "member" || viewer.kind === "invited" || agent.guestTools;
+  if (viewer.kind !== "member" || !memberPermissions) return false;
+  return (
+    memberPermissions.includes("mcp_servers:attach") ||
+    memberPermissions.includes("workspace:admin")
+  );
 }
 
 /** A session id derived from the viewer's create idempotency key (same key, same conversation). */
@@ -459,6 +507,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "GET" && version) return await versionHtml(request, version[1]!);
     if (method === "POST" && suffix === "/auth/exchange") return await exchange(request);
     if (method === "POST" && suffix === "/auth/logout") return await logout(request);
+    if (method === "POST" && suffix === "/auth/view-as") return await viewAs(request);
+    if (method === "POST" && suffix === "/platform/requests") return await platformRequests(request);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
     const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
@@ -491,7 +541,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const viewing = async (request: RuntimeRequest) => {
     const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
     const viewer = await resolveSiteRuntimeViewer(deps, host, request.fields);
-    const { limits, kind: profileKind } = await siteRuntimeLimitProfile(deps, host);
+    const { limits, kind: profileKind } = await siteRuntimeLimitProfile(deps, host, viewer);
     await enforceSiteRuntimeViewerRate(
       deps,
       host,
@@ -629,6 +679,62 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
 
   /**
+   * "View as visitor": a workspace member starts (`invited`, `public`) or
+   * ends (null) previewing this Site as that role on their own site-session.
+   * Refused for anyone else; the preview only ever shows less (see
+   * resolveSiteRuntimeViewer).
+   */
+  const viewAs = async (request: RuntimeRequest): Promise<Response> => {
+    const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
+    const input = parseJson(request.body, z.object({ viewAs: SiteViewAs.nullable() }));
+    const viewer = await resolveSiteRuntimeViewer(deps, host, request.fields, {
+      ignoreViewAs: true,
+    });
+    if (viewer.kind !== "member" || !viewer.sessionId)
+      throw sitePublishingError(
+        403,
+        "forbidden",
+        "site_view_as_members_only",
+        "Only workspace members can preview a Site as a visitor",
+      );
+    await setSiteViewerSessionViewAs(deps.db, host.scope, {
+      siteId: host.site.id,
+      sessionId: viewer.sessionId,
+      viewAs: input.viewAs,
+    });
+    return request.context.json({ viewAs: input.viewAs });
+  };
+
+  /**
+   * Batched gateway request counts (platform usage): the gateway counts
+   * every request it serves for a Site host, cache hits included, and
+   * reports them in signed batches on the Sites domain apex. Each host's
+   * count is recorded once per report id, so a retried report never counts
+   * twice. Hosts that no longer resolve are skipped.
+   */
+  const platformRequests = async (request: RuntimeRequest): Promise<Response> => {
+    const apex = request.domain.toLowerCase();
+    if (request.fields.host.toLowerCase().replace(/\.$/u, "") !== apex)
+      throw invalid("Platform reports are signed for the Sites domain");
+    const input = parseJson(request.body, SitePlatformRequestReport);
+    let counted = 0;
+    for (const entry of input.hosts) {
+      const host = await findSiteRuntimeHost(deps, request.domain, entry.host);
+      if (!host) continue;
+      const recorded = await recordSitePlatformRequests(deps.db, host.scope, {
+        siteId: host.site.id,
+        requests: entry.requests,
+        idempotencyKey: `site_platform.requests:${input.reportId}:${entry.host.toLowerCase()}`,
+      });
+      if (!recorded) continue;
+      counted += entry.requests;
+      const usage = await readSitePlatformUsage(deps.db, host.scope);
+      if (usage) await afterSitePlatformUsage(deps, host.scope, usage);
+    }
+    return request.context.json({ counted });
+  };
+
+  /**
    * Abuse reports: anyone who reaches a served Site host, rate limited per
    * reporter, per client address and per Site. A reporter and a client
    * address each get the same small share (5 a minute by default) of the
@@ -684,12 +790,51 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const tools = async (request: RuntimeRequest, method: string): Promise<Response> => {
     if (!(SITE_TOOL_METHODS as readonly string[]).includes(method)) throw unsupported();
     await viewing(request);
-    throw sitePublishingError(
-      403,
-      "forbidden",
-      "site_tools_unavailable",
-      "Published Sites cannot use workspace tools",
+    throw siteNotAvailableForViewer(
+      "workspace_tools",
+      "Workspace tools are not available on published Sites",
+      { reason: "site_tools_unavailable" },
     );
+  };
+
+  /**
+   * The models a viewer's conversations may use. Members: the Site agent's
+   * model and the allowed models, subscriptions included. Everyone else
+   * never uses a subscription-billed model: a subscription agent model is
+   * replaced by the workspace's default credit-billed model, and
+   * `unavailable` when there is none (agent-model.ts).
+   */
+  const siteViewerModels = async (
+    host: SiteRuntimeHost,
+    viewer: SiteRuntimeViewer,
+    limits: { agentModels: string[] | null },
+  ): Promise<{ allowed: string[]; default: string | null; unavailable: boolean }> => {
+    const agentModel = host.publication.agent.model;
+    const named = (models: (string | null | undefined)[]) => [
+      ...new Set(
+        models.filter((model): model is string => typeof model === "string" && model.length > 0),
+      ),
+    ];
+    if (viewer.kind === "member")
+      return {
+        allowed: named([agentModel, ...(limits.agentModels ?? [])]),
+        default: agentModel,
+        unavailable: false,
+      };
+    const choice = await resolveSiteOutsideModel(deps, host.scope, {
+      siteId: host.site.id,
+      agentModel,
+    });
+    const credited = (models: string[]) =>
+      models.filter((model) => !isSubscriptionBilledModel([], model));
+    if (choice.kind === "unavailable")
+      return { allowed: credited(named(limits.agentModels ?? [])), default: null, unavailable: true };
+    const model = choice.kind === "fallback" ? choice.model : agentModel;
+    return {
+      allowed: credited(named([model, ...(limits.agentModels ?? [])])),
+      default: model,
+      unavailable: false,
+    };
   };
 
   const operation = async (request: RuntimeRequest, id: string): Promise<Response> => {
@@ -711,6 +856,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           versionId: host.versionId,
           access: effectiveSiteAccess(host.publication.access, deps.settings),
           viewer: publicSiteViewer(viewer),
+          capabilities: siteViewerCapabilities(deps, host, viewer, limits),
           agent: {
             enabled: siteAgentRefusal(deps, host, viewer, limits) === null,
             model: host.publication.agent.model,
@@ -722,16 +868,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return context.json(config);
       }
       case "models.list": {
-        const models = [
-          ...new Set(
-            [host.publication.agent.model, ...(limits.agentModels ?? [])].filter(
-              (model): model is string => typeof model === "string" && model.length > 0,
-            ),
-          ),
-        ];
+        const models = await siteViewerModels(host, viewer, limits);
         return context.json({
-          models: models.map((model) => ({ id: model })),
-          defaultModel: host.publication.agent.model,
+          models: models.allowed.map((model) => ({ id: model })),
+          defaultModel: models.default,
         });
       }
       case "site.report":
@@ -792,7 +932,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const siteId = host.site.id;
     return request.context.json(
       await runSiteSqlRoute(() =>
-        runSiteSqlQuery(
+        runSiteSqlForViewer(() =>
+          runSiteSqlQuery(
           deps,
           publishedViewer(host, viewer),
           siteId,
@@ -813,6 +954,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
                 );
             },
           },
+          ),
         ),
       ),
     );
@@ -1013,6 +1155,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (id === "sessions.create") {
       const input = parseJson(request.body, CreateConversationRequest);
       requireSiteAgent(deps, host, viewer, limits);
+      // The Opengeni-wide platform brake stops public visitors' agent turns.
+      if (viewer.kind === "guest" || viewer.kind === "user")
+        await requireSitePlatformOpen(deps, "guest_agent");
+      const models = await siteViewerModels(host, viewer, limits);
+      if (models.unavailable)
+        throw siteNotAvailableForViewer(
+          "agent_model",
+          "This Site's assistant is only available to workspace members right now",
+          { reason: "no_credit_billed_model" },
+        );
       if (
         viewer.kind === "guest" &&
         deps.settings.sitesGuestAgentHumanCheck &&
@@ -1044,7 +1196,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }))
         await settleSiteRuntimeSpend(deps, host, conversation);
       const agent = host.publication.agent;
-      const mcpTools = siteAgentToolRefs(agent, viewer);
+      const memberPermissions =
+        viewer.kind === "member" && viewer.subjectId
+          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
+          : null;
+      const mcpTools = siteAgentToolRefs(agent, viewer, memberPermissions);
       // One transaction counts the start and reserves the conversation's whole
       // cap against the visitor's day and the Site's day and month; the cap
       // becomes the session's usage limit, set in the create transaction. The
@@ -1059,6 +1215,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           toolIds: mcpTools.map((tool) => tool.id),
           versionId: host.versionId,
           limits: budgets,
+          budgetKey: siteRuntimeBudgetKey(viewer),
         }),
       );
       const body = {
@@ -1070,9 +1227,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         rigId: null,
         firstPartyMcpTools: [],
         agent: { capabilities: { from: "none", humanInput: false, skills: false } },
-        ...(agent.model ? { model: agent.model } : {}),
+        ...(models.default ? { model: models.default } : {}),
         ...(agent.instructions?.trim() ? { instructions: agent.instructions.trim() } : {}),
-        ...(mcpTools.length > 0 ? { tools: mcpTools } : {}),
+        // Always explicit: an empty list means no workspace tools at all.
+        tools: mcpTools,
         metadata: {
           opengeniPublishedSite: {
             siteId: host.site.id,
@@ -1176,13 +1334,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The agent and budget checks every message-bearing operation passes.
     const admitAgentWork = async (newTurn: boolean) => {
       requireSiteAgent(deps, host, viewer, limits);
-      // Tools are bound when a conversation starts. One holding a tool the
-      // Site no longer gives this viewer (removed, or no longer for everyone,
-      // or the viewer left the workspace) takes no more work.
+      if (viewer.kind === "guest" || viewer.kind === "user")
+        await requireSitePlatformOpen(deps, "guest_agent");
+      // Tools and budgets are bound when a conversation starts. One holding a
+      // tool the Site no longer gives this viewer (removed, or the viewer left
+      // the workspace or lost the permission), or counted as a member's while
+      // the viewer no longer is one (or the reverse), takes no more work.
+      const memberPermissions =
+        viewer.kind === "member" && viewer.subjectId
+          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
+          : null;
       const allowedTools = new Set(
-        siteAgentToolRefs(host.publication.agent, viewer).map((t) => t.id),
+        siteAgentToolRefs(host.publication.agent, viewer, memberPermissions).map((t) => t.id),
       );
-      if (conversation.toolIds.some((tool) => !allowedTools.has(tool)))
+      if (
+        conversation.budgetKey !== siteRuntimeBudgetKey(viewer) ||
+        conversation.toolIds.some((tool) => !allowedTools.has(tool))
+      )
         throw sitePublishingError(
           409,
           "conflict",
@@ -1223,11 +1391,14 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw invalid(`A message is at most ${MESSAGE_MAX_CHARS} characters`);
       if (draft.resources.length > 0 || (draft.annotations?.length ?? 0) > 0)
         throw invalid("Messages on a published Site are text only");
-      const allowed = new Set(
-        [host.publication.agent.model, ...(limits.agentModels ?? [])].filter(
-          (model): model is string => typeof model === "string" && model.length > 0,
-        ),
-      );
+      const allowed = new Set((await siteViewerModels(host, viewer, limits)).allowed);
+      // People outside the workspace never use a subscription-billed model.
+      if (viewer.kind !== "member" && isSubscriptionBilledModel([], draft.model))
+        throw siteNotAvailableForViewer(
+          "agent_model",
+          "This Site's assistant cannot use that model for you",
+          { reason: "subscription_model" },
+        );
       if (!allowed.has(draft.model)) {
         const current = await send("GET", target);
         const session = current.ok

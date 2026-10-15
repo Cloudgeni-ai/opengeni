@@ -1,7 +1,9 @@
 import {
+  DEFAULT_SITE_LIMITS,
   SiteLimits,
   UNLIMITED_SITE_FLOOD_BRAKES,
   type SiteLimitProfile,
+  type SiteLimitProfileKind,
   type SiteLimits as SiteLimitsValue,
 } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
@@ -9,10 +11,22 @@ import type { StoredSiteLimitProfile } from "@opengeni/db";
 
 /**
  * Limit profiles for published Sites. Opengeni enforces these values (the
- * edge only brakes floods). Effective limits come from the Site's own profile,
- * else the workspace default, else the free profile from settings; every
- * profile keeps the flood brakes, and deployment switches (public agents)
- * apply last.
+ * edge only brakes floods). Limits follow who the viewer is, not the Site's
+ * access mode:
+ *
+ * - Workspace members are never limited by Site limits, on any Site: they
+ *   use the workspace's normal session limits and billing. Only the request
+ *   flood brake applies.
+ * - Everyone outside the workspace (invited people and public visitors,
+ *   signed in or anonymous) shares ONE Site limit (per month by default, or
+ *   per day), and an optional per-person limit (off by default).
+ * - Anonymous guests also meet internal bot guards (conversation and message
+ *   counts and a per-conversation cap), configured in settings and not shown
+ *   to Site owners.
+ *
+ * The profile in force is the Site's own, else the workspace default, else
+ * `standard`. Every profile keeps the flood brakes, and deployment switches
+ * (public agents) apply last.
  */
 
 export type SiteLimitSettings = Pick<
@@ -25,24 +39,66 @@ export type SiteLimitSettings = Pick<
   | "sitesFreeAgentMicrosPerConversation"
   | "sitesFreeAgentMicrosPerVisitorPerDay"
   | "sitesFreeAgentMicrosPerSitePerMonth"
+  | "sitesAgentMicrosPerSitePerMonth"
+  | "sitesAgentMicrosPerPersonPerDay"
+  | "sitesGuestConversationsPerVisitorPerDay"
+  | "sitesGuestConversationsPerSitePerDay"
+  | "sitesGuestTurnsPerConversation"
+  | "sitesGuestAgentMicrosPerConversation"
   | "sitesCreditsLimitMultiplier"
   | "sitesPublicAgentsEnabled"
 >;
 
-export function freeSiteLimits(settings: SiteLimitSettings): SiteLimitsValue {
+/** The stored kind as the API reports it: the legacy `free` is `standard`. */
+export function normalizedSiteLimitProfileKind(kind: SiteLimitProfileKind): SiteLimitProfileKind {
+  return kind === "free" ? "standard" : kind;
+}
+
+/** The standard limits from settings (the new setting, the deprecated one, the built-in default). */
+export function standardSiteLimits(settings: SiteLimitSettings): SiteLimitsValue {
+  const pick = (...values: (number | null | undefined)[]) =>
+    values.find((value) => value !== undefined && value !== null) ?? null;
+  const fallback = DEFAULT_SITE_LIMITS;
   return {
+    ...fallback,
     requestsPerMinutePerVisitor: settings.sitesFreeRequestsPerMinutePerVisitor,
     guestWritesPerMinute: settings.sitesFreeGuestWritesPerMinute,
-    agentsEnabled: true,
-    guestAgentsEnabled: true,
-    conversationsPerVisitorPerDay: settings.sitesFreeConversationsPerVisitorPerDay,
-    conversationsPerSitePerDay: settings.sitesFreeConversationsPerSitePerDay,
-    turnsPerConversation: settings.sitesFreeTurnsPerConversation,
-    agentMicrosPerConversation: settings.sitesFreeAgentMicrosPerConversation,
-    agentMicrosPerVisitorPerDay: settings.sitesFreeAgentMicrosPerVisitorPerDay,
-    agentMicrosPerSitePerMonth: settings.sitesFreeAgentMicrosPerSitePerMonth,
-    agentModels: null,
+    conversationsPerVisitorPerDay: pick(
+      settings.sitesGuestConversationsPerVisitorPerDay,
+      settings.sitesFreeConversationsPerVisitorPerDay,
+      fallback.conversationsPerVisitorPerDay,
+    ),
+    conversationsPerSitePerDay: pick(
+      settings.sitesGuestConversationsPerSitePerDay,
+      settings.sitesFreeConversationsPerSitePerDay,
+      fallback.conversationsPerSitePerDay,
+    ),
+    turnsPerConversation: pick(
+      settings.sitesGuestTurnsPerConversation,
+      settings.sitesFreeTurnsPerConversation,
+      fallback.turnsPerConversation,
+    ),
+    agentMicrosPerConversation: pick(
+      settings.sitesGuestAgentMicrosPerConversation,
+      settings.sitesFreeAgentMicrosPerConversation,
+      fallback.agentMicrosPerConversation,
+    ),
+    agentMicrosPerVisitorPerDay: pick(
+      settings.sitesAgentMicrosPerPersonPerDay,
+      settings.sitesFreeAgentMicrosPerVisitorPerDay,
+      fallback.agentMicrosPerVisitorPerDay,
+    ),
+    agentMicrosPerSitePerMonth: pick(
+      settings.sitesAgentMicrosPerSitePerMonth,
+      settings.sitesFreeAgentMicrosPerSitePerMonth,
+      fallback.agentMicrosPerSitePerMonth,
+    ),
   };
+}
+
+/** @deprecated The former free profile: the standard limits. */
+export function freeSiteLimits(settings: SiteLimitSettings): SiteLimitsValue {
+  return standardSiteLimits(settings);
 }
 
 const times = (value: number | null, factor: number) => (value === null ? null : value * factor);
@@ -66,43 +122,49 @@ export function siteLimitOverrides(
   return kept as Partial<SiteLimitsValue>;
 }
 
-/** The limits of one profile, before deployment switches. */
+/** The limits one profile gives people outside the workspace, before deployment switches. */
 export function siteLimitsForProfile(
   settings: SiteLimitSettings,
   profile: StoredSiteLimitProfile | SiteLimitProfile,
 ): SiteLimitsValue {
-  const free = freeSiteLimits(settings);
+  const standard = standardSiteLimits(settings);
+  const overrides = profile.kind === "custom" ? siteLimitOverrides(profile.overrides) : {};
   let limits: SiteLimitsValue;
   switch (profile.kind) {
+    case "standard":
     case "free":
-      limits = free;
+      limits = standard;
       break;
     case "credits": {
       const factor = settings.sitesCreditsLimitMultiplier;
       limits = {
-        ...free,
-        conversationsPerVisitorPerDay: times(free.conversationsPerVisitorPerDay, factor),
-        conversationsPerSitePerDay: times(free.conversationsPerSitePerDay, factor),
-        agentMicrosPerConversation: times(free.agentMicrosPerConversation, factor),
-        agentMicrosPerVisitorPerDay: times(free.agentMicrosPerVisitorPerDay, factor),
-        agentMicrosPerSitePerMonth: times(free.agentMicrosPerSitePerMonth, factor),
+        ...standard,
+        conversationsPerVisitorPerDay: times(standard.conversationsPerVisitorPerDay, factor),
+        conversationsPerSitePerDay: times(standard.conversationsPerSitePerDay, factor),
+        agentMicrosPerConversation: times(standard.agentMicrosPerConversation, factor),
+        agentMicrosPerVisitorPerDay: times(standard.agentMicrosPerVisitorPerDay, factor),
+        agentMicrosPerVisitorPerMonth: times(standard.agentMicrosPerVisitorPerMonth, factor),
+        agentMicrosPerSitePerDay: times(standard.agentMicrosPerSitePerDay, factor),
+        agentMicrosPerSitePerMonth: times(standard.agentMicrosPerSitePerMonth, factor),
       };
       break;
     }
     case "unlimited":
       limits = {
-        ...free,
+        ...standard,
         conversationsPerVisitorPerDay: null,
         conversationsPerSitePerDay: UNLIMITED_SITE_FLOOD_BRAKES.conversationsPerSitePerDay,
         turnsPerConversation: null,
         agentMicrosPerVisitorPerDay: null,
+        agentMicrosPerVisitorPerMonth: null,
+        agentMicrosPerSitePerDay: null,
         agentMicrosPerSitePerMonth: null,
         requestsPerMinutePerVisitor: UNLIMITED_SITE_FLOOD_BRAKES.requestsPerMinutePerVisitor,
         agentMicrosPerConversation: UNLIMITED_SITE_FLOOD_BRAKES.agentMicrosPerConversation,
       };
       break;
     case "custom":
-      limits = { ...free, ...siteLimitOverrides(profile.overrides) };
+      limits = { ...standard, ...overrides };
       break;
   }
   // Flood brakes hold under every profile.
@@ -123,18 +185,22 @@ export function siteLimitsForProfile(
   };
 }
 
-/** The profile in force: the Site's own, else the workspace default, else free. */
+/** The profile in force: the Site's own, else the workspace default, else standard. */
 export function sourceSiteLimitProfile(
   siteProfile: StoredSiteLimitProfile | null,
   workspaceProfile: StoredSiteLimitProfile | null,
 ): SiteLimitProfile {
-  const profile = siteProfile ?? workspaceProfile ?? { kind: "free", overrides: null };
+  const profile = siteProfile ?? workspaceProfile ?? { kind: "standard", overrides: null };
   return {
-    kind: profile.kind,
+    kind: normalizedSiteLimitProfileKind(profile.kind),
     overrides: profile.kind === "custom" ? siteLimitOverrides(profile.overrides) : null,
   };
 }
 
+/**
+ * The Site's limits (for people outside the workspace) under the profile in
+ * force, deployment switches applied. Viewer-specific limits: siteViewerLimits.
+ */
 export function effectiveSiteLimits(
   settings: SiteLimitSettings,
   siteProfile: StoredSiteLimitProfile | null,
@@ -149,4 +215,49 @@ export function effectiveSiteLimits(
     guestAgentsEnabled:
       limits.agentsEnabled && limits.guestAgentsEnabled && settings.sitesPublicAgentsEnabled,
   };
+}
+
+export type SiteViewerLimitKind = "member" | "invited" | "user" | "guest";
+
+/**
+ * The limits that govern one viewer:
+ * - members: no Site limits at all (agents on, nothing capped), only the
+ *   request flood brake;
+ * - signed-in people outside the workspace: the Site limit and the optional
+ *   per-person limit, with the flood brakes as their only guards;
+ * - anonymous guests: all of the Site's limits, bot guards included.
+ */
+export function siteViewerLimits(
+  limits: SiteLimitsValue,
+  viewerKind: SiteViewerLimitKind,
+): SiteLimitsValue {
+  if (viewerKind === "member")
+    return {
+      ...limits,
+      agentsEnabled: true,
+      guestAgentsEnabled: true,
+      conversationsPerVisitorPerDay: null,
+      conversationsPerSitePerDay: null,
+      turnsPerConversation: null,
+      agentMicrosPerConversation: null,
+      agentMicrosPerVisitorPerDay: null,
+      agentMicrosPerVisitorPerMonth: null,
+      agentMicrosPerSitePerDay: null,
+      agentMicrosPerSitePerMonth: null,
+    };
+  if (viewerKind === "guest") return limits;
+  return {
+    ...limits,
+    conversationsPerVisitorPerDay: null,
+    turnsPerConversation: null,
+    conversationsPerSitePerDay: UNLIMITED_SITE_FLOOD_BRAKES.conversationsPerSitePerDay,
+    agentMicrosPerConversation: UNLIMITED_SITE_FLOOD_BRAKES.agentMicrosPerConversation,
+  };
+}
+
+/** The stored form of a requested profile kind: `free` is stored as `standard`. */
+export function storedSiteLimitProfileKind(
+  kind: SiteLimitProfileKind,
+): StoredSiteLimitProfile["kind"] {
+  return normalizedSiteLimitProfileKind(kind);
 }

@@ -256,7 +256,7 @@ export const SiteLimitProfileKind = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["standard", "free", "credits", "unlimited", "custom"])
     .describe(
-      "standard: platform defaults for the Site's access mode (members-only Sites have no Site caps). free: accepted alias of standard, stored and returned as standard. credits: the standard spend caps and guest guards multiplied. unlimited: no spend caps for viewers outside the workspace (flood brakes still apply). custom: explicit values over the standard defaults.",
+      "Limits for people outside the workspace (workspace members are never limited by Site limits). standard: platform defaults ($10 per Site per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults.",
     ),
 );
 export type SiteLimitProfileKind = z.infer<typeof SiteLimitProfileKind>;
@@ -266,28 +266,50 @@ const NullableLimit = (description: string) =>
 
 /**
  * Effective limits for a published Site. Money is in micro-USD
- * (1_000_000 = $1). Cloudflare cannot cap spend, so the edge applies only
+ * (1_000_000 = $1). They apply to people outside the workspace only
+ * (invited people and public visitors, signed in or anonymous); workspace
+ * members are never limited by them and use the workspace's normal session
+ * limits, on any Site. Cloudflare cannot cap spend, so the edge applies only
  * flood brakes; Opengeni enforces these values.
  */
 export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    requestsPerMinutePerVisitor: NullableLimit("Site runtime requests per visitor per minute."),
+    requestsPerMinutePerVisitor: NullableLimit(
+      "Site runtime requests per viewer per minute (flood brake; members too).",
+    ),
     guestWritesPerMinute: NullableLimit("Data writes per guest visitor per minute."),
-    agentsEnabled: z.boolean().describe("Viewers may start embedded agent conversations."),
+    agentsEnabled: z
+      .boolean()
+      .describe(
+        "People outside the workspace may use the Site's embedded agent. Members always may when the agent is on.",
+      ),
     guestAgentsEnabled: z
       .boolean()
-      .describe("Anonymous guests may start embedded agent conversations (public Sites)."),
-    conversationsPerVisitorPerDay: NullableLimit("New agent conversations per visitor per day."),
-    conversationsPerSitePerDay: NullableLimit(
-      "New agent conversations per Site per UTC day, from every visitor together.",
+      .describe("Anonymous guests may use the embedded agent too (public Sites)."),
+    conversationsPerVisitorPerDay: NullableLimit(
+      "Bot guard for anonymous guests: new conversations per visitor per UTC day.",
     ),
-    turnsPerConversation: NullableLimit("Messages a viewer may send in one conversation."),
-    agentMicrosPerConversation: NullableLimit("Agent spend per conversation, micro-USD."),
-    agentMicrosPerVisitorPerDay: NullableLimit("Agent spend per visitor per UTC day, micro-USD."),
-    agentMicrosPerSitePerMonth: NullableLimit("Agent spend per Site per UTC month, micro-USD."),
-    memberAgentMicrosPerSitePerMonth: NullableLimit(
-      "Optional soft budget for workspace members' conversations on this Site per UTC month, micro-USD; checked before new work, so the last conversation may overshoot it.",
-    ).optional(),
+    conversationsPerSitePerDay: NullableLimit(
+      "Bot guard for anonymous guests: new conversations per Site per UTC day.",
+    ),
+    turnsPerConversation: NullableLimit(
+      "Bot guard for anonymous guests: messages in one conversation.",
+    ),
+    agentMicrosPerConversation: NullableLimit(
+      "Bot guard for anonymous guests: spend per conversation, micro-USD.",
+    ),
+    agentMicrosPerVisitorPerDay: NullableLimit(
+      "Optional per-person limit: spend per person or visitor outside the workspace per UTC day, micro-USD.",
+    ),
+    agentMicrosPerVisitorPerMonth: NullableLimit(
+      "Optional per-person limit: spend per person or visitor outside the workspace per UTC month, micro-USD.",
+    ).default(null),
+    agentMicrosPerSitePerDay: NullableLimit(
+      "The Site limit as a daily amount: spend of everyone outside the workspace together per UTC day, micro-USD.",
+    ).default(null),
+    agentMicrosPerSitePerMonth: NullableLimit(
+      "The Site limit: spend of everyone outside the workspace together per UTC month, micro-USD.",
+    ),
     agentModels: z
       .array(z.string().min(1).max(200))
       .max(20)
@@ -298,59 +320,29 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
 export type SiteLimits = z.infer<typeof SiteLimits>;
 
 /**
- * Members-only Sites: no Site caps or conversation guards. Members' agent
- * work runs under the workspace's normal session limits only.
+ * The standard limits: $10 per Site per month for everyone outside the
+ * workspace together, no per-person limit, and internal bot guards for
+ * anonymous guests (conversation and message counts are not shown to Site
+ * owners). Deployments override them through settings.
  */
-export const DEFAULT_MEMBER_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
+export const DEFAULT_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
   requestsPerMinutePerVisitor: 120,
   guestWritesPerMinute: 30,
   agentsEnabled: true,
   guestAgentsEnabled: true,
-  conversationsPerVisitorPerDay: null,
-  conversationsPerSitePerDay: null,
-  turnsPerConversation: null,
-  agentMicrosPerConversation: null,
-  agentMicrosPerVisitorPerDay: null,
-  agentMicrosPerSitePerMonth: null,
-  memberAgentMicrosPerSitePerMonth: null,
-  agentModels: null,
-});
-
-/** Invited Sites: $1 per person per day and $10 per Site per month by default. */
-export const DEFAULT_INVITED_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
-  ...DEFAULT_MEMBER_SITE_LIMITS,
-  agentMicrosPerVisitorPerDay: 1_000_000,
-  agentMicrosPerSitePerMonth: 10_000_000,
-});
-
-/**
- * Public Sites: $0.20 per visitor per day and $10 per Site per month, plus
- * internal guards against guest floods (conversation and message counts are
- * not shown to Site owners).
- */
-export const DEFAULT_PUBLIC_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
-  ...DEFAULT_MEMBER_SITE_LIMITS,
   conversationsPerVisitorPerDay: 20,
   conversationsPerSitePerDay: 500,
   turnsPerConversation: 50,
   agentMicrosPerConversation: 1_000_000,
-  agentMicrosPerVisitorPerDay: 200_000,
+  agentMicrosPerVisitorPerDay: null,
+  agentMicrosPerVisitorPerMonth: null,
+  agentMicrosPerSitePerDay: null,
   agentMicrosPerSitePerMonth: 10_000_000,
+  agentModels: null,
 });
 
-/** The standard defaults by access mode; deployments override them through settings. */
-export const DEFAULT_STANDARD_SITE_LIMITS: Readonly<Record<SiteAccessMode, Readonly<SiteLimits>>> =
-  Object.freeze({
-    members: DEFAULT_MEMBER_SITE_LIMITS,
-    invited: DEFAULT_INVITED_SITE_LIMITS,
-    public: DEFAULT_PUBLIC_SITE_LIMITS,
-  });
-
-/**
- * @deprecated The former single `free` profile. Limits now depend on the
- * Site's access mode (DEFAULT_STANDARD_SITE_LIMITS); this is the public one.
- */
-export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = DEFAULT_PUBLIC_SITE_LIMITS;
+/** @deprecated The former `free` profile; now the standard limits (DEFAULT_SITE_LIMITS). */
+export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = DEFAULT_SITE_LIMITS;
 
 /** Hard caps that still apply under every profile, unlimited included. */
 export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
@@ -358,12 +350,6 @@ export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
   conversationsPerSitePerDay: 10_000,
   agentMicrosPerConversation: 5_000_000,
 });
-
-/** Limits by access mode: what applies to members, invited people and public visitors. */
-export const SiteLimitsByAccess = /* @__PURE__ */ defineSchema(() =>
-  z.object({ members: SiteLimits, invited: SiteLimits, public: SiteLimits }),
-);
-export type SiteLimitsByAccess = z.infer<typeof SiteLimitsByAccess>;
 
 export const SiteLimitProfile = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -382,16 +368,17 @@ export const SiteEmbeddedAgent = /* @__PURE__ */ defineSchema(() =>
     /** Extra instructions for the Site's agent, appended to the platform's. */
     instructions: z.string().max(8000).nullable().default(null),
     /**
-     * Workspace MCP connections (server ids) the agent may use. null or empty:
-     * no workspace tools. Setting a non-empty list needs a workspace admin.
+     * Workspace MCP connections (server ids) the agent may use for workspace
+     * members, further limited to what each member may do. null or empty: no
+     * workspace tools. People outside the workspace never get them. Setting a
+     * non-empty list needs a workspace admin.
      */
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().default(null),
     /**
-     * Tools for everyone who isn't a workspace member or invited: whether
-     * conversations of signed-in people outside the workspace (on a public
-     * Site) and of anonymous guests get `tools` too. Off by default: only
-     * members and invited viewers get workspace tools. The name is kept for
-     * compatibility. Setting it needs a workspace admin.
+     * Retired; always false. People outside the workspace (invited people and
+     * public visitors) never get workspace tools: only the Site's own data
+     * (Site Data, Site SQL and its named queries) and the page. Accepted and
+     * ignored on input for compatibility.
      */
     guestTools: z.boolean().default(false),
   }),
@@ -405,10 +392,58 @@ export const SiteEmbeddedAgentChanges = /* @__PURE__ */ defineSchema(() =>
     model: z.string().min(1).max(200).nullable().optional(),
     instructions: z.string().max(8000).nullable().optional(),
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().optional(),
+    /** Retired: accepted and ignored (people outside the workspace never get workspace tools). */
     guestTools: z.boolean().optional(),
   }),
 );
 export type SiteEmbeddedAgentChanges = z.infer<typeof SiteEmbeddedAgentChanges>;
+
+/** A safe one-click fix for a readiness warning (applied through the ordinary APIs). */
+export const SitePublishWarningFix = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("site_data_guest_access"),
+      collection: z.string().min(1).max(64),
+      guestAccess: z.enum(["read", "append", "own"]),
+    }),
+    z.object({
+      kind: z.literal("site_sql_query_audience"),
+      query: z.string().min(1).max(64),
+      audience: z.enum(["everyone", "signed_in"]),
+    }),
+  ]),
+);
+export type SitePublishWarningFix = z.infer<typeof SitePublishWarningFix>;
+
+export const SITE_PUBLISH_WARNING_CODES = [
+  "workspace_tools_members_only",
+  "agent_tools_members_only",
+  "site_data_guest_read",
+  "site_data_guest_write",
+  "site_data_members_write",
+  "site_sql_query_signed_in",
+  "site_sql_query_managers",
+  "agent_model_outside_fallback",
+  "agent_model_outside_unavailable",
+] as const;
+
+/**
+ * Something the published version uses that its audience may not do. Found
+ * by a conservative static reading of the page source and the Site's
+ * declared tools, collections and queries (docs/published-sites.md).
+ */
+export const SitePublishWarning = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    code: z.enum(SITE_PUBLISH_WARNING_CODES),
+    /** Plain language: what won't work and for whom. */
+    message: z.string().max(500),
+    /** What to change. */
+    suggestion: z.string().max(500),
+    /** A safe one-click fix, when one exists. */
+    fix: SitePublishWarningFix.nullable().default(null),
+  }),
+);
+export type SitePublishWarning = z.infer<typeof SitePublishWarning>;
 
 export const SitePublication = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -424,13 +459,10 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
     agent: SiteEmbeddedAgent,
     limitProfile: SiteLimitProfile,
     /**
-     * Limits for the Site's access mode after workspace and platform
-     * defaults are applied (limitsByAccess[access]). Workspace members
-     * always get limitsByAccess.members.
+     * Limits for people outside the workspace after workspace and platform
+     * defaults are applied. Workspace members are never limited by them.
      */
     effectiveLimits: SiteLimits,
-    /** The limits the same profile gives each access mode. */
-    limitsByAccess: SiteLimitsByAccess,
     invitedEmails: z.array(z.string().email()).max(500),
     moderation: z.object({
       openReports: z.number().int().nonnegative(),
@@ -439,12 +471,23 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
       suspendedReason: z.string().max(2000).nullable(),
     }),
     usage: z.object({
-      /** Viewers outside the workspace (invited people and public visitors). */
+      /** Spend of people outside the workspace this UTC month (members never count). */
       agentMicrosThisMonth: z.number().int().nonnegative(),
+      /** The same, this UTC day. */
+      agentMicrosToday: z.number().int().nonnegative().default(0),
       conversationsToday: z.number().int().nonnegative(),
-      /** Workspace members' conversations on this Site. */
-      memberAgentMicrosThisMonth: z.number().int().nonnegative(),
     }),
+    /**
+     * What won't work for the audience (invited or public Sites): the
+     * readiness check of the current version. Never blocks publishing.
+     */
+    warnings: z.array(SitePublishWarning).max(50).default([]),
+    /**
+     * The model people outside the workspace use when the agent's model is a
+     * subscription model (they never use subscriptions); null when they use
+     * the agent's model or no credit-billed model exists (then they are refused).
+     */
+    outsideAgentModel: z.string().nullable().default(null),
     createdAt: z.string(),
     updatedAt: z.string(),
   }),
@@ -538,6 +581,37 @@ export const SiteViewer = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteViewer = z.infer<typeof SiteViewer>;
 
+/** The roles an owner may preview their published Site as ("View as visitor"). */
+export const SiteViewAs = /* @__PURE__ */ defineSchema(() => z.enum(["invited", "public"]));
+export type SiteViewAs = z.infer<typeof SiteViewAs>;
+
+/** The query parameter that starts (`invited`, `public`) or ends (`off`) a preview. */
+export const SITE_VIEW_AS_QUERY = "og_view_as";
+
+/**
+ * What this viewer may do, cheaply, so a page can hide features instead of
+ * failing. Anything refused at call time still answers with the error
+ * `not_available_for_viewer`.
+ */
+export const SiteViewerCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The viewer may talk to the Site's embedded agent. */
+    agent: z.boolean(),
+    /** The agent and the page bridge may use workspace tools (workspace members only). */
+    workspaceTools: z.boolean(),
+    /** Site Data rules that apply: the collection's access mode, or its guest access. */
+    siteData: z.enum(["viewer", "guest"]),
+    /** Named Site SQL query audiences this viewer may call. */
+    sqlQueryAudiences: z.array(z.enum(["everyone", "signed_in"])),
+    /** Set while the owner previews the Site as another role. */
+    viewAs: SiteViewAs.nullable(),
+  }),
+);
+export type SiteViewerCapabilities = z.infer<typeof SiteViewerCapabilities>;
+
+/** The error code (`error.details.code`) when the viewer may not do something on a Site. */
+export const SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE = "not_available_for_viewer";
+
 /** GET /_og/api/site/config (gateway shell and `site.viewer`). */
 export const SiteRuntimeConfig = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -547,6 +621,7 @@ export const SiteRuntimeConfig = /* @__PURE__ */ defineSchema(() =>
     versionId: z.string().uuid(),
     access: SiteAccessMode,
     viewer: SiteViewer,
+    capabilities: SiteViewerCapabilities,
     agent: z.object({ enabled: z.boolean(), model: z.string().nullable() }),
     siteData: z.boolean(),
     noindex: z.boolean(),
