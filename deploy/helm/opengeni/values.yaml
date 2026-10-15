@@ -1105,6 +1105,10 @@ ingress:
         - path: /agent
           pathType: Prefix
           service: api
+        # Desktop app downloads: the installer and redirects to the release.
+        - path: /desktop
+          pathType: Prefix
+          service: api
   tls: []
   # Managed invitation emails use a query bearer because mail security
   # gateways may discard URL fragments. A separate exact route lets
@@ -1165,6 +1169,10 @@ ingress:
             pathType: Prefix
             service: api
           - path: /agent/v
+            pathType: Prefix
+            service: api
+          # Desktop app downloads (installer + release redirects, no secrets).
+          - path: /desktop
             pathType: Prefix
             service: api
           # Device-flow enrollment BOOTSTRAP endpoints a not-yet-credentialed

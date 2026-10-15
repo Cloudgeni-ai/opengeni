@@ -325,7 +325,7 @@ jobs:
             cat > "$RUNNER_TEMP/notes.md" <<NOTES
           Opengeni desktop $VERSION.
 
-          - **macOS:** download \`Opengeni-$VERSION-mac.dmg\`, open it and drag Opengeni to Applications.
+          - **macOS:** download \`Opengeni-$VERSION-mac.dmg\`, open it and drag Opengeni to Applications, or run \`brew install --cask cloudgeni-ai/tap/opengeni\`.
           - **Windows:** download \`Opengeni-$VERSION-windows.exe\` and open it. It installs for you alone, without administrator rights, and updates itself. Until the installer is signed, Windows may say it protected your PC: choose **More info**, then **Run anyway**.
           - **Ubuntu, Debian:** download the \`.deb\` for your machine (\`amd64\` or \`arm64\`) and run \`sudo apt install ./Opengeni-$VERSION-linux-amd64.deb\`.
           - **Fedora, RHEL, openSUSE:** download the \`.rpm\` (\`x86_64\` or \`aarch64\`) and run \`sudo dnf install ./Opengeni-$VERSION-linux-x86_64.rpm\`.
@@ -338,3 +338,48 @@ jobs:
           fi
           gh release upload "$tag" ./* --clobber
           gh release edit "$tag" --draft=false --latest=false
+
+  # Point the Homebrew cask at this release. Stable versions only: the cask is
+  # what `brew install --cask cloudgeni-ai/tap/opengeni` installs.
+  homebrew:
+    needs: [version, publish]
+    if: ${{ !contains(needs.version.outputs.version, '-') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: apps/desktop/homebrew
+          sparse-checkout-cone-mode: false
+
+      - name: Update the cask
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          sha="$(gh release download "desktop-v$VERSION" --pattern SHA256SUMS --output - |
+            awk -v file="Opengeni-$VERSION-mac.dmg" '$2 == file { print $1 }')"
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "No checksum for Opengeni-$VERSION-mac.dmg in the release." >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/tap-key"
+          (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone --depth 1 git@github.com:Cloudgeni-ai/homebrew-tap.git "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256@/$sha/" apps/desktop/homebrew/opengeni.rb \
+            > "$RUNNER_TEMP/tap/Casks/opengeni.rb"
+          cd "$RUNNER_TEMP/tap"
+          git add Casks/opengeni.rb
+          if git diff --cached --quiet; then
+            echo "The cask already points at $VERSION."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "opengeni $VERSION"
+          git push origin HEAD

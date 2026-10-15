@@ -793,7 +793,7 @@ bind NodePorts to loopback with
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
 web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
-`/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
+`/opengeni-agent-minisign.pub`, `/agent`, and `/desktop` to the API. Give the NATS
 websocket, relay, and Garage S3 API their own private TLS ports. Set
 `selfhosted.natsUrl`, `selfhosted.relayUrl`, and `garage.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
@@ -3406,6 +3406,19 @@ Macs that must first bootstrap through the whole-app installer are never updated
 this way. Set `OPENGENI_AGENT_AUTO_UPDATE=false` to update only on request. The
 agent fetches the release manifest from `OPENGENI_PUBLIC_BASE_URL`, so automatic
 updates also need it set.
+
+### Desktop app distribution
+
+The API also serves the desktop app's downloads at auth-exempt paths under
+`/desktop`: `/desktop/install.sh` (the macOS and Linux installer, defaulting to
+this deployment's `OPENGENI_PUBLIC_BASE_URL`), `/desktop/latest/<file>` (a 302 to
+that file on the current `desktop-v` release, for example
+`/desktop/latest/Opengeni-mac.dmg`), and `/desktop/latest` (the release page).
+The web app's account menu links to them. The current release is the newest
+stable `desktop-v` tag on the `OPENGENI_AGENT_RELEASES_BASE_URL` repository,
+cached for ten minutes; set `OPENGENI_DESKTOP_STABLE_VERSION` to pin a version,
+which a release host other than GitHub requires. Route `/desktop` to the `api`
+service in the ingress.
 
 ### Enrolling a machine
 
