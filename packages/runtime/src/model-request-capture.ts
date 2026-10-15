@@ -14,9 +14,17 @@ export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<voi
 const modelRequestCapture = new AsyncLocalStorage<ModelRequestCapture>();
 const captureIndices = new WeakMap<object, number>();
 
+/**
+ * Where an admission check is requested. The model wrapper asks once when the
+ * SDK enters a model call (`model_entry`); transport layers ask again right
+ * before the wire (`transport`). An entry always revalidates; a transport check
+ * may reuse the admission its own call already received.
+ */
+export type ModelCallAdmissionPoint = "model_entry" | "transport";
+
 /** Awaited producer-side authority, separate from observational request capture. */
 export type ModelCallLifecycle = {
-  beforeModelRequest?: () => Promise<void>;
+  beforeModelRequest?: (point: ModelCallAdmissionPoint) => Promise<void>;
   /** Register before yielding so the next model entry waits for consumer settlement. */
   onModelResponse?: (event: StreamEvent) => Promise<void>;
 };
@@ -26,8 +34,10 @@ export function withModelCallLifecycle<T>(lifecycle: ModelCallLifecycle, fn: () 
   return modelCallLifecycle.run(lifecycle, fn);
 }
 
-export async function beforeModelRequest(): Promise<void> {
-  await modelCallLifecycle.getStore()?.beforeModelRequest?.();
+export async function beforeModelRequest(
+  point: ModelCallAdmissionPoint = "transport",
+): Promise<void> {
+  await modelCallLifecycle.getStore()?.beforeModelRequest?.(point);
 }
 
 export function modelResponseSettlement(event: StreamEvent): Promise<void> | undefined {
@@ -154,14 +164,14 @@ export class ModelRequestCaptureModel implements Model {
   constructor(private readonly inner: Model) {}
 
   async getResponse(request: ModelRequest) {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     return this.inner.getResponse(request);
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     for await (const event of this.inner.getStreamedResponse(request)) {
