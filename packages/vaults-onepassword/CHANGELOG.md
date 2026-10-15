@@ -1,5 +1,20 @@
 # @opengeni/vaults-onepassword
 
+## 3.0.0
+
+### Patch Changes
+
+- e9a4fee: A server that cannot load the 1Password SDK (for example an image missing its WASM core) now reports `provider_unavailable` with a plain reason, instead of an unhandled error that surfaced as a generic 500. Connecting and syncing then say what is wrong, the vault records it as its sync status, and the next call tries to load the SDK again.
+- Updated dependencies [501bb83]
+- Updated dependencies [2077293]
+- Updated dependencies [db3efc5]
+- Updated dependencies [957f6ee]
+- Updated dependencies [6339cec]
+- Updated dependencies [37169cd]
+- Updated dependencies [d367818]
+  - @opengeni/contracts@3.0.0
+  - @opengeni/vaults@3.0.0
+
 ## 2.0.1
 
 ### Patch Changes
