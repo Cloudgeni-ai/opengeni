@@ -1,0 +1,31 @@
+# Opengeni compute: durable, sleepable sandboxes on hosts we run ourselves.
+#
+# Every crate lives under `crates/` and joins the workspace through the glob
+# below, so parallel work on separate crates never conflicts here.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/Cloudgeni-ai/opengeni"
+authors = ["Opengeni"]
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
