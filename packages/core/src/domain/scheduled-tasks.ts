@@ -1014,6 +1014,9 @@ export async function pauseScheduledTaskAsAdmin(
   );
 }
 
+export const SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE =
+  "This schedule is paused, so it cannot run now. Resume it first, then trigger it.";
+
 export async function triggerScheduledTaskForGrant(
   db: Database,
   grant: AccessGrant,
@@ -1024,6 +1027,10 @@ export async function triggerScheduledTaskForGrant(
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
     if (isRetiredNativeAtlassianTask(input.task))
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
+    // The worker never runs a paused schedule. Refuse here so the caller is
+    // told, instead of accepting a trigger that would silently do nothing.
+    if (input.task.status === "paused")
+      throw new HTTPException(409, { message: SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE });
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and
