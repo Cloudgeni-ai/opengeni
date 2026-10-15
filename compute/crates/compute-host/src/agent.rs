@@ -7,7 +7,7 @@
 //! through this one task, in order, which is what makes it safe without
 //! locks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,7 +25,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
-use crate::layout::{Images, Paths, copy_sparse, sandboxes_dir, vm_spec, write_atomic};
+use crate::layout::{
+    Images, Paths, check_root, copy_sparse, link_kernel, sandboxes_dir, vm_spec, write_atomic,
+};
 use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
 use crate::step::{After, Job, Live};
 use crate::store::Store;
@@ -51,6 +53,10 @@ pub struct HostConfig {
     /// guest can set its clock and reconnect (see [`crate::restore_notice`]).
     /// `None` tells the guest nothing.
     pub restore_notice_port: Option<u32>,
+    /// The user id of the sandbox with ordinal 0. Every sandbox on a host
+    /// has its own ordinal, and its VMM runs as user and group
+    /// `first_uid + ordinal`, so no two VMMs share a user.
+    pub first_uid: u32,
 }
 
 /// A request the host could not carry out.
@@ -148,6 +154,8 @@ struct Running {
 
 #[derive(Debug)]
 struct Slot<V> {
+    /// The sandbox's number on this host, unique among its sandboxes.
+    ordinal: u32,
     paths: Arc<Paths>,
     spec: Arc<VmSpec>,
     /// The VM, when one exists and no step holds it.
@@ -318,6 +326,7 @@ pub struct HostAgent<E: Engine, S: Store> {
     origin: Instant,
     slots: HashMap<SandboxId, Slot<E::Vm>>,
     preparing: HashSet<SandboxId>,
+    ordinals: BTreeSet<u32>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedReceiver<Event<E::Vm>>,
@@ -367,6 +376,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
+        check_root(&config.root).map_err(HostError::Invalid)?;
         tokio::fs::create_dir_all(sandboxes_dir(&config.root))
             .await
             .map_err(|error| HostError::Io(error.to_string()))?;
@@ -378,6 +388,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             images: Images {
                 kernel: config.kernel,
                 boot_args: config.boot_args,
+                first_uid: config.first_uid,
             },
             root: config.root,
             base_image: config.base_image,
@@ -386,6 +397,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             origin: Instant::now(),
             slots: HashMap::new(),
             preparing: HashSet::new(),
+            ordinals: BTreeSet::new(),
             destroying: HashMap::new(),
             commands,
             events,
@@ -446,11 +458,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let config: SandboxConfig =
             serde_json::from_slice(&record).map_err(|error| HostError::Io(error.to_string()))?;
         let policy = config.validate().map_err(HostError::Invalid)?;
-        let spec = vm_spec(id, &config, &paths, &self.images);
-        self.engine
-            .clean_up(&spec)
-            .await
+        // A kernel upgrade on the host reaches the sandbox on its next boot.
+        link_kernel(&self.images.kernel, &paths)
             .map_err(|error| HostError::Io(error.to_string()))?;
+        let ordinal = self.take_ordinal();
+        let spec = vm_spec(id, ordinal, &config, &paths, &self.images);
+        self.engine.clean_up(&spec).await.map_err(|error| {
+            self.ordinals.remove(&ordinal);
+            HostError::Io(error.to_string())
+        })?;
         let image =
             paths.saved.exists() && paths.snapshot.state.exists() && paths.snapshot.memory.exists();
         let (level, memory_saved) = if paths.disk.exists() {
@@ -463,9 +479,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         } else if paths.archived.exists() {
             (Level::Remote, paths.saved.exists())
         } else {
+            self.ordinals.remove(&ordinal);
             return Err(HostError::Io("disk missing and no archived copy".into()));
         };
-        self.insert(id, paths, spec);
+        self.insert(id, ordinal, paths, spec);
         self.input(Input::Add {
             sandbox: id.0,
             level,
@@ -475,7 +492,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok(())
     }
 
-    fn insert(&mut self, id: Id, paths: Paths, spec: VmSpec) {
+    /// The lowest ordinal no sandbox holds.
+    fn take_ordinal(&mut self) -> u32 {
+        let mut free = 0;
+        for taken in &self.ordinals {
+            if *taken != free {
+                break;
+            }
+            free += 1;
+        }
+        self.ordinals.insert(free);
+        free
+    }
+
+    fn insert(&mut self, id: Id, ordinal: u32, paths: Paths, spec: VmSpec) {
         let toucher = Toucher {
             id,
             commands: self.commands_tx.clone(),
@@ -490,6 +520,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.slots.insert(
             id.0,
             Slot {
+                ordinal,
                 paths: Arc::new(paths),
                 spec: Arc::new(spec),
                 vm: None,
@@ -620,11 +651,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.preparing.insert(id.0);
         let paths = Paths::new(&self.root, id);
         let base = self.base_image.clone();
+        let kernel = self.images.kernel.clone();
         let record = serde_json::to_vec(&config).unwrap_or_default();
         let events = self.events_tx.clone();
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                std::fs::create_dir_all(&paths.run)?;
+                std::fs::create_dir_all(&paths.jail)?;
+                link_kernel(&kernel, &paths)?;
                 copy_sparse(&base, &paths.disk)?;
                 // The record goes last: a directory without one is an
                 // unfinished creation and is cleaned up on recovery.
@@ -659,8 +692,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let Ok(policy) = config.validate() else {
                     return;
                 };
-                let spec = vm_spec(id, &config, &paths, &self.images);
-                self.insert(id, paths, spec);
+                let ordinal = self.take_ordinal();
+                let spec = vm_spec(id, ordinal, &config, &paths, &self.images);
+                self.insert(id, ordinal, paths, spec);
                 // A new sandbox is a disk without a memory image: its first
                 // wake boots it, under the same admission limits as any wake.
                 self.input(Input::Add {
@@ -868,6 +902,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(mut slot) = self.slots.remove(&id.0) else {
             return;
         };
+        self.ordinals.remove(&slot.ordinal);
         for waiter in slot.waiters.drain(..) {
             let _ = waiter.send(Err(HostError::Removed(id)));
         }

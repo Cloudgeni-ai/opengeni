@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use compute_core::{HostPolicy, MemoryPolicy, SandboxId, Step};
-use compute_engine::firecracker::Firecracker;
+use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule, step_name,
@@ -65,6 +65,13 @@ struct ServeArgs {
     root: PathBuf,
     #[arg(long)]
     firecracker: PathBuf,
+    /// Firecracker's jailer, from the same release.
+    #[arg(long)]
+    jailer: PathBuf,
+    /// User id of the first sandbox; each sandbox's VMM runs as its own
+    /// user and group from here up.
+    #[arg(long, default_value_t = 1 << 30)]
+    first_uid: u32,
     #[arg(long)]
     kernel: PathBuf,
     /// Root disk image new sandboxes start from.
@@ -244,8 +251,12 @@ fn expect_done(reply: Reply) -> anyhow::Result<()> {
 }
 
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
-    let engine = Firecracker::new(&args.firecracker, &args.cgroup)
-        .with_context(|| format!("creating cgroup {}", args.cgroup.display()))?;
+    let engine = Firecracker::new(FirecrackerConfig {
+        firecracker: args.firecracker,
+        jailer: args.jailer,
+        cgroup_parent: args.cgroup.clone(),
+    })
+    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?;
     let mut policy = HostPolicy::default();
     for (step, limit) in args.limits {
         policy.limits = policy.limits.with(step, limit);
@@ -266,6 +277,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         sample_every: Duration::from_secs(1),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
+        first_uid: args.first_uid,
     };
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;

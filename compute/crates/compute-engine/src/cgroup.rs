@@ -32,6 +32,12 @@ impl Cgroup {
         Ok(group)
     }
 
+    /// The group at `path`, which may or may not exist.
+    #[must_use]
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
     /// The group's directory.
     #[must_use]
     pub fn path(&self) -> &Path {

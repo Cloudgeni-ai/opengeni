@@ -30,11 +30,24 @@ pub enum Completion {
     Cancelled,
 }
 
+/// What a VM found alive by [`Engine::adopt`] is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// Its processors run.
+    Running,
+    /// Its processors are stopped; its memory is in place.
+    Paused,
+}
+
 /// What the host needs from a VM program.
 ///
 /// Every method that can fail reports an [`ErrorKind`] saying what the
 /// failure means for the sandbox. Operations on one VM are never issued
 /// concurrently.
+///
+/// VM processes outlive the host agent: stopping, crashing or upgrading the
+/// agent leaves every VM as it was, and the next agent takes them back with
+/// [`Engine::adopt`].
 pub trait Engine: Send + Sync + 'static {
     /// A running VM process.
     type Vm: Send + Sync + 'static;
@@ -82,8 +95,17 @@ pub trait Engine: Send + Sync + 'static {
     /// any snapshot stay on disk.
     fn stop(&self, vm: Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
-    /// Ends any VM process an earlier run of the host agent left behind for
-    /// `spec` and releases its host resources. Succeeds when there is none.
+    /// Takes over the VM an earlier run of the host agent left running for
+    /// `spec`, if there is one in a usable state, without disturbing it.
+    /// A VM process that cannot be used (for example one that never
+    /// finished starting) is ended and `None` returned.
+    fn adopt(
+        &self,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<Option<(Self::Vm, Found)>, EngineError>> + Send;
+
+    /// Ends any VM process left behind for `spec` and releases its host
+    /// resources. Succeeds when there is none.
     fn clean_up(&self, spec: &VmSpec) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Bytes of host memory the VM holds right now.

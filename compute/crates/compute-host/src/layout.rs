@@ -1,16 +1,33 @@
 //! Where each sandbox's state lives on the host's disk, and the small
 //! crash-safe writes that keep it consistent.
 //!
+//! Every VM runs inside a jail: a chroot directory owned by the sandbox's
+//! own user, which is the only part of the host's filesystem its VMM can
+//! see. Everything the VMM opens therefore lives inside that jail, and
+//! everything only the host needs lives next to it:
+//!
 //! ```text
-//! <root>/sandboxes/<id>/
-//!   sandbox.json   shape and sleep ladder
-//!   disk.ext4      the sandbox's root disk
-//!   vm.state       saved processor and device state
-//!   vm.mem         saved memory image (sparse)
-//!   saved          marker: the memory image is complete and matches the disk
-//!   archived       marker: the store holds a copy matching the local files
-//!   run/           VMM sockets and logs
+//! <root>/vm/firecracker/<id>/  the sandbox directory (host only)
+//!   sandbox.json               shape and sleep ladder
+//!   saved                      marker: the memory image is complete and matches the disk
+//!   archived                   marker: the store holds a copy matching the local files
+//!   console.log                the guest's serial console (written by the engine)
+//!   vmm.log                    the VMM's own log (written by the engine)
+//!   root/                      the jail: "/" for the VMM
+//!     vmlinux                  guest kernel (a hard link to the host's copy)
+//!     disk.ext4                the sandbox's root disk
+//!     vm.state                 saved processor and device state
+//!     vm.mem                   saved memory image (sparse)
+//!     api.sock                 the VMM's control socket
+//!     vsock.sock               host side of the guest's vsock device
+//!     vsock.sock_<port>        listeners for connections the guest opens
 //! ```
+//!
+//! The `vm/firecracker/<id>/root` shape is what Firecracker's jailer builds
+//! from `--chroot-base-dir <root>/vm`, the exec file's name and `--id`, so
+//! the jailer reuses the sandbox's own directory as its chroot. Anything a
+//! VMM must open, such as a page-fault handler's socket, belongs under
+//! [`Paths::jail`]; [`Paths::in_jail`] names such a file.
 //!
 //! A memory image is only valid together with the exact disk it was taken
 //! with. Once a restored guest runs, its disk moves on and the old image
@@ -25,55 +42,115 @@ use compute_engine::{Drive, SnapshotFiles, VmSpec};
 
 use crate::protocol::{Id, SandboxConfig};
 
+/// Directory name the jailer gives each VM's chroot, inside the sandbox
+/// directory.
+const JAIL: &str = "root";
+
+/// Longest Unix socket path the kernel accepts, without the trailing NUL.
+const MAX_SOCKET_PATH: usize = 107;
+
+/// The longest socket name inside a jail: a guest port listener on the
+/// largest possible port.
+const LONGEST_SOCKET: &str = "vsock.sock_4294967295";
+
 /// Every path belonging to one sandbox.
 #[derive(Clone, Debug)]
 pub(crate) struct Paths {
+    /// The sandbox directory, host only.
     pub dir: PathBuf,
     pub record: PathBuf,
-    pub disk: PathBuf,
-    pub snapshot: SnapshotFiles,
     pub saved: PathBuf,
     pub archived: PathBuf,
-    pub run: PathBuf,
+    /// The VM's jail: the only directory its VMM can see.
+    pub jail: PathBuf,
+    pub kernel: PathBuf,
+    pub disk: PathBuf,
+    pub snapshot: SnapshotFiles,
 }
 
 impl Paths {
     pub fn new(root: &Path, id: Id) -> Self {
         let dir = sandboxes_dir(root).join(id.to_string());
+        let jail = dir.join(JAIL);
         Self {
             record: dir.join("sandbox.json"),
-            disk: dir.join("disk.ext4"),
-            snapshot: SnapshotFiles {
-                state: dir.join("vm.state"),
-                memory: dir.join("vm.mem"),
-            },
             saved: dir.join("saved"),
             archived: dir.join("archived"),
-            run: dir.join("run"),
+            kernel: jail.join("vmlinux"),
+            disk: jail.join("disk.ext4"),
+            snapshot: SnapshotFiles {
+                state: jail.join("vm.state"),
+                memory: jail.join("vm.mem"),
+            },
+            jail,
             dir,
         }
     }
+
+    /// The host path of `name` inside the jail, which the VMM sees as
+    /// `/<name>`.
+    #[allow(dead_code)]
+    pub fn in_jail(&self, name: &str) -> PathBuf {
+        self.jail.join(name)
+    }
 }
 
+/// The jailer's chroot base directory.
+pub(crate) fn chroot_base(root: &Path) -> PathBuf {
+    root.join("vm")
+}
+
+/// The directory holding one directory per sandbox.
 pub(crate) fn sandboxes_dir(root: &Path) -> PathBuf {
-    root.join("sandboxes")
+    chroot_base(root).join("firecracker")
+}
+
+/// Checks that every socket a sandbox under `root` needs fits in a Unix
+/// socket address.
+pub(crate) fn check_root(root: &Path) -> Result<(), String> {
+    let sample = Paths::new(root, Id(compute_core::SandboxId(0)));
+    let longest = sample.jail.join(LONGEST_SOCKET);
+    let length = longest.as_os_str().len();
+    if length > MAX_SOCKET_PATH {
+        return Err(format!(
+            "state root {} is too long: sandbox sockets would need {length} bytes \
+             and Unix sockets allow {MAX_SOCKET_PATH}",
+            root.display()
+        ));
+    }
+    Ok(())
 }
 
 /// What the host needs to start a sandbox's VM, besides its own paths.
 #[derive(Clone, Debug)]
 pub(crate) struct Images {
+    /// The host's guest kernel, linked into each jail.
     pub kernel: PathBuf,
     pub boot_args: String,
+    /// The user id of the sandbox with ordinal 0; each sandbox's VMM runs
+    /// as `first_uid + ordinal`, with the same group id.
+    pub first_uid: u32,
 }
 
-/// The VM description for one sandbox.
-pub(crate) fn vm_spec(id: Id, config: &SandboxConfig, paths: &Paths, images: &Images) -> VmSpec {
+/// The VM description for one sandbox, whose ordinal on this host is
+/// `ordinal`.
+pub(crate) fn vm_spec(
+    id: Id,
+    ordinal: u32,
+    config: &SandboxConfig,
+    paths: &Paths,
+    images: &Images,
+) -> VmSpec {
+    let uid = images.first_uid.saturating_add(ordinal);
     VmSpec {
-        name: format!("sbx-{id}"),
-        dir: paths.run.clone(),
+        name: id.to_string(),
+        dir: paths.jail.clone(),
+        logs: paths.dir.clone(),
+        uid,
+        gid: uid,
         vcpus: config.vcpus,
         memory_mib: config.memory_mib,
-        kernel: images.kernel.clone(),
+        kernel: paths.kernel.clone(),
         boot_args: images.boot_args.clone(),
         drives: vec![Drive {
             id: "rootfs".into(),
@@ -84,6 +161,19 @@ pub(crate) fn vm_spec(id: Id, config: &SandboxConfig, paths: &Paths, images: &Im
         network: None,
         free_page_reporting: true,
     }
+}
+
+/// Points the jail's kernel at the host's current guest kernel: a hard link
+/// where the jail shares the kernel's filesystem, otherwise a copy.
+/// Replacing it on every boot picks up a kernel upgrade; restores do not
+/// read the kernel at all.
+pub(crate) fn link_kernel(host_kernel: &Path, paths: &Paths) -> io::Result<()> {
+    let staging = paths.kernel.with_extension("staging");
+    remove_if_present(&staging)?;
+    if fs::hard_link(host_kernel, &staging).is_err() {
+        copy_sparse(host_kernel, &staging)?;
+    }
+    fs::rename(&staging, &paths.kernel)
 }
 
 /// Writes `contents` to `path` so that after a crash the file either holds

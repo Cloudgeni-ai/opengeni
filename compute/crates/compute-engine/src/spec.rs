@@ -18,10 +18,13 @@ pub struct Drive {
 /// A network interface backed by a host tap device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Network {
-    /// Name of the host tap device.
+    /// Name of the tap device, inside `namespace` if one is given.
     pub tap: String,
     /// The guest's MAC address, such as `06:00:ac:10:00:02`.
     pub mac: String,
+    /// The network namespace holding the tap, such as `/run/netns/<name>`.
+    /// The VMM runs inside it.
+    pub namespace: Option<PathBuf>,
 }
 
 /// Everything needed to start or restore one VM.
@@ -30,8 +33,18 @@ pub struct VmSpec {
     /// Name, used for the VMM process and the cgroup. Letters, digits and
     /// hyphens only, at most 64 characters.
     pub name: String,
-    /// Private working directory for sockets and logs.
+    /// The VM's own directory. Every file the VMM opens (kernel, drives,
+    /// snapshot files) and every socket it serves lives inside it, so an
+    /// engine can confine the VMM to it.
     pub dir: PathBuf,
+    /// Where the VMM's console output and logs go: a directory the VMM
+    /// itself never sees.
+    pub logs: PathBuf,
+    /// The unprivileged user the VMM runs as. Every VM has its own, so one
+    /// VMM cannot touch another's files or processes.
+    pub uid: u32,
+    /// The VMM's group.
+    pub gid: u32,
     /// Virtual processors.
     pub vcpus: u8,
     /// Guest memory in MiB.

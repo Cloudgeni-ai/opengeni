@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use compute_core::{HostPolicy, SandboxId, Step};
 use compute_engine::{
-    CancellationToken, Completion, Engine, EngineError, ErrorKind, SnapshotFiles, VmSpec,
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, SnapshotFiles, VmSpec,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -294,6 +294,13 @@ impl Engine for Fake {
         ready(Ok(()))
     }
 
+    fn adopt(
+        &self,
+        _: &VmSpec,
+    ) -> impl Future<Output = Result<Option<(FakeVm, Found)>, EngineError>> + Send {
+        ready(Ok(None))
+    }
+
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
         self.world.crash(&spec.name);
         // Give the crash watcher a moment to release the name.
@@ -337,6 +344,7 @@ impl Lab {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("base.img"), "base").unwrap();
+        std::fs::write(root.join("vmlinux"), "kernel").unwrap();
         root
     }
 
@@ -360,6 +368,7 @@ impl Lab {
             sample_every: Duration::from_millis(50),
             guest_ports: Vec::new(),
             restore_notice_port: None,
+            first_uid: 1 << 30,
         };
         configure(&mut config);
         let engine = Fake {
@@ -473,7 +482,7 @@ impl Lab {
     }
 
     fn sandbox_dir(&self, id: Id) -> PathBuf {
-        self.root.join("state/sandboxes").join(id.to_string())
+        self.root.join("state/vm/firecracker").join(id.to_string())
     }
 }
 
@@ -482,7 +491,7 @@ fn id(n: u128) -> Id {
 }
 
 fn vm_name(id: Id) -> String {
-    format!("sbx-{id}")
+    id.to_string()
 }
 
 const SAVE_QUICKLY: &[(LevelName, u64)] = &[(LevelName::Paused, 30), (LevelName::Saved, 60)];
@@ -789,7 +798,7 @@ async fn data_for_a_sleeping_sandbox_wakes_it() {
 
     // The test plays the guest: it opens a connection to its host, the way
     // an agent inside the VM dials vsock address 2.
-    let socket = lab.sandbox_dir(sandbox).join("run/vsock.sock_4222");
+    let socket = lab.sandbox_dir(sandbox).join("root/vsock.sock_4222");
     let mut guest = UnixStream::connect(&socket).await.unwrap();
     let (mut server, _) = upstream.accept().await.unwrap();
     guest.write_all(b"hello").await.unwrap();
