@@ -1078,7 +1078,7 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
   expect(inspected.status, JSON.stringify(inspected.json)).toBe(200);
   expect(JSON.stringify(inspected.json)).toContain('"agentAccess":"session"');
   // Capped by its own task usage limit: the guest per-conversation guard.
-  expect(inspected.json.usageLimit).toMatchObject({ limitMicros: 1_000_000 });
+  expect(inspected.json.usageLimit).toMatchObject({ limitMicros: 250_000 });
 
   // Only the viewer who started it sees it, and only on its own Site.
   const own = await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
@@ -2578,10 +2578,10 @@ test("members are never capped by a Site; people outside the workspace meet its 
   const usageLimitOf = async (sessionId: string) =>
     (await f.api(f.owner, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`)).json
       .usageLimit?.limitMicros ?? null;
-  expect(await usageLimitOf(String(outsiderStarted.json.id))).toBe(5_000_000);
+  expect(await usageLimitOf(String(outsiderStarted.json.id))).toBe(250_000);
   const guestStarted = await start(site.host, { visitor: visitorId() });
   expect(guestStarted.status).toBe(202);
-  expect(await usageLimitOf(String(guestStarted.json.id))).toBe(1_000_000);
+  expect(await usageLimitOf(String(guestStarted.json.id))).toBe(250_000);
 
   // Invited people: the same Site limit; switching the agent off for people
   // outside the workspace leaves members theirs.
@@ -2663,6 +2663,36 @@ test("a member's conversation from before members were uncapped keeps working, u
     (await f.api(f.owner, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`)).json
       .usageLimit?.limitMicros ?? null;
   expect(await usageLimit()).toBe(20_000);
+  // A failed session-limit clear must not consume the conversation's retry
+  // marker. Inject a write failure at the real PostgreSQL boundary.
+  const faultName = `member_uncap_${sessionId.replaceAll("-", "")}`;
+  await shared.admin
+    .unsafe(`create function ${faultName}() returns trigger language plpgsql as $fault$
+    begin
+      if new.root_session_id = '${sessionId}'::uuid and new.limit_micros is null then
+        raise exception 'injected member uncap failure';
+      end if;
+      return new;
+    end $fault$`);
+  await shared.admin.unsafe(
+    `create trigger ${faultName} before update on opengeni_private.session_usage_limit_roots for each row execute function ${faultName}()`,
+  );
+  try {
+    const failed = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      session: memberSession,
+      body: { type: "user.message", payload: { text: "Try during transient failure" } },
+    });
+    expect(failed.status, JSON.stringify(failed.json)).toBe(503);
+    const [pending] =
+      await shared.admin`select limit_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(Number(pending!.limit_micros)).toBe(20_000);
+    expect(await usageLimit()).toBe(20_000);
+  } finally {
+    await shared.admin.unsafe(
+      `drop trigger ${faultName} on opengeni_private.session_usage_limit_roots`,
+    );
+    await shared.admin.unsafe(`drop function ${faultName}()`);
+  }
   // No site_conversation_outdated: the member keeps the conversation, and the
   // Site's old cap is lifted.
   const sent = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
@@ -2756,8 +2786,8 @@ test("the model follows the viewer: people outside the workspace never use a sub
   });
 });
 
-test("legacy two-window settlement and release preserve newer four-window reservations", async () => {
-  for (const action of ["settle", "release"] as const) {
+test("legacy three-window settlement, release and conversion preserve newer reservations", async () => {
+  for (const action of ["settle", "release", "convert"] as const) {
     const f = await fixture();
     const site = await f.live(`Legacy ${action}`, { access: "public", agent: { enabled: true } });
     const visitor = visitorId();
@@ -2768,19 +2798,30 @@ test("legacy two-window settlement and release preserve newer four-window reserv
     expect(legacy.status).toBe(202);
     expect(newer.status).toBe(202);
     const estimate = f.settings.sitesAgentReservationMicrosPerTurn;
-    // Reproduce an old pod's writes: viewer-day and Site-month only.
-    await shared.admin`update site_runtime_conversations set reservation_windows_complete = false where session_id = ${legacy.json.id}`;
-    await shared.admin`update site_runtime_usage set reserved_micros = reserved_micros - ${estimate}
-      where site_id = ${site.id} and ((principal_key = '*' and period = 'day') or (principal_key = ${`guest:${visitor}`} and period = 'month'))`;
+    // 2fef1581b reserveSiteRuntimeConversationStart writes viewer-day, Site-day
+    // and Site-month (only viewer-month is absent).
+    await shared.admin`update site_runtime_conversations set reservation_windows_complete = false,
+      limit_micros = reserved_micros where session_id = ${legacy.json.id}`;
+    await shared.admin`update site_runtime_usage set reserved_micros = reserved_micros - ${estimate}, conversations = conversations - 1
+      where site_id = ${site.id} and principal_key = ${`guest:${visitor}`} and period = 'month'`;
     const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
     if (action === "release")
       await releaseSiteRuntimeConversationStart(db.db, scope, { sessionId: legacy.json.id });
-    else
+    else if (action === "settle")
       await settleSiteRuntimeConversationSpend(db.db, scope, {
         sessionId: legacy.json.id,
         usedMicros: 0,
         idle: true,
       });
+    else {
+      const converted = await reserveSiteRuntimeConversationWork(db.db, scope, {
+        sessionId: legacy.json.id,
+        newTurn: true,
+        limits: siteRuntimeBudgetLimits(DEFAULT_SITE_LIMITS, f.settings),
+      });
+      expect(converted).toMatchObject({ ok: true, reservedMicros: estimate });
+      await releaseSiteRuntimeConversationStart(db.db, scope, { sessionId: legacy.json.id });
+    }
     const windows =
       await shared.admin`select reserved_micros from site_runtime_usage where site_id = ${site.id}`;
     expect(windows).toHaveLength(4);
@@ -2828,6 +2869,16 @@ test("turns reserve an estimate, so open conversations don't use up a Site; busy
     expect(Number(conversation.reserved_micros)).toBe(
       f.settings.sitesAgentReservationMicrosPerTurn,
     );
+  // Executable ceilings, not just bookkeeping reservations, fit the Site budget.
+  const ceilings = await Promise.all(
+    started.map(
+      async (result) =>
+        (await f.api(f.owner, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${result.json.id}`))
+          .json.usageLimit.limitMicros as number,
+    ),
+  );
+  expect(ceilings).toEqual(Array(6).fill(250_000));
+  expect(ceilings.reduce((sum, value) => sum + value, 0)).toBe(1_500_000);
   // The next finds only the others' reservations in the way: busy, retry shortly.
   const busy = await start(visitorId());
   expect(busy.status, JSON.stringify(busy.json)).toBe(429);
@@ -2889,6 +2940,45 @@ test("a later turn reserves only the budget remaining below the estimate", async
     limits: siteRuntimeBudgetLimits(DEFAULT_SITE_LIMITS, f.settings),
   });
   expect(admitted).toMatchObject({ ok: true, reservedMicros: 50_000 });
+});
+
+test("funded execution tops up cumulatively before sending, without multiplying the Site budget", async () => {
+  const f = await fixture();
+  const site = await f.live("Funded", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 600_000 } },
+  });
+  const visitors = [visitorId(), visitorId()];
+  const started = await Promise.all(
+    visitors.map((visitor) =>
+      f.gateway(site.host, "POST", "/sessions", {
+        visitor,
+        body: { initialMessage: "Hello" },
+      }),
+    ),
+  );
+  expect(started.map((result) => result.status)).toEqual([202, 202]);
+  const first = String(started[0]!.json.id);
+  const ceiling = async (id: string) =>
+    Number(
+      (await f.api(f.owner, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${id}`)).json
+        .usageLimit.limitMicros,
+    );
+  expect(await ceiling(first)).toBe(250_000);
+  // Simulate the authoritative meter at the funded ceiling. The next send
+  // settles it and atomically buys only the remaining $0.10 before execution.
+  await shared.admin`update opengeni_private.session_usage_limit_roots set known_micros = 250000 where root_session_id = ${first}`;
+  const sent = await f.gateway(site.host, "POST", `/sessions/${first}/events`, {
+    visitor: visitors[0],
+    body: { type: "user.message", payload: { text: "Continue" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+  expect(await ceiling(first)).toBe(350_000);
+  expect((await ceiling(first)) + (await ceiling(String(started[1]!.json.id)))).toBe(600_000);
+  const [row] =
+    await shared.admin`select metered_micros, reserved_micros from site_runtime_conversations where session_id = ${first}`;
+  expect(Number(row!.metered_micros)).toBe(250_000);
+  expect(Number(row!.reserved_micros)).toBe(100_000);
 });
 
 test("view as visitor shows a member less, never anyone more", async () => {

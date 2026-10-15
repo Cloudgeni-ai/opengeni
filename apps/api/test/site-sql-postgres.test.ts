@@ -1423,6 +1423,27 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
           tool,
           error: { code: "forbidden" },
         });
+      // Direct database changes deliberately skip cancellation entirely: live
+      // tool authority must not depend on best-effort session cancellation.
+      if (kind !== "member") {
+        if (kind === "invited")
+          await shared.admin`update site_publications set access = 'invited', invited_emails = '[]'::jsonb where site_id = ${siteId}`;
+        else
+          await shared.admin`update site_publications set access = 'members' where site_id = ${siteId}`;
+        try {
+          for (const [tool, args] of [
+            ["site_sql_run", { name: "board" }],
+            ["site_data_query", { collection: "wishes" }],
+            [
+              "site_data_write",
+              { operations: [{ op: "insert", collection: "wishes", data: { wish: "revoked" } }] },
+            ],
+          ] as const)
+            expect(await refused(tool, args)).toMatchObject({ code: "forbidden" });
+        } finally {
+          await shared.admin`update site_publications set access = 'public', invited_emails = ${shared.admin.json([invitedEmail])}::jsonb where site_id = ${siteId}`;
+        }
+      }
     } finally {
       await agent.mcp.close();
     }

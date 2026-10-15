@@ -111,11 +111,9 @@ const braked = (value: number | null, brake: number) =>
  * The previous release's free defaults. Its custom form always saved the six
  * LEGACY_CUSTOM_FORM_FIELDS, prefilled with these, so in a profile of that
  * shape a field with exactly this value means "the default" and takes the
- * new standard value instead. Migration 0787 removes them from stored
- * profiles; reading the same way covers a profile a pod of the previous
- * release saves during the rollout. A profile without all six fields (the
- * current form saves only the limits it changes, and API callers set what
- * they choose) is read as stored.
+ * new standard value instead. Migration 0789 deliberately leaves stored rows
+ * intact for old readers. New writes mark explicit overrides with version 2;
+ * unmarked old-pod writes keep normalizing throughout the rolling deploy.
  */
 export const LEGACY_FREE_SITE_LIMIT_DEFAULTS: Readonly<Record<string, unknown>> = Object.freeze({
   requestsPerMinutePerVisitor: 120,
@@ -146,7 +144,7 @@ export function siteLimitOverrides(
   stored: Record<string, unknown> | null | undefined,
 ): Partial<SiteLimitsValue> {
   if (!stored) return {};
-  const legacyForm = LEGACY_CUSTOM_FORM_FIELDS.every((field) => field in stored);
+  const legacyForm = stored.__siteLimitsVersion !== 2;
   const overrides = legacyForm
     ? Object.fromEntries(
         Object.entries(stored).filter(
@@ -173,7 +171,12 @@ export function siteLimitsForProfile(
 ): SiteLimitsValue {
   const standard = standardSiteLimits(settings);
   // Overrides adjust any kind's limits; custom is the standard limits plus them.
-  const overrides = siteLimitOverrides(profile.overrides);
+  const overrides = siteLimitOverrides(
+    profile.kind === "custom" ||
+      (profile.overrides as Record<string, unknown> | null)?.__siteLimitsVersion === 2
+      ? profile.overrides
+      : null,
+  );
   let limits: SiteLimitsValue;
   switch (profile.kind) {
     case "standard":
@@ -240,7 +243,9 @@ export function sourceSiteLimitProfile(
   return {
     kind: normalizedSiteLimitProfileKind(profile.kind),
     overrides:
-      profile.kind === "custom" || profile.overrides ? siteLimitOverrides(profile.overrides) : null,
+      profile.kind === "custom" || profile.overrides?.__siteLimitsVersion === 2
+        ? siteLimitOverrides(profile.overrides)
+        : null,
   };
 }
 
@@ -255,7 +260,7 @@ export function effectiveSiteLimits(
 ): SiteLimitsValue {
   const limits = siteLimitsForProfile(
     settings,
-    sourceSiteLimitProfile(siteProfile, workspaceProfile),
+    siteProfile ?? workspaceProfile ?? { kind: "standard", overrides: null },
   );
   return {
     ...limits,

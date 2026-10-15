@@ -1,23 +1,27 @@
 // Migrations 0788 and 0789, applied together as one release does, over data
 // the previous release wrote. 0788: existing Site agent conversations count in
 // the Site's windows (budget key `*`) and the platform usage tables arrive
-// owner-only. 0789: stored Site limit profiles move to the new limits model, so
-// existing Sites pick up the new defaults without a republish. Fields equal to
-// the old free defaults are dropped
-// (the old custom form prefilled all of them), a custom profile left with no
-// field of its own becomes standard, `free` becomes standard, and fields an
-// owner set to other values are kept.
+// owner-only. 0789: retain old-reader-compatible storage with no locked backfill;
+// new request-time resolution supplies the new defaults without republishing.
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
-import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
+import {
+  createDb,
+  ensureManagedAccessForUser,
+  putWorkspaceSiteLimitProfile,
+  type DbClient,
+} from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { testSettings } from "@opengeni/testing";
+import { siteLimitsForProfile } from "../../../apps/api/src/site-publishing/limits";
+import { previousReleaseSiteLimitsForProfile } from "./fixtures/site-limits-2fef1581b";
 
 setDefaultTimeout(180_000);
 
@@ -67,8 +71,11 @@ afterAll(async () => {
 });
 
 test.skipIf(!realDb)(
-  "0788 and 0789 keep existing conversations and move old-default limit profiles to the new model",
+  "0788 and 0789 preserve old readers and use request-time normalization without a locked backfill",
   async () => {
+    expect(() =>
+      previousReleaseSiteLimitsForProfile(testSettings(), { kind: "standard", overrides: null }),
+    ).toThrow();
     const admin = database!.admin;
     const userId = `site-limit-profiles-${crypto.randomUUID()}`;
     const access = await ensureManagedAccessForUser(client!.db, {
@@ -91,26 +98,21 @@ test.skipIf(!realDb)(
     ];
 
     type Stored = { kind: string | null; overrides: Record<string, unknown> | null };
-    const sites: Record<string, { before: Stored; after: Stored }> = {
+    const sites: Record<string, { before: Stored }> = {
       free: {
         before: { kind: "free", overrides: null },
-        after: { kind: "standard", overrides: null },
       },
       credits: {
         before: { kind: "credits", overrides: null },
-        after: { kind: "credits", overrides: null },
       },
       inherits: {
         before: { kind: null, overrides: null },
-        after: { kind: null, overrides: null },
       },
       prefilledCustom: {
         before: { kind: "custom", overrides: OLD_PREFILLED },
-        after: { kind: "standard", overrides: null },
       },
       emptyCustom: {
         before: { kind: "custom", overrides: null },
-        after: { kind: "standard", overrides: null },
       },
       ownerSetCustom: {
         before: {
@@ -121,25 +123,18 @@ test.skipIf(!realDb)(
             turnsPerConversation: 40,
           },
         },
-        after: {
-          kind: "custom",
-          overrides: { agentMicrosPerSitePerMonth: 5_000_000, turnsPerConversation: 40 },
-        },
       },
       ownerUncapped: {
         before: {
           kind: "custom",
           overrides: { ...OLD_PREFILLED, agentMicrosPerVisitorPerDay: null },
         },
-        after: { kind: "custom", overrides: { agentMicrosPerVisitorPerDay: null } },
       },
       leftoverOnUnlimited: {
         before: { kind: "unlimited", overrides: { agentMicrosPerConversation: 20_000 } },
-        after: { kind: "unlimited", overrides: null },
       },
       unknownField: {
         before: { kind: "custom", overrides: { agentModels: null, futureField: 7 } },
-        after: { kind: "custom", overrides: { futureField: 7 } },
       },
     };
     const siteIds = Object.fromEntries(
@@ -216,8 +211,20 @@ test.skipIf(!realDb)(
       const row = bySite[siteIds[name]!]!;
       expect({ name, kind: row.kind, overrides: row.overrides }).toEqual({
         name,
-        ...site.after,
+        ...site.before,
       });
+      if (row.kind) {
+        // The real previous-release switch has no standard branch. Its copied
+        // reader must accept every migrated row, not just pass the SQL CHECK.
+        expect(() => previousReleaseSiteLimitsForProfile(testSettings(), row)).not.toThrow();
+        const limits = siteLimitsForProfile(testSettings(), row as never);
+        if (name === "free" || name === "prefilledCustom") {
+          expect(limits.agentMicrosPerConversation).toBe(1_000_000);
+          expect(limits.agentMicrosPerVisitorPerDay).toBeNull();
+          expect(limits.agentMicrosPerSitePerMonth).toBe(10_000_000);
+        }
+        if (name === "ownerSetCustom") expect(limits.agentMicrosPerSitePerMonth).toBe(5_000_000);
+      }
     }
     const profiles = await admin<
       { workspaceId: string; kind: string; overrides: Record<string, unknown> | null }[]
@@ -225,12 +232,58 @@ test.skipIf(!realDb)(
       select workspace_id::text as "workspaceId", kind, overrides from site_limit_profiles
       where workspace_id in ${admin(workspaces)}`;
     const byWorkspace = Object.fromEntries(profiles.map((row) => [row.workspaceId, row]));
-    expect(byWorkspace[prefilledWorkspace]).toMatchObject({ kind: "standard", overrides: null });
+    expect(byWorkspace[prefilledWorkspace]).toMatchObject({
+      kind: "custom",
+      overrides: OLD_PREFILLED,
+    });
     expect(byWorkspace[ownerSetWorkspace]).toMatchObject({
       kind: "custom",
-      overrides: { agentMicrosPerVisitorPerDay: 500_000 },
+      overrides: { ...OLD_PREFILLED, agentMicrosPerVisitorPerDay: 500_000 },
     });
-    expect(byWorkspace[freeWorkspace]).toMatchObject({ kind: "standard", overrides: null });
+    expect(byWorkspace[freeWorkspace]).toMatchObject({ kind: "free", overrides: null });
+    // New writers also remain readable by the old binary, including explicit
+    // owner values exactly equal to an old default.
+    await putWorkspaceSiteLimitProfile(
+      client!.db,
+      { accountId, workspaceId: freeWorkspace },
+      {
+        kind: "standard",
+        overrides: { agentMicrosPerConversation: 20_000 },
+      },
+      `user:${userId}`,
+    );
+    const [written] = await admin<{ kind: string; overrides: Record<string, unknown> }[]>`
+      select kind, overrides from site_limit_profiles where workspace_id = ${freeWorkspace}`;
+    expect(written!.kind).toBe("free");
+    expect(() => previousReleaseSiteLimitsForProfile(testSettings(), written!)).not.toThrow();
+    expect(siteLimitsForProfile(testSettings(), written! as never).agentMicrosPerConversation).toBe(
+      20_000,
+    );
+    // The compatibility checkpoint neither takes table locks nor backfills.
+    const migrationSql = await readFile(
+      join(import.meta.dir, "../drizzle", MIGRATIONS[1]!),
+      "utf8",
+    );
+    const statements = migrationSql
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n")
+      .trim();
+    expect(statements).toBe("SELECT 1;");
+    // Execute the migration while another connection holds exclusive locks:
+    // it must complete rather than queue behind publication traffic.
+    await admin.begin(async (tx) => {
+      await tx`lock table site_publications, site_limit_profiles in access exclusive mode`;
+      const rolling = postgres(database!.ownerUrl, { max: 1, onnotice: () => undefined });
+      try {
+        await rolling.begin(async (connection) => {
+          await connection`set local lock_timeout = '100ms'`;
+          await connection.unsafe(migrationSql);
+        });
+      } finally {
+        await rolling.end();
+      }
+    });
     // The owner-only posture of both tables is restored.
     expect((await forcedRls()).every((row) => row.forced)).toBe(true);
     // The old conversation keeps its row and counts in the Site's windows.

@@ -12,12 +12,14 @@ import {
   getSitePublication,
   getSiteSqlDatabase,
   isSiteWorkspaceMember,
+  siteRuntimeConversationViewerEmail,
   type SiteRuntimeConversationViewerKind,
 } from "@opengeni/db";
 import type { PublishedSiteDataViewer } from "../site-data/service";
 import { siteSqlOffered } from "../site-sql/gateway";
 import { siteRuntimeLimitProfile, type SiteRuntimeHost } from "./runtime";
 import { siteServable } from "./service";
+import { effectiveSiteAccess, signedInSiteViewerKind, siteGuestsAllowed } from "./viewer";
 
 /**
  * A published Site's own data tools for its agent. Every Site agent
@@ -200,6 +202,22 @@ export async function resolveSiteAgentDataContext(
     (!subjectId || !(await isSiteWorkspaceMember(deps.db, scope, subjectId)))
   )
     return refused("This conversation's viewer is no longer a workspace member");
+  // Cancellation is only a convenience. Recheck the current audience for every
+  // tool call, using the verified identity retained on the server at start.
+  if (conversation.viewerKind === "guest") {
+    if (!siteGuestsAllowed(publication.access, deps.settings))
+      return refused("This conversation's viewer no longer has access to this Site");
+  } else if (conversation.viewerKind !== "member") {
+    const kind =
+      subjectId &&
+      signedInSiteViewerKind({
+        access: effectiveSiteAccess(publication.access, deps.settings),
+        member: false,
+        email: await siteRuntimeConversationViewerEmail(deps.db, scope, conversation.sessionId),
+        invitedEmails: publication.invitedEmails,
+      });
+    if (!kind) return refused("This conversation's viewer no longer has access to this Site");
+  }
   const domain = deps.settings.sitesDomain ?? "";
   const host: SiteRuntimeHost = {
     domain,

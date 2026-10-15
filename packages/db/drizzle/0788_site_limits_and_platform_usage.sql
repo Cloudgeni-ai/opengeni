@@ -33,9 +33,11 @@ CREATE TABLE site_platform_storage (
 );
 
 ALTER TABLE site_runtime_conversations ADD COLUMN budget_key text NOT NULL DEFAULT '*';
--- Old pods reserve only viewer-day and Site-month. New writers explicitly mark
+-- Old pods reserve viewer-day, Site-day and Site-month. New writers explicitly mark
 -- the four-window protocol; defaults stay false for old pods during rollout.
 ALTER TABLE site_runtime_conversations ADD COLUMN reservation_windows_complete boolean NOT NULL DEFAULT false;
+-- Server-verified viewer identity for live invitation checks at tool execution.
+ALTER TABLE site_runtime_conversations ADD COLUMN viewer_email text;
 ALTER TABLE site_runtime_conversations
   ADD CONSTRAINT site_runtime_conversations_budget_key_check
   CHECK (budget_key IN ('*', '*members')) NOT VALID;

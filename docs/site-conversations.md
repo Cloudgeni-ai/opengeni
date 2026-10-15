@@ -169,6 +169,10 @@ Non-members receive an explicit credit-billed model, one Site budget and an opti
 per-person budget; anonymous guests additionally meet bot guards. Admission reserves
 a $0.25 turn estimate by default, not the entire conversation cap; outstanding
 reservations return retryable `site_budget_busy`.
+The executable session ceiling is metered spend plus that funded reservation.
+Further sends, steering and resumes fund a top-up before execution; a single
+provider call can overshoot before metering. Data tools revalidate the current
+audience on every call, independently of best-effort cancellation.
 
 The Sites skill recommends a selector for this Site's conversations plus New
 conversation. First Send creates one session with a retry-stable idempotency key;

@@ -178,10 +178,7 @@ import { registerSiteDataTools } from "./site-data-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
 import { siteSqlGatewayConfig } from "../site-sql/gateway";
-import {
-  resolveSiteAgentDataContext,
-  type SiteAgentDataResolution,
-} from "../site-publishing/agent-data-tools";
+import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
@@ -1162,15 +1159,14 @@ export function buildOpenGeniMcpServer(
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
     // A published Site's own agent: its Site Data and Site SQL tools are
-    // pinned to that Site and act as the conversation's viewer (resolved
-    // once per server, on first use).
-    let siteAgentResolution: Promise<SiteAgentDataResolution> | undefined;
+    // pinned to that Site and act as the conversation's viewer. Resolve on
+    // every call: a long-lived MCP server must observe audience revocations.
     const siteAgent = () =>
-      (siteAgentResolution ??= resolveSiteAgentDataContext(
+      resolveSiteAgentDataContext(
         deps,
         { accountId: grant.accountId, workspaceId: grant.workspaceId },
         sessionId,
-      ));
+      );
     registerSiteDataTools(
       server,
       deps,

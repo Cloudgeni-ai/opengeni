@@ -1300,7 +1300,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewer.kind,
       );
       // One transaction counts the start and reserves a per-turn estimate
-      // against the visitor's and the Site's windows; the conversation cap
+      // against the visitor's and the Site's windows; only the funded allowance
       // becomes the session's usage limit, set in the create transaction. The
       // row also records the tools the conversation gets, so narrowing them
       // later stops it.
@@ -1310,6 +1310,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           siteId: host.site.id,
           viewerPrincipal: viewer.principal,
           viewerKind: viewer.kind,
+          viewerEmail: viewer.email,
           toolIds: mcpTools.map((tool) => tool.id),
           versionId: host.versionId,
           limits: budgets,
@@ -1357,7 +1358,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // Workspace members get no Site budget at all: their conversation is an
       // ordinary session under the workspace's normal limits, so no session
       // usage limit is stamped on it, whatever the Site's limits say.
-      const usageLimitMicros = viewer.kind === "member" ? null : reservation.limitMicros;
+      const usageLimitMicros = viewer.kind === "member" ? null : reservation.executionLimitMicros;
       let created: Response;
       try {
         created =
@@ -1496,17 +1497,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           );
       }
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
-      const admitted = await reserve(() =>
-        reserveSiteRuntimeConversationWork(deps.db, host.scope, {
-          sessionId: conversation.sessionId,
-          limits: budgets,
-          newTurn,
-          uncapped: viewer.kind === "member",
-        }),
-      );
-      // A member's conversation started while Sites still capped members
-      // carries the Site's cap as its session usage limit: lift it, unless
-      // someone has changed that limit since.
+      // Clear the stamped session cap before dropping the durable conversation
+      // marker. Failure refuses admission and preserves the marker for retry.
       if (viewer.kind === "member" && conversation.limitMicros !== null)
         await liftSiteConversationUsageLimit(
           deps,
@@ -1515,17 +1507,18 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           conversation.limitMicros,
           usage,
         );
-      // A per-conversation limit lowered since the start lowers the session's
-      // own usage limit too, before the work runs. Members' conversations
-      // never carry a Site-imposed usage limit.
-      if (admitted.limitMicros !== null && viewer.kind !== "member")
-        await capSiteConversationUsageLimit(
-          deps,
-          host,
-          conversation.sessionId,
-          admitted.limitMicros,
-          usage,
-        );
+      const admitted = await reserve(() =>
+        reserveSiteRuntimeConversationWork(deps.db, host.scope, {
+          sessionId: conversation.sessionId,
+          limits: budgets,
+          newTurn,
+          uncapped: viewer.kind === "member",
+        }),
+      );
+      // Stamp the funded ceiling before work, including atomic top-ups and
+      // reduced caps. Members never carry a Site-imposed usage limit.
+      if (admitted.executionLimitMicros !== null && viewer.kind !== "member")
+        await capSiteConversationUsageLimit(deps, host, conversation.sessionId, usage);
     };
     /**
      * A Site's composer drafts are text only: no workspace resources,

@@ -41,7 +41,7 @@ export class SitePublishingError extends Error {
 export type SitePublicationAccess = "members" | "invited" | "public";
 export type SitePublicationStatusValue = "active" | "unpublished" | "suspended";
 export type SiteSuspendedBy = "owner" | "admin" | "platform";
-/** `free` is the legacy name of `standard`; readers treat both alike, writers store `standard`. */
+/** Public `standard` retains the stored spelling `free` for previous-release readers. */
 export type SiteLimitProfileKindValue = "standard" | "free" | "credits" | "unlimited" | "custom";
 export type SiteViewerKindValue = "member" | "invited" | "user";
 
@@ -748,7 +748,11 @@ export async function upsertSitePublication(
     const overridesJson =
       limitProfile?.overrides === null || limitProfile?.overrides === undefined
         ? null
-        : JSON.stringify(limitProfile.overrides);
+        : JSON.stringify(
+            changes.limitProfile === undefined
+              ? limitProfile.overrides
+              : { ...limitProfile.overrides, __siteLimitsVersion: 2 },
+          );
     const [row] = existing
       ? await rawRows<PublicationRow>(
           tx,
@@ -756,7 +760,7 @@ export async function upsertSitePublication(
               noindex = ${noindex}, agent_enabled = ${agent.enabled}, agent_model = ${agent.model},
               agent_instructions = ${agent.instructions}, agent_tools = ${toolsJson}::jsonb,
               agent_guest_tools = ${agent.guestTools},
-              limit_profile_kind = ${limitProfile?.kind ?? null},
+              limit_profile_kind = ${storedSiteLimitKind(limitProfile?.kind ?? null)},
               limit_overrides = ${overridesJson}::jsonb,
               invited_emails = ${JSON.stringify(invited)}::jsonb,
               generation = nextval('site_host_generation_seq'), updated_by = ${input.actor},
@@ -771,7 +775,7 @@ export async function upsertSitePublication(
               limit_profile_kind, limit_overrides, invited_emails, created_by, updated_by)
             values (${input.siteId}, ${scope.accountId}, ${scope.workspaceId}, ${label}, ${access},
               ${status}, ${noindex}, ${agent.enabled}, ${agent.model}, ${agent.instructions},
-              ${toolsJson}::jsonb, ${agent.guestTools}, ${limitProfile?.kind ?? null},
+              ${toolsJson}::jsonb, ${agent.guestTools}, ${storedSiteLimitKind(limitProfile?.kind ?? null)},
               ${overridesJson}::jsonb,
               ${JSON.stringify(invited)}::jsonb, ${input.actor}, ${input.actor})
             returning ${PUBLICATION_COLUMNS}`,
@@ -1310,6 +1314,11 @@ export async function getSiteWorkspaceMemberPermissions(
 
 // --- limit profiles --------------------------------------------------------------
 
+/** Keep the on-disk spelling readable by the previous release during rollout. */
+function storedSiteLimitKind(kind: SiteLimitProfileKindValue | null) {
+  return kind === "standard" ? "free" : kind;
+}
+
 export async function getWorkspaceSiteLimitProfile(
   db: Database,
   scope: SitePublishingScope,
@@ -1336,10 +1345,13 @@ export async function putWorkspaceSiteLimitProfile(
   actor: string,
 ): Promise<StoredSiteLimitProfile> {
   await withRlsContext(db, scope, async (tx) => {
-    const overrides = profile.overrides === null ? null : JSON.stringify(profile.overrides);
+    const overrides =
+      profile.overrides === null
+        ? null
+        : JSON.stringify({ ...profile.overrides, __siteLimitsVersion: 2 });
     await tx.execute(
       sql`insert into site_limit_profiles (workspace_id, account_id, kind, overrides, updated_by)
-        values (${scope.workspaceId}, ${scope.accountId}, ${profile.kind}, ${overrides}::jsonb, ${actor})
+        values (${scope.workspaceId}, ${scope.accountId}, ${storedSiteLimitKind(profile.kind)}, ${overrides}::jsonb, ${actor})
         on conflict (workspace_id) do update set kind = excluded.kind,
           overrides = excluded.overrides, updated_by = excluded.updated_by, updated_at = now()`,
     );
@@ -1348,6 +1360,28 @@ export async function putWorkspaceSiteLimitProfile(
 }
 
 // --- conversations and budgets ---------------------------------------------------
+
+/** Verified identity retained at start; legacy conversations use a matching signed-in Site session. */
+export async function siteRuntimeConversationViewerEmail(
+  db: Database,
+  scope: SitePublishingScope,
+  sessionId: string,
+): Promise<string | null> {
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{ email: string | null }>(
+      tx,
+      sql`
+      select coalesce(c.viewer_email, (
+        select v.email from site_viewer_sessions v
+        where v.workspace_id = c.workspace_id and v.site_id = c.site_id
+          and 'user:' || v.subject_id = c.viewer_principal
+        order by v.created_at desc limit 1
+      )) as email from site_runtime_conversations c
+      where c.workspace_id = ${scope.workspaceId} and c.session_id = ${sessionId}`,
+    );
+    return row?.email ?? null;
+  });
+}
 
 /** Who started a Site conversation, as the Site saw them then. */
 export type SiteRuntimeConversationViewerKind = "member" | "invited" | "user" | "guest";
@@ -1367,7 +1401,7 @@ export type SiteRuntimeConversationRecord = {
   versionId: string | null;
   turns: number;
   meteredMicros: number;
-  /** The conversation's own spend cap, fixed at start (its session usage limit). */
+  /** The conversation's total spend cap; execution receives only funded increments. */
   limitMicros: number | null;
   reservedMicros: number;
   /** Work admitted so far (start, messages, steering, resumes). */
@@ -1402,16 +1436,15 @@ const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, viewer_k
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
   reserved_month::text as reserved_month, reservation_windows_complete, admissions, created_at, updated_at`;
 
-/** Old writers reserved viewer-day and Site-month only, including during rollout. */
+/** Previous-release writers reserved all windows except viewer-month. */
 function conversationReservedInWindow(
   row: ConversationRow,
   window: { principal: string; period: "day" | "month" },
 ): boolean {
   return (
     row.reservation_windows_complete ||
-    (window.principal === row.viewer_principal
-      ? window.period === "day"
-      : window.period === "month")
+    window.principal !== row.viewer_principal ||
+    window.period === "day"
   );
 }
 
@@ -1854,7 +1887,12 @@ export type SiteRuntimeBudget =
   | "agent_micros_per_site_per_month";
 
 export type SiteRuntimeReservation =
-  | { ok: true; limitMicros: number | null; reservedMicros: number }
+  | {
+      ok: true;
+      limitMicros: number | null;
+      executionLimitMicros: number | null;
+      reservedMicros: number;
+    }
   | {
       ok: false;
       budget: SiteRuntimeBudget;
@@ -1864,6 +1902,24 @@ export type SiteRuntimeReservation =
        */
       busy?: boolean;
     };
+
+/** Hold the reservation row while its funded execution ceiling is stamped. */
+export async function siteRuntimeFundedLimitInTransaction(
+  tx: Database,
+  scope: SitePublishingScope,
+  sessionId: string,
+): Promise<number | null> {
+  const [row] = await rawRows<ConversationRow>(
+    tx,
+    sql`
+    select ${CONVERSATION_COLUMNS} from site_runtime_conversations
+    where workspace_id = ${scope.workspaceId} and session_id = ${sessionId} for update`,
+  );
+  if (!row) throw new SitePublishingError("not_found", "Conversation not found");
+  return row.limit_micros === null
+    ? null
+    : Math.min(Number(row.limit_micros), Number(row.metered_micros) + Number(row.reserved_micros));
+}
 
 /** A conversation is not started on less than this (or its cap, when smaller). */
 export const SITE_RUNTIME_MIN_RESERVATION_MICROS = 1_000;
@@ -1887,7 +1943,7 @@ const turnReservation = (limits: SiteRuntimeBudgetLimits, mayStillSpend: number)
  * Site's day and month, refusing when any budget would be exceeded (`busy`
  * when only other running conversations' reservations are in the way). The
  * cap is the per-conversation limit, lowered to what the budgets still have;
- * it becomes the session's usage limit.
+ * the separate executionLimitMicros funds only this first increment.
  * The conversation row records the owner (Site and viewer) before the
  * session exists; `releaseSiteRuntimeConversationStart` undoes all of it.
  */
@@ -1899,6 +1955,8 @@ export async function reserveSiteRuntimeConversationStart(
     siteId: string;
     viewerPrincipal: string;
     viewerKind: SiteRuntimeConversationViewerKind;
+    /** Verified at sign-in, never taken from tool arguments. */
+    viewerEmail?: string | null;
     toolIds: readonly string[];
     versionId: string | null;
     limits: SiteRuntimeBudgetLimits;
@@ -1950,11 +2008,11 @@ export async function reserveSiteRuntimeConversationStart(
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
           viewer_principal, viewer_kind, tool_ids, budget_key, version_id, turns, limit_micros,
-          reserved_micros, reserved_day, reserved_month, admissions, reservation_windows_complete)
+          reserved_micros, reserved_day, reserved_month, admissions, reservation_windows_complete, viewer_email)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
           ${input.viewerPrincipal}, ${input.viewerKind}, ${JSON.stringify(input.toolIds)}::jsonb,
           ${budgetKey}, ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
-          ${periods.month}::date, 1, true)`,
+          ${periods.month}::date, 1, true, ${input.viewerEmail ?? null})`,
     );
     for (const window of Object.values(windows))
       await adjustUsageWindow(tx, scope, input.siteId, window, {
@@ -1970,7 +2028,12 @@ export async function reserveSiteRuntimeConversationStart(
               or (period = 'month' and period_start < (${periods.month}::date - interval '1 month')::date))
           limit 100))`,
     );
-    return { ok: true, limitMicros, reservedMicros: reserve } as const;
+    return {
+      ok: true,
+      limitMicros,
+      executionLimitMicros: limitMicros === null ? null : reserve,
+      reservedMicros: reserve,
+    } as const;
   });
 }
 
@@ -2018,8 +2081,8 @@ export async function releaseSiteRuntimeConversationStart(
  * estimate (at most what the conversation may still spend), refusing when a
  * budget cannot hold it (`busy` when only other conversations' reservations
  * are in the way). A per-conversation limit lowered since the start lowers
- * the conversation's cap (returned as `limitMicros`; the caller lowers the
- * session usage limit to it before the work runs). `uncapped` (a workspace
+ * the conversation's cap (returned as `limitMicros`; the caller stamps only
+ * executionLimitMicros, cumulative spend plus funding, before work). `uncapped` (a workspace
  * member's conversation, including one started before members were uncapped)
  * drops the conversation's own cap and holds no reservation.
  */
@@ -2107,7 +2170,12 @@ export async function reserveSiteRuntimeConversationWork(
           admissions = admissions + 1, reservation_windows_complete = true, updated_at = now()
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
     );
-    return { ok: true, limitMicros: cap, reservedMicros: target } as const;
+    return {
+      ok: true,
+      limitMicros: cap,
+      executionLimitMicros: cap === null ? null : conversation.meteredMicros + target,
+      reservedMicros: target,
+    } as const;
   });
 }
 

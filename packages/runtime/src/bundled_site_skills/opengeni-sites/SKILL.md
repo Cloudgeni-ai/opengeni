@@ -481,6 +481,11 @@ bind such values as parameters). Quote columns named `begin`, `end` or
 Your authoring session's tools let you build, inspect, and publish the Site;
 they do not define what a human viewer may do in the published app. A conversation
 started inside the Site is a separate agent session with its own tool access.
+Its own data tools recheck current audience access on every call: removing an
+invitation or narrowing the audience takes effect even if cancellation fails.
+Non-member execution is funded in increments ($0.25 by default), with the
+session ceiling equal to metered spend plus reserved funding. Further work
+must fund its next increment; one provider call can overshoot before metering.
 
 For documents, spreadsheets and presentations, a Site-started agent needs the
 declared editing tools and may edit or export only artifacts created in its own

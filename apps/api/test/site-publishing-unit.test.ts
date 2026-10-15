@@ -231,7 +231,10 @@ describe("limits", () => {
   test("overrides adjust any kind's limits, so editing a spend limit keeps the kind", () => {
     const credits = effectiveSiteLimits(
       settings,
-      { kind: "credits", overrides: { agentMicrosPerSitePerMonth: 40_000_000 } },
+      {
+        kind: "credits",
+        overrides: { __siteLimitsVersion: 2, agentMicrosPerSitePerMonth: 40_000_000 },
+      },
       null,
     );
     expect(credits.agentMicrosPerSitePerMonth).toBe(40_000_000);
@@ -292,7 +295,7 @@ describe("limits", () => {
     // A profile saved field by field (the current form, API callers) is read as stored.
     const chosen = effectiveSiteLimits(
       settings,
-      { kind: "custom", overrides: { agentMicrosPerConversation: 20_000 } },
+      { kind: "custom", overrides: { __siteLimitsVersion: 2, agentMicrosPerConversation: 20_000 } },
       null,
     );
     expect(chosen.agentMicrosPerConversation).toBe(20_000);

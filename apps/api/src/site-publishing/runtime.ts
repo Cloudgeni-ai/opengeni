@@ -23,6 +23,7 @@ import {
   recordUsageEvent,
   releaseSiteRuntimeConversationStart,
   setSessionUsageLimitInTransaction,
+  siteRuntimeFundedLimitInTransaction,
   settleSiteRuntimeConversationSpend,
   SITE_RUNTIME_ABANDONED_START_MINUTES,
   SITE_RUNTIME_MEMBERS_PRINCIPAL,
@@ -611,8 +612,8 @@ export async function settleSiteRuntimeSpend(
  * Lift the session usage limit a Site stamped on a workspace member's
  * conversation before members were kept out of Site limits: cleared only
  * while it is still exactly the Site's cap (`siteCapMicros`), so a limit
- * someone set on the session since is kept. Best effort: a conflicting
- * change wins.
+ * someone set on the session since is kept. Failure refuses admission; the
+ * caller retains its durable normalization marker and retries next time.
  */
 export async function liftSiteConversationUsageLimit(
   deps: SiteRuntimeDeps,
@@ -628,7 +629,13 @@ export async function liftSiteConversationUsageLimit(
       sessionId,
       runtime: true,
     }).catch(() => null);
-    if (read?.outcome !== "ok") return;
+    if (read?.outcome !== "ok")
+      throw sitePublishingError(
+        503,
+        "upstream_unavailable",
+        "site_conversation_unavailable",
+        "The conversation cannot continue right now",
+      );
     current = {
       usedMicros: read.state.usedMicros ?? 0,
       limitMicros: read.state.limitMicros,
@@ -637,7 +644,7 @@ export async function liftSiteConversationUsageLimit(
   }
   if (current.limitMicros !== siteCapMicros) return;
   const { version } = current;
-  await withWorkspaceSessionActivityRls(
+  const result = await withWorkspaceSessionActivityRls(
     deps.db,
     host.scope.workspaceId,
     async (tx) =>
@@ -651,20 +658,25 @@ export async function liftSiteConversationUsageLimit(
         producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
       }),
   ).catch(() => null);
+  if (result?.outcome !== "ok" && result?.outcome !== "replayed")
+    throw sitePublishingError(
+      503,
+      "upstream_unavailable",
+      "site_conversation_unavailable",
+      "The conversation cannot continue right now",
+    );
 }
 
 /**
- * Lower a conversation's session usage limit to `limitMicros` (a
- * per-conversation limit lowered after it started), before more work runs in
- * it. The Site's host identity writes it, compare-and-set on the version
- * read while settling. Refuses the work (503) when the limit cannot be
- * lowered, so a conversation never runs above its Site's current cap.
+ * Stamp only funded execution: cumulative spend plus the current reservation,
+ * bounded by the conversation cap. Top-ups reserve atomically before this
+ * raises the ceiling; reread under the reservation lock so overlapping
+ * admissions cannot stamp a stale larger allowance. Failure refuses work.
  */
 export async function capSiteConversationUsageLimit(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
   sessionId: string,
-  limitMicros: number,
   usage: SiteConversationUsage | null,
 ): Promise<void> {
   let current = usage;
@@ -685,21 +697,23 @@ export async function capSiteConversationUsageLimit(
           : null;
       if (current === null) break;
     }
-    if (current.limitMicros !== null && current.limitMicros <= limitMicros) return;
     const { version } = current;
     const result = await withWorkspaceSessionActivityRls(
       deps.db,
       host.scope.workspaceId,
-      async (tx) =>
-        await setSessionUsageLimitInTransaction(tx, {
+      async (tx) => {
+        const funded = await siteRuntimeFundedLimitInTransaction(tx, host.scope, sessionId);
+        if (funded === null) throw new Error("Non-member conversation has no funded ceiling");
+        return await setSessionUsageLimitInTransaction(tx, {
           ...host.scope,
           sessionId,
-          limitMicros,
+          limitMicros: funded,
           expectedVersion: version,
-          operationId: `site-runtime-cap:${sessionId}:${version}:${limitMicros}`,
+          operationId: `site-runtime-cap:${sessionId}:${version}:${funded}`,
           actor: { type: "host", subjectId: `site:${host.site.id}` },
           producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
-        }),
+        });
+      },
     ).catch(() => null);
     if (result?.outcome === "ok" || result?.outcome === "replayed") return;
     current = null;

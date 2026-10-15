@@ -1152,7 +1152,9 @@ export async function upsertSitePublicationForManager(
           kind: storedSiteLimitProfileKind(request.limitProfile.kind),
           // Overrides adjust any kind's limits (the console edits only the
           // spend limits and keeps the kind).
-          overrides: (request.limitProfile.overrides as Record<string, unknown> | null) ?? null,
+          overrides: request.limitProfile.overrides
+            ? { ...request.limitProfile.overrides, __siteLimitsVersion: 2 }
+            : null,
         };
   const model = request.agent?.model;
   if (model) {

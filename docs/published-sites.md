@@ -285,7 +285,12 @@ capped by the conversation cap and what is left) against the person's day
 or month and the Site's day or month in one transaction, so visitors who
 keep changing their visitor id or address can't spend past the Site's
 limit, while a few open conversations don't use up the whole Site.
-Reservations are settled to actual spend and released as turns and
+The session's executable usage ceiling is cumulative metered spend plus its
+funded reservation, never the larger conversation cap. A send, steer or resume
+first settles spend and atomically funds the next allowance, then stamps that
+ceiling before execution; exhausted allowances stop at the normal session-usage
+boundary. One provider call may overshoot before its receipt is metered, as with
+ordinary session limits. Reservations are settled to actual spend and released as turns and
 conversations finish. When only other conversations' outstanding
 reservations stand in the way, a start or message answers a retryable 429
 `site_budget_busy` with `retryAfterSeconds`. Guests are also
@@ -317,41 +322,48 @@ by people outside the workspace (for example "$1.20 of $10 used this
 month") for invited and public Sites only.
 
 Existing Sites take the new defaults without being republished. Limits are
-resolved on every request from the stored profile, and migration 0789
-rewrites stored profiles still on the old defaults:
+resolved on every request from the stored profile. Migration 0789 is a no-write
+compatibility checkpoint: it takes no table locks and performs no backfill.
+Previous-release readers do not understand `standard`, so new writers retain
+the stored spelling `free` and the public API reports it as `standard`:
 
-- `free` becomes `standard` (a $10 monthly Site limit, no per-person limit,
+- Stored `free` resolves as `standard` (a $10 monthly Site limit, no per-person limit,
   the guest bot guards above). Rows that old API processes still write as
   `free` during the rollout are read as `standard`.
-- In `custom` overrides, every field equal to the old free default is
-  removed (120 requests per visitor per minute, 30 guest writes per minute,
+- In unmarked legacy `custom` overrides, every field equal to the old free default is
+  ignored at request time (120 requests per visitor per minute, 30 guest writes per minute,
   agents and guest agents on, 10 conversations per visitor and 50 per Site
   per day, 20 messages and $0.02 per conversation, $0.20 per visitor per
   day, $2 per Site per month, no model list). A custom profile left with
-  nothing becomes `standard`, so an old $0.02 cap or $0.20 per-person limit
+  nothing uses standard defaults, so an old $0.02 cap or $0.20 per-person limit
   never carries over.
 - Explicit values different from those old defaults are kept with their new meaning: a
   per-visitor daily amount is the per-person limit, the Site's monthly
   amount is the Site limit, and the conversation, message and
   per-conversation caps are guest bot guards.
-- Overrides stored on other kinds are cleared; `credits` and `unlimited`
+- Legacy overrides stored on other kinds remain ignored; `credits` and `unlimited`
   are kept.
 
 An intentionally chosen value exactly equal to an old default is indistinguishable
-in stored profiles and is removed by this one-time migration. New explicit sparse
-custom overrides are preserved at request time.
+in old profiles and is treated as the old default at request time. New explicit
+overrides carry an internal `__siteLimitsVersion: 2` storage marker, ignored by
+old readers and omitted from API projections, so even an intentional $0.02 new
+override is preserved. No existing rows or CHECK constraints are rewritten.
 
-Reading a stored custom profile that still has the full old form also drops
-its old-default values, so a row the migration hasn't reached yet behaves
-the same.
+Old-pod writes remain unmarked and receive the same request-time normalization.
 
-Migration 0788 also marks existing conversations as using the legacy two-window
+Migration 0788 also marks existing conversations as using the legacy three-window
 reservation protocol. New starts explicitly use four windows; settlement and
 release subtract only reservations actually held in those windows, including
 old-pod writes during rollout. Legacy member conversations with budget key `*`
-stay usable and lose their old Site cap on their next admission.
+stay usable and lose their old Site cap on their next admission. The session
+limit is cleared before its retry marker; a transient failure refuses that
+admission and retries the clear on the next request.
 Their newly settled spend goes to member windows, while any old reservation
 is released from the original windows without touching other conversations.
+Data-tool execution rechecks the current publication audience using the
+server-retained verified viewer identity. Removed invitations and public-to-members
+changes revoke access even if background conversation cancellation failed or was skipped.
 
 ## Platform usage
 
