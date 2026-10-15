@@ -127,8 +127,24 @@ the gateway origin and secret stay configured. Details and limits are in
 
 When the embedded agent is on, visitors can start conversations with it from
 the Site. Each conversation runs as the Site's own service principal with
-narrow permissions, the publication's model and instructions, and a
-per-conversation spend cap that is in place before the first model call. A
+narrow permissions and the publication's model and instructions, without a
+sandbox or shell (a publication has no sandbox setting, so Site agents never
+get one). For people outside the workspace a per-conversation spend cap is
+in place before the first model call; workspace members' conversations get
+no Site cap and no stamped session usage limit, only the workspace's normal
+limits.
+
+Every conversation (members, invited people and guests) gets the Site's own
+data tools, pinned on the server to this Site and acting as the
+conversation's viewer, so they see and change only what that person could
+on the page (per-viewer collections, owner binding, `:viewer` and query
+audiences such as `signed_in` or `managers`): `site_data_query`,
+`site_data_write`, `site_sql_run` for named queries when Site SQL is on, and
+the read-only `site_sql_query` for members when Site SQL is on. Calls for
+another Site and every Site management tool (publication, migrate, define,
+reset, import, export, enable, files) are refused. Members also get the
+overlap of the Site's declared workspace tools and their own permissions
+(below); people outside the workspace get the Site's own data tools only. A
 visitor can list, read and continue only their own conversations on that
 Site, and sees a Site-safe view of them (no workspace ids, instructions,
 tools or metadata). Agents started from a Site can't create or change
@@ -146,8 +162,9 @@ model, subscriptions (Codex, Claude or SuperGrok plans) included. People
 outside the workspace never use a member's subscription: when the Site's
 model is subscription-billed they use the workspace's default credit-billed
 model instead, and when the workspace has none they are refused
-(`not_available_for_viewer`, `feature: "agent_model"`). The publication's
-`outsideAgentModel` and a readiness warning name the model they get.
+(`not_available_for_viewer`, `feature: "agent_model"`), also when an
+existing conversation holds a subscription model. The publication's
+`outsideAgentModel` names the model they get.
 
 Workspace tools (MCP connections) act with the workspace's shared
 connections, so only a workspace admin can give them to a Site's agent, and
@@ -157,8 +174,13 @@ visitors and guests) never get workspace tools; they use the Site's own data
 (Site Data and Site SQL) and the page. `agent.guestTools` is retired: it is
 accepted and ignored, and always reads `false`. An agent started from a
 Site page gets only the tools the Site declared (intersected with the
-member's permissions), and can create or edit documents, spreadsheets and
-presentations only when the Site declares a first-party editing tool. A
+member's permissions), and can create, edit or export documents,
+spreadsheets and presentations only when the Site declares a first-party
+editing tool. A session a Site page starts in the console gets only the
+first-party tools the Site declares plus the Site's own data tools (never
+the workspace default set) and no sandbox. Console-frame workspace connections
+are narrowed to the exact declared tool names through `ToolRef.allowedTools`,
+intersected with the connection's own allowlist and the member's authority. A
 connection the workspace doesn't have is skipped rather than failing the
 conversation.
 Unpublishing, taking down, or narrowing a Site's access signs all its viewers
@@ -181,23 +203,44 @@ or a named query's audience. Members-only Sites have no warnings.
 
 | Warning                            | Means                                                                 |
 | ---------------------------------- | --------------------------------------------------------------------- |
-| `workspace_tools_members_only`     | The page calls workspace tools; only members can                      |
-| `agent_tools_members_only`         | The agent's workspace tools are for members only                      |
+| `workspace_tools_members_only`     | The page calls workspace tools, which work only inside Opengeni       |
+| `agent_tools_members_only`         | The agent's workspace tools are for members who may use connections  |
 | `site_data_guest_read` / `_write`  | Guests can't read, add or change a collection the page uses (fixable) |
 | `site_data_members_write`          | A `shared_read` collection the page writes; only managers write it    |
 | `site_sql_query_signed_in`         | A query needs a signed-in viewer; guests can't run it (fixable)       |
 | `site_sql_query_managers`          | A managers-only query the page runs (fixable)                         |
 | `agent_model_outside_unavailable`  | Outsiders get no agent: no credit-billed model                        |
+| `page_not_checked`                 | The page is over 2 MB, so what it uses was not checked                |
 
 When the agent's model is a subscription and outsiders use a credit-billed
 model instead, that is not a warning: the publication's `outsideAgentModel`
 names it and the dialog shows one quiet line. (`agent_model_outside_fallback`
 is no longer reported.)
 
-At run time, everything a viewer can't do answers 403 with
+### Readiness check
+
+The check reads the published version's stored HTML (up to 2 MB; a larger
+page reports `page_not_checked`) once per version and caches the result.
+It is conservative and never blocks publishing:
+
+- a collection is used when the page names it in `collection("name")`, and
+  written when that expression, or a variable assigned from it, calls
+  `insert`, `put`, `patch`, `delete` or `increment`;
+- a named query is used when the page calls `sql.run("name")`;
+- workspace tools are used when the version requests tools, or the page
+  calls `tools.<server>.<tool>` or `tools.$call`.
+
+Names built at run time are not seen, so a clean result is not a proof; use
+**View as visitor** to try the page as its audience would.
+
+At run time, everything a viewer's audience can't do answers 403 with
 `details.code` `not_available_for_viewer` and a `feature` (`agent`,
 `agent_model`, `workspace_tools`, `site_data`, `site_sql`), so a page can
-show a friendly state. Pages can avoid the error entirely by reading
+show a friendly state. In this release, `details.legacyCode` also
+carries the code older pages matched on (`site_agents_unavailable`,
+`site_tools_unavailable`, or `forbidden` for Site Data and Site SQL). A
+Site Data refusal about one record (one the viewer doesn't own) keeps its
+own Site Data code. Pages can avoid the error entirely by reading
 `site.capabilities` (from `site.config`): `agent`, `workspaceTools`,
 `siteData` (`viewer` or `guest`), `sqlQueryAudiences` and `viewAs`.
 
@@ -230,10 +273,16 @@ the viewer is:
   Publish page: 20 conversations per visitor per day, 500 per Site per day,
   50 messages per conversation and $1.00 per conversation.
 
-Each new conversation reserves its whole spend cap against the person's day
+Each running turn reserves an estimate
+(`OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN`, $0.25 by default,
+capped by the conversation cap and what is left) against the person's day
 or month and the Site's day or month in one transaction, so visitors who
-keep changing their visitor id or address can't spend past the Site's limit;
-unused reservations are released as conversations finish. Guests are also
+keep changing their visitor id or address can't spend past the Site's
+limit, while a few open conversations don't use up the whole Site.
+Reservations are settled to actual spend and released as turns and
+conversations finish. When only other conversations' outstanding
+reservations stand in the way, a start or message answers a retryable 429
+`site_budget_busy` with `retryAfterSeconds`. Guests are also
 rate limited per client address (four visitors' worth), so new visitor ids
 don't reset their limits. A refused start or message answers 429
 `site_budget_exhausted` with the `budget` that ran out
@@ -253,23 +302,59 @@ don't reset their limits. A refused start or message answers 429
 Even unlimited keeps 600 requests per visitor per minute, 10,000
 conversations per Site per day and $5.00 per conversation; signed-in people
 outside the workspace meet the same two conversation caps. Workspace admins
-set the limits (the Publish page writes a `custom` profile) and the default
-profile for new publications; each Site can override it. The Publish page
+set the limits and the default profile for new publications; each Site can
+override it. Any profile may carry overrides that adjust its limits: the
+Publish page edits the Site limit and the per-person limit this way and
+keeps the profile's kind. The Publish page
 shows the Site limit, the optional per-person limit and this period's spend
 by people outside the workspace (for example "$1.20 of $10 used this
 month") for invited and public Sites only.
 
-Stored profiles from before this model keep working: `free` rows became
-`standard` (the new defaults: a $10 monthly Site limit, no per-person limit,
-the guest bot guards above), `credits`, `unlimited` and `custom` rows are
-unchanged, and custom fields that no longer exist are ignored.
+Existing Sites take the new defaults without being republished. Limits are
+resolved on every request from the stored profile, and migration 0789
+rewrites stored profiles still on the old defaults:
+
+- `free` becomes `standard` (a $10 monthly Site limit, no per-person limit,
+  the guest bot guards above). Rows that old API processes still write as
+  `free` during the rollout are read as `standard`.
+- In `custom` overrides, every field equal to the old free default is
+  removed (120 requests per visitor per minute, 30 guest writes per minute,
+  agents and guest agents on, 10 conversations per visitor and 50 per Site
+  per day, 20 messages and $0.02 per conversation, $0.20 per visitor per
+  day, $2 per Site per month, no model list). A custom profile left with
+  nothing becomes `standard`, so an old $0.02 cap or $0.20 per-person limit
+  never carries over.
+- Explicit values different from those old defaults are kept with their new meaning: a
+  per-visitor daily amount is the per-person limit, the Site's monthly
+  amount is the Site limit, and the conversation, message and
+  per-conversation caps are guest bot guards.
+- Overrides stored on other kinds are cleared; `credits` and `unlimited`
+  are kept.
+
+An intentionally chosen value exactly equal to an old default is indistinguishable
+in stored profiles and is removed by this one-time migration. New explicit sparse
+custom overrides are preserved at request time.
+
+Reading a stored custom profile that still has the full old form also drops
+its old-default values, so a row the migration hasn't reached yet behaves
+the same.
+
+Migration 0788 also marks existing conversations as using the legacy two-window
+reservation protocol. New starts explicitly use four windows; settlement and
+release subtract only reservations actually held in those windows, including
+old-pod writes during rollout. Legacy member conversations with budget key `*`
+stay usable and lose their old Site cap on their next admission.
+Their newly settled spend goes to member windows, while any old reservation
+is released from the original windows without touching other conversations.
 
 ## Platform usage
 
 Apart from agent spend, published Sites use the platform: requests served by
 the gateway, Site SQL rows read and written, and storage (Site SQL and Site
 Data). Opengeni meters them per workspace and UTC month, with a monthly
-allowance included:
+allowance included. The allowance and the Opengeni-wide brake below cover
+only this platform usage, never model spend, which follows the limits in
+[Limits and billing](#limits-and-billing):
 
 | Meter        | Included every month | Price above it (default)  | Metered where                               |
 | ------------ | -------------------- | ------------------------- | ------------------------------------------- |

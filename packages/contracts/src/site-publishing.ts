@@ -603,7 +603,7 @@ export const SiteViewerCapabilities = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** The viewer may talk to the Site's embedded agent. */
     agent: z.boolean(),
-    /** The agent and the page bridge may use workspace tools (workspace members only). */
+    /** The agent may use declared workspace tools (authorized members only); the published page bridge cannot. */
     workspaceTools: z.boolean(),
     /** Site Data rules that apply: the collection's access mode, or its guest access. */
     siteData: z.enum(["viewer", "guest"]),

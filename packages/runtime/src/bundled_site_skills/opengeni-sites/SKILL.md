@@ -611,10 +611,18 @@ workspace first.
   off and picks its model. Workspace members are never limited by the Site.
   People outside the workspace share one Site limit ($10 a month by
   default) and an optional per-person limit, which workspace admins set;
-  anonymous guests also meet bot guards. The organization pays; handle
-  `rate_limited`, `site_budget_exhausted` (429) and
+  anonymous guests also meet bot guards. Non-member model calls use organization
+  credits; members keep their normal billing, including subscriptions. Handle
+  `rate_limited`, `site_budget_exhausted` and retryable `site_budget_busy` (429), and
   `site_platform_brake_engaged` (503) as normal UI states.
 - The same Site HTML and Site Data work there; no rebuild is needed.
+- Every published-host agent gets this Site's `site_data_query` and `site_data_write`,
+  plus `site_sql_run` when SQL is enabled; members also get read-only `site_sql_query`.
+  The server pins the Site and binds calls to the conversation's viewer, including
+  collection ownership and query audiences. No management tools or sandbox are
+  supplied; publication settings have no sandbox opt-in. Members get no Site
+  budget or stamped session usage limit. Existing Sites pick up defaults without
+  republishing. Platform allowances and the global brake never count model spend.
 
 **Build for the audience.** A published page can do only what its viewer
 may do. People outside the workspace (invited people and public visitors)

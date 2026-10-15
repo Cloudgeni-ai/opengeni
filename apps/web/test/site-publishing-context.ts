@@ -192,7 +192,7 @@ const model = (
   label: string,
   provider: string,
   providerLabel: string,
-  cost: "paid" | "subscription" = "paid",
+  cost: "credits" | "subscription" = "credits",
 ) => ({
   id,
   label,
@@ -201,6 +201,7 @@ const model = (
   api: "responses",
   capabilities: { reasoning: { efforts: ["medium"], defaultEffort: "medium" }, latencyModes: [] },
   cost,
+  source: cost === "subscription" ? "codex" : "deployment",
   credentialReadiness: { status: "ready", reason: null, basis: "configuration", checkedAt: null },
   policyAllowed: true,
   availability: { status: "available", selectable: true, reason: null, checkedAt: null },

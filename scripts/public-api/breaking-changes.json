@@ -1,6 +1,18 @@
 [
   {
     "ids": [
+      "semantic:SitePublication:effectiveLimits",
+      "semantic:SiteLimitProfile:free-standard",
+      "semantic:SiteEmbeddedAgent:guestTools",
+      "semantic:SiteRuntime:not_available_for_viewer"
+    ],
+    "deprecation": ".changeset/site-limits-platform-usage.md",
+    "removedInMajor": 3,
+    "sunset": "2026-10-15",
+    "reason": "Immediate user-directed Site semantic cutover, recorded in docs/design/api-compatibility-policy.md: limits follow the viewer, free remains accepted but responses normalize to standard, guestTools is ignored, and audience refusals have a new code with a legacyCode migration alias. No security exception or SDK revision refusal is claimed."
+  },
+  {
+    "ids": [
       "schema:CreateScheduledTaskRequest:$|1.connectionAccounts",
       "schema:CreateSessionScheduledTaskRequest:$.connectionAccounts",
       "schema:ScheduledTaskAgentConfig:$.connectionAccounts",

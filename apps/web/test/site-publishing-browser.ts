@@ -134,6 +134,12 @@ const shots: Shot[] = [
     scenario: "codex",
     narrow: true,
     ready: (page) => text(page, /People outside the workspace use .+ \(paid with credits\)/),
+    act: async (page) => {
+      const picker = page.getByRole("button", { name: "Agent model", exact: true });
+      await picker.getByText("Codex", { exact: true }).waitFor({ timeout: 90_000 });
+      assert.match(await picker.innerText(), /GPT-6 Astra/);
+      assert.doesNotMatch(await picker.innerText(), /Opengeni credits/);
+    },
   },
   {
     name: "publish-quota-refused",

@@ -395,9 +395,11 @@ export function readinessTitle(
   warnings: readonly SitePublishWarning[],
   access: SiteAccessMode,
 ): string {
-  const count = warnings.length;
+  const skipped = warnings.some((warning) => warning.code === "page_not_checked");
+  const count = warnings.filter((warning) => warning.code !== "page_not_checked").length;
   const who = access === "public" ? "public visitors" : "invited people";
-  return `${count} ${count === 1 ? "thing" : "things"} won't work for ${who}`;
+  if (count === 0 && skipped) return "Readiness check incomplete";
+  return `${count} ${count === 1 ? "thing" : "things"} won't work for ${who}${skipped ? " · check incomplete" : ""}`;
 }
 
 /** The published Site opened as the role its visitors have ("View as visitor"). */

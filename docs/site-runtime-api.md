@@ -34,14 +34,14 @@ forceNoindex }`. It is `null` when `OPENGENI_SITES_DOMAIN` is unset.
 | `OPENGENI_SITES_FORCE_NOINDEX` | `false` | Forces `noindex` on every Site |
 | `OPENGENI_SITES_ABUSE_EMAIL` | unset (`abuse@<domain>` shown) | Abuse contact shown in `SiteRuntimeConfig` and takedown pages; also where operator notices are emailed |
 | `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` | `false` | A guest agent start needs the gateway's human header (recommended for public Sites with guest agents) |
-| `OPENGENI_SITES_FREE_REQUESTS_PER_MINUTE_PER_VISITOR` | 120 | Free limit |
-| `OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE` | 30 | Free limit |
-| `OPENGENI_SITES_FREE_CONVERSATIONS_PER_VISITOR_PER_DAY` | 10 | Free limit |
-| `OPENGENI_SITES_FREE_CONVERSATIONS_PER_SITE_PER_DAY` | 50 | Free limit, every visitor together (unlimited still stops at 10000) |
-| `OPENGENI_SITES_FREE_TURNS_PER_CONVERSATION` | 20 | Free limit |
-| `OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION` | 20000 | Free limit (USD micros) |
-| `OPENGENI_SITES_FREE_AGENT_MICROS_PER_VISITOR_PER_DAY` | 200000 | Free limit |
-| `OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH` | 2000000 | Free limit |
+| `OPENGENI_SITES_AGENT_MICROS_PER_SITE_PER_MONTH` | 10000000 ($10) | Standard Site limit for people outside the workspace (USD micros) |
+| `OPENGENI_SITES_AGENT_MICROS_PER_PERSON_PER_DAY` | unset (off) | Standard per-person daily limit |
+| `OPENGENI_SITES_GUEST_CONVERSATIONS_PER_VISITOR_PER_DAY` | 20 | Guest bot guard |
+| `OPENGENI_SITES_GUEST_CONVERSATIONS_PER_SITE_PER_DAY` | 500 | Guest bot guard, every guest together (unlimited still stops at 10000) |
+| `OPENGENI_SITES_GUEST_TURNS_PER_CONVERSATION` | 50 | Guest bot guard |
+| `OPENGENI_SITES_GUEST_AGENT_MICROS_PER_CONVERSATION` | 1000000 ($1) | Guest bot guard |
+| `OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN` | 250000 ($0.25) | Held per running turn against the Site's spend limits |
+| `OPENGENI_SITES_FREE_*` | unset | Deprecated fallbacks, used only when the settings above are unset. A leftover `OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION=20000` keeps a $0.02 guest guard, so remove it |
 | `OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER` | 10 | `credits` profile multiplies the conversation and spend limits |
 | `OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR` | 5 | Abuse report rate |
 | `OPENGENI_SITES_VIEWER_SESSION_IDLE_SECONDS` | 43200 (12 h) | Viewer session idle expiry |
@@ -54,10 +54,13 @@ forceNoindex }`. It is `null` when `OPENGENI_SITES_DOMAIN` is unset.
 | `OPENGENI_SITES_HOST_MAP_TTL_SECONDS` | 300 (60 to 86400) | KV expiry of host-map records |
 | `OPENGENI_SITES_WEB_RISK_API_KEY` | unset (scanner `none`) | Enables the Google Web Risk URL scanner |
 
-Agents on Sites also need `OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true`,
-because each conversation is capped with a session usage limit. Without it,
-agent starts fail with `403 not_available_for_viewer` and
-`reason: "usage_limits_disabled"`.
+Agents for people outside the workspace also need
+`OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true`, because each of their
+conversations is capped with a session usage limit. Without it, their agent
+starts fail with `403 not_available_for_viewer` and
+`reason: "usage_limits_disabled"`. Workspace members' conversations carry no
+Site cap and no stamped session usage limit: only the workspace's normal
+limits apply to them.
 
 ## Management
 
@@ -277,7 +280,16 @@ Operations:
     `site:<siteId>`, through in-process dispatch with a short-lived delegated
     token.
     - It uses `agentAccess: "session"`, the publication's model,
-      instructions and MCP servers, no first-party tools, and memory off.
+      instructions and MCP servers, memory off and no sandbox
+      (`sandboxBackend: "none"`; a publication has no sandbox setting).
+    - Its only first-party tools are the Site's own data tools, pinned on
+      the server to this Site and acting as the conversation's viewer (the
+      same audience checks and row binding as the page): `site_data_query`
+      and `site_data_write`, `site_sql_run` when Site SQL is on, and the
+      read-only `site_sql_query` for members when Site SQL is on. A call for
+      another Site, or any Site management tool, is refused. Platform
+      instructions tell the agent whom it is talking with and, for people
+      outside the workspace, that it can only use this Site's own data.
     - The viewer is the end-user label. The Site, its title and the served
       version are recorded as the session's origin and on every turn
       (`SiteSessionOrigin`). The call runs inside
@@ -296,9 +308,11 @@ Operations:
       or permissions, approval policies, vault policy or connection
       accounts for any other caller acting from a Site page: the session
       routes return 403 `SITE_SESSION_TOOLS_FORBIDDEN`.
-    - It is capped with a per-conversation session usage limit, set in the
-      create transaction (the host actor `site:<siteId>`), so the first
-      turn is capped.
+    - For people outside the workspace it is capped with a per-conversation
+      session usage limit, set in the create transaction (the host actor
+      `site:<siteId>`), so the first turn is capped. Members' conversations
+      get no stamped limit; a member conversation from before this rule has
+      its unchanged Site cap lifted on its next message.
     - The conversation is recorded as owned by this Site and this viewer
       before the session is created, with a session id derived from the
       viewer's idempotency key; a retry returns the same conversation.
@@ -344,17 +358,19 @@ Operations:
   - **Queue items** (move, edit, steer, delete) are forwarded with the
     API's own request schemas. Steering a queued message also passes the
     agent and spend checks; the message was already counted when sent.
-  - **Budgets.** A start reserves the conversation's whole spend cap
-    against the visitor's day, the Site's day and the Site's month, and
-    counts the conversation against the visitor's and the Site's starts per
-    day, in one transaction that refuses when any is over. A Site-wide
+  - **Budgets** (people outside the workspace only). A start reserves one
+    turn's estimate (`OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN`,
+    $0.25, capped by the conversation cap and what is left) against the
+    visitor's day and month and the Site's day and month, and counts the
+    conversation against the visitor's and the Site's starts per day, in one
+    transaction that refuses when any is over. A Site-wide
     refusal first sweeps reservations conversations no longer need and
     retries once: a bounded batch of conversations whose session is idle,
     failed or cancelled, starts whose session never appeared, and
     reservations with no work for six hours, least recently visited first
     (each at most every 30 seconds; an empty sweep pauses sweeping that Site
     for a few seconds). Sending, steering and resuming re-check the turn
-    count and top the reservation up to the conversation's cap; a
+    count and reserve one more turn's estimate; a
     per-conversation limit lowered since the start lowers the cap and the
     session's own usage limit before the work runs. Settling (on reads,
     later starts and pause or cancel) brings counted spend up to the
@@ -364,8 +380,12 @@ Operations:
     `conversations_per_site_per_day`, `turns_per_conversation`,
     `agent_micros_per_conversation`, `agent_micros_per_visitor_per_day`,
     `agent_micros_per_visitor_per_month`, `agent_micros_per_site_per_day` or
-    `agent_micros_per_site_per_month`. Members' conversations are recorded
-    with `budget_key` `*members` and never count toward or meet these.
+    `agent_micros_per_site_per_month`. When only other conversations'
+    outstanding reservations stand in the way, the refusal is a retryable
+    429 `site_budget_busy` with `retryAfterSeconds`. Members' conversations
+    are recorded with `budget_key` `*members` and never count toward or
+    meet these; a member conversation recorded under `*` before this rule
+    keeps working, uncapped.
   - **Unavailable agents** return 403 `not_available_for_viewer` with
     `feature: "agent"` and a `reason` of `agent_disabled`,
     `public_agents_disabled`, `guest_agents_disabled` or
@@ -404,12 +424,21 @@ Profiles:
   `OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER`.
 - `unlimited` removes the spend limits but keeps `UNLIMITED_SITE_FLOOD_BRAKES`.
 - `custom` merges valid overrides over the standard defaults.
+- Any profile may carry overrides; they adjust that kind's limits (the
+  Publish page edits the spend limits this way and keeps the kind).
 - The flood brakes apply under every profile.
 
 `GET /site/config` also returns the viewer's `capabilities`
 (`SiteViewerCapabilities`: `agent`, `workspaceTools`, `siteData`,
-`sqlQueryAudiences`, `viewAs`), and anything the viewer can't do answers 403
-`not_available_for_viewer` with a `feature`.
+`sqlQueryAudiences`, `viewAs`), computed from the same checks the routes
+enforce (the agent also reflects the platform brake and whether a
+credit-billed model exists for people outside the workspace;
+`workspaceTools` needs a member who may use connections). Anything the
+viewer's audience can't do answers 403 `not_available_for_viewer` with a
+`feature`, and `details.legacyCode` carries the code older Site code matched
+on (`site_agents_unavailable`, `site_tools_unavailable` or `forbidden`)
+in this release. Per-record Site Data refusals (a record the viewer
+doesn't own) keep their own Site Data code.
 
 Counters are single-row upserts in `site_runtime_rate_windows` (per minute)
 and `site_runtime_usage` (per day and month). Rate windows can overshoot by

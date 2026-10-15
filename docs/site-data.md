@@ -545,7 +545,7 @@ PUT `/settings`, POST|PUT|DELETE `/queries/:name`, POST `/migrations`, `/query`,
 | `site_sql_import`       | SQL (schema statements become an `import_<time>` migration, then the data runs, then triggers become `import_<time>_triggers`), CSV or JSON rows into a table |
 | `site_sql_reset`        | `keep`: empty and rebuild from the migrations; `drop`: delete everything and forget the definitions |
 
-Every route and tool except `site_sql_run` needs the manager role on the
+Ordinary authoring routes and tools except `site_sql_run` need the manager role on the
 Site; read tools also need `artifacts:read` and the rest `artifacts:publish`.
 `site_sql_run` needs `artifacts:read` and applies the query's audience to the
 agent as to a page viewer (managers run every query). The tools are only
@@ -555,7 +555,14 @@ An agent started from a Site page (its session, spawning lineage or current
 turn came from the page) gets the page's reach, as with Site Data: every
 management tool and route refuses it (`forbidden`), and `site_sql_run` runs
 only the named queries the page itself could run, on that Site only, with
-`:viewer` bound to the agent's person.
+`:viewer` bound to the agent's person. Published-host conversations automatically
+receive `site_data_query` and `site_data_write`, plus `site_sql_run` when SQL is
+enabled. Workspace-member conversations additionally receive read-only
+`site_sql_query`. The server pins the Site and resolves the conversation's viewer,
+including collection ownership, per-viewer records and named-query audiences;
+cross-Site requests and management tools are refused. A guest calling a
+`signed_in` named query gets `sign_in_required`. This exception does not grant
+ad hoc writes, definitions, migrations, imports, exports, reset or file management.
 Over HTTP, the Site agent guard (`SITE_AGENT_METHOD_WRITES` in
 `apps/api/src/site-agent-guard.ts`) opens only
 `POST .../sql/queries/:name` to such an agent; every other Site SQL write

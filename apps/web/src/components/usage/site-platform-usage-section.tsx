@@ -83,8 +83,16 @@ export function SitePlatformUsageView({ usage }: { usage: SitePlatformUsage }) {
               key={meter.meter}
               label={PLATFORM_METER_LABELS[meter.meter]}
               measure="used"
-              percent={meter.allowance > 0 ? (meter.used / meter.allowance) * 100 : null}
-              valueLabel={`${formatPlatformAmount(meter.meter, meter.used)} of ${formatPlatformAmount(meter.meter, meter.allowance)}`}
+              percent={
+                usage.billingMode !== "usage_only" && meter.allowance > 0
+                  ? (meter.used / meter.allowance) * 100
+                  : null
+              }
+              valueLabel={
+                usage.billingMode === "usage_only"
+                  ? formatPlatformAmount(meter.meter, meter.used)
+                  : `${formatPlatformAmount(meter.meter, meter.used)} of ${formatPlatformAmount(meter.meter, meter.allowance)}`
+              }
             />
           ))}
         </div>

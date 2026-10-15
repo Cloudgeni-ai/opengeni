@@ -73,14 +73,14 @@ async function render(node: React.ReactNode) {
   };
 }
 
-test("shows each meter against its monthly allowance, not charged in usage_only", async () => {
+test("shows metered usage without implying an allowance is a cap in usage_only", async () => {
   const view = await render(<module.SitePlatformUsageView usage={usage()} />);
   const text = view.container.textContent ?? "";
   expect(text).toContain("Published Sites");
   expect(text).toContain("Not charged.");
   expect(text).toContain("Requests");
   expect(text).toContain("Rows written");
-  expect(text).toContain("of 1 GB");
+  expect(text).not.toContain(" of ");
   expect(text).not.toContain("Sites are paused");
   expect(text).not.toContain("charged this month");
   await view.unmount();

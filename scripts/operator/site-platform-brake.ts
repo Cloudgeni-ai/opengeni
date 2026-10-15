@@ -70,6 +70,7 @@ try {
     JSON.stringify(
       {
         command,
+        operator: values.operator?.trim() ?? null,
         totals,
         estimatedUsd: usd(estimateMicros),
         limitUsd: usd(limitMicros),
