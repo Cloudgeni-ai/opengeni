@@ -132,6 +132,7 @@ import {
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
   compactionFailureTurnEventPayload,
+  compactionFirstPreparationEventPayload,
   modelPreparationFailureEventPayload,
   isCompactionSummaryFailure,
   PostCompactionContinuationEmptyError,
@@ -1642,7 +1643,11 @@ export async function runTurnStreamAttempt(
       }
       if (
         !eventing.firstModelRequestPreparationRecorded &&
-        eventing.firstModelRequestPreparationStartedAt !== null
+        eventing.firstModelRequestPreparationStartedAt !== null &&
+        // Compaction needed before the first request is an expected step the
+        // in-activity recovery below settles and then reopens; it is not a
+        // preparation failure.
+        !(findCompactionNeededError(error) && eventing.turnStartedPublished)
       ) {
         eventing.firstModelRequestPreparationRecorded = true;
         const durationMs = Math.max(
@@ -2294,6 +2299,24 @@ export async function runTurnStreamAttempt(
           thresholdTokens: compactionNeeded?.thresholdTokens,
           ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
         });
+        // When compaction is needed before the turn's first model request,
+        // preparation is still open. Settle it as an expected transition and
+        // reopen it for the retried request, whose real dispatch then records
+        // the preparation landmark and its startup sample.
+        if (
+          !eventing.firstModelRequestPreparationRecorded &&
+          eventing.firstModelRequestPreparationStartedAt !== null
+        ) {
+          const durationMs = performance.now() - eventing.firstModelRequestPreparationStartedAt;
+          eventing.firstModelRequestPreparationStartedAt = null;
+          eventing.firstModelRequestCheckpointAt = null;
+          await eventing.publish([
+            {
+              type: "turn.startup.phase.failed",
+              payload: compactionFirstPreparationEventPayload(durationMs),
+            },
+          ]);
+        }
         let compacted = false;
         let compactionHandled = false;
         let compactionFailureMessage: string | null = null;

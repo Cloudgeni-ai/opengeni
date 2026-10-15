@@ -3802,6 +3802,66 @@ describe("StartupPhaseRow", () => {
     await r.unmount();
   });
 
+  test("compacting before the first model request is a calm step, not a preparation failure", async () => {
+    const attemptId = "0c4d3b8e-5f7a-4e21-9d6c-2b8a1f3e7c90";
+    const receipt = (type: string, payload: unknown) => ({
+      ...timelineEvent(type, payload),
+      turnAttemptId: attemptId,
+    });
+    const compacting = [
+      receipt("turn.started", {}),
+      receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+      receipt("turn.startup.phase.failed", {
+        phase: "model_preparation",
+        durationMs: 145,
+        expectedTransition: true,
+        failureCategory: "context_compaction",
+        failureStage: "context_compaction",
+        failureCode: "compaction_required",
+        retryable: true,
+      }),
+      receipt("session.context.compaction.started", { trigger: "threshold" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={compacting} status="running" />);
+    try {
+      await flush();
+      expect(r.container.textContent).toContain("Compacting conversation first");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+      expect(r.container.querySelectorAll(".text-og-status-failed")).toHaveLength(0);
+
+      // The same attempt reopens preparation for the retried request.
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...compacting,
+            receipt("session.context.compacted", { trigger: "threshold" }),
+            receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+            receipt("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 90 }),
+            receipt("agent.model.request", { phase: "started" }),
+            receipt("agent.model.request", { phase: "first_byte", durationMs: 125 }),
+            receipt("turn.completed", { output: "Continued." }),
+          ]}
+          status="idle"
+        />,
+      );
+      await flush();
+      expect(r.container.textContent).toContain("Continued.");
+      const summary = Array.from(r.container.querySelectorAll<HTMLElement>("[aria-expanded]")).find(
+        (candidate) => candidate.textContent?.includes("Preparation"),
+      );
+      if (summary?.getAttribute("aria-expanded") === "false") {
+        await act(async () => summary.click());
+        await flush();
+      }
+      expect(r.container.textContent).toContain("Model request dispatched");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("an expected preparation wait leaves a lost command failed with retained output", async () => {
     const callId = "8f71c668-a605-4291-93ef-f4e57a37a4d1";
     const command = {

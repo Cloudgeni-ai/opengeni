@@ -34,6 +34,7 @@ export const STARTUP_WAIT_TITLES: Record<NonNullable<StartupPhaseItem["blockedRe
   capture_in_progress: "Waiting for sandbox checkpoint",
   rotation_in_progress: "Waiting for sandbox rotation",
   provider_recovery_in_progress: "Waiting for sandbox recovery",
+  compaction_required: "Compacting conversation first",
 };
 
 const STARTUP_PHASE_TITLES: Record<
