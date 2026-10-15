@@ -26,8 +26,7 @@ function countOf(value: string, char: string): number {
 
 function isValidUrl(value: string): boolean {
   try {
-    new URL(value);
-    return true;
+    return /^https?:$/u.test(new URL(value).protocol);
   } catch {
     return false;
   }
@@ -58,10 +57,14 @@ export function linkifyText(node: ReactNode): ReactNode {
   if (typeof node !== "string") return node;
   const segments = linkifySegments(node);
   if (!segments.some((segment) => segment.kind === "link")) return node;
-  return segments.map((segment, index) =>
-    segment.kind === "link" ? (
+  // Segments are contiguous, so each one's text offset is a stable unique key.
+  let offset = 0;
+  return segments.map((segment) => {
+    const key = offset;
+    offset += segment.value.length;
+    return segment.kind === "link" ? (
       <a
-        key={index}
+        key={key}
         className={LINKIFIED_LINK_CLASS}
         href={segment.value}
         target="_blank"
@@ -70,7 +73,7 @@ export function linkifyText(node: ReactNode): ReactNode {
         {segment.value}
       </a>
     ) : (
-      <Fragment key={index}>{segment.value}</Fragment>
-    ),
-  );
+      <Fragment key={key}>{segment.value}</Fragment>
+    );
+  });
 }
