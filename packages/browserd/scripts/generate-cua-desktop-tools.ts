@@ -6,6 +6,10 @@ import { createCuaRuntime } from "../src/cua/sdk";
 
 // Release generation reads only the bundled driver's static tool inventory.
 // No app discovery, screenshots, native input, or permission prompts.
+// Run it on each platform: macOS defines the admitted set; Linux and Windows
+// publish their own schemas for that set and may omit tools they lack.
+const suffix =
+  process.platform === "linux" ? ".linux" : process.platform === "win32" ? ".windows" : "";
 const directory =
   process.platform === "linux" ? await mkdtemp(join(tmpdir(), "cua-catalog-")) : null;
 const runtime = await createCuaRuntime(
@@ -15,12 +19,13 @@ try {
   const catalog = JSON.parse(await runtime.listToolsJson());
   const admitted = new Set(CUA_DESKTOP_TOOLS.map((tool) => tool.name));
   const tools = catalog.tools.filter((tool: { name: string }) => admitted.has(tool.name));
-  if (tools.length !== admitted.size) throw new Error("CUA desktop inventory is incomplete");
+  const missing = [...admitted].filter(
+    (name) => !tools.some((tool: { name: string }) => tool.name === name),
+  );
+  if (missing.length && !suffix) throw new Error("CUA desktop inventory is incomplete");
+  if (missing.length) console.log(`This platform omits: ${missing.join(", ")}`);
   await Bun.write(
-    new URL(
-      `../../contracts/src/cua-desktop-tools${process.platform === "linux" ? ".linux" : ""}.gen.json`,
-      import.meta.url,
-    ),
+    new URL(`../../contracts/src/cua-desktop-tools${suffix}.gen.json`, import.meta.url),
     JSON.stringify(tools, null, 2) + "\n",
   );
   console.log(`Generated ${tools.length} upstream desktop tool definitions`);

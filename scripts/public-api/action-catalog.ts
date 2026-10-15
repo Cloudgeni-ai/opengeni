@@ -163,6 +163,11 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
   },
   {
     pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/fixes$/,
+    request: "SitePublishWarningFix",
+  },
+  {
+    pattern:
       /^POST \/v1\/workspaces\/:workspaceId\/published-artifacts\/:artifactId\/publication\/takedown$/,
     request: "SiteTakedownRequest",
   },

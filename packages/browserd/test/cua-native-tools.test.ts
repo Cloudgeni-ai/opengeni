@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   CUA_DESKTOP_TOOLS,
   CUA_LINUX_DESKTOP_TOOLS,
+  CUA_WINDOWS_DESKTOP_TOOLS,
   type ComputerNativeCommand,
 } from "@opengeni/contracts";
 import {
@@ -32,6 +33,33 @@ test("Linux native admission uses the Linux release schema without accepting a M
   await expect(new CuaNativeTools(runtime, "owned", "macos").validate(input)).rejects.toThrow(
     "schema differs",
   );
+});
+
+test("Windows native admission uses the Windows release schema", async () => {
+  const runtime: CuaDesktopRuntime = {
+    listToolsJson: async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS }),
+    callTool: async () => {
+      throw new Error("Validation must not dispatch");
+    },
+    shutdown: async () => {},
+  };
+  const click = {
+    operationId: randomUUID(),
+    tool: "click",
+    arguments: { scope: "desktop", x: 10, y: 10 },
+  };
+  await new CuaNativeTools(runtime, "owned", "windows").validate(click);
+  await expect(new CuaNativeTools(runtime, "owned", "macos").validate(click)).rejects.toThrow(
+    "schema differs",
+  );
+  // The Windows driver has no batch tool, so it is never admitted there.
+  await expect(
+    new CuaNativeTools(runtime, "owned", "windows").validate({
+      operationId: randomUUID(),
+      tool: "run_actions",
+      arguments: { steps: [] },
+    }),
+  ).rejects.toThrow("unavailable");
 });
 const command = (): ComputerNativeCommand => ({
   protocolVersion: 1,

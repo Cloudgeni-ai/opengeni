@@ -1,7 +1,6 @@
 import {
-  CUA_DESKTOP_TOOLS,
-  CUA_LINUX_DESKTOP_TOOLS,
   ComputerNativeResult,
+  cuaDesktopToolsFor,
   type ComputerNativeCallRequest,
 } from "@opengeni/contracts";
 import { ComputerBackendError } from "../computer-backend";
@@ -17,8 +16,7 @@ export class CuaNativeTools {
   ) {}
 
   async validate(request: ComputerNativeCallRequest): Promise<void> {
-    const definitions = this.platform === "linux" ? CUA_LINUX_DESKTOP_TOOLS : CUA_DESKTOP_TOOLS;
-    const definition = definitions.find((tool) => tool.name === request.tool);
+    const definition = cuaDesktopToolsFor(this.platform).find((tool) => tool.name === request.tool);
     if (!definition || !this.runtime.listToolsJson)
       throw new ComputerBackendError(
         "unsupported",
