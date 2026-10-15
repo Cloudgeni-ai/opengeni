@@ -15,7 +15,7 @@ import {
   type SitePublication,
   type UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
-import type { AccessGrant, SiteAccessMode } from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
 import {
   assertNotSiteClampedAgent,
   currentSiteSessionOrigin,
@@ -32,6 +32,7 @@ import {
   getSiteDataSite,
   artifactCreatedInSessionTree,
   getSitePublication,
+  isSitePublishingUuid,
   getWorkspaceSiteLimitProfile,
   markSitePublicationEdgeSynced,
   readSiteRuntimeUsage,
@@ -57,7 +58,9 @@ import { ApiHttpError } from "../http/api-error";
 import { siteDataRole } from "../site-data/service";
 import { createSiteContentScanner, type SiteContentScanner } from "./content-scanner";
 import { createSiteEdgeSync, type SiteEdgeSync } from "./edge-sync";
-import { effectiveSiteLimits, sourceSiteLimitProfile } from "./limits";
+import { effectiveSiteLimits, sourceSiteLimitProfile, storedSiteLimitProfileKind } from "./limits";
+import { requireSitePlatformOpen, requireSitePlatformQuota } from "./platform-usage";
+import { readSitePublicationReadiness } from "./readiness";
 
 /**
  * Published Sites: publication management, the host map, and the work that
@@ -567,6 +570,21 @@ export async function afterSiteArtifactMutation<
   return result;
 }
 
+/**
+ * Refuse a new version of a published (active) Site while the Opengeni-wide
+ * platform brake is engaged. Sites that are not published, rollbacks and
+ * unpublishing are never braked.
+ */
+export async function requireSiteVersionPublishOpen(
+  deps: SitePublishingDeps,
+  scope: SitePublishingScope,
+  siteId: string,
+): Promise<void> {
+  if (!isSitePublishingUuid(siteId)) return;
+  const publication = await getSitePublication(deps.db, scope, siteId);
+  if (publication?.status === "active") await requireSitePlatformOpen(deps, "publish");
+}
+
 // --- the Site's own principal ---------------------------------------------------------
 
 /** The authority Site agent sessions run with: sessions only, nothing else. */
@@ -582,12 +600,21 @@ export const SITE_RUNTIME_AGENT_PERMISSIONS: readonly Permission[] = Object.free
  * (`site:<siteId>`), with a 60-second delegated token carrying only session
  * permissions, for in-process dispatch. The Site headers ride along so the
  * API's Site frame guard and provenance see which Site acts.
+ * `extraPermissions` adds what one request must delegate onward (a
+ * conversation start delegates its Site data tools' permissions).
  */
 export async function siteServiceSessionRequest(
   deps: Pick<SitePublishingDeps, "settings">,
   scope: SitePublishingScope,
   site: { id: string; versionId: string | null },
-  input: { origin: string; method: string; path: string; body?: unknown; label: string },
+  input: {
+    origin: string;
+    method: string;
+    path: string;
+    body?: unknown;
+    label: string;
+    extraPermissions?: readonly Permission[];
+  },
 ): Promise<Request> {
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
   if (!secret)
@@ -603,7 +630,9 @@ export async function siteServiceSessionRequest(
     workspaceId: scope.workspaceId,
     subjectId: `site:${site.id}`,
     subjectLabel: input.label.slice(0, 250),
-    permissions: [...SITE_RUNTIME_AGENT_PERMISSIONS],
+    permissions: [
+      ...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])]),
+    ],
     principalKind: "service",
     exp: Math.floor(Date.now() / 1000) + 60,
   });
@@ -947,12 +976,13 @@ export async function sitePublicationView(
 ): Promise<SitePublication> {
   const domain = requireSitesDomain(deps.settings);
   const profiles = await siteLimitInputs(deps, scope, publication);
-  const [openReports, usage] = await Promise.all([
+  const [openReports, usage, readiness] = await Promise.all([
     countOpenSiteAbuseReports(deps.db, scope, publication.siteId),
     readSiteRuntimeUsage(deps.db, scope, {
       siteId: publication.siteId,
       viewerPrincipal: SITE_RUNTIME_SITE_PRINCIPAL,
     }),
+    readSitePublicationReadiness(deps, scope, publication),
   ]);
   const hostname = siteHostname(publication.label, domain);
   return {
@@ -964,7 +994,7 @@ export async function sitePublicationView(
     access: publication.access,
     status: publication.status,
     noindex: publication.noindex || deps.settings.sitesForceNoindex,
-    agent: publication.agent,
+    agent: { ...publication.agent, guestTools: false },
     limitProfile: sourceSiteLimitProfile(profiles.site, profiles.workspace),
     effectiveLimits: effectiveSiteLimits(deps.settings, profiles.site, profiles.workspace),
     invitedEmails: publication.invitedEmails,
@@ -976,8 +1006,11 @@ export async function sitePublicationView(
     },
     usage: {
       agentMicrosThisMonth: usage.siteMonth.agentMicros,
+      agentMicrosToday: usage.siteDay.agentMicros,
       conversationsToday: usage.siteDay.conversations,
     },
+    warnings: readiness.warnings,
+    outsideAgentModel: readiness.outsideAgentModel,
     createdAt: publication.createdAt.toISOString(),
     updatedAt: publication.updatedAt.toISOString(),
   };
@@ -1058,6 +1091,14 @@ export async function upsertSitePublicationForManager(
   const activating =
     (request.status ?? existing?.status ?? "active") === "active" &&
     existing?.status !== "suspended";
+  // The Opengeni-wide platform brake stops new publications (already
+  // published Sites keep serving, and can still be changed or unpublished).
+  // In credits mode, so does a used-up monthly allowance the workspace
+  // cannot pay for (402 site_platform_quota_exhausted).
+  if (activating && existing?.status !== "active") {
+    await requireSitePlatformOpen(deps, "publish");
+    await requireSitePlatformQuota(deps, scope, ["requests", "storage_bytes"]);
+  }
   if (activating && !siteServable(record))
     throw sitePublishingError(
       409,
@@ -1081,54 +1122,20 @@ export async function upsertSitePublicationForManager(
       "site_admin_required",
       "Only a workspace admin can change a Site's limits",
     );
-  // Workspace tools act with the workspace's shared connections for whoever
-  // views the Site: only a workspace admin may give them to the Site's agent
-  // (or to guests). Anyone who manages the Site may keep or remove them.
+  // Workspace tools act with the workspace's shared connections for the
+  // workspace members who use the Site's agent (people outside the workspace
+  // never get them): only a workspace admin may give them to the Site's
+  // agent. Anyone who manages the Site may keep or remove them. `guestTools`
+  // is retired: accepted and ignored.
   const tools = request.agent?.tools;
   const currentTools = new Set(existing?.agent.tools ?? []);
   const addsTools = (tools ?? []).some((tool) => !currentTools.has(tool));
-  const grantsGuestTools =
-    request.agent?.guestTools === true && existing?.agent.guestTools !== true;
-  if ((addsTools || grantsGuestTools) && !management.admin)
+  if (addsTools && !management.admin)
     throw sitePublishingError(
       403,
       "forbidden",
       "site_admin_required",
       "Only a workspace admin can give a Site's assistant workspace tools",
-    );
-  // Opening a Site to everyone while its tools are on for everyone gives them
-  // to people outside the workspace: that needs an admin as well.
-  const toolsAfter = tools === undefined ? (existing?.agent.tools ?? []) : (tools ?? []);
-  const everyoneToolsAfter = request.agent?.guestTools ?? existing?.agent.guestTools ?? false;
-  const opensToEveryone =
-    (request.access ?? existing?.access) === "public" && existing?.access !== "public";
-  if (opensToEveryone && everyoneToolsAfter && toolsAfter.length > 0 && !management.admin)
-    throw sitePublishingError(
-      403,
-      "forbidden",
-      "site_admin_required",
-      "Only a workspace admin can open a Site with tools to everyone",
-    );
-  // Invitees are invited viewers, who always get the Site's tools, whenever
-  // access is not members-only (public Sites included). So while the agent
-  // has tools, giving them to more invitees (adding invitees, or opening a
-  // Site that lists some) needs an admin too, unless everyone on the public
-  // Site gets the tools anyway. Removing invitees or narrowing does not.
-  const accessAfter = request.access ?? existing?.access ?? "members";
-  const invitedAfter =
-    request.invitedEmails !== undefined ? request.invitedEmails : (existing?.invitedEmails ?? []);
-  const toolInvitees = (access: SiteAccessMode | undefined, emails: readonly string[]) =>
-    access !== undefined && access !== "members" ? normalizeEmails(emails) : [];
-  const toolInviteesBefore = new Set(toolInvitees(existing?.access, existing?.invitedEmails ?? []));
-  const invitesPeople =
-    !(accessAfter === "public" && everyoneToolsAfter) &&
-    toolInvitees(accessAfter, invitedAfter).some((email) => !toolInviteesBefore.has(email));
-  if (invitesPeople && toolsAfter.length > 0 && !management.admin)
-    throw sitePublishingError(
-      403,
-      "forbidden",
-      "site_admin_required",
-      "Only a workspace admin can invite people while the Site's assistant has tools",
     );
   for (const tool of tools ?? [])
     if (!SITE_AGENT_TOOL_ID.test(tool) || RESERVED_SITE_AGENT_TOOL_IDS.has(tool))
@@ -1142,11 +1149,12 @@ export async function upsertSitePublicationForManager(
     request.limitProfile === undefined
       ? undefined
       : {
-          kind: request.limitProfile.kind,
-          overrides:
-            request.limitProfile.kind === "custom"
-              ? ((request.limitProfile.overrides as Record<string, unknown> | null) ?? null)
-              : null,
+          kind: storedSiteLimitProfileKind(request.limitProfile.kind),
+          // Overrides adjust any kind's limits (the console edits only the
+          // spend limits and keeps the kind).
+          overrides: request.limitProfile.overrides
+            ? { ...request.limitProfile.overrides, __siteLimitsVersion: 2 }
+            : null,
         };
   const model = request.agent?.model;
   if (model) {
@@ -1182,9 +1190,7 @@ export async function upsertSitePublicationForManager(
             ...(request.agent.tools !== undefined
               ? { tools: request.agent.tools ? [...new Set(request.agent.tools)] : null }
               : {}),
-            ...(request.agent.guestTools !== undefined
-              ? { guestTools: request.agent.guestTools }
-              : {}),
+            guestTools: false,
           },
         }
       : {}),
@@ -1229,10 +1235,7 @@ export async function upsertSitePublicationForManager(
     await stopSiteViewers(deps, scope, record.id, {
       reason: "agent_tools_narrowed",
       revokeSessions: false,
-      toolsNarrowedTo: {
-        tools: publication.agent.tools ?? [],
-        everyoneTools: publication.agent.guestTools,
-      },
+      toolsNarrowedTo: { tools: publication.agent.tools ?? [], everyoneTools: false },
     });
   scheduleSiteEdgeSync(deps, [publication.label, previousLabel], {
     siteIdHint: record.id,
@@ -1264,17 +1267,13 @@ export function siteAccessNarrowed(
   return null;
 }
 
-/**
- * Whether a Site's workspace tools narrowed: a tool removed, or tools no
- * longer given to everyone outside the workspace (`guestTools` turned off).
- */
+/** Whether a Site's workspace tools narrowed: a tool removed. */
 export function siteAgentToolsNarrowed(
-  before: Pick<SitePublicationRecord["agent"], "tools" | "guestTools">,
-  after: Pick<SitePublicationRecord["agent"], "tools" | "guestTools">,
+  before: Pick<SitePublicationRecord["agent"], "tools">,
+  after: Pick<SitePublicationRecord["agent"], "tools">,
 ): boolean {
   const kept = new Set(after.tools ?? []);
-  if ((before.tools ?? []).some((tool) => !kept.has(tool))) return true;
-  return before.guestTools && !after.guestTools && (before.tools ?? []).length > 0;
+  return (before.tools ?? []).some((tool) => !kept.has(tool));
 }
 
 /** MCP server ids (the session tool reference format). */

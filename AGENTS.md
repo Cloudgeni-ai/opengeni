@@ -313,6 +313,12 @@ preserving Pause, accepted inputs, parked turns and physical writers. Historical
 shell correction uses the existing operator manifest and produces no execution
 or parent notification. See `docs/run-lifecycle.md`.
 
+Published-host Site dispatch carries a server-only pending funding token. Its
+conversation row is locked before the session writer prefix through enqueue
+commit. Recovery revokes the token and checks the locked canonical queue before
+releasing funds; timeout or an idle projection alone is never enqueue-failure proof.
+See `docs/site-conversations.md`.
+
 Useful Knowledge retention is ordinary in-scope work under the accepted learning
 policy, including new Slack sessions; it does not require a separate "remember"
 request. Render the frozen effective modes and destination scope to the agent,

@@ -13,12 +13,14 @@ import {
   SiteDataQueryRequest,
   SiteDataWriteRequest,
   SiteSqlRunRequest,
+  SiteViewAs,
   type SiteLimitProfileKind,
   SITE_GATEWAY_CALLBACK_PATH,
   SITE_RUNTIME_API_PREFIX,
   SITE_TOOL_METHODS,
   SteerSessionQueueItemRequest,
   SubmitComposerDraftRequest,
+  type Permission,
   type SiteAuthExchangeResponse,
   type SiteEmbeddedAgent,
   type SiteRuntimeConfig,
@@ -27,17 +29,27 @@ import {
 import {
   withHostSessionUsageLimit,
   withSiteSessionOrigin,
+  admissibleWorkspaceModel,
+  loadWorkspaceModelSelectionInput,
+  resolveWorkspaceModelSelection,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   consumeSiteAuthCode,
+  finishSiteRuntimeAdmission,
+  withSiteRuntimeAdmission,
   createSiteAbuseReport,
+  getSiteWorkspaceMemberPermissions,
+  readSitePlatformUsage,
+  recordSitePlatformRequests,
+  setSiteViewerSessionViewAs,
   createSiteViewerSession,
   getOwnedSiteRuntimeConversation,
   getServableSiteVersion,
   getSession,
   isSiteWorkspaceMember,
   listOwnedSiteRuntimeConversations,
+  listSessionEvents,
   releaseSiteRuntimeConversationStart,
   reserveSiteRuntimeConversationStart,
   reserveSiteRuntimeConversationWork,
@@ -45,7 +57,25 @@ import {
   SiteDataError,
   SITE_RUNTIME_SITE_PRINCIPAL,
   type SiteRuntimeReservation,
+  type SiteRuntimeConversationRecord,
 } from "@opengeni/db";
+import {
+  SITE_AGENT_DATA_TOOL_PERMISSIONS,
+  siteAgentDataToolsForStart,
+  siteAgentInstructions,
+  sitePublishedDataViewer,
+} from "../site-publishing/agent-data-tools";
+import {
+  isSubscriptionBilledModel,
+  resolveSiteOutsideModel,
+  siteCreditModelIds,
+} from "../site-publishing/agent-model";
+import {
+  afterSitePlatformUsage,
+  requireSitePlatformOpen,
+  sitePlatformBrakeEngaged,
+} from "../site-publishing/platform-usage";
+import { SiteSqlError } from "../site-sql/service";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { markLocalInternalDispatch } from "../http/local-browser-boundary";
@@ -67,6 +97,7 @@ import {
 } from "../site-publishing/gateway-signature";
 import {
   capSiteConversationUsageLimit,
+  liftSiteConversationUsageLimit,
   enforceSiteRuntimeRate,
   enforceSiteRuntimeViewerRate,
   findSiteRuntimeHost,
@@ -76,10 +107,12 @@ import {
   resolveSiteRuntimeViewer,
   settleSiteRuntimeSpend,
   sha256Text,
-  siteAgentRefusal,
-  siteBudgetExhausted,
+  siteReservationRefused,
   siteClientAddressPrincipal,
+  siteNotAvailableForViewer,
+  siteRuntimeBudgetKey,
   siteRuntimeBudgetLimits,
+  siteViewerCapabilities,
   siteRuntimeForwardedResponse,
   siteRuntimeLimitProfile,
   siteRuntimeSessionRequest,
@@ -206,14 +239,54 @@ function parseJson<S extends z.ZodType>(bytes: Uint8Array, schema: S): z.infer<S
   return parsed.data;
 }
 
+/**
+ * Site Data for a viewer: what the viewer's audience may not use answers
+ * `not_available_for_viewer`; other refusals (a record the viewer does not
+ * own, a manager-only write) keep their Site Data code.
+ */
 async function runSiteData<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
+    if (
+      error instanceof SiteDataError &&
+      error.code === "forbidden" &&
+      error.details.reason === "guest_access"
+    )
+      throw siteNotAvailableForViewer("site_data", error.message, error.details);
     if (error instanceof SiteDataError) throw siteDataHttpError(error);
     throw error;
   }
 }
+
+/** Site SQL for a viewer: refusals for this viewer answer `not_available_for_viewer`. */
+async function runSiteSqlForViewer<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof SiteSqlError && error.code === "forbidden")
+      throw siteNotAvailableForViewer("site_sql", error.message, error.details);
+    throw error;
+  }
+}
+
+/** Hosts of one gateway platform report recorded at a time. */
+const SITE_PLATFORM_REPORT_CONCURRENCY = 8;
+
+/** POST /v1/site-runtime/platform/requests (gateway only, signed on the Sites apex). */
+const SitePlatformRequestReport = z.object({
+  v: z.literal(1),
+  reportId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u),
+  hosts: z
+    .array(
+      z.object({
+        host: z.string().min(1).max(253),
+        requests: z.number().int().positive().max(1_000_000_000),
+      }),
+    )
+    .min(1)
+    .max(500),
+});
 
 function sameText(a: string, b: string): boolean {
   const left = Buffer.from(a, "utf8");
@@ -350,29 +423,37 @@ function allowedQuery(url: URL, names: readonly string[], extra: Record<string, 
 }
 
 /**
- * The workspace tools a Site conversation gets: the Site's admin-chosen MCP
- * connections for workspace members and invited viewers. Everyone else
- * (signed-in people outside the workspace on a public Site, and anonymous
- * guests) gets them only when an admin opted them in (`guestTools`). Optional
- * references: a connection the workspace does not have is skipped rather
- * than failing the conversation.
+ * The workspace tools a Site conversation gets: the OVERLAP of what the Site
+ * declares (its admin-chosen MCP connections) and what the viewer may do in
+ * the workspace. Only workspace members who may attach MCP connections to
+ * their own sessions (`mcp_servers:attach`, or workspace admins) get them.
+ * People outside the workspace (invited people and public visitors, signed in
+ * or anonymous) never get workspace tools: only the Site's own data and the
+ * page. There is no setting that changes this; `guestTools` is ignored.
+ * Optional references: a connection the workspace does not have is skipped
+ * rather than failing the conversation.
  */
 export function siteAgentToolRefs(
-  agent: Pick<SiteEmbeddedAgent, "tools" | "guestTools">,
+  agent: Pick<SiteEmbeddedAgent, "tools">,
   viewer: Pick<SiteRuntimeViewer, "kind">,
+  memberPermissions: readonly string[] | null = null,
 ): ToolRef[] {
-  const toolIds = siteViewerGetsTools(agent, viewer) ? (agent.tools ?? []) : [];
+  const toolIds = siteViewerGetsTools(viewer, memberPermissions) ? (agent.tools ?? []) : [];
   return toolIds
     .filter((tool) => SessionMcpServerIdPattern.test(tool))
     .map((tool) => ({ kind: "mcp", id: tool, optional: true }));
 }
 
-/** Members and invited viewers get the Site's tools; everyone else only with `guestTools`. */
+/** Only workspace members who may use MCP connections get the Site's tools. */
 export function siteViewerGetsTools(
-  agent: Pick<SiteEmbeddedAgent, "guestTools">,
   viewer: Pick<SiteRuntimeViewer, "kind">,
+  memberPermissions: readonly string[] | null,
 ): boolean {
-  return viewer.kind === "member" || viewer.kind === "invited" || agent.guestTools;
+  if (viewer.kind !== "member" || !memberPermissions) return false;
+  return (
+    memberPermissions.includes("mcp_servers:attach") ||
+    memberPermissions.includes("workspace:admin")
+  );
 }
 
 /** A session id derived from the viewer's create idempotency key (same key, same conversation). */
@@ -459,6 +540,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "GET" && version) return await versionHtml(request, version[1]!);
     if (method === "POST" && suffix === "/auth/exchange") return await exchange(request);
     if (method === "POST" && suffix === "/auth/logout") return await logout(request);
+    if (method === "POST" && suffix === "/auth/view-as") return await viewAs(request);
+    if (method === "POST" && suffix === "/platform/requests")
+      return await platformRequests(request);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
     const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
@@ -491,7 +575,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const viewing = async (request: RuntimeRequest) => {
     const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
     const viewer = await resolveSiteRuntimeViewer(deps, host, request.fields);
-    const { limits, kind: profileKind } = await siteRuntimeLimitProfile(deps, host);
+    const { limits, kind: profileKind } = await siteRuntimeLimitProfile(deps, host, viewer);
     await enforceSiteRuntimeViewerRate(
       deps,
       host,
@@ -629,6 +713,77 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
 
   /**
+   * "View as visitor": a workspace member starts (`invited`, `public`) or
+   * ends (null) previewing this Site as that role on their own site-session.
+   * Refused for anyone else; the preview only ever shows less (see
+   * resolveSiteRuntimeViewer).
+   */
+  const viewAs = async (request: RuntimeRequest): Promise<Response> => {
+    const host = await requireServedSiteRuntimeHost(deps, request.domain, request.fields.host);
+    const input = parseJson(request.body, z.object({ viewAs: SiteViewAs.nullable() }));
+    const viewer = await resolveSiteRuntimeViewer(deps, host, request.fields, {
+      ignoreViewAs: true,
+    });
+    if (viewer.kind !== "member" || !viewer.sessionId)
+      throw sitePublishingError(
+        403,
+        "forbidden",
+        "site_view_as_members_only",
+        "Only workspace members can preview a Site as a visitor",
+      );
+    await setSiteViewerSessionViewAs(deps.db, host.scope, {
+      siteId: host.site.id,
+      sessionId: viewer.sessionId,
+      viewAs: input.viewAs,
+    });
+    return request.context.json({ viewAs: input.viewAs });
+  };
+
+  /**
+   * Batched gateway request counts (platform usage): the gateway counts
+   * every request it serves for a Site host, cache hits included, and
+   * reports them in signed batches on the Sites domain apex. Each host's
+   * count is recorded once per report id, so a retried report never counts
+   * twice. Hosts that no longer resolve are skipped. Hosts are recorded a few
+   * at a time, and each workspace's charges are settled once per report.
+   */
+  const platformRequests = async (request: RuntimeRequest): Promise<Response> => {
+    const apex = request.domain.toLowerCase();
+    if (request.fields.host.toLowerCase().replace(/\.$/u, "") !== apex)
+      throw invalid("Platform reports are signed for the Sites domain");
+    const input = parseJson(request.body, SitePlatformRequestReport);
+    const perHost = new Map<string, number>();
+    for (const entry of input.hosts) {
+      const name = entry.host.toLowerCase();
+      perHost.set(name, (perHost.get(name) ?? 0) + entry.requests);
+    }
+    const entries = [...perHost];
+    const workspaces = new Map<string, SiteRuntimeHost["scope"]>();
+    let counted = 0;
+    const recordOne = async ([name, requests]: [string, number]) => {
+      const host = await findSiteRuntimeHost(deps, request.domain, name);
+      if (!host) return;
+      const recorded = await recordSitePlatformRequests(deps.db, host.scope, {
+        siteId: host.site.id,
+        requests,
+        idempotencyKey: `site_platform.requests:${input.reportId}:${name}`,
+      });
+      if (!recorded) return;
+      counted += requests;
+      workspaces.set(host.scope.workspaceId, host.scope);
+    };
+    for (let next = 0; next < entries.length; next += SITE_PLATFORM_REPORT_CONCURRENCY)
+      await Promise.all(
+        entries.slice(next, next + SITE_PLATFORM_REPORT_CONCURRENCY).map(recordOne),
+      );
+    for (const scope of workspaces.values()) {
+      const usage = await readSitePlatformUsage(deps.db, scope);
+      if (usage) await afterSitePlatformUsage(deps, scope, usage);
+    }
+    return request.context.json({ counted });
+  };
+
+  /**
    * Abuse reports: anyone who reaches a served Site host, rate limited per
    * reporter, per client address and per Site. A reporter and a client
    * address each get the same small share (5 a minute by default) of the
@@ -684,12 +839,102 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const tools = async (request: RuntimeRequest, method: string): Promise<Response> => {
     if (!(SITE_TOOL_METHODS as readonly string[]).includes(method)) throw unsupported();
     await viewing(request);
-    throw sitePublishingError(
-      403,
-      "forbidden",
-      "site_tools_unavailable",
-      "Published Sites cannot use workspace tools",
+    throw siteNotAvailableForViewer(
+      "workspace_tools",
+      "Workspace tools are not available on published Sites",
+      { reason: "site_tools_unavailable" },
     );
+  };
+
+  /**
+   * The models a viewer's conversations may use. Members: the Site agent's
+   * model and the allowed models, subscriptions included. Everyone else
+   * never uses a subscription-billed model: a subscription agent model is
+   * replaced by the workspace's default credit-billed model, and
+   * `unavailable` when there is none (agent-model.ts).
+   */
+  const siteViewerModels = async (
+    host: SiteRuntimeHost,
+    viewer: SiteRuntimeViewer,
+    limits: { agentModels: string[] | null },
+  ): Promise<{ allowed: string[]; default: string | null; unavailable: boolean }> => {
+    const agentModel = host.publication.agent.model;
+    const named = (models: (string | null | undefined)[]) => [
+      ...new Set(
+        models.filter((model): model is string => typeof model === "string" && model.length > 0),
+      ),
+    ];
+    if (viewer.kind === "member") {
+      if (!viewer.subjectId)
+        throw siteNotAvailableForViewer("agent_model", "Sign in to use your workspace's models");
+      const selections = resolveWorkspaceModelSelection(
+        await loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
+          ...host.scope,
+          subjectId: viewer.subjectId,
+        }),
+      );
+      return {
+        allowed: selections
+          .filter((selection) => admissibleWorkspaceModel([selection], selection.model.id))
+          .map((selection) => selection.model.id),
+        default: agentModel,
+        unavailable: false,
+      };
+    }
+    const choice = await resolveSiteOutsideModel(deps, host.scope, {
+      siteId: host.site.id,
+      agentModel,
+    });
+    const creditModels = new Set(await siteCreditModelIds(deps, host.scope, host.site.id));
+    const credited = (models: string[]) => models.filter((model) => creditModels.has(model));
+    if (choice.kind === "unavailable")
+      return {
+        allowed: credited(named(limits.agentModels ?? [])),
+        default: null,
+        unavailable: true,
+      };
+    const model = choice.model;
+    return {
+      allowed: credited(named([model, ...(limits.agentModels ?? [])])),
+      default: model,
+      unavailable: false,
+    };
+  };
+
+  /**
+   * What this viewer can use, from the same checks the routes enforce: the
+   * agent also needs the platform brake open for people outside the
+   * workspace who are not invited, and a credit-billed model for anyone
+   * outside the workspace; the assistant's workspace tools need a member who
+   * may use connections.
+   */
+  const viewerCapabilities = async (
+    host: SiteRuntimeHost,
+    viewer: SiteRuntimeViewer,
+    limits: Parameters<typeof siteViewerCapabilities>[3],
+  ) => {
+    const base = siteViewerCapabilities(deps, host, viewer, limits);
+    let agent = base.agent;
+    if (agent && (viewer.kind === "guest" || viewer.kind === "user"))
+      agent = !(await sitePlatformBrakeEngaged(deps).catch(() => false));
+    if (agent && viewer.kind !== "member") {
+      const choice = await resolveSiteOutsideModel(deps, host.scope, {
+        siteId: host.site.id,
+        agentModel: host.publication.agent.model,
+      }).catch(() => null);
+      agent = choice !== null && choice.kind !== "unavailable";
+    }
+    const workspaceTools =
+      base.workspaceTools &&
+      viewer.subjectId !== null &&
+      viewer.subjectId !== undefined &&
+      siteViewerGetsTools(
+        viewer,
+        await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId).catch(
+          () => null,
+        ),
+      );
+    return { ...base, agent, workspaceTools };
   };
 
   const operation = async (request: RuntimeRequest, id: string): Promise<Response> => {
@@ -704,6 +949,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         // The Site's own view of "its workspace": no tenant data.
         return context.json({ id: host.scope.workspaceId, name: host.site.title });
       case "site.config": {
+        const capabilities = await viewerCapabilities(host, viewer, limits);
         const config: SiteRuntimeConfig = {
           siteId: host.site.id,
           title: host.site.title,
@@ -711,8 +957,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           versionId: host.versionId,
           access: effectiveSiteAccess(host.publication.access, deps.settings),
           viewer: publicSiteViewer(viewer),
+          capabilities,
           agent: {
-            enabled: siteAgentRefusal(deps, host, viewer, limits) === null,
+            enabled: capabilities.agent,
             model: host.publication.agent.model,
           },
           siteData: true,
@@ -722,16 +969,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         return context.json(config);
       }
       case "models.list": {
-        const models = [
-          ...new Set(
-            [host.publication.agent.model, ...(limits.agentModels ?? [])].filter(
-              (model): model is string => typeof model === "string" && model.length > 0,
-            ),
-          ),
-        ];
+        const models = await siteViewerModels(host, viewer, limits);
         return context.json({
-          models: models.map((model) => ({ id: model })),
-          defaultModel: host.publication.agent.model,
+          models: models.allowed.map((model) => ({ id: model })),
+          defaultModel: models.default,
         });
       }
       case "site.report":
@@ -754,21 +995,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const publishedViewer = (
     host: SiteRuntimeHost & { versionId: string },
     viewer: SiteRuntimeViewer,
-  ): PublishedSiteDataViewer => ({
-    kind: "published_viewer",
-    accountId: host.scope.accountId,
-    workspaceId: host.scope.workspaceId,
-    site: {
-      id: host.site.id,
-      title: host.site.title,
-      status: host.site.status,
-      visibility: host.site.visibility,
-      ownerSubjectId: host.site.ownerSubjectId,
-      createdBySubjectId: host.site.createdBySubjectId,
-    },
-    principal: viewer.principal,
-    guest: viewer.kind === "guest",
-  });
+  ): PublishedSiteDataViewer =>
+    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest");
 
   /**
    * Site SQL: run one named query of this Site as the viewer. The query's
@@ -792,27 +1020,29 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const siteId = host.site.id;
     return request.context.json(
       await runSiteSqlRoute(() =>
-        runSiteSqlQuery(
-          deps,
-          publishedViewer(host, viewer),
-          siteId,
-          name,
-          input.params ?? {},
-          { frameSiteId: siteId },
-          {
-            profileKind,
-            beforeWrite: async () => {
-              if (viewer.kind === "guest")
-                await enforceSiteRuntimeViewerRate(
-                  deps,
-                  host,
-                  viewer,
-                  request.fields,
-                  "guest_writes",
-                  guestWritesPerMinute,
-                );
+        runSiteSqlForViewer(() =>
+          runSiteSqlQuery(
+            deps,
+            publishedViewer(host, viewer),
+            siteId,
+            name,
+            input.params ?? {},
+            { frameSiteId: siteId },
+            {
+              profileKind,
+              beforeWrite: async () => {
+                if (viewer.kind === "guest")
+                  await enforceSiteRuntimeViewerRate(
+                    deps,
+                    host,
+                    viewer,
+                    request.fields,
+                    "guest_writes",
+                    guestWritesPerMinute,
+                  );
+              },
             },
-          },
+          ),
         ),
       ),
     );
@@ -947,17 +1177,45 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // carries the Site and version headers the API's Site frame guard
     // validates; sessions and turns it starts record this Site and version.
     const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };
-    const send = async (method: string, path: string, body?: unknown) =>
-      await withSiteSessionOrigin(siteOrigin, async () =>
-        dispatch(
-          await siteRuntimeSessionRequest(deps, host, viewer, {
-            origin: url.origin,
-            method,
-            path,
-            ...(body === undefined ? {} : { body }),
-          }),
-        ),
+    let pendingAdmission: { sessionId: string; admissionId: string } | undefined;
+    const send = async (
+      method: string,
+      path: string,
+      body?: unknown,
+      extraPermissions?: readonly Permission[],
+    ) => {
+      const execute = () =>
+        withSiteSessionOrigin(siteOrigin, async () =>
+          dispatch(
+            await siteRuntimeSessionRequest(deps, host, viewer, {
+              origin: url.origin,
+              method,
+              path,
+              ...(body === undefined ? {} : { body }),
+              ...(extraPermissions ? { extraPermissions } : {}),
+            }),
+          ),
+        );
+      const pending = pendingAdmission;
+      if (!pending) return await execute();
+      // The trusted context fences every session write through enqueue commit.
+      // A thrown/unknown dispatch retains its marker; recovery reconciles it.
+      const response = await withSiteRuntimeAdmission(
+        { ...pending, workspaceId: host.scope.workspaceId },
+        execute,
       );
+      await finishSiteRuntimeAdmission(deps.db, host.scope, pending);
+      pendingAdmission = undefined;
+      if (!response.ok) {
+        const current = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
+          sessionId: pending.sessionId,
+          siteId: host.site.id,
+          viewerPrincipal: viewer.principal,
+        });
+        if (current) await settleSiteRuntimeSpend(deps, host, current, { release: true });
+      }
+      return response;
+    };
     /** A forwarded session read, answered with the Site-safe projection. */
     const projected = async (response: Response, status = response.status) => {
       if (!response.ok) return siteRuntimeForwardedResponse(response);
@@ -981,7 +1239,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         "site_conversation_not_found",
         "Conversation not found",
       );
-    const budgets = siteRuntimeBudgetLimits(limits);
+    const budgets = siteRuntimeBudgetLimits(limits, deps.settings);
     /**
      * Reserve, and when a Site-wide budget refuses, release reservations
      * finished conversations no longer need and retry once (unless the Site
@@ -991,7 +1249,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       let reservation = await run();
       if (siteWideBudget(reservation) && (await sweepSiteRuntimeReservations(deps, host)))
         reservation = await run();
-      if (!reservation.ok) throw siteBudgetExhausted(reservation.budget);
+      if (!reservation.ok) throw siteReservationRefused(reservation);
       return reservation;
     };
 
@@ -1013,6 +1271,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (id === "sessions.create") {
       const input = parseJson(request.body, CreateConversationRequest);
       requireSiteAgent(deps, host, viewer, limits);
+      // The Opengeni-wide platform brake stops public visitors' agent turns.
+      if (viewer.kind === "guest" || viewer.kind === "user")
+        await requireSitePlatformOpen(deps, "guest_agent");
+      const models = await siteViewerModels(host, viewer, limits);
+      if (models.unavailable)
+        throw siteNotAvailableForViewer(
+          "agent_model",
+          "This Site's assistant is only available to workspace members right now",
+          { reason: "no_credit_billed_model" },
+        );
       if (
         viewer.kind === "guest" &&
         deps.settings.sitesGuestAgentHumanCheck &&
@@ -1028,13 +1296,41 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       const requestedSessionId = input.idempotencyKey
         ? idempotentSessionId(`${host.site.id}\n${viewer.principal}\n${input.idempotencyKey}`)
         : randomUUID();
+      let repair: { conversation: SiteRuntimeConversationRecord; model: string } | undefined;
       if (input.idempotencyKey) {
         const replay = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
           sessionId: requestedSessionId,
           siteId: host.site.id,
           viewerPrincipal: viewer.principal,
         });
-        if (replay) return await projected(await send("GET", `${base}/${replay.sessionId}`), 202);
+        if (replay) {
+          // A lost start response may have left only a reservation. Reconcile
+          // before replay so this key cannot remain stuck on a missing session.
+          await settleSiteRuntimeSpend(deps, host, replay);
+          const retained = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
+            sessionId: requestedSessionId,
+            siteId: host.site.id,
+            viewerPrincipal: viewer.principal,
+          });
+          if (retained) {
+            const shell = await getSession(deps.db, host.scope.workspaceId, requestedSessionId);
+            const started = await listSessionEvents(
+              deps.db,
+              host.scope.workspaceId,
+              requestedSessionId,
+              {
+                includeTypes: ["session.created"],
+                payloadMode: "none",
+                limit: 1,
+              },
+            );
+            if (!shell || started.length > 0)
+              return await projected(await send("GET", `${base}/${replay.sessionId}`), 202);
+            // Core deliberately retains a keyed shell when initialization fails.
+            // Re-enter its keyed Start repair, never insert/count a new conversation.
+            repair = { conversation: retained, model: shell.model };
+          }
+        }
       }
       // Settle the viewer's recent spend so the day budget sees it.
       for (const conversation of await listOwnedSiteRuntimeConversations(deps.db, host.scope, {
@@ -1044,23 +1340,85 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }))
         await settleSiteRuntimeSpend(deps, host, conversation);
       const agent = host.publication.agent;
-      const mcpTools = siteAgentToolRefs(agent, viewer);
-      // One transaction counts the start and reserves the conversation's whole
-      // cap against the visitor's day and the Site's day and month; the cap
+      const memberPermissions =
+        viewer.kind === "member" && viewer.subjectId
+          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
+          : null;
+      const mcpTools = siteAgentToolRefs(agent, viewer, memberPermissions);
+      if (repair) {
+        const previous = repair.conversation;
+        const legacyMember =
+          viewer.kind === "member" &&
+          previous.viewerKind === "member" &&
+          previous.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
+        if (
+          (previous.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
+          previous.toolIds.some((tool) => !mcpTools.some((allowed) => allowed.id === tool))
+        )
+          throw sitePublishingError(
+            409,
+            "conflict",
+            "site_conversation_outdated",
+            "This Site's assistant changed since this conversation started; start a new one",
+          );
+        if (
+          viewer.kind !== "member" &&
+          !(await siteCreditModelIds(deps, host.scope, host.site.id)).includes(repair.model)
+        )
+          throw siteNotAvailableForViewer(
+            "agent_model",
+            "This Site's assistant cannot use that model for you",
+            { reason: "subscription_model" },
+          );
+        if (viewer.kind === "member" && previous.limitMicros !== null)
+          await liftSiteConversationUsageLimit(
+            deps,
+            host,
+            requestedSessionId,
+            previous.limitMicros,
+            null,
+          );
+      }
+      // Every conversation gets this Site's own data tools, pinned to this
+      // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      const dataTools = await siteAgentDataToolsForStart(
+        deps,
+        host.scope,
+        host.site.id,
+        viewer.kind,
+      );
+      // One transaction counts the start and reserves a per-turn estimate
+      // against the visitor's and the Site's windows; only the funded allowance
       // becomes the session's usage limit, set in the create transaction. The
       // row also records the tools the conversation gets, so narrowing them
       // later stops it.
+      const admissionId = randomUUID();
       const reservation = await reserve(() =>
-        reserveSiteRuntimeConversationStart(deps.db, host.scope, {
-          sessionId: requestedSessionId,
-          siteId: host.site.id,
-          viewerPrincipal: viewer.principal,
-          viewerKind: viewer.kind,
-          toolIds: mcpTools.map((tool) => tool.id),
-          versionId: host.versionId,
-          limits: budgets,
-        }),
+        repair
+          ? reserveSiteRuntimeConversationWork(deps.db, host.scope, {
+              admissionId,
+              sessionId: requestedSessionId,
+              limits: budgets,
+              newTurn: false,
+              uncapped: viewer.kind === "member",
+              repairStart: true,
+            })
+          : reserveSiteRuntimeConversationStart(deps.db, host.scope, {
+              admissionId,
+              sessionId: requestedSessionId,
+              siteId: host.site.id,
+              viewerPrincipal: viewer.principal,
+              viewerKind: viewer.kind,
+              viewerEmail: viewer.email,
+              toolIds: mcpTools.map((tool) => tool.id),
+              versionId: host.versionId,
+              limits: budgets,
+              budgetKey: siteRuntimeBudgetKey(viewer),
+            }),
       );
+      if (reservation.alreadyStarted)
+        return await projected(await send("GET", `${base}/${requestedSessionId}`), 202);
+      pendingAdmission = { sessionId: requestedSessionId, admissionId };
       const body = {
         initialMessage: input.initialMessage,
         requestedSessionId,
@@ -1068,11 +1426,26 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         agentAccess: "session",
         memoryScope: "off",
         rigId: null,
-        firstPartyMcpTools: [],
-        agent: { capabilities: { from: "none", humanInput: false, skills: false } },
-        ...(agent.model ? { model: agent.model } : {}),
-        ...(agent.instructions?.trim() ? { instructions: agent.instructions.trim() } : {}),
-        ...(mcpTools.length > 0 ? { tools: mcpTools } : {}),
+        // Only this Site's data tools; never management or workspace tools.
+        firstPartyMcpTools: dataTools,
+        ...(dataTools.length > 0
+          ? { firstPartyMcpPermissions: [...SITE_AGENT_DATA_TOOL_PERMISSIONS] }
+          : {}),
+        agent: {
+          capabilities: {
+            from: "none",
+            humanInput: false,
+            skills: false,
+            ...(dataTools.length > 0 ? { artifacts: true } : {}),
+          },
+        },
+        // No sandbox: a Site's agent answers from the page and the Site's
+        // data, with no shell or workspace files.
+        sandboxBackend: "none",
+        ...(repair ? { model: repair.model } : models.default ? { model: models.default } : {}),
+        instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions),
+        // Always explicit: an empty list means no workspace tools at all.
+        tools: mcpTools,
         metadata: {
           opengeniPublishedSite: {
             siteId: host.site.id,
@@ -1082,14 +1455,39 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         ...(input.idempotencyKey ? { idempotencyKey: `site-runtime:${requestedSessionId}` } : {}),
       };
-      const start = () => send("POST", base, body);
+      const start = () =>
+        send("POST", base, body, dataTools.length > 0 ? SITE_AGENT_DATA_TOOL_PERMISSIONS : []);
+      // Workspace members get no Site budget at all: their conversation is an
+      // ordinary session under the workspace's normal limits, so no session
+      // usage limit is stamped on it, whatever the Site's limits say.
+      const usageLimitMicros =
+        viewer.kind === "member" || repair ? null : reservation.executionLimitMicros;
       let created: Response;
       try {
+        // Initial create's limit command is idempotent, not a top-up. A retained
+        // shell must receive its newly funded ceiling before core repairs it.
+        if (repair && viewer.kind !== "member" && reservation.executionLimitMicros !== null) {
+          try {
+            await capSiteConversationUsageLimit(deps, host, requestedSessionId, null);
+          } catch (error) {
+            // Dispatch has not begun: this failure is definitive, unlike a
+            // lost response from core's initialization transaction.
+            await finishSiteRuntimeAdmission(deps.db, host.scope, pendingAdmission);
+            pendingAdmission = undefined;
+            const retained = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
+              sessionId: requestedSessionId,
+              siteId: host.site.id,
+              viewerPrincipal: viewer.principal,
+            });
+            if (retained) await settleSiteRuntimeSpend(deps, host, retained, { release: true });
+            throw error;
+          }
+        }
         created =
-          reservation.limitMicros === null
+          usageLimitMicros === null
             ? await start()
             : await withHostSessionUsageLimit(
-                { subjectId: `site:${host.site.id}`, limitMicros: reservation.limitMicros },
+                { subjectId: `site:${host.site.id}`, limitMicros: usageLimitMicros },
                 start,
               );
       } catch (error) {
@@ -1176,37 +1574,90 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The agent and budget checks every message-bearing operation passes.
     const admitAgentWork = async (newTurn: boolean) => {
       requireSiteAgent(deps, host, viewer, limits);
-      // Tools are bound when a conversation starts. One holding a tool the
-      // Site no longer gives this viewer (removed, or no longer for everyone,
-      // or the viewer left the workspace) takes no more work.
+      if (viewer.kind === "guest" || viewer.kind === "user")
+        await requireSitePlatformOpen(deps, "guest_agent");
+      // Tools and budgets are bound when a conversation starts. One holding a
+      // tool the Site no longer gives this viewer (removed, or the viewer left
+      // the workspace or lost the permission), or counted as a member's while
+      // the viewer no longer is one (or the reverse), takes no more work.
+      const memberPermissions =
+        viewer.kind === "member" && viewer.subjectId
+          ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
+          : null;
       const allowedTools = new Set(
-        siteAgentToolRefs(host.publication.agent, viewer).map((t) => t.id),
+        siteAgentToolRefs(host.publication.agent, viewer, memberPermissions).map((t) => t.id),
       );
-      if (conversation.toolIds.some((tool) => !allowedTools.has(tool)))
+      // A member's conversation started before members were kept out of the
+      // Site's windows counts in `*` and stays usable; its reservations stay
+      // in the windows they were made in.
+      const legacyMember =
+        viewer.kind === "member" &&
+        conversation.viewerKind === "member" &&
+        conversation.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
+      if (
+        (conversation.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
+        conversation.toolIds.some((tool) => !allowedTools.has(tool))
+      )
         throw sitePublishingError(
           409,
           "conflict",
           "site_conversation_outdated",
           "This Site's assistant changed since this conversation started; start a new one",
         );
+      // People outside the workspace never use a subscription-billed model,
+      // whatever model the conversation holds.
+      if (viewer.kind !== "member") {
+        const session = await getSession(deps.db, host.scope.workspaceId, conversation.sessionId);
+        if (
+          session &&
+          !(await siteCreditModelIds(deps, host.scope, host.site.id)).includes(session.model)
+        )
+          throw siteNotAvailableForViewer(
+            "agent_model",
+            "This Site's assistant cannot use that model for you",
+            { reason: "subscription_model" },
+          );
+      }
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
-      const admitted = await reserve(() =>
-        reserveSiteRuntimeConversationWork(deps.db, host.scope, {
-          sessionId: conversation.sessionId,
-          limits: budgets,
-          newTurn,
-        }),
-      );
-      // A per-conversation limit lowered since the start lowers the session's
-      // own usage limit too, before the work runs.
-      if (admitted.limitMicros !== null)
-        await capSiteConversationUsageLimit(
+      // Clear the stamped session cap before dropping the durable conversation
+      // marker. Failure refuses admission and preserves the marker for retry.
+      if (viewer.kind === "member" && conversation.limitMicros !== null)
+        await liftSiteConversationUsageLimit(
           deps,
           host,
           conversation.sessionId,
-          admitted.limitMicros,
+          conversation.limitMicros,
           usage,
         );
+      const admissionId = randomUUID();
+      const admitted = await reserve(() =>
+        reserveSiteRuntimeConversationWork(deps.db, host.scope, {
+          admissionId,
+          sessionId: conversation.sessionId,
+          limits: budgets,
+          newTurn,
+          uncapped: viewer.kind === "member",
+        }),
+      );
+      // Stamp the funded ceiling before work, including atomic top-ups and
+      // reduced caps. Members never carry a Site-imposed usage limit.
+      pendingAdmission = { sessionId: conversation.sessionId, admissionId };
+      try {
+        if (admitted.executionLimitMicros !== null && viewer.kind !== "member")
+          await capSiteConversationUsageLimit(deps, host, conversation.sessionId, usage);
+      } catch (error) {
+        // No dispatch has begun, so failure here is definitive. Reconcile the
+        // queue before refunding: a previous turn may still be executing.
+        await finishSiteRuntimeAdmission(deps.db, host.scope, pendingAdmission);
+        pendingAdmission = undefined;
+        await settleSiteRuntimeSpend(
+          deps,
+          host,
+          { sessionId: conversation.sessionId, admissions: conversation.admissions + 1 },
+          { release: true },
+        );
+        throw error;
+      }
     };
     /**
      * A Site's composer drafts are text only: no workspace resources,
@@ -1223,11 +1674,14 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw invalid(`A message is at most ${MESSAGE_MAX_CHARS} characters`);
       if (draft.resources.length > 0 || (draft.annotations?.length ?? 0) > 0)
         throw invalid("Messages on a published Site are text only");
-      const allowed = new Set(
-        [host.publication.agent.model, ...(limits.agentModels ?? [])].filter(
-          (model): model is string => typeof model === "string" && model.length > 0,
-        ),
-      );
+      const allowed = new Set((await siteViewerModels(host, viewer, limits)).allowed);
+      // People outside the workspace never use a subscription-billed model.
+      if (viewer.kind !== "member" && isSubscriptionBilledModel([], draft.model))
+        throw siteNotAvailableForViewer(
+          "agent_model",
+          "This Site's assistant cannot use that model for you",
+          { reason: "subscription_model" },
+        );
       if (!allowed.has(draft.model)) {
         const current = await send("GET", target);
         const session = current.ok

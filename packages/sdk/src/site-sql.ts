@@ -12,6 +12,8 @@ export type OpenGeniSiteSqlErrorCode =
   | "validation"
   | "not_found"
   | "forbidden"
+  /** This viewer may not do this on this Site (a role the Site's rules exclude). */
+  | "not_available_for_viewer"
   | "conflict"
   | "quota_exceeded"
   | "rate_limited"
@@ -63,6 +65,7 @@ const KNOWN_CODES = new Set<string>([
   "validation",
   "not_found",
   "forbidden",
+  "not_available_for_viewer",
   "conflict",
   "quota_exceeded",
   "rate_limited",

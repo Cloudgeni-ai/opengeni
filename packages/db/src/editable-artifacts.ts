@@ -615,6 +615,28 @@ export async function touchEditableArtifactSessionLink(
   });
 }
 
+/** Immutable creation provenance, unlike session links which reads can create. */
+export async function getEditableArtifactCreationAgent(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  artifactIdInput: string,
+): Promise<{ sessionId: string; turnId: string } | null> {
+  const scope = validateScope(scopeInput);
+  const artifactId = validateStableId(artifactIdInput, "artifact id");
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{ authority_key: string }>(
+      tx,
+      sql`select authority_key from editable_artifact_idempotency_receipts
+        where account_id = ${scope.accountId}::uuid and workspace_id = ${scope.workspaceId}::uuid
+          and artifact_id = ${artifactId} and operation_kind in ('create', 'import')
+          and resource_type = 'artifact' limit 1`,
+    );
+    if (!row) return null;
+    const actor = validateActorKey(row.authority_key);
+    return actor.kind === "agent" ? { sessionId: actor.sessionId, turnId: actor.turnId } : null;
+  });
+}
+
 /** Exact association lookup; never depends on the bounded recent-artifact list. */
 export async function hasEditableArtifactSessionLink(
   db: Database,

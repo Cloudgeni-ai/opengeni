@@ -178,6 +178,7 @@ import { registerSiteDataTools } from "./site-data-tools";
 import { registerSitePublicationTools } from "./site-publication-tools";
 import { registerSiteSqlTools } from "./site-sql-tools";
 import { siteSqlGatewayConfig } from "../site-sql/gateway";
+import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
 import {
   resolveScheduledTaskCreateInput,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
@@ -381,9 +382,11 @@ import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnost
 import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 import {
   afterSiteArtifactMutation,
+  requireSiteVersionPublishOpen,
   SITE_AGENT_OTHER_SITE_MESSAGE,
   siteAgentMayChangeArtifact,
 } from "../site-publishing/service";
+import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
 import {
   siteAgentClampRefusal,
   siteAgentClampedToolResult,
@@ -1155,6 +1158,15 @@ export function buildOpenGeniMcpServer(
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
+    // A published Site's own agent: its Site Data and Site SQL tools are
+    // pinned to that Site and act as the conversation's viewer. Resolve on
+    // every call: a long-lived MCP server must observe audience revocations.
+    const siteAgent = () =>
+      resolveSiteAgentDataContext(
+        deps,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        sessionId,
+      );
     registerSiteDataTools(
       server,
       deps,
@@ -1163,6 +1175,7 @@ export function buildOpenGeniMcpServer(
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
       json,
+      siteAgent,
     );
     // Site SQL tools need a configured gateway (they also reach databases
     // that already exist after the deployment stops offering Site SQL).
@@ -1175,6 +1188,7 @@ export function buildOpenGeniMcpServer(
           await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
         },
         json,
+        siteAgent,
       );
     registerSitePublicationTools(
       server,
@@ -3619,6 +3633,14 @@ function registerWorkspaceArtifactTools(
       await authorize();
       const refused = await otherSiteRefusal(artifactId);
       if (refused) return refused;
+      const braked = await sitePlatformBrakeToolRefusal(() =>
+        requireSiteVersionPublishOpen(
+          deps,
+          { accountId: grant.accountId, workspaceId: grant.workspaceId },
+          artifactId,
+        ),
+      );
+      if (braked) return braked;
       return json(
         await siteMutation(
           await publishWorkspaceArtifactVersion(deps.db, {

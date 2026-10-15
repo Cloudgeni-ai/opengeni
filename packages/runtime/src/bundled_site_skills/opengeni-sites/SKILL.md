@@ -372,6 +372,8 @@ Handle `OpenGeniSiteDataError` codes in the UI: `validation` (bad input or
 schema), `conflict` (stale `expectedVersion`, a duplicate unique value, or a
 schema changed or record grew mid-request: send it again),
 `not_found`, `forbidden` (the access mode does not allow it),
+`not_available_for_viewer` (this viewer of a published Site may not do it:
+show a friendly state, such as a sign-in button for guests),
 `quota_exceeded` (records 256 KB each, charged plus 512 bytes, 100 MB per Site
 and 100,000 per collection; at most 4 MB of records per request; files 10 MB
 each and 1 GB per Site, by default), `rate_limited` (retry later), and
@@ -438,7 +440,9 @@ const { rows, truncated } = await site.sql.run<{ choice: string; votes: number }
 ```
 
 Rows are untrusted input: render them as text. Handle `OpenGeniSiteSqlError`
-codes: `forbidden` (audience; `details.reason: "sign_in_required"` for guests),
+codes: `forbidden` (audience), `not_available_for_viewer` (on a published
+host, the query's audience excludes this viewer; `details.reason:
+"sign_in_required"` for guests),
 `not_found` (no such query), `validation` (missing or unknown params),
 `conflict` (a unique or primary key already taken), `sql_error` (also NOT
 NULL, CHECK and foreign-key failures),
@@ -477,6 +481,18 @@ bind such values as parameters). Quote columns named `begin`, `end` or
 Your authoring session's tools let you build, inspect, and publish the Site;
 they do not define what a human viewer may do in the published app. A conversation
 started inside the Site is a separate agent session with its own tool access.
+Its own data tools recheck current audience access on every call: removing an
+invitation or narrowing the audience takes effect even if cancellation fails.
+Non-member execution is funded in increments ($0.25 by default), with the
+session ceiling equal to metered spend plus reserved funding. Further work
+must fund its next increment; one provider call can overshoot before metering.
+
+For documents, spreadsheets and presentations, a Site-started agent needs the
+declared editing tools and may edit or export only artifacts created in its own
+Site-clamped session tree. Parent and child sessions share those creations;
+another conversation on the same Site does not. Reading or linking an existing
+workspace artifact does not grant editing access. There is no existing-artifact
+declaration field yet; use an ordinary authorized authoring session for those edits.
 
 There are two client surfaces:
 
@@ -604,10 +620,47 @@ workspace first.
   hosts that don't report viewers. Guests have no name or email. Offer a
   sign-in button that calls `site.auth.signIn()`; never build your own login.
 - Embedded agent and limits: the publication turns the Site's agent on or
-  off, picks its model, and sets a limit profile (`free` by default, then
-  `credits`, `unlimited` or `custom`). The organization pays; handle
-  `rate_limited` and budget errors as normal UI states.
-- The same Site HTML, tools and Site Data work there; no rebuild is needed.
+  off and picks its model. Workspace members are never limited by the Site.
+  People outside the workspace share one Site limit ($10 a month by
+  default) and an optional per-person limit, which workspace admins set;
+  anonymous guests also meet bot guards. Non-member model calls use organization
+  credits; members keep their normal billing, including subscriptions. Handle
+  `rate_limited`, `site_budget_exhausted` and retryable `site_budget_busy` (429), and
+  `site_platform_brake_engaged` (503) as normal UI states.
+- The same Site HTML and Site Data work there; no rebuild is needed.
+- Every published-host agent gets this Site's `site_data_query` and `site_data_write`,
+  plus `site_sql_run` when SQL is enabled; members also get read-only `site_sql_query`.
+  The server pins the Site and binds calls to the conversation's viewer, including
+  collection ownership and query audiences. No management tools or sandbox are
+  supplied; publication settings have no sandbox opt-in. Members get no Site
+  budget or stamped session usage limit. Existing Sites pick up defaults without
+  republishing. Platform allowances and the global brake never count model spend.
+
+**Build for the audience.** A published page can do only what its viewer
+may do. People outside the workspace (invited people and public visitors)
+never get workspace tools, and the Site's agent gives them none either; a
+subscription model (Codex, Claude or SuperGrok plan) is swapped for the
+workspace's credit-billed default for them. So for an invited or public
+Site:
+
+- keep the data the page needs in Site Data or Site SQL, not behind
+  workspace tools; call `site.tools` only in parts shown to members;
+- give guests the least they need: a collection's `guestAccess`, and
+  `everyone` only on queries guests must run;
+- read `const caps = await site.capabilities` (`null` on hosts that don't
+  report it) and hide what this viewer can't use: `caps.agent`,
+  `caps.workspaceTools`, `caps.siteData` (`viewer` or `guest`) and
+  `caps.sqlQueryAudiences`; `caps.viewAs` is set while a member previews the
+  Site as a visitor;
+- treat `not_available_for_viewer` (403) as a friendly state, never a crash.
+
+After publishing or changing access, read the publication's `warnings`
+(`opengeni__site_publication_get` or `_update`): each names what won't work
+for whom and what to change. Fix them in the page, or apply a warning's
+safe `fix` with `opengeni__site_publication_apply_fix` (a collection's
+guest access or a query's audience) when the user wants that audience to
+have it. Tell the user about warnings you leave, and suggest **View as
+visitor** on the Publish page to check the Site as its audience sees it.
 
 A published Site is a public web page. Never put secrets, tokens or private
 data in its HTML, and render viewer names, emails, records and agent replies

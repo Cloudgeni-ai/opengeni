@@ -57,6 +57,11 @@ export type SiteRuntimeViewer = {
   email: string | null;
   /** The site-session row when signed in. */
   sessionId: string | null;
+  /**
+   * Set while a workspace member previews the Site as another role ("View
+   * as visitor"): the viewer is then exactly that role, never more.
+   */
+  viewAs?: "invited" | "public" | null;
 };
 
 export function publicSiteViewer(viewer: SiteRuntimeViewer): SiteViewer {

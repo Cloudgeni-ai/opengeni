@@ -1097,6 +1097,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_delete",
   "site_publication_get",
   "site_publication_update",
+  "site_publication_apply_fix",
   "site_hostname_check",
   "site_sql_inspect",
   "site_sql_enable",
@@ -7035,6 +7036,9 @@ export const ToolRef = /* @__PURE__ */ defineSchema(() =>
     // configure the id, validation drops the ref. Auto-attached workspace-default
     // capability MCPs also use this marker.
     optional: z.boolean().optional(),
+    // Optional narrowing of this connection's tools. Empty means no tools;
+    // omission preserves the connection's authorized catalog.
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   }),
 );
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -7344,11 +7348,18 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
     const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const allowedTools =
+      prior.allowedTools === undefined
+        ? tool.allowedTools
+        : tool.allowedTools === undefined
+          ? prior.allowedTools
+          : prior.allowedTools.filter((name) => tool.allowedTools!.includes(name));
     byKey.set(key, {
       kind: "mcp",
       id: prior.id,
       ...(optional ? { optional } : {}),
       ...(eager ? { eager } : {}),
+      ...(allowedTools !== undefined ? { allowedTools } : {}),
     });
   }
   return order.map((key) => byKey.get(key)!);

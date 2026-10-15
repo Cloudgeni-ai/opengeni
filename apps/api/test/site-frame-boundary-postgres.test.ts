@@ -26,6 +26,8 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
+  PostgresEditableArtifactStore,
+  touchEditableArtifactSessionLink,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
@@ -115,7 +117,7 @@ function memoryObjectStorage(): ObjectStorageDependency {
   } as unknown as ObjectStorageDependency;
 }
 
-async function fixture() {
+async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Site frame fixture') returning id`;
   const accountId = String(account!.id);
@@ -130,10 +132,11 @@ async function fixture() {
   });
   const settings = testSettings({
     productAccessMode: "configured",
-    sandboxBackend: "none",
+    sandboxBackend: overrides.sandboxBackend ?? "none",
     // Published Sites on, so their management routes are reachable.
     sitesDomain: "sites.example.test",
     sitesGatewaySecret: "c".repeat(40),
+    mcpServers: [{ id: "crm", url: "https://crm.example.test/mcp" }],
   });
   const objectStorage = memoryObjectStorage();
   // Every workflow call is a no-op: these tests only check what is admitted.
@@ -183,7 +186,7 @@ async function fixture() {
       headers: { ...headers, ...frame },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  const publish = async (title: string) => {
+  const publish = async (title: string, extra: Record<string, unknown> = {}) => {
     const response = await call(
       "POST",
       "/published-artifacts",
@@ -192,6 +195,7 @@ async function fixture() {
         title,
         html: `<!doctype html><h1>${title}</h1>`,
         idempotencyKey: crypto.randomUUID(),
+        ...extra,
       },
     );
     expect(response.status, await response.clone().text()).toBe(201);
@@ -934,6 +938,12 @@ test("agents started from a Site leave the organization profile, machines, envir
     "run_on",
     "sandbox_provision",
   ];
+  // A Site page's session gets only the first-party tools its Site declares;
+  // this test is about the clamp, so its session holds the Site tools it uses.
+  await shared.admin`
+    update sessions
+    set first_party_mcp_tools = first_party_mcp_tools || ${shared.admin.json(tools)}::jsonb
+    where id = ${fromSite}`;
   // One running turn each: the agents the MCP calls and the HTTP calls run as.
   const clampedAgent = await f.liveAgentGrant(fromSite);
   const plainAgent = await f.liveAgentGrant(plain);
@@ -1420,7 +1430,6 @@ test("agents started from a Site write only on the allowlist; other workspace wr
     ["POST", "/codemode/calls", {}],
     ["POST", "/tools/calls", {}],
     ["POST", "/files/uploads", {}],
-    ["POST", "/editable-artifacts", {}],
     ["POST", `/published-artifacts/${own.siteId}/versions`, {}],
     ["POST", `/published-artifacts/${own.siteId}/data/query`, {}],
     ["POST", "/knowledge/entries/search", {}],
@@ -1433,9 +1442,339 @@ test("agents started from a Site write only on the allowlist; other workspace wr
     const result = await as(clampedAgent, method, path, body);
     expect({ route, refused: clampRefusal.test(result.text) }).toEqual({ route, refused: false });
   }
+  // Documents, spreadsheets and presentations open only for a published Site
+  // that declares a first-party editing tool; this Site declares none.
+  const editable = await as(clampedAgent, "POST", "/editable-artifacts", {});
+  expect(editable.status).toBe(403);
+  expect(editable.text).toContain(
+    "documents, spreadsheets or presentations the Site did not declare",
+  );
+  expect(clampRefusal.test((await as(plainAgent, "POST", "/editable-artifacts", {})).text)).toBe(
+    false,
+  );
   // Reads stay open everywhere.
   const read = await as(clampedAgent, "GET", "/variable-sets");
   expect(clampRefusal.test(read.text)).toBe(false);
+});
+
+test("Site artifact edits need declared tools and creation in the clamped session tree, over MCP and HTTP", async () => {
+  const f = await fixture();
+  const plainSite = await f.publish("Plain Site");
+  const editorSite = await f.publish("Editor Site", {
+    requestedTools: [
+      "editable_artifact_create",
+      "editable_artifact_apply",
+      "editable_artifact_export",
+    ].map((toolName) => ({ serverId: "opengeni", toolName })),
+  });
+  const fromPlain = await f.liveAgentGrant(await f.startSession(plainSite.frame("frame-plain")));
+  const fromEditor = await f.liveAgentGrant(await f.startSession(editorSite.frame("frame-editor")));
+  const writes: string[] = [];
+  const artifactId = crypto.randomUUID().replaceAll("-", "");
+  const seed = async (live: AccessGrant, id = crypto.randomUUID().replaceAll("-", "")) => {
+    const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+    const actor = {
+      kind: "agent" as const,
+      subjectId: live.subjectId,
+      replicaId: crypto.randomUUID().replaceAll("-", "").slice(0, 16),
+      sessionId: String(live.metadata!.sessionId),
+      turnId: String(live.metadata!.turnId),
+      attemptId: String(live.metadata!.attemptId),
+      generation: Number(live.metadata!.executionGeneration),
+    };
+    const snapshotId = crypto.randomUUID().replaceAll("-", "");
+    const now = new Date().toISOString();
+    const stateHash = `sha256:${"a".repeat(64)}`;
+    const result = await new PostgresEditableArtifactStore(db.db).createArtifact({
+      scope,
+      artifactId: id,
+      authorizationActor: actor,
+      receiptId: crypto.randomUUID().replaceAll("-", ""),
+      authorityKey: JSON.stringify([
+        "agent",
+        actor.subjectId,
+        actor.sessionId,
+        actor.turnId,
+        actor.attemptId,
+        actor.generation,
+      ]),
+      idempotencyKey: `create:${id}`,
+      requestHash: stateHash,
+      operationKind: "create",
+      modality: "document",
+      title: "Notes",
+      expectedScopeAuthorizationRevision: 1,
+      initialArtifactAuthorizationRevision: 1,
+      createdBySubjectId: actor.subjectId,
+      genesisSnapshot: {
+        scope,
+        artifactId: id,
+        snapshotId,
+        modality: "document",
+        nativeRevision: 0,
+        blobReference: `editable-artifacts/${id}/${snapshotId}`,
+        byteSize: 256,
+        contentHash: stateHash,
+        mimeType: "application/vnd.opengeni.editable-artifact-snapshot",
+        coveredHeadSequence: 0,
+        stateHash,
+        modelSchemaVersion: 1,
+        kernelVersion: "test-kernel-1",
+        verifiedAt: now,
+        publishedAt: now,
+      },
+      outbox: {
+        outboxId: crypto.randomUUID().replaceAll("-", ""),
+        event: {
+          kind: "snapshot_published",
+          schemaVersion: 1,
+          scope,
+          artifactId: id,
+          modality: "document",
+          snapshotId,
+          coveredHeadSequence: 0,
+          stateHash,
+          publishedAt: now,
+        },
+        state: "pending",
+        attemptCount: 0,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: now,
+        lastErrorCode: null,
+        publishedAt: null,
+        deadLetteredAt: null,
+        createdAt: now,
+      },
+    });
+    expect(result.kind).toBe("result");
+    return id;
+  };
+  const artifactMetadata = (id: string) => ({
+    id,
+    artifactReference: `artifact:${id}`,
+    modality: "document",
+    title: "Notes",
+    lifecycle: "active",
+    headSequence: 0,
+    stateHash: `sha256:${"a".repeat(64)}`,
+    createdAt: "2026-10-15T00:00:00.000Z",
+    updatedAt: "2026-10-15T00:00:00.000Z",
+  });
+  const deps = {
+    db: db.db,
+    bus: new MemoryEventBus(),
+    settings: f.settings,
+    objectStorage: f.objectStorage,
+    workflowClient: new Proxy({}, { get: () => noop }),
+    editableArtifactAgent: {
+      async create() {
+        writes.push("create");
+        await seed(fromEditor, artifactId);
+        return artifactMetadata(artifactId);
+      },
+      async apply(input: { artifactId: string }) {
+        writes.push(`apply:${input.artifactId}`);
+        return {
+          artifact: artifactMetadata(input.artifactId),
+          transaction: {
+            id: crypto.randomUUID().replaceAll("-", ""),
+            clientTransactionId: "edit",
+            sequenceStart: 1,
+            sequenceEnd: 1,
+            stateHash: `sha256:${"a".repeat(64)}`,
+            committedAt: new Date().toISOString(),
+            replayed: false,
+          },
+        };
+      },
+      async startExport(input: { artifactId: string }) {
+        writes.push(`export:${input.artifactId}`);
+        return {
+          artifact: artifactMetadata(input.artifactId),
+          versionId: "b".repeat(32),
+          jobId: "c".repeat(32),
+          sourceHeadSequence: 0,
+          sourceStateHash: `sha256:${"a".repeat(64)}`,
+          state: "pending",
+        };
+      },
+    },
+  } as unknown as ApiRouteDeps;
+  const connect = async (live: AccessGrant) => {
+    const server = buildOpenGeniMcpServer(deps, {
+      ...live,
+      permissions: [...live.permissions, "files:upload"],
+      metadata: {
+        ...live.metadata,
+        firstPartyMcpTools: [
+          "editable_artifact_create",
+          "editable_artifact_apply",
+          "editable_artifact_export",
+          "editable_artifact_export_status",
+        ],
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "site-editable-artifacts", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  };
+  const errorCode = (result: Awaited<ReturnType<Client["callTool"]>>) => {
+    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+    try {
+      return (JSON.parse(text) as { error?: { code?: string } }).error?.code;
+    } catch {
+      return undefined;
+    }
+  };
+  const create = {
+    name: "editable_artifact_create",
+    arguments: { modality: "document", title: "Notes" },
+  };
+  const exportCall = {
+    name: "editable_artifact_export",
+    arguments: { artifactId: crypto.randomUUID().replaceAll("-", ""), format: "pdf" },
+  };
+  // The Site declares no editing tool: create and export are both refused.
+  const plainClient = await connect(fromPlain);
+  for (const call of [create, exportCall]) {
+    const result = await plainClient.callTool(call);
+    expect({ tool: call.name, code: errorCode(result) }).toEqual({
+      tool: call.name,
+      code: "site_agent_clamped",
+    });
+  }
+  expect(writes).toEqual([]);
+  // A declared editing tool actually reaches the application and returns a
+  // successful MCP artifact result; unrelated failures cannot pass this test.
+  const editorClient = await connect(fromEditor);
+  const result = await editorClient.callTool(create);
+  expect(result.isError, JSON.stringify(result)).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({ id: artifactId });
+  expect(writes).toEqual(["create"]);
+  const edit = (id: string, modality = "document") => ({
+    name: "editable_artifact_apply",
+    arguments: {
+      artifactId: id,
+      modality,
+      expectedHeadSequence: 0,
+      expectedStateHash: `sha256:${"a".repeat(64)}`,
+      commands: [{ kind: "test.edit" }],
+    },
+  });
+  // Existing workspace artifacts and another conversation on the same Site stay
+  // outside this tree, even after the caller has read/associated the artifact.
+  const unrelated = await seed(await f.liveAgentGrant(await f.startSession()));
+  const otherTree = await seed(
+    await f.liveAgentGrant(await f.startSession(editorSite.frame("other-tree"))),
+  );
+  await touchEditableArtifactSessionLink(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    String(fromEditor.metadata!.sessionId),
+    unrelated,
+  );
+  for (const id of [unrelated, otherTree]) {
+    for (const modality of ["document", "spreadsheet", "presentation"]) {
+      expect(errorCode(await editorClient.callTool(edit(id, modality)))).toBe("site_agent_clamped");
+    }
+    expect(
+      errorCode(
+        await editorClient.callTool({
+          ...exportCall,
+          arguments: { artifactId: id, format: "pdf" },
+        }),
+      ),
+    ).toBe("site_agent_clamped");
+    expect(
+      errorCode(
+        await editorClient.callTool({
+          name: "editable_artifact_export_status",
+          arguments: { artifactId: id, versionId: "b".repeat(32), jobId: "c".repeat(32) },
+        }),
+      ),
+    ).toBe("site_agent_clamped");
+  }
+  expect(writes).toEqual(["create"]);
+  expect((await editorClient.callTool(edit(artifactId))).isError).not.toBe(true);
+  expect(
+    (await editorClient.callTool({ ...exportCall, arguments: { artifactId, format: "pdf" } }))
+      .isError,
+  ).not.toBe(true);
+  const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      parentSessionId: String(fromEditor.metadata!.sessionId),
+      initialMessage: "Child",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+      subjectId: f.grant.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    }),
+  );
+  const childGrant = await f.liveAgentGrant(child.id);
+  const childArtifact = await seed(childGrant);
+  expect((await editorClient.callTool(edit(childArtifact))).isError).not.toBe(true);
+  const childClient = await connect(childGrant);
+  expect((await childClient.callTool(edit(artifactId))).isError).not.toBe(true);
+  await childClient.close();
+  await plainClient.close();
+  await editorClient.close();
+  const bearer = async (grant: AccessGrant) => {
+    const metadata = grant.metadata as {
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+    };
+    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: [...permissions, "documents:manage"],
+      principalKind: "agent_attempt",
+      sessionId: metadata.sessionId,
+      turnId: metadata.turnId,
+      attemptId: metadata.attemptId,
+      executionGeneration: metadata.executionGeneration,
+      exp: Math.floor(Date.now() / 1000) + 600,
+    })}`;
+  };
+  const post = async (grant: AccessGrant, path: string) => {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+      method: "POST",
+      headers: { authorization: await bearer(grant), "content-type": "application/json" },
+      body: "{}",
+    });
+    return { status: response.status, text: await response.text() };
+  };
+  const undeclared = "documents, spreadsheets or presentations the Site did not declare";
+  for (const path of [
+    "/editable-artifacts",
+    `/editable-artifacts/${artifactId}/live-ticket`,
+    `/editable-artifacts/${artifactId}/materializations`,
+  ]) {
+    expect((await post(fromPlain, path)).text).toContain(undeclared);
+    // This fixture intentionally sends an invalid body: an allowed resource
+    // reaches the real route's validation, not a clamp or an unrelated 500.
+    const allowed = await post(fromEditor, path);
+    expect(allowed.status, allowed.text).toBe(422);
+    expect(allowed.text).not.toContain(undeclared);
+  }
+  for (const id of [unrelated, otherTree]) {
+    for (const suffix of ["live-ticket", "versions", "materializations"]) {
+      const denied = await post(fromEditor, `/editable-artifacts/${id}/${suffix}`);
+      expect(denied.status).toBe(403);
+      expect(denied.text).toContain(undeclared);
+    }
+  }
 });
 
 test("Site pages send message text only: no approvals, answers, resources or credentials", async () => {
@@ -1566,6 +1905,62 @@ test("Site pages send message text only: no approvals, answers, resources or cre
   // Outside a frame the same person may still send resources and answers.
   const direct = await f.call("POST", `/sessions/${sessionId}/events`, {}, message({}));
   expect(direct.status, await direct.clone().text()).toBeLessThan(300);
+});
+
+test("a Site page's session gets only the declared first-party tools and the Site's own data tools, without a sandbox", async () => {
+  // The deployment default backend is a real sandbox; a Site page's agent still gets none.
+  const f = await fixture({ sandboxBackend: "docker" });
+  const declaring = await f.publish("Declaring Site", {
+    requestedTools: [{ serverId: "opengeni", toolName: "editable_artifact_create" }],
+  });
+  const plain = await f.publish("Plain Site");
+  const session = async (id: string) => {
+    const [row] = await shared.admin<
+      { first_party_mcp_tools: string[]; sandbox_backend: string; tools: Array<{ id: string }> }[]
+    >`select first_party_mcp_tools, sandbox_backend, tools from sessions where id = ${id}`;
+    return {
+      firstParty: [...row!.first_party_mcp_tools].sort(),
+      sandbox: row!.sandbox_backend,
+      servers: row!.tools.map((tool) => tool.id).sort(),
+    };
+  };
+  expect(await session(await f.startSession(declaring.frame("frame-d")))).toEqual({
+    firstParty: [
+      "editable_artifact_create",
+      "set_session_title",
+      "site_data_query",
+      "site_data_write",
+      "wait_for_input",
+    ],
+    sandbox: "none",
+    servers: [],
+  });
+  expect(await session(await f.startSession(plain.frame("frame-p")))).toEqual({
+    firstParty: ["set_session_title", "site_data_query", "site_data_write", "wait_for_input"],
+    sandbox: "none",
+    servers: [],
+  });
+  // An inline frame (no published Site) has no Site data to reach.
+  expect(await session(await f.startSession(f.inline("frame-i")))).toEqual({
+    firstParty: ["set_session_title", "wait_for_input"],
+    sandbox: "none",
+    servers: [],
+  });
+});
+
+test("a Site frame freezes tool names, not the whole declared MCP connection", async () => {
+  const f = await fixture();
+  const site = await f.publish("CRM reader", {
+    requestedTools: [
+      { serverId: "crm", toolName: "read_contact" },
+      { serverId: "crm", toolName: "search_contacts" },
+    ],
+  });
+  const id = await f.startSession(site.frame("frame-crm"));
+  const [row] = await shared.admin`select tools from sessions where id = ${id}`;
+  expect(row!.tools).toEqual([
+    { kind: "mcp", id: "crm", optional: true, allowedTools: ["read_contact", "search_contacts"] },
+  ]);
 });
 
 test("a Site page starts a session with a message and a model only, on a minimal profile", async () => {

@@ -8,6 +8,7 @@ import {
   withWorkspaceDefaultMcpTools,
 } from "../src/domain/resources";
 import type { ToolRef } from "@opengeni/contracts";
+import { mergeToolRefs } from "@opengeni/contracts";
 
 const settings = {
   mcpServers: [
@@ -23,6 +24,27 @@ const mcp = (id: string, optional?: boolean): ToolRef => ({
 });
 
 describe("session resource tool policy fences", () => {
+  test("per-tool ceilings survive validation and merges and cannot be widened", () => {
+    const limited = { ...mcp("cap-docs"), allowedTools: ["read", "search"] };
+    expect(
+      validateToolRefsForSessionPolicy({
+        requested: [limited],
+        settings,
+        allowedTools: [limited],
+        message: "narrowing required",
+      }),
+    ).toEqual([limited]);
+    expect(() => assertToolRefsSubset([mcp("cap-docs")], [limited])).toThrow(HTTPException);
+    expect(() =>
+      assertToolRefsSubset([{ ...limited, allowedTools: ["write"] }], [limited]),
+    ).toThrow(HTTPException);
+    expect(() => assertToolRefsSubset([{ ...limited, allowedTools: [] }], [limited])).not.toThrow();
+    expect(mergeToolRefs([limited], [mcp("cap-docs")])).toEqual([limited]);
+    expect(mergeToolRefs([mcp("cap-docs")], [limited])).toEqual([limited]);
+    expect(
+      mergeToolRefs([limited], [{ ...limited, allowedTools: ["read", "write"] }])[0]?.allowedTools,
+    ).toEqual(["read"]);
+  });
   test("distinguishes authoritative repository revocation from unavailable validation", () => {
     expect(isAuthoritativeGitHubRepositorySelectionError(new HTTPException(422))).toBe(true);
     expect(isAuthoritativeGitHubRepositorySelectionError(new HTTPException(503))).toBe(false);

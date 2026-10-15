@@ -7,16 +7,24 @@ import {
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
-import { agentConfigDeploymentPolicy, UnsupportedLatencyModeError } from "@opengeni/config";
+import {
+  agentConfigDeploymentPolicy,
+  resolveFirstPartyMcpToolPolicy,
+  UnsupportedLatencyModeError,
+} from "@opengeni/config";
+import { siteAgentDataToolNames, siteAgentSiteSqlOn } from "../site-publishing/agent-data-tools";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import {
+  FIRST_PARTY_MCP_TOOL_CAPABILITIES,
+  FirstPartyMcpToolName,
   resolveWorkspaceAgentDefaults,
   SessionMessageSearchRequest,
   type AgentCapabilities,
+  type ToolRef,
 } from "@opengeni/contracts";
 import {
   SITE_FRAME_SESSION_CREATE_FIELDS,
@@ -170,6 +178,7 @@ import {
   getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
+  getPublishedSiteVersion,
   getSession,
   readActiveSandbox,
   deleteSessionTreeIfQuiescent,
@@ -764,7 +773,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             },
             403,
           );
-        payload = await siteFrameSessionProfile(deps, workspaceId, payload);
+        payload = await siteFrameSessionProfile(deps, workspaceId, payload, {
+          accountId: grant.accountId,
+          siteId: siteOrigin.siteId,
+          versionId: siteOrigin.versionId ?? null,
+        });
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
@@ -6360,14 +6373,18 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
  * and the workspace's default agent capabilities without workspace
  * administration or browser and computer control, so the page cannot reach
  * the viewer's Connected Machines, sandboxes or browsers. Workers it spawns
- * only narrow that. Everything else (tools, servers, sandbox, resources,
- * Skills, learning, goals) is the workspace default for a plain chat, and
- * agents started from a Site stay clamped (`assertNotSiteClampedAgent`).
+ * only narrow that. It runs without a sandbox; its first-party tools are the
+ * ones the Site declares plus the Site's own data tools, and its MCP
+ * connections only the ones the Site declares. Everything else (resources,
+ * Skills, learning, goals) is the workspace default for a plain chat. Agents
+ * started from a Site stay clamped
+ * (`assertNotSiteClampedAgent`).
  */
 async function siteFrameSessionProfile(
   deps: ApiRouteDeps,
   workspaceId: string,
   payload: unknown,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
 ): Promise<Record<string, unknown>> {
   const body = (payload ?? {}) as Record<string, unknown>;
   const profile: Record<string, unknown> = {};
@@ -6379,14 +6396,96 @@ async function siteFrameSessionProfile(
       ? Object.fromEntries(Object.entries(metadata).filter(([key]) => !key.startsWith("_opengeni")))
       : {};
   profile.vaultPolicy = { mode: "selected", vaultIds: [] };
-  profile.agent = {
-    capabilities: siteFrameCapabilities(
-      resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
-        ?.capabilities ?? "all",
-      agentConfigDeploymentPolicy(deps.settings).unavailable,
-    ),
-  };
+  // Tools are the overlap of what the Site declares and what the person may
+  // use: only the workspace MCP connections the Site version requests (the
+  // person's own access to each still applies), never the workspace
+  // default set. A frame with no published Site declares none.
+  profile.tools = await siteFrameDeclaredTools(deps, workspaceId, frame);
+  const unavailable = agentConfigDeploymentPolicy(deps.settings).unavailable;
+  const capabilities = siteFrameCapabilities(
+    resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
+      ?.capabilities ?? "all",
+    unavailable,
+  );
+  profile.agent = { capabilities };
+  // First-party tools are the ones the Site declares plus the Site's own data
+  // tools, never the workspace default set; a Site page's agent runs without
+  // a sandbox.
+  profile.firstPartyMcpTools = (await siteFrameFirstPartyTools(deps, workspaceId, frame)).filter(
+    (tool) => {
+      const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+      if (owner === "runtime") return true;
+      if (owner === "sandbox" || unavailable[owner] !== undefined) return false;
+      const value = (capabilities as Record<string, unknown>)[owner];
+      return value === undefined ? capabilities.from === "all" : value !== false;
+    },
+  );
+  profile.sandboxBackend = "none";
   return profile;
+}
+
+/**
+ * The first-party tools of a Site page's session: the session runtime's own,
+ * the first-party tools the Site version declares, and, for a published Site,
+ * its own data tools (`site_data_query`, `site_data_write`, and the Site SQL
+ * tools when Site SQL is on), all within the deployment's tool allowlist.
+ */
+async function siteFrameFirstPartyTools(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<FirstPartyMcpToolName[]> {
+  const allowed = new Set<string>(resolveFirstPartyMcpToolPolicy(deps.settings).allowed);
+  const tools = new Set<FirstPartyMcpToolName>(["set_session_title", "wait_for_input"]);
+  if (frame.siteId && frame.versionId) {
+    const scope = { accountId: frame.accountId, workspaceId };
+    const version = await getPublishedSiteVersion(
+      deps.db,
+      scope,
+      frame.siteId,
+      frame.versionId,
+    ).catch(() => null);
+    for (const tool of version?.requestedTools ?? []) {
+      const parsed = FirstPartyMcpToolName.safeParse(tool.toolName);
+      if (tool.serverId === "opengeni" && parsed.success) tools.add(parsed.data);
+    }
+    if (version)
+      for (const tool of siteAgentDataToolNames({
+        viewerKind: "member",
+        siteSql: await siteAgentSiteSqlOn(deps, scope, frame.siteId),
+        allowed: [...allowed],
+      }))
+        tools.add(tool);
+  }
+  return [...tools].filter((tool) => allowed.has(tool)).sort();
+}
+
+/** The workspace MCP connections (not the first-party server) a Site version declares. */
+async function siteFrameDeclaredTools(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<ToolRef[]> {
+  if (!frame.siteId || !frame.versionId) return [];
+  const version = await getPublishedSiteVersion(
+    deps.db,
+    { accountId: frame.accountId, workspaceId },
+    frame.siteId,
+    frame.versionId,
+  ).catch(() => null);
+  const declared = new Map<string, Set<string>>();
+  for (const { serverId, toolName } of version?.requestedTools ?? []) {
+    if (serverId === "opengeni" || !/^[A-Za-z0-9_-]{1,200}$/u.test(serverId)) continue;
+    const names = declared.get(serverId) ?? new Set<string>();
+    names.add(toolName);
+    declared.set(serverId, names);
+  }
+  return [...declared].map(([id, names]) => ({
+    kind: "mcp",
+    id,
+    optional: true,
+    allowedTools: [...names].sort(),
+  }));
 }
 
 /**

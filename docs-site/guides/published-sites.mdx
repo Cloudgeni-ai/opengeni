@@ -42,14 +42,17 @@ Guests reach a collection only when its guest rule allows it: `none` (the defaul
 
 ## Limits
 
-| Profile   | Limits                                                                                                                                             |
-| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Free      | 10 conversations per visitor a day, 20 messages per conversation, agent spend of $0.02 per conversation, $0.20 per visitor a day and $2.00 a month |
-| Credits   | Higher limits paid from your organization's credits                                                                                                |
-| Unlimited | No budgets; flood brakes and a per-conversation cap still apply                                                                                    |
-| Custom    | Your own numbers                                                                                                                                   |
+Limits follow who is viewing:
 
-Workspace admins set the default for new publications; each Site can override it. The Publish page shows this month's agent spend.
+- **Workspace members** are never limited by the Site. Their normal workspace limits apply, and they keep the agent even when it is off for everyone else.
+- **People outside the workspace** (invited people and public visitors) share one Site limit, $10 a month by default (or a daily amount instead). Workspace admins can add a limit per person, or turn the agent off for people outside the workspace.
+- **Guests** who don't sign in also meet built-in guards against bots: 20 conversations a day, 50 messages per conversation and $1 per conversation.
+
+People outside the workspace never get workspace tools and never use a member's ChatGPT, Claude or SuperGrok plan: when the Site's model runs on a plan, they use the workspace's default model paid with credits. The Publish page lists anything on the page that won't work for the Site's audience, with a **Fix** button where a safe fix exists, and **View as visitor** opens the Site as an invited person or a public visitor would see it.
+
+## Platform usage
+
+Apart from agent spend, Sites use requests, Site SQL rows and storage. Every workspace gets 1 million requests, 10 million rows read, 100,000 rows written and 1 GB of storage each month. Workspace settings > Usage shows how much of it is used. When your deployment bills platform usage, use above the allowance is paid with credits, and without credits new publications and Site SQL calls stop until the next month or until credits are added; published pages keep loading.
 
 ## Reports and takedown
 

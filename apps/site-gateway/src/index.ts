@@ -30,6 +30,7 @@ import { applySecurityHeaders, jsonError } from "./headers";
 import { UpstreamError, lookupHost } from "./host-map";
 import { handleHumanCheck } from "./human";
 import { messagePage, neutralPage, takedownPage } from "./pages";
+import { countSiteRequest } from "./platform-requests";
 import { handleReport } from "./report";
 import { SITE_GATEWAY_HUMAN_PATH } from "./shell/shell-config";
 import { handleShell } from "./shell";
@@ -119,6 +120,9 @@ export async function handleRequest(
           "This Site could not be loaded. Try again shortly.",
         );
   }
+  // Platform usage: every request served for a known Site host counts,
+  // cache hits and refusals included (src/platform-requests.ts).
+  if (record) countSiteRequest(config, ctx, hostname);
   const forceNoindex = config.forceNoindex || !record || record.noindex;
   if (pathname === "/robots.txt")
     return robots(forceNoindex || record?.status !== "active" || !record?.versionId);

@@ -5023,10 +5023,21 @@ export async function prepareAgentTools(
     "server_construction",
     async () =>
       await boundedParallelMap(refs, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
-        const config = registry.get(tool.id);
-        if (!config) {
+        const registeredConfig = registry.get(tool.id);
+        if (!registeredConfig) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);
         }
+        const config =
+          tool.allowedTools === undefined
+            ? registeredConfig
+            : {
+                ...registeredConfig,
+                allowedTools: tool.allowedTools.filter(
+                  (name) =>
+                    registeredConfig.allowedTools === undefined ||
+                    registeredConfig.allowedTools.includes(name),
+                ),
+              };
         if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
           throw new Error("Codex Apps server id is reserved for the canonical endpoint");
         }
