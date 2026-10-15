@@ -436,7 +436,9 @@ describe("interaction attempt tools", () => {
       ],
     });
     expect(
-      Object.keys((result.structuredContent as { attachedBrowsers: object[] }).attachedBrowsers[0]!),
+      Object.keys(
+        (result.structuredContent as { attachedBrowsers: object[] }).attachedBrowsers[0]!,
+      ),
     ).toHaveLength(8);
   });
 
@@ -1761,9 +1763,9 @@ describe("interaction attempt tools", () => {
       agentView: { sourceKind: "snapshot", nodes: [] },
     });
     expect(visualResult.structuredContent).not.toHaveProperty("semantic");
-    expect(
-      (visualResult.structuredContent as { agentView: object }).agentView,
-    ).not.toHaveProperty("omittedNodeCount");
+    expect((visualResult.structuredContent as { agentView: object }).agentView).not.toHaveProperty(
+      "omittedNodeCount",
+    );
   });
 
   test("a failed page read waits for the parallel capture to settle", async () => {
