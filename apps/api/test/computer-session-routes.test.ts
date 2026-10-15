@@ -156,6 +156,25 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain("retryable: false");
   });
 
+  test("resolves a routed Connected Machine with the turn's machine authority, not the agent grant", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withComputerPlacement"),
+      source.indexOf("async function withActiveComputerController"),
+    );
+    const routed = placement.slice(placement.indexOf("handle.routingSession.prime()"));
+    // An agent's tool calls carry a worker subject. A personal (Only me)
+    // machine is visible only to the person who started the turn, so the
+    // routed lookup must use the same authority as routing itself.
+    expect(routed).toContain("await handle.machineAuthority()");
+    expect(routed).toContain("subjectId: machineAuthority.subjectId");
+    expect(routed).toContain("resolveChannelAMachineConnection(");
+    expect(routed.indexOf("handle.machineAuthority()")).toBeLessThan(
+      routed.indexOf("assertConnectedMachineComputerAccess("),
+    );
+    expect(routed).not.toContain("getSandbox(deps.db, grant");
+  });
+
   test("dispatches lifecycle authority before physical mutation and preserves unknown outcomes", async () => {
     const source = await readFile(routeUrl, "utf8");
     const create = source.slice(

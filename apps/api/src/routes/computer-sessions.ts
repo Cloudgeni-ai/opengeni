@@ -65,6 +65,7 @@ import {
   requireAccessGrant,
   requireSessionAuthorization,
   relayConfigFromSettings,
+  resolveChannelAMachineConnection,
   resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -1236,14 +1237,32 @@ export function registerComputerSessionRoutes(
         const resolved = await handle.routingSession.prime();
         let screenControlAllowed = false;
         if (operation !== "computer.end" && resolved.kind === "selfhosted" && resolved.sandboxId) {
-          const sandbox = await getSandbox(deps.db, grant, resolved.sandboxId);
+          // Look the routed machine up as the routing did: an agent acts for
+          // the person who started its turn, so a personal (Only me) machine
+          // stays reachable, subject to that attempt's per-chat permission.
+          const machineAuthority = await handle.machineAuthority();
+          const sandbox = await getSandbox(
+            deps.db,
+            {
+              accountId: grant.accountId,
+              workspaceId: sourceSession.workspaceId,
+              subjectId: machineAuthority.subjectId,
+            },
+            resolved.sandboxId,
+          );
           if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
             throw new ComputerSessionStateError("Connected Machine placement is unavailable");
           }
-          const enrollment = await getLiveEnrollmentConnection(
+          const enrollment = await resolveChannelAMachineConnection(
             deps.db,
-            grant,
-            sandbox.enrollmentId,
+            {
+              accountId: grant.accountId,
+              workspaceId: sourceSession.workspaceId,
+              sessionId: sourceSession.id,
+              machineWorkspaceId: sandbox.workspaceId,
+              enrollmentId: sandbox.enrollmentId,
+            },
+            machineAuthority,
           );
           if (!enrollment?.connectionInstanceId) {
             throw new ComputerSessionStateError("Connected Machine is unavailable");
