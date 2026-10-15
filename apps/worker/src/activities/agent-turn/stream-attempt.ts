@@ -1770,6 +1770,7 @@ export async function runTurnStreamAttempt(
               provider: aggregateProvider,
               providerApi: aggregateProviderApi,
               model: turnExecutionPolicy.productModelId,
+              purpose: "main",
               sourceKey: aggregateSourceKey,
               usage: { usage: aggregateUsage },
               normalizedUsage: normalizedAggregateUsage,
