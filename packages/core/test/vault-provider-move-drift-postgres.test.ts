@@ -150,6 +150,24 @@ async function world() {
     move,
     providerValue,
     calls: (op: string) => fake.calls.filter((call) => call.op === op).length,
+    targetWrites: () =>
+      fake.calls.filter((call) => call.op === "writeItem" && call.externalVaultId === "dst").length,
+    syncSource: async () =>
+      await syncLinkedProviderVault({ db, context, vaultId: source.id, providers, force: true }),
+    providerFieldNames: async (vaultRef: string, name: string) =>
+      (await fake.listItems(direct(), vaultRef))
+        .find((meta) => meta.name === name)
+        ?.fields.map((field) => field.name)
+        .sort() ?? null,
+    addSourceFieldInProvider: async (fieldName: string, value: string) => {
+      await fake.writeItem(direct(), "src", {
+        externalItemId: "deploy",
+        name: "Deploy key",
+        type: "api_key",
+        websites: [],
+        fields: [{ name: fieldName, kind: "concealed", value }],
+      });
+    },
     editSourceInProvider: async (value: string) => {
       await fake.writeItem(direct(), "src", {
         externalItemId: "deploy",
@@ -183,6 +201,29 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       expect(w.calls("archiveItem")).toBe(1);
       expect(await w.providerValue("dst", "Deploy key")).toBe("old-value");
       expect(await w.providerValue("src", "Deploy key")).toBeNull();
+    });
+
+    test("an original changed in the provider since the last sync is refused before anything is saved", async () => {
+      if (!client) return;
+      const w = await world();
+      // A field added upstream after the mirror was synced: the mirror's field
+      // list is stale, though the provider reports one version before and after.
+      await w.addSourceFieldInProvider("backup", "backup-value");
+      const error = await refusal(w.move());
+      expect(error.code).toBe("provider_conflict");
+      expect(error.message).toContain("sync");
+      expect(error.details).toMatchObject({ vaultId: w.source.id });
+      expect(error.details?.saved).toBeUndefined();
+      expect(w.targetWrites()).toBe(0);
+      expect(w.calls("archiveItem")).toBe(0);
+      expect(await w.providerFieldNames("dst", "Deploy key")).toBeNull();
+      expect(await w.providerFieldNames("src", "Deploy key")).toEqual(["backup", "value"]);
+      // After a sync the same move copies every field and archives the original.
+      await w.syncSource();
+      const moved = await w.move();
+      expect(moved.vaultId).toBe(w.target.id);
+      expect(await w.providerFieldNames("dst", "Deploy key")).toEqual(["backup", "value"]);
+      expect(w.calls("archiveItem")).toBe(1);
     });
 
     test("an original edited in the provider while the copy was saved is kept", async () => {

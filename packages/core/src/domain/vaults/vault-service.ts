@@ -465,13 +465,16 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
    * reported as saved, so the move is not repeated.
    *
    * A move out of a connected vault records the provider's version of the
-   * original from a fresh listing before any value is read, and lists it
-   * again just before archiving. If the provider now reports another
-   * version, no longer lists it, or cannot be asked, the original is kept and
-   * the copy is reported as saved with `sourceArchived: false`. Providers
-   * offer no conditional archive, so a change landing between that last check
-   * and the archive is still archived (recoverably); a provider that does not
-   * version items gets no drift check.
+   * original from a fresh listing before anything is copied. A version that
+   * differs from the mirrored one (whose field list the copy follows) is
+   * refused with `provider_conflict` before anything is saved: the vault must
+   * be synced first. The original is listed again just before archiving; if
+   * the provider then reports another version, no longer lists it, or cannot
+   * be asked, the original is kept and the copy is reported as saved with
+   * `sourceArchived: false`. These are separate checks, not an atomic read:
+   * values are read live between them, and providers offer no conditional
+   * archive, so a change landing after the last check is still archived
+   * (recoverably). A provider that does not version items gets no drift check.
    */
   async function moveAcrossProviders(input: {
     context: VaultDbContext;
@@ -513,14 +516,17 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (input.mode === "move" && source.vaultSource !== "opengeni") {
       await assertProviderVaultReleases(input.providerWrites, sourceVault);
     }
-    // The version the copied values belong to, observed before they are read:
-    // an edit after this makes the later check differ and keeps the original.
+    // The provider's version before anything is copied. It must equal the
+    // mirrored version the field list below comes from; an edit after this
+    // observation makes the pre-archive check differ and keeps the original.
+    // Values are read live afterwards, so this is not an atomic snapshot.
     let pinned: { providerItemRef: string; version: string } | null = null;
     if (input.mode === "move" && source.vaultSource !== "opengeni") {
-      const { providerItemRef } = await getProviderVaultItemRef(deps.db, input.context, {
+      const mirrored = await getProviderVaultItemRef(deps.db, input.context, {
         vaultId: sourceVault.id,
         itemId: source.id,
       });
+      const { providerItemRef } = mirrored;
       const observed = await observeProviderItemVersion(input.providerWrites, {
         vault: sourceVault,
         providerItemRef,
@@ -532,7 +538,24 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           { itemId: source.id, vaultId: sourceVault.id },
         );
       }
-      if (observed.version !== null) pinned = { providerItemRef, version: observed.version };
+      if (observed.version !== null) {
+        if (
+          mirrored.providerVersion !== observed.version ||
+          mirrored.generation !== source.generation
+        ) {
+          throw new VaultError(
+            "provider_conflict",
+            `${source.name} changed in ${sourceVault.name} since Opengeni last synced it, so its fields here may be out of date. Nothing was moved: sync ${sourceVault.name}, then move it again.`,
+            {
+              itemId: source.id,
+              vaultId: sourceVault.id,
+              mirroredVersion: mirrored.providerVersion,
+              providerVersion: observed.version,
+            },
+          );
+        }
+        pinned = { providerItemRef, version: observed.version };
+      }
     }
     const name = input.newName ?? source.name;
     const fields: FieldSource[] = [];
