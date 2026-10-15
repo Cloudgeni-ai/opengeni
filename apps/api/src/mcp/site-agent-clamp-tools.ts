@@ -2,12 +2,18 @@ import type { AccessGrant } from "@opengeni/contracts";
 import {
   SITE_AGENT_COMPUTE_MESSAGE,
   siteAgentClamp,
+  siteSessionClamp,
   siteClampedAgentMessage,
   type ApiRouteDeps,
   type SiteAgentClamp,
   type SiteClampedResource,
 } from "@opengeni/core";
-import { getPublishedSite, getPublishedSiteVersion } from "@opengeni/db";
+import {
+  getEditableArtifactCreationAgent,
+  getPublishedSite,
+  getPublishedSiteVersion,
+  getSession,
+} from "@opengeni/db";
 
 /** A refused write by an agent started from a Site page, as first-party tools return it. */
 export function siteAgentClampedToolResult(message: string) {
@@ -68,15 +74,38 @@ export const SITE_AGENT_EDITABLE_ARTIFACT_RESOURCE =
  * first-party editing tool (`editable_artifact_create`, `_import` or
  * `_apply`) in its current version's requested tools. Console frames (no
  * published Site) and Sites that declare none may not; a read that fails
- * refuses.
+ * refuses. Existing artifacts additionally need immutable creation provenance
+ * in this same Site-clamped session tree; merely reading/associating one is not
+ * authority to edit it. There is no explicit artifact declaration surface yet.
  */
 export async function siteAgentMayEditArtifacts(
   deps: Pick<ApiRouteDeps, "db">,
-  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId" | "metadata">,
   clamp: SiteAgentClamp,
+  artifactId?: string,
 ): Promise<boolean> {
   if (!clamp.clamped) return true;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  if (artifactId !== undefined) {
+    const callerId = grant.metadata?.sessionId;
+    if (typeof callerId !== "string" || !/^[0-9a-f]{32}$/u.test(artifactId)) return false;
+    const creator = await getEditableArtifactCreationAgent(deps.db, scope, artifactId);
+    if (!creator) return false;
+    const [caller, source, sourceClamp] = await Promise.all([
+      getSession(deps.db, scope.workspaceId, callerId),
+      getSession(deps.db, scope.workspaceId, creator.sessionId),
+      siteSessionClamp(deps.db, scope, creator.sessionId, creator.turnId),
+    ]);
+    if (
+      !caller ||
+      !source ||
+      !sourceClamp.clamped ||
+      (caller.rootSessionId ?? caller.id) !== (source.rootSessionId ?? source.id) ||
+      sourceClamp.originSiteIds.length === 0 ||
+      sourceClamp.originSiteIds.some((siteId) => !clamp.originSiteIds.includes(siteId))
+    )
+      return false;
+  }
   for (const siteId of clamp.originSiteIds) {
     const site = await getPublishedSite(deps.db, scope, siteId).catch(() => null);
     if (!site?.currentVersionId) continue;
@@ -102,8 +131,10 @@ export async function siteAgentMayEditArtifacts(
 export async function siteAgentEditableArtifactRefusal(
   deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
+  artifactId?: string,
 ): Promise<SiteAgentClampedToolResult | null> {
   const clamp = await siteAgentClamp(deps.db, grant);
-  if (!clamp?.clamped || (await siteAgentMayEditArtifacts(deps, grant, clamp))) return null;
+  if (!clamp?.clamped || (await siteAgentMayEditArtifacts(deps, grant, clamp, artifactId)))
+    return null;
   return siteAgentClampedToolResult(siteClampedAgentMessage(SITE_AGENT_EDITABLE_ARTIFACT_RESOURCE));
 }

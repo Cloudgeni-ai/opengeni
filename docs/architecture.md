@@ -41,6 +41,8 @@ never omitted-tools queue arrays. Connection-backed MCPs use native authenticati
 An optional `ToolRef.allowedTools` narrows a connection's catalog and direct calls;
 merged refs intersect that ceiling and children cannot widen it. Console Site
 agents use it for the overlap of Site-declared tools and the viewer's permissions.
+Their editable-artifact writes also require immutable create/import provenance
+within the same Site-clamped session tree; read-created session links grant no edits.
 Signed callbacks retain accepted initiators; children inherit bounded lineage.
 Continuations freeze causal-turn provenance at claim; renewals preserve snapshots
 and service principals. See

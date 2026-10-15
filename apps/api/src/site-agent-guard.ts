@@ -235,7 +235,9 @@ export function siteClampedAgentGuard(deps: ApiRouteDeps) {
     }
     const clamp = await siteAgentClamp(deps.db, grant);
     if (clamp?.clamped && EDITABLE_ARTIFACT_WRITES.test(workspaceRoute(path) ?? "")) {
-      if (await siteAgentMayEditArtifacts(deps, grant, clamp)) {
+      const resource = /^\/editable-artifacts\/([^/]+)/u.exec(workspaceRoute(path) ?? "")?.[1];
+      const artifactId = resource === "imports" ? undefined : resource;
+      if (await siteAgentMayEditArtifacts(deps, grant, clamp, artifactId)) {
         await next();
         return;
       }

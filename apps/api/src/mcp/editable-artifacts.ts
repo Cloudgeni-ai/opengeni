@@ -103,9 +103,9 @@ export function registerEditableArtifactAgentTools(
     return jsonResult(await operation());
   };
   /** Writes: an agent started from a Site page edits only what the Site declared. */
-  const executeWrite = async <T>(operation: () => Promise<T>) => {
+  const executeWrite = async <T>(operation: () => Promise<T>, artifactId?: string) => {
     await input.authorize();
-    const refused = await siteAgentEditableArtifactRefusal(input.deps, input.grant);
+    const refused = await siteAgentEditableArtifactRefusal(input.deps, input.grant, artifactId);
     if (refused) return refused;
     return jsonResult(await operation());
   };
@@ -267,6 +267,7 @@ export function registerEditableArtifactAgentTools(
             expectedStateHash,
             batch: { modality, commands } as EditableArtifactAgentCommandBatch,
           }),
+        artifactId,
       );
     },
   );
@@ -306,6 +307,7 @@ export function registerEditableArtifactAgentTools(
             ...(options ? { options } : {}),
             signal: extra.signal,
           }),
+        artifactId,
       );
     },
   );
@@ -334,7 +336,7 @@ export function registerEditableArtifactAgentTools(
       annotations: mutationAnnotations("Get artifact export", { idempotent: true }),
     },
     async ({ artifactId, versionId, jobId }, extra) =>
-      await execute(
+      await executeWrite(
         async () =>
           await application().exportStatus({
             ...context("editable_artifact_export_status", extra),
@@ -343,6 +345,7 @@ export function registerEditableArtifactAgentTools(
             jobId,
             signal: extra.signal,
           }),
+        artifactId,
       ),
   );
 }

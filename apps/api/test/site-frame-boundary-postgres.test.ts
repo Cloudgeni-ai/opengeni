@@ -26,6 +26,8 @@ import {
   createSession,
   createWorkspace,
   ensureExternalIdentity,
+  PostgresEditableArtifactStore,
+  touchEditableArtifactSessionLink,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
@@ -1455,16 +1457,110 @@ test("agents started from a Site write only on the allowlist; other workspace wr
   expect(clampRefusal.test(read.text)).toBe(false);
 });
 
-test("a Site-started agent edits documents only when its Site declared an editing tool, over MCP and HTTP", async () => {
+test("Site artifact edits need declared tools and creation in the clamped session tree, over MCP and HTTP", async () => {
   const f = await fixture();
   const plainSite = await f.publish("Plain Site");
   const editorSite = await f.publish("Editor Site", {
-    requestedTools: [{ serverId: "opengeni", toolName: "editable_artifact_create" }],
+    requestedTools: [
+      "editable_artifact_create",
+      "editable_artifact_apply",
+      "editable_artifact_export",
+    ].map((toolName) => ({ serverId: "opengeni", toolName })),
   });
   const fromPlain = await f.liveAgentGrant(await f.startSession(plainSite.frame("frame-plain")));
   const fromEditor = await f.liveAgentGrant(await f.startSession(editorSite.frame("frame-editor")));
   const writes: string[] = [];
   const artifactId = crypto.randomUUID().replaceAll("-", "");
+  const seed = async (live: AccessGrant, id = crypto.randomUUID().replaceAll("-", "")) => {
+    const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+    const actor = {
+      kind: "agent" as const,
+      subjectId: live.subjectId,
+      replicaId: crypto.randomUUID().replaceAll("-", "").slice(0, 16),
+      sessionId: String(live.metadata!.sessionId),
+      turnId: String(live.metadata!.turnId),
+      attemptId: String(live.metadata!.attemptId),
+      generation: Number(live.metadata!.executionGeneration),
+    };
+    const snapshotId = crypto.randomUUID().replaceAll("-", "");
+    const now = new Date().toISOString();
+    const stateHash = `sha256:${"a".repeat(64)}`;
+    const result = await new PostgresEditableArtifactStore(db.db).createArtifact({
+      scope,
+      artifactId: id,
+      authorizationActor: actor,
+      receiptId: crypto.randomUUID().replaceAll("-", ""),
+      authorityKey: JSON.stringify([
+        "agent",
+        actor.subjectId,
+        actor.sessionId,
+        actor.turnId,
+        actor.attemptId,
+        actor.generation,
+      ]),
+      idempotencyKey: `create:${id}`,
+      requestHash: stateHash,
+      operationKind: "create",
+      modality: "document",
+      title: "Notes",
+      expectedScopeAuthorizationRevision: 1,
+      initialArtifactAuthorizationRevision: 1,
+      createdBySubjectId: actor.subjectId,
+      genesisSnapshot: {
+        scope,
+        artifactId: id,
+        snapshotId,
+        modality: "document",
+        nativeRevision: 0,
+        blobReference: `editable-artifacts/${id}/${snapshotId}`,
+        byteSize: 256,
+        contentHash: stateHash,
+        mimeType: "application/vnd.opengeni.editable-artifact-snapshot",
+        coveredHeadSequence: 0,
+        stateHash,
+        modelSchemaVersion: 1,
+        kernelVersion: "test-kernel-1",
+        verifiedAt: now,
+        publishedAt: now,
+      },
+      outbox: {
+        outboxId: crypto.randomUUID().replaceAll("-", ""),
+        event: {
+          kind: "snapshot_published",
+          schemaVersion: 1,
+          scope,
+          artifactId: id,
+          modality: "document",
+          snapshotId,
+          coveredHeadSequence: 0,
+          stateHash,
+          publishedAt: now,
+        },
+        state: "pending",
+        attemptCount: 0,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: now,
+        lastErrorCode: null,
+        publishedAt: null,
+        deadLetteredAt: null,
+        createdAt: now,
+      },
+    });
+    expect(result.kind).toBe("result");
+    return id;
+  };
+  const artifactMetadata = (id: string) => ({
+    id,
+    artifactReference: `artifact:${id}`,
+    modality: "document",
+    title: "Notes",
+    lifecycle: "active",
+    headSequence: 0,
+    stateHash: `sha256:${"a".repeat(64)}`,
+    createdAt: "2026-10-15T00:00:00.000Z",
+    updatedAt: "2026-10-15T00:00:00.000Z",
+  });
   const deps = {
     db: db.db,
     bus: new MemoryEventBus(),
@@ -1474,16 +1570,33 @@ test("a Site-started agent edits documents only when its Site declared an editin
     editableArtifactAgent: {
       async create() {
         writes.push("create");
+        await seed(fromEditor, artifactId);
+        return artifactMetadata(artifactId);
+      },
+      async apply(input: { artifactId: string }) {
+        writes.push(`apply:${input.artifactId}`);
         return {
-          id: artifactId,
-          artifactReference: `artifact:${artifactId}`,
-          modality: "document",
-          title: "Notes",
-          lifecycle: "active",
-          headSequence: 0,
-          stateHash: `sha256:${"a".repeat(64)}`,
-          createdAt: "2026-10-15T00:00:00.000Z",
-          updatedAt: "2026-10-15T00:00:00.000Z",
+          artifact: artifactMetadata(input.artifactId),
+          transaction: {
+            id: crypto.randomUUID().replaceAll("-", ""),
+            clientTransactionId: "edit",
+            sequenceStart: 1,
+            sequenceEnd: 1,
+            stateHash: `sha256:${"a".repeat(64)}`,
+            committedAt: new Date().toISOString(),
+            replayed: false,
+          },
+        };
+      },
+      async startExport(input: { artifactId: string }) {
+        writes.push(`export:${input.artifactId}`);
+        return {
+          artifact: artifactMetadata(input.artifactId),
+          versionId: "b".repeat(32),
+          jobId: "c".repeat(32),
+          sourceHeadSequence: 0,
+          sourceStateHash: `sha256:${"a".repeat(64)}`,
+          state: "pending",
         };
       },
     },
@@ -1491,9 +1604,15 @@ test("a Site-started agent edits documents only when its Site declared an editin
   const connect = async (live: AccessGrant) => {
     const server = buildOpenGeniMcpServer(deps, {
       ...live,
+      permissions: [...live.permissions, "files:upload"],
       metadata: {
         ...live.metadata,
-        firstPartyMcpTools: ["editable_artifact_create", "editable_artifact_export"],
+        firstPartyMcpTools: [
+          "editable_artifact_create",
+          "editable_artifact_apply",
+          "editable_artifact_export",
+          "editable_artifact_export_status",
+        ],
       },
     });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1532,9 +1651,80 @@ test("a Site-started agent edits documents only when its Site declared an editin
   // successful MCP artifact result; unrelated failures cannot pass this test.
   const editorClient = await connect(fromEditor);
   const result = await editorClient.callTool(create);
-  expect(result.isError).not.toBe(true);
+  expect(result.isError, JSON.stringify(result)).not.toBe(true);
   expect(result.structuredContent).toMatchObject({ id: artifactId });
   expect(writes).toEqual(["create"]);
+  const edit = (id: string, modality = "document") => ({
+    name: "editable_artifact_apply",
+    arguments: {
+      artifactId: id,
+      modality,
+      expectedHeadSequence: 0,
+      expectedStateHash: `sha256:${"a".repeat(64)}`,
+      commands: [{ kind: "test.edit" }],
+    },
+  });
+  // Existing workspace artifacts and another conversation on the same Site stay
+  // outside this tree, even after the caller has read/associated the artifact.
+  const unrelated = await seed(await f.liveAgentGrant(await f.startSession()));
+  const otherTree = await seed(
+    await f.liveAgentGrant(await f.startSession(editorSite.frame("other-tree"))),
+  );
+  await touchEditableArtifactSessionLink(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    String(fromEditor.metadata!.sessionId),
+    unrelated,
+  );
+  for (const id of [unrelated, otherTree]) {
+    for (const modality of ["document", "spreadsheet", "presentation"]) {
+      expect(errorCode(await editorClient.callTool(edit(id, modality)))).toBe("site_agent_clamped");
+    }
+    expect(
+      errorCode(
+        await editorClient.callTool({
+          ...exportCall,
+          arguments: { artifactId: id, format: "pdf" },
+        }),
+      ),
+    ).toBe("site_agent_clamped");
+    expect(
+      errorCode(
+        await editorClient.callTool({
+          name: "editable_artifact_export_status",
+          arguments: { artifactId: id, versionId: "b".repeat(32), jobId: "c".repeat(32) },
+        }),
+      ),
+    ).toBe("site_agent_clamped");
+  }
+  expect(writes).toEqual(["create"]);
+  expect((await editorClient.callTool(edit(artifactId))).isError).not.toBe(true);
+  expect(
+    (await editorClient.callTool({ ...exportCall, arguments: { artifactId, format: "pdf" } }))
+      .isError,
+  ).not.toBe(true);
+  const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      parentSessionId: String(fromEditor.metadata!.sessionId),
+      initialMessage: "Child",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: f.grant.subjectId },
+      subjectId: f.grant.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    }),
+  );
+  const childGrant = await f.liveAgentGrant(child.id);
+  const childArtifact = await seed(childGrant);
+  expect((await editorClient.callTool(edit(childArtifact))).isError).not.toBe(true);
+  const childClient = await connect(childGrant);
+  expect((await childClient.callTool(edit(artifactId))).isError).not.toBe(true);
+  await childClient.close();
   await plainClient.close();
   await editorClient.close();
   const bearer = async (grant: AccessGrant) => {
@@ -1568,10 +1758,22 @@ test("a Site-started agent edits documents only when its Site declared an editin
   const undeclared = "documents, spreadsheets or presentations the Site did not declare";
   for (const path of [
     "/editable-artifacts",
-    `/editable-artifacts/${crypto.randomUUID()}/materializations`,
+    `/editable-artifacts/${artifactId}/live-ticket`,
+    `/editable-artifacts/${artifactId}/materializations`,
   ]) {
     expect((await post(fromPlain, path)).text).toContain(undeclared);
-    expect((await post(fromEditor, path)).text).not.toContain(undeclared);
+    // This fixture intentionally sends an invalid body: an allowed resource
+    // reaches the real route's validation, not a clamp or an unrelated 500.
+    const allowed = await post(fromEditor, path);
+    expect(allowed.status, allowed.text).toBe(422);
+    expect(allowed.text).not.toContain(undeclared);
+  }
+  for (const id of [unrelated, otherTree]) {
+    for (const suffix of ["live-ticket", "versions", "materializations"]) {
+      const denied = await post(fromEditor, `/editable-artifacts/${id}/${suffix}`);
+      expect(denied.status).toBe(403);
+      expect(denied.text).toContain(undeclared);
+    }
   }
 });
 

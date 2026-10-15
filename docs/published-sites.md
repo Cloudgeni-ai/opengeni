@@ -176,7 +176,13 @@ accepted and ignored, and always reads `false`. An agent started from a
 Site page gets only the tools the Site declared (intersected with the
 member's permissions), and can create, edit or export documents,
 spreadsheets and presentations only when the Site declares a first-party
-editing tool. A session a Site page starts in the console gets only the
+editing tool, and only artifacts created within that Site-clamped session tree.
+The server checks the immutable create/import receipt, not a recent-use link:
+reading an unrelated workspace artifact does not grant permission to edit or
+export it. Parent and child sessions in that clamped tree share their creations;
+another conversation on the same Site does not. No explicit existing-artifact
+declaration field is exposed yet. Normal artifact permissions still apply.
+A session a Site page starts in the console gets only the
 first-party tools the Site declares plus the Site's own data tools (never
 the workspace default set) and no sandbox. Console-frame workspace connections
 are narrowed to the exact declared tool names through `ToolRef.allowedTools`,

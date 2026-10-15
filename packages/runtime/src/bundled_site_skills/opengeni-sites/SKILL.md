@@ -482,6 +482,13 @@ Your authoring session's tools let you build, inspect, and publish the Site;
 they do not define what a human viewer may do in the published app. A conversation
 started inside the Site is a separate agent session with its own tool access.
 
+For documents, spreadsheets and presentations, a Site-started agent needs the
+declared editing tools and may edit or export only artifacts created in its own
+Site-clamped session tree. Parent and child sessions share those creations;
+another conversation on the same Site does not. Reading or linking an existing
+workspace artifact does not grant editing access. There is no existing-artifact
+declaration field yet; use an ordinary authorized authoring session for those edits.
+
 There are two client surfaces:
 
 - `site.tools.*` calls workspace tools. Published direct calls must appear in
