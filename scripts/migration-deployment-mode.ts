@@ -38,6 +38,8 @@ export const MIN_CONTRACT_STEP_CHARS = 15;
 
 export type DeploymentModeFindingKind =
   | "missing-header"
+  | "misplaced-directive"
+  | "maintenance-concurrent-index"
   | "missing-justification"
   | "weak-justification"
   | "unannotated-contract"
@@ -62,26 +64,35 @@ function normalizeNewlines(sql: string): string {
 }
 
 /**
- * The comment lines at the top of the file, up to the first line that is
- * neither blank nor a `--` comment.
+ * The lines at the top of the file, trimmed, up to the first line that is
+ * neither blank nor a `--` comment. Blank lines are kept as "" so a header
+ * value can end at them.
  */
 export function leadingCommentBlock(sql: string): string[] {
   const lines: string[] = [];
   for (const raw of normalizeNewlines(sql).split("\n")) {
     const line = raw.trim();
-    if (line === "") continue;
-    if (!line.startsWith("--")) break;
+    if (line !== "" && !line.startsWith("--")) break;
     lines.push(line);
   }
   return lines;
 }
 
-const ANY_HEADER = /^--\s*[a-z][a-z0-9-]*:/i;
+/** Headers this guard and the migration runner understand. */
+const KNOWN_HEADER = new RegExp(
+  `^--\\s*(?:deployment-mode|opengeni|${JUSTIFICATION_KEY}|${CONTRACT_STEP_KEY})\\s*:`,
+  "i",
+);
+/** A continuation line: `--` followed by at least two spaces (or a tab) of indent. */
+const CONTINUATION = /^--(?: {2,}|\t)\s*\S/;
+const DIRECTIVE = /^--\s*opengeni:/i;
+const CONCURRENT_INDEX_DIRECTIVE = /^--\s*opengeni:concurrent-index\b/i;
 
 /**
  * The value of a `-- <key>: value` header in the leading comment block, joined
- * with any continuation comment lines that follow it (until a blank comment
- * line or another `-- key:` header). Null when the header is absent.
+ * with the indented continuation lines (`--   more text`) directly below it.
+ * The value ends at a blank line, an unindented comment or another known
+ * header. Null when the header is absent.
  */
 export function headerValue(sql: string, key: string): { first: string; full: string } | null {
   const lines = leadingCommentBlock(sql);
@@ -92,13 +103,23 @@ export function headerValue(sql: string, key: string): { first: string; full: st
     const first = (match[1] ?? "").trim();
     const parts = [first];
     for (const next of lines.slice(index + 1)) {
-      const text = next.replace(/^--+/, "").trim();
-      if (text === "" || ANY_HEADER.test(next)) break;
-      parts.push(text);
+      if (!CONTINUATION.test(next) || KNOWN_HEADER.test(next)) break;
+      parts.push(next.replace(/^--+/, "").trim());
     }
     return { first, full: parts.join(" ").replace(/\s+/g, " ").trim() };
   }
   return null;
+}
+
+/**
+ * The runner reads `-- opengeni:` directives only from line 2; anywhere else
+ * they are silently ignored and, for a batched backfill, the statement runs
+ * once as an ordinary migration.
+ */
+export function misplacedDirectiveLines(sql: string): number[] {
+  return leadingCommentBlock(sql)
+    .map((line, index) => (index !== 1 && DIRECTIVE.test(line) ? index + 1 : 0))
+    .filter((lineNumber) => lineNumber > 0);
 }
 
 const LEADING_PLACEHOLDER = /^(?:(?:todo|tbd|tbc|fixme|xxx)\b|<)/i;
@@ -116,20 +137,20 @@ export function placeholderReason(value: string): string | null {
 }
 
 function justificationProblem(value: { first: string; full: string }): string | null {
-  const placeholder = placeholderReason(value.first);
+  const placeholder = placeholderReason(value.full);
   if (placeholder) return `the ${JUSTIFICATION_KEY} ${placeholder}`;
   const words = value.full.split(" ").filter((word) => /[a-z0-9]/i.test(word));
   if (value.full.length < MIN_JUSTIFICATION_CHARS || words.length < MIN_JUSTIFICATION_WORDS) {
-    return `the ${JUSTIFICATION_KEY} is too short (${value.full.length} characters, ${words.length} words; need at least ${MIN_JUSTIFICATION_CHARS} characters and ${MIN_JUSTIFICATION_WORDS} words) to say why no expand/contract sequence works`;
+    return `the ${JUSTIFICATION_KEY} is too short (${value.full.length} characters, ${words.length} words; need at least ${MIN_JUSTIFICATION_CHARS} characters and ${MIN_JUSTIFICATION_WORDS} words) to say why no expand/contract sequence works; wrap long text onto indented \`--   \` continuation lines`;
   }
   return null;
 }
 
 function contractStepProblem(value: { first: string; full: string }): string | null {
-  const placeholder = placeholderReason(value.first);
+  const placeholder = placeholderReason(value.full);
   if (placeholder) return `the ${CONTRACT_STEP_KEY} annotation ${placeholder}`;
   if (value.full.length < MIN_CONTRACT_STEP_CHARS) {
-    return `the ${CONTRACT_STEP_KEY} annotation is too short (${value.full.length} characters, need at least ${MIN_CONTRACT_STEP_CHARS}); name the earlier release or migration after which nothing uses the removed shape`;
+    return `the ${CONTRACT_STEP_KEY} annotation is too short (${value.full.length} characters, need at least ${MIN_CONTRACT_STEP_CHARS}); name the earlier release or migration after which nothing uses the old shape, or say why the previous release is unaffected`;
   }
   return null;
 }
@@ -156,12 +177,15 @@ function normalizeName(name: string): string {
       ? trimmed.slice(1, -1).replaceAll('""', '"')
       : trimmed.toLowerCase();
   });
-  // `public.widgets` and `widgets` name the same table for this purpose.
-  return parts.length === 2 && parts[0] === "public" ? parts[1]! : parts.join(".");
+  // `public.widgets` and `widgets` name the same table for this purpose, and a
+  // `pg_temp.` prefix names the session's temporary table.
+  return parts.length === 2 && (parts[0] === "public" || parts[0] === "pg_temp")
+    ? parts[1]!
+    : parts.join(".");
 }
 
 const CREATE_TABLE = new RegExp(
-  String.raw`\bCREATE\s+(?:(?:GLOBAL|LOCAL)\s+)?(?:TEMP(?:ORARY)?\s+|UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(${QUALIFIED})`,
+  String.raw`\bCREATE\s+(?:(?:GLOBAL|LOCAL)\s+)?(TEMP(?:ORARY)?\s+|UNLOGGED\s+)?TABLE\s+(IF\s+NOT\s+EXISTS\s+)?(${QUALIFIED})`,
   "gi",
 );
 const ALTER_TABLE = new RegExp(
@@ -179,6 +203,9 @@ const DROP_TABLE = new RegExp(
  * Deliberately narrow: DROP INDEX/TRIGGER/POLICY/FUNCTION/CONSTRAINT, ADD
  * COLUMN and RENAME CONSTRAINT are not listed.
  */
+// `ALTER COLUMN <name>` or `ALTER <name>`, so a column named `type` is not
+// mistaken for the TYPE keyword.
+const ALTER_COLUMN = String.raw`\bALTER\s+(?:COLUMN\s+${IDENT}|(?!COLUMN\b)${IDENT})`;
 const CONTRACT_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
   { label: "DROP COLUMN", pattern: /\bDROP\s+COLUMN\b/i },
   {
@@ -191,23 +218,22 @@ const CONTRACT_PATTERNS: readonly { label: string; pattern: RegExp }[] = [
   { label: "RENAME TABLE", pattern: /\bRENAME\s+TO\b/i },
   {
     label: "ALTER COLUMN ... TYPE",
-    pattern: new RegExp(
-      String.raw`\bALTER\s+(?:COLUMN\s+)?${IDENT}\s+(?:SET\s+DATA\s+)?TYPE\b`,
-      "i",
-    ),
+    pattern: new RegExp(String.raw`${ALTER_COLUMN}\s+(?:SET\s+DATA\s+)?TYPE\b`, "i"),
   },
   {
     label: "SET NOT NULL",
-    pattern: new RegExp(String.raw`\bALTER\s+(?:COLUMN\s+)?${IDENT}\s+SET\s+NOT\s+NULL\b`, "i"),
+    pattern: new RegExp(String.raw`${ALTER_COLUMN}\s+SET\s+NOT\s+NULL\b`, "i"),
   },
 ];
 
-function tablesCreatedIn(texts: readonly string[]): Set<string> {
-  const created = new Set<string>();
-  for (const text of texts) {
-    for (const match of text.matchAll(CREATE_TABLE)) created.add(normalizeName(match[1]!));
-  }
-  return created;
+/**
+ * Tables a statement certainly creates. `CREATE TABLE IF NOT EXISTS` may be a
+ * no-op on an existing table, so only temporary tables count with it.
+ */
+function tablesCreatedBy(text: string): string[] {
+  return [...text.matchAll(CREATE_TABLE)]
+    .filter((match) => match[2] === undefined || /^TEMP/i.test(match[1] ?? ""))
+    .map((match) => normalizeName(match[3]!));
 }
 
 /**
@@ -247,15 +273,19 @@ export function contractOperationsIn(
   return found;
 }
 
-/** Every contract-phase operation a migration performs, in first-seen order. */
+/**
+ * Every contract-phase operation a migration performs, in first-seen order.
+ * A table counts as created here only from the statement after its CREATE, so
+ * dropping or renaming an existing table and then recreating it is flagged.
+ */
 export function contractOperations(sql: string): string[] {
-  const statements = splitStatements(normalizeNewlines(sql));
-  const createdHere = tablesCreatedIn(statements.map(executableText));
+  const createdHere = new Set<string>();
   const found: string[] = [];
-  for (const statement of statements) {
+  for (const statement of splitStatements(normalizeNewlines(sql))) {
     for (const label of contractOperationsIn(statement, createdHere)) {
       if (!found.includes(label)) found.push(label);
     }
+    for (const table of tablesCreatedBy(executableText(statement))) createdHere.add(table);
   }
   return found;
 }
@@ -279,34 +309,53 @@ export function analyzeMigrationDeploymentMode(
       },
     ];
   }
+  const findings: DeploymentModeFinding[] = [];
+  const misplaced = misplacedDirectiveLines(text);
+  if (misplaced.length > 0) {
+    findings.push({
+      file,
+      kind: "misplaced-directive",
+      detail: `\`-- opengeni:\` directives are read only from line 2, directly below the deployment-mode header; line ${misplaced.join(", ")} would be ignored and the file would run as an ordinary migration`,
+    });
+  }
+  const lineTwo = leadingCommentBlock(text)[1] ?? "";
   if (firstLine === MAINTENANCE_HEADER) {
+    if (CONCURRENT_INDEX_DIRECTIVE.test(lineTwo)) {
+      findings.push({
+        file,
+        kind: "maintenance-concurrent-index",
+        detail:
+          "a `-- opengeni:concurrent-index` migration builds its index online and cannot carry a justification; declare it `-- deployment-mode: rolling`",
+      });
+      return findings;
+    }
     const justification = headerValue(text, JUSTIFICATION_KEY);
     if (!justification) {
-      return [
-        {
-          file,
-          kind: "missing-justification",
-          detail: `maintenance migrations need \`-- ${JUSTIFICATION_KEY}: <why no expand/contract sequence works>\` in the leading comment block`,
-        },
-      ];
+      findings.push({
+        file,
+        kind: "missing-justification",
+        detail: `maintenance migrations need \`-- ${JUSTIFICATION_KEY}: <why no expand/contract sequence works>\` in the leading comment block`,
+      });
+      return findings;
     }
     const problem = justificationProblem(justification);
-    return problem ? [{ file, kind: "weak-justification", detail: problem }] : [];
+    if (problem) findings.push({ file, kind: "weak-justification", detail: problem });
+    return findings;
   }
   const operations = contractOperations(text);
-  if (operations.length === 0) return [];
+  if (operations.length === 0) return findings;
   const contractStep = headerValue(text, CONTRACT_STEP_KEY);
   if (!contractStep) {
-    return [
-      {
-        file,
-        kind: "unannotated-contract",
-        detail: `rolling migration performs ${operations.join(", ")} without \`-- ${CONTRACT_STEP_KEY}: <which earlier release stopped using it>\` in the leading comment block`,
-      },
-    ];
+    findings.push({
+      file,
+      kind: "unannotated-contract",
+      detail: `rolling migration performs ${operations.join(", ")} on an existing table without \`-- ${CONTRACT_STEP_KEY}: <which earlier release stopped using it, or why the previous release is unaffected>\` in the leading comment block`,
+    });
+    return findings;
   }
   const problem = contractStepProblem(contractStep);
-  return problem ? [{ file, kind: "weak-contract-step", detail: problem }] : [];
+  if (problem) findings.push({ file, kind: "weak-contract-step", detail: problem });
+  return findings;
 }
 
 export function analyzeMigrationDeploymentModes(

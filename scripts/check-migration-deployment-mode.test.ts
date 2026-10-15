@@ -60,7 +60,7 @@ describe("migration deployment-mode guard", () => {
   test("a justification may wrap across continuation comment lines", () => {
     const sql = [
       "-- deployment-mode: maintenance",
-      "-- opengeni:batched-backfill size=500 lock_timeout=5s statement_timeout=60s",
+      "-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s",
       "-- maintenance-justification: installs triggers that reject pre-5000",
       "--   writers outright, so old and new binaries cannot share the schema.",
       "--",
@@ -95,6 +95,26 @@ describe("migration deployment-mode guard", () => {
     expect(
       placeholderReason("none of the expand/contract sequences keep old writers correct"),
     ).toBeNull();
+  });
+
+  test("a justification ends at a blank line or an unindented comment", () => {
+    // One word, then unrelated descriptive comments, is not a justification.
+    for (const separator of ["\n\n", "\n"]) {
+      const sql = `-- deployment-mode: maintenance\n-- maintenance-justification: needed${separator}-- Rebuilds the session tenancy fence for every hot table in one transaction.\nSELECT 1;\n`;
+      expect(kinds("5000_one_word.sql", sql)).toEqual(["weak-justification"]);
+    }
+    // The key alone on its line, text on indented continuation lines.
+    const wrapped = [
+      "-- deployment-mode: maintenance",
+      "-- maintenance-justification:",
+      "--   pre-5000 binaries keep serving a revoked credential path; see",
+      "--   https://example.com/advisory for why any mixed window is the exposure.",
+      "SELECT 1;",
+    ].join("\n");
+    expect(kinds("5000_wrapped.sql", wrapped)).toEqual([]);
+    expect(headerValue(wrapped, "maintenance-justification")?.full).toContain(
+      "https://example.com/advisory",
+    );
   });
 
   test("the justification must be in the leading comment block", () => {
@@ -187,7 +207,7 @@ DO $$ BEGIN ALTER TABLE widgets ADD COLUMN shade text; ALTER INDEX widgets_x REN
   test("tables created by the same migration may be reshaped and dropped", () => {
     const sql = `-- deployment-mode: rolling
 CREATE TEMP TABLE widget_backfill AS SELECT id FROM widgets;
-CREATE TABLE IF NOT EXISTS public.gadgets (id uuid, size int);
+CREATE TABLE public.gadgets (id uuid, size int);
 ALTER TABLE gadgets ALTER COLUMN size TYPE bigint;
 ALTER TABLE gadgets ALTER COLUMN size SET NOT NULL;
 ALTER TABLE gadgets RENAME COLUMN size TO weight;
@@ -198,6 +218,75 @@ DROP TABLE IF EXISTS "widget_backfill";
     expect(contractOperations(`${sql}DROP TABLE widget_backfill, widgets;\n`)).toEqual([
       "DROP TABLE",
     ]);
+  });
+
+  test("a table only counts as created from the statement after its CREATE", () => {
+    for (const sql of [
+      "DROP TABLE IF EXISTS widgets;\nCREATE TABLE widgets (id uuid);",
+      "ALTER TABLE widgets RENAME TO widgets_legacy;\nCREATE TABLE widgets (id uuid);",
+      // IF NOT EXISTS may be a no-op on the existing table.
+      "CREATE TABLE IF NOT EXISTS widgets (id uuid);\nALTER TABLE widgets DROP COLUMN legacy;",
+    ]) {
+      expect(contractOperations(`-- deployment-mode: rolling\n${sql}\n`)).not.toEqual([]);
+    }
+    // A temporary table is session-local, so IF NOT EXISTS and pg_temp still count.
+    expect(
+      contractOperations(
+        "-- deployment-mode: rolling\nCREATE TEMP TABLE IF NOT EXISTS scratch (id uuid);\nDROP TABLE pg_temp.scratch;\n",
+      ),
+    ).toEqual([]);
+  });
+
+  test("a column named type is not a type change", () => {
+    expect(
+      contractOperations(
+        "-- deployment-mode: rolling\nALTER TABLE widgets ALTER COLUMN type SET DEFAULT 'x', ALTER COLUMN type DROP NOT NULL;\n",
+      ),
+    ).toEqual([]);
+    expect(
+      contractOperations(
+        "-- deployment-mode: rolling\nALTER TABLE widgets ALTER COLUMN type TYPE text;\n",
+      ),
+    ).toEqual(["ALTER COLUMN ... TYPE"]);
+  });
+
+  test("opengeni directives must stay on line 2", () => {
+    const backfill =
+      "-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s";
+    expect(
+      kinds(
+        "5000_misplaced.sql",
+        `-- deployment-mode: maintenance\n${JUSTIFICATION}\n${backfill}\nWITH x AS (SELECT 1) UPDATE widgets SET a = 1 RETURNING id;\n`,
+      ),
+    ).toEqual(["misplaced-directive"]);
+    expect(
+      kinds(
+        "5000_placed.sql",
+        `-- deployment-mode: maintenance\n${backfill}\n${JUSTIFICATION}\nWITH x AS (SELECT 1) UPDATE widgets SET a = 1 RETURNING id;\n`,
+      ),
+    ).toEqual([]);
+    expect(
+      kinds(
+        "5000_rolling_misplaced.sql",
+        `-- deployment-mode: rolling\n-- Backfill widgets.\n${backfill}\nSELECT 1;\n`,
+      ),
+    ).toEqual(["misplaced-directive"]);
+  });
+
+  test("a concurrent-index migration cannot be maintenance", () => {
+    const index = "CREATE INDEX CONCURRENTLY IF NOT EXISTS widgets_a ON widgets (a);";
+    expect(
+      kinds(
+        "5000_index.sql",
+        `-- deployment-mode: maintenance\n-- opengeni:concurrent-index lock-timeout=5s\n${index}\n`,
+      ),
+    ).toEqual(["maintenance-concurrent-index"]);
+    expect(
+      kinds(
+        "5000_index.sql",
+        `-- deployment-mode: rolling\n-- opengeni:concurrent-index lock-timeout=5s\n${index}\n`,
+      ),
+    ).toEqual([]);
   });
 
   test("comments, string literals and routine bodies are not executable DDL", () => {
