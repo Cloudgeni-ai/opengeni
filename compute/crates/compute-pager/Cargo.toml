@@ -1,0 +1,19 @@
+[package]
+name = "compute-pager"
+description = "Snapshot-backed userfaultfd paging for compute microVMs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"
+memmap2 = "0.9"
+nix = { version = "0.30", features = ["socket", "uio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
