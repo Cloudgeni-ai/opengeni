@@ -13,7 +13,10 @@
 //                                 provider-rate-limited and stale and never-synced
 //                                 (Keeper), adapter-unavailable (Keeper off here),
 //                                 long-names, keeper-pending (a Keeper connection
-//                                 not finished), verify-fails, verify-refused
+//                                 not finished), verify-fails, verify-refused,
+//                                 fresh-server (no connections; Proton Pass and
+//                                 Keeper not enabled), no-catalog (an older server
+//                                 that lists connections without its providers)
 import {
   totpCodeSync,
   totpRemainingMs,
@@ -238,6 +241,23 @@ function visibleConnection(
       who === "owner" || who === "admin" || (who === "member" && connection.ownership === "user"),
     available: !(connection.provider === "keeper" && scenarios().has("adapter-unavailable")),
   };
+}
+
+/** The providers this mock server can connect, as its catalog says. */
+function providerCatalog() {
+  const off = new Set<string>();
+  if (scenarios().has("adapter-unavailable")) off.add("keeper");
+  if (scenarios().has("fresh-server")) {
+    off.add("protonpass");
+    off.add("keeper");
+  }
+  return (["onepassword", "protonpass", "keeper", "bitwarden", "external"] as const).map(
+    (provider) => ({
+      provider,
+      available: !off.has(provider),
+      reason: off.has(provider) ? ("not_enabled" as const) : null,
+    }),
+  );
 }
 
 function summary(item: MockItem): VaultItemSummary {
@@ -750,7 +770,11 @@ function routes(state: MockState): Route[] {
       pattern: /\/vault-providers\/connections$/,
       handle: () =>
         json(200, {
-          connections: scenarios().has("empty") ? [] : state.connections.map(visibleConnection),
+          connections:
+            scenarios().has("empty") || scenarios().has("fresh-server")
+              ? []
+              : state.connections.map(visibleConnection),
+          ...(scenarios().has("no-catalog") ? {} : { providers: providerCatalog() }),
         }),
     },
     {

@@ -2,6 +2,7 @@ import {
   OpenGeniApiError,
   type ExternalVaultProviderKind,
   type InstallVaultProviderResponse,
+  type VaultProviderAvailability,
   type VaultProviderConnectionSummary,
   type VaultProviderFreshness,
   type VaultProviderOperations,
@@ -128,6 +129,29 @@ export function connectionName(connection: {
 /** A bridge or a service is a machine that can be offline; vendors are "unavailable". */
 export function isSelfHosted(provider: VaultProviderId | null): boolean {
   return provider === "bitwarden" || provider === "external";
+}
+
+/** Providers this server can't connect, each with the reason the picker shows. */
+export type ProviderAvailability = Partial<Record<VaultProviderId, string>>;
+
+const NOT_ENABLED = "Not enabled on this server";
+
+/**
+ * Which providers this server can't connect. The server's catalog says so
+ * even before anyone connects; an older server without one only hints
+ * through its existing connections.
+ */
+export function unavailableProviders(
+  catalog: readonly VaultProviderAvailability[] | undefined,
+  connections: readonly Pick<VaultConnection, "provider" | "available">[] | null,
+): ProviderAvailability {
+  const result: ProviderAvailability = {};
+  if (catalog) {
+    for (const each of catalog) if (!each.available) result[each.provider] = NOT_ENABLED;
+    return result;
+  }
+  for (const each of connections ?? []) if (!each.available) result[each.provider] = NOT_ENABLED;
+  return result;
 }
 
 /* ------------------------------------------------------------- operations */

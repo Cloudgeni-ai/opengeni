@@ -16,6 +16,7 @@ import {
   type VaultSummary,
   type VaultsApi,
 } from "@opengeni/react";
+import type { VaultProviderAvailability } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -26,7 +27,6 @@ import {
   ConnectPickerPage,
   ConnectProviderPage,
   RenewCredentialsPage,
-  type ProviderAvailability,
 } from "@/components/secrets/connect-provider";
 import { ItemEditorPage } from "@/components/secrets/item-editor";
 import { ItemPage, ItemPageLoading, type ItemTransfer } from "@/components/secrets/item-page";
@@ -52,8 +52,10 @@ import {
   PROVIDERS,
   sourceHome,
   stillPending,
+  unavailableProviders as providersUnavailable,
   vaultOperations,
   type ExternalVaultProviderKind,
+  type ProviderAvailability,
   type VaultConnection,
 } from "@/components/secrets/vault-providers";
 import { SecretsMissing, VaultPage, VaultPageLoading } from "@/components/secrets/vault-page";
@@ -138,32 +140,42 @@ function isNotFound(error: unknown): boolean {
 
 /**
  * Every password manager connection this person can see; none without list
- * access. A server without the unified list still lists its 1Password ones.
+ * access, plus which providers this server can connect at all (its catalog,
+ * from the same request). A server without the unified list still lists its
+ * 1Password ones; one without the catalog leaves it undefined.
  */
 function useVaultConnections(api: VaultsApi, enabled: boolean) {
   const [state, setState] = useState<{
     connections: VaultConnection[] | null;
+    providers: VaultProviderAvailability[] | undefined;
     loading: boolean;
     error: unknown;
-  }>({ connections: null, loading: enabled, error: null });
+  }>({ connections: null, providers: undefined, loading: enabled, error: null });
   const controller = useRef<AbortController | null>(null);
   const refresh = useCallback(async () => {
     controller.current?.abort();
     if (!enabled) {
-      setState({ connections: null, loading: false, error: null });
+      setState({ connections: null, providers: undefined, loading: false, error: null });
       return;
     }
     const current = new AbortController();
     controller.current = current;
     setState((previous) => ({ ...previous, loading: true }));
     try {
-      const connections = await api
-        .listVaultProviderConnections(current.signal)
+      const catalog = await api
+        .getVaultProviderCatalog(current.signal)
         .catch(async (error: unknown) => {
           if (!isNotFound(error)) throw error;
-          return (await api.listOnePasswordConnections(current.signal)).map(fromOnePassword);
+          const onePassword = await api.listOnePasswordConnections(current.signal);
+          return { connections: onePassword.map(fromOnePassword), providers: undefined };
         });
-      if (!current.signal.aborted) setState({ connections, loading: false, error: null });
+      if (!current.signal.aborted)
+        setState({
+          connections: catalog.connections,
+          providers: catalog.providers,
+          loading: false,
+          error: null,
+        });
     } catch (error) {
       if (!current.signal.aborted) setState((previous) => ({ ...previous, loading: false, error }));
     }
@@ -344,15 +356,17 @@ export function SecretsRoute({
         : Promise.resolve([]),
     [api, connectionId, connectionHome],
   );
-  // A provider this server can't reach: its existing connections say so.
-  const unavailableProviders: ProviderAvailability = useMemo(() => {
-    const result: ProviderAvailability = {};
-    for (const each of connections ?? []) {
-      if (!each.available) result[each.provider] = "Not enabled on this server";
-    }
-    return result;
-  }, [connections]);
+  // A provider this server can't connect: its catalog says so, or else its connections.
+  const catalogProviders = connectionList.providers;
+  const unavailableProviders: ProviderAvailability = useMemo(
+    () => providersUnavailable(catalogProviders, connections),
+    [catalogProviders, connections],
+  );
   const connectProvider = connectViewProvider(view);
+  // A setup link for a provider this server can't connect opens the picker, which says why.
+  const setupDisabled =
+    (view === "connect-1password" && Boolean(unavailableProviders.onepassword)) ||
+    (connectProvider !== undefined && Boolean(unavailableProviders[connectProvider]));
   const closeConnect = () => {
     void Promise.all([vaults.refresh(), refreshConnections()]);
     openList();
@@ -465,7 +479,7 @@ export function SecretsRoute({
           }}
         />
       );
-    } else if (view === "connect" && canList && canWrite) {
+    } else if ((view === "connect" || setupDisabled) && canList && canWrite) {
       page = (
         <ConnectPickerPage
           unavailable={unavailableProviders}
@@ -928,6 +942,13 @@ function ItemRoute({
         item={item}
         targets={targets}
         canMove={canMove}
+        leavesBehind={
+          hosted
+            ? undefined
+            : removal === "trash"
+              ? `A move puts the original in ${home} trash.`
+              : `A move archives the original in ${home}.`
+        }
         open={moving}
         onOpenChange={setMoving}
         onMove={async (request, target) => {

@@ -256,12 +256,13 @@ export function FinishConnectingNotice({
       : `${info.name} accepted the access, but Opengeni couldn't finish checking it.`;
   const refused = failure?.refused ?? false;
   const action = !canManage ? undefined : refused && onRenew ? (
-    <Button type="button" size="sm" onClick={onRenew}>
+    <Button type="button" variant="outline" size="sm" onClick={onRenew}>
       {info.renewLabel}
     </Button>
   ) : (
     <Button
       type="button"
+      variant="outline"
       size="sm"
       disabled={pending}
       onClick={() => {

@@ -374,6 +374,29 @@ const steps =
   async (page: Page) => {
     for (const step of each) await step(page);
   };
+/** Presses keys in order, as a person would. */
+const keys =
+  (...pressed: string[]) =>
+  async (page: Page) => {
+    for (const key of pressed) {
+      await page.keyboard.press(key);
+      await page.waitForTimeout(150);
+    }
+    await page.waitForTimeout(300);
+  };
+const wait = (ms: number) => async (page: Page) => {
+  await page.waitForTimeout(ms);
+};
+/**
+ * Focuses a control the way a keyboard does (Tab away and back), so the
+ * screenshot shows its focus-visible ring.
+ */
+const focusRole = (role: "button" | "combobox" | "link", name: RegExp) => async (page: Page) => {
+  await page.getByRole(role, { name }).first().focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await page.waitForTimeout(250);
+};
 const SECRET_32 = "f598-mock-signing-secret-0123456789abcdef";
 /** The item page's ⋯ menu, then one of its entries. */
 const itemMenu = (entry?: RegExp) => async (page: Page) => {
@@ -402,6 +425,34 @@ const PROVIDER_STATES: CaptureState[] = [
     "Keeper not enabled on this server: row disabled with reason",
     (ids) => secrets(ids, "?view=connect"),
     { mock: { scenario: "adapter-unavailable" } },
+  ),
+  s(
+    "S17",
+    "picker-fresh-server",
+    "Fresh server, no connections yet: its catalog disables Proton Pass and Keeper",
+    (ids) => secrets(ids, "?view=connect"),
+    { mock: { scenario: "fresh-server" } },
+  ),
+  s(
+    "S17",
+    "picker-old-server",
+    "Older server without a catalog: every provider offered, Keeper hint from its connection",
+    (ids) => secrets(ids, "?view=connect"),
+    { mock: { scenario: "no-catalog,adapter-unavailable" } },
+  ),
+  s(
+    "S17",
+    "setup-link-disabled",
+    "A setup link for a provider this server can't connect opens the picker",
+    connectPage("protonpass"),
+    { mock: { scenario: "fresh-server" } },
+  ),
+  s(
+    "S17",
+    "list-fresh-server",
+    "Fresh server vault list: no connections, Connect password manager",
+    (ids) => secrets(ids),
+    { mock: { scenario: "empty,fresh-server" } },
   ),
   // S18 setup forms
   s(
@@ -541,7 +592,11 @@ const PROVIDER_STATES: CaptureState[] = [
     connectPage("keeper"),
     {
       steps: steps(fill("secret", "US:ok-0123456789"), submit(/^Connect$/u), async (page) => {
-        await page.getByRole("button", { name: "Access to Production" }).first().click();
+        await page
+          .getByRole("combobox", { name: "Access to Production" })
+          .or(page.getByRole("button", { name: "Access to Production" }))
+          .first()
+          .click();
         await page.waitForTimeout(400);
       }),
     },
@@ -909,6 +964,95 @@ const PROVIDER_STATES: CaptureState[] = [
   s("S23", "list-long-names", "Vault list with long provider names", (ids) => secrets(ids), {
     mock: { scenario: "long-names" },
   }),
+  // S24 keyboard: every flow above works without a pointer, with a visible focus ring
+  s(
+    "S24",
+    "picker-tab",
+    "Picker by keyboard: Tab moves between provider rows",
+    (ids) => secrets(ids, "?view=connect"),
+    {
+      steps: steps(focusRole("button", /^Proton Pass/u), keys("Tab")),
+    },
+  ),
+  s(
+    "S24",
+    "picker-enter",
+    "Picker by keyboard: Enter on Proton Pass opens its setup",
+    (ids) => secrets(ids, "?view=connect"),
+    {
+      steps: steps(focusRole("button", /^Proton Pass/u), keys("Enter")),
+    },
+  ),
+  s(
+    "S24",
+    "proton-form-errors",
+    "Proton Pass submitted empty by Enter: focus moves to the first error",
+    connectPage("protonpass"),
+    {
+      steps: steps(focusRole("button", /^Connect$/u), keys("Enter"), wait(500)),
+    },
+  ),
+  s(
+    "S24",
+    "chooser-access-keys",
+    "Keeper chooser: access menu opened and moved by arrow keys",
+    connectPage("keeper"),
+    {
+      steps: steps(
+        fill("secret", "US:ok-0123456789"),
+        submit(/^Connect$/u),
+        focusRole("combobox", /^Access to Production/u),
+        keys("Enter", "ArrowDown"),
+      ),
+    },
+  ),
+  s(
+    "S24",
+    "connection-menu-keys",
+    "Keeper connection: More menu opened by keyboard",
+    (ids) => connection(ids, "keeper"),
+    {
+      steps: steps(focusRole("button", /^More actions for /u), keys("Enter")),
+    },
+  ),
+  s(
+    "S24",
+    "disconnect-escape",
+    "Disconnect confirm closed by Escape: focus returns to the menu button",
+    (ids) => connection(ids, "keeper"),
+    {
+      steps: steps(itemMenu(/^Disconnect/u), keys("Escape"), wait(400)),
+    },
+  ),
+  s(
+    "S24",
+    "trash-confirm-focus",
+    "Move to trash in Proton Pass by keyboard: confirm dialog focus starts on Cancel",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      steps: steps(focusRole("button", /^More actions for /u), keys("Enter"), keys("End", "Enter")),
+    },
+  ),
+  s(
+    "S24",
+    "pending-finish-focus",
+    "Keeper not finished: Finish connecting reached by Tab",
+    (ids) => secrets(ids),
+    {
+      mock: { scenario: "keeper-pending" },
+      steps: steps(openRow(/^Staging agents/u), focusRole("button", /^Finish connecting$/u)),
+    },
+  ),
+  s(
+    "S24",
+    "stale-sync-focus",
+    "Keeper stale: Sync now focused from the notice",
+    (ids) => vault(ids, "Keeper Production"),
+    {
+      mock: { scenario: "stale" },
+      steps: focusRole("button", /^Sync now$/u),
+    },
+  ),
 ];
 
 export const CAPTURE_STATES: CaptureState[] = [
@@ -1240,6 +1384,32 @@ type ShotRecord = {
   };
 };
 
+const SIGNED_OUT = "signed out (stale session)";
+class SignedOutError extends Error {}
+/** The stack's sign-in page instead of the app: a session revoked by a concurrent refresh. */
+async function signedOut(page: Page): Promise<boolean> {
+  return (
+    (await page.locator("input[type=email]").count()) > 0 &&
+    (await page.getByText(/^Create an account$/u).count()) > 0
+  );
+}
+
+/** Captures once more with a fresh sign-in when the saved session was revoked. */
+async function captureWithRetry(
+  browser: Browser,
+  ids: Ids,
+  state: CaptureState,
+  width: number,
+  height: number,
+  theme: "light" | "dark",
+): Promise<ShotRecord> {
+  const record = await capture(browser, ids, state, width, height, theme);
+  if (record.reason !== SIGNED_OUT) return record;
+  const user = state.user ?? flags.user!;
+  states.delete(user === "tom" ? "viewer" : user);
+  return capture(browser, ids, state, width, height, theme);
+}
+
 async function capture(
   browser: Browser,
   ids: Ids,
@@ -1298,6 +1468,7 @@ async function capture(
       )
       .catch(() => {});
     await page.waitForTimeout(1_500);
+    if (await signedOut(page)) throw new SignedOutError();
     await state.steps?.(page, ids);
     const file = join(OUT, name);
     await page.screenshot({ path: file });
@@ -1349,6 +1520,7 @@ async function capture(
       checks: { ...layout, axe, ...(expectation ? { expect: expectation } : {}) },
     };
   } catch (error) {
+    if (error instanceof SignedOutError) return { ...base, status: "failed", reason: SIGNED_OUT };
     await page.screenshot({ path: join(OUT, name) }).catch(() => {});
     return { ...base, status: "failed", reason: (error as Error).message.split("\n")[0] };
   } finally {
@@ -1376,7 +1548,7 @@ try {
     for (const [width, height] of VIEWPORTS) {
       for (const theme of THEMES) {
         jobs.push(async () => {
-          const record = await capture(browser, ids, state, width, height, theme);
+          const record = await captureWithRetry(browser, ids, state, width, height, theme);
           records.push(record);
           const issues = record.checks
             ? [

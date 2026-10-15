@@ -33,6 +33,7 @@ import {
   PROVIDERS,
   stillPending,
   type ExternalVaultProviderKind,
+  type ProviderAvailability,
   type VaultConnection,
   type VaultProviderId,
 } from "./vault-providers";
@@ -51,7 +52,7 @@ import {
    -------------------------------------------------------------------------- */
 
 /** Why a provider can't be connected here, by provider; absent when it can. */
-export type ProviderAvailability = Partial<Record<VaultProviderId, string>>;
+export type { ProviderAvailability };
 
 export function ConnectPickerPage({
   unavailable,

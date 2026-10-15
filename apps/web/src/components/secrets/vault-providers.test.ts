@@ -15,6 +15,7 @@ import {
   removalLabel,
   sourceHome,
   stillPending,
+  unavailableProviders,
   vaultHealth,
   vaultOperations,
   writesPausedReason,
@@ -268,5 +269,35 @@ describe("a linked vault's health", () => {
     expect(connectionName({ provider: "protonpass", label: null, accountName: null })).toBe(
       "Proton Pass",
     );
+  });
+});
+
+describe("which providers this server can connect", () => {
+  test("the server's catalog decides, even with no connections yet", () => {
+    const catalog = [
+      { provider: "onepassword" as const, available: true, reason: null },
+      { provider: "protonpass" as const, available: false, reason: "not_enabled" as const },
+      { provider: "keeper" as const, available: true, reason: null },
+    ];
+    expect(unavailableProviders(catalog, [])).toEqual({
+      protonpass: "Not enabled on this server",
+    });
+    expect(unavailableProviders(catalog, null)).toEqual({
+      protonpass: "Not enabled on this server",
+    });
+    // The catalog wins over a connection's own hint.
+    expect(unavailableProviders(catalog, [{ provider: "keeper", available: false }])).toEqual({
+      protonpass: "Not enabled on this server",
+    });
+  });
+
+  test("an older server without a catalog hints through its connections", () => {
+    expect(unavailableProviders(undefined, null)).toEqual({});
+    expect(
+      unavailableProviders(undefined, [
+        { provider: "keeper", available: false },
+        { provider: "onepassword", available: true },
+      ]),
+    ).toEqual({ keeper: "Not enabled on this server" });
   });
 });

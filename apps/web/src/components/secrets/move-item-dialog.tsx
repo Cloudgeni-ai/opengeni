@@ -17,6 +17,7 @@ export function MoveItemDialog({
   item,
   targets,
   canMove = true,
+  leavesBehind,
   open,
   onOpenChange,
   onMove,
@@ -26,6 +27,11 @@ export function MoveItemDialog({
   targets: VaultSummary[];
   /** Whether this vault can let the item go; otherwise only Copy. */
   canMove?: boolean;
+  /**
+   * What a move does to the original in a password manager, said up front:
+   * "A move puts the original in Proton Pass trash."
+   */
+  leavesBehind?: string | undefined;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onMove: (request: MoveVaultItemRequest, target: VaultSummary) => Promise<void>;
@@ -58,7 +64,7 @@ export function MoveItemDialog({
       }
       description={
         canMove
-          ? "References that name the old vault stop working after a move. A copy leaves this item where it is."
+          ? `${leavesBehind ? `${leavesBehind} ` : ""}References that name the old vault stop working after a move. A copy leaves this item where it is.`
           : "A copy leaves this item where it is. Only vaults that can hold everything in it are listed."
       }
       submitLabel={mode === "move" ? "Move item" : "Copy item"}
