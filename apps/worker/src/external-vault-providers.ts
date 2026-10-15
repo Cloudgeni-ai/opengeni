@@ -12,6 +12,8 @@ import type { ProtonPassProviderPool } from "@opengeni/vaults-protonpass";
 /** Test seams only; production passes nothing. */
 export type NativeExternalVaultOptions = {
   keeper?: Pick<KeeperRuntimeOptions, "queryFunction" | "fetchFile" | "sdk">;
+  /** Applies when this call creates the pool for its CLI path. */
+  protonpass?: { stateRoot?: string; hostEnv?: Readonly<Record<string, string | undefined>> };
 };
 
 /**
@@ -29,7 +31,7 @@ export function createNativeExternalVaultFactories(
     keeper: keeperFactory(settings, options.keeper ?? {}),
   };
   const cliPath = settings.protonPassCliPath;
-  if (cliPath) factories.protonpass = protonPassFactory(cliPath);
+  if (cliPath) factories.protonpass = protonPassFactory(cliPath, options.protonpass ?? {});
   return factories;
 }
 
@@ -91,6 +93,8 @@ function keeperFactory(
           }
         : {}),
       ...(input.operations ? { operations: input.operations } : {}),
+      // Cancels a pending bootstrap; a stored configuration opens without a request.
+      ...(input.signal ? { signal: input.signal } : {}),
       fetch,
       ...seams,
     });
@@ -105,19 +109,28 @@ function keeperFactory(
 /** One pool per CLI path per process, so repeated factory creation never leaks sessions. */
 const protonPools = new Map<string, Promise<ProtonPassProviderPool>>();
 
-function protonPassFactory(binaryPath: string): ExternalVaultProviderFactory {
+function protonPassFactory(
+  binaryPath: string,
+  seams: NonNullable<NativeExternalVaultOptions["protonpass"]>,
+): ExternalVaultProviderFactory {
   return async (input) => {
     const credentials = input.credentials;
     if (credentials.provider !== "protonpass") mismatch();
     let pool = protonPools.get(binaryPath);
     if (!pool) {
       pool = import("@opengeni/vaults-protonpass").then(({ createProtonPassProviderPool }) =>
-        createProtonPassProviderPool({ binaryPath }),
+        createProtonPassProviderPool({ ...seams, binaryPath }),
       );
       protonPools.set(binaryPath, pool);
       pool.catch(() => protonPools.delete(binaryPath));
     }
-    const provider = (await pool).provider(credentials.token, input.operations);
+    // Sessions are scoped to the connection, so two connections never share
+    // CLI state even with the same token. Without a connection id (a setup
+    // probe) the provider gets an isolated session of its own.
+    const provider = (await pool).provider(credentials.token, {
+      ...(input.connectionId === undefined ? {} : { connectionId: input.connectionId }),
+      ...(input.operations ? { operations: input.operations } : {}),
+    });
     return { provider, credentials: { provider: "protonpass", token: credentials.token } };
   };
 }

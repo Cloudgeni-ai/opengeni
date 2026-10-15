@@ -41,11 +41,18 @@ refuses the rest without running the CLI. `runner`, `hostEnv` and `now` exist
 for tests.
 
 Servers use `createProtonPassProviderPool({ binaryPath, … })` once per
-process. `pool.provider(token, operations?)` returns a provider; calls with the
-same token share one logged-in CLI session, different tokens never share a
-session, state directory or cache. Sessions unused for 15 minutes
-(`poolIdleMs`) are logged out, wiped and forgotten, at most 32
-(`maxSessions`) are kept, and `pool.close()` logs them all out.
+process. `pool.provider(token, { connectionId?, operations? })` returns a
+provider whose session is created on its first call. Sessions are scoped to
+the connection id and token: one connection reuses its logged-in CLI session,
+while different connections (even with the same token) and different tokens
+never share a session, state directory, key or cache. Without a connection id
+the provider gets a session of its own. A connection's new token replaces its
+idle old session. Sessions unused for 15 minutes (`poolIdleMs`) are logged
+out, wiped and forgotten. `maxSessions` (32) is a hard limit: the least
+recently used idle session makes room, and when every session is busy the
+call fails with `provider_rate_limited` (retry after
+`PROTON_PASS_POOL_BUSY_RETRY_MS`, 5 seconds). `pool.close()` logs them all
+out and refuses later calls.
 
 ## How it runs the CLI
 

@@ -4,6 +4,7 @@ import { DestinationPolicyError } from "@opengeni/network";
 import { createProviderCallBudget, providerOperations, VaultProviderError } from "@opengeni/vaults";
 import { testSettings } from "@opengeni/testing";
 import { FakeKsm, loginData } from "../../../packages/vaults-keeper/test/fake-ksm";
+import { VALID_TOKEN, makeFakeCli } from "../../../packages/vaults-protonpass/test/fixture";
 import {
   closeNativeExternalVaultProviders,
   createNativeExternalVaultFactories,
@@ -142,6 +143,51 @@ describe("native external vault factories", () => {
       }),
     );
     expect((error as VaultProviderError).code).toBe("provider_unavailable");
+  });
+
+  test("Keeper setup stops at the caller's signal without redeeming the token", async () => {
+    const { fake, keeper } = keeperWorld();
+    const controller = new AbortController();
+    controller.abort(new Error("setup deadline"));
+    const saved: StoredVaultProviderCredentials[] = [];
+    await rejection(
+      keeper({
+        credentials: { provider: "keeper", oneTimeToken: fake.createToken() },
+        persistCredentials: async (next) => {
+          saved.push(next);
+        },
+        signal: controller.signal,
+      }),
+    );
+    expect(fake.requests).toHaveLength(0);
+    expect(saved).toHaveLength(0);
+  });
+
+  test("Proton Pass sessions are scoped to the connection, not the token", async () => {
+    const fake = makeFakeCli();
+    try {
+      const { protonpass } = createNativeExternalVaultFactories(
+        testSettings({ protonPassCliPath: fake.binaryPath }),
+        { protonpass: { stateRoot: fake.stateRoot, hostEnv: { PATH: "/usr/bin:/bin" } } },
+      );
+      const open = async (connectionId?: string) =>
+        (
+          await protonpass!({
+            credentials: { provider: "protonpass", token: VALID_TOKEN },
+            ...(connectionId ? { connectionId } : {}),
+          })
+        ).provider;
+      await (await open("conn-a")).listVaults(ctx());
+      await (await open("conn-a")).listVaults(ctx());
+      await (await open("conn-b")).listVaults(ctx());
+      await (await open()).listVaults(ctx());
+      const logins = fake.log().filter((entry) => entry.argv[0] === "login");
+      expect(logins).toHaveLength(3);
+      expect(new Set(logins.map((entry) => entry.home)).size).toBe(3);
+    } finally {
+      await closeNativeExternalVaultProviders();
+      await fake.cleanup();
+    }
   });
 
   test("Proton Pass returns a pooled, narrowed provider without starting the CLI", async () => {

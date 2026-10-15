@@ -3,6 +3,7 @@ export {
   PROTON_PASS_OPERATIONS,
   PROTON_PASS_VALUE_CACHE_MS,
   createProtonPassVaultProvider,
+  protonPassCapabilities,
   type ProtonPassVaultProvider,
   type ProtonPassVaultProviderOptions,
 } from "./provider";
@@ -16,9 +17,11 @@ export {
 } from "./session";
 export { FILE_FIELD_PREFIX, LOGIN_FIELD_IDS, NOTE_FIELD_ID } from "./mapping";
 export {
+  PROTON_PASS_POOL_BUSY_RETRY_MS,
   PROTON_PASS_POOL_IDLE_MS,
   PROTON_PASS_POOL_MAX_SESSIONS,
   createProtonPassProviderPool,
+  type ProtonPassPoolProviderOptions,
   type ProtonPassProviderPool,
   type ProtonPassProviderPoolOptions,
 } from "./pool";

@@ -53,6 +53,23 @@ export const PROTON_PASS_OPERATIONS: VaultProviderOperations = {
   restoreFieldHistory: false,
 };
 
+/** The adapter's capabilities; the same for every token (the PAT scope is enforced upstream). */
+export function protonPassCapabilities(): VaultProviderCapabilities {
+  return {
+    write: true,
+    createVault: false,
+    totp: true,
+    // Legacy flag means file writes; reads are declared in operations.readFiles.
+    files: false,
+    groupGrants: false,
+    passkeys: false,
+    operations: {
+      ...PROTON_PASS_OPERATIONS,
+      createItemTypes: [...PROTON_PASS_OPERATIONS.createItemTypes],
+    },
+  };
+}
+
 export type ProtonPassVaultProviderOptions = ProtonCliOptions & {
   /** Operations verified at setup; the adapter narrows to them and never widens. */
   operations?: VaultProviderOperations;
@@ -417,21 +434,7 @@ export function createProtonPassVaultProvider(
   const provider: ProtonPassVaultProvider = {
     id: "protonpass",
 
-    capabilities(): VaultProviderCapabilities {
-      return {
-        write: true,
-        createVault: false,
-        totp: true,
-        // Legacy flag means file writes; reads are declared in operations.readFiles.
-        files: false,
-        groupGrants: false,
-        passkeys: false,
-        operations: {
-          ...PROTON_PASS_OPERATIONS,
-          createItemTypes: [...PROTON_PASS_OPERATIONS.createItemTypes],
-        },
-      };
-    },
+    capabilities: protonPassCapabilities,
 
     async validate(ctx) {
       ctx.signal?.throwIfAborted();
