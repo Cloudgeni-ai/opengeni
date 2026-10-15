@@ -103,6 +103,7 @@ import {
   updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
+  withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -1200,11 +1201,24 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         : null;
       const beforeFreshAgentRunCommit = acceptedCustomModel
         ? async (tx: Database): Promise<void> => {
-            const active = await lockActiveCustomModelForAdmission(tx, {
-              accountId: task.accountId,
-              workspaceId: task.workspaceId,
-              reference: acceptedCustomModel,
-            });
+            // Admission reads the task's accepted Claude authority (its
+            // carrier) as the person accountable for the task. The subject is
+            // scoped to this check and restored afterwards.
+            const active = await withWorkspaceSubjectRls(
+              tx,
+              task.workspaceId,
+              causalHumanSubjectId ?? task.ownerSubjectId ?? task.createdBy.subjectId,
+              async (scoped) =>
+                await lockActiveCustomModelForAdmission(scoped, {
+                  accountId: task.accountId,
+                  workspaceId: task.workspaceId,
+                  reference: acceptedCustomModel,
+                  claudeAuthority: {
+                    authoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
+                    scheduledTaskId: task.id,
+                  },
+                }),
+            );
             if (!active) {
               throw new ScheduledRunTerminalAuthorityError(
                 "scheduled_model_unavailable",
@@ -2142,7 +2156,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         }
         const terminalError = scheduledRunRecoveryTerminalError(error);
         if (terminalError?.code === "scheduled_model_unavailable") {
-          return scheduledRunTerminalResult(terminalError.code);
+          // The fresh-run admission rolled back the run insert. Record the
+          // refusal as a visible run so the schedule never fails silently.
+          return await refuseAdmission("scheduled_model_unavailable", false, terminalError.message);
         }
         throw error;
       }

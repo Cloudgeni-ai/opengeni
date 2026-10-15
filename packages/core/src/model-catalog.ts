@@ -179,7 +179,12 @@ export async function lockActiveCustomModelForAdmission(
     accountId: string;
     workspaceId: string;
     reference: WorkspaceCustomModelReference;
-    claudeAuthority?: OrganizationClaudeModelAdmissionAuthority;
+    /**
+     * The accepted Claude authority this admission re-reads. Every caller
+     * states it: an organization Claude model is never admitted without it,
+     * so an omitted value would refuse that model silently.
+     */
+    claudeAuthority: OrganizationClaudeModelAdmissionAuthority | null;
   },
 ): Promise<boolean> {
   if (input.reference.scope === "organization") {

@@ -575,6 +575,9 @@ function prReviewCustomModelCommitGuard(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       reference,
+      // Review runs carry no accepted Claude authority, so an organization
+      // Claude model is refused here (unchanged behaviour).
+      claudeAuthority: null,
     });
     if (!active) {
       throw modelUnavailableHttpException(input.modelId);
