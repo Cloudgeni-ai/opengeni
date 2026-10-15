@@ -30,8 +30,13 @@ pub struct VmSpec {
     /// Name, used for the VMM process and the cgroup. Letters, digits and
     /// hyphens only, at most 64 characters.
     pub name: String,
-    /// Private working directory for sockets and logs.
+    /// The VM's own directory. Every file the VMM opens (kernel, drives,
+    /// snapshot files) and every socket it serves lives inside it, so an
+    /// engine can confine the VMM to it.
     pub dir: PathBuf,
+    /// Where the VMM's console output and logs go: a directory the VMM
+    /// itself never sees.
+    pub logs: PathBuf,
     /// Virtual processors.
     pub vcpus: u8,
     /// Guest memory in MiB.

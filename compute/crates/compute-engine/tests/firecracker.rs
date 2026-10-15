@@ -86,6 +86,7 @@ async fn boot_pause_compress_snapshot_restore() {
     let spec = VmSpec {
         name: name.clone(),
         dir: dir.clone(),
+        logs: dir.clone(),
         vcpus: 2,
         memory_mib: 2048,
         kernel: lab.join("vmlinux"),

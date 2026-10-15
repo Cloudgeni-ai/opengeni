@@ -116,8 +116,8 @@ impl Firecracker {
             .write(true)
             .open(cgroup.path().join("cgroup.procs"))
             .map_err(io_error)?;
-        let console = File::create(spec.dir.join("console.log")).map_err(io_error)?;
-        let log = File::create(spec.dir.join("vmm.log")).map_err(io_error)?;
+        let console = File::create(spec.logs.join("console.log")).map_err(io_error)?;
+        let log = File::create(spec.logs.join("vmm.log")).map_err(io_error)?;
 
         let mut command = Command::new(&self.binary);
         command
@@ -514,6 +514,7 @@ mod tests {
         let mut spec = VmSpec {
             name: "a".into(),
             dir: "/lab/a".into(),
+            logs: "/lab".into(),
             vcpus: 1,
             memory_mib: 512,
             kernel: "/lab/vmlinux".into(),

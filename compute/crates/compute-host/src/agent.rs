@@ -25,7 +25,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
-use crate::layout::{Images, Paths, copy_sparse, sandboxes_dir, vm_spec, write_atomic};
+use crate::layout::{
+    Images, Paths, check_root, copy_sparse, link_kernel, sandboxes_dir, vm_spec, write_atomic,
+};
 use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
 use crate::step::{After, Job, Live};
 use crate::store::Store;
@@ -367,6 +369,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
+        check_root(&config.root).map_err(HostError::Invalid)?;
         tokio::fs::create_dir_all(sandboxes_dir(&config.root))
             .await
             .map_err(|error| HostError::Io(error.to_string()))?;
@@ -446,6 +449,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let config: SandboxConfig =
             serde_json::from_slice(&record).map_err(|error| HostError::Io(error.to_string()))?;
         let policy = config.validate().map_err(HostError::Invalid)?;
+        // A kernel upgrade on the host reaches the sandbox on its next boot.
+        link_kernel(&self.images.kernel, &paths)
+            .map_err(|error| HostError::Io(error.to_string()))?;
         let spec = vm_spec(id, &config, &paths, &self.images);
         self.engine
             .clean_up(&spec)
@@ -620,11 +626,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.preparing.insert(id.0);
         let paths = Paths::new(&self.root, id);
         let base = self.base_image.clone();
+        let kernel = self.images.kernel.clone();
         let record = serde_json::to_vec(&config).unwrap_or_default();
         let events = self.events_tx.clone();
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                std::fs::create_dir_all(&paths.run)?;
+                std::fs::create_dir_all(&paths.jail)?;
+                link_kernel(&kernel, &paths)?;
                 copy_sparse(&base, &paths.disk)?;
                 // The record goes last: a directory without one is an
                 // unfinished creation and is cleaned up on recovery.
