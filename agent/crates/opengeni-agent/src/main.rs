@@ -63,6 +63,7 @@ mod supervisor;
 mod uninstall;
 mod update;
 mod uploads;
+mod vsock_dial;
 mod windows_control;
 mod windows_task;
 

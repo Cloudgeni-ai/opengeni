@@ -81,6 +81,8 @@ hostname = "0.4"
 # workspace `unsafe_code = forbid` holds. Only the `fs` feature (statvfs) is
 # pulled; unix-only (cfg-gated at the call site).
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal"] }
+# vsock from inside a compute sandbox VM to its host (Linux only).
+tokio-vsock = "0.7"
 # Safe extended-attribute access. On Linux the supervisor cgroup itself must carry
 # systemd-oomd's `user.oomd_avoid=1`; the unit-level attribute does not inherit
 # into the delegated child cgroup the agent moves into.

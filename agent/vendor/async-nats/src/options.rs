@@ -20,10 +20,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::engine::Engine;
 use futures_util::Future;
 use std::fmt::Formatter;
+#[cfg(feature = "nkeys")]
+use std::path::Path;
+use std::sync::Arc;
 use std::{fmt, path::PathBuf, pin::Pin, time::Duration};
-#[cfg(feature = "nkeys")]
-use std::{path::Path, sync::Arc};
-#[cfg(feature = "nkeys")]
 use tokio::io;
 use tokio_rustls::rustls;
 
@@ -64,7 +64,18 @@ pub struct ConnectOptions {
     pub(crate) read_buffer_capacity: u16,
     pub(crate) reconnect_delay_callback: Box<dyn Fn(usize) -> Duration + Send + Sync + 'static>,
     pub(crate) auth_callback: Option<CallbackArg1<Vec<u8>, Result<Auth, AuthError>>>,
+    pub(crate) dialer: Option<Dialer>,
 }
+
+/// A byte stream opened by a [`ConnectOptions::custom_dialer`].
+pub trait DialedStream: io::AsyncRead + io::AsyncWrite + Send + Unpin {}
+
+impl<T: io::AsyncRead + io::AsyncWrite + Send + Unpin> DialedStream for T {}
+
+type Dialing = Pin<Box<dyn Future<Output = io::Result<Box<dyn DialedStream>>> + Send>>;
+
+/// Opens the stream to one server in place of a TCP connection.
+pub(crate) type Dialer = Arc<dyn Fn(crate::ServerAddr) -> Dialing + Send + Sync>;
 
 impl fmt::Debug for ConnectOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -84,6 +95,7 @@ impl fmt::Debug for ConnectOptions {
             .entry(&"inbox_prefix", &self.inbox_prefix)
             .entry(&"retry_on_initial_connect", &self.retry_on_initial_connect)
             .entry(&"read_buffer_capacity", &self.read_buffer_capacity)
+            .entry(&"custom_dialer", &self.dialer.is_some())
             .finish()
     }
 }
@@ -116,6 +128,7 @@ impl Default for ConnectOptions {
             }),
             auth: Default::default(),
             auth_callback: None,
+            dialer: None,
         }
     }
 }
@@ -922,6 +935,33 @@ impl ConnectOptions {
     /// ```
     pub fn read_buffer_capacity(mut self, size: u16) -> ConnectOptions {
         self.read_buffer_capacity = size;
+        self
+    }
+
+    /// Opens every connection with `dial` instead of TCP, for transports such
+    /// as vsock or Unix sockets.
+    ///
+    /// `dial` receives the server address being tried and DNS resolution is
+    /// skipped. Only `nats://` and `tls://` servers can be reached this way;
+    /// when TLS is required it runs over the dialed stream, verified against
+    /// the server address's host. Servers a cluster advertises are dialed the
+    /// same way, so combine this with
+    /// [`ConnectOptions::ignore_discovered_servers`] when every address leads
+    /// to the same place.
+    pub fn custom_dialer<F, Fut, S>(mut self, dial: F) -> ConnectOptions
+    where
+        F: Fn(crate::ServerAddr) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<S>> + Send + 'static,
+        S: io::AsyncRead + io::AsyncWrite + Send + Unpin + 'static,
+    {
+        self.dialer = Some(Arc::new(move |server| {
+            let dialing = dial(server);
+            Box::pin(async move {
+                dialing
+                    .await
+                    .map(|stream| Box::new(stream) as Box<dyn DialedStream>)
+            })
+        }));
         self
     }
 }

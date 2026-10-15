@@ -27,6 +27,11 @@ The local changes are confined to three source files and synthetic tests:
 - `flush_custody_tests.rs` exercises the actual handler and client with paused
   sequential and vectored streams, cancellation, validation, and a real TCP
   replacement connection after a partial write.
+- `options.rs`, `connector.rs` and `lib.rs` add `ConnectOptions::custom_dialer`.
+  It replaces the TCP connection with any byte stream, for example vsock from
+  inside a VM to its host. DNS resolution is skipped, TLS still runs over the
+  dialed stream when required, and websocket servers are refused rather than
+  silently dialed over TCP. `dialer_tests.rs` covers both paths.
 
 This confirms transport settlement, not server processing or consumer storage.
 Receipt failure remains an unknown publication outcome; it does not authorize

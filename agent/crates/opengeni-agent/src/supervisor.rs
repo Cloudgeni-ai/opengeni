@@ -2047,6 +2047,13 @@ impl<P: Platform + 'static> Supervisor<P> {
                     }
                 }
             });
+        // Inside a compute sandbox the host relays the connection over vsock.
+        let opts = match crate::vsock_dial::configured_port().map_err(SupervisorError::Connect)? {
+            Some(port) => {
+                crate::vsock_dial::dial_host(opts, port).map_err(SupervisorError::Connect)?
+            }
+            None => opts,
+        };
 
         let client = async_nats::connect_with_options(link.creds.nats_urls.clone(), opts)
             .await

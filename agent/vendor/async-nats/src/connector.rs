@@ -69,6 +69,7 @@ pub(crate) struct ConnectorOptions {
     pub(crate) reconnect_delay_callback: Box<dyn Fn(usize) -> Duration + Send + Sync + 'static>,
     pub(crate) auth_callback: Option<CallbackArg1<Vec<u8>, Result<Auth, AuthError>>>,
     pub(crate) max_reconnects: Option<usize>,
+    pub(crate) dialer: Option<crate::options::Dialer>,
 }
 
 /// Maintains a list of servers and establishes connections.
@@ -175,10 +176,16 @@ impl Connector {
 
             sleep(duration).await;
 
-            let socket_addrs = server_addr
-                .socket_addrs()
-                .await
-                .map_err(|err| ConnectError::with_source(crate::ConnectErrorKind::Dns, err))?;
+            let socket_addrs: Vec<SocketAddr> = if self.options.dialer.is_some() {
+                // The dialer reaches the server itself; there is nothing to resolve.
+                vec![SocketAddr::from(([0, 0, 0, 0], 0))]
+            } else {
+                server_addr
+                    .socket_addrs()
+                    .await
+                    .map_err(|err| ConnectError::with_source(crate::ConnectErrorKind::Dns, err))?
+                    .collect()
+            };
             for socket_addr in socket_addrs {
                 match self
                     .try_connect_to(
@@ -384,6 +391,12 @@ impl Connector {
             tls_required = %tls_required,
             "establishing connection"
         );
+        if self.options.dialer.is_some() && matches!(server_addr.scheme(), "ws" | "wss") {
+            return Err(ConnectError::with_source(
+                crate::ConnectErrorKind::ServerParse,
+                "a custom dialer cannot open websocket connections",
+            ));
+        }
         let mut connection = match server_addr.scheme() {
             #[cfg(feature = "websockets")]
             "ws" => {
@@ -425,6 +438,22 @@ impl Connector {
                 .map_err(|err| ConnectError::with_source(crate::ConnectErrorKind::Io, err))?;
                 let con = WebSocketAdapter::new(ws.0);
                 Connection::new(Box::new(con), 0, self.connect_stats.clone())
+            }
+            _ if self.options.dialer.is_some() => {
+                let stream = match &self.options.dialer {
+                    Some(dial) => tokio::time::timeout(
+                        self.options.connection_timeout,
+                        dial(server_addr.clone()),
+                    )
+                    .await
+                    .map_err(|_| ConnectError::new(crate::ConnectErrorKind::TimedOut))??,
+                    None => unreachable!("guarded by the match arm"),
+                };
+                Connection::new(
+                    Box::new(stream),
+                    self.options.read_buffer_capacity.into(),
+                    self.connect_stats.clone(),
+                )
             }
             _ => {
                 let tcp_stream = tokio::time::timeout(

@@ -218,6 +218,9 @@ jobs:
       - name: Verify publication receipts across blocked writes and reconnects
         run: cargo test --manifest-path vendor/async-nats/Cargo.toml --locked --lib --no-default-features --features ring,websockets flush_custody
 
+      - name: Verify custom dialers replace DNS and TCP
+        run: cargo test --manifest-path vendor/async-nats/Cargo.toml --locked --lib --no-default-features --features ring,websockets dialer_tests
+
       - name: Prove embedded helper selection with synthetic payloads
         if: runner.os == 'Linux'
         env:

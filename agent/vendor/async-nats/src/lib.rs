@@ -256,7 +256,7 @@ pub use auth::Auth;
 pub use client::{
     Client, PublishError, Request, RequestError, RequestErrorKind, Statistics, SubscribeError,
 };
-pub use options::{AuthError, ConnectOptions};
+pub use options::{AuthError, ConnectOptions, DialedStream};
 
 #[cfg(feature = "crypto")]
 #[cfg_attr(docsrs, doc(cfg(feature = "crypto")))]
@@ -1060,6 +1060,7 @@ pub async fn connect_with_options<A: ToServerAddrs>(
             reconnect_delay_callback: options.reconnect_delay_callback,
             auth_callback: options.auth_callback,
             max_reconnects: options.max_reconnects,
+            dialer: options.dialer,
         },
         events_tx,
         state_tx,
@@ -1881,3 +1882,6 @@ mod tests {
 
 #[cfg(test)]
 mod flush_custody_tests;
+
+#[cfg(test)]
+mod dialer_tests;

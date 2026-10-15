@@ -77,6 +77,10 @@ hostname = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 
+# Dialing the host from inside a compute sandbox VM.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }
