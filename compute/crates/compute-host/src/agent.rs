@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, Failure, HoldId, Host, HostPolicy, Input, Level, Notice, OpId, Outcome, Priority,
-    SandboxId, Step,
+    Action, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, Notice, OpId, Outcome,
+    Priority, SandboxId, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec, vsock};
 use tokio::net::UnixStream;
@@ -98,6 +98,11 @@ enum Command {
     Touch {
         id: Id,
         priority: Priority,
+    },
+    Sleep {
+        id: Id,
+        level: Level,
+        reply: Reply<()>,
     },
     Acquire {
         id: Id,
@@ -263,6 +268,14 @@ impl Handle {
     /// Every sandbox and the host's counters.
     pub async fn status(&self) -> Result<HostStatus, HostError> {
         self.ask(|reply| Command::Status { reply }).await
+    }
+
+    /// Puts a sandbox at least as deep as `level` now, whatever its sleep
+    /// settings say. Returns once the request is accepted, not once the
+    /// sandbox is there; a later wake cancels it.
+    pub async fn sleep(&self, id: Id, level: Level) -> Result<(), HostError> {
+        self.ask(|reply| Command::Sleep { id, level, reply })
+            .await?
     }
 }
 
@@ -453,23 +466,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(|error| HostError::Io(error.to_string()))?;
         let image =
             paths.saved.exists() && paths.snapshot.state.exists() && paths.snapshot.memory.exists();
-        let (level, memory_saved) = if paths.disk.exists() {
-            let level = if paths.archived.exists() {
-                Level::Archived
+        let state = if paths.disk.exists() {
+            if paths.archived.exists() {
+                State::new(Level::Archived, Durability::Remote, image)
             } else {
-                Level::Saved
-            };
-            (level, image)
+                State::new(Level::Saved, Durability::Local, image)
+            }
         } else if paths.archived.exists() {
-            (Level::Remote, paths.saved.exists())
+            State::new(Level::Remote, Durability::Remote, paths.saved.exists())
         } else {
             return Err(HostError::Io("disk missing and no archived copy".into()));
         };
         self.insert(id, paths, spec);
         self.input(Input::Add {
             sandbox: id.0,
-            level,
-            memory_saved,
+            state,
             policy,
         });
         Ok(())
@@ -563,6 +574,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     });
                 }
             }
+            Command::Sleep { id, level, reply } => {
+                let result = if !self.slots.contains_key(&id.0) {
+                    Err(HostError::NotFound(id))
+                } else if level >= Level::Archived && !self.store.is_configured() {
+                    Err(HostError::Invalid(
+                        "this host has no store, so sandboxes cannot be archived".into(),
+                    ))
+                } else {
+                    self.input(Input::Sleep {
+                        sandbox: id.0,
+                        level,
+                    });
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
             Command::Acquire {
                 id,
                 hold,
@@ -611,7 +638,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        if policy.enables(Level::Archived) && !self.store.is_configured() {
+        if policy.rules().archive_after.is_some() && !self.store.is_configured() {
             let _ = reply.send(Err(HostError::Invalid(
                 "this host has no store, so sandboxes cannot be archived".into(),
             )));
@@ -665,8 +692,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // wake boots it, under the same admission limits as any wake.
                 self.input(Input::Add {
                     sandbox: id.0,
-                    level: Level::Saved,
-                    memory_saved: false,
+                    state: State::new(Level::Saved, Durability::Local, false),
                     policy,
                 });
                 let _ = reply.send(Ok(()));
@@ -722,9 +748,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             });
             return;
         };
+        // A step that may run while a VM process exists owns it until the
+        // step finishes; archiving a paused VM's saved copy hands it back.
         let needs_vm = matches!(
             step,
-            Step::Pause | Step::Resume | Step::Compress | Step::Save
+            Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop | Step::Archive
         );
         let cancel = CancellationToken::new();
         slot.op = Some(Running {
@@ -901,10 +929,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn notify(&mut self, id: Id, notice: Notice) {
         match notice {
-            Notice::Level {
-                level,
-                memory_saved,
-            } => tracing::debug!(%id, ?level, memory_saved, "level"),
+            Notice::State(state) => tracing::debug!(
+                %id,
+                level = ?state.level,
+                durability = ?state.durability,
+                memory_saved = state.memory_saved,
+                "state"
+            ),
             Notice::MemoryLost => tracing::warn!(%id, "running programs lost; files kept"),
             Notice::Retrying { step, failures } => {
                 tracing::warn!(%id, ?step, failures, "step failed; retrying");
@@ -929,7 +960,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let result = if view.broken {
             Err(HostError::Broken(id))
-        } else if view.level == Level::Running && view.step.is_none() && slot.vm.is_some() {
+        } else if view.state.level == Level::Running && view.step.is_none() && slot.vm.is_some() {
             Ok(slot.spec.vsock_path())
         } else {
             return;
@@ -968,8 +999,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let view = self.core.sandbox(*id)?;
                 Some(SandboxStatus {
                     id: Id(*id),
-                    level: view.level.into(),
-                    memory_saved: view.level.has_process() || view.memory_saved,
+                    level: view.state.level.into(),
+                    durability: view.state.durability.into(),
+                    memory_saved: view.state.keeps_programs(),
                     step: view.step.map(|step| step_name(step).to_owned()),
                     holds: view.holds,
                     resident_bytes: slot

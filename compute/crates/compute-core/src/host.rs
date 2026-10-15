@@ -5,7 +5,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::ids::{HoldId, OpId, SandboxId};
-use crate::level::{Level, Priority, Step};
+use crate::level::{Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
 use crate::sandbox::{InFlight, QueueKey, Retry, Sandbox, Wake};
 use crate::time::At;
@@ -18,11 +18,9 @@ pub enum Input {
     Add {
         /// The sandbox.
         sandbox: SandboxId,
-        /// Where its state is now.
-        level: Level,
-        /// Whether a saved memory image exists (only meaningful without a
-        /// VM process).
-        memory_saved: bool,
+        /// Where its state is now. Inconsistent combinations are corrected
+        /// as [`State::new`] does.
+        state: State,
         /// When it sleeps deeper.
         policy: SleepPolicy,
     },
@@ -66,8 +64,8 @@ pub enum Input {
         /// How it went.
         outcome: Outcome,
     },
-    /// The VM process ended unexpectedly. Files survive; running programs
-    /// do not.
+    /// The VM process ended unexpectedly. Files survive, and so do running
+    /// programs if a current copy was saved.
     Lost {
         /// The sandbox.
         sandbox: SandboxId,
@@ -83,6 +81,17 @@ pub enum Input {
         sandbox: SandboxId,
         /// Resident bytes.
         bytes: u64,
+    },
+    /// Put the sandbox at least as deep as `level` now, whatever its sleep
+    /// rules say, for example to drain the host or to benchmark a level.
+    /// It waits while something holds the sandbox awake; a later
+    /// [`Input::Touch`] or [`Input::Hold`] cancels it, and so does reaching
+    /// the level. [`Level::Running`] cancels an earlier request.
+    Sleep {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// The least depth to reach.
+        level: Level,
     },
     /// Time passed. Call at [`Host::next_deadline`].
     Tick,
@@ -104,8 +113,10 @@ pub enum Outcome {
 pub enum Failure {
     /// Nothing changed and a retry may succeed, after a backoff.
     Transient,
-    /// The memory image is unusable but the files are intact. The sandbox
-    /// boots fresh from its disk next time it is needed.
+    /// For a step on a VM process: the process is gone. A current saved
+    /// copy takes its place; without one, only the files survive. For any
+    /// other step: the memory image is unusable but the files are intact,
+    /// so the sandbox boots fresh from its disk next time it is needed.
     MemoryLost,
     /// The sandbox cannot be recovered on this host. It is left alone until
     /// removed.
@@ -150,13 +161,8 @@ pub enum Action {
 /// A change worth reporting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notice {
-    /// The sandbox settled at a new level.
-    Level {
-        /// The new level.
-        level: Level,
-        /// Whether a memory image exists at that level.
-        memory_saved: bool,
-    },
+    /// The sandbox's state changed: its level, its saved copies, or both.
+    State(State),
     /// Running programs were lost; files survive.
     MemoryLost,
     /// A step failed transiently and will be retried.
@@ -174,17 +180,20 @@ pub enum Notice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SandboxView {
     /// Where its state is.
-    pub level: Level,
-    /// Whether a saved memory image exists (levels without a VM process).
-    pub memory_saved: bool,
+    pub state: State,
     /// The step in flight, if any.
     pub step: Option<Step>,
     /// Whether something currently needs it awake.
     pub wants_awake: bool,
     /// Number of active holds.
     pub holds: usize,
+    /// Its last activity.
+    pub last_activity: At,
     /// The depth memory pressure demands; [`Level::Running`] means none.
     pub floor: Level,
+    /// The depth asked for by [`Input::Sleep`]; [`Level::Running`] means
+    /// none.
+    pub requested: Level,
     /// Whether it is beyond recovery on this host.
     pub broken: bool,
 }
@@ -209,6 +218,10 @@ pub struct Host {
     available_memory: Option<u64>,
     /// Memory expected back from pressure floors not yet reached.
     pending_relief: u64,
+    /// Memory expected back from pressure floors reached since the last
+    /// [`Input::Memory`] reading, which may not show it yet. Counting it
+    /// prevents freeing the same shortfall twice.
+    settled_relief: u64,
 }
 
 impl Host {
@@ -226,6 +239,7 @@ impl Host {
             next_op: 0,
             available_memory: None,
             pending_relief: 0,
+            settled_relief: 0,
         })
     }
 
@@ -250,14 +264,28 @@ impl Host {
     #[must_use]
     pub fn sandbox(&self, id: SandboxId) -> Option<SandboxView> {
         self.sandboxes.get(&id).map(|sandbox| SandboxView {
-            level: sandbox.level,
-            memory_saved: sandbox.memory_saved,
+            state: sandbox.state,
             step: sandbox.in_flight.map(|flight| flight.step),
             wants_awake: sandbox.wants_awake(),
             holds: sandbox.holds.len(),
+            last_activity: sandbox.last_activity,
             floor: sandbox.floor,
+            requested: sandbox.requested,
             broken: sandbox.broken,
         })
+    }
+
+    /// Bytes of host memory that ending VM processes could free at once,
+    /// without losing anything or keeping anyone waiting: idle, paused
+    /// sandboxes whose current state is already saved. Placement can count
+    /// this memory as free.
+    #[must_use]
+    pub fn reclaimable_memory(&self) -> u64 {
+        self.sandboxes
+            .values()
+            .filter(|sandbox| sandbox.reclaimable())
+            .map(|sandbox| sandbox.resident)
+            .sum()
     }
 
     /// Ids of all managed sandboxes, in no particular order.
@@ -288,20 +316,20 @@ impl Host {
         match input {
             Input::Add {
                 sandbox,
-                level,
-                memory_saved,
+                state,
                 policy,
             } => {
                 if let Entry::Vacant(entry) = self.sandboxes.entry(sandbox) {
-                    entry.insert(Sandbox::new(now, level, memory_saved, policy));
+                    entry.insert(Sandbox::new(now, state, policy));
                     self.mark(sandbox);
                 }
             }
             Input::Remove { sandbox } => self.remove(sandbox, out),
             Input::Touch { sandbox, priority } => {
-                if let Some(state) = self.sandboxes.get_mut(&sandbox) {
-                    state.touch(now);
-                    state.request_wake(priority, now);
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+                    slot.touch(now);
+                    slot.requested = Level::Running;
+                    slot.request_wake(priority, now);
                     self.mark(sandbox);
                 }
             }
@@ -311,20 +339,21 @@ impl Host {
                 until,
                 priority,
             } => {
-                if let Some(state) = self.sandboxes.get_mut(&sandbox) {
-                    state.holds.insert(hold, until);
-                    state.touch(now);
-                    if state.level != Level::Running || state.in_flight.is_some() {
-                        state.request_wake(priority, now);
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+                    slot.holds.insert(hold, until);
+                    slot.touch(now);
+                    slot.requested = Level::Running;
+                    if slot.state.level != Level::Running || slot.in_flight.is_some() {
+                        slot.request_wake(priority, now);
                     }
                     self.mark(sandbox);
                 }
             }
             Input::Release { sandbox, hold } => {
-                if let Some(state) = self.sandboxes.get_mut(&sandbox)
-                    && state.holds.remove(&hold).is_some()
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox)
+                    && slot.holds.remove(&hold).is_some()
                 {
-                    state.touch(now);
+                    slot.touch(now);
                     self.mark(sandbox);
                 }
             }
@@ -334,24 +363,40 @@ impl Host {
                 outcome,
             } => self.finish(now, sandbox, op, outcome, out),
             Input::Lost { sandbox } => {
-                if let Some(state) = self.sandboxes.get_mut(&sandbox) {
-                    if state.in_flight.is_some() {
-                        state.process_lost = true;
-                    } else if state.level.has_process() {
-                        state.lose_memory();
-                        out.push(Action::Notify {
-                            sandbox,
-                            notice: Notice::MemoryLost,
-                        });
-                        out.push(level_notice(sandbox, state));
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+                    if slot.in_flight.is_some() {
+                        slot.process_lost = true;
+                    } else if slot.state.level.has_process() {
+                        let (state, lost) = slot.state.without_process();
+                        slot.state = state;
+                        if lost {
+                            out.push(Action::Notify {
+                                sandbox,
+                                notice: Notice::MemoryLost,
+                            });
+                        }
+                        out.push(state_notice(sandbox, slot));
                     }
                     self.mark(sandbox);
                 }
             }
-            Input::Memory { available } => self.available_memory = Some(available),
+            Input::Memory { available } => {
+                self.available_memory = Some(available);
+                self.settled_relief = 0;
+            }
             Input::Resident { sandbox, bytes } => {
-                if let Some(state) = self.sandboxes.get_mut(&sandbox) {
-                    state.resident = bytes;
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+                    slot.resident = bytes;
+                }
+            }
+            Input::Sleep { sandbox, level } => {
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+                    slot.requested = if level > slot.state.level {
+                        level
+                    } else {
+                        Level::Running
+                    };
+                    self.mark(sandbox);
                 }
             }
             Input::Tick => {}
@@ -370,30 +415,32 @@ impl Host {
             self.in_flight[step.index()] -= 1;
             return;
         }
-        let Some(state) = self.sandboxes.get_mut(&id) else {
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
-        let Some(flight) = state.in_flight.filter(|flight| flight.op == op) else {
+        let Some(flight) = slot.in_flight.filter(|flight| flight.op == op) else {
             return;
         };
-        state.in_flight = None;
+        slot.in_flight = None;
         self.in_flight[flight.step.index()] -= 1;
-        let before = (state.level, state.memory_saved);
+        let before = slot.state;
         let mut lost = false;
         match outcome {
             Outcome::Done => {
-                state.level = flight.step.target();
-                if flight.step == Step::Save {
-                    state.memory_saved = true;
+                debug_assert!(
+                    flight.step.can_start(slot.state),
+                    "{flight:?} from {:?}",
+                    slot.state
+                );
+                slot.state = flight.step.apply(slot.state);
+                if flight.step.wakes() && slot.state.level == Level::Running {
+                    slot.touch(now);
                 }
-                if flight.step.wakes() && state.level == Level::Running {
-                    state.touch(now);
-                }
-                state.retry = None;
+                slot.retry = None;
             }
             Outcome::Cancelled => {}
             Outcome::Failed(Failure::Transient) => {
-                let failures = state
+                let failures = slot
                     .retry
                     .map_or(1, |retry| retry.failures.saturating_add(1));
                 let backoff = if flight.step.wakes() {
@@ -401,7 +448,7 @@ impl Host {
                 } else {
                     self.policy.sleep_backoff
                 };
-                state.retry = Some(Retry {
+                slot.retry = Some(Retry {
                     failures,
                     not_before: now + backoff.delay(failures),
                 });
@@ -413,41 +460,51 @@ impl Host {
                     },
                 });
             }
-            Outcome::Failed(Failure::MemoryLost) => lost |= state.lose_memory(),
+            Outcome::Failed(Failure::MemoryLost) => {
+                let (state, lost_now) = slot.state.without_memory_image();
+                slot.state = state;
+                lost |= lost_now;
+            }
             Outcome::Failed(Failure::Fatal) => {
-                state.broken = true;
+                slot.broken = true;
                 out.push(Action::Notify {
                     sandbox: id,
                     notice: Notice::Broken,
                 });
             }
         }
-        if std::mem::take(&mut state.process_lost) && state.level.has_process() {
-            lost |= state.lose_memory();
+        if std::mem::take(&mut slot.process_lost) {
+            let (state, lost_now) = slot.state.without_process();
+            slot.state = state;
+            lost |= lost_now;
         }
         if lost {
-            state.retry = None;
+            slot.retry = None;
             out.push(Action::Notify {
                 sandbox: id,
                 notice: Notice::MemoryLost,
             });
         }
-        if state.floor != Level::Running && state.level >= state.floor {
-            self.pending_relief = self.pending_relief.saturating_sub(state.floor_relief);
-            state.floor = Level::Running;
-            state.floor_relief = 0;
+        if slot.floor != Level::Running && slot.state.level >= slot.floor {
+            self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
+            self.settled_relief = self.settled_relief.saturating_add(slot.floor_relief);
+            slot.floor = Level::Running;
+            slot.floor_relief = 0;
         }
-        if (state.level, state.memory_saved) != before {
-            out.push(level_notice(id, state));
+        if slot.state.level >= slot.requested {
+            slot.requested = Level::Running;
+        }
+        if slot.state != before {
+            out.push(state_notice(id, slot));
         }
         self.mark(id);
     }
 
     fn remove(&mut self, id: SandboxId, out: &mut Vec<Action>) {
-        let Some(state) = self.sandboxes.remove(&id) else {
+        let Some(slot) = self.sandboxes.remove(&id) else {
             return;
         };
-        if let Some(flight) = state.in_flight {
+        if let Some(flight) = slot.in_flight {
             self.orphans.insert(flight.op, flight.step);
             if !flight.cancel_sent {
                 out.push(Action::Cancel {
@@ -456,21 +513,21 @@ impl Host {
                 });
             }
         }
-        if let Some((step, key)) = state.queued {
+        if let Some((step, key)) = slot.queued {
             self.queues[step.index()].remove(&key);
         }
-        if let Some(at) = state.timer {
+        if let Some(at) = slot.timer {
             self.timers.remove(&(at, id));
         }
-        self.pending_relief = self.pending_relief.saturating_sub(state.floor_relief);
+        self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
         out.push(Action::Destroy { sandbox: id });
     }
 
     fn mark(&mut self, id: SandboxId) {
-        if let Some(state) = self.sandboxes.get_mut(&id)
-            && !state.dirty
+        if let Some(slot) = self.sandboxes.get_mut(&id)
+            && !slot.dirty
         {
-            state.dirty = true;
+            slot.dirty = true;
             self.dirty.push(id);
         }
     }
@@ -481,8 +538,8 @@ impl Host {
                 break;
             }
             self.timers.pop_first();
-            if let Some(state) = self.sandboxes.get_mut(&id) {
-                state.timer = None;
+            if let Some(slot) = self.sandboxes.get_mut(&id) {
+                slot.timer = None;
             }
             self.mark(id);
         }
@@ -499,26 +556,26 @@ impl Host {
     /// Brings one sandbox's derived state up to date: wake bookkeeping,
     /// cancellation, its queue entry and its timer.
     fn reconcile(&mut self, id: SandboxId, now: At, out: &mut Vec<Action>) {
-        let Some(state) = self.sandboxes.get_mut(&id) else {
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
-        state.dirty = false;
-        state.expire_holds(now);
-        if state.level == Level::Running && state.in_flight.is_none() {
-            state.wake = None;
-        } else if state.wake.is_none() && !state.holds.is_empty() {
-            state.wake = Some(Wake {
+        slot.dirty = false;
+        slot.expire_holds(now);
+        if slot.state.level == Level::Running && slot.in_flight.is_none() {
+            slot.wake = None;
+        } else if slot.wake.is_none() && !slot.holds.is_empty() {
+            slot.wake = Some(Wake {
                 priority: Priority::Interactive,
                 since: now,
             });
         }
-        if state.wants_awake() {
-            if state.floor != Level::Running {
-                self.pending_relief = self.pending_relief.saturating_sub(state.floor_relief);
-                state.floor = Level::Running;
-                state.floor_relief = 0;
+        if slot.wants_awake() {
+            if slot.floor != Level::Running {
+                self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
+                slot.floor = Level::Running;
+                slot.floor_relief = 0;
             }
-            if let Some(flight) = &mut state.in_flight
+            if let Some(flight) = &mut slot.in_flight
                 && !flight.step.wakes()
                 && !flight.cancel_sent
             {
@@ -529,27 +586,27 @@ impl Host {
                 });
             }
         }
-        let wanted = state
+        let wanted = slot
             .next_step(now)
-            .map(|step| (step, state.queue_key(id, step, now)));
-        if wanted != state.queued {
-            if let Some((step, key)) = state.queued {
+            .map(|step| (step, slot.queue_key(id, step, now)));
+        if wanted != slot.queued {
+            if let Some((step, key)) = slot.queued {
                 self.queues[step.index()].remove(&key);
             }
             if let Some((step, key)) = wanted {
                 self.queues[step.index()].insert(key);
             }
-            state.queued = wanted;
+            slot.queued = wanted;
         }
-        let deadline = state.next_deadline(now);
-        if deadline != state.timer {
-            if let Some(at) = state.timer {
+        let deadline = slot.next_deadline(now);
+        if deadline != slot.timer {
+            if let Some(at) = slot.timer {
                 self.timers.remove(&(at, id));
             }
             if let Some(at) = deadline {
                 self.timers.insert((at, id));
             }
-            state.timer = deadline;
+            slot.timer = deadline;
         }
     }
 
@@ -562,14 +619,14 @@ impl Host {
                 let Some(key) = self.queues[index].pop_first() else {
                     break;
                 };
-                let Some(state) = self.sandboxes.get_mut(&key.sandbox) else {
+                let Some(slot) = self.sandboxes.get_mut(&key.sandbox) else {
                     continue;
                 };
-                debug_assert_eq!(state.queued, Some((step, key)));
-                state.queued = None;
+                debug_assert_eq!(slot.queued, Some((step, key)));
+                slot.queued = None;
                 let op = OpId(self.next_op);
                 self.next_op += 1;
-                state.in_flight = Some(InFlight {
+                slot.in_flight = Some(InFlight {
                     op,
                     step,
                     cancel_sent: false,
@@ -587,6 +644,11 @@ impl Host {
     /// When available memory drops below the low watermark, pushes the least
     /// recently used idle sandboxes deeper until the expected available
     /// memory reaches the high watermark. Returns whether any floor changed.
+    ///
+    /// Each pass moves every candidate at most one level deeper, oldest
+    /// first. When even that is not enough, the next pass goes deeper, so
+    /// a large shortfall ends processes directly instead of compressing
+    /// memory that is about to be freed anyway.
     fn relieve_pressure(&mut self) -> bool {
         let (Some(memory), Some(available)) = (self.policy.memory, self.available_memory) else {
             return false;
@@ -597,47 +659,53 @@ impl Host {
         let mut needed = memory
             .high_watermark
             .saturating_sub(available)
-            .saturating_sub(self.pending_relief);
+            .saturating_sub(self.pending_relief)
+            .saturating_sub(self.settled_relief);
         if needed == 0 {
             return false;
         }
-        let mut candidates: Vec<(At, SandboxId, Level, u64)> = self
-            .sandboxes
-            .iter()
-            .filter(|(_, state)| !state.broken && !state.wants_awake() && state.resident > 0)
-            .filter_map(|(id, state)| {
-                let reached = state.level.max(state.floor);
-                let target = state.policy.relief_target(reached)?;
-                let relief = state.relief_between(reached, target, memory.compressed_percent);
-                (relief > 0).then_some((state.last_activity, *id, target, relief))
-            })
-            .collect();
-        candidates.sort_unstable();
         let mut changed = false;
-        for (_, id, target, relief) in candidates {
-            if needed == 0 {
+        let mut candidates: Vec<(At, SandboxId, Level, u64)> = Vec::new();
+        while needed > 0 {
+            candidates.clear();
+            candidates.extend(
+                self.sandboxes
+                    .iter()
+                    .filter(|(_, slot)| !slot.broken && !slot.wants_awake() && slot.resident > 0)
+                    .filter_map(|(id, slot)| {
+                        let reached = slot.state.level.max(slot.floor);
+                        let target = slot.policy.relief_target(reached)?;
+                        let relief =
+                            slot.relief_between(reached, target, memory.compressed_percent);
+                        (relief > 0).then_some((slot.last_activity, *id, target, relief))
+                    }),
+            );
+            if candidates.is_empty() {
                 break;
             }
-            let Some(state) = self.sandboxes.get_mut(&id) else {
-                continue;
-            };
-            state.floor = target;
-            state.floor_relief += relief;
-            self.pending_relief += relief;
-            needed = needed.saturating_sub(relief);
-            changed = true;
-            self.mark(id);
+            candidates.sort_unstable();
+            for &(_, id, target, relief) in &candidates {
+                if needed == 0 {
+                    break;
+                }
+                let Some(slot) = self.sandboxes.get_mut(&id) else {
+                    continue;
+                };
+                slot.floor = target;
+                slot.floor_relief += relief;
+                self.pending_relief += relief;
+                needed = needed.saturating_sub(relief);
+                changed = true;
+                self.mark(id);
+            }
         }
         changed
     }
 }
 
-fn level_notice(sandbox: SandboxId, state: &Sandbox) -> Action {
+fn state_notice(sandbox: SandboxId, slot: &Sandbox) -> Action {
     Action::Notify {
         sandbox,
-        notice: Notice::Level {
-            level: state.level,
-            memory_saved: state.memory_saved,
-        },
+        notice: Notice::State(slot.state),
     }
 }
