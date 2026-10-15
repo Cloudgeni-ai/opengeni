@@ -17,7 +17,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::Priority;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
@@ -29,7 +28,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bytes buffered per direction of one connection. Small, because a host
 /// keeps one long-lived connection per sandbox and most of them sit idle.
 const BUFFER: usize = 8 * 1024;
-/// Traffic is reported as activity at most this often per direction.
+/// Inbound data wakes the sandbox at most this often per connection.
 const REPORT_EVERY: Duration = Duration::from_millis(250);
 
 /// A port the guest may connect to on its host, and where it leads.
@@ -46,7 +45,10 @@ pub struct GuestPort {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Route {
     /// Relay bytes to a TCP address, such as the control plane's message
-    /// server. Traffic in either direction counts as activity.
+    /// server. Traffic alone never keeps a sandbox awake: keepalives and
+    /// telemetry flow constantly on such links, so counting them would mean
+    /// sandboxes never sleep. Work inside the guest shows as processor use
+    /// instead.
     Forward {
         /// `host:port`, resolved for each connection.
         upstream: String,
@@ -104,11 +106,11 @@ impl fmt::Display for GuestPort {
     }
 }
 
-/// Receives a sandbox's traffic as activity.
+/// Wakes a sandbox when data arrives for it.
 pub(crate) trait Activity: Clone + Send + Sync + 'static {
-    /// Data flowed. With [`Priority::Interactive`] the sandbox should also
-    /// wake if it sleeps.
-    fn report(&self, priority: Priority);
+    /// Data arrived for the guest on a port that wakes it: wake the sandbox
+    /// if it sleeps, and count that as activity.
+    fn wake(&self);
 }
 
 /// The listeners of one sandbox. Dropping it closes them, ends their
@@ -189,7 +191,6 @@ async fn accept<A: Activity>(
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    activity.report(Priority::Background);
                     let route = guest_port.route.clone();
                     let activity = activity.clone();
                     let port = guest_port.port;
@@ -231,17 +232,10 @@ async fn forward<A: Activity>(
     let (mut guest_read, mut guest_write) = guest.into_split();
     let (mut upstream_read, mut upstream_write) = upstream.into_split();
     // The guest only sends while it runs, so its traffic never needs a wake.
-    let outbound = pump(&mut guest_read, &mut upstream_write, || {
-        activity.report(Priority::Background);
-    });
-    let inbound_priority = if wake_on_inbound {
-        Priority::Interactive
-    } else {
-        Priority::Background
-    };
+    let outbound = pump(&mut guest_read, &mut upstream_write, || {});
     let inbound = pump(&mut upstream_read, &mut guest_write, || {
         if wake_on_inbound {
-            activity.report(inbound_priority);
+            activity.wake();
         }
     });
     tokio::try_join!(outbound, inbound)?;
@@ -283,11 +277,11 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Default)]
-    struct Recorder(Arc<Mutex<Vec<Priority>>>);
+    struct Recorder(Arc<Mutex<usize>>);
 
     impl Activity for Recorder {
-        fn report(&self, priority: Priority) {
-            self.0.lock().unwrap().push(priority);
+        fn wake(&self) {
+            *self.0.lock().unwrap() += 1;
         }
     }
 
@@ -322,7 +316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwards_both_ways_and_reports_activity() {
+    async fn forwards_both_ways_and_wakes_on_inbound_data() {
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = upstream.local_addr().unwrap();
         let echo = tokio::spawn(async move {
@@ -349,9 +343,7 @@ mod tests {
         assert_eq!(reply, "pong\n");
         assert_eq!(&echo.await.unwrap(), b"ping\n");
 
-        let seen = recorder.0.lock().unwrap().clone();
-        assert!(seen.contains(&Priority::Background), "{seen:?}");
-        assert!(seen.contains(&Priority::Interactive), "{seen:?}");
+        assert_eq!(*recorder.0.lock().unwrap(), 1, "one wake for the reply");
 
         drop(listeners);
         assert!(!socket_path(&vsock, 4222).exists());
@@ -376,7 +368,7 @@ mod tests {
         guest.read_to_string(&mut reply).await.unwrap();
         assert_eq!(reply, "hello");
         assert!(
-            !recorder.0.lock().unwrap().contains(&Priority::Interactive),
+            *recorder.0.lock().unwrap() == 0,
             "inbound data must not wake without wake_on_inbound"
         );
         let _ = std::fs::remove_dir_all(dir);

@@ -15,6 +15,7 @@ mod spec;
 pub mod vsock;
 
 use std::future::Future;
+use std::time::Duration;
 
 pub use error::{EngineError, ErrorKind};
 pub use spec::{Drive, Network, SnapshotFiles, VmSpec};
@@ -88,6 +89,11 @@ pub trait Engine: Send + Sync + 'static {
 
     /// Bytes of host memory the VM holds right now.
     fn resident_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
+
+    /// Processor time the VM has used since it started, counting every
+    /// thread of its VMM. The host compares readings to tell a sandbox busy
+    /// with work of its own from an idle one.
+    fn cpu_time(&self, vm: &Self::Vm) -> Result<Duration, EngineError>;
 
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can

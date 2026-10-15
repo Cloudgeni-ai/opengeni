@@ -15,9 +15,10 @@ use compute_engine::{
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
+    DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SleepConfig,
 };
-use compute_host::{GuestPort, HostAgent, HostConfig, NoStore, serve};
+use compute_host::{BusyRule, GuestPort, HostAgent, HostConfig, NoStore, serve};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
@@ -94,6 +95,35 @@ struct FakeVm {
     paused: Mutex<bool>,
     exit: watch::Sender<bool>,
     guest: JoinHandle<()>,
+    cpu: Arc<Mutex<CpuMeter>>,
+}
+
+/// Processor time a fake VM used: one full processor while its guest is
+/// told to be busy.
+#[derive(Debug, Default)]
+struct CpuMeter {
+    used: Duration,
+    busy_since: Option<Instant>,
+}
+
+impl CpuMeter {
+    fn total(&self) -> Duration {
+        self.used
+            + self
+                .busy_since
+                .map_or(Duration::ZERO, |since| since.elapsed())
+    }
+
+    fn set_busy(&mut self, busy: bool) {
+        match (busy, self.busy_since) {
+            (true, None) => self.busy_since = Some(Instant::now()),
+            (false, Some(since)) => {
+                self.used += since.elapsed();
+                self.busy_since = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Fake {
@@ -107,12 +137,14 @@ impl Fake {
         let _ = std::fs::remove_file(&vsock);
         let listener = UnixListener::bind(&vsock).unwrap();
         let memory = Arc::new(Mutex::new(memory));
+        let cpu = Arc::new(Mutex::new(CpuMeter::default()));
         let (exit, mut exited) = watch::channel(false);
         let guest = tokio::spawn(guest(
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::clone(&cpu),
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -137,6 +169,7 @@ impl Fake {
             paused: Mutex::new(false),
             exit,
             guest,
+            cpu,
         }
     }
 
@@ -174,11 +207,13 @@ async fn guest(
     memory: Arc<Mutex<String>>,
     disk: PathBuf,
     told_restored: Arc<AtomicBool>,
+    cpu: Arc<Mutex<CpuMeter>>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
         let told_restored = Arc::clone(&told_restored);
+        let cpu = Arc::clone(&cpu);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -207,6 +242,14 @@ async fn guest(
                         "ok".into()
                     }
                     ("told-restored?", _) => told_restored.load(Ordering::SeqCst).to_string(),
+                    ("busy", _) => {
+                        cpu.lock().unwrap().set_busy(true);
+                        "ok".into()
+                    }
+                    ("quiet", _) => {
+                        cpu.lock().unwrap().set_busy(false);
+                        "ok".into()
+                    }
                     (other, _) => format!("unknown {other}"),
                 };
                 if write
@@ -310,6 +353,10 @@ impl Engine for Fake {
         Ok(100 << 20)
     }
 
+    fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
+        Ok(vm.cpu.lock().unwrap().total())
+    }
+
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {
         let mut exit = vm.exit.subscribe();
         let late = self.delays.exit_notice;
@@ -360,6 +407,11 @@ impl Lab {
             sample_every: Duration::from_millis(50),
             guest_ports: Vec::new(),
             restore_notice_port: None,
+            busy: Some(BusyRule {
+                cpu_percent: 50,
+                window: Duration::from_millis(100),
+            }),
+            can_compress: true,
         };
         configure(&mut config);
         let engine = Fake {
@@ -374,14 +426,17 @@ impl Lab {
             let _ = serve(handle, &listening).await;
         });
         // Generous: on a loaded machine the server can take a while to bind.
+        // The socket file appears at bind, before the server listens, so
+        // wait for a request to succeed rather than for the file.
+        let client = Client::new(&socket);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !socket.exists() {
+        while client.call(&Request::Status).await.is_err() {
             assert!(Instant::now() < deadline, "the host API never came up");
             sleep(Duration::from_millis(1)).await;
         }
         Self {
             root,
-            client: Client::new(socket),
+            client,
             world,
             server,
         }
@@ -399,17 +454,11 @@ impl Lab {
         (self.root, self.world)
     }
 
-    async fn create(&self, id: Id, sleep: &[(LevelName, u64)]) {
+    async fn create(&self, id: Id, sleep: SleepConfig) {
         let config = SandboxConfig {
             vcpus: 1,
             memory_mib: 256,
-            sleep: sleep
-                .iter()
-                .map(|(level, after_ms)| SleepRule {
-                    level: *level,
-                    after_ms: *after_ms,
-                })
-                .collect(),
+            sleep,
         };
         let reply = self
             .client
@@ -417,6 +466,21 @@ impl Lab {
             .await
             .unwrap();
         assert_eq!(reply, Reply::Done);
+    }
+
+    async fn sleep_to(&self, id: Id, level: LevelName) -> Reply {
+        self.client
+            .call(&Request::Sleep { id, level })
+            .await
+            .unwrap()
+    }
+
+    fn sandbox(status: &HostStatus, id: Id) -> &compute_host::protocol::SandboxStatus {
+        status
+            .sandboxes
+            .iter()
+            .find(|sandbox| sandbox.id == id)
+            .unwrap()
     }
 
     /// Runs guest shell lines in one connection and returns the replies.
@@ -485,7 +549,29 @@ fn vm_name(id: Id) -> String {
     format!("sbx-{id}")
 }
 
-const SAVE_QUICKLY: &[(LevelName, u64)] = &[(LevelName::Paused, 30), (LevelName::Saved, 60)];
+/// Never sleeps on its own.
+const NEVER: SleepConfig = SleepConfig {
+    pause_after_ms: None,
+    save_after_ms: None,
+    archive_after_ms: None,
+    drop_after_ms: None,
+    evict_after_ms: None,
+    forget_after_ms: None,
+    compress: false,
+};
+
+/// Pauses and saves quickly, and keeps the paused VM.
+const SAVE_IN_PLACE: SleepConfig = SleepConfig {
+    pause_after_ms: Some(30),
+    save_after_ms: Some(60),
+    ..NEVER
+};
+
+/// Pauses, saves and ends the VM process quickly.
+const SAVE_QUICKLY: SleepConfig = SleepConfig {
+    drop_after_ms: Some(90),
+    ..SAVE_IN_PLACE
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sleeping_through_save_keeps_memory_and_disk() {
@@ -512,6 +598,209 @@ async fn sleeping_through_save_keeps_memory_and_disk() {
     );
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_keeps_the_paused_vm_ready_to_resume() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(12);
+    lab.create(sandbox, SAVE_IN_PLACE).await;
+    assert_eq!(lab.run(sandbox, &["set hello"]).await, ["ok"]);
+    let status = lab
+        .wait_until("the save to finish", |status| {
+            let view = Lab::sandbox(status, sandbox);
+            view.durability == DurabilityName::Local && view.step.is_none()
+        })
+        .await;
+    let view = Lab::sandbox(&status, sandbox);
+    assert_eq!(view.level, LevelName::Paused);
+    assert!(view.memory_saved);
+    assert!(lab.sandbox_dir(sandbox).join("saved").exists());
+    assert!(lab.world.live.lock().unwrap().contains(&vm_name(sandbox)));
+
+    let resumes = lab.world.resumes.load(Ordering::SeqCst);
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["hello"]);
+    assert_eq!(lab.world.resumes.load(Ordering::SeqCst), resumes + 1);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
+    assert!(
+        !lab.sandbox_dir(sandbox).join("saved").exists(),
+        "a resumed guest makes the saved image stale"
+    );
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crash_after_a_save_loses_nothing() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(13);
+    lab.create(sandbox, SAVE_IN_PLACE).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("the save to finish", |status| {
+        Lab::sandbox(status, sandbox).durability == DurabilityName::Local
+    })
+    .await;
+    lab.world.crash(&vm_name(sandbox));
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sleep_request_overrides_the_settings_until_the_next_wake() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(14);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert!(lab.world.live.lock().unwrap().is_empty());
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+
+    // The wake cleared the request: a never-sleeping sandbox stays awake.
+    sleep(Duration::from_millis(200)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+
+    // Without a store, nothing can be archived.
+    let reply = lab.sleep_to(sandbox, LevelName::Archived).await;
+    assert!(
+        matches!(&reply, Reply::Error { message } if message.contains("store")),
+        "{reply:?}"
+    );
+    let reply = lab.sleep_to(id(99), LevelName::Paused).await;
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    lab.assert_clean();
+}
+
+/// Pauses soon after the last activity.
+const PAUSE_SOON: SleepConfig = SleepConfig {
+    pause_after_ms: Some(200),
+    ..NEVER
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_inside_the_guest_keeps_it_awake() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(16);
+    lab.create(sandbox, PAUSE_SOON).await;
+    // The guest starts a background job and nobody is connected any more.
+    assert_eq!(lab.run(sandbox, &["busy"]).await, ["ok"]);
+    sleep(Duration::from_millis(800)).await;
+    let status = lab.status().await;
+    assert_eq!(
+        Lab::sandbox(&status, sandbox).level,
+        LevelName::Running,
+        "a busy guest stays awake"
+    );
+    // The job ends; the sandbox goes idle and pauses.
+    assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
+    let quiet = Instant::now();
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert!(quiet.elapsed() >= Duration::from_millis(200));
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(17);
+    lab.create(sandbox, PAUSE_SOON).await;
+    let hold = |ttl_ms| Request::Hold {
+        id: sandbox,
+        hold: "turn".into(),
+        ttl_ms,
+        priority: PriorityName::Interactive,
+    };
+    let started = Instant::now();
+    assert_eq!(
+        lab.client.call(&hold(Some(600))).await.unwrap(),
+        Reply::Done
+    );
+    // Holding wakes it: a turn starting is a good moment to boot.
+    lab.wait_level(sandbox, LevelName::Running).await;
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    sleep(Duration::from_millis(450)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+    assert_eq!(Lab::sandbox(&status, sandbox).holds, 1);
+    // Nobody refreshed it: it lapses, and the idle clock runs from there.
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(800),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // A hold without expiry lasts until released.
+    assert_eq!(lab.client.call(&hold(None)).await.unwrap(), Reply::Done);
+    lab.wait_level(sandbox, LevelName::Running).await;
+    sleep(Duration::from_millis(400)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+    let release = Request::Release {
+        id: sandbox,
+        hold: "turn".into(),
+    };
+    assert_eq!(lab.client.call(&release).await.unwrap(), Reply::Done);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+
+    let missing = Request::Release {
+        id: id(98),
+        hold: "turn".into(),
+    };
+    let reply = lab.client.call(&missing).await.unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_that_cannot_compress_refuses_to() {
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.can_compress = false,
+    )
+    .await;
+    let sandbox = id(18);
+    let compressible = SleepConfig {
+        compress: true,
+        ..PAUSE_SOON
+    };
+    lab.create(sandbox, compressible).await;
+    lab.run(sandbox, &["set x"]).await;
+    let reply = lab.sleep_to(sandbox, LevelName::Compressed).await;
+    assert!(
+        matches!(&reply, Reply::Error { message } if message.contains("compress")),
+        "{reply:?}"
+    );
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forgetting_memory_keeps_the_files() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(15);
+    let forget_soon = SleepConfig {
+        forget_after_ms: Some(150),
+        ..SAVE_QUICKLY
+    };
+    lab.create(sandbox, forget_soon).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("the memory image to be forgotten", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Saved && !view.memory_saved && view.step.is_none()
+    })
+    .await;
+    assert!(!lab.sandbox_dir(sandbox).join("saved").exists());
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
     lab.assert_clean();
 }
 
@@ -558,7 +847,7 @@ async fn a_burst_of_wakes_respects_the_restore_limit() {
 async fn a_crash_loses_memory_but_keeps_files() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let sandbox = id(2);
-    lab.create(sandbox, &[]).await;
+    lab.create(sandbox, NEVER).await;
     lab.run(sandbox, &["set hello", "write kept"]).await;
     lab.world.crash(&vm_name(sandbox));
     lab.wait_until("the crash to be noticed", |status| {
@@ -579,12 +868,18 @@ async fn a_wake_interrupts_compression() {
     };
     let lab = Lab::new(delays, HostPolicy::default()).await;
     let sandbox = id(3);
-    lab.create(
-        sandbox,
-        &[(LevelName::Paused, 20), (LevelName::Compressed, 40)],
-    )
-    .await;
+    let compressible = SleepConfig {
+        pause_after_ms: Some(20),
+        compress: true,
+        ..NEVER
+    };
+    lab.create(sandbox, compressible).await;
     lab.run(sandbox, &["set warm"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert_eq!(
+        lab.sleep_to(sandbox, LevelName::Compressed).await,
+        Reply::Done
+    );
     lab.wait_until("compression to start", |status| {
         status.sandboxes[0].step.as_deref() == Some("compress")
     })
@@ -609,7 +904,7 @@ async fn a_wake_during_save_resumes_the_paused_vm() {
     };
     let lab = Lab::new(delays, HostPolicy::default()).await;
     let sandbox = id(4);
-    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.create(sandbox, SAVE_IN_PLACE).await;
     lab.run(sandbox, &["set warm"]).await;
     lab.wait_until("the save to start", |status| {
         status.sandboxes[0].step.as_deref() == Some("save")
@@ -681,7 +976,7 @@ async fn remove_waits_for_a_running_save_and_deletes_everything() {
     assert!(lab.world.live.lock().unwrap().is_empty());
     assert_eq!(lab.status().await.sandboxes.len(), 0);
     // The id is free again.
-    lab.create(sandbox, &[]).await;
+    lab.create(sandbox, NEVER).await;
     assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
     lab.assert_clean();
 }
@@ -691,7 +986,7 @@ async fn a_restarted_agent_recovers_every_sandbox() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let (saved, running) = (id(6), id(7));
     lab.create(saved, SAVE_QUICKLY).await;
-    lab.create(running, &[]).await;
+    lab.create(running, NEVER).await;
     lab.run(saved, &["set kept", "write saved-disk"]).await;
     lab.run(running, &["set gone", "write running-disk"]).await;
     lab.wait_level(saved, LevelName::Saved).await;
@@ -726,21 +1021,13 @@ async fn bad_requests_are_refused() {
         .await
         .unwrap();
     assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
-    let archived = &[
-        (LevelName::Paused, 10),
-        (LevelName::Saved, 20),
-        (LevelName::Archived, 30),
-    ];
     let config = SandboxConfig {
         vcpus: 1,
         memory_mib: 256,
-        sleep: archived
-            .iter()
-            .map(|(level, after_ms)| SleepRule {
-                level: *level,
-                after_ms: *after_ms,
-            })
-            .collect(),
+        sleep: SleepConfig {
+            archive_after_ms: Some(90),
+            ..SAVE_IN_PLACE
+        },
     };
     let reply = lab
         .client
@@ -754,7 +1041,6 @@ async fn bad_requests_are_refused() {
         matches!(&reply, Reply::Error { message } if message.contains("store")),
         "{reply:?}"
     );
-    lab.create(missing, &[]).await;
     let reply = lab
         .client
         .call(&Request::Create {
@@ -762,7 +1048,27 @@ async fn bad_requests_are_refused() {
             config: SandboxConfig {
                 vcpus: 1,
                 memory_mib: 256,
-                sleep: Vec::new(),
+                sleep: SleepConfig {
+                    save_after_ms: Some(10),
+                    ..NEVER
+                },
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reply, Reply::Error { message } if message.contains("pause")),
+        "saving needs pausing first: {reply:?}"
+    );
+    lab.create(missing, NEVER).await;
+    let reply = lab
+        .client
+        .call(&Request::Create {
+            id: missing,
+            config: SandboxConfig {
+                vcpus: 1,
+                memory_mib: 256,
+                sleep: NEVER,
             },
         })
         .await
@@ -784,7 +1090,14 @@ async fn data_for_a_sleeping_sandbox_wakes_it() {
     )
     .await;
     let sandbox = id(10);
-    lab.create(sandbox, &[(LevelName::Paused, 30)]).await;
+    lab.create(
+        sandbox,
+        SleepConfig {
+            pause_after_ms: Some(30),
+            ..NEVER
+        },
+    )
+    .await;
     lab.run(sandbox, &["set up"]).await;
 
     // The test plays the guest: it opens a connection to its host, the way

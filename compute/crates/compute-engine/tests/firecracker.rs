@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use compute_engine::firecracker::Firecracker;
+use compute_engine::firecracker::{Firecracker, FirecrackerVm};
 use compute_engine::{CancellationToken, Completion, Drive, Engine, SnapshotFiles, VmSpec, vsock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -63,6 +63,42 @@ async fn assert_guest_clock_is_current(uds: &Path) {
     );
 }
 
+/// Processor time is what the host's activity rule reads: guest work must show
+/// up in it, and a paused VM must use none. Leaves the VM running.
+async fn assert_processor_time_follows_work(engine: &Firecracker, vm: &FirecrackerVm, uds: &Path) {
+    let used_since = |earlier: Duration| {
+        engine
+            .cpu_time(vm)
+            .unwrap()
+            .checked_sub(earlier)
+            .expect("processor time went backwards")
+    };
+    // The loop spins until the clock has passed two second boundaries, so for
+    // at least one full second.
+    let before = engine.cpu_time(vm).unwrap();
+    exec(
+        uds,
+        "end=$(($(date +%s) + 2)); while [ $(date +%s) -lt $end ]; do :; done",
+    )
+    .await
+    .unwrap();
+    let busy = used_since(before);
+    assert!(
+        busy >= Duration::from_millis(500),
+        "at least a second of guest work showed only {busy:?} of processor time"
+    );
+    engine.pause(vm).await.unwrap();
+    let before = engine.cpu_time(vm).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let paused = used_since(before);
+    engine.resume(vm).await.unwrap();
+    assert!(
+        paused < Duration::from_millis(30),
+        "a paused VM used {paused:?} of processor time"
+    );
+    eprintln!("processor time: busy loop {busy:?}, paused 300 ms {paused:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn boot_pause_compress_snapshot_restore() {
     let Some(lab) = lab() else {
@@ -113,6 +149,7 @@ async fn boot_pause_compress_snapshot_restore() {
         .unwrap();
     assert_ne!(output.trim(), "");
     let awake = engine.resident_bytes(&vm).unwrap();
+    assert_processor_time_follows_work(&engine, &vm, &uds).await;
 
     let started = Instant::now();
     engine.pause(&vm).await.unwrap();

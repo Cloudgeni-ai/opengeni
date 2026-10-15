@@ -79,7 +79,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             );
         }
         match step {
-            Step::Pause | Step::Resume | Step::Compress | Step::Save => {
+            Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop => {
                 let Some(live) = self.live.take() else {
                     // The VM vanished between the decision and the step; the
                     // exit notice is on its way.
@@ -87,16 +87,22 @@ impl<E: Engine, S: Store> Job<E, S> {
                 };
                 match step {
                     Step::Pause => self.simple(self.engine.pause(&live.vm).await, live),
-                    Step::Resume => self.simple(self.engine.resume(&live.vm).await, live),
+                    Step::Resume => self.resume(live).await,
                     Step::Compress => self.compress(live).await,
-                    _ => self.save(live).await,
+                    Step::Save => self.save(live).await,
+                    _ => self.end_process(live).await,
                 }
             }
             Step::Restore => self.restore().await,
             Step::Boot => self.boot().await,
-            Step::Archive => (self.archive().await, After::NoVm),
+            // A paused VM stays as it is while its saved copy is archived.
+            Step::Archive => {
+                let outcome = self.archive().await;
+                (outcome, self.live.take().map_or(After::NoVm, After::Kept))
+            }
             Step::Evict => (self.evict().await, After::NoVm),
             Step::Fetch => (self.fetch().await, After::NoVm),
+            Step::Forget => (self.forget().await, After::NoVm),
         }
     }
 
@@ -110,6 +116,20 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
+    /// Resumes a paused VM. A saved copy of it goes stale the moment the
+    /// guest runs and its disk moves on, so it is unmarked first.
+    async fn resume(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        let paths = &self.paths;
+        if paths.saved.exists() || paths.archived.exists() {
+            let unmarked =
+                remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
+            if let Err(error) = unmarked {
+                return (io_failure("resume", error), After::Kept(live));
+            }
+        }
+        self.simple(self.engine.resume(&live.vm).await, live)
+    }
+
     async fn compress(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         let outcome = match self.engine.compress(&live.vm, &self.cancel).await {
             Ok(Completion::Finished) => Outcome::Done,
@@ -120,9 +140,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
-    /// Snapshot, make it durable, mark it valid, then end the VM process.
-    /// A wake that arrives before the process ends cancels the save and the
-    /// still-paused VM simply resumes.
+    /// Snapshot the paused VM, make the copy durable and mark it valid. The
+    /// VM stays paused in memory, so a wake still only has to resume it; the
+    /// copy lets memory pressure end the process instantly and survives the
+    /// process crashing. A wake that arrives during the save cancels it.
     async fn save(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         let paths = &self.paths;
         if let Err(error) = remove_durably(&paths.saved) {
@@ -150,12 +171,28 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(error) = write_atomic(&paths.saved, b"") {
             return (io_failure("save", error), After::Kept(live));
         }
+        (Outcome::Done, After::Kept(live))
+    }
+
+    /// Ends the VM process of a paused VM whose current state is saved, which
+    /// frees all of its memory at once and loses nothing.
+    async fn end_process(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        if !self.paths.saved.exists() {
+            // The core only drops a VM with a current copy; ending this one
+            // would lose its running programs.
+            tracing::error!(id = %self.id, "no saved copy to fall back on; keeping the VM");
+            return (Outcome::Failed(Failure::Fatal), After::Kept(live));
+        }
         live.stopping.store(true, Ordering::Release);
         match self.engine.stop(live.vm).await {
             Ok(()) => (Outcome::Done, After::NoVm),
-            // The image is safe on disk either way; a VMM that would not die
-            // is a host problem worth surfacing.
-            Err(error) => (failure(&error), After::NoVm),
+            Err(error) => {
+                // The copy is safe on disk either way, so the sandbox moves
+                // on without the process; a VMM that would not die is a host
+                // problem worth surfacing.
+                tracing::error!(id = %self.id, %error, "VM process did not end cleanly");
+                (Outcome::Failed(Failure::MemoryLost), After::NoVm)
+            }
         }
     }
 
@@ -233,6 +270,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
+    /// Copies the saved state to the store. The copy runs to its end even
+    /// when cancelled: abandoning the future would leave the store writing in
+    /// the background after the step claimed to have stopped, so it reports
+    /// its real outcome instead.
     async fn archive(&self) -> Outcome {
         let files = self.saved_files();
         let marker: &[u8] = if files.memory.is_some() {
@@ -276,6 +317,27 @@ impl<E: Engine, S: Store> Job<E, S> {
         match self.store.fetch(self.id, &files).await {
             Ok(()) => Outcome::Done,
             Err(error) => failure(&error),
+        }
+    }
+
+    /// Deletes the memory image here and in the store, keeping the files.
+    /// The image is unmarked first, so a crash part-way never claims an
+    /// image that is gone.
+    async fn forget(&self) -> Outcome {
+        let paths = &self.paths;
+        if let Err(error) = remove_durably(&paths.saved) {
+            return io_failure("forget", error);
+        }
+        drop_snapshot(paths);
+        if !paths.archived.exists() {
+            return Outcome::Done;
+        }
+        if let Err(error) = self.store.forget_memory(self.id).await {
+            return failure(&error);
+        }
+        match write_atomic(&paths.archived, b"disk") {
+            Ok(()) => Outcome::Done,
+            Err(error) => io_failure("forget", error),
         }
     }
 }

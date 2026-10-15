@@ -9,7 +9,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use compute_core::{Level, Priority, SandboxId, SleepPolicy, Step};
+use compute_core::{Durability, Level, Priority, SandboxId, SleepPolicy, SleepRules, Step};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A sandbox id on the wire: 32 lowercase hex digits (a UUID without dashes).
@@ -109,13 +109,96 @@ impl From<PriorityName> for Priority {
     }
 }
 
-/// Sleep one level deeper after this long without activity.
+/// [`Durability`] on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SleepRule {
-    /// The level to reach.
-    pub level: LevelName,
-    /// Idle milliseconds before reaching it.
-    pub after_ms: u64,
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum DurabilityName {
+    Volatile,
+    Local,
+    Remote,
+}
+
+impl From<Durability> for DurabilityName {
+    fn from(durability: Durability) -> Self {
+        match durability {
+            Durability::Volatile => Self::Volatile,
+            Durability::Local => Self::Local,
+            Durability::Remote => Self::Remote,
+        }
+    }
+}
+
+/// How a sandbox sleeps: idle milliseconds before each rule applies, and an
+/// omitted rule never applies. The default never sleeps. See
+/// [`SleepRules`] for what each rule does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SleepConfig {
+    /// Pause the VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_after_ms: Option<u64>,
+    /// Save to local disk while the VM stays paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_after_ms: Option<u64>,
+    /// Copy the saved state to object storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_after_ms: Option<u64>,
+    /// End the VM process even without memory pressure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_after_ms: Option<u64>,
+    /// Delete the local copy, keeping object storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evict_after_ms: Option<u64>,
+    /// Delete the memory image, keeping the files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forget_after_ms: Option<u64>,
+    /// Let memory pressure compress the paused VM's memory, on hosts that
+    /// can.
+    #[serde(default)]
+    pub compress: bool,
+}
+
+impl SleepConfig {
+    /// [`SleepRules::RECOMMENDED`] on the wire.
+    pub const RECOMMENDED: Self = Self::from_rules(SleepRules::RECOMMENDED);
+
+    /// The rules on the wire. Durations round down to whole milliseconds.
+    #[must_use]
+    pub const fn from_rules(rules: SleepRules) -> Self {
+        const fn ms(duration: Option<Duration>) -> Option<u64> {
+            match duration {
+                // Saturates far beyond any useful idle time.
+                #[allow(clippy::cast_possible_truncation)]
+                Some(duration) => Some(duration.as_millis() as u64),
+                None => None,
+            }
+        }
+        Self {
+            pause_after_ms: ms(rules.pause_after),
+            save_after_ms: ms(rules.save_after),
+            archive_after_ms: ms(rules.archive_after),
+            drop_after_ms: ms(rules.drop_after),
+            evict_after_ms: ms(rules.evict_after),
+            forget_after_ms: ms(rules.forget_after),
+            compress: rules.compress_under_pressure,
+        }
+    }
+
+    /// The rules these settings describe.
+    #[must_use]
+    pub fn rules(&self) -> SleepRules {
+        let after = |ms: Option<u64>| ms.map(Duration::from_millis);
+        SleepRules {
+            pause_after: after(self.pause_after_ms),
+            save_after: after(self.save_after_ms),
+            archive_after: after(self.archive_after_ms),
+            drop_after: after(self.drop_after_ms),
+            evict_after: after(self.evict_after_ms),
+            forget_after: after(self.forget_after_ms),
+            compress_under_pressure: self.compress,
+        }
+    }
 }
 
 /// What a sandbox looks like and how it sleeps.
@@ -125,19 +208,16 @@ pub struct SandboxConfig {
     pub vcpus: u8,
     /// Guest memory in MiB.
     pub memory_mib: u32,
-    /// The sleep ladder; an empty ladder never sleeps.
-    pub sleep: Vec<SleepRule>,
+    /// How it sleeps; omitted, it never sleeps.
+    #[serde(default)]
+    pub sleep: SleepConfig,
 }
 
 impl SandboxConfig {
-    /// The ladder as a validated core policy.
+    /// The sleep settings as a validated core policy.
     pub fn sleep_policy(&self) -> Result<SleepPolicy, String> {
-        SleepPolicy::new(
-            self.sleep
-                .iter()
-                .map(|rule| (rule.level.into(), Duration::from_millis(rule.after_ms))),
-        )
-        .map_err(|error| format!("invalid sleep ladder: {error:?}"))
+        SleepPolicy::new(self.sleep.rules())
+            .map_err(|error| format!("invalid sleep settings: {error}"))
     }
 
     /// Checks everything that can be wrong before any work is done.
@@ -197,6 +277,41 @@ pub enum Request {
         #[serde(default)]
         priority: PriorityName,
     },
+    /// Put a sandbox at least as deep as `level` now, whatever its sleep
+    /// settings say, for example to drain the host. Replies at once; the
+    /// sandbox waits while something holds it awake, and a later wake
+    /// cancels the request.
+    Sleep {
+        /// Its id.
+        id: Id,
+        /// The least depth to reach.
+        level: LevelName,
+    },
+    /// Keep a sandbox awake for a named reason, such as an agent turn in
+    /// progress, waking it if it sleeps. Replies at once. Holding again
+    /// under the same name refreshes the hold, and with `ttl_ms` it lapses
+    /// on its own unless refreshed in time, so a caller that disappears
+    /// cannot keep a sandbox awake forever.
+    Hold {
+        /// Its id.
+        id: Id,
+        /// The reason, unique within the sandbox.
+        hold: String,
+        /// Milliseconds until the hold lapses; omitted, it lasts until
+        /// released.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_ms: Option<u64>,
+        /// How urgently to wake for it.
+        #[serde(default)]
+        priority: PriorityName,
+    },
+    /// End a named hold. Ending one that does not exist does nothing.
+    Release {
+        /// Its id.
+        id: Id,
+        /// The reason that ended.
+        hold: String,
+    },
     /// Report every sandbox and host counters.
     Status,
 }
@@ -235,6 +350,8 @@ pub struct SandboxStatus {
     pub id: Id,
     /// Where its state lives.
     pub level: LevelName,
+    /// Where a copy of its current state is kept besides the VM.
+    pub durability: DurabilityName,
     /// Whether its running programs survive (a memory image or live VM).
     pub memory_saved: bool,
     /// The step in progress.
@@ -275,6 +392,10 @@ pub struct HostStatus {
     pub steps: Vec<(String, StepStats)>,
     /// Host memory available, as last sampled.
     pub available_memory: Option<u64>,
+    /// Host memory that ending idle, saved VM processes would free at once
+    /// without losing anything. Placement can count it as available.
+    #[serde(default)]
+    pub reclaimable_memory: u64,
 }
 
 /// A step's name on the wire.
@@ -286,10 +407,12 @@ pub fn step_name(step: Step) -> &'static str {
         Step::Boot => "boot",
         Step::Fetch => "fetch",
         Step::Pause => "pause",
+        Step::Drop => "drop",
         Step::Compress => "compress",
         Step::Save => "save",
         Step::Archive => "archive",
         Step::Evict => "evict",
+        Step::Forget => "forget",
     }
 }
 
@@ -326,22 +449,31 @@ mod tests {
         let mut config = SandboxConfig {
             vcpus: 2,
             memory_mib: 1024,
-            sleep: vec![
-                SleepRule {
-                    level: LevelName::Paused,
-                    after_ms: 30_000,
-                },
-                SleepRule {
-                    level: LevelName::Saved,
-                    after_ms: 600_000,
-                },
-            ],
+            sleep: SleepConfig::RECOMMENDED,
         };
         assert!(config.validate().is_ok());
-        config.sleep.remove(0);
-        assert!(config.validate().is_err(), "saved requires paused");
-        config.sleep.clear();
+        config.sleep.pause_after_ms = None;
+        assert!(config.validate().is_err(), "saving requires pausing");
+        config.sleep = SleepConfig::default();
+        assert!(config.validate().is_ok(), "never sleeping is valid");
         config.vcpus = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn sleep_settings_round_trip_and_omit_disabled_rules() {
+        assert_eq!(
+            SleepConfig::RECOMMENDED.rules(),
+            compute_core::SleepRules::RECOMMENDED
+        );
+        let json = serde_json::to_string(&SleepConfig {
+            pause_after_ms: Some(10_000),
+            ..SleepConfig::default()
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"pause_after_ms":10000,"compress":false}"#);
+        let parsed: SleepConfig = serde_json::from_str(r#"{"pause_after_ms":5}"#).unwrap();
+        assert_eq!(parsed.rules().pause_after, Some(Duration::from_millis(5)));
+        assert!(serde_json::from_str::<SleepConfig>(r#"{"pause":5}"#).is_err());
     }
 }

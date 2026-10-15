@@ -476,6 +476,12 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("resident_bytes", error))
     }
 
+    fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {
+        vm.cgroup
+            .cpu_time()
+            .map_err(|error| EngineError::io("cpu_time", error))
+    }
+
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
         let mut exit = vm.exit.clone();
         async move {
