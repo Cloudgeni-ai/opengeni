@@ -108,6 +108,10 @@ struct BenchArgs {
     /// Script each wake runs.
     #[arg(long, default_value = "cat /proc/loadavg")]
     script: String,
+    /// Script the first wake (the boot) runs, to give each sandbox a
+    /// realistic working set before it sleeps.
+    #[arg(long, default_value = "echo ready")]
+    warm: String,
     /// Idle time between sleep levels.
     #[arg(long, default_value = "3s", value_parser = parse_duration)]
     settle: Duration,
@@ -548,7 +552,7 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
     }
     println!("created {} sandboxes in {:?}", ids.len(), started.elapsed());
 
-    let mut bursts = vec![burst(client, &ids, args, "echo ready", "first wake (boot)").await];
+    let mut bursts = vec![burst(client, &ids, args, &args.warm, "first wake (boot)").await];
     for round in 1..=args.rounds {
         wait_for_level(client, &ids, target(args.level)).await?;
         let label = format!("round {round}: wake from {:?}", target(args.level));
