@@ -371,6 +371,47 @@ describe("context compaction rendering", () => {
 });
 
 describe("structured human-input history", () => {
+  test("an answered question keeps its link clickable and wrapped inside the card", async () => {
+    timelineSequence = 0;
+    const url = `https://example.com/oauth/authorize?client_id=${"x".repeat(120)}&scope=a+b`;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-link",
+              questions: [
+                {
+                  id: "code",
+                  kind: "text",
+                  label: "Sign-in code",
+                  prompt: `Open this link and approve: ${url}. Then paste the code.`,
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-link",
+            response: { outcome: "answered", answers: [{ questionId: "code", values: ["ok"] }] },
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+    try {
+      const history = r.container.querySelector('[data-human-input-history="request-link"]');
+      const anchor = history?.querySelector<HTMLAnchorElement>(`a[href="${url}"]`);
+      expect(anchor).not.toBeNull();
+      expect(anchor?.getAttribute("target")).toBe("_blank");
+      expect(anchor?.parentElement?.className).toContain("[overflow-wrap:anywhere]");
+      expect(history?.textContent).toContain(`${url}. Then paste the code.`);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("keeps an answered request visible outside the collapsed steps", async () => {
     timelineSequence = 0;
     const r = await renderComponent(

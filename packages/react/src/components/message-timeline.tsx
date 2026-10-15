@@ -92,6 +92,7 @@ import {
   type OlderHistoryLoader,
 } from "../older-history";
 import { Markdown, type MarkdownProps } from "./markdown";
+import { linkifyText } from "./linkified-text";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
@@ -4476,7 +4477,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
               item.questions.map((question, index) => (
                 <div key={question.id}>
                   {question.label ? (
-                    <p className="text-og-sm font-semibold text-og-fg">
+                    <p className="text-og-sm font-semibold text-og-fg [overflow-wrap:anywhere]">
                       {multipleQuestions ? (
                         <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                       ) : null}
@@ -4486,7 +4487,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                   ) : null}
                   <p
                     className={cn(
-                      "text-og-md leading-6 text-og-fg",
+                      "text-og-md leading-6 text-og-fg [overflow-wrap:anywhere]",
                       question.label && "mt-0.5 text-og-sm text-og-fg-muted",
                     )}
                   >
@@ -4494,7 +4495,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                       <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                     ) : null}
                     {!question.label && multipleQuestions ? " " : null}
-                    {question.prompt}
+                    {linkifyText(question.prompt)}
                   </p>
                 </div>
               ))
