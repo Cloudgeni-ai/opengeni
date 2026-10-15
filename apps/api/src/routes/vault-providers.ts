@@ -33,6 +33,7 @@ import {
   externalActorContinuationForAuthorization,
   hasPermission,
   isVaultError,
+  VaultError,
   providerSecretName,
   requirePermission,
   syncLinkedProviderVault,
@@ -636,6 +637,25 @@ export function registerVaultProviderRoutes(
     }
     const context = vaultContextFor(authorization, workspaceId);
     try {
+      // Match link_provider_vault's ownership gate before making a remote
+      // vault. A refused local link must not leave a newly created vault behind.
+      const { connection, metadata } = await requireOnePasswordConnection(
+        deps,
+        authorization,
+        workspaceId,
+        connectionId,
+      );
+      const ownership = connection.subjectId !== null ? "user" : metadata.ownership;
+      if (
+        ownership !== payload.ownerKind ||
+        (ownership === "user" && connection.subjectId !== authorization.grant.subjectId)
+      ) {
+        throw new VaultError(
+          "vault_permission_denied",
+          `A ${ownership} 1Password connection backs only ${ownership} vaults`,
+          { connectionId, connectionOwnership: ownership, ownerKind: payload.ownerKind },
+        );
+      }
       const { provider } = await onePasswordProviderForConnection(deps, {
         workspaceId,
         connectionId,

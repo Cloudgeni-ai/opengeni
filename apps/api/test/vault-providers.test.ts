@@ -558,6 +558,70 @@ describe("provider vault link, sync and managed vaults", () => {
     await resetOnePasswordFakeProvidersForTests();
   });
 
+  test("refuses mismatched managed-vault ownership before reaching 1Password", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    for (const [connectionOwnership, ownerKind] of [
+      ["workspace", "user"],
+      ["user", "workspace"],
+      ["organization", "workspace"],
+    ] as const) {
+      const installed = await install(workspace, {
+        token: FAKE_HEALTHY,
+        ownership: connectionOwnership === "organization" ? "workspace" : connectionOwnership,
+      });
+      expect(installed.status).toBe(201);
+      if (connectionOwnership === "organization") {
+        // Seed an organization connection without granting the caller admin rights.
+        await shared!.admin`
+          update connections set metadata = metadata || '{"ownership":"organization"}'::jsonb
+          where id = ${installed.body.connectionId}::uuid`;
+      }
+      let providerCalls = 0;
+      const response = await call(
+        workspace,
+        "POST",
+        `/connections/${installed.body.connectionId}/managed-vaults`,
+        {
+          body: { name: "Must not be created upstream", ownerKind },
+          deps: {
+            onePasswordVaultProvider: async () => {
+              providerCalls++;
+              return createFakeVaultProvider();
+            },
+          },
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({
+        error: "vault_permission_denied",
+        details: { connectionOwnership, ownerKind },
+      });
+      expect(providerCalls).toBe(0);
+    }
+  });
+
+  test("creates a managed Only-me vault through its owner's personal connection", async () => {
+    if (!available) return;
+    await resetOnePasswordFakeProvidersForTests();
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "user" });
+    const created = await call(
+      workspace,
+      "POST",
+      `/connections/${installed.body.connectionId}/managed-vaults`,
+      { body: { name: "Personal agents", ownerKind: "user" } },
+    );
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      name: "Personal agents",
+      ownerKind: "user",
+      source: "onepassword",
+      syncStatus: "ok",
+    });
+    await resetOnePasswordFakeProvidersForTests();
+  });
+
   test("edits in a read-write 1Password vault write through to the provider", async () => {
     if (!available) return;
     await resetOnePasswordFakeProvidersForTests();
