@@ -1,20 +1,25 @@
-// Regression: a zero-holder drain retried its workspace capture forever while
-// earlier captures of the same box were still running. The drain wait gave up
-// at the snapshot budget, but a host-backed spool capture kept reading and
-// spooling the whole workspace for late publication. A parallel-read provider
-// (Docker) let the next attempt replace that claim at once and start another
-// full capture. On a benchmark host, 7-8 GB workspaces accumulated about 140 GB
-// of concurrent spools for a handful of idle boxes.
+// Regression: a zero-holder drain started one more full workspace capture on
+// every retry while earlier captures of the same box were still running. The
+// drain wait gives up at the snapshot budget, but the capture keeps reading and
+// spooling the whole workspace so it can still publish late. A parallel-read
+// provider (Docker) let each retry replace that claim at once and start another
+// full read, so a capture slower than the retry interval multiplied. On a
+// benchmark host, 7-8 GB workspaces accumulated about 140 GB of concurrent
+// spools for a handful of idle boxes.
 //
-// The first group drives the real terminateProviderBox against a real host
-// workspace and fake providers (no Docker daemon, no database). The second
-// group drives the real drain activity against PostgreSQL; the provider stop is
-// a spy, while the earlier attempt's capture is the real terminateProviderBox.
+// Everything runs the real drain activity against PostgreSQL. The Docker group
+// keeps the real claim, host-backed spool capture, publication and teardown
+// ordering; only the provider client is a fake over a host directory whose
+// capture is slow but finite. The Modal group spies the provider stop, while
+// the earlier attempt's capture is the real terminateProviderBox.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Context } from "@temporalio/activity";
 import {
   claimWorkspaceArchiveCapture,
   createDb,
@@ -23,6 +28,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
+import type { ObjectStorage } from "@opengeni/storage";
 import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
@@ -66,38 +72,6 @@ function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
-/** A Docker drain attachment over a real host workspace directory, so the real
- * host-backed spool capture reads it. */
-function dockerHostClient() {
-  let deletes = 0;
-  return {
-    get deletes() {
-      return deletes;
-    },
-    client: {
-      backendId: "docker",
-      async deserializeSessionState(state: Record<string, unknown>) {
-        return { ...state };
-      },
-      async attachWorkspaceForDrain(
-        state: Record<string, unknown>,
-        assertCurrentCapture: () => Promise<unknown>,
-      ) {
-        await assertCurrentCapture();
-        return {
-          state,
-          persistWorkspace: async () => {
-            throw new Error("whole archive capture forbidden");
-          },
-          delete: async () => {
-            deletes += 1;
-          },
-        };
-      },
-    },
-  };
-}
-
 /** A provider-native capture this test settles explicitly. The drain signal
  * cannot interrupt it once started. */
 function pendingModalClient(capture: Promise<Uint8Array>) {
@@ -127,86 +101,6 @@ function pendingModalClient(capture: Promise<Uint8Array>) {
     },
   };
 }
-
-describe("drain workspace capture budget", () => {
-  test.skipIf(process.platform !== "linux")(
-    "a host-backed drain capture that outlives its budget stops reading and removes its spool",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "opengeni-drain-budget-workspace-"));
-      const spoolBase = mkdtempSync(join(tmpdir(), "opengeni-drain-budget-spools-"));
-      // Large enough that four passes over it cannot finish inside the budget.
-      const chunk = Buffer.alloc(1024 * 1024, 7);
-      for (let index = 0; index < 32; index++) writeFileSync(join(root, `blob-${index}`), chunk);
-      const previousTemp = process.env.TMPDIR;
-      process.env.TMPDIR = spoolBase;
-      const { client, ...provider } = dockerHostClient();
-      let publications = 0;
-      const published = deferred();
-      let releases = 0;
-      const released = deferred();
-      try {
-        const operation = terminateProviderBox(
-          testSettings({
-            sandboxBackend: "docker",
-            sandboxOwnershipEnabled: true,
-            sandboxSnapshotTimeoutMs: 5,
-          }),
-          {
-            sandboxGroupId: "drain-budget-host",
-            leaseEpoch: 9,
-            backend: "docker",
-            instanceId: "docker-drain-budget",
-            resumeBackendId: "docker",
-            resumeState: {
-              backendId: "docker",
-              sessionState: {
-                providerState: {
-                  containerId: "docker-drain-budget",
-                  workspaceRootPath: root,
-                  workspaceRootOwned: true,
-                },
-              },
-            },
-          } as never,
-          observability,
-          async () => {
-            publications += 1;
-            published.resolve();
-            return { wrote: true };
-          },
-          (() => client) as never,
-          undefined,
-          "stable-provider-request",
-          "capture_required",
-          undefined,
-          true,
-          async () => {
-            releases += 1;
-            released.resolve();
-          },
-          undefined,
-          undefined,
-          async () => ({ archivePublished: false }),
-        );
-        // Never terminated: the box keeps its files and stays draining.
-        await expect(operation).rejects.toBeDefined();
-        await within(Promise.race([published.promise, released.promise]), 30_000, "drain capture");
-        // The capture was stopped, not completed late: nothing is published,
-        // the exact claim is released for a fresh retry, and the spool is gone.
-        expect(publications).toBe(0);
-        expect(releases).toBe(1);
-        expect(readdirSync(spoolBase)).toEqual([]);
-        expect(provider.deletes).toBe(0);
-      } finally {
-        if (previousTemp === undefined) delete process.env.TMPDIR;
-        else process.env.TMPDIR = previousTemp;
-        rmSync(root, { recursive: true, force: true });
-        rmSync(spoolBase, { recursive: true, force: true });
-      }
-    },
-    60_000,
-  );
-});
 
 // ---------------------------------------------------------------------------
 // Retry while an earlier capture is still settling (real PostgreSQL)
@@ -507,4 +401,295 @@ describe("drain retry while an earlier capture is settling", () => {
     });
     expect(spy.stopped).toEqual([ids.groupId]);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Slow but finite Docker capture under fast retries (real PostgreSQL)
+// ---------------------------------------------------------------------------
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Local-file object storage with the streaming and range primitives the
+ * disk-backed archive publication requires. */
+function fileObjectStorage(directory: string): ObjectStorage {
+  mkdirSync(directory, { recursive: true });
+  const keyOf = (input: unknown) =>
+    typeof input === "string" ? input : (input as { key: string }).key;
+  const pathOf = (input: unknown) =>
+    join(directory, createHash("sha256").update(keyOf(input)).digest("hex"));
+  return {
+    backend: "s3-compatible",
+    async putObjectStream(input: { key: string; chunks: AsyncIterable<Uint8Array> }) {
+      const handle = await open(pathOf(input), "w");
+      try {
+        for await (const chunk of input.chunks) await handle.write(chunk);
+      } finally {
+        await handle.close();
+      }
+    },
+    async headObject(input: unknown) {
+      return { ContentLength: statSync(pathOf(input)).size, VersionToken: "fixture-v1" };
+    },
+    async getObjectRange(input: { key: string; start: number; endInclusive: number }) {
+      const bytes = Buffer.alloc(input.endInclusive - input.start + 1);
+      const handle = await open(pathOf(input), "r");
+      try {
+        let offset = 0;
+        while (offset < bytes.length) {
+          const { bytesRead } = await handle.read(
+            bytes,
+            offset,
+            bytes.length - offset,
+            input.start + offset,
+          );
+          if (!bytesRead) throw new Error("fixture range truncated");
+          offset += bytesRead;
+        }
+      } finally {
+        await handle.close();
+      }
+      return { bytes, versionToken: "fixture-v1" };
+    },
+    async deleteObject(input: unknown) {
+      rmSync(pathOf(input), { force: true });
+    },
+    async getObjectBytes(): Promise<never> {
+      throw new Error("whole-object download forbidden");
+    },
+    async putObject(): Promise<never> {
+      throw new Error("whole-object upload forbidden");
+    },
+  } as unknown as ObjectStorage;
+}
+
+/** A Docker drain attachment over a real host directory. Each attachment is
+ * one physical capture, which spends `captureMs` before reading (a slow disk);
+ * like the real attachment, it re-proves the exact claim and refuses teardown
+ * before durable publication. */
+function slowDockerHost(captureMs: number) {
+  const stats = { started: 0, reading: 0, peakReading: 0, deletes: [] as boolean[] };
+  const client = {
+    backendId: "docker",
+    async deserializeSessionState(state: Record<string, unknown>) {
+      return { ...state };
+    },
+    async attachWorkspaceForDrain(
+      state: { providerState?: { workspaceRootPath?: string } } & Record<string, unknown>,
+      assertCurrentCapture: () => Promise<{ archivePublished: boolean }>,
+    ) {
+      await assertCurrentCapture();
+      let started = false;
+      return {
+        state: {
+          workspaceRootPath: state.providerState?.workspaceRootPath ?? state.workspaceRootPath,
+        },
+        async assertWorkspaceCaptureAuthority() {
+          await assertCurrentCapture();
+          if (started) return;
+          started = true;
+          stats.started += 1;
+          stats.reading += 1;
+          stats.peakReading = Math.max(stats.peakReading, stats.reading);
+          try {
+            await sleep(captureMs);
+          } finally {
+            stats.reading -= 1;
+          }
+        },
+        persistWorkspace: async () => {
+          throw new Error("whole-archive capture is not the host-spool drain path");
+        },
+        async delete() {
+          const fence = await assertCurrentCapture();
+          stats.deletes.push(fence.archivePublished);
+          if (!fence.archivePublished) throw new Error("exact capture is not durably published");
+        },
+      };
+    },
+  };
+  return { client, stats };
+}
+
+function spoolDirs(base: string): number {
+  return readdirSync(base).filter((name) => name.startsWith("opengeni-host-archive-")).length;
+}
+
+async function drainingDockerLease(epoch: number, instanceId: string, root: string) {
+  const admin = shared!.admin;
+  const [account] = await admin<{ id: string }[]>`
+    insert into managed_accounts (name) values ('acct') returning id`;
+  const [workspace] = await admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
+  const ids = { accountId: account!.id, workspaceId: workspace!.id, groupId: crypto.randomUUID() };
+  const envelope = {
+    backendId: "docker",
+    sessionState: {
+      providerState: { containerId: instanceId, workspaceRootPath: root, workspaceRootOwned: false },
+    },
+  };
+  await admin`
+    insert into sandbox_leases (
+      account_id, workspace_id, sandbox_group_id, liveness, refcount,
+      turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+      resume_backend_id, resume_state, expires_at
+    ) values (
+      ${ids.accountId}, ${ids.workspaceId}, ${ids.groupId}, 'draining', 0, 0, 0,
+      ${instanceId}, 'docker', ${epoch}, 'docker',
+      ${JSON.stringify(envelope)}::text::jsonb,
+      now() - interval '1 second'
+    )`;
+  return ids;
+}
+
+const DOCKER_BUDGET_MS = 250;
+const DOCKER_CAPTURE_MS = 1_500;
+const DOCKER_RETRY_MS = 100;
+
+/** Replays Temporal attempts of one drain activity input (fixed retry
+ * interval, faster than the capture) across the given workers in turn, until
+ * an attempt returns, then waits for every capture and spool to settle. */
+async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
+  const runDir = mkdtempSync(join(tmpdir(), `opengeni-drain-slow-${label}-`));
+  const root = join(runDir, "workspace");
+  const spoolBase = join(runDir, "spools");
+  mkdirSync(root);
+  mkdirSync(spoolBase);
+  for (let index = 0; index < 4; index++) {
+    writeFileSync(join(root, `blob-${index}`), randomBytes(256 * 1024));
+  }
+  const previousTemp = process.env.TMPDIR;
+  process.env.TMPDIR = spoolBase;
+  let currentAttempt = 1;
+  const context = spyOn(Context, "current").mockImplementation(
+    () => ({ info: { attempt: currentAttempt }, heartbeat() {} }) as never,
+  );
+  try {
+    const settings = testSettings({
+      sandboxBackend: "docker",
+      webSearchEnabled: false,
+      sandboxOwnershipEnabled: true,
+      sandboxSnapshotTimeoutMs: DOCKER_BUDGET_MS,
+    });
+    const storage = fileObjectStorage(join(runDir, "objects"));
+    const docker = slowDockerHost(DOCKER_CAPTURE_MS);
+    const services = async () =>
+      ({
+        settings,
+        db,
+        bus: null,
+        runtime: null,
+        objectStorage: storage,
+        documentServices: null,
+        observability: createObservability(settings, { component: "worker-test" }),
+        wakeSessionWorkflow: null,
+      }) as never;
+    // A second evaluation of the module owns its own in-process state, as a
+    // second worker process would.
+    const secondWorker = "../src/activities/sandbox-lease.ts?drain-worker=b";
+    const factories: Array<typeof createSandboxLeaseActivities> = [createSandboxLeaseActivities];
+    if (workerCount === 2) {
+      const second = (await import(secondWorker)) as {
+        createSandboxLeaseActivities: typeof createSandboxLeaseActivities;
+      };
+      expect(second.createSandboxLeaseActivities).not.toBe(createSandboxLeaseActivities);
+      factories.push(second.createSandboxLeaseActivities);
+    }
+    const workers = factories.map((create) =>
+      create(services, {
+        probeDrainableProvider: async () => "ready",
+        createClientForBackend: (() => docker.client) as never,
+      }),
+    );
+    const instanceId = `docker-slow-${label}`;
+    const ids = await drainingDockerLease(7, instanceId, root);
+    const input = {
+      target: {
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        instanceId,
+        leaseEpoch: 7,
+      },
+      timeoutClass: "fast" as const,
+      snapshotTimeoutMs: DOCKER_BUDGET_MS,
+      captureTimeoutMs: DOCKER_BUDGET_MS + 10_000,
+      operationId: crypto.randomUUID(),
+    };
+    let peakSpools = 0;
+    const sampler = setInterval(() => {
+      peakSpools = Math.max(peakSpools, spoolDirs(spoolBase));
+    }, 10);
+    const outcomes: string[] = [];
+    let result: unknown = null;
+    for (let attempt = 1; attempt <= 60 && result === null; attempt++) {
+      currentAttempt = attempt;
+      try {
+        result = await workers[(attempt - 1) % workers.length]!.drainSandboxLease(input);
+        outcomes.push("returned");
+      } catch (error) {
+        outcomes.push((error as { name?: string }).name ?? "Error");
+        await sleep(DOCKER_RETRY_MS);
+      }
+    }
+    // Let any capture another worker started finish and remove its spool.
+    const settleBy = Date.now() + 4 * DOCKER_CAPTURE_MS;
+    while (Date.now() < settleBy && (docker.stats.reading > 0 || spoolDirs(spoolBase) > 0)) {
+      await sleep(20);
+    }
+    await sleep(50);
+    clearInterval(sampler);
+    return {
+      result,
+      outcomes,
+      stats: docker.stats,
+      peakSpools,
+      leftoverSpools: spoolDirs(spoolBase),
+      lease: await readLease(db, ids.workspaceId, ids.groupId),
+    };
+  } finally {
+    context.mockRestore();
+    if (previousTemp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTemp;
+    rmSync(runDir, { recursive: true, force: true });
+  }
+}
+
+describe("slow but finite Docker drain capture under fast retries", () => {
+  test.skipIf(process.platform !== "linux")(
+    "one worker runs one physical capture, publishes it late and then drains",
+    async () => {
+      if (!available) return;
+      const run = await runSlowDockerDrain(1, "one-worker");
+      // The capture outlived several budgets, yet the box drained from it.
+      expect(run.result).toEqual({ status: "terminated" });
+      expect(run.outcomes.filter((outcome) => outcome !== "returned").length).toBeGreaterThan(2);
+      expect(run.lease?.liveness).toBe("cold");
+      expect(run.lease?.archiveComplete).toBe(true);
+      // Every retry during the capture deferred to it instead of reading again.
+      expect(run.stats.started).toBe(1);
+      expect(run.stats.peakReading).toBe(1);
+      expect(run.peakSpools).toBeLessThanOrEqual(1);
+      expect(run.leftoverSpools).toBe(0);
+      // Teardown only ever happened after durable publication.
+      expect(run.stats.deletes).toEqual([true]);
+    },
+    60_000,
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "alternating workers each run at most one physical capture and still drain",
+    async () => {
+      if (!available) return;
+      const run = await runSlowDockerDrain(2, "two-workers");
+      expect(run.result).toEqual({ status: "terminated" });
+      expect(run.lease?.liveness).toBe("cold");
+      expect(run.lease?.archiveComplete).toBe(true);
+      // The in-process deferral bounds physical captures by the worker count.
+      expect(run.stats.started).toBeLessThanOrEqual(2);
+      expect(run.stats.peakReading).toBeLessThanOrEqual(2);
+      expect(run.leftoverSpools).toBe(0);
+      expect(run.stats.deletes.every(Boolean)).toBe(true);
+    },
+    60_000,
+  );
 });

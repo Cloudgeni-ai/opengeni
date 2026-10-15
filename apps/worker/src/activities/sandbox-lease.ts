@@ -349,6 +349,9 @@ export type SandboxLeaseActivityOptions = {
    * Returns the live session, or null when the provider no longer has it. The
    * capture claim, publication and release remain real. */
   resumeIdleCheckpointSession?: ResumeIdleCheckpointSessionFn;
+  /** Override only the provider client factory of the default drain. The
+   * claim, capture, publication and teardown ordering remain real. */
+  createClientForBackend?: CreateSandboxClientForBackendFn;
 };
 
 export type ResumeIdleCheckpointSessionFn = (
@@ -556,34 +559,19 @@ class SandboxDrainRecoveryDeferredError extends Error {
   readonly name = "SandboxDrainRecoveryDeferredError";
 }
 
-/** The abort reason of a drain capture stopped at its snapshot budget. Local
- * host-backed reads reject with it at their next chunk, which is the physical
- * end of the capture; a provider-native persist call ignores it once started. */
-export class SandboxDrainCaptureStoppedError extends Error {
-  readonly name = "SandboxDrainCaptureStoppedError";
-
-  constructor(
-    public readonly sandboxGroupId: string,
-    public readonly leaseEpoch: number,
-    public readonly timeoutMs: number,
-  ) {
-    super(
-      `sandbox ${sandboxGroupId} epoch ${leaseEpoch} drain workspace capture was stopped ` +
-        `at its ${timeoutMs}ms budget`,
-    );
-  }
-}
-
 /**
  * Drain captures still physically running in this worker, keyed by exact lease
- * epoch and provider instance. A parallel-read provider (Docker, for one) lets
- * the next attempt replace an unpublished claim at once, and a capture that
- * outlived its budget keeps running for late publication. Without this, every
- * retry started another full read of the same workspace while the earlier ones
- * were still reading and spooling it. The durable claim fences publication
- * across workers; this fences physical work inside one. An entry older than the
- * longest durable capture window no longer defers, so a provider call that
- * never settles cannot pin the lease to this worker forever.
+ * epoch and provider instance. A capture that outlives its attempt's budget
+ * keeps running and may publish late through its claim's provider-request
+ * lineage. A parallel-read provider (Docker, for one) also lets the next
+ * attempt replace that unpublished claim at once and start its own full read,
+ * so a capture slower than the retry interval used to gain one more concurrent
+ * read and host spool per retry. This keeps one physical capture per lease
+ * epoch and instance in each worker; the durable claim still decides which
+ * archive publishes, and a capture started by another worker (or one that died
+ * with its process) is handled by the ordinary claim replacement. An entry
+ * older than the longest durable capture window no longer defers, so a
+ * provider call that never settles cannot pin the lease to this worker forever.
  */
 const settlingDrainCaptures = new Map<string, { startedAtMs: number }>();
 
@@ -682,7 +670,7 @@ export function createSandboxLeaseActivities(
         lease,
         observability,
         persistArchive,
-        createSandboxClientForBackend,
+        options.createClientForBackend ?? createSandboxClientForBackend,
         terminateModalSandboxById,
         providerCaptureRequestId,
         captureDisposition,
@@ -3943,10 +3931,10 @@ async function terminateDrainableBox(
     sandboxDrainCaptureSettlingInProcess(lease)
   ) {
     // An earlier attempt's capture is still reading, publishing late, or
-    // removing its spool in this worker. Keep its claim (replacing it would
-    // fence that late publication) and do not start a second physical capture
-    // of the same workspace; retry once it has settled. An already published
-    // archive still resumes teardown immediately.
+    // removing its spool in this worker. Leave its claim untouched and do not
+    // start a second physical capture of the same workspace; a later retry
+    // tears down from its published archive or, if it failed, captures anew.
+    // An already published archive still resumes teardown immediately.
     throw new SandboxDrainRecoveryDeferredError(
       `sandbox ${row.sandboxGroupId} epoch ${row.leaseEpoch} still has a workspace capture settling in this worker`,
     );
@@ -4858,35 +4846,18 @@ export async function terminateProviderBox(
   try {
     if (captureDisposition !== "archive_published" && session?.persistWorkspace) {
       releaseSettlingCapture = trackSettlingDrainCapture(lease);
-      // Stop local reads at the same budget as the caller's wait. A host-backed
-      // spool capture rejects at its next chunk and removes its spool, so a
-      // retry never overlaps it; a provider-native persist call that already
-      // started ignores the signal and keeps the late publication below.
-      const captureAbort = new AbortController();
-      const captureAbortTimer = setTimeout(
-        () =>
-          captureAbort.abort(
-            new SandboxDrainCaptureStoppedError(
-              lease.sandboxGroupId,
-              lease.leaseEpoch,
-              settings.sandboxSnapshotTimeoutMs,
-            ),
-          ),
-        settings.sandboxSnapshotTimeoutMs,
-      );
-      captureAbortTimer.unref?.();
+      // The budget bounds only this attempt's wait, never the capture: a slow
+      // but finite capture keeps reading and publishes late, and the retry
+      // that finds it still settling here defers instead of starting another.
       const capture = captureWorkspaceArchiveForStorage(
         session,
         Date.now(),
         {
           requestId: providerCaptureRequestId ?? randomUUID(),
           strategy: liveCapturePolicy.strategy,
-          signal: captureAbort.signal,
         },
         diskBackedArchives,
       );
-      const stopCaptureAbortTimer = () => clearTimeout(captureAbortTimer);
-      void capture.then(stopCaptureAbortTimer, stopCaptureAbortTimer);
       verifiedArchive = await awaitProviderCaptureWithLatePublication({
         capture,
         timeoutMs: settings.sandboxSnapshotTimeoutMs,
