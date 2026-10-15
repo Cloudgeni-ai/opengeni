@@ -18,8 +18,7 @@ const BLOCK = 4096;
 
 function putCmd(file: string, key: string): string {
   if (kind === "gcs") {
-    const bucket = base!.split("/").pop();
-    return `curl -sf -X PUT -T ${file} -H "Authorization: Bearer $BLOB_TOKEN" "https://storage.googleapis.com/upload/storage/v1/b/${bucket}/o?uploadType=media&name=${key}" -o /dev/null`;
+    return `curl -sf -X PUT -T ${file} -H "Authorization: Bearer $BLOB_TOKEN" "${base}/${key}" -o /dev/null`;
   }
   return `curl -sf -X PUT -T ${file} -H "x-ms-blob-type: BlockBlob" "${base}/${key}?$BLOB_SAS" -o /dev/null`;
 }

@@ -30,7 +30,11 @@ sudo apt-get install -y -qq jq squashfs-tools e2fsprogs xfsprogs socat mdadm acl
 log "scratch disk"
 if [ ! -e "$LAB_DIR/.scratch-ready" ]; then
   mapfile -t nvme < <(ls /dev/disk/by-id/google-local-nvme-ssd-* 2>/dev/null || true)
-  if [ "${#nvme[@]}" -gt 0 ]; then
+  if [ "${#nvme[@]}" -eq 1 ]; then
+    sudo mkfs.xfs -q -f "${nvme[0]}"
+    sudo mkdir -p "$LAB_DIR"
+    sudo mount -o noatime "${nvme[0]}" "$LAB_DIR"
+  elif [ "${#nvme[@]}" -gt 1 ]; then
     # GCP local NVMe: stripe all devices, XFS for reflink copies of disk images.
     if [ ! -e /dev/md0 ]; then
       sudo mdadm --create /dev/md0 --level=0 --raid-devices="${#nvme[@]}" "${nvme[@]}" --run
@@ -72,8 +76,9 @@ sudo ln -sf "$HOME/.bun/bin/bun" /usr/local/bin/bun
 S3="https://s3.amazonaws.com/spec.ccfc.min"
 if [ ! -f vmlinux ] || [ ! -f ubuntu.squashfs ]; then
   log "guest kernel and base image from Firecracker CI"
-  prefix=$(curl -fsSL "$S3?list-type=2&prefix=firecracker-ci/&delimiter=/" |
-    grep -oP "(?<=<Prefix>)firecracker-ci/[0-9]{8}-[^/]+/(?=</Prefix>)" | sort | tail -1)
+  # CI_PREFIX pins the artifact set so several hosts run an identical guest.
+  prefix="${CI_PREFIX:-$(curl -fsSL "$S3?list-type=2&prefix=firecracker-ci/&delimiter=/" |
+    grep -oP "(?<=<Prefix>)firecracker-ci/[0-9]{8}-[^/]+/(?=</Prefix>)" | sort | tail -1)}"
   kernel_key=$(curl -fsSL "$S3?list-type=2&prefix=${prefix}${ARCH}/vmlinux-" |
     grep -oP "(?<=<Key>)(${prefix}${ARCH}/vmlinux-[0-9]+\.[0-9]+\.[0-9]{1,3})(?=</Key>)" | sort -V | tail -1)
   ubuntu_key=$(curl -fsSL "$S3?list-type=2&prefix=${prefix}${ARCH}/ubuntu-" |
