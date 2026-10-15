@@ -3,6 +3,7 @@ import {
   KEEPER_DEFAULT_ALLOWED_HOSTS,
   KEEPER_REGION_HOSTS,
   assertAllowedHost,
+  memoryKeeperStorage,
   parseKeeperConfiguration,
   serializeKeeperConfiguration,
 } from "./config";
@@ -22,6 +23,13 @@ export interface KeeperBootstrapOptions extends KeeperRuntimeOptions {
   /** Region host for a token without a region prefix. */
   hostname?: string;
   signal?: AbortSignal;
+  /**
+   * Awaited with the bound configuration (`previous: null`, `reason: "bind"`)
+   * as soon as Keeper has accepted the token, before bootstrap returns or
+   * reports a later failure. The token is spent at that point, so this is the
+   * only copy of the credential.
+   */
+  persistConfiguration?: PersistKeeperConfiguration;
 }
 
 export interface KeeperBootstrapResult {
@@ -76,34 +84,61 @@ export async function bootstrapKeeperConfiguration(
   assertAllowedHost(keeperTokenHost(token, options.hostname), allowed);
   const loader = options.sdk ?? createKeeperSdkLoader();
   let tracker: { sent: number; lastStatus: number | null; mutating: boolean } | null = null;
+  let bindStorage: ReturnType<typeof memoryKeeperStorage> | null = null;
+  let accountName: string | null = null;
+  let failure: unknown = null;
   try {
-    const { result, storage } = await runKeeperOperation({
+    await runKeeperOperation({
       runtime: options,
       loader,
       config: new Map(),
       hostInConfig: false,
       ...(options.signal ? { signal: options.signal } : {}),
-      work: async (keeper, bindStorage) => {
+      work: async (keeper, storage) => {
         tracker = keeper.tracker;
-        await keeper.sdk.initializeStorage(bindStorage, token, options.hostname);
-        assertAllowedHost(bindStorage.values.get("hostname"), allowed);
+        bindStorage = storage;
+        await keeper.sdk.initializeStorage(storage, token, options.hostname);
+        assertAllowedHost(storage.values.get("hostname"), allowed);
         keeper.tracker.mutating = true;
         const secrets = await keeper.sdk.getSecrets2(keeper.options);
         keeper.tracker.mutating = false;
         const title = secrets.appData?.title;
-        return typeof title === "string" && title.trim() ? title.trim().slice(0, 200) : null;
+        accountName = typeof title === "string" && title.trim() ? title.trim().slice(0, 200) : null;
       },
     });
-    storage.values.delete("clientKey");
-    if (!storage.values.get("appKey")) {
+  } catch (error) {
+    failure = error;
+  }
+
+  // Keeper binds the key pair when it answers the first request. Once the
+  // SDK has unwrapped the app key the token is spent, so the configuration is
+  // kept (and persisted) even if something after the bind failed.
+  const bound = bindStorage as ReturnType<typeof memoryKeeperStorage> | null;
+  if (bound?.values.get("appKey")) {
+    bound.values.delete("clientKey");
+    const configuration = serializeKeeperConfiguration(bound.values);
+    parseKeeperConfiguration(configuration);
+    if (options.persistConfiguration) {
+      try {
+        await options.persistConfiguration(configuration, { previous: null, reason: "bind" });
+      } catch {
+        throw new VaultProviderError(
+          "provider_unavailable",
+          "Keeper accepted the one-time token but Opengeni could not save the connection; generate a new token and connect again",
+        );
+      }
+    }
+    return { configuration, accountName };
+  }
+
+  try {
+    if (failure === null) {
       throw new VaultProviderError(
         "provider_outcome_unknown",
         "Keeper did not complete binding; generate a new one-time token",
       );
     }
-    const configuration = serializeKeeperConfiguration(storage.values);
-    parseKeeperConfiguration(configuration);
-    return { configuration, accountName: result };
+    throw failure;
   } catch (error) {
     if (error instanceof VaultProviderError && error.code === "provider_outcome_unknown")
       throw error;
@@ -132,7 +167,11 @@ export async function bootstrapKeeperConfiguration(
   }
 }
 
-/** Bootstrap, then a provider over the bound configuration. Persist `configuration` first. */
+/**
+ * Bootstrap, then a provider over the bound configuration. The configuration
+ * is persisted through `persistConfiguration` (reason `"bind"`) before this
+ * returns and before the provider makes any request.
+ */
 export async function bootstrapKeeperVaultProvider(
   options: KeeperBootstrapOptions & { persistConfiguration: PersistKeeperConfiguration },
 ): Promise<KeeperBootstrapResult & { provider: KeeperVaultProvider }> {

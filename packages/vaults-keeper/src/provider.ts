@@ -63,10 +63,15 @@ export const KEEPER_OPERATIONS: VaultProviderOperations = {
   restoreFieldHistory: false,
 };
 
-/** Persists a changed configuration; the parent stores it encrypted with compare-and-swap. */
+/**
+ * Persists a changed configuration; the parent stores it encrypted with
+ * compare-and-swap. `configuration` is canonical JSON of a string record
+ * (binary entries are base64). `previous` is null for the first save after
+ * binding a one-time token.
+ */
 export type PersistKeeperConfiguration = (
   configuration: string,
-  context: { previous: string },
+  context: { previous: string | null; reason: "bind" | "rotation" },
 ) => Promise<void>;
 
 export interface KeeperRuntimeOptions {
@@ -84,8 +89,11 @@ export interface KeeperRuntimeOptions {
 }
 
 export interface KeeperVaultProviderOptions extends KeeperRuntimeOptions {
-  /** The bound KSM configuration (JSON or base64 JSON) from bootstrap or Keeper tooling. */
-  configuration: string;
+  /**
+   * The bound KSM configuration from bootstrap or Keeper tooling: JSON, base64
+   * JSON, or the parsed string record.
+   */
+  configuration: string | Readonly<Record<string, string>>;
   /** Awaited whenever the SDK changes the configuration (server key rotation). */
   persistConfiguration: PersistKeeperConfiguration;
   valueCacheMs?: number;
@@ -216,7 +224,7 @@ export function createKeeperVaultProvider(
     if (pending === null) return;
     const next = pending;
     try {
-      await options.persistConfiguration(next, { previous: persisted });
+      await options.persistConfiguration(next, { previous: persisted, reason: "rotation" });
     } catch {
       throw new VaultProviderError(
         "provider_unavailable",

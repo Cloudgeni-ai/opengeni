@@ -18,10 +18,12 @@ the token and binds a key pair; the result is the connection's credential.
 const keeper = await import("@opengeni/vaults-keeper");
 const { configuration, accountName } = await keeper.bootstrapKeeperConfiguration({
   oneTimeToken, // hostname is needed only for a token without a region prefix
+  persistConfiguration: async (configuration, { previous, reason }) => {
+    // reason "bind", previous null: store it encrypted before anything else runs
+  },
 });
-// Store `configuration` encrypted before using it. A token works once.
 const provider = keeper.createKeeperVaultProvider({
-  configuration,
+  configuration, // or the stored string record
   persistConfiguration: async (next, { previous }) => {
     // compare-and-swap the stored, encrypted configuration from `previous` to `next`
   },
@@ -29,19 +31,29 @@ const provider = keeper.createKeeperVaultProvider({
 ```
 
 `bootstrapKeeperVaultProvider(options)` does both and returns
-`{ provider, configuration, accountName }`; the caller still persists
-`configuration`.
+`{ provider, configuration, accountName }`. It requires
+`persistConfiguration` and awaits it with the bound configuration before
+returning, so a later validate or list failure cannot lose a spent token's
+credential.
 
-- **Redeem once.** A lost bind response is `provider_outcome_unknown` and is
-  never retried; the customer generates a new token. A definite refusal is
+- **Redeem once, save at once.** As soon as Keeper has bound the key pair,
+  the configuration is passed to `persistConfiguration` (`previous: null`,
+  `reason: "bind"`), even if something after the bind failed. If that save
+  fails, bootstrap reports `provider_unavailable` (without the configuration)
+  and the customer generates a new token. A lost bind response is
+  `provider_outcome_unknown` and is never retried. A definite refusal is
   `provider_auth_invalid`. If the application is IP-locked, the first request
   locks it to the Opengeni egress address.
-- **Configuration.** JSON or base64 JSON, as Keeper tools export it. Only the
-  known keys are kept; `hostname`, `clientId`, `privateKey` and `appKey` are
-  required. The host must be on `allowedHosts` (default `KEEPER_REGION_HOSTS`:
-  US, EU, AU, GOV, JP, CA and IL5), checked before every request.
+- **Configuration.** JSON, base64 JSON (as Keeper tools export it) or a
+  string record. The adapter emits canonical JSON of a string record, with
+  binary entries in base64; `keeperConfigurationRecord()` returns the record
+  for structured storage. Only the known keys are kept; `hostname`,
+  `clientId`, `privateKey` and `appKey` are required. The host must be on
+  `allowedHosts` (default `KEEPER_REGION_HOSTS`: US, EU, AU, GOV, JP, CA and
+  IL5), checked before every request.
 - **Rotation.** When the server rotates its key, the SDK changes the
-  configuration and the adapter awaits `persistConfiguration`. If that fails,
+  configuration and the adapter awaits `persistConfiguration` (`reason:
+  "rotation"`, `previous` the last saved value). If that fails,
   the change stays pending and is persisted first on the next call, and the
   read fails with `provider_unavailable` (a write that already happened still
   succeeds). `currentConfiguration()` returns the latest value.

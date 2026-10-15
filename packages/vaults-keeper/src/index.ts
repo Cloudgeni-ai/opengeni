@@ -18,6 +18,7 @@ export {
   KEEPER_CONFIG_KEYS,
   KEEPER_DEFAULT_ALLOWED_HOSTS,
   KEEPER_REGION_HOSTS,
+  keeperConfigurationRecord,
   parseKeeperConfiguration,
   serializeKeeperConfiguration,
 } from "./config";

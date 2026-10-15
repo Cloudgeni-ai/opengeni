@@ -79,6 +79,8 @@ export type FakeHooks = {
   dropResponse?: string | null;
   /** Require this transmission key id; others get a `key` rotation error. */
   requireKeyId?: number | null;
+  /** Send app data the client cannot decrypt (fails after a bind completes). */
+  corruptAppData?: boolean;
 };
 
 export function uid(): string {
@@ -278,7 +280,12 @@ export class FakeKsm {
         .filter((record) => !record.folderUid)
         .filter(include)
         .map((record) => this.encodeRecord(record, this.appKey));
-      body.appData = webSafe(gcm(this.appKey, json({ title: this.appTitle, type: "general" })));
+      body.appData = webSafe(
+        gcm(
+          this.hooks.corruptAppData ? randomBytes(32) : this.appKey,
+          json({ title: this.appTitle, type: "general" }),
+        ),
+      );
       body.expiresOn = 0;
       return respond(body);
     }

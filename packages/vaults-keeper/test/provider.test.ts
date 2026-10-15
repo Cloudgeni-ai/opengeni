@@ -6,6 +6,7 @@ import {
 } from "@opengeni/vaults";
 import { bootstrapKeeperConfiguration, bootstrapKeeperVaultProvider } from "../src/bootstrap";
 import { createKeeperVaultProvider, type KeeperVaultProvider } from "../src/provider";
+import { keeperConfigurationRecord } from "../src/config";
 import { createKeeperSdkLoader } from "../src/sdk";
 import { FakeKsm, loginData, uid } from "./fake-ksm";
 
@@ -27,7 +28,7 @@ async function errorOf(promise: Promise<unknown>): Promise<VaultProviderError> {
 type World = {
   fake: FakeKsm;
   provider: KeeperVaultProvider;
-  persisted: Array<{ configuration: string; previous: string }>;
+  persisted: Array<{ configuration: string; previous: string | null; reason: string }>;
   rw: string;
   ro: string;
   sub: string;
@@ -64,7 +65,7 @@ async function world(options: { persistFails?: () => boolean } = {}): Promise<Wo
     configuration,
     persistConfiguration: async (next, context) => {
       if (options.persistFails?.()) throw new Error("storage down");
-      persisted.push({ configuration: next, previous: context.previous });
+      persisted.push({ configuration: next, ...context });
     },
     queryFunction: fake.queryFunction,
     fetchFile: fake.fetchFile,
@@ -156,13 +157,63 @@ describe("bootstrap", () => {
   test("bootstrapKeeperVaultProvider returns a working provider", async () => {
     const fake = new FakeKsm();
     fake.addFolder("Ops");
+    const saved: Array<{ configuration: string; previous: string | null; reason: string }> = [];
+    let requestsAtSave = -1;
     const { provider, configuration } = await bootstrapKeeperVaultProvider({
       oneTimeToken: fake.createToken(),
       queryFunction: fake.queryFunction,
-      persistConfiguration: async () => {},
+      persistConfiguration: async (next, context) => {
+        requestsAtSave = fake.requests.length;
+        saved.push({ configuration: next, ...context });
+      },
     });
+    // Saved once, when the binding call (the bind plus the SDK's own refetch)
+    // returns, before the provider makes any request.
+    expect(saved).toEqual([{ configuration, previous: null, reason: "bind" }]);
+    expect(requestsAtSave).toBe(2);
     expect(provider.currentConfiguration()).toBe(configuration);
     expect((await provider.listVaults(ctx())).map((vault) => vault.name)).toEqual(["Ops"]);
+    expect(saved).toHaveLength(1);
+  });
+
+  test("a bind that succeeds before a later failure still keeps and saves the configuration", async () => {
+    const fake = new FakeKsm();
+    fake.addFolder("Ops");
+    fake.hooks.corruptAppData = true;
+    const saved: string[] = [];
+    const result = await bootstrapKeeperConfiguration({
+      oneTimeToken: fake.createToken(),
+      queryFunction: fake.queryFunction,
+      persistConfiguration: async (next) => {
+        saved.push(next);
+      },
+    });
+    expect(result.accountName).toBeNull();
+    expect(saved).toEqual([result.configuration]);
+    fake.hooks.corruptAppData = false;
+    const provider = createKeeperVaultProvider({
+      configuration: keeperConfigurationRecord(result.configuration),
+      persistConfiguration: async () => {},
+      queryFunction: fake.queryFunction,
+    });
+    expect((await provider.listVaults(ctx())).map((vault) => vault.name)).toEqual(["Ops"]);
+  });
+
+  test("a failed save after binding is reported without the configuration", async () => {
+    const fake = new FakeKsm();
+    const error = await errorOf(
+      bootstrapKeeperVaultProvider({
+        oneTimeToken: fake.createToken(),
+        queryFunction: fake.queryFunction,
+        persistConfiguration: async () => {
+          throw new Error("storage down");
+        },
+      }),
+    );
+    expect(error.code).toBe("provider_unavailable");
+    expect(error.message).toContain("generate a new token");
+    expect(error.message).not.toContain("appKey");
+    expect(fake.requests).toHaveLength(2);
   });
 });
 
@@ -213,6 +264,7 @@ describe("configuration", () => {
     expect(persisted).toHaveLength(1);
     expect(JSON.parse(persisted[0]!.configuration).serverPublicKeyId).toBe("8");
     expect(persisted[0]!.previous).toBe(before);
+    expect(persisted[0]!.reason).toBe("rotation");
     await provider.listVaults(ctx());
     expect(persisted).toHaveLength(1);
     expect(fake.requests.at(-1)!.keyId).toBe(8);

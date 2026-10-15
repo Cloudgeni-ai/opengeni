@@ -41,10 +41,18 @@ function invalid(message: string): never {
 
 /**
  * Parses a bound KSM configuration (JSON, or base64 of JSON as Keeper tools
- * export it). Unknown keys are dropped; the client must already be bound
- * (appKey present, one-time clientKey gone).
+ * export it, or the already parsed string record). Unknown keys are dropped;
+ * the client must already be bound (appKey present).
  */
-export function parseKeeperConfiguration(input: string): KeeperConfigValues {
+export function parseKeeperConfiguration(
+  input: string | Readonly<Record<string, string>>,
+): KeeperConfigValues {
+  if (typeof input !== "string") {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return invalid("The Keeper configuration is not KSM JSON");
+    }
+    return valuesOf(input);
+  }
   let text = input.trim();
   if (!text.startsWith("{")) {
     try {
@@ -62,8 +70,12 @@ export function parseKeeperConfiguration(input: string): KeeperConfigValues {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return invalid("The Keeper configuration is not KSM JSON");
   }
+  return valuesOf(parsed as Record<string, unknown>);
+}
+
+function valuesOf(parsed: Readonly<Record<string, unknown>>): KeeperConfigValues {
   const values: KeeperConfigValues = new Map();
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(parsed)) {
     if (!KNOWN.has(key)) continue;
     if (typeof value !== "string" || value.length === 0 || value.length > 4096) {
       invalid(`The Keeper configuration has an invalid ${key}`);
@@ -90,6 +102,15 @@ export function serializeKeeperConfiguration(values: KeeperConfigValues): string
     if (value !== undefined) out[key] = value;
   }
   return JSON.stringify(out);
+}
+
+/** The canonical string record of a bound configuration, for structured storage. */
+export function keeperConfigurationRecord(
+  configuration: string | Readonly<Record<string, string>>,
+): Record<string, string> {
+  return JSON.parse(
+    serializeKeeperConfiguration(parseKeeperConfiguration(configuration)),
+  ) as Record<string, string>;
 }
 
 export function assertAllowedHost(
