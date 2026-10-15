@@ -7,10 +7,13 @@
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { macLoginAgentName, macLoginAgentPlist } from "@opengeni/desktop/mac-login-agent";
+
 const root = join(import.meta.dirname, "..");
 const dist = join(root, "dist");
 const production = process.argv.includes("--production");
 const kit = dirname(Bun.resolveSync("@opengeni/desktop/contract", root));
+const appId = "ai.opengeni.desktop";
 
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
@@ -53,6 +56,13 @@ cpSync(join(kit, "pages"), join(dist, "pages"), { recursive: true });
 cpSync(join(root, "..", "web", "public", "favicon.svg"), join(dist, "pages", "logo.svg"));
 cpSync(join(root, "assets"), join(dist, "assets"), { recursive: true });
 cpSync(join(root, "resources", "icon.png"), join(dist, "assets", "icon.png"));
+
+// macOS: the launch agent that opens the app hidden at login, which
+// electron-builder copies into Contents/Library/LaunchAgents.
+const launchAgents = join(root, "build", "LaunchAgents");
+rmSync(launchAgents, { recursive: true, force: true });
+mkdirSync(launchAgents, { recursive: true });
+writeFileSync(join(launchAgents, macLoginAgentName(appId)), macLoginAgentPlist(appId));
 
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as Record<
   string,

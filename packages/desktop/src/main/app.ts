@@ -43,6 +43,7 @@ import {
   removeLinuxAutostart,
 } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
+import { macLoginAgentName } from "./mac-login-agent";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
@@ -108,7 +109,10 @@ async function recordMemory(): Promise<void> {
   flushMarks(idle === null ? loadedMarks : { ...loadedMarks, idleMemoryMb: idle });
 }
 
-/** Opened by the system at login, to keep this computer available without a window. */
+/**
+ * Opened by the system at login, to keep this computer available without a
+ * window: with `--hidden` (the login item's argument), or by a macOS 12 login item.
+ */
 function openedAtLogin(): boolean {
   if (process.argv.includes("--hidden")) return true;
   return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
@@ -246,6 +250,9 @@ export class DesktopShell {
     this.registerIpc();
     const hidden = openedAtLogin() && this.store.active() !== null;
     if (!hidden) this.openWindow();
+    if (process.platform === "darwin" && app.isPackaged && this.config.thisComputer) {
+      setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
+    }
     app.on("activate", () => this.reveal());
     powerMonitor.on("resume", () => this.retryUnreachable());
     app.on("before-quit", (event) => {
@@ -928,7 +935,7 @@ export class DesktopShell {
         };
     if (this.config.thisComputer && app.isPackaged) {
       const change = this.computer.openAtLoginChange(summary.connected);
-      if (change) setOpenAtLogin(this.config.productName, change === "open");
+      if (change) setOpenAtLogin(this.config, change === "open");
     }
     // macOS keeps running without a window anyway; the menu bar item is for the
     // computer. Elsewhere the tray is how a closed window comes back.
@@ -951,13 +958,47 @@ export class DesktopShell {
 }
 
 /** Open the app, without a window, at login, or stop doing so. */
-function setOpenAtLogin(productName: string, open: boolean): void {
+function setOpenAtLogin(config: DesktopAppConfig, open: boolean): void {
   if (process.platform === "linux") {
-    if (open) installLinuxAutostart(productName);
-    else removeLinuxAutostart(productName);
+    if (open) installLinuxAutostart(config.productName);
+    else removeLinuxAutostart(config.productName);
+    return;
+  }
+  if (process.platform === "darwin") {
+    const agent = macLoginAgent(config.appId);
+    if (agent) {
+      app.setLoginItemSettings({ openAtLogin: open, ...agent });
+      // Earlier versions registered the app itself; macOS opens that with a window.
+      if (app.getLoginItemSettings().openAtLogin) app.setLoginItemSettings({ openAtLogin: false });
+      return;
+    }
+    // macOS 12 reports a login launch through `wasOpenedAtLogin`.
+    app.setLoginItemSettings({ openAtLogin: open });
     return;
   }
   app.setLoginItemSettings({ openAtLogin: open, args: ["--hidden"] });
+}
+
+/**
+ * The bundled launch agent that opens the app hidden at login (see
+ * mac-login-agent.ts), on macOS 13 and later when the build includes it.
+ */
+function macLoginAgent(appId: string): { type: "agentService"; serviceName: string } | null {
+  const major = Number.parseInt(process.getSystemVersion().split(".")[0] ?? "", 10);
+  if (!(major >= 13)) return null;
+  const agent = { type: "agentService", serviceName: macLoginAgentName(appId) } as const;
+  return app.getLoginItemSettings(agent).status === "not-found" ? null : agent;
+}
+
+/**
+ * Moves a login item from an earlier version, which registered the app itself,
+ * to the launch agent. Login items the person turned off stay off.
+ */
+function migrateMacLoginItem(appId: string): void {
+  const agent = macLoginAgent(appId);
+  if (!agent || !app.getLoginItemSettings().openAtLogin) return;
+  app.setLoginItemSettings({ openAtLogin: true, ...agent });
+  app.setLoginItemSettings({ openAtLogin: false });
 }
 
 /** A Set-Cookie header as Electron cookie details. */
