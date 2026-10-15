@@ -409,3 +409,47 @@ export function stillPending(result: InstallVaultProviderResponse): InstallVault
     mutation: true,
   });
 }
+
+const RENEWED: Record<ExternalVaultProviderKind, { done: string; saved: string }> = {
+  protonpass: { done: "Token replaced", saved: "Saved the new token" },
+  keeper: { done: "Reconnected", saved: "Saved the new device" },
+  bitwarden: { done: "Bridge updated", saved: "Saved the bridge settings" },
+  external: { done: "Service updated", saved: "Saved the service settings" },
+};
+
+/**
+ * What a renewal says. A pending result saved the new access but couldn't
+ * check it yet: not a success, and never a reason to enter it again (a
+ * Keeper token works once). The connection page then offers Finish connecting.
+ */
+export function renewalNotice(
+  provider: ExternalVaultProviderKind,
+  result: Pick<InstallVaultProviderResponse, "discoveryPending">,
+): { tone: "success" | "warning"; title: string; description?: string } {
+  if (!result.discoveryPending) return { tone: "success", title: RENEWED[provider].done };
+  return {
+    tone: "warning",
+    title: RENEWED[provider].saved,
+    description: `Opengeni couldn't finish checking it. Use Finish connecting on this page; ${
+      provider === "keeper" ? "you don't need a new token" : "you don't need to enter it again"
+    }.`,
+  };
+}
+
+/**
+ * A provider that says its vault is locked, in its own words: a Bitwarden
+ * account on the customer's bridge, a Proton Pass session, a remote service.
+ */
+export function lockedText(provider: VaultProviderId, then: "connect" | "retry"): string {
+  const next = then === "connect" ? "then connect again" : "then try again";
+  switch (provider) {
+    case "bitwarden":
+      return `Bitwarden is locked on the bridge. Unlock it there, ${next}.`;
+    case "protonpass":
+      return `Proton Pass says this session is locked. Unlock Proton Pass, ${next}.`;
+    case "external":
+      return `Your service says its vault is locked. Unlock it there, ${next}.`;
+    default:
+      return `${PROVIDERS[provider].name} is locked. Unlock it, ${next}.`;
+  }
+}

@@ -29,6 +29,7 @@ import {
 import { vaultErrorText, type ConnectionOwner } from "./vault-model";
 import {
   connectionName,
+  lockedText,
   PROVIDER_IDS,
   PROVIDERS,
   stillPending,
@@ -382,10 +383,7 @@ function routeCredentialError(
           }
         : { fields: {}, form: vaultErrorText(error, undefined, name) };
     case "provider_locked":
-      return {
-        fields: {},
-        form: "Bitwarden is locked on the bridge. Unlock it there, then connect again.",
-      };
+      return { fields: {}, form: lockedText(provider, "connect") };
     default:
       return { fields: {}, form: vaultErrorText(error, undefined, name) };
   }
@@ -442,6 +440,11 @@ export interface ConnectProviderActions extends LinkVaultActions {
   install: (request: InstallVaultProviderRequest) => Promise<InstallVaultProviderResponse>;
   /** Checks a saved-but-pending connection again, with its saved access. */
   verify: (connectionId: string) => Promise<InstallVaultProviderResponse>;
+  /**
+   * Opens new access for this same connection, when its saved access is
+   * refused. Never a second setup: a spent one-time token isn't sent again.
+   */
+  renew?: (connectionId: string) => void | Promise<void>;
 }
 
 export function ConnectProviderPage({
@@ -531,6 +534,7 @@ export function ConnectProviderPage({
             onConnected?.();
             setConnection(result);
           }}
+          onRenew={actions.renew ? () => void actions.renew?.(connection.connectionId) : undefined}
         />
       </FlushFormPage>
     );

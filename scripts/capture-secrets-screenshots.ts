@@ -423,6 +423,21 @@ const focusRole = (role: "button" | "combobox" | "link", name: RegExp) => async 
   await page.waitForTimeout(250);
 };
 const SECRET_32 = "f598-mock-signing-secret-0123456789abcdef";
+/** In the open Move or Copy dialog: a vault that takes the item (else the first), then submit. */
+const moveTo = (target?: RegExp) => async (page: Page) => {
+  const dialog = page.getByRole("dialog").last();
+  await dialog.getByRole("combobox").first().click();
+  const named = target ? page.getByRole("option", { name: target }).first() : null;
+  if (named && (await named.isVisible().catch(() => false))) await named.click();
+  else await page.getByRole("option").first().click();
+  await page.waitForTimeout(300);
+  await dialog
+    .getByRole("button", { name: /^(Move|Copy) item$/u })
+    .last()
+    .click();
+  await page.waitForTimeout(1500);
+};
+const moveToFirst = moveTo();
 /** The item page's ⋯ menu, then one of its entries. */
 const itemMenu = (entry?: RegExp) => async (page: Page) => {
   await page
@@ -566,6 +581,26 @@ const PROVIDER_STATES: CaptureState[] = [
     "Connect your vault service: name, address, signing secret",
     connectPage("external"),
   ),
+  s(
+    "S18",
+    "proton-locked",
+    "Proton Pass session locked during setup (Proton's words, not Bitwarden's)",
+    connectPage("protonpass"),
+    { steps: steps(fill("secret", "pst_locked_0123456789"), submit(/^Connect$/u)) },
+  ),
+  s(
+    "S18",
+    "external-locked",
+    "Your vault service reports its vault locked during setup",
+    connectPage("external"),
+    {
+      steps: steps(
+        fill("endpoint", "https://vault.example"),
+        fill("secret", `locked-${SECRET_32}`),
+        submit(/^Connect$/u),
+      ),
+    },
+  ),
   // S19 choose what to link, after connecting
   s(
     "S19",
@@ -657,6 +692,35 @@ const PROVIDER_STATES: CaptureState[] = [
         fill("secret", "US:pending-0123456789"),
         submit(/^Connect$/u),
         submit(/^Finish connecting$/u),
+      ),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-pending-setup-refused",
+    "Setup: the saved Keeper device is refused, so the action is Reconnect",
+    connectPage("keeper"),
+    {
+      mock: { scenario: "verify-refused" },
+      steps: steps(
+        fill("secret", "US:pending-0123456789"),
+        submit(/^Connect$/u),
+        submit(/^Finish connecting$/u),
+      ),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-pending-setup-reconnect",
+    "Setup Reconnect opens new access for the same connection (no second setup)",
+    connectPage("keeper"),
+    {
+      mock: { scenario: "verify-refused" },
+      steps: steps(
+        fill("secret", "US:pending-0123456789"),
+        submit(/^Connect$/u),
+        submit(/^Finish connecting$/u),
+        submit(/^Reconnect$/u),
       ),
     },
   ),
@@ -784,6 +848,16 @@ const PROVIDER_STATES: CaptureState[] = [
   ),
   s("S20", "bitwarden-renew", "Update the Bitwarden bridge", (ids) =>
     connection(ids, "bitwarden", "replace-token"),
+  ),
+  s(
+    "S20",
+    "keeper-renew-pending",
+    "Reconnect saved the new device but couldn't check it: warning, then Finish connecting",
+    (ids) => connection(ids, "keeper", "replace-token"),
+    {
+      mock: { scenario: "renew-pending" },
+      steps: steps(fill("secret", "US:ok-0123456789"), submit(/^Reconnect$/u)),
+    },
   ),
   s("S20", "keeper-choose", "Keeper: choose shared folders for an existing connection", (ids) =>
     connection(ids, "keeper", "choose-vaults"),
@@ -963,6 +1037,45 @@ const PROVIDER_STATES: CaptureState[] = [
   ),
   s("S22", "external-item", "Billing API from your read-only service", (ids) =>
     item(ids, "Service credentials/Billing API"),
+  ),
+  // A move that saved its copy but not the rest: closed, refreshed, never offered again.
+  ...(
+    [
+      ["move-saved", "Move saved the copy; trashing the original didn't finish"],
+      ["move-changed", "Move saved the copy; the original changed in Proton Pass, kept"],
+      ["move-missing", "Move saved the copy; the original is no longer listed"],
+      ["move-unlisted", "Moved, copy not listed yet: on to the target vault"],
+      ["move-fails", "Ordinary move failure: dialog stays open to try again"],
+    ] as const
+  ).map(([scenario, description]) =>
+    s("S22", `proton-${scenario}`, description, (ids) => item(ids, "Proton Ops/Grafana"), {
+      mock: { scenario },
+      // Only a password manager confirms a write it can't list yet: move into 1Password there.
+      steps: steps(
+        itemMenu(/^(Move or copy|Copy to another)/u),
+        scenario === "move-unlisted" ? moveTo(/^1P Shared$/u) : moveToFirst,
+      ),
+    }),
+  ),
+  s(
+    "S22",
+    "proton-move-saved-open-copy",
+    "Open copy from the warning: the saved copy in its vault",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      mock: { scenario: "move-saved" },
+      steps: steps(itemMenu(/^(Move or copy|Copy to another)/u), moveToFirst, click("Open copy")),
+    },
+  ),
+  s(
+    "S22",
+    "onepassword-move-saved",
+    "1Password move saved the copy; archiving the original didn't finish",
+    (ids) => item(ids, "1P Shared/Figma"),
+    {
+      mock: { scenario: "move-saved" },
+      steps: steps(itemMenu(/^(Move or copy|Copy to another)/u), moveToFirst),
+    },
   ),
   s(
     "S22",

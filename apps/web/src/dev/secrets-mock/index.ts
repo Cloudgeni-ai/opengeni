@@ -16,7 +16,12 @@
 //                                 not finished), verify-fails, verify-refused,
 //                                 fresh-server (no connections; Proton Pass and
 //                                 Keeper not enabled), no-catalog (an older server
-//                                 that lists connections without its providers)
+//                                 that lists connections without its providers),
+//                                 move-saved, move-changed, move-missing (a move
+//                                 saved its copy but kept the original),
+//                                 move-unlisted (a copy not listed yet), move-fails
+//                                 (nothing saved, the dialog can try again),
+//                                 renew-pending (new access saved, not checked)
 import {
   totpCodeSync,
   totpRemainingMs,
@@ -654,6 +659,91 @@ function routes(state: MockState): Route[] {
     },
     {
       method: "POST",
+      pattern: /\/vaults\/([^/]+)\/items\/([^/]+)\/move$/,
+      handle: (match, body) => {
+        const source = vaultOf(match[1]!);
+        const found = itemOf(match[1]!, match[2]!);
+        const target = vaultOf(String(body.targetVaultId ?? ""));
+        if (!source || !found || !target) return fail(404, "vault_item_not_found", "Not found.");
+        const blocked = readOnly(target);
+        if (blocked) return blocked;
+        const active = scenarios();
+        // An ordinary failure: nothing saved, the dialog stays and can try again.
+        if (active.has("move-fails"))
+          return fail(503, "provider_unavailable", "The password manager didn't respond.");
+        const unlisted = active.has("move-unlisted");
+        const now = new Date().toISOString();
+        // References name the vault they're in: the copy's name the target.
+        const retarget = (ref: string) =>
+          ref.replace(`secret:${source.name}/`, `secret:${target.name}/`);
+        const copy: MockItem = {
+          ...found,
+          id: mockId(`item-${target.id}-${found.name}`),
+          vaultId: target.id,
+          archivedAt: null,
+          updatedAt: now,
+          createdAt: now,
+          generation: 1,
+          references: {
+            primary: found.references.primary ? retarget(found.references.primary) : null,
+            otp: found.references.otp ? retarget(found.references.otp) : null,
+            byField: Object.fromEntries(
+              Object.entries(found.references.byField).map(([name, ref]) => [name, retarget(ref)]),
+            ),
+          },
+          fields: found.fields.map((field) => ({
+            ...field,
+            reference: `{{secret:${target.name}/${found.name}/${field.name}}}`,
+          })),
+        };
+        // A copy a password manager confirmed but didn't list yet appears after a sync.
+        if (!unlisted) {
+          state.items.push(copy);
+          refresh(state, target.id);
+        }
+        // The copy is saved; the original's step didn't finish (core moveAcrossProviders).
+        const kept = {
+          saved: true,
+          sourceArchived: false,
+          vaultId: target.id,
+          itemId: copy.id,
+          sourceItemId: found.id,
+          sourceVaultId: source.id,
+        };
+        if (body.mode === "move" && active.has("move-saved"))
+          return fail(
+            503,
+            "provider_unavailable",
+            "Archiving the original did not complete.",
+            kept,
+          );
+        if (body.mode === "move" && active.has("move-changed"))
+          return fail(409, "vault_generation_conflict", "Changed after its values were read.", {
+            ...kept,
+            sourceChanged: true,
+          });
+        if (body.mode === "move" && active.has("move-missing"))
+          return fail(404, "vault_item_not_found", "No longer listed at the version read.", {
+            ...kept,
+            sourceChanged: true,
+          });
+        if (body.mode === "move") {
+          if (source.source === "opengeni") found.archivedAt = now;
+          else state.items = state.items.filter((each) => each !== found);
+          refresh(state, source.id);
+        }
+        if (unlisted)
+          return fail(503, "provider_inventory_incomplete", "Saved, but not listed yet.", {
+            saved: true,
+            vaultId: target.id,
+            itemName: found.name,
+            ...(body.mode === "move" ? { sourceArchived: true } : {}),
+          });
+        return json(200, detail(copy));
+      },
+    },
+    {
+      method: "POST",
       pattern: /\/vaults\/([^/]+)\/items\/([^/]+)\/fields\/([^/]+)\/reveal$/,
       handle: (match, body) => {
         if (role() === "viewer") return fail(403, "vault_permission_denied", "Permission denied.");
@@ -912,6 +1002,19 @@ function routes(state: MockState): Route[] {
         if (!connection) return fail(404, "not_found", "Connection not found.");
         const rejected = credentialFailure(body.credentials ?? {});
         if (rejected) return rejected;
+        // Saved but not checked yet (the API's 202): the page offers Finish connecting.
+        if (scenarios().has("renew-pending")) {
+          connection.verificationStatus = "pending";
+          return json(202, {
+            connectionId: connection.id,
+            accountName: connection.accountName,
+            provider: connection.provider,
+            operations: connection.operations,
+            vaults: [],
+            discoveryPending: true,
+            errorCode: "provider_unavailable",
+          });
+        }
         connection.verifiedAt = new Date().toISOString();
         for (const each of state.vaults) {
           if (each.providerConnectionId !== connection.id) continue;

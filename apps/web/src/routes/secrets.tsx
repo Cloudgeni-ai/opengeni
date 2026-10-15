@@ -13,6 +13,7 @@ import {
   type OnePasswordConnectionSummary,
   type ProviderVaultMeta,
   type VaultAvailability,
+  type VaultItem,
   type VaultSummary,
   type VaultsApi,
 } from "@opengeni/react";
@@ -40,6 +41,7 @@ import {
 } from "@/components/secrets/vault-forms";
 import { SecretsListPage, type SecretsListState } from "@/components/secrets/vault-list";
 import {
+  savedTransfer,
   secretsCapabilityOff,
   vaultError,
   vaultsOfConnection,
@@ -50,11 +52,11 @@ import {
   creatableTypes,
   LEGACY_PROVIDER_OPERATIONS,
   PROVIDERS,
+  renewalNotice,
   sourceHome,
   stillPending,
   unavailableProviders as providersUnavailable,
   vaultOperations,
-  type ExternalVaultProviderKind,
   type ProviderAvailability,
   type VaultConnection,
 } from "@/components/secrets/vault-providers";
@@ -106,14 +108,6 @@ function vaultStaysHere(
   // An Only-me vault always reaches its home (Personal) workspace.
   return vault.ownerKind === "user" && vault.workspaceId === workspaceId;
 }
-
-/** The toast after renewing a connection's access. */
-const RENEWED: Record<ExternalVaultProviderKind, string> = {
-  protonpass: "Token replaced",
-  keeper: "Reconnected",
-  bitwarden: "Bridge updated",
-  external: "Service updated",
-};
 
 /** Wraps a mutation so its error carries the vault copy (UI-9). */
 async function attempt<T>(operation: () => Promise<T>, home?: string): Promise<T> {
@@ -423,9 +417,14 @@ export function SecretsRoute({
             connection={{ ...connection, provider: renewing }}
             onClose={() => openConnection(connection.id)}
             onRenew={async (credentials) => {
-              await api.replaceVaultProviderCredentials(connection.id, { credentials });
+              const result = await api.replaceVaultProviderCredentials(connection.id, {
+                credentials,
+              });
               await Promise.all([vaults.refresh(), refreshConnections()]);
-              toast.success(RENEWED[renewing]);
+              // Saved but not checked: the connection page shows Finish connecting.
+              const notice = renewalNotice(renewing, result);
+              if (notice.tone === "success") toast.success(notice.title);
+              else toast.warning(notice.title, { description: notice.description });
               openConnection(connection.id);
             }}
           />
@@ -516,6 +515,11 @@ export function SecretsRoute({
           actions={{
             install: (request) => api.installVaultProvider(request),
             verify: (id) => api.verifyVaultProviderConnection(id),
+            // The saved access was refused: new access for this same connection, never a new one.
+            renew: async (id) => {
+              await refreshConnections();
+              openConnection(id, "replace-token");
+            },
             ...linkActions,
           }}
         />
@@ -565,6 +569,7 @@ export function SecretsRoute({
         canUse={canUse}
         onBack={() => openVault(vault.id)}
         onOpenItem={openItem}
+        onOpenVault={openVault}
         onChanged={refreshVaults}
       />
     );
@@ -826,6 +831,7 @@ function ItemRoute({
   canUse,
   onBack,
   onOpenItem,
+  onOpenVault,
   onChanged,
 }: {
   vault: VaultSummary;
@@ -836,6 +842,8 @@ function ItemRoute({
   canUse: boolean;
   onBack: () => void;
   onOpenItem: (vaultId: string, itemId: string, search?: { view?: SecretsItemView }) => void;
+  /** Opens another vault's page, for a moved item that isn't listed there yet. */
+  onOpenVault: (vaultId: string) => void;
   onChanged: () => Promise<void>;
 }) {
   const loaded = useVaultItem(vault.id, itemId);
@@ -952,7 +960,37 @@ function ItemRoute({
         open={moving}
         onOpenChange={setMoving}
         onMove={async (request, target) => {
-          const moved = await attempt(() => api.moveItem(vault.id, item.id, request), home);
+          let moved: VaultItem;
+          try {
+            moved = await api.moveItem(vault.id, item.id, request);
+          } catch (error) {
+            // The copy was saved even though the request failed: close, refresh, never retry.
+            const saved = savedTransfer(error, {
+              mode: request.mode,
+              itemName: item.name,
+              targetName: target.name,
+              source: home ?? vault.name,
+              removal,
+            });
+            if (!saved) throw vaultError(error, undefined, home);
+            await Promise.all([saved.originalRemoved ? undefined : loaded.refresh(), onChanged()]);
+            const copy = saved.copy;
+            toast.warning(saved.title, {
+              description: saved.description,
+              duration: Number.POSITIVE_INFINITY,
+              closeButton: true,
+              ...(copy
+                ? {
+                    action: {
+                      label: "Open copy",
+                      onClick: () => onOpenItem(copy.vaultId, copy.itemId),
+                    },
+                  }
+                : {}),
+            });
+            if (saved.originalRemoved) onOpenVault(target.id);
+            return;
+          }
           await onChanged();
           toast.success(
             request.mode === "move" ? `Moved to ${target.name}` : `Copied to ${target.name}`,

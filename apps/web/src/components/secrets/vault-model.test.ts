@@ -7,6 +7,7 @@ import {
   groupVaults,
   isMissingKeyError,
   itemsLabel,
+  savedTransfer,
   secretsCapabilityOff,
   secretsOffIn,
   syncLabel,
@@ -265,5 +266,128 @@ describe("chat and schedule Secrets summaries", () => {
     expect(scheduleSecretsSummary({ mode: "all" })).toBeNull();
     expect(scheduleSecretsSummary({ mode: "selected", vaultIds: [] })).toBe("No secrets");
     expect(scheduleSecretsSummary({ mode: "selected", vaultIds: ["a"] })).toBe("1 vault");
+  });
+});
+
+describe("a move whose copy was saved", () => {
+  const context = {
+    mode: "move" as const,
+    itemName: "Grafana",
+    targetName: "Platform",
+    source: "Proton Pass",
+    removal: "trash" as const,
+  };
+  // The server's details when the copy is saved but the original isn't moved to trash.
+  const kept = {
+    saved: true,
+    sourceArchived: false,
+    vaultId: "target-vault",
+    itemId: "copy-item",
+    sourceItemId: "original-item",
+    sourceVaultId: "source-vault",
+  };
+
+  test.each([
+    ["provider_unavailable", 503, {}],
+    ["vault_generation_conflict", 409, { sourceChanged: true }],
+    ["vault_item_not_found", 404, { sourceChanged: true }],
+  ] as const)("%s with saved: true is not offered again", (code, status, extra) => {
+    const outcome = savedTransfer(vaultApiError(status, code, { ...kept, ...extra }), context);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.title).toBe("Saved a copy in Platform");
+    expect(outcome!.description).toContain("Don't move it again");
+    expect(outcome!.copy).toEqual({ vaultId: "target-vault", itemId: "copy-item" });
+    expect(outcome!.originalRemoved).toBe(false);
+  });
+
+  test("each reason says what happened to the original", () => {
+    const unanswered = savedTransfer(vaultApiError(503, "provider_unavailable", kept), context);
+    expect(unanswered!.description).toBe(
+      "Trashing the original in Proton Pass didn't finish. Don't move it again; check Proton Pass and move the original to trash if it's still there.",
+    );
+    const archived = savedTransfer(vaultApiError(503, "provider_unavailable", kept), {
+      ...context,
+      source: "1Password",
+      removal: "archive",
+    });
+    expect(archived!.description).toContain("Archiving the original in 1Password didn't finish.");
+    const changed = savedTransfer(
+      vaultApiError(409, "vault_generation_conflict", { ...kept, sourceChanged: true }),
+      context,
+    );
+    expect(changed!.description).toContain("Grafana changed in Proton Pass during the move");
+    expect(changed!.description).toContain("compare the two");
+    const missing = savedTransfer(
+      vaultApiError(404, "vault_item_not_found", { ...kept, sourceChanged: true }),
+      context,
+    );
+    expect(missing!.description).toBe(
+      "The original is no longer listed in Proton Pass. Don't move it again; check Proton Pass for it.",
+    );
+    // Never the generic "this item isn't here" copy for the code.
+    expect(missing!.description).not.toContain("isn't here anymore");
+  });
+
+  test("an archived original, with a copy not listed yet, opens nothing", () => {
+    const outcome = savedTransfer(
+      vaultApiError(409, "provider_inventory_incomplete", {
+        saved: true,
+        sourceArchived: true,
+        vaultId: "target-vault",
+        itemName: "Grafana",
+      }),
+      { ...context, removal: "archive" },
+    );
+    expect(outcome).toEqual({
+      title: "Moved Grafana to Platform",
+      description: "It appears in Platform after the next sync. Don't move it again.",
+      copy: null,
+      originalRemoved: true,
+    });
+  });
+
+  test("a copy not listed yet says so", () => {
+    const outcome = savedTransfer(
+      vaultApiError(409, "provider_inventory_incomplete", { saved: true, vaultId: "target" }),
+      { ...context, mode: "copy" },
+    );
+    expect(outcome!.title).toBe("Copied Grafana to Platform");
+    expect(outcome!.description).toContain("Don't copy it again");
+    expect(outcome!.originalRemoved).toBe(false);
+  });
+
+  test("reads through the copy wrapper the route adds", () => {
+    const wrapped = vaultError(
+      vaultApiError(503, "provider_unavailable", kept),
+      undefined,
+      "Proton Pass",
+    );
+    expect(savedTransfer(wrapped, context)?.copy?.itemId).toBe("copy-item");
+  });
+
+  test("reads the details of a failed POST as the API sends them", () => {
+    const posted = new OpenGeniApiError(
+      503,
+      JSON.stringify({
+        error: "provider_unavailable",
+        message: "Saved Grafana in Platform…",
+        details: kept,
+      }),
+      { mutation: true },
+    );
+    expect(savedTransfer(posted, context)?.copy).toEqual({
+      vaultId: "target-vault",
+      itemId: "copy-item",
+    });
+  });
+
+  test.each([
+    ["provider_unavailable", 503],
+    ["vault_generation_conflict", 409],
+    ["vault_item_not_found", 404],
+    ["provider_outcome_unknown", 502],
+  ] as const)("an ordinary %s stays retryable", (code, status) => {
+    expect(savedTransfer(vaultApiError(status, code), context)).toBeNull();
+    expect(savedTransfer(vaultApiError(status, code, { saved: false }), context)).toBeNull();
   });
 });

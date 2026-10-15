@@ -11,8 +11,10 @@ import {
   HOSTED_OPERATIONS,
   isPending,
   LEGACY_PROVIDER_OPERATIONS,
+  lockedText,
   needsAttention,
   removalLabel,
+  renewalNotice,
   sourceHome,
   stillPending,
   unavailableProviders,
@@ -299,5 +301,40 @@ describe("which providers this server can connect", () => {
         { provider: "onepassword", available: true },
       ]),
     ).toEqual({ keeper: "Not enabled on this server" });
+  });
+});
+
+describe("renewing a connection's access", () => {
+  test("a checked renewal is a success", () => {
+    expect(renewalNotice("protonpass", {})).toEqual({ tone: "success", title: "Token replaced" });
+    expect(renewalNotice("keeper", { discoveryPending: false }).tone).toBe("success");
+  });
+
+  test("a saved but unchecked renewal is not a success and never asks again", () => {
+    const keeper = renewalNotice("keeper", { discoveryPending: true });
+    expect(keeper.tone).toBe("warning");
+    expect(keeper.title).toBe("Saved the new device");
+    expect(keeper.description).toContain("Finish connecting");
+    expect(keeper.description).toContain("you don't need a new token");
+    const bridge = renewalNotice("bitwarden", { discoveryPending: true });
+    expect(bridge.title).toBe("Saved the bridge settings");
+    expect(bridge.description).toContain("you don't need to enter it again");
+  });
+});
+
+describe("a locked provider", () => {
+  test("names where it is locked, not always Bitwarden", () => {
+    expect(lockedText("bitwarden", "connect")).toBe(
+      "Bitwarden is locked on the bridge. Unlock it there, then connect again.",
+    );
+    expect(lockedText("protonpass", "connect")).toBe(
+      "Proton Pass says this session is locked. Unlock Proton Pass, then connect again.",
+    );
+    expect(lockedText("external", "retry")).toBe(
+      "Your service says its vault is locked. Unlock it there, then try again.",
+    );
+    for (const provider of ["protonpass", "external", "keeper"] as const) {
+      expect(lockedText(provider, "connect")).not.toContain("Bitwarden");
+    }
   });
 });

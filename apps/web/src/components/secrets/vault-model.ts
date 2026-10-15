@@ -329,6 +329,77 @@ export function isMissingKeyError(error: unknown): boolean {
   return vaultErrorCode(error) === "encryption_key_missing";
 }
 
+/* ------------------------------------------------- a move that half finished */
+
+/** A move or copy that failed after its copy was saved: what to tell the person. */
+export interface SavedTransfer {
+  title: string;
+  description: string;
+  /** The saved copy, when the server could name it (it may not be listed yet). */
+  copy: { vaultId: string; itemId: string } | null;
+  /** The original was archived or trashed too, so its page is gone. */
+  originalRemoved: boolean;
+}
+
+function stringDetail(error: unknown, key: string): string | null {
+  const value = vaultErrorDetail(error, key);
+  return typeof value === "string" && value ? value : null;
+}
+
+/**
+ * A failed move or copy whose copy was saved anyway (`details.saved`), so it
+ * mustn't be offered again: a retry would save a second copy. Null for an
+ * ordinary failure, which stays retryable. The error's code says why the
+ * original was kept (a provider that didn't answer, a changed original, one
+ * no longer listed), so the copy here never reads the code alone.
+ */
+export function savedTransfer(
+  caught: unknown,
+  context: {
+    mode: "move" | "copy";
+    itemName: string;
+    targetName: string;
+    /** Where the original lives: "Proton Pass", or the vault's name in Opengeni. */
+    source: string;
+    removal: "archive" | "trash";
+  },
+): SavedTransfer | null {
+  const error = (caught as { cause?: unknown } | null)?.cause ?? caught;
+  if (vaultErrorDetail(error, "saved") !== true) return null;
+  const { mode, itemName, targetName, source, removal } = context;
+  const vaultId = stringDetail(error, "vaultId");
+  const itemId = stringDetail(error, "itemId");
+  const copy = vaultId && itemId ? { vaultId, itemId } : null;
+  const later = copy ? "" : ` It appears in ${targetName} after the next sync.`;
+  const originalRemoved = mode === "move" && vaultErrorDetail(error, "sourceArchived") === true;
+  if (mode === "copy" || originalRemoved) {
+    return {
+      title:
+        mode === "move"
+          ? `Moved ${itemName} to ${targetName}`
+          : `Copied ${itemName} to ${targetName}`,
+      description: `${later.trim() || `It's saved in ${targetName}.`} Don't ${mode} it again.`,
+      copy,
+      originalRemoved,
+    };
+  }
+  const removing = removal === "trash" ? "Trashing" : "Archiving";
+  const remove = removal === "trash" ? "move the original to trash" : "archive the original";
+  const again = "Don't move it again;";
+  const changed = vaultErrorDetail(error, "sourceChanged") === true;
+  const reason = !changed
+    ? `${removing} the original in ${source} didn't finish. ${again} check ${source} and ${remove} if it's still there.`
+    : vaultErrorCode(error) === "vault_item_not_found"
+      ? `The original is no longer listed in ${source}. ${again} check ${source} for it.`
+      : `${itemName} changed in ${source} during the move, so the original was kept. ${again} compare the two, then update the copy or ${remove}.`;
+  return {
+    title: `Saved a copy in ${targetName}`,
+    description: `${reason}${later}`,
+    copy,
+    originalRemoved: false,
+  };
+}
+
 export function isNotFoundError(error: unknown): boolean {
   const code = vaultErrorCode(error);
   if (code === "vault_not_found" || code === "vault_item_not_found") return true;
