@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,7 +16,7 @@ afterEach(() => {
   for (const path of folders.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-function computer(dataDir: string): ThisComputer {
+function computer(dataDir: string, onChange: () => void = () => undefined): ThisComputer {
   const unused = () => {
     throw new Error("not used");
   };
@@ -32,7 +32,7 @@ function computer(dataDir: string): ThisComputer {
     mintEnrollToken: unused,
     openSystemSettings: () => undefined,
     trash: async () => undefined,
-    onChange: () => undefined,
+    onChange,
   });
 }
 
@@ -66,5 +66,40 @@ describe("opening at login", () => {
       if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previous;
     }
+  });
+});
+
+describe.skipIf(process.platform === "win32")("noticing a disconnect", () => {
+  test("tells the app when the last connection goes, but not when a read fails", async () => {
+    const home = folder();
+    const listing = join(home, "connections.txt");
+    mkdirSync(join(home, ".local", "bin"), { recursive: true });
+    const agent = join(home, ".local", "bin", "opengeni-agent");
+    // A stand-in agent: `connections` prints the listing, or fails when it's missing.
+    writeFileSync(agent, `#!/bin/sh\n[ -f "${listing}" ] || exit 1\ncat "${listing}"\n`);
+    chmodSync(agent, 0o755);
+    const connected =
+      "Configured Opengeni connections (1):\n  abc  https://server.example  workspace=w1  agent=a1\n";
+    writeFileSync(listing, connected);
+
+    let changes = 0;
+    const machine = computer(home, () => changes++);
+    expect((await machine.summary()).connected).toBe(true);
+    expect(changes).toBe(0);
+
+    rmSync(listing);
+    machine.invalidate();
+    expect((await machine.summary()).connected).toBe(true);
+    expect(changes).toBe(0);
+
+    writeFileSync(listing, "Configured Opengeni connections (0):\n");
+    machine.invalidate();
+    expect((await machine.summary()).connected).toBe(false);
+    expect(changes).toBe(1);
+
+    writeFileSync(listing, connected);
+    machine.invalidate();
+    expect((await machine.summary()).connected).toBe(true);
+    expect(changes).toBe(2);
   });
 });
