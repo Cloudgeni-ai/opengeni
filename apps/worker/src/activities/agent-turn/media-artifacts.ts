@@ -12,7 +12,7 @@ import {
   type TurnToolCancellationFence,
 } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
-import type { RetainedArtifactMetadata, RetainedSessionScreenshotKind } from "@opengeni/contracts";
+import type { RetainedSessionScreenshotKind } from "@opengeni/contracts";
 import type { ResumedTurnSandbox } from "../../sandbox-resume";
 import type { SharedActivityServices } from "../types";
 import {
@@ -32,6 +32,7 @@ import {
   toolOutputContainsInlineImage,
   typedScreenshotFromToolOutput,
   unavailableRetainedSessionImage,
+  type RetainedImageReceipts,
 } from "../retained-screenshots";
 import { objectStorageForSandboxDownloads } from "./file-resources";
 import type { TurnEventPublisher } from "./model-usage";
@@ -67,7 +68,7 @@ export type TurnMediaArtifactDeps = {
 };
 
 export class TurnMediaArtifacts {
-  readonly retainedScreenshotReceiptsByCallId = new Map<string, RetainedArtifactMetadata>();
+  readonly retainedScreenshotReceiptsByCallId = new Map<string, RetainedImageReceipts>();
   modelCanReceiveRetainedSessionImages = true;
   readonly generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
   readonly generatedImageReceiptsCreatedThisTurn = new Map<string, GeneratedImageReceipt>();
