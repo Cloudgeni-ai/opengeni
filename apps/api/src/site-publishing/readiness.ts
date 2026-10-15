@@ -189,12 +189,8 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
         fix: { kind: "site_sql_query_audience", query: name, audience: "everyone" },
       });
   }
-  if (input.agent.enabled && input.outsideModel?.kind === "fallback")
-    add({
-      code: "agent_model_outside_fallback",
-      message: `People outside the workspace use ${input.outsideModel.model} (paid with credits).`,
-      suggestion: "Pick a credit-billed model if they should use the same one as members.",
-    });
+  // A working credit-billed fallback is not a problem: the publish dialog
+  // shows it as one quiet line (outsideAgentModel), not as a warning.
   if (input.agent.enabled && input.outsideModel?.kind === "unavailable")
     add({
       code: "agent_model_outside_unavailable",

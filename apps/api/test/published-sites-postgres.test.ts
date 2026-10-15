@@ -18,6 +18,8 @@ import {
   engageSitePlatformBrake,
   ensureExternalIdentity,
   liftSitePlatformBrake,
+  setSessionUsageLimitInTransaction,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -690,10 +692,10 @@ test("site-runtime checks the gateway signature before anything else", async () 
   // Minimal workspace and model views; tools are not available to published Sites.
   const workspace = await f.gateway(site.host, "GET", "", { visitor });
   expect(workspace.json).toEqual({ id: f.workspace.id, name: "Signed" });
-  expect((await f.gateway(site.host, "GET", "/model-catalog", { visitor })).json).toMatchObject({
-    models: [],
-    defaultModel: null,
-  });
+  // People outside the workspace see the one concrete model they would use.
+  const catalog = (await f.gateway(site.host, "GET", "/model-catalog", { visitor })).json;
+  expect(catalog.defaultModel).toEqual(expect.any(String));
+  expect(catalog.models).toEqual([{ id: catalog.defaultModel }]);
   const tools = await f.gateway(site.host, "POST", "/tools/catalog", { visitor, body: {} });
   expect(tools.status).toBe(403);
   expect(code(tools)).toBe("not_available_for_viewer");
@@ -1598,8 +1600,9 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
     return { limit: Number(row!.limit_micros), reserved: Number(row!.reserved_micros) };
   };
 
-  // Each start reserves its whole cap against the Site's month in one
-  // transaction: the third gets what is left, the fourth is refused.
+  // Each start reserves its first turn (at most its cap) against the Site's
+  // month in one transaction: the third gets what is left, and the fourth
+  // finds only their reservations in the way (busy: nothing is spent yet).
   await setLimits({ agentMicrosPerSitePerMonth: 50_000, agentMicrosPerConversation: 20_000 });
   const first = await start();
   expect(first.status, JSON.stringify(first.json)).toBe(202);
@@ -1618,7 +1621,7 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   const fourth = await start();
   expect(fourth.status).toBe(429);
   expect(fourth.json.error.details).toMatchObject({
-    code: "site_budget_exhausted",
+    code: "site_budget_busy",
     budget: "agent_micros_per_site_per_month",
   });
   // Starts per Site per day hold whatever the money budget.
@@ -2609,6 +2612,146 @@ test("members are never capped by a Site; people outside the workspace meet its 
   expect(reported.json.usage).toMatchObject({ agentMicrosThisMonth: 0, agentMicrosToday: 0 });
   expect(reported.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(1);
 }, 90_000);
+
+test("a member's conversation from before members were uncapped keeps working, uncapped", async () => {
+  const f = await fixture();
+  const site = await f.live("Legacy", { access: "public", agent: { enabled: true } });
+  const memberSession = await f.signIn(f.member, site.host);
+  const started = await f.gateway(site.host, "POST", "/sessions", {
+    session: memberSession,
+    body: { initialMessage: "Hi" },
+  });
+  expect(started.status, JSON.stringify(started.json)).toBe(202);
+  const sessionId = String(started.json.id);
+  // As the previous release left it: counted in the Site's windows, with the
+  // old $0.02 per-conversation cap stamped as its session usage limit.
+  await shared.admin`update site_runtime_conversations set budget_key = '*', limit_micros = 20000
+    where session_id = ${sessionId}`;
+  const stamped = await withWorkspaceSessionActivityRls(
+    db.db,
+    f.workspace.id,
+    async (tx) =>
+      await setSessionUsageLimitInTransaction(tx, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        sessionId,
+        limitMicros: 20_000,
+        expectedVersion: 0,
+        operationId: `legacy-${sessionId}`,
+        actor: { type: "host", subjectId: `site:${site.id}` },
+        producerEnabled: true,
+      }),
+  );
+  expect(stamped.outcome).toBe("ok");
+  const usageLimit = async () =>
+    (await f.api(f.owner, "GET", `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`)).json
+      .usageLimit?.limitMicros ?? null;
+  expect(await usageLimit()).toBe(20_000);
+  // No site_conversation_outdated: the member keeps the conversation, and the
+  // Site's old cap is lifted.
+  const sent = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    session: memberSession,
+    body: { type: "user.message", payload: { text: "More" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+  const [row] = await shared.admin`select budget_key, limit_micros, reserved_micros
+    from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(row).toMatchObject({ budget_key: "*", limit_micros: null });
+  expect(Number(row!.reserved_micros)).toBe(0);
+  expect(await usageLimit()).toBeNull();
+});
+
+test("the model follows the viewer: people outside the workspace never use a subscription", async () => {
+  const f = await fixture();
+  const site = await f.live("Models", { access: "public", agent: { enabled: true } });
+  const memberSession = await f.signIn(f.member, site.host);
+  const start = (who: { visitor?: string; session?: string }) =>
+    f.gateway(site.host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const send = (sessionId: string, who: { visitor?: string; session?: string }) =>
+    f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      ...who,
+      body: { type: "user.message", payload: { text: "More" } },
+    });
+  const modelOf = async (sessionId: string) =>
+    String((await shared.admin`select model from sessions where id = ${sessionId}`)[0]!.model);
+  // A guest's conversation is created with an explicit, credit-billed model.
+  const visitor = visitorId();
+  const guest = await start({ visitor });
+  expect(guest.status, JSON.stringify(guest.json)).toBe(202);
+  const guestModel = await modelOf(String(guest.json.id));
+  expect(guestModel.length).toBeGreaterThan(0);
+  expect(guestModel.startsWith("codex/")).toBe(false);
+  // A conversation that holds a subscription model (one started before this
+  // rule) takes no more work from someone outside the workspace...
+  const subscription = "codex/gpt-6-astra";
+  await shared.admin`update sessions set model = ${subscription} where id = ${guest.json.id}`;
+  const refused = await send(String(guest.json.id), { visitor });
+  expect(refused.status, JSON.stringify(refused.json)).toBe(403);
+  expect(refused.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "agent_model",
+    reason: "subscription_model",
+  });
+  // ...while a member keeps using their subscription.
+  const member = await start({ session: memberSession });
+  expect(member.status, JSON.stringify(member.json)).toBe(202);
+  await shared.admin`update sessions set model = ${subscription} where id = ${member.json.id}`;
+  const memberSent = await send(String(member.json.id), { session: memberSession });
+  // The Site lets it through (this test deployment has no Codex connection,
+  // so the session itself may still say the model is unavailable).
+  expect(memberSent.json?.error?.details?.code ?? null).not.toBe("not_available_for_viewer");
+});
+
+test("turns reserve an estimate, so open conversations don't use up a Site; busy is retryable", async () => {
+  const f = await fixture();
+  const site = await f.live("Reservations", { access: "public", agent: { enabled: true } });
+  const setLimits = async (overrides: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, site.id, "PUT", {
+      limitProfile: { kind: "custom", overrides },
+    });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  };
+  const start = (visitor: string) =>
+    f.gateway(site.host, "POST", "/sessions", { visitor, body: { initialMessage: "Hi" } });
+  const siteReserved = async () => {
+    const [row] = await shared.admin`select coalesce(sum(reserved_micros), 0)::bigint as reserved
+      from site_runtime_usage where site_id = ${site.id} and principal_key = '*'
+        and period = 'month'`;
+    return Number(row!.reserved);
+  };
+  // $1.50 a month for the Site and a $1 guest cap per conversation: holding
+  // the whole cap would let two open conversations use up the Site. Each
+  // holds one turn's estimate ($0.25) instead, so six start at once.
+  await setLimits({ agentMicrosPerSitePerMonth: 1_500_000 });
+  const started = await Promise.all(Array.from({ length: 6 }, () => start(visitorId())));
+  expect(started.map((result) => result.status)).toEqual(Array(6).fill(202));
+  expect(await siteReserved()).toBe(6 * f.settings.sitesAgentReservationMicrosPerTurn);
+  // Their session usage limit is still the conversation cap.
+  const [conversation] = await shared.admin`select limit_micros, reserved_micros
+    from site_runtime_conversations where session_id = ${started[0]!.json.id}`;
+  expect(Number(conversation!.limit_micros)).toBe(1_000_000);
+  expect(Number(conversation!.reserved_micros)).toBe(f.settings.sitesAgentReservationMicrosPerTurn);
+  // The next finds only the others' reservations in the way: busy, retry shortly.
+  const busy = await start(visitorId());
+  expect(busy.status, JSON.stringify(busy.json)).toBe(429);
+  expect(busy.json.error.details).toMatchObject({
+    code: "site_budget_busy",
+    budget: "agent_micros_per_site_per_month",
+    retryAfterSeconds: expect.any(Number),
+  });
+  // Concurrent starts never hold more than the Site limit between them.
+  const raced = await Promise.all(Array.from({ length: 6 }, () => start(visitorId())));
+  for (const result of raced) expect(result.status).toBe(429);
+  expect(await siteReserved()).toBeLessThanOrEqual(1_500_000);
+  // Spent money is exhausted, not busy.
+  await shared.admin`update site_runtime_usage set agent_micros = 1500000, reserved_micros = 0
+    where site_id = ${site.id} and principal_key = '*' and period = 'month'`;
+  const exhausted = await start(visitorId());
+  expect(exhausted.json.error.details).toMatchObject({
+    code: "site_budget_exhausted",
+    budget: "agent_micros_per_site_per_month",
+  });
+});
 
 test("Site agent sessions run without a sandbox, whatever the deployment default", async () => {
   const f = await fixture({ sandboxBackend: "docker" });

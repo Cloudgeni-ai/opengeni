@@ -124,6 +124,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sitesGuestTurnsPerConversation: undefined,
     sitesGuestAgentMicrosPerConversation: undefined,
     sitesCreditsLimitMultiplier: 10,
+    sitesAgentReservationMicrosPerTurn: 250_000,
     sitesPlatformBillingMode: "usage_only",
     sitesPlatformOverageEnabled: true,
     sitesPlatformAllowanceRequests: 1_000_000,

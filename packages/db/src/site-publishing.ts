@@ -1821,6 +1821,12 @@ export type SiteRuntimeBudgetLimits = {
   agentMicrosPerVisitorPerMonth?: number | null;
   agentMicrosPerSitePerDay?: number | null;
   agentMicrosPerSitePerMonth: number | null;
+  /**
+   * What one turn holds against the spend budgets while it runs (its actual
+   * spend replaces it when settled), at most the conversation's own cap.
+   * Unset: the whole cap.
+   */
+  turnReservationMicros?: number | null;
 };
 
 export type SiteRuntimeBudget =
@@ -1835,21 +1841,39 @@ export type SiteRuntimeBudget =
 
 export type SiteRuntimeReservation =
   | { ok: true; limitMicros: number | null; reservedMicros: number }
-  | { ok: false; budget: SiteRuntimeBudget };
+  | {
+      ok: false;
+      budget: SiteRuntimeBudget;
+      /**
+       * Only what running conversations hold refuses it: the budget has room
+       * once their spend settles, so a retry shortly may succeed.
+       */
+      busy?: boolean;
+    };
 
 /** A conversation is not started on less than this (or its cap, when smaller). */
 export const SITE_RUNTIME_MIN_RESERVATION_MICROS = 1_000;
 
 const remaining = (limit: number | null, window: UsageWindow) =>
   limit === null ? Number.POSITIVE_INFINITY : limit - window.agentMicros - window.reservedMicros;
+/** What a budget has left counting settled spend only (no reservations). */
+const unspent = (limit: number | null, window: UsageWindow) =>
+  limit === null ? Number.POSITIVE_INFINITY : limit - window.agentMicros;
+/** One turn's reservation: the per-turn estimate, within what the conversation may still spend. */
+const turnReservation = (limits: SiteRuntimeBudgetLimits, mayStillSpend: number) =>
+  Math.max(
+    0,
+    Math.floor(Math.min(mayStillSpend, limits.turnReservationMicros ?? Number.POSITIVE_INFINITY)),
+  );
 
 /**
  * Start a conversation: in one transaction, count the start against the
- * visitor's and the Site's daily starts, and reserve its whole spend cap in
- * the visitor's day and the Site's day and month, refusing when any budget
- * would be exceeded. The cap is the per-conversation limit, lowered to what
- * the budgets still have; it becomes the session's usage limit, so settled
- * plus reserved spend never exceeds a budget whoever the visitors are.
+ * visitor's and the Site's daily starts, and reserve its first turn (the
+ * per-turn estimate, at most its cap) in the visitor's day and month and the
+ * Site's day and month, refusing when any budget would be exceeded (`busy`
+ * when only other running conversations' reservations are in the way). The
+ * cap is the per-conversation limit, lowered to what the budgets still have;
+ * it becomes the session's usage limit.
  * The conversation row records the owner (Site and viewer) before the
  * session exists; `releaseSiteRuntimeConversationStart` undoes all of it.
  */
@@ -1899,11 +1923,16 @@ export async function reserveSiteRuntimeConversationStart(
     let left = Number.POSITIVE_INFINITY;
     for (const budget of spendBudgets(limits, windows)) {
       const budgetLeft = remaining(budget.limit, budget.window);
-      if (budgetLeft < floor) return { ok: false, budget: budget.budget } as const;
+      if (budgetLeft < floor)
+        return {
+          ok: false,
+          budget: budget.budget,
+          ...(unspent(budget.limit, budget.window) >= floor ? { busy: true } : {}),
+        } as const;
       left = Math.min(left, budgetLeft);
     }
-    const reserve = cap === null ? 0 : Math.max(0, Math.floor(Math.min(cap, left)));
-    const limitMicros = cap === null ? null : reserve;
+    const limitMicros = cap === null ? null : Math.max(0, Math.floor(Math.min(cap, left)));
+    const reserve = limitMicros === null ? 0 : turnReservation(limits, limitMicros);
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
           viewer_principal, viewer_kind, tool_ids, budget_key, version_id, turns, limit_micros,
@@ -1971,16 +2000,25 @@ export async function releaseSiteRuntimeConversationStart(
 /**
  * Admit agent work in an existing conversation (a new message when
  * `newTurn`, else steering, resuming or running a queued message): under the
- * turn cap and its own spend cap, and top its reservation back up to what
- * the conversation may still spend, refusing when a budget cannot hold it.
- * A per-conversation limit lowered since the start lowers the conversation's
- * cap (returned as `limitMicros`; the caller lowers the session usage limit
- * to it before the work runs).
+ * turn cap and its own spend cap, and set its reservation to one turn's
+ * estimate (at most what the conversation may still spend), refusing when a
+ * budget cannot hold it (`busy` when only other conversations' reservations
+ * are in the way). A per-conversation limit lowered since the start lowers
+ * the conversation's cap (returned as `limitMicros`; the caller lowers the
+ * session usage limit to it before the work runs). `uncapped` (a workspace
+ * member's conversation, including one started before members were uncapped)
+ * drops the conversation's own cap and holds no reservation.
  */
 export async function reserveSiteRuntimeConversationWork(
   db: Database,
   scope: SitePublishingScope,
-  input: { sessionId: string; limits: SiteRuntimeBudgetLimits; newTurn: boolean; now?: Date },
+  input: {
+    sessionId: string;
+    limits: SiteRuntimeBudgetLimits;
+    newTurn: boolean;
+    uncapped?: boolean;
+    now?: Date;
+  },
 ): Promise<SiteRuntimeReservation> {
   if (!UUID.test(input.sessionId)) throw new SitePublishingError("not_found", "Not found");
   const periods = periodStarts(input.now ?? new Date());
@@ -2000,15 +2038,16 @@ export async function reserveSiteRuntimeConversationWork(
       conversation.turns >= limits.turnsPerConversation
     )
       return { ok: false, budget: "turns_per_conversation" } as const;
-    const cap =
-      conversation.limitMicros === null
+    const cap = input.uncapped
+      ? null
+      : conversation.limitMicros === null
         ? limits.agentMicrosPerConversation
         : limits.agentMicrosPerConversation === null
           ? conversation.limitMicros
           : Math.min(conversation.limitMicros, limits.agentMicrosPerConversation);
     if (cap !== null && conversation.meteredMicros >= cap)
       return { ok: false, budget: "agent_micros_per_conversation" } as const;
-    const target = cap === null ? 0 : cap - conversation.meteredMicros;
+    const target = cap === null ? 0 : turnReservation(limits, cap - conversation.meteredMicros);
     const windows = await lockConversationWindows(
       tx,
       scope,
@@ -2028,7 +2067,12 @@ export async function reserveSiteRuntimeConversationWork(
     for (const budget of budgets) {
       const delta = budget.window.period === "day" ? dayDelta : monthDelta;
       if (remaining(budget.limit, budget.window) - Math.max(0, delta) < 0)
-        return { ok: false, budget: budget.budget } as const;
+        return {
+          ok: false,
+          budget: budget.budget,
+          // Settled spend alone leaves room for this turn: others' reservations refuse it.
+          ...(unspent(budget.limit, budget.window) - target >= 0 ? { busy: true } : {}),
+        } as const;
     }
     for (const budget of budgets)
       if (budget.limit !== null && budget.window.agentMicros >= budget.limit)

@@ -82,6 +82,7 @@ import {
 } from "../site-publishing/gateway-signature";
 import {
   capSiteConversationUsageLimit,
+  liftSiteConversationUsageLimit,
   enforceSiteRuntimeRate,
   enforceSiteRuntimeViewerRate,
   findSiteRuntimeHost,
@@ -92,7 +93,7 @@ import {
   settleSiteRuntimeSpend,
   sha256Text,
   siteAgentRefusal,
-  siteBudgetExhausted,
+  siteReservationRefused,
   siteClientAddressPrincipal,
   siteNotAvailableForViewer,
   siteRuntimeBudgetKey,
@@ -841,7 +842,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         default: null,
         unavailable: true,
       };
-    const model = choice.kind === "fallback" ? choice.model : agentModel;
+    const model = choice.model;
     return {
       allowed: credited(named([model, ...(limits.agentModels ?? [])])),
       default: model,
@@ -1128,7 +1129,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         "site_conversation_not_found",
         "Conversation not found",
       );
-    const budgets = siteRuntimeBudgetLimits(limits);
+    const budgets = siteRuntimeBudgetLimits(limits, deps.settings);
     /**
      * Reserve, and when a Site-wide budget refuses, release reservations
      * finished conversations no longer need and retry once (unless the Site
@@ -1138,7 +1139,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       let reservation = await run();
       if (siteWideBudget(reservation) && (await sweepSiteRuntimeReservations(deps, host)))
         reservation = await run();
-      if (!reservation.ok) throw siteBudgetExhausted(reservation.budget);
+      if (!reservation.ok) throw siteReservationRefused(reservation);
       return reservation;
     };
 
@@ -1379,8 +1380,15 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       const allowedTools = new Set(
         siteAgentToolRefs(host.publication.agent, viewer, memberPermissions).map((t) => t.id),
       );
+      // A member's conversation started before members were kept out of the
+      // Site's windows counts in `*` and stays usable; its reservations stay
+      // in the windows they were made in.
+      const legacyMember =
+        viewer.kind === "member" &&
+        conversation.viewerKind === "member" &&
+        conversation.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
       if (
-        conversation.budgetKey !== siteRuntimeBudgetKey(viewer) ||
+        (conversation.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
         conversation.toolIds.some((tool) => !allowedTools.has(tool))
       )
         throw sitePublishingError(
@@ -1389,14 +1397,37 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           "site_conversation_outdated",
           "This Site's assistant changed since this conversation started; start a new one",
         );
+      // People outside the workspace never use a subscription-billed model,
+      // whatever model the conversation holds.
+      if (viewer.kind !== "member") {
+        const session = await getSession(deps.db, host.scope.workspaceId, conversation.sessionId);
+        if (session && isSubscriptionBilledModel([], session.model))
+          throw siteNotAvailableForViewer(
+            "agent_model",
+            "This Site's assistant cannot use that model for you",
+            { reason: "subscription_model" },
+          );
+      }
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
       const admitted = await reserve(() =>
         reserveSiteRuntimeConversationWork(deps.db, host.scope, {
           sessionId: conversation.sessionId,
           limits: budgets,
           newTurn,
+          uncapped: viewer.kind === "member",
         }),
       );
+      // A member's conversation started while Sites still capped members
+      // carries the Site's cap as its session usage limit: lift it, unless
+      // someone has changed that limit since.
+      if (viewer.kind === "member" && conversation.limitMicros !== null)
+        await liftSiteConversationUsageLimit(
+          deps,
+          host,
+          conversation.sessionId,
+          conversation.limitMicros,
+          usage,
+        );
       // A per-conversation limit lowered since the start lowers the session's
       // own usage limit too, before the work runs. Members' conversations
       // never carry a Site-imposed usage limit.

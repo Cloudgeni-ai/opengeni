@@ -1664,6 +1664,10 @@ const SettingsSchema = z.object({
   sitesGuestConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
   sitesGuestTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
   sitesGuestAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  // What each agent turn of someone outside the workspace holds against the
+  // Site's spend limits while it runs (micro-USD; actual spend replaces it
+  // when settled), capped by the conversation's own cap and what is left.
+  sitesAgentReservationMicrosPerTurn: z.coerce.number().int().min(1_000).default(250_000),
   // The credits profile multiplies the standard spend caps and guest guards.
   sitesCreditsLimitMultiplier: z.coerce.number().int().min(1).max(1_000).default(10),
   // Site platform usage (gateway requests, Site SQL rows and storage, Site
@@ -5113,6 +5117,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH",
     ),
     sitesCreditsLimitMultiplier: optional("OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER"),
+    sitesAgentReservationMicrosPerTurn: optional(
+      "OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN",
+    ),
     sitesAgentMicrosPerSitePerMonth: optional("OPENGENI_SITES_AGENT_MICROS_PER_SITE_PER_MONTH"),
     sitesAgentMicrosPerPersonPerDay: optional("OPENGENI_SITES_AGENT_MICROS_PER_PERSON_PER_DAY"),
     sitesGuestConversationsPerVisitorPerDay: optional(

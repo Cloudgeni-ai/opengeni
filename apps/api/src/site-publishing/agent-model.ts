@@ -27,9 +27,8 @@ import { getOrganizationModelDefaults, getWorkspace, type Database } from "@open
  * the Site agent's model, subscriptions included.
  */
 export type SiteOutsideModelChoice =
-  | { kind: "same"; model: string | null }
-  | { kind: "fallback"; model: string }
-  | { kind: "unavailable" };
+  /** The Site agent's model (or the workspace default it resolves to), not a subscription. */
+  { kind: "same"; model: string } | { kind: "fallback"; model: string } | { kind: "unavailable" };
 
 /** Whether a model is billed through a subscription rather than credits. */
 export function isSubscriptionBilledModel(
@@ -63,9 +62,11 @@ export function siteOutsideModelChoice(input: {
     input.agentModel ??
     selectDefaultSessionModel({ ...base, selections: input.selections, creditsAvailable: true })
       .model;
-  if (!isSubscriptionBilledModel(input.selections, chosen))
-    return { kind: "same", model: input.agentModel };
-  const credited = input.selections.filter((selection) => selection.model.cost !== "subscription");
+  // Always the concrete model: a session created without one would take the
+  // workspace's ordinary default, which may be a subscription.
+  if (!isSubscriptionBilledModel(input.selections, chosen)) return { kind: "same", model: chosen };
+  // The fallback is paid with credits, as the publish dialog says.
+  const credited = input.selections.filter((selection) => selection.model.cost === "credits");
   const fallback = selectDefaultSessionModel({
     ...base,
     selections: credited,

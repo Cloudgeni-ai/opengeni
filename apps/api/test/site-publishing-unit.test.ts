@@ -274,6 +274,13 @@ describe("limits", () => {
     expect(siteViewerLimits(prefilled, "guest").agentMicrosPerConversation).toBe(
       DEFAULT_SITE_LIMITS.agentMicrosPerConversation,
     );
+    // A profile saved field by field (the current form, API callers) is read as stored.
+    const chosen = effectiveSiteLimits(
+      settings,
+      { kind: "custom", overrides: { agentMicrosPerConversation: 20_000 } },
+      null,
+    );
+    expect(chosen.agentMicrosPerConversation).toBe(20_000);
   });
 
   test("turning public agents off turns guest agents off everywhere", () => {
@@ -412,15 +419,14 @@ describe("readiness", () => {
     expect(siteReadinessWarnings({ ...base, access: "members" })).toEqual([]);
   });
 
-  test("says which model outsiders get, or that they get none", () => {
+  test("a working credit-billed fallback is no warning; no model for outsiders is", () => {
     const fallback = siteReadinessWarnings({
       ...base,
       page: null,
       agent: { enabled: true, tools: null },
       outsideModel: { kind: "fallback", model: "gpt-6" },
     });
-    expect(fallback.map((warning) => warning.code)).toEqual(["agent_model_outside_fallback"]);
-    expect(fallback[0]!.message).toContain("gpt-6");
+    expect(fallback).toEqual([]);
     const none = siteReadinessWarnings({
       ...base,
       page: null,

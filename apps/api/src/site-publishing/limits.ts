@@ -108,11 +108,14 @@ const braked = (value: number | null, brake: number) =>
   value === null ? brake : Math.min(value, brake);
 
 /**
- * The previous release's free defaults. Its custom form saved every field
- * prefilled with these, so a stored field with exactly this value means "the
- * default" and takes the new standard value instead (migration 0787 removes
- * them from stored profiles; reading the same way covers profiles a pod of
- * the previous release writes during a rollout).
+ * The previous release's free defaults. Its custom form always saved the six
+ * LEGACY_CUSTOM_FORM_FIELDS, prefilled with these, so in a profile of that
+ * shape a field with exactly this value means "the default" and takes the
+ * new standard value instead. Migration 0787 removes them from stored
+ * profiles; reading the same way covers a profile a pod of the previous
+ * release saves during the rollout. A profile without all six fields (the
+ * current form saves only the limits it changes, and API callers set what
+ * they choose) is read as stored.
  */
 export const LEGACY_FREE_SITE_LIMIT_DEFAULTS: Readonly<Record<string, unknown>> = Object.freeze({
   requestsPerMinutePerVisitor: 120,
@@ -128,17 +131,31 @@ export const LEGACY_FREE_SITE_LIMIT_DEFAULTS: Readonly<Record<string, unknown>> 
   agentModels: null,
 });
 
+/** The fields the previous release's custom form always saved. */
+export const LEGACY_CUSTOM_FORM_FIELDS = Object.freeze([
+  "conversationsPerVisitorPerDay",
+  "conversationsPerSitePerDay",
+  "turnsPerConversation",
+  "agentMicrosPerConversation",
+  "agentMicrosPerVisitorPerDay",
+  "agentMicrosPerSitePerMonth",
+] as const);
+
 /** Parse stored overrides leniently: unknown or invalid fields are ignored. */
 export function siteLimitOverrides(
   stored: Record<string, unknown> | null | undefined,
 ): Partial<SiteLimitsValue> {
   if (!stored) return {};
-  const overrides = Object.fromEntries(
-    Object.entries(stored).filter(
-      ([key, value]) =>
-        !(key in LEGACY_FREE_SITE_LIMIT_DEFAULTS) || LEGACY_FREE_SITE_LIMIT_DEFAULTS[key] !== value,
-    ),
-  );
+  const legacyForm = LEGACY_CUSTOM_FORM_FIELDS.every((field) => field in stored);
+  const overrides = legacyForm
+    ? Object.fromEntries(
+        Object.entries(stored).filter(
+          ([key, value]) =>
+            !(key in LEGACY_FREE_SITE_LIMIT_DEFAULTS) ||
+            LEGACY_FREE_SITE_LIMIT_DEFAULTS[key] !== value,
+        ),
+      )
+    : stored;
   const parsed = SiteLimits.partial().safeParse(overrides);
   if (parsed.success) return parsed.data as Partial<SiteLimitsValue>;
   const kept: Record<string, unknown> = {};

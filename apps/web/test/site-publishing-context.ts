@@ -114,14 +114,8 @@ const saved: Record<string, SitePublication | null> = {
       guestTools: false,
     },
     outsideAgentModel: "claude-opus-5-5",
-    warnings: [
-      {
-        code: "agent_model_outside_fallback",
-        message: "GPT-6 Astra runs on a ChatGPT plan. Invited people use Claude Opus 5.5 instead.",
-        suggestion: "Pick a model paid with credits to use the same one for everyone.",
-        fix: null,
-      },
-    ],
+    // A working credit-billed fallback is shown as one quiet line, not a warning.
+    warnings: [],
   }),
   // A first publish in credits mode with the monthly allowance used up and no credits.
   quota: null,

@@ -460,13 +460,39 @@ export function siteBudgetExhausted(budget: SiteRuntimeBudget) {
   return budgetExhausted(budget, BUDGET_MESSAGES[budget]);
 }
 
+/** Seconds a viewer waits before retrying a start or message refused as busy. */
+export const SITE_BUDGET_BUSY_RETRY_SECONDS = 30;
+
+/**
+ * The 429 when only other running conversations' reservations refuse a
+ * reservation: the budget has room once their spend settles, so it is worth
+ * retrying shortly (`site_budget_busy`, with `retryAfterSeconds`).
+ */
+export function siteBudgetBusy(budget: SiteRuntimeBudget) {
+  return sitePublishingError(
+    429,
+    "limit_exceeded",
+    "site_budget_busy",
+    "This Site's assistant is busy right now; try again in a moment",
+    { budget, retryAfterSeconds: SITE_BUDGET_BUSY_RETRY_SECONDS },
+  );
+}
+
+/** The 429 for a refused reservation, busy or exhausted. */
+export function siteReservationRefused(result: Extract<SiteRuntimeReservation, { ok: false }>) {
+  return result.busy ? siteBudgetBusy(result.budget) : siteBudgetExhausted(result.budget);
+}
+
 /**
  * The budgets a conversation start or message is reserved against. Members
  * reserve nothing (their caps are all null). For everyone else a
  * conversation is bounded by the per-conversation cap, else by the smallest
  * spend limit that applies, so a session usage limit always holds it.
  */
-export function siteRuntimeBudgetLimits(limits: SiteLimits): SiteRuntimeBudgetLimits {
+export function siteRuntimeBudgetLimits(
+  limits: SiteLimits,
+  settings: Pick<SiteRuntimeDeps["settings"], "sitesAgentReservationMicrosPerTurn">,
+): SiteRuntimeBudgetLimits {
   const spend = [
     limits.agentMicrosPerVisitorPerDay,
     limits.agentMicrosPerVisitorPerMonth,
@@ -483,6 +509,7 @@ export function siteRuntimeBudgetLimits(limits: SiteLimits): SiteRuntimeBudgetLi
     agentMicrosPerVisitorPerMonth: limits.agentMicrosPerVisitorPerMonth,
     agentMicrosPerSitePerDay: limits.agentMicrosPerSitePerDay,
     agentMicrosPerSitePerMonth: limits.agentMicrosPerSitePerMonth,
+    turnReservationMicros: settings.sitesAgentReservationMicrosPerTurn,
   };
 }
 
@@ -564,6 +591,52 @@ export async function settleSiteRuntimeSpend(
     });
     return null;
   }
+}
+
+/**
+ * Lift the session usage limit a Site stamped on a workspace member's
+ * conversation before members were kept out of Site limits: cleared only
+ * while it is still exactly the Site's cap (`siteCapMicros`), so a limit
+ * someone set on the session since is kept. Best effort: a conflicting
+ * change wins.
+ */
+export async function liftSiteConversationUsageLimit(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+  sessionId: string,
+  siteCapMicros: number,
+  usage: SiteConversationUsage | null,
+): Promise<void> {
+  let current = usage;
+  if (current === null) {
+    const read = await readSessionUsageLimit(deps.db, {
+      ...host.scope,
+      sessionId,
+      runtime: true,
+    }).catch(() => null);
+    if (read?.outcome !== "ok") return;
+    current = {
+      usedMicros: read.state.usedMicros ?? 0,
+      limitMicros: read.state.limitMicros,
+      version: read.state.version,
+    };
+  }
+  if (current.limitMicros !== siteCapMicros) return;
+  const { version } = current;
+  await withWorkspaceSessionActivityRls(
+    deps.db,
+    host.scope.workspaceId,
+    async (tx) =>
+      await setSessionUsageLimitInTransaction(tx, {
+        ...host.scope,
+        sessionId,
+        limitMicros: null,
+        expectedVersion: version,
+        operationId: `site-runtime-member-uncap:${sessionId}:${version}`,
+        actor: { type: "host", subjectId: `site:${host.site.id}` },
+        producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
+      }),
+  ).catch(() => null);
 }
 
 /**

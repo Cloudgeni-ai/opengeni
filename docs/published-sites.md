@@ -187,8 +187,12 @@ or a named query's audience. Members-only Sites have no warnings.
 | `site_data_members_write`          | A `shared_read` collection the page writes; only managers write it    |
 | `site_sql_query_signed_in`         | A query needs a signed-in viewer; guests can't run it (fixable)       |
 | `site_sql_query_managers`          | A managers-only query the page runs (fixable)                         |
-| `agent_model_outside_fallback`     | Outsiders use another, credit-billed model                            |
 | `agent_model_outside_unavailable`  | Outsiders get no agent: no credit-billed model                        |
+
+When the agent's model is a subscription and outsiders use a credit-billed
+model instead, that is not a warning: the publication's `outsideAgentModel`
+names it and the dialog shows one quiet line. (`agent_model_outside_fallback`
+is no longer reported.)
 
 At run time, everything a viewer can't do answers 403 with
 `details.code` `not_available_for_viewer` and a `feature` (`agent`,
@@ -380,6 +384,7 @@ gateway falls back to the API for host lookups.
 | `OPENGENI_SITES_GUEST_CONVERSATIONS_PER_SITE_PER_DAY`      | `500`               | Guest bot guard                                      |
 | `OPENGENI_SITES_GUEST_TURNS_PER_CONVERSATION`              | `50`                | Guest bot guard                                      |
 | `OPENGENI_SITES_GUEST_AGENT_MICROS_PER_CONVERSATION`       | `1000000` ($1)      | Guest bot guard                                      |
+| `OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN`         | `250000` ($0.25)    | Held per running turn against the Site's spend limits |
 | `OPENGENI_SITES_FREE_*`                                    | unset               | Deprecated; used only when the settings above are unset |
 | `OPENGENI_SITES_PLATFORM_BILLING_MODE`                     | `usage_only`        | `usage_only`, `shadow` or `credits`                  |
 | `OPENGENI_SITES_PLATFORM_OVERAGE_ENABLED`                  | `true`              | Credits mode charges usage above the allowance       |

@@ -423,6 +423,7 @@ export const SITE_PUBLISH_WARNING_CODES = [
   "site_data_members_write",
   "site_sql_query_signed_in",
   "site_sql_query_managers",
+  /** No longer reported (the fallback shows as outsideAgentModel); kept for compatibility. */
   "agent_model_outside_fallback",
   "agent_model_outside_unavailable",
 ] as const;
