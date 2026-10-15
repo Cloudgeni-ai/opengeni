@@ -111,7 +111,9 @@ export type CodemodeBrowserOpenOptions = {
   name?: string | undefined;
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
-  placement?: InteractionPlacement | undefined;
+  /** `{ kind: "attached_device" }` without a deviceId opens the person's own
+   * connected Chrome (the only, or most recently active, profile). */
+  placement?: InteractionPlacement | { kind: "attached_device" } | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;
   linkedComputerSessionId?: string | undefined;

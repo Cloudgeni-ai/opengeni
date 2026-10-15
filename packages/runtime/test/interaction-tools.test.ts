@@ -810,6 +810,107 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  describe("browser_open on the person's own Chrome without a deviceId", () => {
+    const profile = (
+      name: string,
+      updatedAt: string,
+      overrides: { state?: "connected" | "disconnected"; debuggerAttachment?: boolean } = {},
+    ) => {
+      const state = overrides.state ?? "connected";
+      return {
+        id: randomUUID(),
+        accountId,
+        workspaceId,
+        enrollmentId: randomUUID(),
+        name,
+        profileLabel: name,
+        browserName: "Chrome",
+        browserVersion: "150.0.0.0",
+        extensionVersion: "0.1.4",
+        platform: "macos" as const,
+        architecture: "arm64" as const,
+        state,
+        connectionGeneration: "connection-1",
+        inventoryRevision: 3,
+        tabCount: 4,
+        capabilities: {
+          tabInventory: true,
+          debuggerAttachment: overrides.debuggerAttachment ?? true,
+          semanticObservation: true,
+          screenshots: true,
+          liveFrames: false,
+          humanInput: true,
+          diagnostics: true,
+          rawCdp: false,
+          linkedComputer: false,
+        },
+        lastSeenAt: updatedAt,
+        disconnectedAt: state === "connected" ? null : updatedAt,
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt,
+      };
+    };
+    const open = async (devices: ReturnType<typeof profile>[]) => {
+      let createRequest: Record<string, unknown> | null = null;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices }),
+          createBrowserSession: async (_workspaceId, request) => {
+            createRequest = request as unknown as Record<string, unknown>;
+            return { session: discoveredBrowserSession(randomUUID(), sessionId) } as never;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { placement: { kind: "attached_device" } },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return { result, createRequest: createRequest as Record<string, unknown> | null };
+    };
+
+    test("opens the only connected profile", async () => {
+      const only = profile("Personal", "2026-10-15T10:00:00.000Z");
+      const { result, createRequest } = await open([only]);
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: only.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: only.id, name: "Personal" },
+      });
+      expect(result.structuredContent).not.toHaveProperty("otherAttachedProfiles");
+    });
+
+    test("opens the most recently active profile and names the others", async () => {
+      const older = profile("Work", "2026-10-15T09:00:00.000Z");
+      const newer = profile("Personal", "2026-10-15T10:00:00.000Z");
+      const gone = profile("Old", "2026-10-15T11:00:00.000Z", { state: "disconnected" });
+      const blind = profile("Locked", "2026-10-15T12:00:00.000Z", { debuggerAttachment: false });
+      const { result, createRequest } = await open([older, gone, blind, newer]);
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: newer.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: newer.id, name: "Personal" },
+        otherAttachedProfiles: [{ id: older.id, name: "Work" }],
+      });
+    });
+
+    test("explains how to connect Chrome when no profile is connected", async () => {
+      const { result, createRequest } = await open([
+        profile("Old", "2026-10-15T11:00:00.000Z", { state: "disconnected" }),
+      ]);
+      expect(createRequest).toBeNull();
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
+      expect(JSON.stringify(result.structuredContent)).toContain("attached_browser_unavailable");
+    });
+  });
+
   test("projects one permission-filtered definition set into the exact attempt catalog", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       transport: unusedTransport(),

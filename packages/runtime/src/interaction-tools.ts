@@ -400,6 +400,21 @@ const DiscoveryOutput = z
   })
   .strict();
 
+/** browser_open may name the person's connected Chrome without a profile id;
+ * the tool then resolves it (see chooseAttachedProfile). */
+const BrowserOpenPlacement = z.union([
+  InteractionPlacement,
+  z.object({ kind: z.literal("attached_device") }).strict(),
+]);
+/** The Chrome profile browser_open chose when the request named none. */
+const AgentAttachedProfile = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string(),
+    profileLabel: z.string().optional(),
+  })
+  .strict();
+
 const BrowserOpenInput = z
   .object({
     browserSessionId: z.string().uuid().optional(),
@@ -408,7 +423,7 @@ const BrowserOpenInput = z
     initialUrl: z.string().url().max(16_384).optional(),
     headless: z.boolean().optional(),
     storageMode: BrowserStorageMode.optional(),
-    placement: InteractionPlacement.optional(),
+    placement: BrowserOpenPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
     networkRouteId: z.string().uuid().optional(),
@@ -457,6 +472,8 @@ const BrowserOpenOutput = z
     targets: z.array(AgentBrowserTarget),
     otherTabCount: z.number().int().nonnegative().optional(),
     observation: CompactBrowserObservation.optional(),
+    attachedProfile: AgentAttachedProfile.optional(),
+    otherAttachedProfiles: z.array(AgentAttachedProfile).optional(),
   })
   .strict();
 
@@ -799,7 +816,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "interaction_discover",
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
-    description: `Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
+    description: `Discover browsers and computers. To use the user's existing/current/personal Chrome, call browser_open with placement={kind:'attached_device'} directly; use scope=attached_browsers only to pick a specific Chrome profile or to see why none is connected. That scope reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -868,7 +885,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state, plus observation: a compact snapshot of the opened (or selected) tab when one is available. With initialUrl, targets holds only the opened tab and otherTabCount counts the rest (browser_tabs list shows them). Reuse its refs and generations for the first action instead of observing again.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state, plus observation: a compact snapshot of the opened (or selected) tab when one is available. With initialUrl, targets holds only the opened tab and otherTabCount counts the rest (browser_tabs list shows them). Reuse its refs and generations for the first action instead of observing again.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1841,18 +1858,28 @@ async function openBrowser(
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
+  let profileChoice: AttachedProfileChoice | undefined;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
     if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
       throw new Error("existing BrowserSession storage mode does not match request");
   } else {
-    const listed =
+    // placement={kind:'attached_device'} without a deviceId means "the person's
+    // own Chrome". Read the profile inventory alongside the reuse lookup so the
+    // resolution adds no sequential round trip.
+    const resolveProfile =
+      value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
+    const [listed, attachedInventory] = await Promise.all([
       value.mode === "new"
         ? { sessions: [] }
-        : await transport.listBrowserSessions(workspaceId, {
+        : transport.listBrowserSessions(workspaceId, {
             associatedSessionId: sourceSessionId,
             includeTerminal: false,
-          });
+          }),
+      resolveProfile
+        ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
+        : null,
+    ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
     // reused for an omitted/default headed request: OAuth providers such as
@@ -1881,6 +1908,11 @@ async function openBrowser(
       session = reusable;
     } else {
       created = true;
+      if (attachedInventory) profileChoice = chooseAttachedProfile(attachedInventory);
+      // Without a deviceId, chooseAttachedProfile has resolved one (or thrown).
+      const placement = profileChoice
+        ? { kind: "attached_device" as const, deviceId: profileChoice.chosen.id }
+        : (value.placement as z.infer<typeof InteractionPlacement> | undefined);
       session = (
         await transport.createBrowserSession(workspaceId, {
           operationId: context.operationId,
@@ -1889,7 +1921,7 @@ async function openBrowser(
           ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
           headless: requestedHeadless,
           ...(value.storageMode ? { storageMode: value.storageMode } : {}),
-          ...(value.placement ? { placement: value.placement } : {}),
+          ...(placement ? { placement } : {}),
           ...(value.identityId ? { identityId: value.identityId } : {}),
           ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
           ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
@@ -1907,7 +1939,15 @@ async function openBrowser(
       })
     ).session;
   }
-  if (session.lifecycle !== "active") return { session, targets: [] };
+  const chosenProfile = profileChoice
+    ? {
+        attachedProfile: agentAttachedProfile(profileChoice.chosen),
+        ...(profileChoice.others.length > 0
+          ? { otherAttachedProfiles: profileChoice.others.map(agentAttachedProfile) }
+          : {}),
+      }
+    : {};
+  if (session.lifecycle !== "active") return { session, targets: [], ...chosenProfile };
   let targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   if (
     value.initialUrl &&
@@ -1954,6 +1994,44 @@ async function openBrowser(
     targets: shown.map(agentBrowserTarget),
     ...(shown.length < targets.length ? { otherTabCount: targets.length - shown.length } : {}),
     ...(observation ? { observation } : {}),
+    ...chosenProfile,
+  };
+}
+
+type AttachedProfileChoice = {
+  chosen: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"][number];
+  others: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"];
+};
+
+/** The person's own Chrome when browser_open names no profile: the only
+ * connected profile, else the one whose tabs changed most recently (a device's
+ * updatedAt moves with its tab inventory, not with heartbeats). */
+function chooseAttachedProfile(
+  inventory: z.infer<typeof AttachedBrowserDeviceListResponse>,
+): AttachedProfileChoice {
+  const usable = inventory.devices
+    .filter((device) => device.state === "connected" && device.capabilities.debuggerAttachment)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const [chosen, ...others] = usable;
+  if (!chosen) {
+    throw new OpenGeniApiError(
+      409,
+      `No Chrome profile is connected through the Opengeni Browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+      { code: "attached_browser_unavailable", retryable: false },
+    );
+  }
+  return { chosen, others };
+}
+
+function agentAttachedProfile(
+  device: AttachedProfileChoice["chosen"],
+): z.infer<typeof AgentAttachedProfile> {
+  return {
+    id: device.id,
+    name: device.name,
+    ...(device.profileLabel && device.profileLabel !== device.name
+      ? { profileLabel: device.profileLabel }
+      : {}),
   };
 }
 
@@ -2049,7 +2127,7 @@ async function openComputer(
 
 function compatibleInteractionPlacement(
   candidate: z.infer<typeof InteractionPlacement>,
-  requested: z.infer<typeof InteractionPlacement> | undefined,
+  requested: z.infer<typeof BrowserOpenPlacement> | undefined,
 ): boolean {
   if (!requested) return candidate.kind !== "attached_device";
   return Object.entries(requested).every(
