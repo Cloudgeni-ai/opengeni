@@ -153,6 +153,13 @@ impl SandboxConfig {
 }
 
 /// One request.
+///
+/// Requests about an existing sandbox may name the `generation` (the
+/// sandbox's execution, from [`SandboxStatus::generation`]) they were issued
+/// under. Such a request is refused with [`ErrorCode::Stale`] once a boot or
+/// restore has replaced that execution, so a caller relying on programs it
+/// started inside the sandbox learns they are gone instead of acting on a
+/// different execution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -168,12 +175,18 @@ pub enum Request {
     Remove {
         /// Its id.
         id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
     },
     /// Note that a sandbox will probably be needed soon and start waking it,
     /// without waiting.
     Touch {
         /// Its id.
         id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
         /// How urgently.
         #[serde(default)]
         priority: PriorityName,
@@ -182,6 +195,9 @@ pub enum Request {
     Wake {
         /// Its id.
         id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
         /// How urgently.
         #[serde(default)]
         priority: PriorityName,
@@ -191,6 +207,9 @@ pub enum Request {
     Connect {
         /// Its id.
         id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
         /// The guest vsock port.
         port: u32,
         /// How urgently.
@@ -225,7 +244,35 @@ pub enum Reply {
     Error {
         /// What went wrong.
         message: String,
+        /// What kind of failure, for callers that act on it.
+        #[serde(default)]
+        code: ErrorCode,
     },
+}
+
+/// What kind of failure a [`Reply::Error`] reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The request is malformed or not allowed.
+    Invalid,
+    /// No such sandbox.
+    NotFound,
+    /// The sandbox already exists.
+    Exists,
+    /// The sandbox is still being created; try again.
+    Busy,
+    /// The sandbox cannot run on this host.
+    Broken,
+    /// The sandbox was removed while the request waited.
+    Removed,
+    /// The request names a generation the sandbox has moved past.
+    Stale,
+    /// A guest port did not answer.
+    Unreachable,
+    /// The host failed; the request may succeed if retried.
+    #[default]
+    Internal,
 }
 
 /// One sandbox's state.
@@ -233,6 +280,10 @@ pub enum Reply {
 pub struct SandboxStatus {
     /// Its id.
     pub id: Id,
+    /// Its execution: raised by every boot and restore.
+    pub generation: u64,
+    /// How many times its record has been written.
+    pub revision: u64,
     /// Where its state lives.
     pub level: LevelName,
     /// Whether its running programs survive (a memory image or live VM).

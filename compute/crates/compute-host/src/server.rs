@@ -9,7 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::time::Instant;
 
 use crate::agent::{Handle, HostError};
-use crate::protocol::{Reply, Request};
+use crate::protocol::{ErrorCode, Reply, Request};
 
 /// Requests are small; anything longer is refused.
 const MAX_REQUEST: u64 = 64 << 10;
@@ -47,12 +47,18 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
         Ok(request) => request,
         Err(error) => {
             let message = format!("bad request: {error}");
-            return write_reply(&mut client, &Reply::Error { message }).await;
+            let code = ErrorCode::Invalid;
+            return write_reply(&mut client, &Reply::Error { message, code }).await;
         }
     };
     let reply = match request {
-        Request::Connect { id, port, priority } => {
-            let lease = match handle.acquire(id, priority.into()).await {
+        Request::Connect {
+            id,
+            generation,
+            port,
+            priority,
+        } => {
+            let lease = match handle.acquire(id, generation, priority.into()).await {
                 Ok(lease) => lease,
                 Err(error) => return write_reply(&mut client, &error_reply(&error)).await,
             };
@@ -61,7 +67,8 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
                 Ok(guest) => guest,
                 Err(error) => {
                     let message = format!("guest port {port} unreachable: {error}");
-                    return write_reply(&mut client, &Reply::Error { message }).await;
+                    let code = ErrorCode::Unreachable;
+                    return write_reply(&mut client, &Reply::Error { message, code }).await;
                 }
             };
             write_reply(
@@ -78,9 +85,17 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             return Ok(());
         }
         Request::Create { id, config } => done(handle.create(id, config).await),
-        Request::Remove { id } => done(handle.remove(id).await),
-        Request::Touch { id, priority } => done(handle.touch(id, priority.into())),
-        Request::Wake { id, priority } => match handle.acquire(id, priority.into()).await {
+        Request::Remove { id, generation } => done(handle.remove(id, generation).await),
+        Request::Touch {
+            id,
+            generation,
+            priority,
+        } => done(handle.touch(id, generation, priority.into())),
+        Request::Wake {
+            id,
+            generation,
+            priority,
+        } => match handle.acquire(id, generation, priority.into()).await {
             Ok(lease) => Reply::Woken {
                 waited_us: micros(lease.waited()),
             },
@@ -101,6 +116,16 @@ fn done(result: Result<(), HostError>) -> Reply {
 fn error_reply(error: &HostError) -> Reply {
     Reply::Error {
         message: error.to_string(),
+        code: match error {
+            HostError::NotFound(_) => ErrorCode::NotFound,
+            HostError::Exists(_) => ErrorCode::Exists,
+            HostError::Busy(_) => ErrorCode::Busy,
+            HostError::Broken(_) => ErrorCode::Broken,
+            HostError::Removed(_) => ErrorCode::Removed,
+            HostError::Invalid(_) => ErrorCode::Invalid,
+            HostError::Stale { .. } => ErrorCode::Stale,
+            HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,
+        },
     }
 }
 

@@ -3,6 +3,11 @@
 //! The core guarantees at most one step per sandbox at a time, so a step
 //! takes the sandbox's VM handle, owns it while it works and hands it back
 //! when it finishes. No locks are needed around a VM.
+//!
+//! A step is issued against the sandbox's record as it was at that moment
+//! and records what it did with compare-and-set writes against that
+//! version, so a step that outlived its sandbox, or raced anything else
+//! that changed the record, fails instead of overwriting newer state.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,9 +16,10 @@ use std::time::{Duration, Instant};
 use compute_core::{Failure, Outcome, Step};
 use compute_engine::{CancellationToken, Completion, Engine, EngineError, ErrorKind, VmSpec};
 
-use crate::layout::{Paths, remove_durably, remove_if_present, sync_file, write_atomic};
+use crate::layout::{Paths, remove_if_present, sync_file};
 use crate::protocol::Id;
 use crate::restore_notice::tell_restored;
+use crate::state::{Change, Disk, Record, Records, StateError};
 use crate::store::{SavedFiles, Store};
 
 /// How long a restore waits for the guest to acknowledge the restore notice.
@@ -47,6 +53,10 @@ pub(crate) enum After<V> {
 pub(crate) struct Job<E: Engine, S> {
     pub engine: Arc<E>,
     pub store: Arc<S>,
+    pub records: Arc<Records>,
+    /// The sandbox's record when the step was issued, then as the step
+    /// last committed it.
+    pub record: Record,
     pub id: Id,
     pub spec: VmSpec,
     pub paths: Paths,
@@ -67,6 +77,17 @@ fn failure(error: &EngineError) -> Outcome {
 
 fn io_failure(operation: &'static str, error: std::io::Error) -> Outcome {
     failure(&EngineError::io(operation, error))
+}
+
+/// What failing to record a step's effect means for the sandbox.
+fn state_failure(error: &StateError) -> Outcome {
+    if let StateError::Io(_) = error {
+        tracing::warn!(%error, "step could not record its effect");
+        Outcome::Failed(Failure::Transient)
+    } else {
+        tracing::error!(%error, "step refused: the sandbox's record moved on");
+        Outcome::Failed(Failure::Fatal)
+    }
 }
 
 impl<E: Engine, S: Store> Job<E, S> {
@@ -100,6 +121,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
+    /// Records `change` against the version this step last saw.
+    async fn commit(&mut self, change: Change) -> Result<(), StateError> {
+        self.record = self
+            .records
+            .commit(self.id, self.record.fence(), change)
+            .await?;
+        Ok(())
+    }
+
     #[allow(clippy::unused_self)]
     fn simple(
         &self,
@@ -120,18 +150,21 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
-    /// Snapshot, make it durable, mark it valid, then end the VM process.
+    /// Snapshot, make it durable, record it as valid, then end the VM process.
     /// A wake that arrives before the process ends cancels the save and the
     /// still-paused VM simply resumes.
-    async fn save(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
-        let paths = &self.paths;
-        if let Err(error) = remove_durably(&paths.saved) {
-            return (io_failure("save", error), After::Kept(live));
+    async fn save(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        // The snapshot overwrites the image files, so no record may vouch
+        // for them meanwhile. A live VM's record never does; this is a guard.
+        if self.record.image
+            && let Err(error) = self.commit(Change::new().image(false)).await
+        {
+            return (state_failure(&error), After::Kept(live));
         }
-        if let Err(error) = self.engine.snapshot(&live.vm, &paths.snapshot).await {
+        if let Err(error) = self.engine.snapshot(&live.vm, &self.paths.snapshot).await {
             return (failure(&error), After::Kept(live));
         }
-        let files = paths.snapshot.clone();
+        let files = self.paths.snapshot.clone();
         let synced = tokio::task::spawn_blocking(move || {
             sync_file(&files.state)?;
             sync_file(&files.memory)
@@ -144,11 +177,12 @@ impl<E: Engine, S: Store> Job<E, S> {
         if self.cancel.is_cancelled() {
             // The image matches this paused VM but goes stale the moment it
             // resumes, so drop it rather than leave a trap.
-            drop_snapshot(paths);
+            drop_snapshot(&self.paths);
             return (Outcome::Cancelled, After::Kept(live));
         }
-        if let Err(error) = write_atomic(&paths.saved, b"") {
-            return (io_failure("save", error), After::Kept(live));
+        let valid = Change::new().image(true).archived(false);
+        if let Err(error) = self.commit(valid).await {
+            return (state_failure(&error), After::Kept(live));
         }
         live.stopping.store(true, Ordering::Release);
         match self.engine.stop(live.vm).await {
@@ -159,31 +193,32 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
-    /// Start from the saved image, mark the image stale before the guest
-    /// runs, then resume.
-    async fn restore(&self) -> (Outcome, After<E::Vm>) {
-        let paths = &self.paths;
-        if !paths.saved.exists() {
+    /// Start from the saved image, record the image as stale and a new
+    /// execution before the guest runs, then resume.
+    async fn restore(&mut self) -> (Outcome, After<E::Vm>) {
+        if !self.record.image || self.record.disk != Disk::Local {
             return (Outcome::Failed(Failure::MemoryLost), After::NoVm);
         }
-        let vm = match self.engine.restore(&self.spec, &paths.snapshot).await {
+        let vm = match self.engine.restore(&self.spec, &self.paths.snapshot).await {
             Ok(vm) => vm,
             Err(error) => {
                 if error.kind == ErrorKind::MemoryLost {
-                    let _ = remove_durably(&paths.saved);
+                    let _ = self.commit(Change::new().image(false)).await;
                 }
                 return (failure(&error), After::NoVm);
             }
         };
-        let unmarked = remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
-        if let Err(error) = unmarked {
+        let archived = self.record.archived;
+        let running = Change::new().image(false).archived(false).execution();
+        if let Err(error) = self.commit(running).await {
             let _ = self.engine.stop(vm).await;
-            return (io_failure("restore", error), After::NoVm);
+            return (state_failure(&error), After::NoVm);
         }
         if let Err(error) = self.engine.resume(&vm).await {
             // The guest never ran, so the image is still good: keep it.
             let _ = self.engine.stop(vm).await;
-            let _ = write_atomic(&paths.saved, b"");
+            let kept = Change::new().image(true).archived(archived);
+            let _ = self.commit(kept).await;
             return (failure(&error), After::NoVm);
         }
         self.tell_guest_restored().await;
@@ -209,13 +244,12 @@ impl<E: Engine, S: Store> Job<E, S> {
     }
 
     /// Boot fresh from the disk; any old memory image is meaningless now.
-    async fn boot(&self) -> (Outcome, After<E::Vm>) {
-        let paths = &self.paths;
-        let cleared = remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
-        if let Err(error) = cleared {
-            return (io_failure("boot", error), After::NoVm);
+    async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
+        let fresh = Change::new().image(false).archived(false).execution();
+        if let Err(error) = self.commit(fresh).await {
+            return (state_failure(&error), After::NoVm);
         }
-        drop_snapshot(paths);
+        drop_snapshot(&self.paths);
         match self.engine.boot(&self.spec).await {
             Ok(vm) => (Outcome::Done, After::New(vm)),
             Err(error) => (failure(&error), After::NoVm),
@@ -225,37 +259,33 @@ impl<E: Engine, S: Store> Job<E, S> {
     fn saved_files(&self) -> SavedFiles {
         SavedFiles {
             disk: self.paths.disk.clone(),
-            memory: self
-                .paths
-                .saved
-                .exists()
-                .then(|| self.paths.snapshot.clone()),
+            memory: self.record.image.then(|| self.paths.snapshot.clone()),
         }
     }
 
-    async fn archive(&self) -> Outcome {
-        let files = self.saved_files();
-        let marker: &[u8] = if files.memory.is_some() {
-            b"memory"
-        } else {
-            b"disk"
-        };
-        if let Err(error) = self.store.archive(self.id, &files).await {
+    async fn archive(&mut self) -> Outcome {
+        if let Err(error) = self.store.archive(self.id, &self.saved_files()).await {
             return failure(&error);
         }
-        match write_atomic(&self.paths.archived, marker) {
+        match self.commit(Change::new().archived(true)).await {
             Ok(()) => Outcome::Done,
-            Err(error) => io_failure("archive", error),
+            Err(error) => state_failure(&error),
         }
     }
 
-    async fn evict(&self) -> Outcome {
-        if !self.paths.archived.exists() {
+    /// Records the disk as remote, then deletes the local files: a crash in
+    /// between leaves files nothing relies on, never a record that relies
+    /// on deleted files.
+    async fn evict(&mut self) -> Outcome {
+        if !self.record.archived {
             return failure(&EngineError::new(
                 ErrorKind::Fatal,
                 "evict",
                 "no archived copy to fall back on",
             ));
+        }
+        if let Err(error) = self.commit(Change::new().disk(Disk::Remote)).await {
+            return state_failure(&error);
         }
         let paths = self.paths.clone();
         let removed = tokio::task::spawn_blocking(move || {
@@ -271,11 +301,14 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
-    async fn fetch(&self) -> Outcome {
+    async fn fetch(&mut self) -> Outcome {
         let files = self.saved_files();
-        match self.store.fetch(self.id, &files).await {
+        if let Err(error) = self.store.fetch(self.id, &files).await {
+            return failure(&error);
+        }
+        match self.commit(Change::new().disk(Disk::Local)).await {
             Ok(()) => Outcome::Done,
-            Err(error) => failure(&error),
+            Err(error) => state_failure(&error),
         }
     }
 }

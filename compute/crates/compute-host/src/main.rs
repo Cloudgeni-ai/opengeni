@@ -223,7 +223,14 @@ async fn main() -> anyhow::Result<()> {
             };
             expect_done(client.call(&Request::Create { id, config }).await?)
         }
-        Command::Remove { id } => expect_done(client.call(&Request::Remove { id }).await?),
+        Command::Remove { id } => expect_done(
+            client
+                .call(&Request::Remove {
+                    id,
+                    generation: None,
+                })
+                .await?,
+        ),
         Command::Status => {
             let reply = client.call(&Request::Status).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
@@ -594,7 +601,14 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
         let mut removes = JoinSet::new();
         for id in &ids {
             let (client, id) = (client.clone(), *id);
-            removes.spawn(async move { client.call(&Request::Remove { id }).await });
+            removes.spawn(async move {
+                client
+                    .call(&Request::Remove {
+                        id,
+                        generation: None,
+                    })
+                    .await
+            });
         }
         while let Some(result) = removes.join_next().await {
             expect_done(result??)?;

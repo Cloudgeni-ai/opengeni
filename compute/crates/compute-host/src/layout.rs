@@ -8,9 +8,7 @@
 //!
 //! ```text
 //! <root>/vm/firecracker/<id>/  the sandbox directory (host only)
-//!   sandbox.json               shape and sleep ladder
-//!   saved                      marker: the memory image is complete and matches the disk
-//!   archived                   marker: the store holds a copy matching the local files
+//!   sandbox.json               the sandbox's record (see crate::state)
 //!   console.log                the guest's serial console (written by the engine)
 //!   vmm.log                    the VMM's own log (written by the engine)
 //!   root/                      the jail: "/" for the VMM
@@ -31,8 +29,9 @@
 //!
 //! A memory image is only valid together with the exact disk it was taken
 //! with. Once a restored guest runs, its disk moves on and the old image
-//! would corrupt it, so the `saved` marker is removed before the guest runs
-//! and written only after a new image is complete and on disk.
+//! would corrupt it, so the record stops vouching for the image before the
+//! guest runs and vouches for a new one only once it is complete and on
+//! disk. Which files are valid is only ever read from the record.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -59,8 +58,6 @@ pub(crate) struct Paths {
     /// The sandbox directory, host only.
     pub dir: PathBuf,
     pub record: PathBuf,
-    pub saved: PathBuf,
-    pub archived: PathBuf,
     /// The VM's jail: the only directory its VMM can see.
     pub jail: PathBuf,
     pub kernel: PathBuf,
@@ -74,8 +71,6 @@ impl Paths {
         let jail = dir.join(JAIL);
         Self {
             record: dir.join("sandbox.json"),
-            saved: dir.join("saved"),
-            archived: dir.join("archived"),
             kernel: jail.join("vmlinux"),
             disk: jail.join("disk.ext4"),
             snapshot: SnapshotFiles {
