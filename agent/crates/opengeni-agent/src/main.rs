@@ -63,6 +63,8 @@ mod supervisor;
 mod uninstall;
 mod update;
 mod uploads;
+mod windows_control;
+mod windows_task;
 
 use std::{path::Path, sync::Arc};
 
@@ -1028,7 +1030,8 @@ fn spawn_signal_handler(shutdown: supervisor::ShutdownSignal) {
     });
 }
 
-/// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix).
+/// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix;
+/// on Windows also a closing console and `opengeni-agent stop`'s pipe request).
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -1046,7 +1049,29 @@ async fn wait_for_shutdown_signal() {
             _ = sigterm.recv() => {}
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let stop_request = async {
+            match config::config_dir() {
+                Ok(dir) => windows_control::wait_for_stop_request(&dir).await,
+                Err(_) => std::future::pending().await,
+            }
+        };
+        let console_closing = async {
+            match tokio::signal::windows::ctrl_close() {
+                Ok(mut close) => {
+                    close.recv().await;
+                }
+                Err(_) => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            () = stop_request => {}
+            () = console_closing => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
     }
