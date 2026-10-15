@@ -97,7 +97,10 @@ impl Host {
             .arg("/sys/fs/cgroup/compute-test")
             .args(["--limit", "boot=32", "--limit", "restore=32"])
             .args(&self.extra)
-            .env("RUST_LOG", "info")
+            .env(
+                "RUST_LOG",
+                std::env::var("COMPUTE_TEST_LOG").unwrap_or_else(|_| "info".into()),
+            )
             .stdout(Stdio::null())
             .stderr(log)
             .spawn()
@@ -112,6 +115,18 @@ impl Host {
             sleep(Duration::from_millis(20)).await;
         }
         Agent { child, client }
+    }
+
+    /// Keeps the agent's log with the results, then deletes the host's
+    /// files.
+    fn finish(self, name: &str) {
+        if let Some(dir) = std::env::var_os("COMPUTE_TEST_RESULTS") {
+            let _ = std::fs::copy(
+                self.root.join("agent.log"),
+                PathBuf::from(dir).join(format!("{name}-agent.log")),
+            );
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -369,7 +384,7 @@ async fn sandboxes_survive_the_agent_being_killed() {
     agent.remove_all().await;
     assert_eq!(firecrackers(), 0);
     agent.kill();
-    let _ = std::fs::remove_dir_all(&host.root);
+    host.finish(&format!("kill-restart-{count}"));
 }
 
 /// Wakes every sandbox at once and checks its guest kept the background
@@ -521,7 +536,7 @@ for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*
     );
     agent.remove_all().await;
     agent.kill();
-    let _ = std::fs::remove_dir_all(&host.root);
+    host.finish(&format!("network-restore-{count}"));
 }
 
 /// On a trusted host guests reach the local network; on any other host the
@@ -551,6 +566,6 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         assert_eq!(output.trim(), expected, "trusted={trusted}: {target}");
         agent.remove_all().await;
         agent.kill();
-        let _ = std::fs::remove_dir_all(&host.root);
+        host.finish(&format!("lan-trusted-{trusted}"));
     }
 }
