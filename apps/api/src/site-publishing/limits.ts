@@ -172,7 +172,8 @@ export function siteLimitsForProfile(
   profile: StoredSiteLimitProfile | SiteLimitProfile,
 ): SiteLimitsValue {
   const standard = standardSiteLimits(settings);
-  const overrides = profile.kind === "custom" ? siteLimitOverrides(profile.overrides) : {};
+  // Overrides adjust any kind's limits; custom is the standard limits plus them.
+  const overrides = siteLimitOverrides(profile.overrides);
   let limits: SiteLimitsValue;
   switch (profile.kind) {
     case "standard":
@@ -208,9 +209,10 @@ export function siteLimitsForProfile(
       };
       break;
     case "custom":
-      limits = { ...standard, ...overrides };
+      limits = standard;
       break;
   }
+  limits = { ...limits, ...overrides };
   // Flood brakes hold under every profile.
   return {
     ...limits,
@@ -237,7 +239,8 @@ export function sourceSiteLimitProfile(
   const profile = siteProfile ?? workspaceProfile ?? { kind: "standard", overrides: null };
   return {
     kind: normalizedSiteLimitProfileKind(profile.kind),
-    overrides: profile.kind === "custom" ? siteLimitOverrides(profile.overrides) : null,
+    overrides:
+      profile.kind === "custom" || profile.overrides ? siteLimitOverrides(profile.overrides) : null,
   };
 }
 

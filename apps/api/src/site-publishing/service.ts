@@ -1150,10 +1150,9 @@ export async function upsertSitePublicationForManager(
       ? undefined
       : {
           kind: storedSiteLimitProfileKind(request.limitProfile.kind),
-          overrides:
-            request.limitProfile.kind === "custom"
-              ? ((request.limitProfile.overrides as Record<string, unknown> | null) ?? null)
-              : null,
+          // Overrides adjust any kind's limits (the console edits only the
+          // spend limits and keeps the kind).
+          overrides: (request.limitProfile.overrides as Record<string, unknown> | null) ?? null,
         };
   const model = request.agent?.model;
   if (model) {

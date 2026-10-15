@@ -138,7 +138,7 @@ describe("Site publishing helpers", () => {
     );
   });
 
-  test("changed outside limits are saved as the Site's own limits, by admins only", () => {
+  test("changed outside limits are saved as overrides on the Site's profile, by admins only", () => {
     const invited = { ...saved, access: "invited" as const };
     const draft = {
       ...draftFromPublication(invited, "x"),
@@ -150,7 +150,8 @@ describe("Site publishing helpers", () => {
     };
     expect(publicationRequest(draft, invited, { publish: false })).toEqual({
       limitProfile: {
-        kind: "custom",
+        // The profile keeps its kind; only the limit fields change.
+        kind: "standard",
         overrides: {
           agentsEnabled: true,
           agentMicrosPerSitePerMonth: null,
@@ -173,6 +174,16 @@ describe("Site publishing helpers", () => {
         publish: false,
       }).limitProfile?.overrides,
     ).toMatchObject({ requestsPerMinutePerVisitor: 60, agentsEnabled: false });
+    // A credits profile stays credits: its multiplied guards are not lost.
+    const credits = {
+      ...invited,
+      limitProfile: { kind: "credits" as const, overrides: null },
+    };
+    expect(
+      publicationRequest({ ...draftFromPublication(credits, "x"), siteLimit: "40" }, credits, {
+        publish: false,
+      }).limitProfile,
+    ).toMatchObject({ kind: "credits", overrides: { agentMicrosPerSitePerMonth: 40_000_000 } });
     // Members-only Sites have no outside limits to send.
     expect(
       publicationRequest({ ...draftFromPublication(saved, "x"), siteLimit: "3" }, saved, {

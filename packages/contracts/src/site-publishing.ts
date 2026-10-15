@@ -256,7 +256,7 @@ export const SiteLimitProfileKind = /* @__PURE__ */ defineSchema(() =>
   z
     .enum(["standard", "free", "credits", "unlimited", "custom"])
     .describe(
-      "Limits for people outside the workspace (workspace members are never limited by Site limits). standard: platform defaults ($10 per Site per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults.",
+      "Limits for people outside the workspace (workspace members are never limited by Site limits). standard: platform defaults ($10 per Site per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults. Any kind may carry overrides, which adjust that kind's limits.",
     ),
 );
 export type SiteLimitProfileKind = z.infer<typeof SiteLimitProfileKind>;
@@ -354,7 +354,10 @@ export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
 export const SiteLimitProfile = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: SiteLimitProfileKind,
-    /** Only for custom; ignored otherwise. Missing fields take the standard defaults. */
+    /**
+     * Explicit values over the kind's limits (custom: over the standard
+     * defaults). Missing fields keep the kind's values.
+     */
     overrides: SiteLimits.partial().nullable().default(null),
   }),
 );

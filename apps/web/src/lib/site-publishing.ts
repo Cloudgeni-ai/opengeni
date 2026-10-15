@@ -303,8 +303,8 @@ export function formatLimitAmount(micros: number): string {
 /**
  * The PUT body for a draft: the fields that differ from the saved
  * publication (every field on a first publish), plus `status: "active"`
- * when publishing. Changed outside spend limits are saved as the Site's own
- * (custom) limits, keeping any other custom values.
+ * when publishing. Changed outside spend limits are saved as overrides on the
+ * Site's profile, keeping its kind and any other overrides.
  */
 export function publicationRequest(
   draft: SitePublishDraft,
@@ -335,11 +335,8 @@ export function publicationRequest(
     );
     if (changed)
       request.limitProfile = {
-        kind: "custom",
-        overrides: {
-          ...(saved?.limitProfile.kind === "custom" ? (saved.limitProfile.overrides ?? {}) : {}),
-          ...outside.limits,
-        },
+        kind: saved?.limitProfile.kind ?? "standard",
+        overrides: { ...(saved?.limitProfile.overrides ?? {}), ...outside.limits },
       };
   }
   if (!saved || saved.noindex !== draft.noindex) request.noindex = draft.noindex;

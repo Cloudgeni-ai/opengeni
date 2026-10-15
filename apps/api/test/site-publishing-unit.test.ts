@@ -226,6 +226,19 @@ describe("limits", () => {
     );
   });
 
+  test("overrides adjust any kind's limits, so editing a spend limit keeps the kind", () => {
+    const credits = effectiveSiteLimits(
+      settings,
+      { kind: "credits", overrides: { agentMicrosPerSitePerMonth: 40_000_000 } },
+      null,
+    );
+    expect(credits.agentMicrosPerSitePerMonth).toBe(40_000_000);
+    // The multiplied guest guards stay.
+    expect(credits.conversationsPerSitePerDay).toBe(
+      DEFAULT_SITE_LIMITS.conversationsPerSitePerDay! * settings.sitesCreditsLimitMultiplier,
+    );
+  });
+
   test("unlimited keeps the flood brakes and custom values cannot pass them", () => {
     const unlimited = effectiveSiteLimits(settings, { kind: "unlimited", overrides: null }, null);
     expect(unlimited.requestsPerMinutePerVisitor).toBe(
@@ -458,6 +471,20 @@ describe("agent model for people outside the workspace", () => {
     expect(siteOutsideModelChoice({ ...input, agentModel: "codex/gpt-6-astra" })).toEqual({
       kind: "unavailable",
     });
+  });
+
+  test("the workspace default is resolved to a concrete model, never left to the session", () => {
+    const choice = siteOutsideModelChoice({
+      settings: testSettings(),
+      selections: [],
+      agentModel: null,
+      workspaceDefaults: null,
+      organizationDefaults: null,
+    });
+    expect(choice.kind).toBe("same");
+    expect(
+      choice.kind === "same" && typeof choice.model === "string" && choice.model.length > 0,
+    ).toBe(true);
   });
 });
 
