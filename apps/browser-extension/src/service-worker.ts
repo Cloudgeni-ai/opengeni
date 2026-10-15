@@ -24,6 +24,9 @@ const INVENTORY_DEBOUNCE_MS = 100;
 const MAX_DEBUGGER_EVENTS = 10_000;
 const MAX_DEBUGGER_EVENT_BYTES = 512 * 1024;
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
+// Once no agent command has arrived for this long, attached tabs are treated as
+// idle and a downloaded update is applied even though they are still attached.
+const UPDATE_IDLE_RELOAD_MS = 15 * 60_000;
 
 type StoredState = {
   deviceId?: string;
@@ -45,6 +48,10 @@ let lastError: string | null = null;
 let debuggerSequence = 0;
 const debuggerEvents: BridgeDebuggerEvent[] = [];
 const attachedDebuggerTabs = new Set<number>();
+let updatePending = false;
+let updateTimer: ReturnType<typeof setTimeout> | null = null;
+let commandsInFlight = 0;
+let lastAgentCommandAtMs = Date.now();
 // Tab ids, debugger attachments and the event buffer above live exactly as long
 // as this worker. Every native reconnect in that lifetime reports the same
 // state generation, so the agent can keep sessions bound across agent or
@@ -239,6 +246,20 @@ async function settleCommand(
   generation: string,
   message: unknown,
 ): Promise<void> {
+  commandsInFlight += 1;
+  try {
+    await settleCommandNow(port, generation, message);
+  } finally {
+    commandsInFlight -= 1;
+    maybeApplyUpdate();
+  }
+}
+
+async function settleCommandNow(
+  port: chrome.runtime.Port,
+  generation: string,
+  message: unknown,
+): Promise<void> {
   let requestId: string = crypto.randomUUID();
   let deviceId: string = currentDeviceId ?? crypto.randomUUID();
   let result: ExtensionCommandResult;
@@ -248,6 +269,11 @@ async function settleCommand(
     deviceId = command.deviceId;
     if (command.deviceId !== currentDeviceId || command.connectionGeneration !== generation) {
       throw new BridgeCommandError("fenced", "attached browser connection changed", true);
+    }
+    // Event polling and pings continue while nothing is happening; only real
+    // tab and debugger work counts as an agent using this browser.
+    if (command.payload.type !== "debugger.poll" && command.payload.type !== "ping") {
+      lastAgentCommandAtMs = Date.now();
     }
     result = {
       type: "command_result",
@@ -370,6 +396,31 @@ async function detachDebugger(tabId: number): Promise<void> {
   }
 }
 
+/**
+ * Chrome downloads a new extension version but installs it only when this
+ * worker stops, and the native port keeps the worker running for as long as
+ * Chrome does. Without this, a fix reaches the person's browser only after
+ * they restart Chrome. Reloading ends this worker's debugger attachments, so
+ * it waits until no agent is driving a tab: nothing attached, or no agent
+ * command for UPDATE_IDLE_RELOAD_MS, and never during a command.
+ */
+function maybeApplyUpdate(): void {
+  if (!updatePending || commandsInFlight > 0) return;
+  const idleMs = Date.now() - lastAgentCommandAtMs;
+  if (attachedDebuggerTabs.size === 0 || idleMs >= UPDATE_IDLE_RELOAD_MS) {
+    chrome.runtime.reload();
+    return;
+  }
+  if (updateTimer !== null) return;
+  updateTimer = setTimeout(
+    () => {
+      updateTimer = null;
+      maybeApplyUpdate();
+    },
+    Math.max(1_000, UPDATE_IDLE_RELOAD_MS - idleMs),
+  );
+}
+
 function numericTabId(value: string): number {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id < 1) {
@@ -475,6 +526,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     method: "OpenGeni.debuggerDetached",
     params: { reason },
   });
+  maybeApplyUpdate();
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -554,6 +606,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, respond) => {
   return false;
 });
 
+chrome.runtime.onUpdateAvailable?.addListener(() => {
+  updatePending = true;
+  maybeApplyUpdate();
+});
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => void connect());
 void connect();
