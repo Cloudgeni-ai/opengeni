@@ -6,10 +6,12 @@
 import {
   formatSecretReference,
   secretNameKey,
+  VaultProviderOperations,
   type VaultItem,
   type VaultItemField,
   type VaultItemReferences,
   type VaultItemSummary,
+  type VaultMode,
   type VaultSummary,
 } from "@opengeni/contracts";
 import {
@@ -18,6 +20,7 @@ import {
   type VaultItemRow,
   type VaultRow,
 } from "@opengeni/db";
+import { providerVaultFreshness } from "./provider-sync";
 
 /** What the caller may do beyond reading; decided by the route's grant. */
 export type VaultCallerAuthority = {
@@ -27,9 +30,90 @@ export type VaultCallerAuthority = {
   accountAdmin: boolean;
 };
 
+/** No writes at all: what a read-only link or a read-only provider vault allows. */
+export function withoutProviderWrites(
+  operations: VaultProviderOperations,
+): VaultProviderOperations {
+  return {
+    ...operations,
+    createItemTypes: [],
+    updateItem: false,
+    removeField: false,
+    archiveItem: false,
+    archiveKind: "none",
+    deleteItem: false,
+    restoreItem: false,
+    writeFiles: false,
+    createTotp: false,
+    updateTotp: false,
+    createVault: false,
+    restoreFieldHistory: false,
+  };
+}
+
+/** Operations both sides allow (an archive needs both to agree on its kind). */
+export function intersectProviderOperations(
+  left: VaultProviderOperations,
+  right: VaultProviderOperations,
+): VaultProviderOperations {
+  const archiveItem =
+    left.archiveItem &&
+    right.archiveItem &&
+    left.archiveKind === right.archiveKind &&
+    left.archiveKind !== "none";
+  return {
+    createItemTypes: left.createItemTypes.filter(
+      (type) => type !== "passkey" && right.createItemTypes.includes(type),
+    ),
+    updateItem: left.updateItem && right.updateItem,
+    removeField: left.removeField && right.removeField,
+    archiveItem,
+    archiveKind: archiveItem ? left.archiveKind : "none",
+    deleteItem: false,
+    restoreItem: left.restoreItem && right.restoreItem,
+    readFiles: left.readFiles && right.readFiles,
+    writeFiles: left.writeFiles && right.writeFiles,
+    createTotp: left.createTotp && right.createTotp,
+    updateTotp: left.updateTotp && right.updateTotp,
+    createVault: left.createVault && right.createVault,
+    restoreFieldHistory: left.restoreFieldHistory && right.restoreFieldHistory,
+  };
+}
+
+/**
+ * What a linked vault allows: the operations its provider last reported for
+ * it, narrowed by the link mode. Null for hosted vaults and for links not yet
+ * checked since operations were recorded (callers then ask the provider).
+ */
+export function storedProviderOperations(
+  row: Pick<VaultRow, "source" | "mode"> & {
+    providerOperations?: VaultProviderOperations | null;
+  },
+): VaultProviderOperations | null {
+  if (row.source === "opengeni" || !row.providerOperations) return null;
+  // Stored JSON is checked against the contract before it grants anything.
+  const parsed = VaultProviderOperations.safeParse(row.providerOperations);
+  return parsed.success ? providerOperationsForMode(parsed.data, row.mode) : null;
+}
+
+export function providerOperationsForMode(
+  operations: VaultProviderOperations,
+  mode: VaultMode,
+): VaultProviderOperations {
+  const normalized = intersectProviderOperations(operations, operations);
+  return mode === "read_write" ? normalized : withoutProviderWrites(normalized);
+}
+
+function providerAllowsAnyWrite(operations: VaultProviderOperations | null): boolean {
+  if (!operations) return true;
+  return operations.createItemTypes.length > 0 || operations.updateItem || operations.archiveItem;
+}
+
 export function vaultCanWrite(row: VaultRow, authority: VaultCallerAuthority): boolean {
   // Read-write connected vaults are edited through their provider (W5, OP-3).
   if (row.mode !== "read_write" || !authority.write) return false;
+  // A provider that reported no item writes for this vault makes it read-only here too.
+  if (!providerAllowsAnyWrite(storedProviderOperations(row))) return false;
   if (row.ownerKind === "user") return row.ownedByCaller;
   return true;
 }
@@ -47,7 +131,15 @@ export function vaultCanManage(row: VaultRow, authority: VaultCallerAuthority): 
   }
 }
 
-export function toVaultSummary(row: VaultRow, authority: VaultCallerAuthority): VaultSummary {
+export function toVaultSummary(
+  row: VaultRow,
+  authority: VaultCallerAuthority,
+  options: { now?: Date; refreshing?: boolean } = {},
+): VaultSummary {
+  const operations = storedProviderOperations(row);
+  const freshness = providerVaultFreshness(row, options.now ?? new Date(), {
+    ...(options.refreshing ? { refreshing: true } : {}),
+  });
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -64,6 +156,8 @@ export function toVaultSummary(row: VaultRow, authority: VaultCallerAuthority): 
     lastSyncedAt: row.lastSyncedAt,
     rateLimitedUntil: row.rateLimitedUntil,
     providerConnectionId: row.providerConnectionId,
+    ...(operations ? { providerOperations: operations } : {}),
+    ...(freshness ? { freshness } : {}),
     availability: row.availability,
     isDefault: row.isDefault,
     itemCount: Number(row.itemCount),

@@ -58,6 +58,7 @@ import {
   getSessionSecretsView,
   getVault,
   getVaultItem,
+  isVaultError,
   listVaultFieldVersions,
   listVaultItems,
   listVaultsForSubject,
@@ -95,12 +96,20 @@ import { vaultErrorCodeForProvider } from "./provider-registry";
 import {
   LINKED_VAULT_OPEN_WAIT_MS,
   LINKED_VAULT_SEARCH_MAX_AGE_MS,
+  providerVaultFreshness,
+  refreshLinkedVaults,
   refreshStaleLinkedVaults,
 } from "./provider-sync";
 import {
   archiveProviderVaultItem,
+  assertProviderVaultAccepts,
+  assertProviderVaultReleases,
+  refuseProviderOperation,
+  savedNotListedError,
   writeProviderVaultItem,
+  writeProviderVaultItemOutcome,
   type ProviderWriteDeps,
+  type ProviderWriteOutcome,
 } from "./provider-writes";
 import { chooseSecretCandidate, createSecretResolver } from "./secret-resolver";
 import type { VaultRequestActor, VaultServiceDeps } from "./types";
@@ -424,12 +433,34 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   }
 
   /**
+   * Restore and permanent deletion are Opengeni-hosted operations. Connected
+   * items are archived recoverably in their provider and restored there, so
+   * these refuse with the reason instead of reaching any provider.
+   */
+  async function refuseForConnectedItem(
+    context: VaultDbContext,
+    itemId: string,
+    operation: "restoreItem" | "deleteItem",
+  ): Promise<void> {
+    const item = await getVaultItem(deps.db, context, { itemId });
+    if (item.vaultSource === "opengeni") return;
+    refuseProviderOperation(await getVault(deps.db, context, { vaultId: item.vaultId }), operation);
+  }
+
+  /**
    * Move or copy an item when either side is a connected (provider) vault.
    * Values never live in both stores' databases at once: each field is read
    * from the source (service-side, unaudited like other internal copies),
    * written to the target through its own path, and a move then archives the
    * source so the old item stays recoverable. Opengeni-to-Opengeni moves keep
    * the single-statement database move, which preserves the item id.
+   *
+   * Everything the target must accept (item type, one-time password, files)
+   * and, for a move, a recoverable archive of the original is checked before
+   * any value is read or written. The original is archived only after the
+   * target confirmed the write; an unknown or failed target write leaves it
+   * untouched, and a confirmed copy whose original could not be archived is
+   * reported as saved, so the move is not repeated.
    */
   async function moveAcrossProviders(input: {
     context: VaultDbContext;
@@ -465,6 +496,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         },
       );
     }
+    if (target.source !== "opengeni") {
+      await assertProviderVaultAccepts(input.providerWrites, target, source);
+    }
+    if (input.mode === "move" && source.vaultSource !== "opengeni") {
+      await assertProviderVaultReleases(input.providerWrites, sourceVault);
+    }
     const name = input.newName ?? source.name;
     const fields: FieldSource[] = [];
     for (const field of source.fields) {
@@ -493,14 +530,20 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       ...(source.expiresAt ? { expiresAt: source.expiresAt } : {}),
       fields,
     };
-    let created: VaultItemRow;
+    let created: VaultItemRow | null = null;
+    let notListed: Extract<ProviderWriteOutcome, { status: "saved_not_listed" }> | null = null;
     if (target.source !== "opengeni") {
-      const itemId = await writeProviderVaultItem(input.providerWrites, {
+      // A failed or unknown target write throws here, before the original is touched.
+      const outcome = await writeProviderVaultItemOutcome(input.providerWrites, {
         vault: target,
         existing: null,
         change,
       });
-      created = await getVaultItem(deps.db, input.context, { itemId });
+      if (outcome.status === "listed") {
+        created = await getVaultItem(deps.db, input.context, { itemId: outcome.itemId });
+      } else {
+        notListed = outcome;
+      }
     } else {
       const write = await itemWrite(
         change,
@@ -515,16 +558,38 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       });
     }
     if (input.mode === "move") {
-      if (source.vaultSource !== "opengeni") {
-        await archiveProviderVaultItem(input.providerWrites, {
-          vault: sourceVault,
-          itemId: source.id,
-        });
-      } else {
-        await archiveVaultItem(deps.db, input.context, { itemId: source.id });
+      try {
+        if (source.vaultSource !== "opengeni") {
+          await archiveProviderVaultItem(input.providerWrites, {
+            vault: sourceVault,
+            itemId: source.id,
+          });
+        } else {
+          await archiveVaultItem(deps.db, input.context, { itemId: source.id });
+        }
+      } catch (error) {
+        throw new VaultError(
+          isVaultError(error) ? error.code : "provider_outcome_unknown",
+          `Saved ${name} in ${target.name}, but archiving the original in ${sourceVault.name} did not complete${isVaultError(error) ? ` (${error.message})` : ""}. Do not move it again: check ${sourceVault.name} and archive the original there if it is still listed.`,
+          {
+            saved: true,
+            sourceArchived: false,
+            vaultId: target.id,
+            ...(created ? { itemId: created.id } : {}),
+            sourceItemId: source.id,
+            sourceVaultId: sourceVault.id,
+          },
+        );
       }
     }
-    return created;
+    if (notListed) {
+      const error = savedNotListedError(target, name, notListed);
+      throw new VaultError(error.code, error.message, {
+        ...error.details,
+        ...(input.mode === "move" ? { sourceArchived: true } : {}),
+      });
+    }
+    return created!;
   }
 
   function toItem(row: VaultItemRow): VaultItem {
@@ -550,7 +615,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         // Providers charge the budget per call themselves.
         const budget = createProviderCallBudget(VAULT_LIMITS.providerReadsPerAttempt);
         const [value] = await provider.readFields(
-          { connectionId: read.providerConnectionId, budget },
+          // The durable epoch invalidates provider value caches after a refresh anywhere.
+          {
+            connectionId: read.providerConnectionId,
+            budget,
+            cacheEpoch: read.providerCacheEpoch ?? null,
+          },
           read.providerVaultRef ?? "",
           read.providerItemRef ?? "",
           [read.providerFieldRef ?? ""],
@@ -618,6 +688,10 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     const vaults = await listVaultsForSubject(deps.db, principalContext(principal), {
       workspaceId: principal.workspaceId,
     });
+    return agentVaultFrom(vaults, nameOrId);
+  }
+
+  function agentVaultFrom(vaults: readonly VaultRow[], nameOrId: string): VaultRow {
     const byId = vaults.find((vault) => vault.id === nameOrId.toLowerCase());
     if (byId) return byId;
     const matches = vaults.filter((vault) => secretNameKey(vault.name) === secretNameKey(nameOrId));
@@ -874,13 +948,16 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async restoreItem(actor, workspaceId, itemId) {
-      return toItem(
-        await restoreVaultItem(deps.db, subjectContext(actor, workspaceId), { itemId }),
-      );
+      const context = subjectContext(actor, workspaceId);
+      await refuseForConnectedItem(context, itemId, "restoreItem");
+      return toItem(await restoreVaultItem(deps.db, context, { itemId }));
     },
 
     async deleteItemPermanently(actor, workspaceId, itemId) {
-      await deleteVaultItemPermanently(deps.db, subjectContext(actor, workspaceId), { itemId });
+      const context = subjectContext(actor, workspaceId);
+      // Never a permanent provider deletion: Archive is the only way an item leaves.
+      await refuseForConnectedItem(context, itemId, "deleteItem");
+      await deleteVaultItemPermanently(deps.db, context, { itemId });
     },
 
     async moveItem(actor, workspaceId, itemId, req) {
@@ -924,6 +1001,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     async restoreFieldVersion(actor, workspaceId, itemId, fieldId, version) {
       const context = subjectContext(actor, workspaceId);
       const existing = await getVaultItem(deps.db, context, { itemId });
+      if (existing.vaultSource !== "opengeni") {
+        refuseProviderOperation(
+          await getVault(deps.db, context, { vaultId: existing.vaultId }),
+          "restoreFieldHistory",
+        );
+      }
       const field = existing.fields.find((candidate) => candidate.id === fieldId);
       if (!field) throw new VaultError("vault_field_not_found", "field not found", { fieldId });
       return toItem(
@@ -963,29 +1046,48 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       let reachable = await listVaultsForSubject(deps.db, context, {
         workspaceId: principal.workspaceId,
       });
+      let scoped: VaultRow[] =
+        input.vault !== undefined ? [agentVaultFrom(reachable, input.vault)] : reachable;
       // Items added straight in a connected provider (1Password) appear here
-      // without anyone pressing Sync: stale mirrors refresh before the scan.
-      if (deps.providers) {
-        const changed = await refreshStaleLinkedVaults({
+      // without anyone pressing Sync: stale mirrors in the search's scope
+      // refresh before the scan. `refresh` (first page only) re-lists them and
+      // bypasses provider caches for later reads, never an active rate limit.
+      let refreshing = new Set<string>();
+      const connected = scoped.filter((vault) => vault.source !== "opengeni");
+      if (deps.providers && connected.length > 0) {
+        const report = await refreshLinkedVaults({
           db: deps.db,
           context,
-          vaults: reachable,
+          vaults: connected,
           providers: deps.providers,
           maxAgeMs: LINKED_VAULT_SEARCH_MAX_AGE_MS,
+          ...(input.refresh && input.cursor === undefined ? { force: true } : {}),
         });
-        if (changed.length > 0) {
+        refreshing = new Set(report.pending);
+        if (
+          report.outcomes.some((outcome) => outcome.state === "done" || outcome.state === "failed")
+        ) {
           reachable = await listVaultsForSubject(deps.db, context, {
             workspaceId: principal.workspaceId,
           });
+          scoped = scoped.map((vault) => reachable.find((row) => row.id === vault.id) ?? vault);
         }
       }
+      // Every page says which connected sources were checked, so an empty or
+      // short result is never mistaken for proof that a secret does not exist.
+      const checkedAt = new Date();
+      const freshnessOf = (vault: VaultRow) =>
+        providerVaultFreshness(vault, checkedAt, { refreshing: refreshing.has(vault.id) });
+      const sources = scoped.flatMap((vault) => {
+        const freshness = freshnessOf(vault);
+        return freshness ? [{ vaultId: vault.id, freshness }] : [];
+      });
+      const complete = sources.every((source) => source.freshness.state === "current");
       const byTier = (vaults: VaultRow[]) =>
         [...vaults].sort(
           (left, right) => left.tier - right.tier || left.name.localeCompare(right.name),
         );
-      const vaults = byTier(
-        input.vault !== undefined ? [await agentVault(principal, input.vault)] : reachable,
-      );
+      const vaults = byTier(scoped);
       const limit = input.limit ?? 20;
       const filters = agentSearchFilterKey(input);
       // Resume exactly after the last item the previous page examined.
@@ -1060,16 +1162,22 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         nextCursor: next === null ? null : encodeAgentSearchCursor(next),
         ...(input.cursor === undefined
           ? {
-              vaults: byTier(reachable).map((vault) => ({
-                id: vault.id,
-                name: vault.name,
-                ownerKind: vault.ownerKind,
-                source: vault.source,
-                mode: vault.mode,
-                itemCount: vault.itemCount,
-              })),
+              vaults: byTier(reachable).map((vault) => {
+                const freshness = freshnessOf(vault);
+                return {
+                  id: vault.id,
+                  name: vault.name,
+                  ownerKind: vault.ownerKind,
+                  source: vault.source,
+                  mode: vault.mode,
+                  itemCount: vault.itemCount,
+                  ...(freshness ? { freshness } : {}),
+                };
+              }),
             }
           : {}),
+        complete,
+        sources,
       };
 
       function agentSearchResult(vault: VaultRow, row: VaultItemRow) {
@@ -1225,7 +1333,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const current = await getVaultItem(deps.db, context, { itemId: target.itemId });
       if (current.vaultSource !== "opengeni") {
         const vault = await getVault(deps.db, context, { vaultId: current.vaultId });
-        await archiveProviderVaultItem(
+        const { archiveKind } = await archiveProviderVaultItem(
           {
             db: deps.db,
             context,
@@ -1236,7 +1344,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         );
         return {
           archived: true,
-          restoreHint: `A person can restore ${current.name} from the provider's archive.`,
+          restoreHint: `A person can restore ${current.name} from the ${archiveKind === "trash" ? "trash" : "archive"} in ${vault.name}'s provider; it reappears here after the next sync.`,
         };
       }
       const row = await archiveVaultItem(deps.db, context, {

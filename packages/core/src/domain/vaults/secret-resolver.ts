@@ -4,6 +4,13 @@
  * chosen here (archived dropped, lowest tier, names over aliases, otherwise
  * ambiguous), provider values are fetched, hosted values decrypted, and the
  * batch is recorded. A call resolves all of its references or none (I2).
+ *
+ * A reference that finds nothing first refreshes the connected vaults that
+ * could hold it. When one of those could not be checked (unreachable, rate
+ * limited, needing reconnection or still refreshing), the failure names that
+ * source instead of reporting the secret missing, so no missing-secret ask
+ * card is made for a secret that may exist (external vaults §9). Hosted and
+ * explicitly named healthy vaults are never blocked by unrelated outages.
  */
 import {
   buildMissingSecretAskCard,
@@ -11,6 +18,7 @@ import {
   isValidTotpInput,
   parseTotpInput,
   referenceKey,
+  secretNameKey,
   SecretReferenceError,
   VAULT_LIMITS,
   type ResolvedSecretValue,
@@ -20,6 +28,7 @@ import {
   type SecretReferenceFailure,
   type SecretResolver,
   type SecretUseContext,
+  type VaultProviderFreshness,
 } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
@@ -29,6 +38,7 @@ import {
   type SecretReferenceCandidate,
   type SecretReferenceLookup,
   type SecretResolutionMeta,
+  type VaultRow,
 } from "@opengeni/db";
 import {
   createProviderCallBudget,
@@ -38,7 +48,11 @@ import {
   type VaultProviderErrorCode,
   type VaultProviderRegistry,
 } from "@opengeni/vaults";
-import { LINKED_VAULT_MISS_MAX_AGE_MS, refreshStaleLinkedVaults } from "./provider-sync";
+import {
+  LINKED_VAULT_MISS_MAX_AGE_MS,
+  providerVaultFreshness,
+  refreshLinkedVaults,
+} from "./provider-sync";
 import type { VaultServiceDeps } from "./types";
 
 export type SecretResolverOptions = {
@@ -204,6 +218,82 @@ function providerFailureCode(code: VaultProviderErrorCode): SecretReferenceFailu
   return "provider_unavailable";
 }
 
+/**
+ * The connected vaults that could hold what a reference did not find: the
+ * vault of a matched connected item that lacks the field; otherwise the vault
+ * a three-segment reference names; for two segments the named vault when the
+ * first segment names one (else every connected vault, since it may be
+ * `Item/field`); every connected vault for a bare item name; none for an ID.
+ */
+export function relevantProviderVaults(
+  reference: SecretReference,
+  candidates: readonly SecretReferenceCandidate[],
+  reachable: readonly VaultRow[],
+): VaultRow[] {
+  const connected = reachable.filter((vault) => vault.source !== "opengeni");
+  if (connected.length === 0) return [];
+  const live = candidates.filter((candidate) => !candidate.archived);
+  if (live.length > 0) {
+    const lacking = new Set(
+      live
+        .filter(
+          (candidate) =>
+            candidate.source !== "opengeni" &&
+            (candidate.missing === "field" || candidate.missing === "totp_field"),
+        )
+        .map((candidate) => candidate.vaultId),
+    );
+    return connected.filter((vault) => lacking.has(vault.id));
+  }
+  if (reference.target.form !== "path") return [];
+  const segments = reference.target.segments;
+  if (segments.length === 1) return connected;
+  const nameKey = secretNameKey(segments[0]!);
+  const named = reachable.filter((vault) => secretNameKey(vault.name) === nameKey);
+  if (segments.length === 2 && named.length === 0) return connected;
+  return named.filter((vault) => vault.source !== "opengeni");
+}
+
+/** A miss that cannot be trusted because a relevant connected vault was not checked. */
+function uncheckedSourceFailure(
+  reference: SecretReference,
+  unchecked: ReadonlyArray<{ vault: VaultRow; freshness: VaultProviderFreshness }>,
+): SecretReferenceFailure {
+  const authExpired = unchecked.filter(({ vault }) => vault.syncStatus === "auth_expired");
+  const rateLimited = unchecked.filter(
+    ({ freshness }) => freshness.state === "unavailable" && freshness.retryAt !== null,
+  );
+  const [code, named, why] =
+    authExpired.length > 0
+      ? (["provider_auth_expired", authExpired, "needs to be reconnected"] as const)
+      : rateLimited.length > 0
+        ? (["provider_rate_limited", rateLimited, "is rate limited by its provider"] as const)
+        : ([
+            "provider_unavailable",
+            unchecked,
+            unchecked.every(({ freshness }) => freshness.state === "refreshing")
+              ? "is still refreshing"
+              : "could not be checked",
+          ] as const);
+  const names = named
+    .slice(0, 3)
+    .map(({ vault }) => vault.name)
+    .join(", ");
+  const retryAt = rateLimited
+    .map(({ freshness }) => freshness.retryAt!)
+    .sort()
+    .at(0);
+  return {
+    raw: reference.raw,
+    code,
+    message:
+      `not found in the vaults that could be checked, but ${names} ${why}, so it may be there` +
+      (code === "provider_rate_limited" && retryAt
+        ? `; try again after ${retryAt}`
+        : "; try again later"),
+  };
+}
+
 function decodeBase64(value: string): Uint8Array {
   return new Uint8Array(Buffer.from(value, "base64"));
 }
@@ -292,38 +382,82 @@ export function createSecretResolver(
       const { meta, candidates } = await resolveSecretReferenceCandidates(deps.db, context, {
         refs: references.map((reference, index) => lookupFor(reference, index)),
       });
-      const failures: SecretReferenceFailure[] = [];
-      const chosen: Chosen[] = [];
-      references.forEach((reference, index) => {
-        const outcome = chooseSecretCandidate(
-          reference,
-          candidates.filter((candidate) => candidate.refIndex === index),
-          meta,
-        );
-        if ("failure" in outcome) failures.push(outcome.failure);
-        else chosen.push({ reference, candidate: outcome.candidate });
+      const outcomes = references.map((reference, index) => {
+        const own = candidates.filter((candidate) => candidate.refIndex === index);
+        return { reference, candidates: own, outcome: chooseSecretCandidate(reference, own, meta) };
       });
-      return { meta, failures, chosen };
+      return { meta, outcomes };
     };
-    let { meta, failures, chosen } = await choose();
+    let { meta, outcomes } = await choose();
+    // One provider registry per resolve, made only when a connected vault is needed.
+    let registry: VaultProviderRegistry | null | undefined;
+    const providers = (): VaultProviderRegistry | null => {
+      if (registry === undefined) {
+        registry = deps.providers ?? opts.providersForSubject?.(meta.subjectId) ?? null;
+      }
+      return registry;
+    };
+    const misses = () =>
+      outcomes.filter(
+        (entry) => "failure" in entry.outcome && entry.outcome.failure.code === "not_found",
+      );
     // A reference to an item added straight in a connected provider (1Password)
-    // finds nothing until the vault's mirror catches up: refresh stale linked
-    // vaults once and look again before reporting it missing.
-    if (failures.some((failure) => failure.code === "not_found")) {
-      const registry = deps.providers ?? opts.providersForSubject?.(meta.subjectId);
-      if (registry) {
-        const reachable = await listVaultsForSubject(deps.db, context, {
-          workspaceId: principal.workspaceId,
-        });
-        const changed = await refreshStaleLinkedVaults({
+    // finds nothing until the vault's mirror catches up: refresh the relevant
+    // stale linked vaults once and look again before reporting it missing.
+    let reachable: VaultRow[] | null = null;
+    let refreshing = new Set<string>();
+    if (misses().length > 0) {
+      reachable = await listVaultsForSubject(deps.db, context, {
+        workspaceId: principal.workspaceId,
+      });
+      const relevant = new Map<string, VaultRow>();
+      for (const entry of misses()) {
+        for (const vault of relevantProviderVaults(entry.reference, entry.candidates, reachable)) {
+          relevant.set(vault.id, vault);
+        }
+      }
+      const refreshProviders = relevant.size > 0 ? providers() : null;
+      if (refreshProviders) {
+        const report = await refreshLinkedVaults({
           db: deps.db,
           context,
-          vaults: reachable,
-          providers: registry,
+          vaults: [...relevant.values()],
+          providers: refreshProviders,
           maxAgeMs: LINKED_VAULT_MISS_MAX_AGE_MS,
         });
-        if (changed.length > 0) ({ meta, failures, chosen } = await choose());
+        refreshing = new Set(report.pending);
+        if (report.changed.length > 0) ({ meta, outcomes } = await choose());
+        if (
+          report.outcomes.some((outcome) => outcome.state === "done" || outcome.state === "failed")
+        ) {
+          reachable = await listVaultsForSubject(deps.db, context, {
+            workspaceId: principal.workspaceId,
+          });
+        }
       }
+    }
+    const failures: SecretReferenceFailure[] = [];
+    const chosen: Chosen[] = [];
+    const checkedAt = new Date();
+    for (const entry of outcomes) {
+      if ("candidate" in entry.outcome) {
+        chosen.push({ reference: entry.reference, candidate: entry.outcome.candidate });
+        continue;
+      }
+      let failure = entry.outcome.failure;
+      if (failure.code === "not_found" && reachable) {
+        const unchecked = relevantProviderVaults(entry.reference, entry.candidates, reachable)
+          .map((vault) => ({
+            vault,
+            freshness: providerVaultFreshness(vault, checkedAt, {
+              maxAgeMs: LINKED_VAULT_MISS_MAX_AGE_MS,
+              refreshing: refreshing.has(vault.id),
+            })!,
+          }))
+          .filter(({ freshness }) => freshness.state !== "current");
+        if (unchecked.length > 0) failure = uncheckedSourceFailure(entry.reference, unchecked);
+      }
+      failures.push(failure);
     }
     const hasActingHuman = meta.humanExpected && meta.humanValid;
     if (failures.length > 0) {
@@ -344,17 +478,18 @@ export function createSecretResolver(
     for (const group of providerGroups.values()) {
       const first = group[0]!.candidate;
       try {
-        const registry =
-          deps.providers ??
-          opts.providersForSubject?.(meta.subjectId) ??
-          EMPTY_VAULT_PROVIDER_REGISTRY;
-        const provider = await registry.forVault({
+        const provider = await (providers() ?? EMPTY_VAULT_PROVIDER_REGISTRY).forVault({
           source: first.source,
           providerConnectionId: first.providerConnectionId,
         });
-        // The provider charges `budget` per call (one readFields per item).
+        // The provider charges `budget` per call (one readFields per item). The
+        // durable epoch invalidates its value cache after a refresh anywhere.
         const values = await provider.readFields(
-          { connectionId: first.providerConnectionId, budget },
+          {
+            connectionId: first.providerConnectionId,
+            budget,
+            cacheEpoch: first.providerCacheEpoch ?? null,
+          },
           first.providerVaultRef ?? "",
           first.providerItemRef ?? "",
           [...new Set(group.map((entry) => entry.candidate.providerFieldRef ?? ""))],
@@ -375,7 +510,9 @@ export function createSecretResolver(
                 ? "the connected vault is rate limited; try again later"
                 : code === "provider_auth_expired"
                   ? "the connected vault needs to be reconnected"
-                  : "the connected vault is unavailable",
+                  : code === "not_found"
+                    ? "the connected vault no longer has this item"
+                    : "the connected vault is unavailable",
           });
         }
       }
