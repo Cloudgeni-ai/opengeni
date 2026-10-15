@@ -267,6 +267,23 @@ write capabilities differ; a connected vault is not automatically fully
 editable. See [external-vaults.md](external-vaults.md) for setup, the supported
 operations, freshness, and the distinction from renewable run credentials.
 
+**Remote vaults (signed protocol).** A password manager can also be served
+from the customer's own server over `opengeni.vault.v1`: Opengeni signs each
+request (`OpenGeni-Signature` over the exact body) with the connection's
+secret, and the server signs its response with a key derived from the same
+secret. Embedders build the server with `createExternalVaultReceiver` from
+`@opengeni/sdk/external-vault-receiver` (server-only). It checks the
+signature, request age and replay, then calls the host's `authorize` to map
+Opengeni's account, workspace and user to its own tenant and user on every
+request; a valid signature alone authorizes nothing. Writes are claimed in a
+caller-owned durable store under their idempotency key and never retried; an
+uncertain write returns `provider_outcome_unknown`. Listings carry metadata
+only, in bounded pages from one snapshot. Bitwarden Password Manager uses the
+same protocol through the customer-run `packages/vaults-bitwarden-bridge`,
+which talks to an already-unlocked `bw serve` on a private Unix socket; the
+master password and unlocked session never leave the customer's machine. The
+ask card still saves answers into Opengeni-hosted vaults only.
+
 For local development, `OPENGENI_ONEPASSWORD_FAKE_TOKENS=1` enables the
 in-memory fake provider tokens `ops_fake_healthy` and `ops_fake_sync_error`.
 Managed runtimes refuse to start with it set.

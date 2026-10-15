@@ -1447,6 +1447,7 @@ behind a generic 500, so its session lookups run through
 | `packages/tool-gateway` | `@opengeni/tool-gateway` | Protocol-neutral tool identity, cataloging, schemas, validation, authorization, approval classification, and execution |
 | `packages/vaults` | `@opengeni/vaults` | Vault provider interface and registry, shell reference splicing, and secret test doubles |
 | `packages/vaults-onepassword` | `@opengeni/vaults-onepassword` | 1Password service-account vault provider (pinned `@1password/sdk`), loaded only by dynamic import from the API and worker |
+| `packages/vaults-bitwarden-bridge` | `@opengeni/vaults-bitwarden-bridge` | Customer-run bridge (private, unpublished) serving the signed remote vault protocol from an already-unlocked `bw serve` on a private Unix socket |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |

@@ -924,6 +924,21 @@
         "typescript": "7.0.2",
       },
     },
+    "packages/vaults-bitwarden-bridge": {
+      "name": "@opengeni/vaults-bitwarden-bridge",
+      "version": "2.0.1",
+      "bin": {
+        "opengeni-bitwarden-bridge": "./src/cli.ts",
+      },
+      "dependencies": {
+        "@opengeni/contracts": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@opengeni/vaults": "workspace:*",
+        "typescript": "7.0.2",
+      },
+    },
     "packages/vaults-onepassword": {
       "name": "@opengeni/vaults-onepassword",
       "version": "1.4.4",
@@ -1829,6 +1844,8 @@
     "@opengeni/tool-gateway": ["@opengeni/tool-gateway@workspace:packages/tool-gateway"],
 
     "@opengeni/vaults": ["@opengeni/vaults@workspace:packages/vaults"],
+
+    "@opengeni/vaults-bitwarden-bridge": ["@opengeni/vaults-bitwarden-bridge@workspace:packages/vaults-bitwarden-bridge"],
 
     "@opengeni/vaults-onepassword": ["@opengeni/vaults-onepassword@workspace:packages/vaults-onepassword"],
 
