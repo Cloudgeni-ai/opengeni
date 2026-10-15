@@ -122,6 +122,18 @@ function stateFor(workspaceId: string): MockState {
       for (const each of state.connections) {
         if (each.provider === "keeper")
           each.label = "Acme Corporation Keeper Secrets Manager application for production agents";
+        if (each.provider === "bitwarden")
+          each.label = "Ola's laptop bridge next to the unlocked Bitwarden desktop vault";
+        for (const folder of state.providerVaults[each.id] ?? []) {
+          if (each.provider === "keeper" && folder.name === "Staging")
+            folder.name =
+              "Staging shared folder for customer notifications and billing reconciliation";
+        }
+      }
+      for (const item of state.items) {
+        if (item.name === "Twilio")
+          item.name =
+            "Twilio messaging API key for the customer notifications service in production";
       }
     }
   }

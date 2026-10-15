@@ -156,8 +156,9 @@ function modeOptions(
   provider: VaultProviderId,
   access: "read_only" | "read_write" | "unknown",
 ): { value: Choice; label: string; description: string }[] {
+  const noun = PROVIDERS[provider].vaultNoun.one;
   const options: { value: Choice; label: string; description: string }[] = [
-    { value: "off", label: "Off", description: "Agents can't use this vault." },
+    { value: "off", label: "Off", description: `Agents can't use this ${noun}.` },
     {
       value: "read_only",
       label: "Read-only",
@@ -171,7 +172,7 @@ function modeOptions(
     description:
       access === "unknown"
         ? `Agents can also save new items. ${PROVIDERS[provider].name} checks edit rights when they do.`
-        : "Agents can also save new items to this vault.",
+        : `Agents can also save new items to this ${noun}.`,
   });
   return options;
 }

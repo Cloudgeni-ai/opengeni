@@ -964,6 +964,44 @@ const PROVIDER_STATES: CaptureState[] = [
   s("S23", "list-long-names", "Vault list with long provider names", (ids) => secrets(ids), {
     mock: { scenario: "long-names" },
   }),
+  s(
+    "S23",
+    "keeper-vault-long",
+    "Keeper vault page with a long vault, connection and item name",
+    (ids) => vault(ids, "Keeper Production"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "keeper-item-long",
+    "Keeper item page with a long item name",
+    (ids) => item(ids, "Keeper Production/Twilio"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "keeper-choose-long",
+    "Choose shared folders with a long folder name and access menus",
+    (ids) => connection(ids, "keeper", "choose-vaults"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "bitwarden-connection-long",
+    "Bitwarden bridge connection with a long label",
+    (ids) => connection(ids, "bitwarden"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "keeper-move-long",
+    "Copy a long-named Keeper item: dialog title and targets",
+    (ids) => item(ids, "Keeper Production/Twilio"),
+    {
+      mock: { scenario: "long-names" },
+      steps: itemMenu(/^(Move or copy|Copy to another)/u),
+    },
+  ),
   // S24 keyboard: every flow above works without a pointer, with a visible focus ring
   s(
     "S24",
@@ -1437,8 +1475,18 @@ async function capture(
   const path = state.path(ids, theme);
   if (!path)
     return { ...base, reason: "pending seed (W6): the seeded record for this state was not found" };
+  let storageState: string;
+  try {
+    storageState = await storageStateFor(browser, user === "tom" ? "viewer" : user);
+  } catch (error) {
+    return {
+      ...base,
+      status: "failed",
+      reason: `sign-in: ${(error as Error).message.split("\n")[0]}`,
+    };
+  }
   const context = await browser.newContext({
-    storageState: await storageStateFor(browser, user === "tom" ? "viewer" : user),
+    storageState,
     viewport: { width, height },
     colorScheme: theme,
     deviceScaleFactor: 1,

@@ -68,7 +68,7 @@ export const PROVIDERS: Record<VaultProviderId, ProviderInfo> = {
   keeper: {
     id: "keeper",
     name: "Keeper",
-    summary: "Link shared folders with a Secrets Manager one-time token.",
+    summary: "Link shared folders with a one-time token.",
     credential: "this device's Secrets Manager configuration",
     renewLabel: "Reconnect",
     vaultNoun: { one: "shared folder", many: "shared folders" },
@@ -77,7 +77,7 @@ export const PROVIDERS: Record<VaultProviderId, ProviderInfo> = {
   bitwarden: {
     id: "bitwarden",
     name: "Bitwarden",
-    summary: "Link vaults through a bridge you run next to your unlocked Bitwarden.",
+    summary: "Link vaults through a bridge you run.",
     credential: "the bridge address and signing secret",
     renewLabel: "Update bridge",
     vaultNoun: { one: "vault", many: "vaults" },
@@ -86,7 +86,7 @@ export const PROVIDERS: Record<VaultProviderId, ProviderInfo> = {
   external: {
     id: "external",
     name: "Your vault service",
-    summary: "Link vaults from a service you run, over a signed HTTPS endpoint.",
+    summary: "Link vaults from a service you run.",
     credential: "the service address and signing secret",
     renewLabel: "Update service",
     vaultNoun: { one: "vault", many: "vaults" },
