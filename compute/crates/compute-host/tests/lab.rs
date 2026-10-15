@@ -462,10 +462,12 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
     blocked.push(format!("198.18.0.3:{port}"));
     // The first command after the restore is the outbound connection, then
     // a second one to tell network latency from the restored guest's first
-    // page faults; then each forbidden destination must fail, and fast.
+    // page faults, then a name lookup; then each forbidden destination must
+    // fail, and fast.
     let script = format!(
         "s=$(date +%s%N); if exec 3<>/dev/tcp/1.1.1.1/80; then echo out $(( ($(date +%s%N) - s) / 1000 )); else echo out-failed; fi
 s=$(date +%s%N); if exec 4<>/dev/tcp/1.1.1.1/80; then echo again $(( ($(date +%s%N) - s) / 1000 )); else echo again-failed; fi
+if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; fi
 for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; then r=open; else r=closed; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
         blocked.join(" ")
     );
@@ -495,6 +497,7 @@ for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*
         };
         #[allow(clippy::cast_precision_loss)]
         second_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
+        assert_eq!(lines.next(), Some("dns ok"), "{sandbox}: {output}");
         wake_ms.push(waited.as_secs_f64() * 1e3);
         for line in lines {
             let fields: Vec<&str> = line.split_whitespace().collect();
@@ -519,4 +522,35 @@ for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*
     agent.remove_all().await;
     agent.kill();
     let _ = std::fs::remove_dir_all(&host.root);
+}
+
+/// On a trusted host guests reach the local network; on any other host the
+/// same address is blocked. Runs only when `COMPUTE_TEST_LAN_TARGET` names a
+/// listening `address:port` on the host's local network (not the host).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_trusted_hosts_let_guests_reach_the_local_network() {
+    let (Some(lab), Some(target)) = (lab(), std::env::var_os("COMPUTE_TEST_LAN_TARGET")) else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB and COMPUTE_TEST_LAN_TARGET");
+        return;
+    };
+    let target = target.to_string_lossy().into_owned();
+    let (address, port) = target.rsplit_once(':').unwrap();
+    let script = format!(
+        "if timeout 3 bash -c 'exec 3<>/dev/tcp/{address}/{port}' 2>/dev/null; then echo open; else echo closed; fi"
+    );
+    for (trusted, expected) in [(false, "closed"), (true, "open")] {
+        let flags: &[&str] = if trusted {
+            &["--network", "--trusted"]
+        } else {
+            &["--network"]
+        };
+        let host = Host::new(&lab, "lan", flags);
+        let agent = host.start().await;
+        agent.create(id(0), &[]).await;
+        let (output, _) = exec(&agent.client, id(0), &script).await;
+        assert_eq!(output.trim(), expected, "trusted={trusted}: {target}");
+        agent.remove_all().await;
+        agent.kill();
+        let _ = std::fs::remove_dir_all(&host.root);
+    }
 }

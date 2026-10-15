@@ -135,6 +135,9 @@ UNIT
   sudo ln -sf /etc/systemd/system/lab-agent.service rootfs/etc/systemd/system/multi-user.target.wants/lab-agent.service
   for m in proc sys dev; do sudo umount -l "rootfs/$m"; done
   trap - EXIT
+  # Name servers come from the kernel's `ip=` boot argument, which the
+  # kernel publishes in /proc/net/pnp in resolv.conf syntax.
+  sudo ln -sfn /proc/net/pnp rootfs/etc/resolv.conf
   sudo chown -R root:root rootfs
   truncate -s "$ROOTFS_SIZE" base.ext4
   sudo mkfs.ext4 -q -d rootfs -F base.ext4

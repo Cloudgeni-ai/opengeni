@@ -602,7 +602,7 @@ mod tests {
         let untrusted = NetworkConfig::default();
         let trusted = NetworkConfig {
             trusted: true,
-            blocked: vec!["35.228.188.0/24".parse().unwrap()],
+            blocked: vec!["93.184.216.0/24".parse().unwrap()],
             ..NetworkConfig::default()
         };
         for config in [&untrusted, &trusted] {
@@ -620,7 +620,7 @@ mod tests {
             assert!(untrusted.blocked().iter().any(|net| net == local));
             assert!(!trusted.blocked().iter().any(|net| net == local));
         }
-        assert!(trusted.blocked().iter().any(|net| net == "35.228.188.0/24"));
+        assert!(trusted.blocked().iter().any(|net| net == "93.184.216.0/24"));
         let rules = untrusted.sandbox_rules(1460);
         assert!(rules.contains("policy drop"));
         assert!(rules.contains("10.0.0.0/8"));
