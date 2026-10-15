@@ -11,16 +11,19 @@ describe("the macOS login agent", () => {
   const plist = macLoginAgentPlist("ai.example.desktop");
 
   test("opens the app by its bundle identifier, in the background and hidden", () => {
-    expect(strings(plist, "ProgramArguments")).toEqual([
-      "/usr/bin/open",
-      "-g",
-      "-b",
-      "ai.example.desktop",
-      "--args",
-      "--hidden",
-    ]);
+    const [shell, flag, command, bundleId] = strings(plist, "ProgramArguments");
+    expect([shell, flag, bundleId]).toEqual(["/bin/sh", "-c", "ai.example.desktop"]);
+    expect(command).toContain('exec /usr/bin/open -g -b "$0" --args --hidden');
     expect(plist).toContain("<key>RunAtLoad</key>\n  <true/>");
     expect(strings(plist, "AssociatedBundleIdentifiers")).toEqual(["ai.example.desktop"]);
+  });
+
+  test("waits for macOS to reopen apps, then leaves a running app alone", () => {
+    const command = strings(plist, "ProgramArguments")[2]!;
+    expect(command).toStartWith("sleep 5; ");
+    expect(command).toContain(
+      '/usr/bin/lsappinfo find bundleid="$0" | /usr/bin/grep -q ASN || exec',
+    );
   });
 
   test("has its own label and runs once, so unregistering it never stops the app", () => {
