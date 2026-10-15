@@ -1327,6 +1327,8 @@ Provider-normalized calls freeze nullable provider/equivalent-credit comparisons
 `priced_cost_micros` is requested price, not debit; external calls record zero.
 Telemetry/comparison prices cannot authorize capacity/debits. `agent.model.usage`
 preserves accepted billing/Gateway authority; repair prefers it over legacy inference.
+Its worker-set `purpose` names the call: `main` (the turn's own inference, including
+the aggregate fallback), `compaction` or `session-title`. Older events have none.
 
 Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before

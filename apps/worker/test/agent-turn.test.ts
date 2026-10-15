@@ -2598,6 +2598,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-1",
       usage: {
         responseId: "resp-1",
@@ -2673,6 +2674,7 @@ describe("model call usage observability", () => {
       provider: "codex-subscription",
       providerApi: "responses",
       model: "codex/gpt-5.6",
+      purpose: "main",
       sourceKey: "resp-1",
       usage: {
         responseId: "resp-1",
@@ -2723,6 +2725,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-duplicate",
       usage: { usage: { inputTokens: 10, outputTokens: 1 } },
     });
@@ -2763,6 +2766,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-write",
       usage: responseUsage,
     });
@@ -2825,6 +2829,7 @@ describe("model call usage observability", () => {
       provider: "codex-subscription",
       providerApi: "responses" as const,
       model: "codex/gpt-5.6-sol",
+      purpose: "main" as const,
       sourceKey: "aggregate-1",
       usage: { usage: aggregate },
       emittedSourceKeys: sourceKeys,
@@ -2893,6 +2898,7 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
+      purpose: "main",
       sourceKey: "resp-malformed",
       usage: responseUsage,
     });

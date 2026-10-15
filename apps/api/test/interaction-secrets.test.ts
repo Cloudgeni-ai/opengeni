@@ -251,7 +251,7 @@ describe("resolveInteractionSecretValues", () => {
   });
 
   test("a controller guard refuses before any reference is used", async () => {
-    const reference = "{" + "{secret:Email code/password}}";
+    const reference = "{".repeat(2) + "secret:Email code/password}}";
     const base = port({ "Email code/password": "424242" });
     const resolved: string[] = [];
     const spied: InteractionSecretsPort = {

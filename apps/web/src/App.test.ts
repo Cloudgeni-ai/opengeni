@@ -2545,7 +2545,7 @@ describe("GitHub repository resources", () => {
     });
   });
 
-  describe("duplicate repository attachments (OPE-804)", () => {
+  describe("duplicate repository attachments", () => {
     const opengeni = githubRepository({
       id: 1212552738,
       installationId: 143685771,

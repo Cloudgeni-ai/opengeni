@@ -1,4 +1,4 @@
-// OPE-804: a new-task draft restored while the GitHub catalog is still loading
+// A new-task draft restored while the GitHub catalog is still loading
 // must not end up with the same repository attached twice. This drives the
 // production repository picker and the catalog reconciliation hook together:
 // restore -> catalog arrives -> picker shows the repository selected -> one
@@ -300,7 +300,7 @@ function updateBeforePassiveEffects(update: () => void): void {
 
 const sortedIds = (ids: Set<number>) => [...ids].sort((left, right) => left - right);
 
-describe("repository picker catalog reconciliation (OPE-804)", () => {
+describe("repository picker catalog reconciliation", () => {
   test("a draft restored before the catalog loads shows the repository selected once", async () => {
     // Draft hydration runs while the GitHub catalog is unknown.
     const restored = repositorySelectionFromResources(
