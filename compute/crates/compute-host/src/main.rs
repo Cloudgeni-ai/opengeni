@@ -12,7 +12,7 @@ use compute_host::client::Client;
 use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule, step_name,
 };
-use compute_host::{Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve};
+use compute_host::{Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -78,9 +78,12 @@ struct ServeArgs {
         default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0"
     )]
     boot_args: String,
-    /// Archive into this directory (enables the archived and remote levels).
+    /// Where archived sandboxes go, which enables the archived and remote
+    /// levels: a directory, or object storage as `gs://bucket/prefix`,
+    /// `az://container/prefix` or `s3://bucket/prefix`, with credentials
+    /// from the environment or the machine's own identity.
     #[arg(long)]
-    store: Option<PathBuf>,
+    store: Option<String>,
     /// A step concurrency limit such as `restore=32`; repeatable.
     #[arg(long = "limit", value_parser = parse_limit)]
     limits: Vec<(Step, u32)>,
@@ -264,9 +267,12 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
     };
-    match args.store {
-        Some(dir) => run_agent(config, engine, Directory::new(dir), socket).await,
-        None => run_agent(config, engine, NoStore, socket).await,
+    let Some(store) = args.store else {
+        return run_agent(config, engine, NoStore, socket).await;
+    };
+    match Chunked::from_url(&store)? {
+        Some(chunked) => run_agent(config, engine, chunked, socket).await,
+        None => run_agent(config, engine, Directory::new(store), socket).await,
     }
 }
 

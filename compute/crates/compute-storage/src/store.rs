@@ -14,6 +14,9 @@ use crate::{
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
 };
 
+/// Largest pointer object accepted; pointers only name manifests.
+pub const MAX_POINTER_BYTES: usize = 64 * 1024;
+
 /// Use provider-native environment or machine-identity credentials.
 pub fn provider_from_env(kind: &str) -> Result<Arc<dyn ObjectStore>> {
     match kind {
@@ -43,7 +46,60 @@ impl ChunkStore {
     }
 
     fn path(&self, key: &str) -> Path {
-        self.prefix.child(key)
+        // One path part per segment: a single `child` would escape the
+        // slashes, so `chunks/v1/...` would become one opaque name that
+        // prefix listings (and garbage collection) cannot walk.
+        key.split('/')
+            .fold(self.prefix.clone(), |path, part| path.child(part))
+    }
+
+    fn pointer_path(&self, name: &str) -> Result<Path> {
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(Error::Invalid("pointer name"));
+        }
+        Ok(self.path(&format!("pointers/v1/{name}")))
+    }
+
+    /// Replaces the small mutable object `name`, such as the record of which
+    /// manifests make up a sandbox's current copy. Chunks and manifests are
+    /// immutable; pointers are the only objects ever overwritten, so write one
+    /// only after everything it names is stored.
+    pub async fn put_pointer(&self, name: &str, bytes: Vec<u8>) -> Result<()> {
+        if bytes.len() > MAX_POINTER_BYTES {
+            return Err(Error::Invalid("pointer too large"));
+        }
+        self.backend
+            .put(&self.pointer_path(name)?, Bytes::from(bytes).into())
+            .await?;
+        Ok(())
+    }
+
+    /// Reads pointer `name`, or `None` when there is none.
+    pub async fn get_pointer(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        match self.backend.get(&self.pointer_path(name)?).await {
+            Ok(result) => {
+                if result.meta.size > MAX_POINTER_BYTES as u64 {
+                    return Err(Error::Invalid("pointer too large"));
+                }
+                Ok(Some(result.bytes().await?.to_vec()))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Deletes pointer `name`; succeeds when there is none. What it named
+    /// stays until garbage collection finds nothing refers to it.
+    pub async fn delete_pointer(&self, name: &str) -> Result<()> {
+        match self.backend.delete(&self.pointer_path(name)?).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Returns true only when this call created the object; never overwrites it.
@@ -133,6 +189,48 @@ impl ChunkStore {
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
+
+    #[tokio::test]
+    async fn pointers_are_replaced_read_and_deleted() {
+        let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("tenant/test"));
+        assert_eq!(store.get_pointer("a1").await.unwrap(), None);
+        store.put_pointer("a1", b"one".to_vec()).await.unwrap();
+        store.put_pointer("a1", b"two".to_vec()).await.unwrap();
+        assert_eq!(
+            store.get_pointer("a1").await.unwrap(),
+            Some(b"two".to_vec())
+        );
+        store.delete_pointer("a1").await.unwrap();
+        store.delete_pointer("a1").await.unwrap();
+        assert_eq!(store.get_pointer("a1").await.unwrap(), None);
+        assert!(store.put_pointer("../escape", Vec::new()).await.is_err());
+        assert!(
+            store
+                .put_pointer("big", vec![0; MAX_POINTER_BYTES + 1])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn keys_nest_under_the_prefix_so_they_can_be_listed() {
+        use futures::TryStreamExt as _;
+
+        let backend = Arc::new(InMemory::new());
+        let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+        let chunk = EncodedChunk::encode(&[5; 4096], 1).unwrap();
+        store.put_chunk(&chunk).await.unwrap();
+        let listed: Vec<_> = backend
+            .list(Some(&Path::from("tenant/test/chunks/v1")))
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].location.as_ref(),
+            format!("tenant/test/{}", chunk.object_key())
+        );
+    }
 
     #[tokio::test]
     async fn deduplicates_and_verifies() {

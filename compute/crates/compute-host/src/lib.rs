@@ -11,6 +11,7 @@
 //! terminals, file access and previews are all that one primitive.
 
 mod agent;
+mod chunked;
 pub mod client;
 pub mod guest_ports;
 mod layout;
@@ -21,6 +22,7 @@ mod step;
 mod store;
 
 pub use agent::{Handle, HostAgent, HostConfig, HostError, Lease};
+pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
 pub use server::serve;
 pub use store::{Directory, NoStore, SavedFiles, Store};

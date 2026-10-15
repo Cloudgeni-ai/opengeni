@@ -270,12 +270,17 @@ name = "compute-host"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "clap",
  "compute-core",
  "compute-engine",
+ "compute-storage",
+ "futures",
+ "object_store",
  "rustix",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",

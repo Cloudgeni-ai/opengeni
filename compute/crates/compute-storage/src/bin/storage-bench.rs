@@ -31,7 +31,7 @@ fn main() -> Result<()> {
         compute_storage::fiemap::candidates(&before, &after)?
     };
     #[cfg(not(target_os = "linux"))]
-    let candidates = vec![0..size];
+    let candidates: Vec<_> = std::iter::once(0..size).collect();
     let fiemap_ms = t.elapsed().as_secs_f64() * 1000.0;
     let candidate_bytes: u64 = candidates.iter().map(|r| r.end - r.start).sum();
     let mut changed = Vec::new();
