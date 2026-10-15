@@ -214,7 +214,12 @@ export async function settleSitePlatformCharges(
   if (mode === "usage_only") return;
   const billable = sitePlatformBillableMicros(deps.settings, usage);
   if (mode === "shadow" ? billable <= usage.shadowMicros : billable <= usage.chargedMicros) return;
-  const attribution = currentCreditDebitAttribution();
+  // Platform usage is the Sites' own running cost (gateway request reports,
+  // visitors' Site SQL and Site Data): a service debit unless a person's
+  // request is in scope.
+  const current = currentCreditDebitAttribution();
+  const attribution: ReturnType<typeof currentCreditDebitAttribution> =
+    current.kind === "unknown" ? { kind: "service" } : current;
   try {
     await claimSitePlatformCharge(deps.db, scope, {
       billableMicros: billable,
@@ -363,10 +368,7 @@ export async function sitePlatformBrakeToolRefusal(check: () => Promise<void>) {
     await check();
     return null;
   } catch (error) {
-    if (
-      error instanceof ApiHttpError &&
-      error.details?.code === SITE_PLATFORM_BRAKE_ERROR_CODE
-    )
+    if (error instanceof ApiHttpError && error.details?.code === SITE_PLATFORM_BRAKE_ERROR_CODE)
       return {
         isError: true as const,
         content: [

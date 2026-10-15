@@ -219,15 +219,14 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     requireSiteManager(management);
     const publication = await getSitePublication(deps.db, management.scope, management.record.id);
     if (!publication)
-      throw sitePublishingError(404, "not_found", "site_not_published", "This Site is not published");
-    try {
-      await applySitePublishWarningFix(
-        deps,
-        grant,
-        management.scope,
-        management.record.id,
-        fix,
+      throw sitePublishingError(
+        404,
+        "not_found",
+        "site_not_published",
+        "This Site is not published",
       );
+    try {
+      await applySitePublishWarningFix(deps, grant, management.scope, management.record.id, fix);
     } catch (error) {
       if (error instanceof SiteFixTargetMissing)
         throw sitePublishingError(404, "not_found", "site_fix_target_missing", error.message);

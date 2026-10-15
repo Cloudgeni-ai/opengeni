@@ -1676,11 +1676,7 @@ const SettingsSchema = z.object({
   sitesPlatformAllowanceRequests: z.coerce.number().int().nonnegative().default(1_000_000),
   sitesPlatformAllowanceSqlRowsRead: z.coerce.number().int().nonnegative().default(10_000_000),
   sitesPlatformAllowanceSqlRowsWritten: z.coerce.number().int().nonnegative().default(100_000),
-  sitesPlatformAllowanceStorageBytes: z.coerce
-    .number()
-    .int()
-    .nonnegative()
-    .default(1_000_000_000),
+  sitesPlatformAllowanceStorageBytes: z.coerce.number().int().nonnegative().default(1_000_000_000),
   // Unit prices in micro-USD: twice the Cloudflare list price (Workers
   // requests, Durable Object SQLite rows and storage), covering host lookups,
   // Durable Object requests and duration, and API work.
@@ -5136,9 +5132,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sitesPlatformAllowanceSqlRowsWritten: optional(
       "OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_WRITTEN",
     ),
-    sitesPlatformAllowanceStorageBytes: optional(
-      "OPENGENI_SITES_PLATFORM_ALLOWANCE_STORAGE_BYTES",
-    ),
+    sitesPlatformAllowanceStorageBytes: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_STORAGE_BYTES"),
     sitesPlatformPriceMicrosPerMillionRequests: optional(
       "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_REQUESTS",
     ),

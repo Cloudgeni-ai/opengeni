@@ -108,7 +108,7 @@ export function registerSitePublicationTools(
     "site_publication_update",
     {
       description:
-        'Publish a Site on its own hostname (https://<label>.<sites domain>/), or change its publication. The Site must be shared with the workspace. access: members (workspace members sign in), invited (members and invitedEmails), public (anyone; may be off on this deployment). status: "unpublished" stops serving it and keeps its hostname. Audience rules: people outside the workspace (invited and public) get only the Site\'s own data (Site Data, Site SQL named queries and the page), never workspace tools or subscription models; for invited or public Sites build on Site Data, Site SQL and the page, and set collection guest access and query audiences to match. The answer lists readiness warnings: fix them before sharing (site_publication_apply_fix applies a safe fix). The agent\'s use by people outside the workspace counts toward the Site limit ($10 a month by default); members are never limited. Changing limitProfile or giving the agent workspace tools (agent.tools, for members only) needs a workspace admin; agent.guestTools is retired and ignored. Public puts the Site on the internet; make a Site public only when the person asked for it.',
+        "Publish a Site on its own hostname (https://<label>.<sites domain>/), or change its publication. The Site must be shared with the workspace. access: members (workspace members sign in), invited (members and invitedEmails), public (anyone; may be off on this deployment). status: \"unpublished\" stops serving it and keeps its hostname. Audience rules: people outside the workspace (invited and public) get only the Site's own data (Site Data, Site SQL named queries and the page), never workspace tools or subscription models; for invited or public Sites build on Site Data, Site SQL and the page, and set collection guest access and query audiences to match. The answer lists readiness warnings: fix them before sharing (site_publication_apply_fix applies a safe fix). The agent's use by people outside the workspace counts toward the Site limit ($10 a month by default); members are never limited. Changing limitProfile or giving the agent workspace tools (agent.tools, for members only) needs a workspace admin; agent.guestTools is retired and ignored. Public puts the Site on the internet; make a Site public only when the person asked for it.",
       inputSchema: contractToolInput(
         z4.object({ siteId: SiteIdInput, ...UpsertSitePublicationRequest.shape }),
       ),
@@ -151,7 +151,12 @@ export function registerSitePublicationTools(
       requireSiteManager(management);
       const publication = await getSitePublication(deps.db, management.scope, management.record.id);
       if (!publication)
-        throw sitePublishingError(404, "not_found", "site_not_published", "This Site is not published");
+        throw sitePublishingError(
+          404,
+          "not_found",
+          "site_not_published",
+          "This Site is not published",
+        );
       try {
         await applySitePublishWarningFix(
           deps,

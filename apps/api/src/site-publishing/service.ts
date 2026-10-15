@@ -15,7 +15,7 @@ import {
   type SitePublication,
   type UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
-import type { AccessGrant, SiteAccessMode } from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
 import {
   assertNotSiteClampedAgent,
   currentSiteSessionOrigin,
@@ -58,12 +58,8 @@ import { ApiHttpError } from "../http/api-error";
 import { siteDataRole } from "../site-data/service";
 import { createSiteContentScanner, type SiteContentScanner } from "./content-scanner";
 import { createSiteEdgeSync, type SiteEdgeSync } from "./edge-sync";
-import {
-  effectiveSiteLimits,
-  sourceSiteLimitProfile,
-  storedSiteLimitProfileKind,
-} from "./limits";
-import { requireSitePlatformOpen } from "./platform-usage";
+import { effectiveSiteLimits, sourceSiteLimitProfile, storedSiteLimitProfileKind } from "./limits";
+import { requireSitePlatformOpen, requireSitePlatformQuota } from "./platform-usage";
 import { readSitePublicationReadiness } from "./readiness";
 
 /**
@@ -1086,8 +1082,12 @@ export async function upsertSitePublicationForManager(
     existing?.status !== "suspended";
   // The Opengeni-wide platform brake stops new publications (already
   // published Sites keep serving, and can still be changed or unpublished).
-  if (activating && existing?.status !== "active")
+  // In credits mode, so does a used-up monthly allowance the workspace
+  // cannot pay for (402 site_platform_quota_exhausted).
+  if (activating && existing?.status !== "active") {
     await requireSitePlatformOpen(deps, "publish");
+    await requireSitePlatformQuota(deps, scope, ["requests", "storage_bytes"]);
+  }
   if (activating && !siteServable(record))
     throw sitePublishingError(
       409,

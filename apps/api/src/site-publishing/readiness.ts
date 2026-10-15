@@ -126,8 +126,7 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
     add({
       code: "workspace_tools_members_only",
       message: `The page uses workspace tools, which ${who} can't use.`,
-      suggestion:
-        "Build the page on Site Data and Site SQL instead, or publish to members only.",
+      suggestion: "Build the page on Site Data and Site SQL instead, or publish to members only.",
     });
   if (input.agent.enabled && (input.agent.tools?.length ?? 0) > 0)
     add({

@@ -134,7 +134,12 @@ export async function resolveSiteRuntimeViewer(
 ): Promise<SiteRuntimeViewer> {
   const { scope, publication, site } = host;
   const denied = () =>
-    sitePublishingError(403, "forbidden", "site_access_denied", "You do not have access to this Site");
+    sitePublishingError(
+      403,
+      "forbidden",
+      "site_access_denied",
+      "You do not have access to this Site",
+    );
   const access = effectiveSiteAccess(publication.access, deps.settings);
   if (fields.session) {
     const session = await findSiteViewerSession(deps.db, scope, {
@@ -153,7 +158,10 @@ export async function resolveSiteRuntimeViewer(
       if (!kind) throw denied();
       const viewAs = !options.ignoreViewAs && kind === "member" ? (session.viewAs ?? null) : null;
       if (viewAs === "public") {
-        if (!siteGuestsAllowed(publication.access, deps.settings) || !SITE_VISITOR_ID.test(fields.visitor))
+        if (
+          !siteGuestsAllowed(publication.access, deps.settings) ||
+          !SITE_VISITOR_ID.test(fields.visitor)
+        )
           throw denied();
         return {
           kind: "guest",
@@ -207,7 +215,12 @@ export async function resolveSiteRuntimeViewer(
 }
 
 /** What a viewer cannot do on a Site: 403 with `details.code` `not_available_for_viewer`. */
-export type SiteViewerFeature = "agent" | "agent_model" | "workspace_tools" | "site_data" | "site_sql";
+export type SiteViewerFeature =
+  | "agent"
+  | "agent_model"
+  | "workspace_tools"
+  | "site_data"
+  | "site_sql";
 
 export function siteNotAvailableForViewer(
   feature: SiteViewerFeature,

@@ -325,10 +325,7 @@ export async function claimSitePlatformCharge(
   });
 }
 
-async function inPlatformLane<T>(
-  db: Database,
-  fn: (tx: Database) => Promise<T>,
-): Promise<T> {
+async function inPlatformLane<T>(db: Database, fn: (tx: Database) => Promise<T>): Promise<T> {
   return await db.transaction(async (raw) => {
     const tx = raw as unknown as Database;
     await enterPlatformLane(tx);

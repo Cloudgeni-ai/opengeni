@@ -508,7 +508,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (method === "POST" && suffix === "/auth/exchange") return await exchange(request);
     if (method === "POST" && suffix === "/auth/logout") return await logout(request);
     if (method === "POST" && suffix === "/auth/view-as") return await viewAs(request);
-    if (method === "POST" && suffix === "/platform/requests") return await platformRequests(request);
+    if (method === "POST" && suffix === "/platform/requests")
+      return await platformRequests(request);
     if (method === "POST" && suffix === "/site/reports") return await report(request);
     const tool = /^\/tools\/([a-z]+)$/u.exec(suffix);
     if (method === "POST" && tool) return await tools(request, tool[1]!);
@@ -828,7 +829,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const credited = (models: string[]) =>
       models.filter((model) => !isSubscriptionBilledModel([], model));
     if (choice.kind === "unavailable")
-      return { allowed: credited(named(limits.agentModels ?? [])), default: null, unavailable: true };
+      return {
+        allowed: credited(named(limits.agentModels ?? [])),
+        default: null,
+        unavailable: true,
+      };
     const model = choice.kind === "fallback" ? choice.model : agentModel;
     return {
       allowed: credited(named([model, ...(limits.agentModels ?? [])])),
@@ -934,26 +939,26 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       await runSiteSqlRoute(() =>
         runSiteSqlForViewer(() =>
           runSiteSqlQuery(
-          deps,
-          publishedViewer(host, viewer),
-          siteId,
-          name,
-          input.params ?? {},
-          { frameSiteId: siteId },
-          {
-            profileKind,
-            beforeWrite: async () => {
-              if (viewer.kind === "guest")
-                await enforceSiteRuntimeViewerRate(
-                  deps,
-                  host,
-                  viewer,
-                  request.fields,
-                  "guest_writes",
-                  guestWritesPerMinute,
-                );
+            deps,
+            publishedViewer(host, viewer),
+            siteId,
+            name,
+            input.params ?? {},
+            { frameSiteId: siteId },
+            {
+              profileKind,
+              beforeWrite: async () => {
+                if (viewer.kind === "guest")
+                  await enforceSiteRuntimeViewerRate(
+                    deps,
+                    host,
+                    viewer,
+                    request.fields,
+                    "guest_writes",
+                    guestWritesPerMinute,
+                  );
+              },
             },
-          },
           ),
         ),
       ),

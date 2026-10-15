@@ -89,7 +89,8 @@ export async function siteAgentMayEditArtifacts(
     if (
       version?.requestedTools.some(
         (tool) =>
-          tool.serverId === "opengeni" && SITE_AGENT_EDITABLE_ARTIFACT_WRITE_TOOLS.has(tool.toolName),
+          tool.serverId === "opengeni" &&
+          SITE_AGENT_EDITABLE_ARTIFACT_WRITE_TOOLS.has(tool.toolName),
       )
     )
       return true;

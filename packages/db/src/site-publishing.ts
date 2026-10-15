@@ -1302,7 +1302,9 @@ export async function getSiteWorkspaceMemberPermissions(
       sql`select permissions from workspace_memberships
         where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
     );
-    return row ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions)) : null;
+    return row
+      ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions))
+      : null;
   });
 }
 
