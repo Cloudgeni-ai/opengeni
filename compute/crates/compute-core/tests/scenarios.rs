@@ -673,3 +673,141 @@ fn work_inside_a_running_sandbox_keeps_it_awake_but_never_wakes_it() {
         Level::Saved
     );
 }
+
+#[test]
+fn readings_taken_together_are_all_applied_before_any_timer_fires() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, State::RUNNING, recommended());
+    rig.add(2, State::RUNNING, recommended());
+    // Both reach their pause threshold just as one sweep finds both busy.
+    rig.at(secs(10));
+    let busy = |id| Input::Busy {
+        sandbox: SandboxId(id),
+    };
+    let mut out = Vec::new();
+    rig.host.handle_all(rig.now, [busy(1), busy(2)], &mut out);
+    assert_eq!(out, [], "neither busy sandbox may pause");
+    assert_eq!(rig.host.next_deadline(), Some(At::from_duration(secs(20))));
+}
+
+#[test]
+fn a_resume_that_fails_stops_trusting_the_saved_copy() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Local), recommended());
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    let actions = rig.finish(1, op, Outcome::Failed(Failure::Transient));
+    // The guest may have run before the failure, so the copy may be stale.
+    assert_eq!(rig.state(1), paused(Durability::Volatile));
+    assert!(notices(&actions, 1).contains(&Notice::State(paused(Durability::Volatile))));
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Resume, "the retry resumes the same VM");
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), State::RUNNING);
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Pause);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), paused(Durability::Volatile));
+    let (step, _) = only_start(&rig.tick_at_deadline());
+    assert_eq!(
+        step,
+        Step::Save,
+        "nothing to fall back on until saved again"
+    );
+}
+
+#[test]
+fn a_resume_that_fails_with_its_process_gone_boots_from_the_files() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Remote), recommended());
+    rig.add(2, paused(Durability::Local), recommended());
+    let (_, first) = only_start(&rig.touch(1));
+    let (_, second) = only_start(&rig.touch(2));
+
+    // The process ends as the resume fails.
+    let actions = rig.finish(1, first, Outcome::Failed(Failure::MemoryLost));
+    assert!(notices(&actions, 1).contains(&Notice::MemoryLost));
+    assert_eq!(rig.state(1), state(Level::Saved, Durability::Local, false));
+    assert_eq!(only_start(&actions).0, Step::Boot);
+
+    // The process exit is noticed first, then the resume fails.
+    assert_nothing_started(&rig.send(Input::Lost {
+        sandbox: SandboxId(2),
+    }));
+    let actions = rig.finish(2, second, Outcome::Failed(Failure::Transient));
+    assert!(notices(&actions, 2).contains(&Notice::MemoryLost));
+    assert_eq!(rig.state(2), state(Level::Saved, Durability::Local, false));
+}
+
+#[test]
+fn a_sleep_request_made_during_a_wake_applies_after_it() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, saved(), SleepPolicy::NEVER);
+    let hold = Input::Hold {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+        until: None,
+        priority: Priority::Interactive,
+    };
+    let (step, restore) = only_start(&rig.send(hold));
+    assert_eq!(step, Step::Restore);
+    assert_nothing_started(&rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    }));
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Saved
+    );
+    assert_nothing_started(&rig.finish(1, restore, Outcome::Done));
+    assert_eq!(rig.state(1), State::RUNNING, "the wake is served first");
+
+    let (step, op) = only_start(&rig.send(Input::Release {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+    }));
+    assert_eq!(step, Step::Pause);
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Save);
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Drop);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), saved());
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Running
+    );
+}
+
+#[test]
+fn memory_pressure_cancels_an_archive_that_would_hold_it_up() {
+    let mut rig = pressured_rig();
+    let rules = SleepRules {
+        compress_under_pressure: false,
+        ..SleepRules::RECOMMENDED
+    };
+    rig.add(
+        1,
+        paused(Durability::Local),
+        SleepPolicy::new(rules).unwrap(),
+    );
+    rig.send(Input::Resident {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    rig.at(secs(120));
+    let (step, archive) = only_start(&rig.send(Input::Tick));
+    assert_eq!(step, Step::Archive);
+    assert_eq!(
+        rig.send(Input::Memory { available: GIB }),
+        [Action::Cancel {
+            sandbox: SandboxId(1),
+            op: archive
+        }]
+    );
+    let (step, drop) = only_start(&rig.finish(1, archive, Outcome::Cancelled));
+    assert_eq!(step, Step::Drop, "the saved copy is enough to free memory");
+    let (step, _) = only_start(&rig.finish(1, drop, Outcome::Done));
+    assert_eq!(rig.state(1), saved());
+    assert_eq!(step, Step::Archive, "archiving starts again from the copy");
+}

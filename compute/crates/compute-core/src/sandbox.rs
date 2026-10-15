@@ -125,6 +125,27 @@ impl Sandbox {
         self.wake.is_some() || !self.holds.is_empty()
     }
 
+    /// Whether the sandbox is needed awake or a step is already waking it.
+    pub fn waking(&self) -> bool {
+        self.wants_awake() || self.in_flight.is_some_and(|flight| flight.step.wakes())
+    }
+
+    /// Asks for at least `level` of depth; [`Level::Running`] or a level
+    /// already reached withdraws the request. A sandbox on its way up counts
+    /// as running, so the request applies once the wake it serves is done.
+    pub fn request_sleep(&mut self, level: Level) {
+        let current = if self.waking() {
+            Level::Running
+        } else {
+            self.state.level
+        };
+        self.requested = if level > current {
+            level
+        } else {
+            Level::Running
+        };
+    }
+
     /// Whether ending the VM process right now would free its memory without
     /// losing anything or keeping anyone waiting.
     pub fn reclaimable(&self) -> bool {

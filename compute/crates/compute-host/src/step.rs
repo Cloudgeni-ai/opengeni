@@ -270,9 +270,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
-    /// Copies the saved state to the store. A wake cancels it at once: the
-    /// store names a new copy only after all of it is stored, so stopping
-    /// part-way leaves the previous copy in place.
+    /// Copies the saved state to the store. The copy runs to its end even
+    /// when cancelled: abandoning the future would leave the store writing in
+    /// the background after the step claimed to have stopped, so it reports
+    /// its real outcome instead.
     async fn archive(&self) -> Outcome {
         let files = self.saved_files();
         let marker: &[u8] = if files.memory.is_some() {
@@ -280,14 +281,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         } else {
             b"disk"
         };
-        tokio::select! {
-            biased;
-            () = self.cancel.cancelled() => return Outcome::Cancelled,
-            result = self.store.archive(self.id, &files) => {
-                if let Err(error) = result {
-                    return failure(&error);
-                }
-            }
+        if let Err(error) = self.store.archive(self.id, &files).await {
+            return failure(&error);
         }
         match write_atomic(&self.paths.archived, marker) {
             Ok(()) => Outcome::Done,

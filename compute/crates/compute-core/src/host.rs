@@ -5,7 +5,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::ids::{HoldId, OpId, SandboxId};
-use crate::level::{Level, Priority, State, Step};
+use crate::level::{Durability, Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
 use crate::sandbox::{InFlight, QueueKey, Retry, Sandbox, Wake};
 use crate::time::At;
@@ -95,7 +95,8 @@ pub enum Input {
     /// rules say, for example to drain the host or to benchmark a level.
     /// It waits while something holds the sandbox awake; a later
     /// [`Input::Touch`] or [`Input::Hold`] cancels it, and so does reaching
-    /// the level. [`Level::Running`] cancels an earlier request.
+    /// the level. A request made while the sandbox is waking applies once
+    /// that wake is done. [`Level::Running`] cancels an earlier request.
     Sleep {
         /// The sandbox.
         sandbox: SandboxId,
@@ -254,7 +255,23 @@ impl Host {
 
     /// Applies `input` at time `now` and appends the resulting actions.
     pub fn handle(&mut self, now: At, input: Input, out: &mut Vec<Action>) {
-        self.apply(now, input, out);
+        self.handle_all(now, [input], out);
+    }
+
+    /// Applies several inputs observed together at time `now`, then decides
+    /// once. Use it for readings taken in one sweep, such as [`Input::Busy`]
+    /// for every sandbox that used its processors: deciding after each one
+    /// would let a sleep timer fire for a sandbox whose own reading has not
+    /// been applied yet.
+    pub fn handle_all(
+        &mut self,
+        now: At,
+        inputs: impl IntoIterator<Item = Input>,
+        out: &mut Vec<Action>,
+    ) {
+        for input in inputs {
+            self.apply(now, input, out);
+        }
         self.fire_timers(now);
         self.reconcile_dirty(now, out);
         if self.relieve_pressure() {
@@ -409,11 +426,7 @@ impl Host {
             }
             Input::Sleep { sandbox, level } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.requested = if level > slot.state.level {
-                        level
-                    } else {
-                        Level::Running
-                    };
+                    slot.request_sleep(level);
                     self.mark(sandbox);
                 }
             }
@@ -442,6 +455,12 @@ impl Host {
         slot.in_flight = None;
         self.in_flight[flight.step.index()] -= 1;
         let before = slot.state;
+        if flight.step == Step::Resume && outcome != Outcome::Done {
+            // The guest may have run before the resume failed, so a saved
+            // copy may no longer match the VM's disk. The host agent stops
+            // trusting it before resuming; the next sleep saves afresh.
+            slot.state = State::new(slot.state.level, Durability::Volatile, false);
+        }
         let mut lost = false;
         match outcome {
             Outcome::Done => {
@@ -603,6 +622,19 @@ impl Host {
                     op: flight.op,
                 });
             }
+        } else if slot.floor != Level::Running
+            && let Some(flight) = &mut slot.in_flight
+            && flight.step == Step::Archive
+            && !flight.cancel_sent
+        {
+            // Archiving frees no memory and is not needed to free it, so it
+            // must not hold up the memory pressure demands. It starts again
+            // from the saved copy once the pressure is relieved.
+            flight.cancel_sent = true;
+            out.push(Action::Cancel {
+                sandbox: id,
+                op: flight.op,
+            });
         }
         let wanted = slot
             .next_step(now)

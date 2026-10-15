@@ -655,9 +655,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     fn input(&mut self, input: Input) {
+        self.inputs([input]);
+    }
+
+    /// Feeds inputs observed together to the core, which decides once after
+    /// all of them.
+    fn inputs(&mut self, inputs: impl IntoIterator<Item = Input>) {
         let now = self.now();
         let mut actions = std::mem::take(&mut self.actions);
-        self.core.handle(now, input, &mut actions);
+        self.core.handle_all(now, inputs, &mut actions);
         for action in actions.drain(..) {
             self.execute(action);
         }
@@ -1134,34 +1140,38 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn sample(&mut self) {
         self.available_memory = read_available_memory();
-        if let Some(rule) = self.busy {
-            self.sample_busy(rule);
-        }
+        let mut batch: Vec<Input> = match self.busy {
+            Some(rule) => self
+                .sample_busy(rule)
+                .into_iter()
+                .map(|sandbox| Input::Busy { sandbox })
+                .collect(),
+            None => Vec::new(),
+        };
         // Resident sizes always, so the status can report reclaimable
         // memory; they go in before the host total so relief is planned
-        // from fresh numbers.
-        let readings: Vec<(SandboxId, u64)> = self
-            .slots
-            .iter()
-            .filter_map(|(id, slot)| {
-                let live = slot.vm.as_ref()?;
-                Some((*id, self.engine.resident_bytes(&live.vm).ok()?))
+        // from fresh numbers. The whole sweep is one batch, so no sleep
+        // timer fires between two readings taken at the same moment.
+        batch.extend(self.slots.iter().filter_map(|(id, slot)| {
+            let live = slot.vm.as_ref()?;
+            let bytes = self.engine.resident_bytes(&live.vm).ok()?;
+            Some(Input::Resident {
+                sandbox: *id,
+                bytes,
             })
-            .collect();
-        for (sandbox, bytes) in readings {
-            self.input(Input::Resident { sandbox, bytes });
-        }
+        }));
         if self.pressure
             && let Some(available) = self.available_memory
         {
-            self.input(Input::Memory { available });
+            batch.push(Input::Memory { available });
         }
+        self.inputs(batch);
     }
 
-    /// Reports running sandboxes whose VMs used enough processor time over
-    /// the last window. A window starts afresh whenever the sandbox is not
-    /// simply running, so time spent waking or pausing never counts.
-    fn sample_busy(&mut self, rule: BusyRule) {
+    /// Finds running sandboxes whose VMs used enough processor time over the
+    /// last window. A window starts afresh whenever the sandbox is not simply
+    /// running, so time spent waking or pausing never counts.
+    fn sample_busy(&mut self, rule: BusyRule) -> Vec<SandboxId> {
         let now = Instant::now();
         let mut busy = Vec::new();
         for (id, slot) in &mut self.slots {
@@ -1195,9 +1205,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 _ => slot.cpu = Some(fresh),
             }
         }
-        for sandbox in busy {
-            self.input(Input::Busy { sandbox });
-        }
+        busy
     }
 
     fn status(&self) -> HostStatus {

@@ -173,8 +173,12 @@ impl World {
     }
 
     fn send(&mut self, input: Input) {
+        self.send_all(vec![input]);
+    }
+
+    fn send_all(&mut self, inputs: Vec<Input>) {
         let mut out = Vec::new();
-        self.host.handle(self.now, input, &mut out);
+        self.host.handle_all(self.now, inputs, &mut out);
         for action in out {
             self.act(action);
         }
@@ -260,6 +264,10 @@ impl World {
             && truth.op.is_some_and(|(op, _)| op == pending.op)
         {
             truth.op = None;
+            if pending.step == Step::Resume && outcome != Outcome::Done {
+                // The guest may have run, so the saved copy is stale.
+                truth.state = State::new(truth.state.level, Durability::Volatile, false);
+            }
             match outcome {
                 Outcome::Done => truth.state = pending.step.apply(truth.state),
                 Outcome::Cancelled | Outcome::Failed(Failure::Transient) => {}
@@ -450,7 +458,16 @@ impl World {
                 let level = self.rng.pick(&Level::ALL);
                 self.send(Input::Sleep { sandbox: id, level });
             }
-            98..100 => self.send(Input::Busy { sandbox: id }),
+            98..100 => {
+                // One sweep of processor readings arrives as one batch.
+                let mut batch = vec![Input::Busy { sandbox: id }];
+                for _ in 0..self.rng.below(3) {
+                    if let Some(sandbox) = self.random_sandbox() {
+                        batch.push(Input::Busy { sandbox });
+                    }
+                }
+                self.send_all(batch);
+            }
             _ => {}
         }
     }

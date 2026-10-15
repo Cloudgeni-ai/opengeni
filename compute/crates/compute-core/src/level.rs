@@ -170,7 +170,9 @@ impl State {
 /// so waking always takes precedence over putting sandboxes to sleep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Step {
-    /// Restart the processors: Paused or Compressed to Running.
+    /// Restart the processors: Paused or Compressed to Running. A resume
+    /// that does not finish still leaves the sandbox without a saved copy
+    /// of its current state: the guest may have run before it failed.
     Resume,
     /// Start a VM from the saved memory image: Saved or Archived to Running.
     Restore,
