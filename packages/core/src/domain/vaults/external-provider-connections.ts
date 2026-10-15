@@ -1,4 +1,5 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { isDeepStrictEqual } from "node:util";
 import {
   ExternalVaultProviderKind,
   VaultProviderCredentials,
@@ -308,12 +309,29 @@ export async function externalVaultProviderForConnection(input: {
           ),
         ),
       });
-      if (!updated)
-        throw new VaultProviderError(
-          "provider_conflict",
-          "This vault connection changed while its credentials were renewed.",
-        );
-      connection = updated;
+      if (updated) {
+        connection = updated;
+        return;
+      }
+      // Another API/worker may already have persisted the identical SDK key
+      // rotation. Reconcile that exact result without retrying a stale write.
+      // Loading again rechecks current reach, status, ownership and credentials.
+      const live = await loadExternalVaultConnection(input.db, input.settings, input);
+      if (
+        isDeepStrictEqual(
+          rotationConnectionIdentity(live.connection),
+          rotationConnectionIdentity(connection),
+        ) &&
+        isDeepStrictEqual(live.currentCredentials, credentials) &&
+        isDeepStrictEqual(live.pendingCredentials, loaded.pendingCredentials)
+      ) {
+        connection = live.connection;
+        return;
+      }
+      throw new VaultProviderError(
+        "provider_conflict",
+        "This vault connection changed while its credentials were renewed.",
+      );
     },
   });
   if (prepared.provider.id !== input.provider) throw unavailable();
@@ -356,4 +374,18 @@ export async function externalVaultProviderForConnection(input: {
         throw unavailable();
     },
   });
+}
+
+/** Credential rotation changes generations and observation timestamps, not identity or grants. */
+function rotationConnectionIdentity(connection: ConnectionMetadata) {
+  const {
+    version: _version,
+    connectionAuthorityGeneration: _authorityGeneration,
+    updatedAt: _updatedAt,
+    updatedBySubjectId: _updatedBy,
+    lastUsedAt: _lastUsedAt,
+    lastRefreshAt: _lastRefreshAt,
+    ...identity
+  } = connection;
+  return identity;
 }

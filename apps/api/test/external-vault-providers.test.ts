@@ -9,16 +9,19 @@ import {
 import {
   type ExternalVaultProviderFactories,
   externalVaultConnectionDetails,
+  externalVaultProviderForConnection,
   loadExternalVaultConnection,
+  type StoredVaultProviderCredentials,
 } from "@opengeni/core";
 import {
   createDb,
   decryptEnvironmentValue,
   getConnectionMetadata,
+  transitionConnectionState,
   type DbClient,
 } from "@opengeni/db";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
-import { VaultProviderError } from "@opengeni/vaults";
+import { createProviderCallBudget, VaultProviderError } from "@opengeni/vaults";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -175,6 +178,83 @@ const installBody = (ownership = "workspace") => ({
 });
 
 describe("generic external vault connection lifecycle", () => {
+  test("identical concurrent key rotations reconcile, but changed keys or metadata do not", async () => {
+    if (!shared) return;
+    const native = await scope();
+    const f = fixture();
+    const installed = await f.request(
+      native,
+      "/vault-providers/connections",
+      "POST",
+      installBody(),
+    );
+    expect(installed.status).toBe(201);
+    const { connectionId } = (await installed.json()) as { connectionId: string };
+    const persist: ((next: StoredVaultProviderCredentials) => Promise<void>)[] = [];
+    const open = () =>
+      externalVaultProviderForConnection({
+        db: client.db,
+        settings,
+        workspaceId: native.workspaceId,
+        subjectId: "person-a",
+        connectionId,
+        provider: "external",
+        factory: async (input) => {
+          persist.push(input.persistCredentials!);
+          return {
+            credentials: input.credentials as StoredVaultProviderCredentials,
+            provider: { ...createFakeVaultProvider(), id: "external" },
+          };
+        },
+      });
+    const first = await open();
+    const second = await open();
+    const next: StoredVaultProviderCredentials = {
+      provider: "external",
+      endpoint: installBody().credentials.endpoint,
+      signingSecret: randomBytes(32).toString("hex"),
+    };
+    await persist[0]!(next);
+    await persist[1]!(next);
+    const ctx = { connectionId, budget: createProviderCallBudget(50) };
+    await expect(first.listVaults(ctx)).resolves.toEqual([]);
+    await expect(second.listVaults(ctx)).resolves.toEqual([]);
+    await open();
+    await open();
+    const newer = { ...next, signingSecret: randomBytes(32).toString("hex") };
+    await persist[2]!(newer);
+    await expect(
+      persist[3]!({ ...next, signingSecret: randomBytes(32).toString("hex") }),
+    ).rejects.toMatchObject({ code: "provider_conflict" });
+    await open();
+    const current = await getConnectionMetadata(
+      client.db,
+      native.workspaceId,
+      connectionId,
+      "person-a",
+    );
+    expect(current).not.toBeNull();
+    await transitionConnectionState(client.db, {
+      workspaceId: native.workspaceId,
+      connectionId,
+      visibleToSubjectId: "person-a",
+      expectedVersion: current!.version,
+      metadata: { ...current!.metadata, label: "Changed by another operation" },
+    });
+    await expect(persist[4]!(newer)).rejects.toMatchObject({ code: "provider_conflict" });
+    const saved = await loadExternalVaultConnection(client.db, settings, {
+      workspaceId: native.workspaceId,
+      connectionId,
+      subjectId: "person-a",
+      provider: "external",
+    });
+    expect(saved.credentials).toEqual(newer);
+    await open();
+    expect(
+      (await f.request(native, `/vault-providers/connections/${connectionId}`, "DELETE")).status,
+    ).toBe(200);
+    await expect(persist[5]!(newer)).rejects.toMatchObject({ code: "provider_auth_expired" });
+  }, 30_000);
   test("catalog reports deployment availability before the first connection", async () => {
     if (!shared) return;
     const native = await scope();
