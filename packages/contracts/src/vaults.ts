@@ -661,6 +661,8 @@ export const VaultProviderConnectionSummary = /* @__PURE__ */ defineSchema(() =>
     planTier: z.enum(["family", "teams", "business"]).optional(),
     /** Unavailable means this deployment cannot run the adapter, not bad credentials. */
     available: z.boolean(),
+    /** Setup material is saved, but provider verification has not completed. */
+    verificationStatus: z.enum(["ready", "pending"]).optional(),
   }),
 );
 export type VaultProviderConnectionSummary = z.infer<typeof VaultProviderConnectionSummary>;
@@ -679,6 +681,9 @@ export const InstallVaultProviderResponse = /* @__PURE__ */ defineSchema(() =>
     provider: ExternalVaultProviderKind,
     operations: VaultProviderOperations,
     vaults: z.array(ProviderVaultMeta),
+    /** Retry verification on this connection; never replay a consumed bootstrap token. */
+    discoveryPending: z.boolean().optional(),
+    errorCode: z.string().max(100).optional(),
   }),
 );
 export type InstallVaultProviderResponse = z.infer<typeof InstallVaultProviderResponse>;

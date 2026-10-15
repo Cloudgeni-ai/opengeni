@@ -356,6 +356,7 @@ export type VaultProviderConnectionSummary = {
   operations: VaultProviderOperations;
   planTier?: OnePasswordPlanTier | undefined;
   available: boolean;
+  verificationStatus?: "ready" | "pending" | undefined;
 };
 export type ListVaultProviderConnectionsResponse = {
   connections: VaultProviderConnectionSummary[];
@@ -366,5 +367,7 @@ export type InstallVaultProviderResponse = {
   provider: ExternalVaultProviderKind;
   operations: VaultProviderOperations;
   vaults: ProviderVaultMeta[];
+  discoveryPending?: boolean | undefined;
+  errorCode?: string | undefined;
 };
 export type DisconnectVaultProviderResponse = { unlinkedVaultIds: string[] };

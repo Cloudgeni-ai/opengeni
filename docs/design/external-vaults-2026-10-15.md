@@ -88,6 +88,16 @@ Reconnect must retain stable links and reject an unexpected account switch.
 Disconnect unlinks locally and revokes stored access; it never deletes a
 vendor vault or item.
 
+Setup reserves a credential-empty, `needs_reauth` connection before contacting
+the provider. This supplies a stable native connection identity to a remote
+host. Bound Keeper configuration is encrypted and version-CAS persisted as
+soon as binding succeeds, before a later validation/listing can fail. Pending
+connections cannot resolve secrets or be linked. The connection list exposes
+`verificationStatus: pending`; a separate authorized Verify action resumes
+using the saved configuration, never the consumed one-time token. If no usable
+credential was produced, revoke the reservation. Return saved-but-pending
+explicitly rather than telling the person to repeat a destructive bootstrap.
+
 ## 7. Remote protocol and authority
 
 Use a versioned JSON POST envelope, signed with the existing exact-body HMAC
