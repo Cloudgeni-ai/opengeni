@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   type FileAsset,
 } from "@opengeni/contracts";
@@ -59,6 +60,71 @@ describe("attachment refs after compaction", () => {
     expect(seeded[1]).toBe(history[1]!);
     expect(history[0]).toEqual(user("Inspect this file"));
     expect(withCurrentUserAttachmentRefs([catalog()], [current])).toEqual([catalog()]);
+  });
+
+  test("an existing catalog keeps its exact earlier projection", async () => {
+    const project = createModelHistoryAttachmentProjector({
+      supportsImageInput: true,
+    });
+    // Text already sent to a provider must replay byte for byte (prompt cache).
+    expect(await project([catalog()])).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "[Opengeni retained attachment references]",
+          },
+          {
+            type: "input_text",
+            text:
+              `[Attachment: fileId=${archived.fileId}; mountDirectory=.opengeni/files/${archived.fileId}. ` +
+              "Use the existing file there, or call files__files_get_download_url with this fileId and " +
+              "download it with the shell.]",
+          },
+        ],
+        [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      },
+    ]);
+  });
+
+  test("a dated catalog replays its frozen text without per-file receipts or lookups", async () => {
+    let lookups = 0;
+    const project = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true },
+      async () => {
+        lookups++;
+        return new Uint8Array();
+      },
+      async () => {
+        lookups++;
+        return [];
+      },
+    );
+    const dated = {
+      type: "message",
+      role: "system",
+      content: "[Opengeni earlier attachments]\n- fileId=example",
+      [MODEL_ATTACHMENT_REFS_FIELD]: [archived],
+      [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      [MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD]: true,
+    };
+    const projected = await project([dated, user("Continue")]);
+    expect(projected[0]).toEqual({
+      type: "message",
+      role: "system",
+      content: "[Opengeni earlier attachments]\n- fileId=example",
+      [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      [MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD]: true,
+    });
+    expect(projected[1]).toEqual(user("Continue"));
+    expect(lookups).toBe(0);
+    // The archived ref still counts as retained, so it is never re-stamped
+    // onto the latest message as if it had just been attached.
+    expect(withCurrentUserAttachmentRefs([dated, user("Continue")], [archived])[1]).toEqual(
+      user("Continue"),
+    );
   });
 });
 

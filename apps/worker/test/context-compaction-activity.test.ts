@@ -982,6 +982,99 @@ describe("standalone context compaction execution", () => {
     });
   });
 
+  test("an earlier attachment is catalogued with its upload time before the latest request", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Attachment catalog test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Attachment catalog test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const fileId = crypto.randomUUID();
+    const message = (position: number, role: string, content: string, extra = {}) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      position,
+      item: { type: "message", role, content, ...extra },
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.files).values({
+        id: fileId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        status: "ready",
+        filename: "dashboard.png",
+        safeFilename: "dashboard.png",
+        contentType: "image/png",
+        sizeBytes: 10,
+        bucket: "test",
+        objectKey: `test/${fileId}`,
+        createdAt: new Date("2026-10-09T08:15:00.000Z"),
+      });
+      await db.insert(schema.sessionHistoryItems).values([
+        message(0, "user", "look at this dashboard", {
+          [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId }],
+        }),
+        message(1, "user", "x".repeat(100_000)),
+        message(2, "assistant", "working notes ".repeat(20_000)),
+        message(3, "user", "how does the pricing work?"),
+      ]);
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 100_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+      },
+      null,
+      async () => "The user shared a dashboard and then asked about pricing.",
+      { force: true, trigger: "operator" },
+    );
+
+    expect(outcome).toMatchObject({ compacted: true });
+    const active = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    const catalog = active.findIndex((item) => JSON.stringify(item).includes(fileId));
+    const latest = active.findIndex((item) => item.content === "how does the pricing work?");
+    expect(catalog).toBeGreaterThan(-1);
+    expect(latest).toBeGreaterThan(catalog);
+    expect(active[catalog]).toMatchObject({ role: "system" });
+    expect(String(active[catalog]!.content)).toContain(
+      `- fileId=${fileId}; uploaded Friday 2026-10-09 08:15 UTC;`,
+    );
+  });
+
   test("a failed standalone summary consumes the request once and preserves active history", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
