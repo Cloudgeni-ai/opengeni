@@ -5,6 +5,9 @@ import type { ProcessResult } from "./runner";
  * pass-cli 2.4.2 prints anyhow errors as `Error: <context>\n\nCaused by:\n …`.
  * API failures surface as `Could not perform operation. Reason: <ProtonApiErrorCode>`
  * (pass/src/macros.rs `assert_response!`) or `Invalid status code: <status>`.
+ * The reason form appears whenever a non-2xx body carries a `Code` that
+ * pass/src/error.rs `ProtonApiErrorCode` knows, whatever the HTTP status, so
+ * a reason alone does not prove a 4xx; the status form appears otherwise.
  * stderr is never returned to callers; only the classification below is.
  */
 const REASON = /Could not perform operation\. Reason: ([A-Za-z]+)/;
@@ -42,9 +45,81 @@ export function protonStatus(stderr: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-/** True when stderr shows the server answered (so the outcome is known). */
-export function hasServerVerdict(stderr: string): boolean {
-  return protonReason(stderr) !== null || protonStatus(stderr) !== null;
+/**
+ * Statuses with which Proton refuses a request before applying it: a bad or
+ * invalid request (400, 422), an unauthorised or forbidden one (401, 403), a
+ * missing target (404), a conflict (409), an oversized payload (413) or
+ * throttling (429). Any other status (500, 502, 503, 504 from Proton or a
+ * proxy, or anything unexpected) may follow an applied change.
+ */
+export const PROTON_DEFINITE_REJECTION_STATUSES: ReadonlySet<number> = new Set([
+  400, 401, 403, 404, 409, 413, 422, 429,
+]);
+
+/**
+ * `ProtonApiErrorCode` names (pass-cli 2.4.2 pass/src/error.rs) that describe
+ * a refusal of the request itself: permission, a missing or deleted target, a
+ * stale revision or key, a lock, a quota, or invalid input. Server-side
+ * failures that may follow a partial write (`Timeout`, `InsertFailed`,
+ * `SelectFailed`, `UploadFailure`, the `Provider*` family) and any name not
+ * listed here leave a mutation's outcome unknown.
+ */
+export const PROTON_DEFINITE_REJECTION_REASONS: ReadonlySet<string> = new Set([
+  ...PERMISSION_REASONS,
+  ...NOT_FOUND_REASONS,
+  ...CONFLICT_REASONS,
+  ...QUOTA_REASONS,
+  "SessionLocked",
+  "IsLocked",
+  "InvalidSignature",
+  "MissingKeys",
+  "RotationPayloadIncomplete",
+  "IncompatibleState",
+  "BadLockId",
+  "InvalidRequirements",
+  "InvalidValue",
+  "InvalidType",
+  "ValueOutOfBounds",
+  "NotNull",
+  "NotEmpty",
+  "NotTrue",
+  "NotFalse",
+  "NotEqual",
+  "Equal",
+  "NotSameAsField",
+  "RegexError",
+  "InvalidNumber",
+  "InvalidLength",
+  "TooShort",
+  "TooLong",
+  "HashNotEqual",
+  "EmailFormat",
+  "IpFormat",
+  "UrlFormat",
+  "CurrencyFormat",
+  "LocaleFormat",
+  "DateFormat",
+  "JsonFormat",
+  "MimeFormat",
+  "PhoneFormat",
+  "DomainFormat",
+  "PgpFormat",
+  "IdFormat",
+  "HexFormat",
+  "Base64Format",
+  "VersionFormat",
+  "ImageFormat",
+]);
+
+/**
+ * True when stderr shows Proton refused the request without applying it: a
+ * known rejection reason, or (when no reason was decoded) a rejection status.
+ */
+export function isDefiniteRejection(stderr: string): boolean {
+  const reason = protonReason(stderr);
+  if (reason !== null) return PROTON_DEFINITE_REJECTION_REASONS.has(reason);
+  const status = protonStatus(stderr);
+  return status !== null && PROTON_DEFINITE_REJECTION_STATUSES.has(status);
 }
 
 /**
@@ -147,10 +222,12 @@ const PRE_FLIGHT =
 
 /**
  * Whether a failed mutation is known not to have taken effect. Only a server
- * verdict inside the mutation's own error context (`Error creating …`,
- * `Error trashing item`) or a pre-flight marker counts; a timeout, a signal,
- * a cancelled call or an error after the request (for example the agent
- * monitor event sent after a create) leaves the outcome unknown.
+ * rejection inside the mutation's own error context (`Error creating …`,
+ * `Error trashing item`) with a known rejection reason or status, or a
+ * pre-flight marker, counts. A server error (500, 502, 503, 504 or any other
+ * status or reason outside the rejection sets), a timeout, a signal, a
+ * cancelled call or an error after the request (for example the agent monitor
+ * event sent after a create) leaves the outcome unknown.
  */
 export function isDefiniteMutationFailure(result: ProcessResult, mutationContext: RegExp): boolean {
   if (result.spawnError) return true;
@@ -161,7 +238,7 @@ export function isDefiniteMutationFailure(result: ProcessResult, mutationContext
   const stderr = result.stderr;
   if (SESSION_INVALIDATED.test(stderr)) return false;
   if (PRE_FLIGHT.test(stderr)) return true;
-  return mutationContext.test(stderr) && hasServerVerdict(stderr);
+  return mutationContext.test(stderr) && isDefiniteRejection(stderr);
 }
 
 export function outcomeUnknown(subject: string): VaultProviderError {

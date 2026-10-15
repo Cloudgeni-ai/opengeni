@@ -84,8 +84,15 @@ out and refuses later calls.
   bound.
 - **Errors.** Failures map to `VaultProviderError` codes from the CLI's
   `Reason:` lines and HTTP status. Raw stderr is never surfaced. A failed
-  write is definite only when the server's verdict is tied to that write;
-  otherwise it is `provider_outcome_unknown`. A failed login is
+  write is definite only when it failed before sending (bad input, no
+  session, missing agent reason) or Proton refused that write itself: a
+  rejection status (400, 401, 403, 404, 409, 413, 422 or 429) or a known
+  rejection reason (permission, not found, stale revision, lock, quota,
+  invalid input). A 5xx, any other status, a server-failure or unrecognised
+  reason (`Timeout`, `InsertFailed`, …), a timeout or an error after the
+  request is `provider_outcome_unknown` and is never retried. The CLI prints
+  a decoded reason without its HTTP status, so a reason outside the
+  rejection list is treated as possibly applied. A failed login is
   `provider_auth_invalid` only when Proton refused the token (400, 401, 403
   or 422, or a permission or not-found reason, in the token-login context);
   local, network, server and unrecognised failures are

@@ -47,6 +47,10 @@ describe("mapProtonFailure", () => {
     ["403", failed(status("Error listing items", 403)), "provider_permission_denied"],
     ["404", failed(status("Error listing items", 404)), "provider_not_found"],
     ["503", failed(status("Error listing items", 503)), "provider_unavailable"],
+    ["500", failed(status("Error retrieving item", 500)), "provider_unavailable"],
+    ["502", failed(status("Error listing items", 502)), "provider_unavailable"],
+    ["504", failed(status("Error listing shares", 504)), "provider_unavailable"],
+    ["Timeout reason", failed(api("Error listing items", "Timeout")), "provider_unavailable"],
     [
       "item not found",
       failed("Error: Error retrieving item\n\nCaused by:\n    Item not found\n"),
@@ -138,6 +142,77 @@ describe("isDefiniteMutationFailure", () => {
       false,
     );
     expect(isDefiniteMutationFailure(failed("Your session has been invalidated\n"), create)).toBe(
+      false,
+    );
+  });
+
+  const trash = /Error trashing item/;
+  const contexts: Array<[string, RegExp]> = [
+    ["Error creating login item", create],
+    ["Error creating note item", /Error creating note item/],
+    ["Error creating custom item", /Error creating custom item/],
+    ["Error trashing item", trash],
+  ];
+
+  test("server errors inside the mutation context leave the outcome unknown", () => {
+    for (const [context, pattern] of contexts) {
+      for (const code of [500, 502, 503, 504, 302, 200, 418]) {
+        expect(isDefiniteMutationFailure(failed(status(context, code)), pattern)).toBe(false);
+      }
+      // http::StatusCode's Display form, as muon prints it.
+      expect(
+        isDefiniteMutationFailure(
+          failed(`Error: ${context}\n\nCaused by:\n    Invalid status code: 502 Bad Gateway\n`),
+          pattern,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  test("server-failure and unknown reasons leave the outcome unknown", () => {
+    // A decoded reason carries no HTTP status; these may follow a partial write.
+    for (const reason of [
+      "Timeout",
+      "InsertFailed",
+      "SelectFailed",
+      "UploadFailure",
+      "ProviderUnavailable",
+      "ProviderFailed",
+      "SomethingNew",
+    ]) {
+      for (const [context, pattern] of contexts) {
+        expect(isDefiniteMutationFailure(failed(api(context, reason)), pattern)).toBe(false);
+      }
+    }
+  });
+
+  test("only verified rejection statuses and reasons are definite", () => {
+    for (const [context, pattern] of contexts) {
+      for (const code of [400, 401, 403, 404, 409, 413, 422, 429]) {
+        expect(isDefiniteMutationFailure(failed(status(context, code)), pattern)).toBe(true);
+      }
+      for (const reason of [
+        "PermissionDenied",
+        "InsufficientScope",
+        "NotExists",
+        "DeletedShare",
+        "NotLatestRevision",
+        "AlreadyExists",
+        "NoQuotaLeft",
+        "SessionLocked",
+        "InvalidValue",
+        "TooLong",
+      ]) {
+        expect(isDefiniteMutationFailure(failed(api(context, reason)), pattern)).toBe(true);
+      }
+    }
+  });
+
+  test("a rejection outside the mutation's own context is not definite", () => {
+    expect(
+      isDefiniteMutationFailure(failed(status("Error sending monitor event", 422)), create),
+    ).toBe(false);
+    expect(isDefiniteMutationFailure(failed(status("Error trashing item", 409)), create)).toBe(
       false,
     );
   });

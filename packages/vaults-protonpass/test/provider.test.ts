@@ -733,3 +733,131 @@ describe("writes", () => {
     expect(read.code).toBe("provider_unavailable");
   }, 20_000);
 });
+
+describe("mutation outcome after dispatch", () => {
+  const serverError = (context: string, code: number) =>
+    `Error: ${context}\n\nCaused by:\n    Invalid status code: ${code}\n`;
+  const creates: Array<[string, Parameters<ProtonPassVaultProvider["writeItem"]>[2]]> = [
+    [
+      "login",
+      {
+        name: "applied login",
+        type: "login",
+        websites: [],
+        fields: [{ name: "password", kind: "concealed", value: "s3cret-value" }],
+      },
+    ],
+    [
+      "note",
+      {
+        name: "applied note",
+        type: "note",
+        websites: [],
+        fields: [{ name: "note", kind: "concealed", value: "body" }],
+      },
+    ],
+    [
+      "custom",
+      {
+        name: "applied custom",
+        type: "api_key",
+        websites: [],
+        fields: [{ name: "value", kind: "concealed", value: "sk_test_x" }],
+      },
+    ],
+  ];
+  const titles = (fake: FakeCli) =>
+    fake.state().items[RW]!.map((item) => (item.content as { title: string }).title);
+
+  for (const code of [500, 502, 503, 504]) {
+    for (const [kind, input] of creates) {
+      test(`a ${kind} create applied and then answered ${code} is unknown and not retried`, async () => {
+        const { fake, provider } = setup((state) => {
+          state.failures.push({
+            match: `item create ${kind}`,
+            afterEffect: true,
+            stderr: serverError(`Error creating ${kind} item`, code),
+          });
+        });
+        const error = await errorOf(provider.writeItem(ctx(), RW, input));
+        expect(error.code).toBe("provider_outcome_unknown");
+        expect(error.message).not.toContain("Invalid status code");
+        expect(titles(fake).filter((title) => title === input.name)).toHaveLength(1);
+        expect(commands(fake).filter((command) => command.startsWith("item create"))).toHaveLength(
+          1,
+        );
+      });
+    }
+
+    test(`a trash applied and then answered ${code} is unknown and not retried`, async () => {
+      const { fake, provider } = setup((state) => {
+        state.failures.push({
+          match: "item trash",
+          afterEffect: true,
+          stderr: serverError("Error trashing item", code),
+        });
+      });
+      const error = await errorOf(provider.archiveItem(ctx(), RW, "loginItem1"));
+      expect(error.code).toBe("provider_outcome_unknown");
+      const item = fake.state().items[RW]!.find((candidate) => candidate.id === "loginItem1")!;
+      expect(item.state).toBe("Trashed");
+      expect(commands(fake).filter((command) => command.startsWith("item trash"))).toHaveLength(1);
+    });
+  }
+
+  test("a server-failure reason after a create is unknown", async () => {
+    const { fake, provider } = setup((state) => {
+      state.failures.push({
+        match: "item create note",
+        afterEffect: true,
+        stderr:
+          "Error: Error creating note item\n\nCaused by:\n    Could not perform operation. Reason: InsertFailed\n",
+      });
+    });
+    const error = await errorOf(provider.writeItem(ctx(), RW, creates[1]![1]));
+    expect(error.code).toBe("provider_outcome_unknown");
+    expect(commands(fake).filter((command) => command.startsWith("item create"))).toHaveLength(1);
+  });
+
+  test("verified rejections stay definite, apply nothing and are not retried", async () => {
+    const cases: Array<[string, string]> = [
+      [serverError("Error creating note item", 422), "provider_unavailable"],
+      [serverError("Error creating note item", 409), "provider_conflict"],
+      [serverError("Error creating note item", 429), "provider_rate_limited"],
+      [
+        "Error: Error creating note item\n\nCaused by:\n    Could not perform operation. Reason: NoQuotaLeft\n",
+        "provider_unavailable",
+      ],
+    ];
+    for (const [stderr, code] of cases) {
+      const { fake, provider } = setup((state) => {
+        state.failures.push({ match: "item create note", stderr });
+      });
+      const error = await errorOf(provider.writeItem(ctx(), RW, creates[1]![1]));
+      expect(error.code).toBe(code as never);
+      expect(titles(fake)).not.toContain("applied note");
+      expect(commands(fake).filter((command) => command.startsWith("item create"))).toHaveLength(1);
+    }
+    const { fake, provider } = setup((state) => {
+      state.failures.push({ match: "item trash", stderr: serverError("Error trashing item", 403) });
+    });
+    const error = await errorOf(provider.archiveItem(ctx(), RW, "loginItem1"));
+    expect(error.code).toBe("provider_permission_denied");
+    const item = fake.state().items[RW]!.find((candidate) => candidate.id === "loginItem1")!;
+    expect(item.state).toBe("Active");
+    expect(commands(fake).filter((command) => command.startsWith("item trash"))).toHaveLength(1);
+  });
+
+  test("reads keep ordinary semantics for the same server errors", async () => {
+    for (const code of [500, 502, 503, 504]) {
+      const { provider } = setup((state) => {
+        state.failures.push({
+          match: "item view",
+          stderr: serverError("Error retrieving item", code),
+        });
+      });
+      const error = await errorOf(provider.readFields(ctx(), RW, "loginItem1", ["login.password"]));
+      expect(error.code).toBe("provider_unavailable");
+    }
+  });
+});
