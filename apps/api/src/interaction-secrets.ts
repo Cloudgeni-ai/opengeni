@@ -249,8 +249,12 @@ type PasskeySessionState = {
  * (leases last ten minutes and renew on use, Q-32). */
 const passkeySessions = new Map<string, PasskeySessionState>();
 
+/** The latest pending sync per BrowserSession; later syncs chain after it. */
+const passkeySyncTails = new Map<string, Promise<void>>();
+
 export function resetPasskeySessionCacheForTests(): void {
   passkeySessions.clear();
+  passkeySyncTails.clear();
 }
 
 /** One lease holder per BrowserSession: every target in it shares the set. */
@@ -273,8 +277,30 @@ function isUnsupportedSync(error: unknown): boolean {
  * happened since the last sync. Best effort: a failure is logged and never
  * fails the surrounding action. Unacknowledged events stay in browserd and
  * are retried on the next sync.
+ *
+ * Syncs for one BrowserSession run one at a time, in call order, so a caller
+ * may start the write-back after an action without awaiting it: the next
+ * action's sync waits for it instead of racing it on the same events.
  */
-export async function syncBrowserPasskeys(input: {
+export function syncBrowserPasskeys(input: PasskeySyncInput): Promise<PasskeySyncResult> {
+  const previous = passkeySyncTails.get(input.browserSessionId);
+  const run = (previous ?? Promise.resolve()).then(() => syncBrowserPasskeysNow(input));
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  passkeySyncTails.set(input.browserSessionId, tail);
+  void tail.then(() => {
+    if (passkeySyncTails.get(input.browserSessionId) === tail) {
+      passkeySyncTails.delete(input.browserSessionId);
+    }
+  });
+  return run;
+}
+
+type PasskeySyncResult = { saved: number; asserted: number } | null;
+
+type PasskeySyncInput = {
   port: InteractionSecretsPort | null | undefined;
   grant: AccessGrant;
   browserSessionId: string;
@@ -284,7 +310,9 @@ export async function syncBrowserPasskeys(input: {
   refresh?: boolean;
   now?: () => number;
   log?: InteractionSecretsLog;
-}): Promise<{ saved: number; asserted: number } | null> {
+};
+
+async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeySyncResult> {
   const store = input.port?.passkeys;
   if (!store) return null;
   const principal = attemptSecretPrincipal(input.grant);
