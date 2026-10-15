@@ -21,8 +21,8 @@ desktop app by pointing the kit at its own web app and branding.
 | Native code | Electron APIs first; `objc-js` for small macOS gaps; a typed native module for anything larger. |
 | Look | Inset traffic lights and standard sidebar vibrancy on macOS; the page's own title row under the system caption buttons on Windows; the system title bar on Linux. No Liquid Glass. |
 | Accounts | Several accounts on several servers, each in its own isolated browser session. |
-| Local machine | "Use this computer" installs (if needed) and connects the connected-machine agent in one click, using the deployment's own signed installer. The agent keeps its own updater and service. |
-| Background | The agent keeps running after the window closes, with a menu bar / tray item and a pause control. |
+| Local machine | "Use this computer" connects this computer in one click. The app runs the connected-machine agent itself, as its own child process, so there is one app to install, quit and grant permissions to. Headless machines keep the standalone agent service. |
+| Background | The agent keeps running after the window closes, with a menu bar / tray item and a pause control. While this computer is connected the app opens at login, hidden. |
 | Packaging | electron-builder: DMG (Developer ID, notarized), NSIS (Authenticode once a signing identity exists), AppImage plus deb and rpm. |
 | Updates | electron-updater for the shell; the web content updates with the server; the agent keeps its own signed updater. |
 | Out of scope now | Global quick-ask hotkey, offline use, Mac App Store, Liquid Glass. |
@@ -38,7 +38,7 @@ desktop app by pointing the kit at its own web app and branding.
 │ ┌──────┴──────────────────────────────┐   ┌───────────────┐  │
 │ │ web content per account             │   │ opengeni-agent│  │
 │ │ https://<server>/  (desktop layout) │   │ (Rust, signed)│  │
-│ │ sandboxed, context-isolated         │   │ user service  │  │
+│ │ sandboxed, context-isolated         │   │ child process │  │
 │ └─────────────────────────────────────┘   └───────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -144,33 +144,84 @@ workspace, exactly like mobile. Back and forward work inside the window.
 
 ## This computer
 
-The app does not carry its own copy of the agent. It uses the agent the
-deployment already ships, so there is one signed agent, one updater and one
-service per machine, whether it was set up from the app or from the one-line
-installer.
+Revised 2026-10-15. The first release installed the standalone agent as a
+separate background service. That made the computer one more thing to
+understand: macOS asked people to grant Screen Recording and Accessibility to
+an "Agent" app they never opened, quitting Opengeni left a second program
+running, and two programs updated on their own schedules.
 
-1. After sign-in the app offers "Use this computer".
-2. The app asks the server for a single-use personal enroll token
-   (`scope: "user"`). If the agent is installed, the app runs
+### What the agent needs
+
+- To run while the person works, including with the window closed, and again
+  after they log in.
+- On macOS, the Screen Recording, Accessibility and Input Monitoring
+  permissions. Input Monitoring lets the agent notice the person's own mouse
+  and keyboard so it never races them. macOS charges these permissions to the
+  *responsible* process: the app that started the process tree. A launchd job
+  is its own responsible process, so a separate agent service is always asked
+  about under its own name.
+- On Windows, the person's interactive desktop session, where CUA sees and
+  drives their windows.
+- To stay compatible with every server it serves, which may run different
+  versions.
+- To work on machines with no screen and no desktop app.
+
+### Design
+
+On a desktop the app is the agent's supervisor and parent process; on a
+headless machine nothing changes.
+
+1. After sign-in the app offers "Use this computer". The app asks the server
+   for a single-use personal enroll token (`scope: "user"`) and runs
    `opengeni-agent connect --non-interactive` with the token in the
-   environment, never on the command line, then starts the service. If not, it
-   downloads the server's `install.sh` or `install.ps1` and runs it with the
-   same token. Nothing to copy or paste.
-3. The agent runs as a per-user service (a launchd LaunchAgent, a systemd user
-   unit, a Windows logon task in the user's desktop session) and keeps running
-   after the window closes. If an installed agent cannot start, Connect replaces
-   it with the server's current release through the same installer.
-4. Screen control is a switch in the same dialog; the operating system's
-   Screen Recording and Accessibility prompts name the agent app.
-5. A second account gets the same one-click offer but is never connected
+   environment, never on the command line.
+2. The app starts `opengeni-agent run` as its own child process and restarts
+   it if it exits unexpectedly. macOS therefore attributes the agent's screen
+   and accessibility use to Opengeni: the prompts and System Settings show
+   "Opengeni", and one grant covers every agent helper. On Windows the agent
+   runs in the person's desktop session because the app does.
+3. While a computer is connected the app registers itself to open at login,
+   hidden in the menu bar / tray, so the agent is back after a restart.
+   Closing the window keeps both running. Quit asks for confirmation when it
+   would take this computer offline. Pause this computer stops the child
+   without unlinking.
+4. The agent binary is not inside the installer: most people never connect
+   their computer, and the agent with its browser and computer runtimes is
+   larger than the app. The app downloads it on the first Connect from the
+   server's signed agent release into the app's data folder, verifies its
+   signature and checksum, and keeps it there. Because it runs as the app's
+   child, its location does not affect permissions.
+5. The agent keeps its signed self-update, which already chooses the newest
+   release offered by any of its servers. On macOS and Linux an update execs
+   the new binary in the same process, so it stays the app's child; on Windows
+   the app starts the updated binary when the old one exits.
+6. An existing standalone install on a desktop is adopted: the app keeps its
+   connections and configuration folder, stops and removes its background
+   service (LaunchAgent, systemd user unit or logon task) so one agent runs,
+   and from then on starts it as its child. Earlier grants to the old agent
+   app are no longer used; macOS asks once for Opengeni.
+7. A second account gets the same one-click offer but is never connected
    automatically.
 
-The menu bar / tray item shows whether the computer is connected and offers
-Open, Pause this computer, Resume and Quit. Pause stops the service without
-unlinking the computer. An existing agent install is adopted as it is: its
-connections are kept and shown.
+Screen control is a switch in the Connect dialog.
 
-Headless machines keep the one-line installer and need no desktop app.
+The menu bar / tray item shows whether the computer is connected and offers
+Open, Pause this computer, Resume and Quit.
+On macOS it also lists any permission the agent still lacks and opens that
+pane of System Settings; a grant takes effect without restarting the app.
+
+Headless machines keep the one-line installer (`install.sh`, `install.ps1`)
+and its background service, and need no desktop app.
+
+Considered and not chosen:
+
+- **Agent as a background service registered from inside the app bundle**
+  (an `SMAppService` launch agent on macOS). It survives quitting the app,
+  but macOS still treats the service as its own responsible process, so the
+  prompts would not reliably say Opengeni, and the installer would carry the
+  agent for everyone.
+- **Agent inside the installer.** Roughly doubles every download for a
+  feature most people never turn on.
 
 ## Packaging, signing and updates
 
