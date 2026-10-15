@@ -2,7 +2,7 @@
 // between the app's accounts, and telling the app which workspace is open.
 // Each renders nothing outside the desktop app.
 import type { DesktopAccountsSnapshot, ThisComputerStatus } from "@opengeni/desktop/contract";
-import { CheckIcon, LaptopIcon, LogOutIcon, PlusIcon, UsersIcon } from "lucide-react";
+import { CheckIcon, LaptopIcon, Loader2Icon, LogOutIcon, PlusIcon, UsersIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -94,6 +94,22 @@ export function DesktopThisComputerCard({ workspaceId }: { workspaceId: string }
   if (!bridge || !status) return null;
 
   if (status.state === "paused") {
+    // Resuming can take a minute when the agent has to be repaired first, so
+    // the row says what is happening instead of squeezing a busy button in.
+    if (status.busy) {
+      return (
+        <div
+          role="status"
+          className="mx-2 mt-2 flex items-center gap-2 rounded-lg border border-border bg-surface/70 px-2.5 py-2 text-xs"
+        >
+          <Loader2Icon className="size-4 shrink-0 animate-spin text-fg-muted" aria-hidden />
+          {/* leading-6 matches the Resume button's height, so the row does not jump. */}
+          <span className="min-w-0 flex-1 truncate leading-6 text-fg-label">
+            Resuming this computer…
+          </span>
+        </div>
+      );
+    }
     return (
       <div className="mx-2 mt-2 flex items-center gap-2 rounded-lg border border-border bg-surface/70 px-2.5 py-2 text-xs">
         <LaptopIcon className="size-4 shrink-0 text-fg-muted" aria-hidden />
@@ -102,7 +118,6 @@ export function DesktopThisComputerCard({ workspaceId }: { workspaceId: string }
           type="button"
           size="xs"
           variant="outline"
-          disabled={status.busy}
           onClick={() => {
             void bridge.thisComputer.resume().catch((caught: unknown) =>
               toast.error("Couldn't resume this computer", {
@@ -111,7 +126,7 @@ export function DesktopThisComputerCard({ workspaceId }: { workspaceId: string }
             );
           }}
         >
-          {status.busy ? "Resuming…" : "Resume"}
+          Resume
         </Button>
       </div>
     );
