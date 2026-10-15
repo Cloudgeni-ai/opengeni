@@ -139,10 +139,9 @@ const shots: Shot[] = [
     name: "publish-quota-refused",
     scenario: "quota",
     narrow: true,
-    ready: (page) => text(page, "used this month"),
+    ready: (page) => text(page, /is available/),
     act: async (page) => {
-      await page.getByLabel("Limit amount").first().fill("20");
-      await page.getByRole("button", { name: "Save changes" }).first().click();
+      await page.getByRole("button", { name: "Publish", exact: true }).last().click();
       await text(page, "Sites allowance used up");
       await page.evaluate(() => scrollTo(0, 0));
     },

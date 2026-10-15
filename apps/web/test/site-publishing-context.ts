@@ -123,10 +123,8 @@ const saved: Record<string, SitePublication | null> = {
       },
     ],
   }),
-  quota: publication({
-    access: "public",
-    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },
-  }),
+  // A first publish in credits mode with the monthly allowance used up and no credits.
+  quota: null,
   members: publication({
     access: "members",
     agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },

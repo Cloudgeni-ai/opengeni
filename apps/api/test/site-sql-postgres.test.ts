@@ -547,19 +547,20 @@ test("limits refuse past the monthly write cap and the storage cap", async () =>
   expect(counted.json.rows).toEqual([{ n: stored }]);
 }, 120_000);
 
-test("free, credits and unlimited profiles shape the limits", () => {
+test("standard, credits and unlimited profiles shape the limits", () => {
   const settings = testSettings({ sitesCreditsLimitMultiplier: 10 } as Partial<Settings>);
-  const free = siteSqlLimits(settings, "free");
-  expect(free).toMatchObject({
-    storageBytesPerSite: 50 * 1024 * 1024,
-    rowsReadPerSitePerMonth: 5_000_000,
-    rowsWrittenPerSitePerMonth: 100_000,
+  const standard = siteSqlLimits(settings, "standard");
+  // Rows are platform usage per workspace now: no per-Site row quotas by default.
+  expect(standard).toMatchObject({
+    storageBytesPerSite: 5 * 1024 * 1024 * 1024,
+    rowsReadPerSitePerMonth: null,
+    rowsWrittenPerSitePerMonth: null,
     callsPerMinutePerViewer: 60,
     maxRowsPerCall: 1_000,
   });
+  expect(siteSqlLimits(settings, "free")).toEqual(standard);
   expect(siteSqlLimits(settings, "credits")).toMatchObject({
-    storageBytesPerSite: 500 * 1024 * 1024,
-    rowsWrittenPerSitePerMonth: 1_000_000,
+    rowsWrittenPerSitePerMonth: null,
     callsPerMinutePerViewer: 600,
   });
   expect(siteSqlLimits(settings, "unlimited")).toMatchObject({
@@ -568,7 +569,22 @@ test("free, credits and unlimited profiles shape the limits", () => {
     storageBytesPerSite: 5 * 1024 * 1024 * 1024,
     callsPerMinutePerViewer: 600,
   });
-  expect(siteSqlLimits(settings, "custom")).toEqual(free);
+  expect(siteSqlLimits(settings, "custom")).toEqual(standard);
+  // Optional per-Site quotas still apply when configured, multiplied by credits.
+  const quotas = testSettings({
+    sitesCreditsLimitMultiplier: 10,
+    sitesSqlFreeRowsReadPerMonth: 5_000_000,
+    sitesSqlFreeRowsWrittenPerMonth: 100_000,
+    sitesSqlFreeStorageBytes: 50 * 1024 * 1024,
+  } as Partial<Settings>);
+  expect(siteSqlLimits(quotas, "standard")).toMatchObject({
+    rowsReadPerSitePerMonth: 5_000_000,
+    rowsWrittenPerSitePerMonth: 100_000,
+  });
+  expect(siteSqlLimits(quotas, "credits")).toMatchObject({
+    storageBytesPerSite: 500 * 1024 * 1024,
+    rowsWrittenPerSitePerMonth: 1_000_000,
+  });
 });
 
 test("published hosts run named queries as the verified viewer; guests only everyone", async () => {
@@ -710,7 +726,8 @@ test("published hosts run named queries as the verified viewer; guests only ever
   const guestVote = await run("cast_vote", { poll: "lunch", choice: "soup" }, guest);
   expect(guestVote.status).toBe(403);
   expect(guestVote.json.error.details).toMatchObject({
-    code: "forbidden",
+    code: "not_available_for_viewer",
+    feature: "site_sql",
     reason: "sign_in_required",
   });
   const guestMine = await run("my_vote", {}, guest);
@@ -776,7 +793,9 @@ test("published hosts run named queries as the verified viewer; guests only ever
 
   // The publication's limit profile decides the Site SQL limits.
   expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
-    rowsReadPerSitePerMonth: 5_000_000,
+    rowsReadPerSitePerMonth: null,
+    storageBytesPerSite: 5 * 1024 * 1024 * 1024,
+    callsPerMinutePerSite: 600,
   });
   const unlimited = await f.app.request(`${f.base}/${siteId}/publication`, {
     method: "PUT",
@@ -787,6 +806,7 @@ test("published hosts run named queries as the verified viewer; guests only ever
   expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
     rowsReadPerSitePerMonth: null,
     rowsWrittenPerSitePerMonth: null,
+    callsPerMinutePerSite: 6_000,
   });
 }, 120_000);
 

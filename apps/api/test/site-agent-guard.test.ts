@@ -72,11 +72,6 @@ const OPEN = [
   "POST /codemode/calls",
   "POST /document-bases/:baseId/search",
   "POST /documents/:documentId/original-file/download-url",
-  "POST /editable-artifacts",
-  "POST /editable-artifacts/:artifactId/live-ticket",
-  "POST /editable-artifacts/:artifactId/materializations",
-  "POST /editable-artifacts/:artifactId/versions",
-  "POST /editable-artifacts/imports",
   "POST /feedback",
   "POST /files/:fileId/download-url",
   "POST /files/uploads",
@@ -147,6 +142,11 @@ test("a Site-started agent's writes are exactly the allowlist; every other works
     return siteAgentMayWrite(concrete(path), method);
   });
   expect(open).toEqual(OPEN);
+  // Documents, spreadsheets and presentations are not on the static list: the
+  // guard opens them only for a Site that declares a first-party editing tool.
+  const editable = writes.filter((route) => route.includes("/editable-artifacts"));
+  expect(editable.length).toBeGreaterThan(3);
+  expect(editable.filter((route) => OPEN.includes(route))).toEqual([]);
   // Site SQL: only running a named query, as the Site's page does. Defining,
   // deleting, settings, migrations, ad hoc statements, import and reset stay closed.
   const sql = writes.filter((route) => route.includes("/sql"));

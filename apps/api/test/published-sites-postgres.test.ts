@@ -15,7 +15,9 @@ import {
   createSession,
   createSiteViewerSession,
   createWorkspace,
+  engageSitePlatformBrake,
   ensureExternalIdentity,
+  liftSitePlatformBrake,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -30,6 +32,10 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
+import {
+  evaluateSitePlatformLimit,
+  resetSitePlatformBrakeCache,
+} from "../src/site-publishing/platform-usage";
 import {
   configureSitePublishingEffects,
   scheduleSiteEdgeSync,
@@ -408,8 +414,14 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
     status: "active",
     access: "members",
     noindex: true,
-    limitProfile: { kind: "free" },
-    effectiveLimits: { requestsPerMinutePerVisitor: 120, turnsPerConversation: 20 },
+    limitProfile: { kind: "standard", overrides: null },
+    effectiveLimits: {
+      requestsPerMinutePerVisitor: 120,
+      turnsPerConversation: 50,
+      agentMicrosPerSitePerMonth: 10_000_000,
+      agentMicrosPerVisitorPerDay: null,
+    },
+    warnings: [],
     moderation: { openReports: 0, suspendedAt: null },
   });
   expect(created.json.label).toMatch(/^team-crm-[a-z0-9]{4}$/u);
@@ -473,7 +485,10 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
   expect((await f.api(f.member, "PUT", workspaceProfile, { kind: "credits" })).status).toBe(403);
   const credits = await f.api(f.admin, "PUT", workspaceProfile, { kind: "credits" });
   expect(credits.status).toBe(200);
-  expect(credits.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(100);
+  // The standard guest guard of 20 conversations, times the credits multiplier.
+  expect(credits.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(
+    20 * f.settings.sitesCreditsLimitMultiplier,
+  );
   expect((await f.api(f.member, "GET", workspaceProfile)).json.profile.kind).toBe("credits");
   // The sibling inherits the workspace default; the first Site keeps its own.
   expect((await f.publication(f.owner, sibling.id, "GET")).json.limitProfile.kind).toBe("credits");
@@ -681,7 +696,7 @@ test("site-runtime checks the gateway signature before anything else", async () 
   });
   const tools = await f.gateway(site.host, "POST", "/tools/catalog", { visitor, body: {} });
   expect(tools.status).toBe(403);
-  expect(code(tools)).toBe("site_tools_unavailable");
+  expect(code(tools)).toBe("not_available_for_viewer");
 }, 60_000);
 
 test("viewer sign-in: one-time PKCE codes bound to their host, then revocable sessions", async () => {
@@ -1046,8 +1061,8 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
   );
   expect(inspected.status, JSON.stringify(inspected.json)).toBe(200);
   expect(JSON.stringify(inspected.json)).toContain('"agentAccess":"session"');
-  // Capped by its own task usage limit: the free per-conversation budget.
-  expect(inspected.json.usageLimit).toMatchObject({ limitMicros: 20_000 });
+  // Capped by its own task usage limit: the guest per-conversation guard.
+  expect(inspected.json.usageLimit).toMatchObject({ limitMicros: 1_000_000 });
 
   // Only the viewer who started it sees it, and only on its own Site.
   const own = await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
@@ -1124,7 +1139,8 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
   const off = await start(sibling.host, { visitor, human: true });
   expect(off.status).toBe(403);
   expect(off.json.error.details).toMatchObject({
-    code: "site_agents_unavailable",
+    code: "not_available_for_viewer",
+    feature: "agent",
     reason: "agent_disabled",
   });
   await f.publication(f.owner, sibling.id, "PUT", { agent: { enabled: true } });
@@ -1584,7 +1600,7 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
 
   // Each start reserves its whole cap against the Site's month in one
   // transaction: the third gets what is left, the fourth is refused.
-  await setLimits({ agentMicrosPerSitePerMonth: 50_000 });
+  await setLimits({ agentMicrosPerSitePerMonth: 50_000, agentMicrosPerConversation: 20_000 });
   const first = await start();
   expect(first.status, JSON.stringify(first.json)).toBe(202);
   expect(await reservation(first.json.id)).toEqual({ limit: 20_000, reserved: 20_000 });
@@ -1675,17 +1691,19 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(huge.status).toBe(413);
   expect(code(huge)).toBe("site_request_too_large");
 
-  // Workspace tools act with shared connections: only an admin gives them.
+  // Workspace tools act with shared connections: only an admin gives them,
+  // and only workspace members who may use connections get them.
   const agentChange = (who: Who, agent: Record<string, unknown>) =>
     f.publication(who, site.id, "PUT", { agent });
-  for (const agent of [{ tools: ["crm"] }, { guestTools: true }]) {
-    const refused = await agentChange(f.owner, agent);
-    expect({ agent, status: refused.status, code: code(refused) }).toEqual({
-      agent,
-      status: 403,
-      code: "site_admin_required",
-    });
-  }
+  const refused = await agentChange(f.owner, { tools: ["crm"] });
+  expect({ status: refused.status, code: code(refused) }).toEqual({
+    status: 403,
+    code: "site_admin_required",
+  });
+  // The retired opt-in for everyone is accepted and ignored.
+  const optIn = await agentChange(f.owner, { guestTools: true });
+  expect(optIn.status, JSON.stringify(optIn.json)).toBe(200);
+  expect(optIn.json.agent.guestTools).toBe(false);
   for (const tool of ["bad id!", "opengeni"]) {
     const invalid = await agentChange(f.admin, { tools: [tool] });
     expect({ tool, status: invalid.status, code: code(invalid) }).toEqual({
@@ -1694,14 +1712,22 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
       code: "site_tool_invalid",
     });
   }
-  const given = await agentChange(f.admin, { tools: ["crm"] });
+  const given = await agentChange(f.admin, { tools: ["crm"], guestTools: true });
   expect(given.status, JSON.stringify(given.json)).toBe(200);
   expect(given.json.agent).toMatchObject({ tools: ["crm"], guestTools: false });
+  // A public Site whose page or assistant uses workspace tools says so.
+  expect(given.json.warnings.map((warning: { code: string }) => warning.code)).toContain(
+    "agent_tools_members_only",
+  );
   // Tools are optional references: a connection the workspace does not have
   // (or no longer has) is skipped, never a failed conversation. Which viewers
   // get them is unit-tested with siteAgentToolRefs.
   await setLimits({ agentMicrosPerSitePerMonth: 10_000_000, conversationsPerSitePerDay: 10 });
-  expect((await start()).status).toBe(202);
+  const guestStart = await start();
+  expect(guestStart.status).toBe(202);
+  const [guestRow] = await shared.admin`select tool_ids from site_runtime_conversations
+    where session_id = ${guestStart.json.id}`;
+  expect(guestRow!.tool_ids).toEqual([]);
   const memberStart = await f.gateway(site.host, "POST", "/sessions", {
     session: await f.signIn(f.member, site.host),
     body: { initialMessage: "Hi" },
@@ -1716,89 +1742,24 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   expect(removed.status).toBe(200);
   expect(removed.json.agent.tools).toBeNull();
 
-  // Opening a members Site whose tools an admin gave to everyone gives them
-  // to people outside the workspace: only an admin may.
+  // People outside the workspace never get the tools, so opening a Site with
+  // tools or inviting people to it needs no admin.
   const internal = await f.live("Internal tools", { access: "members", agent: { enabled: true } });
-  const toEveryone = await f.publication(f.admin, internal.id, "PUT", {
-    agent: { tools: ["crm"], guestTools: true },
-  });
-  expect(toEveryone.status, JSON.stringify(toEveryone.json)).toBe(200);
+  expect(
+    (await f.publication(f.admin, internal.id, "PUT", { agent: { tools: ["crm"] } })).status,
+  ).toBe(200);
   const opened = await f.publication(f.owner, internal.id, "PUT", { access: "public" });
-  expect({ status: opened.status, code: code(opened) }).toEqual({
-    status: 403,
-    code: "site_admin_required",
-  });
-  expect(opened.json.error.message).toBe(
-    "Only a workspace admin can open a Site with tools to everyone",
-  );
-  // Without tools for everyone, the owner opens it.
-  const openedWithout = await f.publication(f.owner, internal.id, "PUT", {
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  expect(opened.json).toMatchObject({
     access: "public",
-    agent: { guestTools: false },
+    agent: { tools: ["crm"], guestTools: false },
   });
-  expect(openedWithout.status, JSON.stringify(openedWithout.json)).toBe(200);
-  expect(openedWithout.json).toMatchObject({ access: "public", agent: { guestTools: false } });
-  expect((await f.publication(f.owner, internal.id, "PUT", { access: "members" })).status).toBe(
-    200,
-  );
-  expect(
-    (await f.publication(f.admin, internal.id, "PUT", { agent: { guestTools: true } })).status,
-  ).toBe(200);
-  // An admin opens it with the tools.
-  expect((await f.publication(f.admin, internal.id, "PUT", { access: "public" })).status).toBe(200);
-
-  // Invitees get the Site's tools whenever access isn't members-only (public
-  // Sites too), so while the agent has tools, giving them to more invitees
-  // needs an admin. Removing invitees or narrowing does not.
-  const team = await f.live("Team tools", { access: "members", agent: { enabled: true } });
-  const teamChange = (who: Who, body: Record<string, unknown>) =>
-    f.publication(who, team.id, "PUT", body);
-  const refusedInvite = async (body: Record<string, unknown>) => {
-    const refused = await teamChange(f.owner, body);
-    expect({ body, status: refused.status, code: code(refused) }).toEqual({
-      body,
-      status: 403,
-      code: "site_admin_required",
-    });
-    expect(refused.json.error.message).toBe(
-      "Only a workspace admin can invite people while the Site's assistant has tools",
-    );
-  };
-  expect((await teamChange(f.admin, { agent: { tools: ["crm"] } })).status).toBe(200);
-  await refusedInvite({ access: "invited", invitedEmails: ["outside@example.com"] });
-  // Switching to invited access with nobody new invited changes nobody's tools.
-  expect((await teamChange(f.owner, { access: "invited" })).status).toBe(200);
-  expect((await teamChange(f.owner, { access: "members" })).status).toBe(200);
-  // Invitees listed on a members Site get nothing until it opens, to invited
-  // or public access.
-  const unopened = await teamChange(f.owner, { invitedEmails: ["outside@example.com"] });
-  expect(unopened.status, JSON.stringify(unopened.json)).toBe(200);
-  await refusedInvite({ access: "invited" });
-  await refusedInvite({ access: "public" });
-  const openedByAdmin = await teamChange(f.admin, { access: "public" });
-  expect(openedByAdmin.status, JSON.stringify(openedByAdmin.json)).toBe(200);
-  // On a public Site, adding invitees gives them the tools.
-  await refusedInvite({ invitedEmails: ["outside@example.com", "ada@example.com"] });
-  // Narrowing to invited access, the same people however written, or fewer
-  // people: the owner may.
-  expect((await teamChange(f.owner, { access: "invited" })).status).toBe(200);
-  expect((await teamChange(f.owner, { invitedEmails: ["OUTSIDE@example.com"] })).status).toBe(200);
-  expect((await teamChange(f.owner, { invitedEmails: [] })).status).toBe(200);
-  // Once everyone on a public Site gets the tools, invitees gain nothing more.
-  expect(
-    (await teamChange(f.admin, { access: "public", agent: { guestTools: true } })).status,
-  ).toBe(200);
-  expect((await teamChange(f.owner, { invitedEmails: ["ada@example.com"] })).status).toBe(200);
-  // Without tools, the owner invites people.
-  expect(
-    (await teamChange(f.owner, { access: "invited", agent: { tools: null, guestTools: false } }))
-      .status,
-  ).toBe(200);
-  const withoutTools = await teamChange(f.owner, {
-    invitedEmails: ["ada@example.com", "outside@example.com"],
+  const invited = await f.publication(f.owner, internal.id, "PUT", {
+    access: "invited",
+    invitedEmails: ["outside@example.com"],
   });
-  expect(withoutTools.status, JSON.stringify(withoutTools.json)).toBe(200);
-  expect(withoutTools.json.invitedEmails).toEqual(["ada@example.com", "outside@example.com"]);
+  expect(invited.status, JSON.stringify(invited.json)).toBe(200);
+  expect(invited.json.invitedEmails).toEqual(["outside@example.com"]);
 }, 90_000);
 
 test("finished conversations free the Site budget; a lowered cap lowers running conversations", async () => {
@@ -1820,7 +1781,7 @@ test("finished conversations free the Site budget; a lowered cap lowers running 
     return { reserved: Number(row!.reserved_micros), limit: Number(row!.limit_micros) };
   };
   // Room for two conversations of 20_000 in the Site's month.
-  await setLimits({ agentMicrosPerSitePerMonth: 40_000 });
+  await setLimits({ agentMicrosPerSitePerMonth: 40_000, agentMicrosPerConversation: 20_000 });
   const [alice, bob, carol] = [visit(), visit(), visit()];
   const first = await start(alice);
   expect(first.status, JSON.stringify(first.json)).toBe(202);
@@ -1842,7 +1803,7 @@ test("finished conversations free the Site budget; a lowered cap lowers running 
     `/v1/workspaces/${f.workspace.id}/sessions/${second.json.id}`,
   );
   expect(usage.json.usageLimit).toMatchObject({ limitMicros: 5_000 });
-  await setLimits({ agentMicrosPerSitePerMonth: 25_000 });
+  await setLimits({ agentMicrosPerSitePerMonth: 25_000, agentMicrosPerConversation: 20_000 });
 
   // The first conversation finished (its session went idle) without anyone
   // settling it: a refused start sweeps it and then succeeds.
@@ -1876,7 +1837,9 @@ test("narrowing a Site's tools stops the conversations that hold tools they woul
   };
   await change({ tools: ["crm", "billing"], guestTools: true });
   const guest = { visitor: visitorId(), clientIp: "198.51.100.40" };
-  const member = { session: await f.signIn(f.member, site.host) };
+  // A member who may use connections (an admin), and one who may not.
+  const member = { session: await f.signIn(f.admin, site.host) };
+  const plainMember = { session: await f.signIn(f.member, site.host) };
   const start = async (who: Record<string, string>) => {
     const started = await f.gateway(site.host, "POST", "/sessions", {
       ...who,
@@ -1890,35 +1853,34 @@ test("narrowing a Site's tools stops the conversations that hold tools they woul
       ...who,
       body: { type: "user.message", payload: { text: "More" } },
     });
+  // People outside the workspace never hold workspace tools, whatever the
+  // retired opt-in said; members who may use connections hold the Site's.
   const guestChat = await start(guest);
   const memberChat = await start(member);
-  expect(await conversation(guestChat)).toEqual({
-    kind: "guest",
+  expect(await conversation(guestChat)).toEqual({ kind: "guest", tools: [], cancelled: false });
+  expect(await conversation(memberChat)).toEqual({
+    kind: "member",
     tools: ["crm", "billing"],
     cancelled: false,
   });
-  expect(await conversation(memberChat)).toMatchObject({ kind: "member", cancelled: false });
+  expect((await conversation(await start(plainMember))).tools).toEqual([]);
 
-  // Tools no longer for everyone: the guest's conversation stops and takes no
-  // more messages; the member's goes on. Nobody is signed out.
+  // The retired opt-in changes nothing.
   await change({ guestTools: false });
-  expect((await conversation(guestChat)).cancelled).toBe(true);
+  expect((await conversation(guestChat)).cancelled).toBe(false);
   expect((await conversation(memberChat)).cancelled).toBe(false);
-  const outdated = await send(guest, guestChat);
-  expect(outdated.status, JSON.stringify(outdated.json)).toBe(409);
-  expect(code(outdated)).toBe("site_conversation_outdated");
-  expect((await send(member, memberChat)).status).toBeLessThan(300);
-  // A new guest conversation starts without tools.
-  expect((await conversation(await start(guest))).tools).toEqual([]);
 
-  // A removed tool stops the member's conversation too; a new one gets what is left.
+  // A removed tool stops the member's conversation, not the guest's, which
+  // holds none; a new one gets what is left. Nobody is signed out.
   await change({ tools: ["crm"] });
   expect((await conversation(memberChat)).cancelled).toBe(true);
+  expect((await conversation(guestChat)).cancelled).toBe(false);
   expect(code(await send(member, memberChat))).toBe("site_conversation_outdated");
+  expect((await send(guest, guestChat)).status).toBeLessThan(300);
   expect((await conversation(await start(member))).tools).toEqual(["crm"]);
   const [signedIn] = await shared.admin`select count(*)::int as n from site_viewer_sessions
     where site_id = ${site.id} and revoked_at is null`;
-  expect(signedIn!.n).toBe(1);
+  expect(signedIn!.n).toBe(2);
 }, 60_000);
 
 test("abuse reports and flagged scans reach the platform, at most once an hour per Site", async () => {
@@ -2514,3 +2476,410 @@ test("agent tools read and change a Site's publication with the person's authori
     await mcp.close();
   }
 }, 60_000);
+
+test("members are never capped by a Site; people outside the workspace meet its limits", async () => {
+  const f = await fixture();
+  const outsider = (await fixture()).owner;
+  const site = await f.live("Caps", { access: "public", agent: { enabled: true } });
+  const setLimits = async (siteId: string, overrides: Record<string, unknown>) => {
+    const changed = await f.publication(f.admin, siteId, "PUT", {
+      limitProfile: { kind: "custom", overrides },
+    });
+    expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  };
+  const start = (host: string, who: { visitor?: string; session?: string }) =>
+    f.gateway(host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const refusedBudget = (result: Result) => ({
+    status: result.status,
+    code: code(result),
+    budget: result.json?.error?.details?.budget,
+  });
+  const memberSession = await f.signIn(f.member, site.host);
+  const userSession = await f.signIn(outsider, site.host);
+
+  // The Site's money is spent: guests and signed-in outsiders are refused, members are not.
+  await setLimits(site.id, { agentMicrosPerSitePerMonth: 0 });
+  const siteMonth = {
+    status: 429,
+    code: "site_budget_exhausted",
+    budget: "agent_micros_per_site_per_month",
+  };
+  expect(refusedBudget(await start(site.host, { visitor: visitorId() }))).toEqual(siteMonth);
+  expect(refusedBudget(await start(site.host, { session: userSession }))).toEqual(siteMonth);
+  const asMember = await start(site.host, { session: memberSession });
+  expect(asMember.status, JSON.stringify(asMember.json)).toBe(202);
+  // Member conversations are kept out of the Site's windows.
+  const [memberRow] = await shared.admin`select viewer_kind, budget_key
+    from site_runtime_conversations where session_id = ${asMember.json.id}`;
+  expect(memberRow).toMatchObject({ viewer_kind: "member", budget_key: "*members" });
+  const inspected = await f.api(
+    f.owner,
+    "GET",
+    `/v1/workspaces/${f.workspace.id}/sessions/${asMember.json.id}`,
+  );
+  // No Site-imposed per-conversation cap on a member's conversation.
+  expect(inspected.json.usageLimit?.limitMicros ?? null).not.toBe(0);
+
+  // The per-person limit refuses a signed-in outsider with its own budget code.
+  await setLimits(site.id, { agentMicrosPerVisitorPerDay: 0 });
+  expect(refusedBudget(await start(site.host, { session: userSession }))).toEqual({
+    status: 429,
+    code: "site_budget_exhausted",
+    budget: "agent_micros_per_visitor_per_day",
+  });
+  expect((await start(site.host, { session: memberSession })).status).toBe(202);
+  // Guests also meet the bot guards: conversations per visitor per day.
+  await setLimits(site.id, { conversationsPerVisitorPerDay: 1 });
+  const guest = visitorId();
+  expect((await start(site.host, { visitor: guest })).status).toBe(202);
+  expect(refusedBudget(await start(site.host, { visitor: guest }))).toEqual({
+    status: 429,
+    code: "site_budget_exhausted",
+    budget: "conversations_per_visitor_per_day",
+  });
+  // ...but a signed-in outsider does not.
+  expect((await start(site.host, { session: userSession })).status).toBe(202);
+  expect((await start(site.host, { session: userSession })).status).toBe(202);
+
+  // Invited people: the same Site limit; switching the agent off for people
+  // outside the workspace leaves members theirs.
+  const invited = await f.live("Invited caps", {
+    access: "invited",
+    invitedEmails: ["guest@example.com"],
+    agent: { enabled: true },
+  });
+  const token = randomBytes(32).toString("base64url");
+  await createSiteViewerSession(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    {
+      siteId: invited.id,
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+      subjectId: outsider.subjectId,
+      kind: "invited",
+      email: "guest@example.com",
+      displayName: "Invited Guest",
+      absoluteSeconds: 3_600,
+    },
+  );
+  const invitedMember = await f.signIn(f.member, invited.host);
+  await setLimits(invited.id, { agentMicrosPerSitePerMonth: 0 });
+  expect(refusedBudget(await start(invited.host, { session: token }))).toEqual(siteMonth);
+  await setLimits(invited.id, { agentsEnabled: false });
+  const off = await start(invited.host, { session: token });
+  expect(off.status).toBe(403);
+  expect(off.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "agent",
+    reason: "agent_disabled",
+  });
+  const config = await f.gateway(invited.host, "GET", "/site/config", { session: token });
+  expect(config.json.capabilities).toMatchObject({ agent: false, workspaceTools: false });
+  expect((await start(invited.host, { session: invitedMember })).status).toBe(202);
+  const memberConfig = await f.gateway(invited.host, "GET", "/site/config", {
+    session: invitedMember,
+  });
+  expect(memberConfig.json.capabilities).toMatchObject({ agent: true, viewAs: null });
+
+  // The publication reports outsiders' spend and the limits that govern them.
+  const reported = await f.publication(f.owner, site.id, "GET");
+  expect(reported.json.usage).toMatchObject({ agentMicrosThisMonth: 0, agentMicrosToday: 0 });
+  expect(reported.json.effectiveLimits.conversationsPerVisitorPerDay).toBe(1);
+}, 90_000);
+
+test("view as visitor shows a member less, never anyone more", async () => {
+  const f = await fixture();
+  const outsider = (await fixture()).owner;
+  const site = await f.live("Preview", { access: "public", agent: { enabled: true } });
+  const member = await f.signIn(f.member, site.host);
+  const visitor = visitorId();
+  const viewAs = (who: { session?: string; visitor?: string }, role: string | null) =>
+    f.gateway(site.host, "POST", "/auth/view-as", { ...who, body: { viewAs: role } });
+
+  const started = await viewAs({ session: member, visitor }, "public");
+  expect(started.status, JSON.stringify(started.json)).toBe(200);
+  expect(started.json).toEqual({ viewAs: "public" });
+  // The member now meets the Site as an anonymous visitor would.
+  const previewing = await f.gateway(site.host, "GET", "/site/config", {
+    session: member,
+    visitor,
+  });
+  expect(previewing.json.viewer.kind).toBe("guest");
+  expect(previewing.json.capabilities).toMatchObject({
+    viewAs: "public",
+    workspaceTools: false,
+    siteData: "guest",
+    sqlQueryAudiences: ["everyone"],
+  });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 0 } },
+  });
+  const capped = await f.gateway(site.host, "POST", "/sessions", {
+    session: member,
+    visitor,
+    body: { initialMessage: "Hi" },
+  });
+  expect(capped.status).toBe(429);
+  // Ending the preview restores the member.
+  expect((await viewAs({ session: member, visitor }, null)).json).toEqual({ viewAs: null });
+  const restored = await f.gateway(site.host, "GET", "/site/config", { session: member, visitor });
+  expect(restored.json.viewer.kind).toBe("member");
+  expect(restored.json.capabilities.viewAs).toBeNull();
+
+  // Nobody else may preview: signed-in outsiders and guests are refused.
+  const user = await f.signIn(outsider, site.host);
+  const asUser = await viewAs({ session: user }, "invited");
+  expect({ status: asUser.status, code: code(asUser) }).toEqual({
+    status: 403,
+    code: "site_view_as_members_only",
+  });
+  expect((await viewAs({ visitor }, "public")).status).toBeGreaterThanOrEqual(400);
+  // Previewing invited on a members-only Site would show nothing: refused on use.
+  const members = await f.live("Members only");
+  const inside = await f.signIn(f.member, members.host);
+  await f.gateway(members.host, "POST", "/auth/view-as", {
+    session: inside,
+    body: { viewAs: "invited" },
+  });
+  const denied = await f.gateway(members.host, "GET", "/site/config", { session: inside });
+  expect(denied.status).toBeGreaterThanOrEqual(400);
+}, 60_000);
+
+test("readiness warnings name what outsiders can't do and fixes apply through the ordinary APIs", async () => {
+  const f = await fixture();
+  const created = await f.api(f.owner, "POST", f.sites, {
+    title: "Deals",
+    html: `<!doctype html><h1>Deals</h1><script>
+      const rows = await site.data.collection("deals").query();
+      await site.sql.run("top_customers", {});
+    </script>`,
+    idempotencyKey: crypto.randomUUID(),
+    visibility: "workspace",
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  const siteId = String(created.json.artifact.id);
+  const defined = await f.api(f.owner, "PUT", `${f.sites}/${siteId}/data/collections/deals`, {
+    accessMode: "shared",
+  });
+  expect(defined.status, JSON.stringify(defined.json)).toBeLessThan(300);
+  const members = await f.publication(f.owner, siteId, "PUT", {});
+  expect(members.status, JSON.stringify(members.json)).toBe(201);
+  expect(members.json.warnings).toEqual([]);
+  const opened = await f.publication(f.owner, siteId, "PUT", { access: "public" });
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  const found = opened.json.warnings.find(
+    (warning: { code: string }) => warning.code === "site_data_guest_read",
+  );
+  expect(found).toMatchObject({
+    fix: { kind: "site_data_guest_access", collection: "deals", guestAccess: "read" },
+  });
+  expect(found.message).toContain("deals");
+  // A members-only manager may not apply fixes; the Site's manager may.
+  const fixed = await f.publication(f.owner, siteId, "POST", found.fix, "/fixes");
+  expect(fixed.status, JSON.stringify(fixed.json)).toBe(200);
+  expect(fixed.json.warnings.map((warning: { code: string }) => warning.code)).not.toContain(
+    "site_data_guest_read",
+  );
+  const missing = await f.publication(
+    f.owner,
+    siteId,
+    "POST",
+    { kind: "site_data_guest_access", collection: "nope", guestAccess: "read" },
+    "/fixes",
+  );
+  expect({ status: missing.status, code: code(missing) }).toEqual({
+    status: 404,
+    code: "site_fix_target_missing",
+  });
+}, 60_000);
+
+test("platform usage: gateway counts once per report, billing modes, the quota error", async () => {
+  const report = (f: Awaited<ReturnType<typeof fixture>>, reportId: string, hosts: unknown[]) =>
+    f.gateway(DOMAIN, "POST", "/platform/requests", { body: { v: 1, reportId, hosts } });
+  const usage = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const res = await f.api(
+      f.member,
+      "GET",
+      `/v1/workspaces/${f.workspace.id}/site-platform-usage`,
+    );
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    return res.json;
+  };
+  const meter = (view: any, name: string) =>
+    view.meters.find((entry: { meter: string }) => entry.meter === name);
+  const seedCredits = async (accountId: string, micros: number) => {
+    await shared.admin`insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+      values (${accountId}, 'grant', ${micros}, ${`seed:${crypto.randomUUID()}`})`;
+  };
+
+  // usage_only (the default): counted, deduplicated per report id, never refused.
+  const f = await fixture({ sitesPlatformAllowanceRequests: 10 });
+  const site = await f.live("Counted", { access: "public" });
+  const first = await report(f, "report-0001", [
+    { host: site.host.toUpperCase(), requests: 7 },
+    { host: `gone.${DOMAIN}`, requests: 3 },
+  ]);
+  expect(first.status, JSON.stringify(first.json)).toBe(200);
+  expect(first.json).toEqual({ counted: 7 });
+  expect((await report(f, "report-0001", [{ host: site.host, requests: 7 }])).json).toEqual({
+    counted: 0,
+  });
+  await report(f, "report-0002", [{ host: site.host, requests: 20 }]);
+  const plain = await usage(f);
+  expect(plain).toMatchObject({ billingMode: "usage_only", chargedMicros: 0, shadowMicros: 0 });
+  expect(meter(plain, "requests")).toMatchObject({ used: 27, allowance: 10 });
+  expect((await f.live("Still publishes")).publication.status).toBe("active");
+  // Only the gateway reports, and only on the Sites apex.
+  expect(
+    (
+      await f.gateway(site.host, "POST", "/platform/requests", {
+        body: { v: 1, reportId: "report-0003", hosts: [{ host: site.host, requests: 1 }] },
+      })
+    ).status,
+  ).toBe(400);
+  const unsigned = await f.app.request("/v1/site-runtime/platform/requests", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ v: 1, reportId: "report-0004", hosts: [] }),
+  });
+  expect(unsigned.status).toBeGreaterThanOrEqual(400);
+
+  // shadow: records what credits would charge, refuses nothing.
+  const shadow = await fixture({
+    sitesPlatformBillingMode: "shadow",
+    sitesPlatformAllowanceRequests: 10,
+  });
+  const shadowSite = await shadow.live("Shadow", { access: "public" });
+  await report(shadow, "report-0101", [{ host: shadowSite.host, requests: 1_000_010 }]);
+  const shadowed = await usage(shadow);
+  expect(shadowed.chargedMicros).toBe(0);
+  // 1,000,000 requests over the allowance at $0.60 per million.
+  expect(shadowed.shadowMicros).toBe(600_000);
+  expect((await shadow.live("Shadow publishes")).publication.status).toBe("active");
+
+  // credits: the use above the allowance is charged from credits...
+  const credits = await fixture({
+    sitesPlatformBillingMode: "credits",
+    sitesPlatformAllowanceRequests: 10,
+  });
+  await seedCredits(credits.accountId, 5_000_000);
+  const paidSite = await credits.live("Paid", { access: "public" });
+  await report(credits, "report-0201", [{ host: paidSite.host, requests: 1_000_010 }]);
+  const charged = await usage(credits);
+  expect(charged.chargedMicros).toBe(600_000);
+  const [ledger] = await shared.admin`select coalesce(sum(amount_micros), 0)::bigint as balance
+    from credit_ledger_entries where account_id = ${credits.accountId}`;
+  expect(Number(ledger!.balance)).toBe(4_400_000);
+  // ...a retried report charges nothing more...
+  await report(credits, "report-0201", [{ host: paidSite.host, requests: 1_000_010 }]);
+  expect((await usage(credits)).chargedMicros).toBe(600_000);
+  expect((await credits.live("Paid publishes")).publication.status).toBe("active");
+
+  // ...and without credits, or with overage off, a used-up allowance refuses
+  // new publications with the quota error.
+  const broke = await fixture({
+    sitesPlatformBillingMode: "credits",
+    sitesPlatformAllowanceRequests: 10,
+  });
+  const brokeSite = await broke.live("Broke", { access: "public" });
+  await report(broke, "report-0301", [{ host: brokeSite.host, requests: 11 }]);
+  const next = await broke.publish("Next");
+  const refused = await broke.publication(broke.owner, next.id, "PUT", {});
+  expect(refused.status, JSON.stringify(refused.json)).toBe(402);
+  expect(refused.json.error.details).toMatchObject({
+    code: "site_platform_quota_exhausted",
+    meter: "requests",
+    allowance: 10,
+    used: 11,
+    reason: "no_credits",
+  });
+  expect(refused.json.error.message).toContain("no credits left");
+  // Already published Sites keep serving and can still change.
+  expect(
+    (await broke.publication(broke.owner, brokeSite.id, "PUT", { noindex: false })).status,
+  ).toBe(200);
+  const noOverage = await fixture({
+    sitesPlatformBillingMode: "credits",
+    sitesPlatformAllowanceRequests: 10,
+    sitesPlatformOverageEnabled: false,
+  });
+  await seedCredits(noOverage.accountId, 5_000_000);
+  const capped = await noOverage.live("Capped", { access: "public" });
+  await report(noOverage, "report-0401", [{ host: capped.host, requests: 10 }]);
+  const blocked = await noOverage.publication(
+    noOverage.owner,
+    (await noOverage.publish("Blocked")).id,
+    "PUT",
+    {},
+  );
+  expect(blocked.status).toBe(402);
+  expect(blocked.json.error.details).toMatchObject({
+    code: "site_platform_quota_exhausted",
+    reason: "overage_disabled",
+  });
+}, 120_000);
+
+test("the platform brake: alert, engage at the monthly limit, refuse writes, operator lift", async () => {
+  // A tiny limit: $0.50 a month at $0.60 per million requests.
+  const f = await fixture({ sitesPlatformMonthlyLimitUsd: 0.5, sitesPlatformAlertPercent: 50 });
+  const site = await f.live("Busy", { access: "public", agent: { enabled: true } });
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    await f.gateway(DOMAIN, "POST", "/platform/requests", {
+      body: { v: 1, reportId: "brake-0001", hosts: [{ host: site.host, requests: 1_000_000 }] },
+    });
+    const evaluated = await evaluateSitePlatformLimit(f.deps as never);
+    expect(evaluated.limitMicros).toBe(500_000);
+    expect(evaluated.estimateMicros).toBeGreaterThanOrEqual(600_000);
+    expect(evaluated.brake.engagedBy).toBe("auto");
+    expect(warnings.some((line) => line.includes("site_platform_limit_alert"))).toBe(true);
+    expect(warnings.some((line) => line.includes("site_platform_brake_engaged"))).toBe(true);
+    resetSitePlatformBrakeCache();
+
+    // Engaged: new publications and guest agent turns are refused with 503;
+    // pages keep serving and members keep their agent.
+    const next = await f.publish("Next");
+    const publish = await f.publication(f.owner, next.id, "PUT", {});
+    expect(publish.status).toBe(503);
+    expect(code(publish)).toBe("site_platform_brake_engaged");
+    const guestTurn = await f.gateway(site.host, "POST", "/sessions", {
+      visitor: visitorId(),
+      body: { initialMessage: "Hi" },
+    });
+    expect(guestTurn.status).toBe(503);
+    expect(code(guestTurn)).toBe("site_platform_brake_engaged");
+    expect(
+      (await f.gateway(site.host, "GET", "/site/config", { visitor: visitorId() })).status,
+    ).toBe(200);
+    expect((await usage()).brake.engaged).toBe(true);
+
+    // An operator lift holds for the rest of the month, even over the limit.
+    await liftSitePlatformBrake(db.db, { by: "operator@example.com", reason: "Reviewed" });
+    resetSitePlatformBrakeCache();
+    const again = await evaluateSitePlatformLimit(f.deps as never);
+    expect(again.brake.engagedAt).toBeNull();
+    expect((await f.publication(f.owner, next.id, "PUT", {})).status).toBe(201);
+    // An operator can engage it by hand, and lift it again.
+    await engageSitePlatformBrake(db.db, { reason: "Manual check" });
+    resetSitePlatformBrakeCache();
+    const manual = await f.publication(f.owner, (await f.publish("Manual")).id, "PUT", {});
+    expect(manual.status).toBe(503);
+  } finally {
+    console.warn = warn;
+    await liftSitePlatformBrake(db.db, { by: "test", reason: "Test cleanup" });
+    resetSitePlatformBrakeCache();
+  }
+
+  async function usage() {
+    const res = await f.api(
+      f.member,
+      "GET",
+      `/v1/workspaces/${f.workspace.id}/site-platform-usage`,
+    );
+    return res.json;
+  }
+}, 90_000);

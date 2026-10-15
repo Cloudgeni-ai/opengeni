@@ -1420,7 +1420,6 @@ test("agents started from a Site write only on the allowlist; other workspace wr
     ["POST", "/codemode/calls", {}],
     ["POST", "/tools/calls", {}],
     ["POST", "/files/uploads", {}],
-    ["POST", "/editable-artifacts", {}],
     ["POST", `/published-artifacts/${own.siteId}/versions`, {}],
     ["POST", `/published-artifacts/${own.siteId}/data/query`, {}],
     ["POST", "/knowledge/entries/search", {}],
@@ -1433,6 +1432,16 @@ test("agents started from a Site write only on the allowlist; other workspace wr
     const result = await as(clampedAgent, method, path, body);
     expect({ route, refused: clampRefusal.test(result.text) }).toEqual({ route, refused: false });
   }
+  // Documents, spreadsheets and presentations open only for a published Site
+  // that declares a first-party editing tool; this Site declares none.
+  const editable = await as(clampedAgent, "POST", "/editable-artifacts", {});
+  expect(editable.status).toBe(403);
+  expect(editable.text).toContain(
+    "documents, spreadsheets or presentations the Site did not declare",
+  );
+  expect(clampRefusal.test((await as(plainAgent, "POST", "/editable-artifacts", {})).text)).toBe(
+    false,
+  );
   // Reads stay open everywhere.
   const read = await as(clampedAgent, "GET", "/variable-sets");
   expect(clampRefusal.test(read.text)).toBe(false);
