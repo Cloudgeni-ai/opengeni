@@ -25364,7 +25364,7 @@
         "$": "object",
         "$.activeEpoch": "integer!",
         "$.activeSandboxId": "string! null",
-        "$.code": "enum?=[\"\\\"concurrent_swap\\\"\",\"\\\"offline_enrollment\\\"\",\"\\\"recovery_degraded\\\"\",\"\\\"recovery_in_progress\\\"\",\"\\\"recovery_unrecoverable\\\"\",\"\\\"stale_pointer\\\"\",\"\\\"transient_establishment\\\"\",\"\\\"unsupported_backend_context\\\"\"]",
+        "$.code": "enum?=[\"\\\"concurrent_swap\\\"\",\"\\\"offline_enrollment\\\"\",\"\\\"personal_machine_not_permitted\\\"\",\"\\\"personal_machine_permission_required\\\"\",\"\\\"recovery_degraded\\\"\",\"\\\"recovery_in_progress\\\"\",\"\\\"recovery_unrecoverable\\\"\",\"\\\"stale_pointer\\\"\",\"\\\"transient_establishment\\\"\",\"\\\"unsupported_backend_context\\\"\"]",
         "$.reason": "string?",
         "$.swapped": "boolean!"
       }

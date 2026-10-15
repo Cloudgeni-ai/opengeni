@@ -26,6 +26,7 @@ import {
   getSandbox,
   listEnrollments,
   listSandboxes,
+  nestedPostgresSqlState,
   readActiveSandbox,
   readLease,
   resolvePersonalMachineConnectionForAttempt,
@@ -204,10 +205,81 @@ export type FleetSwapResult = {
     | BackendUnresolvableCode
     | "invalid_working_directory"
     | "concurrent_swap"
+    | PersonalMachineRefusalCode
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";
 };
+
+export type PersonalMachineRefusalCode =
+  | "personal_machine_permission_required"
+  | "personal_machine_not_permitted";
+
+/**
+ * Plain refusal for a personal ("Only me") Connected Machine that the database
+ * admission (`authorize_session_attempt_personal_machine`) turned down. The
+ * function raises SQLSTATE 42501 for policy refusals and P0002 when a required
+ * owner, authority or enrollment row is not current. Only failures of that
+ * admission statement are mapped; anything else is a real failure and stays an
+ * error. The raw database error is never shown.
+ */
+export function personalMachineRefusal(
+  error: unknown,
+): { code: PersonalMachineRefusalCode; reason: string } | null {
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState !== "42501" && sqlState !== "P0002") return null;
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
+    messages.push(current.message);
+    current = current.cause;
+  }
+  const text = messages.join("\n");
+  if (!text.includes("authorize_session_attempt_personal_machine")) return null;
+  if (sqlState === "42501" && text.includes("requires explicit grant")) {
+    return {
+      code: "personal_machine_permission_required",
+      reason:
+        "This is a personal (Only me) machine, and its owner has not allowed this chat to use it. " +
+        "The owner can allow it from this chat: choose the machine with Use in this chat, then allow it once, for this chat, or always.",
+    };
+  }
+  if (
+    text.includes("only the personal machine owner may use it") ||
+    text.includes("not the frozen initiating human")
+  ) {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This is a personal (Only me) machine. Only its owner can use it, in turns the owner started.",
+    };
+  }
+  if (text.includes("lacks target workspace access")) {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This is a personal (Only me) machine, and its owner does not have access to this workspace.",
+    };
+  }
+  if (text.includes("requires exact current attempt authority")) {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This turn is no longer the chat's current turn, so it cannot use the personal machine.",
+    };
+  }
+  if (sqlState === "P0002") {
+    return {
+      code: "personal_machine_not_permitted",
+      reason:
+        "This personal machine's connection or its owner's access is no longer current. The owner can reconnect it.",
+    };
+  }
+  return {
+    code: "personal_machine_not_permitted",
+    reason: "This personal (Only me) machine cannot be used from this chat.",
+  };
+}
 
 const PROBE_TIMEOUT_MS = 5_000;
 
@@ -740,20 +812,34 @@ export async function swapActiveSandbox(
       // Even a same-target attach advances active_epoch. It is a repair/fence
       // request, not a no-op acknowledgment: any cached stale route is invalidated
       // only after target readiness has been proved above.
-      const result = await setActiveSandbox(services.db, {
-        accountId: ctx.accountId,
-        workspaceId: ctx.workspaceId,
-        sessionId: ctx.sessionId,
-        targetSandboxId: resolved.targetSandboxId,
-        expectedEpoch: pointer.activeEpoch,
-        ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
-        ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
-        ...(resolved.workspaceRoot !== undefined
-          ? { workingDir: effectiveWorkingDir ?? resolved.workspaceRoot }
-          : workingDir !== undefined
-            ? { workingDir }
-            : {}),
-      });
+      let result: Awaited<ReturnType<typeof setActiveSandbox>>;
+      try {
+        result = await setActiveSandbox(services.db, {
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.sessionId,
+          targetSandboxId: resolved.targetSandboxId,
+          expectedEpoch: pointer.activeEpoch,
+          ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
+          ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
+          ...(resolved.workspaceRoot !== undefined
+            ? { workingDir: effectiveWorkingDir ?? resolved.workspaceRoot }
+            : workingDir !== undefined
+              ? { workingDir }
+              : {}),
+        });
+      } catch (error) {
+        // The admission refusal rolled the whole CAS transaction back, so the
+        // pointer read above is still current.
+        const refusal = personalMachineRefusal(error);
+        if (!refusal) throw error;
+        return {
+          swapped: false,
+          activeSandboxId: pointer.activeSandboxId,
+          activeEpoch: pointer.activeEpoch,
+          ...refusal,
+        };
+      }
       if (result.swapped && result.pointer) {
         return {
           swapped: true,
@@ -1161,13 +1247,15 @@ export async function runOnSandbox(
           reason: "personal Connected Machine authority was not admitted for this attempt",
         };
       }
-    } catch {
+    } catch (error) {
       return {
         target,
         targetName: sandbox.name,
         kind: op.kind,
         ok: false,
-        reason: "personal Connected Machine authority is not live for this attempt",
+        reason:
+          personalMachineRefusal(error)?.reason ??
+          "personal Connected Machine authority is not live for this attempt",
       };
     }
   }
