@@ -1,0 +1,21 @@
+# Lab tool: measures a NATS control link from inside a sandbox VM over vsock.
+# Not part of the compute workspace.
+[package]
+name = "vsock-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+async-nats = { path = "../../../agent/vendor/async-nats", default-features = false, features = ["ring"] }
+futures-util = "0.3"
+libc = "0.2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "time"] }
+tokio-vsock = "0.7"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
