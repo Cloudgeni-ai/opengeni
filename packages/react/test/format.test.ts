@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  COMPOSER_SITE_REFUSAL_MESSAGES,
   ComposerReconciliationRequiredError,
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
@@ -177,6 +178,37 @@ describe("composerSubmissionErrorMessage", () => {
     expect(composerSubmissionCanRetry(error)).toBe(false);
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("free");
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("Codex");
+  });
+
+  test("a published Site's assistant refusals read plainly; only busy is retryable", () => {
+    const refusal = (status: number, code: string) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({
+          error: {
+            status,
+            code: status === 429 ? "rate_limited" : "forbidden",
+            message: "Internal wording",
+            retryable: status === 429,
+            requestId: "req-site",
+            details: { code },
+          },
+        }),
+        { mutation: true },
+      );
+    for (const [status, code, retry] of [
+      [403, "not_available_for_viewer", false],
+      [402, "site_budget_exhausted", false],
+      [429, "site_budget_busy", true],
+      [503, "site_platform_brake_engaged", false],
+    ] as const) {
+      const error = refusal(status, code);
+      expect({ code, message: composerSubmissionErrorMessage(error) }).toEqual({
+        code,
+        message: COMPOSER_SITE_REFUSAL_MESSAGES[code]!,
+      });
+      expect({ code, retry: composerSubmissionCanRetry(error) }).toEqual({ code, retry });
+    }
   });
 
   test("a model removed from the catalog asks for another model instead of a retry", () => {
