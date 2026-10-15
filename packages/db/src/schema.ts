@@ -7576,6 +7576,18 @@ export const sessionTurns = pgTable(
     unclaimedPromptTrigger: index("session_turns_unclaimed_prompt_trigger_idx")
       .on(table.workspaceId, table.sessionId, table.triggerEventId)
       .where(sql`${table.startedAt} is null`),
+    // Newest-finished-first walk for the session input-wait deciding turn, so
+    // the lateral LIMIT 1 stops at the first match instead of sorting the whole
+    // session history (migration 0786).
+    finishedOrder: index("session_turns_finished_order_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        table.finishedAt.desc(),
+        table.position.desc(),
+        table.createdAt.desc(),
+      )
+      .where(sql`${table.finishedAt} is not null`),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
@@ -9099,6 +9111,11 @@ export const sessionSystemUpdates = pgTable(
     pendingTerminalRepair: index("session_system_updates_pending_terminal_repair_idx")
       .on(table.workspaceId, table.sessionId, table.sourceId, table.dedupeKey)
       .where(sql`${table.state} = 'pending' and ${table.kind} = 'child_terminal_result'`),
+    // "Did this turn consume awaited machine input?" in the session input-wait
+    // deciding-turn predicate, probed once per candidate turn (migration 0787).
+    deliveredTurn: index("session_system_updates_delivered_turn_idx")
+      .on(table.workspaceId, table.deliveredTurnId)
+      .where(sql`${table.deliveredTurnId} is not null`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
