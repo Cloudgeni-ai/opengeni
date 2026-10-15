@@ -281,6 +281,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     modelStreamProgressTimeoutMs: 600_000,
     codexConnectedAppsEnabled: false,
     codexToolSearchEnabled: false,
+    codexResponsesWebSocketEnabled: false,
     lazyToolSearchEnabled: false,
     codexFleetPolicyShadowEnabled: false,
     // Off by default in tests so existing suites keep their exact database
