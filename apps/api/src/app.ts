@@ -2150,7 +2150,12 @@ export function createAppComposition(deps: AppDependencies): {
       throw new HTTPException(400, { message: "Invalid Codemode call" });
     }
     try {
-      const submission = await submitAndDispatchCodemodeCall(routeDeps, grant, parsed.data);
+      const submission = await submitAndDispatchCodemodeCall(
+        routeDeps,
+        grant,
+        parsed.data,
+        c.req.raw.signal,
+      );
       const terminal = ["completed", "failed", "outcome_unknown", "cancelled"].includes(
         submission.operation.state,
       );

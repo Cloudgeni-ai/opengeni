@@ -321,6 +321,7 @@ export async function submitAndDispatchCodemodeCall(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   rawRequest: unknown,
+  signal?: AbortSignal,
 ): Promise<CodemodeCallSubmissionValue> {
   const { durableApproval, ...request } = CodemodeCallRequest.parse(rawRequest);
   const { authority, catalog } = await requireActiveCodemodeCatalog(deps, grant);
@@ -340,34 +341,147 @@ export async function submitAndDispatchCodemodeCall(
       ? "already_running"
       : "unavailable";
   if (codemodeOperationNeedsDispatch(operation)) {
-    try {
-      const reply = await deps.bus.request(
-        codemodeDispatchSubject(authority.workspaceId, authority.attemptId),
-        encodeCodemodeDispatchRequest({
-          version: 1,
-          operationId: operation.operationId,
-          catalogDigest: catalog.digest,
-        }),
-        { timeoutMs: CODEMODE_DISPATCH_TIMEOUT_MS },
-      );
-      dispatch = decodeCodemodeDispatchAck(reply.data).status;
-    } catch {
-      dispatch = "unavailable";
-    }
-    operation = await refreshAdmittedCodemodeOperation(operation, () =>
+    const readOperation = () =>
       getCodemodeOperation(deps.db, {
         accountId: authority.accountId,
         workspaceId: authority.workspaceId,
         attemptId: authority.attemptId,
         operationId: operation.operationId,
-      }),
-    );
-    if (terminal(operation)) dispatch = "terminal";
-    else if (operation.state === "running" && dispatch === "unavailable") {
-      dispatch = "already_running";
+      });
+    // Listen before dispatching so a fast settlement cannot be missed. The
+    // settlement event is committed with the operation row, so its arrival
+    // means one read returns the terminal operation.
+    const wake = codemodeSettlementWake();
+    const unsubscribe = await deps.bus
+      .subscribe(authority.workspaceId, authority.sessionId, (events) => {
+        if (events.some((event) => isCodemodeSettlementEvent(event, operation.operationId))) {
+          wake.notify();
+        }
+      })
+      .catch(() => null);
+    try {
+      try {
+        const reply = await deps.bus.request(
+          codemodeDispatchSubject(authority.workspaceId, authority.attemptId),
+          encodeCodemodeDispatchRequest({
+            version: 1,
+            operationId: operation.operationId,
+            catalogDigest: catalog.digest,
+          }),
+          { timeoutMs: CODEMODE_DISPATCH_TIMEOUT_MS },
+        );
+        dispatch = decodeCodemodeDispatchAck(reply.data).status;
+      } catch {
+        dispatch = "unavailable";
+      }
+      operation = await refreshAdmittedCodemodeOperation(operation, readOperation);
+      // An executing call usually settles within moments. Return its result in
+      // this response so clients need no polling round; a longer call returns
+      // still running and is read as before.
+      if (
+        unsubscribe &&
+        !terminal(operation) &&
+        (dispatch === "accepted" || dispatch === "already_running")
+      ) {
+        operation = await awaitCodemodeSettlement({
+          operation,
+          read: readOperation,
+          wake,
+          budgetMs: CODEMODE_SUBMIT_SETTLE_WAIT_MS,
+          fallbackReadMs: CODEMODE_SETTLE_FALLBACK_READ_MS,
+          ...(signal ? { signal } : {}),
+        });
+      }
+      if (terminal(operation)) dispatch = "terminal";
+      else if (operation.state === "running" && dispatch === "unavailable") {
+        dispatch = "already_running";
+      }
+    } finally {
+      unsubscribe?.();
     }
   }
   return CodemodeCallSubmission.parse({ operation, dispatch });
+}
+
+/**
+ * How long a submission holds its request open for the call to settle. Most
+ * tool calls finish well within it; a longer call returns still running.
+ */
+export const CODEMODE_SUBMIT_SETTLE_WAIT_MS = 8_000;
+/** Safety-net read cadence if the live settlement event is missed. */
+export const CODEMODE_SETTLE_FALLBACK_READ_MS = 400;
+
+export function isCodemodeSettlementEvent(
+  event: { type: string; payload?: unknown },
+  operationId: string,
+): boolean {
+  if (event.type !== "agent.toolCall.output") return false;
+  const payload = event.payload;
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    (payload as { id?: unknown }).id === operationId
+  );
+}
+
+export type CodemodeSettlementWake = {
+  notify(): void;
+  /** Resolve on the next notification (or one already pending), a timeout or abort. */
+  wait(timeoutMs: number, signal?: AbortSignal): Promise<void>;
+};
+
+export function codemodeSettlementWake(): CodemodeSettlementWake {
+  let pending = false;
+  let release: (() => void) | null = null;
+  return {
+    notify() {
+      pending = true;
+      release?.();
+    },
+    async wait(timeoutMs, signal) {
+      if (!pending && !signal?.aborted) {
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", done);
+            release = null;
+            resolve();
+          };
+          const timer = setTimeout(done, Math.max(0, timeoutMs));
+          signal?.addEventListener("abort", done, { once: true });
+          release = done;
+        });
+      }
+      pending = false;
+    },
+  };
+}
+
+/**
+ * Wait, within a budget, for an executing operation to settle. Waits only
+ * while the operation is queued or running; approval and terminal states
+ * return at once. Read failures keep the last known row.
+ */
+export async function awaitCodemodeSettlement(input: {
+  operation: CodemodeOperation;
+  read: () => Promise<CodemodeOperation | null>;
+  wake: CodemodeSettlementWake;
+  budgetMs: number;
+  fallbackReadMs: number;
+  signal?: AbortSignal;
+  now?: () => number;
+}): Promise<CodemodeOperation> {
+  const now = input.now ?? (() => performance.now());
+  const deadline = now() + input.budgetMs;
+  let operation = input.operation;
+  while (operation.state === "queued" || operation.state === "running") {
+    const remaining = deadline - now();
+    if (remaining <= 0 || input.signal?.aborted) break;
+    await input.wake.wait(Math.min(input.fallbackReadMs, remaining), input.signal);
+    if (input.signal?.aborted) break;
+    operation = (await input.read().catch(() => null)) ?? operation;
+  }
+  return operation;
 }
 
 export function codemodeOperationNeedsDispatch(operation: CodemodeOperation): boolean {
