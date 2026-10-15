@@ -1,0 +1,106 @@
+# Structure rules for the compute workspace, checked by `cargo arch`
+# (crates/archcheck). Existing violations are listed in
+# architecture-baseline.toml and may only shrink.
+
+# Files past a thousand code lines are hard to review and usually hold more
+# than one idea.
+[rules.file_size]
+limit = 1000                          # code lines per production Rust file
+
+[rules.file_size.no_crossing]         # no file outside the baseline may exceed the limit
+mode = "required"
+
+[rules.file_size.no_new_entries]      # a branch may not add entries to the baseline
+mode = "advisory"
+
+[rules.file_size.no_raised_caps]      # a branch may not raise a cap in the baseline
+mode = "advisory"
+
+[rules.file_size.listed_no_growth]    # files in the baseline may not gain code lines
+mode = "advisory"
+
+[rules.file_size.stale_entries]       # entries whose file shrank, fell under the limit, or is gone
+mode = "advisory"
+
+# compute-core is the pure lifecycle state machine: inputs in, actions out. It
+# never touches files, sockets, threads, processes, the environment or the
+# clock, so the seeded simulation can drive it exactly and replay any failure.
+# Time arrives as an input. Every other crate is allowed; a new crate must be
+# added here on purpose.
+[rules.pattern_ratchet.pure_core]
+patterns = [
+  '\btokio\b',
+  '\bstd::(fs|net|thread|process|env)\b',
+  '\b(Instant|SystemTime)::now\b',
+  '\brand::',
+]
+allow = [
+  "crates/archcheck/**",
+  "crates/compute-engine/**",
+  "crates/compute-host/**",
+  "crates/compute-pager/**",
+  "crates/compute-storage/**",
+]
+
+[rules.pattern_ratchet.pure_core.no_crossing]       # only allowed and listed files may match
+mode = "required"
+
+[rules.pattern_ratchet.pure_core.no_new_entries]    # a branch may not add entries to the baseline
+mode = "advisory"
+
+[rules.pattern_ratchet.pure_core.no_raised_caps]    # a branch may not raise a cap in the baseline
+mode = "advisory"
+
+[rules.pattern_ratchet.pure_core.listed_no_growth]  # listed files may not gain matching lines
+mode = "advisory"
+
+[rules.pattern_ratchet.pure_core.stale_entries]     # entries with fewer matches, none, or gone
+mode = "advisory"
+
+# Unsafe code lives in the modules written to hold it, where each block's
+# safety argument is reviewed together: the pager's userfaultfd and mmap
+# handling, and the storage crate's FIEMAP ioctl. Anything else is listed in
+# the baseline until it moves behind one of them.
+[rules.pattern_ratchet.unsafe_code]
+patterns = ['\bunsafe\b']
+allow = [
+  "crates/compute-pager/src/linux.rs",
+  "crates/compute-storage/src/fiemap.rs",
+]
+
+[rules.pattern_ratchet.unsafe_code.no_crossing]
+mode = "required"
+
+[rules.pattern_ratchet.unsafe_code.no_new_entries]
+mode = "advisory"
+
+[rules.pattern_ratchet.unsafe_code.no_raised_caps]
+mode = "advisory"
+
+[rules.pattern_ratchet.unsafe_code.listed_no_growth]
+mode = "advisory"
+
+[rules.pattern_ratchet.unsafe_code.stale_entries]
+mode = "advisory"
+
+# The engine owns every process a sandbox needs (the VMM, its jailer, the
+# pager), so their lifetimes, cgroups and cleanup live in one place. Lab
+# binaries are listed in the baseline.
+[rules.pattern_ratchet.process_spawn]
+patterns = ['\bCommand::new\b']
+allow = ["crates/compute-engine/**", "crates/archcheck/**"]
+
+[rules.pattern_ratchet.process_spawn.no_crossing]
+mode = "advisory"
+
+[rules.pattern_ratchet.process_spawn.no_new_entries]
+mode = "advisory"
+
+[rules.pattern_ratchet.process_spawn.no_raised_caps]
+mode = "advisory"
+
+[rules.pattern_ratchet.process_spawn.listed_no_growth]
+mode = "advisory"
+
+[rules.pattern_ratchet.process_spawn.stale_entries]
+mode = "advisory"

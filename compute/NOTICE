@@ -1,0 +1,13 @@
+Opengeni compute
+Copyright 2026 Opengeni
+
+This directory contains work derived from SPACE
+(https://github.com/perplexityai/SPACE), Copyright 2026 Perplexity AI,
+licensed under the Apache License, Version 2.0. SPACE has no NOTICE file of
+its own. The derived files were taken at SPACE commit c788098f and changed as
+listed here; each says so at its top.
+
+- crates/archcheck: SPACE's crates/tools/archcheck. Renamed to
+  compute-archcheck, given standalone dependency versions, taught to expand
+  `<dir>/*` workspace members, and its README and repository test pointed at
+  this workspace.
