@@ -31,7 +31,6 @@ import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
-  getLiveEnrollmentConnection,
   getSandbox,
   touchLeaseHolder,
   markWarmLeaseInstanceLost,
@@ -92,12 +91,16 @@ import {
   type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
 import {
+  grantHasAgentAttemptAuthority,
   managedSessionGroupBackend,
   managedSessionGroupOs,
   providerSettingsForSessionSandboxRuntime,
   relayConfigFromSettings,
+  requireLiveAgentAttemptAuthorization,
+  resolveChannelAMachineConnection,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
+  type ChannelAMachineAuthority,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 
@@ -537,6 +540,36 @@ export async function withChannelARead<T>(
   return await withChannelAOperation(services, ctx, true, fn);
 }
 
+/**
+ * Whose access this request uses to reach a Connected Machine. A person uses
+ * their own. An agent acts for the person who started its turn (as swap and
+ * run_on do), so the machines that person can use stay usable from browser,
+ * computer, file and terminal requests; a personal machine also needs the
+ * attempt's own per-chat permission, checked by the connection resolver.
+ */
+async function channelAMachineAuthority(
+  db: Database,
+  ctx: ChannelAContext,
+): Promise<ChannelAMachineAuthority> {
+  const grant = ctx.grant;
+  const callerSessionId = grant?.metadata?.["sessionId"];
+  if (!grant || !grantHasAgentAttemptAuthority(grant) || typeof callerSessionId !== "string") {
+    return { subjectId: ctx.subjectId, personalMachineAttempt: null };
+  }
+  const actor = await requireLiveAgentAttemptAuthorization(db, grant, callerSessionId);
+  if (!actor.initiatingHumanSubjectId) {
+    return { subjectId: ctx.subjectId, personalMachineAttempt: null };
+  }
+  return {
+    subjectId: actor.initiatingHumanSubjectId,
+    personalMachineAttempt: {
+      turnId: actor.turnId,
+      attemptId: actor.attemptId,
+      executionGeneration: actor.executionGeneration,
+    },
+  };
+}
+
 async function withChannelAOperation<T>(
   services: ChannelAServices,
   ctx: ChannelAContext,
@@ -663,9 +696,10 @@ async function withChannelAOperation<T>(
           message: "machine-home session has no active Connected Machine or managed sandbox",
         });
       }
+      const machineAuthority = await channelAMachineAuthority(db, ctx);
       const sandbox = await getSandbox(
         db,
-        { accountId: ctx.accountId, workspaceId, subjectId: ctx.subjectId },
+        { accountId: ctx.accountId, workspaceId, subjectId: machineAuthority.subjectId },
         pointer.activeSandboxId,
       );
       if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
@@ -674,10 +708,16 @@ async function withChannelAOperation<T>(
         });
       }
       const originWorkspaceId = sandbox.workspaceId;
-      const enrollment = await getLiveEnrollmentConnection(
+      const enrollment = await resolveChannelAMachineConnection(
         db,
-        { accountId, workspaceId, subjectId: ctx.subjectId },
-        sandbox.enrollmentId,
+        {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          machineWorkspaceId: originWorkspaceId,
+          enrollmentId: sandbox.enrollmentId,
+        },
+        machineAuthority,
       );
       if (!enrollment?.connectionInstanceId) {
         // Preserve causal machine liveness through Channel-A. Generic callers
@@ -745,6 +785,7 @@ async function withChannelAOperation<T>(
           workspaceId,
           sessionId: session.id,
           resourceSubjectId: ctx.subjectId,
+          machineAuthority: async () => machineAuthority,
           pinnedSelfhosted: {
             sandboxId: sandbox.id,
             epoch: pointer.activeEpoch,
@@ -1064,6 +1105,7 @@ async function withChannelAOperation<T>(
           workspaceId,
           sessionId: session.id,
           resourceSubjectId: ctx.subjectId,
+          machineAuthority: () => channelAMachineAuthority(db, ctx),
           homeLease: {
             sandboxGroupId,
             leaseEpoch: leaseSnapshot.leaseEpoch,
