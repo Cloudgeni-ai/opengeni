@@ -2509,7 +2509,10 @@ helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
 Every migration declares `-- deployment-mode: rolling` or
 `-- deployment-mode: maintenance`. Rolling migrations apply while the previous
 release keeps serving; a maintenance migration needs every API, control and
-turn worker database login drained first. Before an upgrade, run the
+turn worker database login drained first. Rolling is the default: new
+maintenance migrations must state a `-- maintenance-justification:`, and
+incompatible changes are split into expand/contract steps across releases
+([migrations-expand-contract.md](migrations-expand-contract.md)). Before an upgrade, run the
 read-only plan from the new release's API image against the live database to
 decide whether the rollout needs a drain:
 
