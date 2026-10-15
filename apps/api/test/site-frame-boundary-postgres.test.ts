@@ -183,7 +183,7 @@ async function fixture() {
       headers: { ...headers, ...frame },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-  const publish = async (title: string) => {
+  const publish = async (title: string, extra: Record<string, unknown> = {}) => {
     const response = await call(
       "POST",
       "/published-artifacts",
@@ -192,6 +192,7 @@ async function fixture() {
         title,
         html: `<!doctype html><h1>${title}</h1>`,
         idempotencyKey: crypto.randomUUID(),
+        ...extra,
       },
     );
     expect(response.status, await response.clone().text()).toBe(201);
@@ -1445,6 +1446,110 @@ test("agents started from a Site write only on the allowlist; other workspace wr
   // Reads stay open everywhere.
   const read = await as(clampedAgent, "GET", "/variable-sets");
   expect(clampRefusal.test(read.text)).toBe(false);
+});
+
+test("a Site-started agent edits documents only when its Site declared an editing tool, over MCP and HTTP", async () => {
+  const f = await fixture();
+  const plainSite = await f.publish("Plain Site");
+  const editorSite = await f.publish("Editor Site", {
+    requestedTools: [{ serverId: "opengeni", toolName: "editable_artifact_create" }],
+  });
+  const fromPlain = await f.liveAgentGrant(await f.startSession(plainSite.frame("frame-plain")));
+  const fromEditor = await f.liveAgentGrant(await f.startSession(editorSite.frame("frame-editor")));
+  const deps = {
+    db: db.db,
+    bus: new MemoryEventBus(),
+    settings: f.settings,
+    objectStorage: f.objectStorage,
+    workflowClient: new Proxy({}, { get: () => noop }),
+  } as unknown as ApiRouteDeps;
+  const connect = async (live: AccessGrant) => {
+    const server = buildOpenGeniMcpServer(deps, {
+      ...live,
+      metadata: {
+        ...live.metadata,
+        firstPartyMcpTools: ["editable_artifact_create", "editable_artifact_export"],
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "site-editable-artifacts", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    return client;
+  };
+  const errorCode = (result: Awaited<ReturnType<Client["callTool"]>>) => {
+    const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+    try {
+      return (JSON.parse(text) as { error?: { code?: string } }).error?.code;
+    } catch {
+      return undefined;
+    }
+  };
+  const create = {
+    name: "editable_artifact_create",
+    arguments: { modality: "document", title: "Notes" },
+  };
+  const exportCall = {
+    name: "editable_artifact_export",
+    arguments: { artifactId: crypto.randomUUID().replaceAll("-", ""), format: "pdf" },
+  };
+  // The Site declares no editing tool: create and export are both refused.
+  const plainClient = await connect(fromPlain);
+  for (const call of [create, exportCall]) {
+    const result = await plainClient.callTool(call);
+    expect({ tool: call.name, code: errorCode(result) }).toEqual({
+      tool: call.name,
+      code: "site_agent_clamped",
+    });
+  }
+  // The Site declares editable_artifact_create: the clamp lets writes through
+  // (whatever the artifact service then answers is not a clamp refusal).
+  const editorClient = await connect(fromEditor);
+  for (const call of [create, exportCall]) {
+    const result = await editorClient
+      .callTool(call)
+      .catch((error: unknown) => ({ content: [{ text: String(error) }] }));
+    expect({ tool: call.name, code: errorCode(result as never) }).not.toEqual({
+      tool: call.name,
+      code: "site_agent_clamped",
+    });
+  }
+  const bearer = async (grant: AccessGrant) => {
+    const metadata = grant.metadata as {
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+    };
+    return `Bearer ${await signDelegatedAccessToken(f.settings.delegationSecret!, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: [...permissions, "documents:manage"],
+      principalKind: "agent_attempt",
+      sessionId: metadata.sessionId,
+      turnId: metadata.turnId,
+      attemptId: metadata.attemptId,
+      executionGeneration: metadata.executionGeneration,
+      exp: Math.floor(Date.now() / 1000) + 600,
+    })}`;
+  };
+  const post = async (grant: AccessGrant, path: string) => {
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}${path}`, {
+      method: "POST",
+      headers: { authorization: await bearer(grant), "content-type": "application/json" },
+      body: "{}",
+    });
+    return { status: response.status, text: await response.text() };
+  };
+  const undeclared = "documents, spreadsheets or presentations the Site did not declare";
+  for (const path of [
+    "/editable-artifacts",
+    `/editable-artifacts/${crypto.randomUUID()}/materializations`,
+  ]) {
+    expect((await post(fromPlain, path)).text).toContain(undeclared);
+    expect((await post(fromEditor, path)).text).not.toContain(undeclared);
+  }
 });
 
 test("Site pages send message text only: no approvals, answers, resources or credentials", async () => {

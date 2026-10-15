@@ -295,7 +295,8 @@ export function registerEditableArtifactAgentTools(
     },
     async ({ artifactId, format, options }, extra) => {
       const invocation = context("editable_artifact_export", extra);
-      return await execute(
+      // HTTP refuses the matching materialization for the same agent.
+      return await executeWrite(
         async () =>
           await application().startExport({
             ...invocation,
