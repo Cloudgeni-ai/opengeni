@@ -556,7 +556,15 @@ describe("interaction attempt tools", () => {
       const primary = scenario === "selected" ? selected : requested;
       expect(observed).toEqual([primary.id]);
       const content = result.structuredContent as Record<string, unknown>;
-      expect(content.targets).toEqual([selected, requested]);
+      if (scenario === "selected") {
+        // Without a requested URL every tab stays listed.
+        expect(content.targets).toEqual([selected, requested]);
+        expect(content).not.toHaveProperty("otherTabCount");
+      } else {
+        // A browser opened on a URL lists only that tab and counts the rest.
+        expect(content.targets).toEqual([requested]);
+        expect(content.otherTabCount).toBe(1);
+      }
       if (scenario === "failed") {
         expect(content).not.toHaveProperty("observation");
       } else {

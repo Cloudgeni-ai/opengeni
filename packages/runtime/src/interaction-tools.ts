@@ -387,6 +387,7 @@ const BrowserOpenOutput = z
   .object({
     session: BrowserSession,
     targets: z.array(BrowserTarget),
+    otherTabCount: z.number().int().nonnegative().optional(),
     observation: CompactBrowserObservation.optional(),
   })
   .strict();
@@ -795,7 +796,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state, plus observation: a compact snapshot of the opened (or selected) tab when one is available. Reuse its refs and generations for the first action instead of observing again.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state, plus observation: a compact snapshot of the opened (or selected) tab when one is available. With initialUrl, targets holds only the opened tab and otherTabCount counts the rest (browser_tabs list shows them). Reuse its refs and generations for the first action instead of observing again.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1863,36 +1864,55 @@ async function openBrowser(
     }
     targets = inventory.targets;
   }
-  const observation = await observeOpenedBrowserTarget(
-    transport,
-    workspaceId,
-    session.id,
-    targets,
-    value.initialUrl,
-  );
-  return observation ? { session, targets, observation } : { session, targets };
+  const primary = openedBrowserTarget(targets, value.initialUrl);
+  const observation = primary
+    ? await observeOpenedBrowserTarget(transport, workspaceId, session.id, primary)
+    : undefined;
+  // A browser opened on a URL is about that tab. A person's own Chrome profile
+  // can hold dozens of unrelated tabs; listing them all costs context on every
+  // later step, so only the opened tab is returned with a count of the rest
+  // (browser_tabs list shows them).
+  const opened =
+    value.initialUrl && primary && sameBrowserUrl(primary.url, value.initialUrl)
+      ? primary
+      : undefined;
+  const shown = opened && targets.length > 1 ? [opened] : targets;
+  return {
+    session,
+    targets: shown,
+    ...(shown.length < targets.length ? { otherTabCount: targets.length - shown.length } : {}),
+    ...(observation ? { observation } : {}),
+  };
 }
 
 /**
- * A compact observation of the tab the agent most likely acts on next: the tab
- * showing the requested URL, else the selected page. Opening a browser is
- * almost always followed by reading it, so this saves that model round trip.
- * It is a read-only convenience: if it fails, the open still succeeds and the
- * agent can observe explicitly.
+ * The tab the agent most likely acts on next: the tab showing the requested
+ * URL, else the selected page.
+ */
+function openedBrowserTarget(
+  targets: z.infer<typeof BrowserTarget>[],
+  initialUrl: string | undefined,
+): z.infer<typeof BrowserTarget> | undefined {
+  const pages = targets.filter((target) => target.kind === "page");
+  return (
+    (initialUrl ? pages.find((target) => sameBrowserUrl(target.url, initialUrl)) : undefined) ??
+    pages.find((target) => target.selected) ??
+    (pages.length === 1 ? pages[0] : undefined)
+  );
+}
+
+/**
+ * A compact observation of the opened tab. Opening a browser is almost always
+ * followed by reading it, so this saves that model round trip. It is a
+ * read-only convenience: if it fails, the open still succeeds and the agent can
+ * observe explicitly.
  */
 async function observeOpenedBrowserTarget(
   transport: InteractionTransport,
   workspaceId: string,
   browserSessionId: string,
-  targets: z.infer<typeof BrowserTarget>[],
-  initialUrl: string | undefined,
+  primary: z.infer<typeof BrowserTarget>,
 ): Promise<z.infer<typeof CompactBrowserObservation> | undefined> {
-  const pages = targets.filter((target) => target.kind === "page");
-  const primary =
-    (initialUrl ? pages.find((target) => sameBrowserUrl(target.url, initialUrl)) : undefined) ??
-    pages.find((target) => target.selected) ??
-    (pages.length === 1 ? pages[0] : undefined);
-  if (!primary) return undefined;
   try {
     return projectBrowserObservation(
       await transport.observeBrowserTarget(workspaceId, browserSessionId, primary.id),
