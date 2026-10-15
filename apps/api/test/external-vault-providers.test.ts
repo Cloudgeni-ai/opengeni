@@ -175,6 +175,24 @@ const installBody = (ownership = "workspace") => ({
 });
 
 describe("generic external vault connection lifecycle", () => {
+  test("catalog reports deployment availability before the first connection", async () => {
+    if (!shared) return;
+    const native = await scope();
+    const f = fixture();
+    const response = await f.request(native, "/vault-providers/connections");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      connections: [],
+      providers: [
+        { provider: "onepassword", available: true, reason: null },
+        { provider: "external", available: true, reason: null },
+        { provider: "protonpass", available: false, reason: "not_enabled" },
+        { provider: "keeper", available: true, reason: null },
+        { provider: "bitwarden", available: false, reason: "not_enabled" },
+      ],
+    });
+    expect(f.calls).toHaveLength(0);
+  }, 30_000);
   test("default signed remote connection supports register, verify and metadata-only discovery", async () => {
     if (!shared) return;
     const native = await scope();
@@ -435,7 +453,7 @@ describe("generic external vault connection lifecycle", () => {
           person: "person-b",
         })
       ).json(),
-    ).toEqual({ connections: [] });
+    ).toMatchObject({ connections: [] });
     expect(
       (
         await f.request(native, `/connections/${connectionId}/provider-vaults`, "GET", undefined, {

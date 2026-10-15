@@ -901,7 +901,16 @@ export function registerVaultProviderRoutes(
           },
         ];
       });
-    return c.json(ListVaultProviderConnectionsResponse.parse({ connections }));
+    const providers = (
+      ["onepassword", "external", "protonpass", "keeper", "bitwarden"] as const
+    ).map((provider) => {
+      const available =
+        provider === "onepassword"
+          ? deps.onePasswordVaultProvider !== null
+          : Boolean(factories[provider]);
+      return { provider, available, reason: available ? null : ("not_enabled" as const) };
+    });
+    return c.json(ListVaultProviderConnectionsResponse.parse({ connections, providers }));
   });
 
   app.post("/v1/workspaces/:workspaceId/vault-providers/connections", async (c) => {
