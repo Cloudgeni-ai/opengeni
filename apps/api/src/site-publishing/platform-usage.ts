@@ -453,8 +453,8 @@ export async function evaluateSitePlatformLimit(
 
 /**
  * After usage was metered: charge it (shadow and credits modes) and, at most
- * every 30 seconds per process, re-evaluate the Opengeni-wide limit. Never
- * throws.
+ * every 30 seconds per process, re-evaluate the Opengeni-wide limit in the
+ * background (the request does not wait for it). Never throws.
  */
 export async function afterSitePlatformUsage(
   deps: SitePlatformDeps,
@@ -476,5 +476,4 @@ export async function afterSitePlatformUsage(
     .finally(() => {
       evaluating = null;
     });
-  await evaluating;
 }

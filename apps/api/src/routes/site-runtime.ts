@@ -259,6 +259,9 @@ async function runSiteSqlForViewer<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Hosts of one gateway platform report recorded at a time. */
+const SITE_PLATFORM_REPORT_CONCURRENCY = 8;
+
 /** POST /v1/site-runtime/platform/requests (gateway only, signed on the Sites apex). */
 const SitePlatformRequestReport = z.object({
   v: z.literal(1),
@@ -730,26 +733,41 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
    * every request it serves for a Site host, cache hits included, and
    * reports them in signed batches on the Sites domain apex. Each host's
    * count is recorded once per report id, so a retried report never counts
-   * twice. Hosts that no longer resolve are skipped.
+   * twice. Hosts that no longer resolve are skipped. Hosts are recorded a few
+   * at a time, and each workspace's charges are settled once per report.
    */
   const platformRequests = async (request: RuntimeRequest): Promise<Response> => {
     const apex = request.domain.toLowerCase();
     if (request.fields.host.toLowerCase().replace(/\.$/u, "") !== apex)
       throw invalid("Platform reports are signed for the Sites domain");
     const input = parseJson(request.body, SitePlatformRequestReport);
-    let counted = 0;
+    const perHost = new Map<string, number>();
     for (const entry of input.hosts) {
-      const host = await findSiteRuntimeHost(deps, request.domain, entry.host);
-      if (!host) continue;
+      const name = entry.host.toLowerCase();
+      perHost.set(name, (perHost.get(name) ?? 0) + entry.requests);
+    }
+    const entries = [...perHost];
+    const workspaces = new Map<string, SiteRuntimeHost["scope"]>();
+    let counted = 0;
+    const recordOne = async ([name, requests]: [string, number]) => {
+      const host = await findSiteRuntimeHost(deps, request.domain, name);
+      if (!host) return;
       const recorded = await recordSitePlatformRequests(deps.db, host.scope, {
         siteId: host.site.id,
-        requests: entry.requests,
-        idempotencyKey: `site_platform.requests:${input.reportId}:${entry.host.toLowerCase()}`,
+        requests,
+        idempotencyKey: `site_platform.requests:${input.reportId}:${name}`,
       });
-      if (!recorded) continue;
-      counted += entry.requests;
-      const usage = await readSitePlatformUsage(deps.db, host.scope);
-      if (usage) await afterSitePlatformUsage(deps, host.scope, usage);
+      if (!recorded) return;
+      counted += requests;
+      workspaces.set(host.scope.workspaceId, host.scope);
+    };
+    for (let next = 0; next < entries.length; next += SITE_PLATFORM_REPORT_CONCURRENCY)
+      await Promise.all(
+        entries.slice(next, next + SITE_PLATFORM_REPORT_CONCURRENCY).map(recordOne),
+      );
+    for (const scope of workspaces.values()) {
+      const usage = await readSitePlatformUsage(deps.db, scope);
+      if (usage) await afterSitePlatformUsage(deps, scope, usage);
     }
     return request.context.json({ counted });
   };
