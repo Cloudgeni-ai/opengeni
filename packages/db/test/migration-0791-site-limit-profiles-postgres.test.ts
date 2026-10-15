@@ -1,7 +1,7 @@
-// Migrations 0788 and 0789, applied together as one release does, over data
-// the previous release wrote. 0788: existing Site agent conversations count in
+// Migrations 0790 and 0791, applied together as one release does, over data
+// the previous release wrote. 0790: existing Site agent conversations count in
 // the Site's windows (budget key `*`) and the platform usage tables arrive
-// owner-only. 0789: retain old-reader-compatible storage with no locked backfill;
+// owner-only. 0791: retain old-reader-compatible storage with no locked backfill;
 // new request-time resolution supplies the new defaults without republishing.
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
@@ -26,8 +26,8 @@ import { previousReleaseSiteLimitsForProfile } from "./fixtures/site-limits-2fef
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const FIRST = "0788_site_limits_and_platform_usage.sql";
-const MIGRATIONS = [FIRST, "0789_site_limit_profiles_new_defaults.sql"];
+const FIRST = "0790_site_limits_and_platform_usage.sql";
+const MIGRATIONS = [FIRST, "0791_site_limit_profiles_new_defaults.sql"];
 
 /** The previous release's custom form saved every field, prefilled with these. */
 const OLD_PREFILLED = {
@@ -71,7 +71,7 @@ afterAll(async () => {
 });
 
 test.skipIf(!realDb)(
-  "0788 and 0789 preserve old readers and use request-time normalization without a locked backfill",
+  "0790 and 0791 preserve old readers and use request-time normalization without a locked backfill",
   async () => {
     expect(() =>
       previousReleaseSiteLimitsForProfile(testSettings(), { kind: "standard", overrides: null }),

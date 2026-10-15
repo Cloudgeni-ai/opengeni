@@ -6,7 +6,11 @@ import {
 } from "@opengeni/config";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
-import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
+import {
+  CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+  codexResponsesTransport,
+  codexSubscriptionFetch,
+} from "@opengeni/codex";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   xaiSubscriptionFetch,
@@ -175,6 +179,15 @@ function sdkRetryingModelFetch(maxRetries: number, inner: typeof fetch): typeof 
  * unchanged concurrent turns still share one connection pool.
  */
 const providerClientCache = new Map<string, OpenAI>();
+// One process-wide pool of warm Codex Responses WebSockets, shared by every
+// client that serves the subscription so a conversation keeps its connection.
+let codexWebSocketTransport: typeof globalThis.fetch | undefined;
+function sharedCodexWebSocketTransport(): typeof globalThis.fetch {
+  codexWebSocketTransport ??= codexResponsesTransport((input, init) =>
+    globalThis.fetch(input, init),
+  ) as typeof globalThis.fetch;
+  return codexWebSocketTransport;
+}
 
 function canonicalCacheJson(value: unknown): string {
   const normalize = (input: unknown): unknown => {
@@ -235,6 +248,9 @@ function providerClientCacheKey(
           : {}),
         openaiMaxRetries: settings.openaiMaxRetries,
         streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
+        ...(provider.kind === "codex-subscription"
+          ? { codexResponsesWebSocket: settings.codexResponsesWebSocketEnabled }
+          : {}),
         builtin:
           provider.builtin && settings.openaiProvider === "azure"
             ? {
@@ -413,7 +429,14 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             // Codex transport owns finer headers/idle/whole deadlines and emits
             // typed durable evidence. Keep the SDK envelope beyond that budget.
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-            fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+            fetch: codexSubscriptionFetch(
+              instrumentedModelFetch(
+                provider.id,
+                settings.codexResponsesWebSocketEnabled
+                  ? sharedCodexWebSocketTransport()
+                  : globalThis.fetch,
+              ),
+            ),
           },
           {
             modelRequestPolicy: modelRequestPolicyForProvider(

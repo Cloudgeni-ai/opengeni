@@ -298,3 +298,52 @@ test.each(["response-id", null])(
     barrier.close();
   },
 );
+
+test("transport checks of one model call join its entry admission", async () => {
+  let admissions = 0;
+  const barrier = createModelCallAdmission({
+    signal: new AbortController().signal,
+    admit: async () => {
+      admissions++;
+    },
+  });
+  try {
+    await barrier.beforeModelRequest("model_entry");
+    await barrier.beforeModelRequest("transport");
+    await barrier.beforeModelRequest("transport");
+    expect(admissions).toBe(1);
+    // An SDK retry re-enters the model and is admitted again.
+    await barrier.beforeModelRequest("model_entry");
+    expect(admissions).toBe(2);
+    // A response consumes the admission: the next transport check revalidates.
+    const event = {
+      type: "response_done",
+      response: { id: "r1", usage: {}, output: [] },
+    } as Parameters<typeof barrier.onModelResponse>[0];
+    const settled = barrier.onModelResponse(event);
+    barrier.settle({ type: "raw_model_stream_event", data: event });
+    await settled;
+    await barrier.beforeModelRequest("transport");
+    expect(admissions).toBe(3);
+  } finally {
+    barrier.close();
+  }
+});
+
+test("a refused admission is never joined by a later transport check", async () => {
+  const refused = new BudgetExhaustedError("workspace allowance exhausted", null);
+  let admissions = 0;
+  const barrier = createModelCallAdmission({
+    signal: new AbortController().signal,
+    admit: async () => {
+      if (++admissions === 1) throw refused;
+    },
+  });
+  try {
+    await expect(barrier.beforeModelRequest("model_entry")).rejects.toBe(refused);
+    await barrier.beforeModelRequest("transport");
+    expect(admissions).toBe(2);
+  } finally {
+    barrier.close();
+  }
+});

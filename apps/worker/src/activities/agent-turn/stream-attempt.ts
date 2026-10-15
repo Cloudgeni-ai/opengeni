@@ -672,21 +672,32 @@ export async function runTurnStreamAttempt(
   let toolsExecuted = false;
   let finalReplyNudged = false;
   const revalidateModelCallAdmission = async () => {
-    await historySink.reconcileConversationTruth({ requireDurable: true });
-    await revalidatePlacedSubscriptionCore(db, providerTurn);
-    creditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
-      modelId: resolvedModel?.configured.id ?? turn.model,
-      settings,
-      db,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      isExternallyBilledTurn: billingState.isExternallyBilledTurn,
-      entitlements,
-      chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-      countsTowardTokenCap: billingState.countsTowardTokenCap,
-      initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
-      sessionId: input.sessionId,
-    });
+    // The three checks are independent, so they run together; this sits on the
+    // critical path of every model call. All of them settle before any outcome
+    // is reported, and failures surface in the original order (durable
+    // history, subscription source, then usage), so a refusal is the same one
+    // the sequential checks would have produced.
+    const [history, source, usage] = await Promise.allSettled([
+      historySink.reconcileConversationTruth({ requireDurable: true }),
+      revalidatePlacedSubscriptionCore(db, providerTurn),
+      ensureRunAllowedBetweenModelCalls({
+        modelId: resolvedModel?.configured.id ?? turn.model,
+        settings,
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+        entitlements,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        countsTowardTokenCap: billingState.countsTowardTokenCap,
+        initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+        sessionId: input.sessionId,
+      }),
+    ]);
+    if (history.status === "rejected") throw history.reason;
+    if (source.status === "rejected") throw source.reason;
+    if (usage.status === "rejected") throw usage.reason;
+    creditPolicyRevision = usage.value;
   };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
@@ -945,9 +956,9 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
-          beforeModelRequest: () => {
+          beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry();
-            return modelCallAdmission.beforeModelRequest();
+            return modelCallAdmission.beforeModelRequest(point);
           },
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);

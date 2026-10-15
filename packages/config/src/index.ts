@@ -936,6 +936,11 @@ const SettingsSchema = z.object({
   // emergency compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(true),
+  // Carry Codex subscription model requests over the backend's Responses
+  // WebSocket (one warm connection per conversation) instead of a new HTTP
+  // request per step. Requests the socket cannot carry fall back to HTTP.
+  // OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED
+  codexResponsesWebSocketEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
   // client search and ordinary-function generic dispatch. Kept separate from
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
@@ -4854,6 +4859,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelStreamProgressTimeoutMs: optional("OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
+    codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),

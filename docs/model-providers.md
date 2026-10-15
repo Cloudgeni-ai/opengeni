@@ -1639,6 +1639,16 @@ A compaction request built from the turn's prepared request carries the same
 model settings, so the portable checkpoint summary is also requested at low
 verbosity. `reasoning.summary` stays `detailed`.
 
+Streaming Codex subscription requests travel over a pooled Responses
+WebSocket (`packages/codex/src/responses-websocket.ts`), as the Codex CLI does,
+which saves a TLS/HTTP setup per model call. Each worker process keeps one idle
+socket per account and handshake identity; a busy socket, a failed handshake
+(five-minute backoff), a non-streaming request, or any non-Responses URL uses
+ordinary HTTP instead. Rate-limit and response-metadata events are mapped back
+to the same `x-codex-*` response headers the HTTP path returns, so usage
+accounting is unchanged. `OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED=false`
+turns the transport off.
+
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend

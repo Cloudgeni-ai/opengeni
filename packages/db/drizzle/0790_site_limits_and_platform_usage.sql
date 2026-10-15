@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- Site limits by access mode and Site platform usage (docs/published-sites.md).
 --
--- 1. Limit profiles move to the new model in 0789 (kept apart so this
+-- 1. Limit profiles move to the new model in 0791 (kept apart so this
 --    migration takes no lock on site_publications).
 -- 2. site_runtime_conversations.budget_key: the Site-wide usage windows a
 --    conversation counts in. `*` (every existing row) is the Site's budgets

@@ -23,7 +23,7 @@ import {
   type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
@@ -472,9 +472,19 @@ async function replayedMutation(
   });
 }
 
+/** Lifecycles that never return to use; `includeTerminal: false` omits them in SQL. */
+const TERMINAL_INTERACTION_LIFECYCLES = ["ended", "failed"] as const;
+
 export async function listBrowserSessions(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Only sessions with any association to this agent session. */
+    associatedSessionId?: string;
+    /** Defaults to true (complete history). */
+    includeTerminal?: boolean;
+  },
 ): Promise<BrowserSessionListResponseValue> {
   return await withRlsContext(
     db,
@@ -483,7 +493,22 @@ export async function listBrowserSessions(
       const rows = await scopedDb
         .select()
         .from(schema.browserSessions)
-        .where(eq(schema.browserSessions.workspaceId, input.workspaceId))
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            input.includeTerminal === false
+              ? notInArray(schema.browserSessions.lifecycle, [...TERMINAL_INTERACTION_LIFECYCLES])
+              : undefined,
+            input.associatedSessionId
+              ? sql`exists (
+                  select 1 from ${schema.browserSessionAssociations}
+                  where ${schema.browserSessionAssociations.workspaceId} = ${input.workspaceId}
+                    and ${schema.browserSessionAssociations.browserSessionId} = ${schema.browserSessions.id}
+                    and ${schema.browserSessionAssociations.sessionId} = ${input.associatedSessionId}
+                )`
+              : undefined,
+          ),
+        )
         .orderBy(desc(schema.browserSessions.lastUsedAt), desc(schema.browserSessions.id));
       const associations = await loadAssociations(
         scopedDb,

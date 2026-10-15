@@ -51,6 +51,10 @@ export type TurnHistorySinkDeps = {
 export class TurnHistorySink {
   private readonly prefix = new HistoryPrefixGuard();
   private checkpointTail: Promise<void> = Promise.resolve();
+  // Serialized form of the envelope this sink last made durable. This sink is
+  // the envelope's only writer, and reconcile runs at every model-call and
+  // turn boundary, so an unchanged envelope needs no further write.
+  private persistedEnvelope: string | null = null;
 
   seedHistory(input: string | readonly unknown[] | { readonly history: unknown[] }, count: number) {
     const items =
@@ -164,14 +168,18 @@ export class TurnHistorySink {
           ))(name),
       });
       if (envelope) {
-        await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
-          upsertSandboxSessionEnvelope(this.deps.db, {
-            accountId: this.deps.accountId,
-            workspaceId: this.deps.workspaceId,
-            sessionId: this.deps.sessionId,
-            envelope,
-          }),
-        );
+        const serialized = JSON.stringify(envelope);
+        if (serialized !== this.persistedEnvelope) {
+          await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
+            upsertSandboxSessionEnvelope(this.deps.db, {
+              accountId: this.deps.accountId,
+              workspaceId: this.deps.workspaceId,
+              sessionId: this.deps.sessionId,
+              envelope,
+            }),
+          );
+          this.persistedEnvelope = serialized;
+        }
       }
     } catch (persistError) {
       console.error("session history persistence failed", safeErrorDiagnostic(persistError));

@@ -928,6 +928,29 @@ export type OpenGeniRequestOptions = {
   responseType?: "json" | "void";
 };
 
+/** Narrowing filters for BrowserSession/ComputerSession inventories. Filters
+ *  never grant access; omitted filters return the complete workspace history. */
+export type InteractionSessionListOptions = OpenGeniRequestOptions & {
+  /** Only sessions associated with this agent session. */
+  associatedSessionId?: string | undefined;
+  /** false omits ended and failed sessions. */
+  includeTerminal?: boolean | undefined;
+};
+
+function interactionSessionListQuery(options: InteractionSessionListOptions): {
+  query: Record<string, string>;
+  request: OpenGeniRequestOptions;
+} {
+  const { associatedSessionId, includeTerminal, ...request } = options;
+  return {
+    query: {
+      ...(associatedSessionId ? { associatedSessionId } : {}),
+      ...(includeTerminal !== undefined ? { includeTerminal: String(includeTerminal) } : {}),
+    },
+    request,
+  };
+}
+
 export type SharedSessionReadOptions = {
   /**
    * Observe the selected shared network GET's actual start. A caller joining
@@ -4380,14 +4403,15 @@ export class OpenGeniClient {
    *  not access: peers and child agents intentionally remain discoverable. */
   async listBrowserSessions(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<BrowserSessionListResponse> {
+    const { query, request } = interactionSessionListQuery(options);
     return await this.requestJson<BrowserSessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/browser-sessions`,
       undefined,
-      {},
-      options,
+      query,
+      request,
     );
   }
 
@@ -4823,14 +4847,15 @@ export class OpenGeniClient {
    * relevance, not access; peer sessions intentionally remain discoverable. */
   async listComputerSessions(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<ComputerSessionListResponse> {
+    const { query, request } = interactionSessionListQuery(options);
     return await this.requestJson<ComputerSessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/computer-sessions`,
       undefined,
-      {},
-      options,
+      query,
+      request,
     );
   }
 

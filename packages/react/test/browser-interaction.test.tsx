@@ -688,9 +688,9 @@ describe("BrowserSession React resources", () => {
   test("uses each completed action observation immediately for the next fence", async () => {
     const calls: Array<{
       targetId: string;
-      expectedTargetGeneration: string;
-      expectedDocumentGeneration: string | null;
-      expectedFrameId: string | null;
+      expectedTargetGeneration: string | undefined;
+      expectedDocumentGeneration: string | null | undefined;
+      expectedFrameId: string | null | undefined;
     }> = [];
     const firstTarget = target();
     const firstObservation = observation(BROWSER_SESSION_ID, firstTarget);

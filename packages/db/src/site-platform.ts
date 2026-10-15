@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 
 /**
- * Site platform usage (migration 0788): gateway requests, Site SQL rows read
+ * Site platform usage (migration 0790): gateway requests, Site SQL rows read
  * and written, and the Site SQL plus Site Data storage level, metered per
  * workspace and month apart from model spend, plus deployment-global
  * per-month totals in eight shards and the Opengeni-wide monthly brake.

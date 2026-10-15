@@ -747,9 +747,15 @@ export function createInteractionAttemptToolDefinitions(
           attachedBrowsers: attached.devices,
         };
       }
+      // Narrow in SQL: a workspace can retain thousands of ended sessions, and
+      // current_session discovery only ever returns this session's own.
+      const listFilter = {
+        ...(scope === "current_session" ? { associatedSessionId: input.sessionId } : {}),
+        ...((value.includeTerminal ?? false) ? {} : { includeTerminal: false }),
+      };
       const [browsers, computers, identities, attached] = await Promise.all([
-        input.transport.listBrowserSessions(input.workspaceId),
-        input.transport.listComputerSessions(input.workspaceId),
+        input.transport.listBrowserSessions(input.workspaceId, listFilter),
+        input.transport.listComputerSessions(input.workspaceId, listFilter),
         input.transport.listBrowserIdentities(input.workspaceId, {
           includeArchived: value.includeArchivedIdentities ?? false,
         }),
@@ -1022,29 +1028,23 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     execute: async (value, context) => {
-      const current =
-        value.expectedTargetGeneration !== undefined &&
-        value.expectedDocumentGeneration !== undefined &&
-        value.expectedFrameId !== undefined
-          ? null
-          : await input.transport.getBrowserTargetState(
-              input.workspaceId,
-              value.browserSessionId,
-              value.targetId,
-            );
+      // Omitted fences are resolved by the API from the live target in the same
+      // request, so acting on the current document costs one round trip.
       const receipt = await input.transport.actInBrowser(
         input.workspaceId,
         value.browserSessionId,
         {
           operationId: context.operationId,
           targetId: value.targetId,
-          expectedTargetGeneration: value.expectedTargetGeneration ?? current!.targetGeneration,
-          expectedDocumentGeneration:
-            value.expectedDocumentGeneration === undefined
-              ? current!.documentGeneration
-              : value.expectedDocumentGeneration,
-          expectedFrameId:
-            value.expectedFrameId === undefined ? current!.frameId : value.expectedFrameId,
+          ...(value.expectedTargetGeneration === undefined
+            ? {}
+            : { expectedTargetGeneration: value.expectedTargetGeneration }),
+          ...(value.expectedDocumentGeneration === undefined
+            ? {}
+            : { expectedDocumentGeneration: value.expectedDocumentGeneration }),
+          ...(value.expectedFrameId === undefined
+            ? {}
+            : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
           action: value.action,
         },
@@ -1770,7 +1770,12 @@ async function openBrowser(
       throw new Error("existing BrowserSession storage mode does not match request");
   } else {
     const listed =
-      value.mode === "new" ? { sessions: [] } : await transport.listBrowserSessions(workspaceId);
+      value.mode === "new"
+        ? { sessions: [] }
+        : await transport.listBrowserSessions(workspaceId, {
+            associatedSessionId: sourceSessionId,
+            includeTerminal: false,
+          });
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
     // reused for an omitted/default headed request: OAuth providers such as
@@ -1877,7 +1882,12 @@ async function openComputer(
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
     const listed =
-      value.mode === "new" ? { sessions: [] } : await transport.listComputerSessions(workspaceId);
+      value.mode === "new"
+        ? { sessions: [] }
+        : await transport.listComputerSessions(workspaceId, {
+            associatedSessionId: sourceSessionId,
+            includeTerminal: false,
+          });
     const reusable = newestRelevant(
       listed.sessions.filter((candidate) =>
         compatibleInteractionPlacement(candidate.placement, value.placement),

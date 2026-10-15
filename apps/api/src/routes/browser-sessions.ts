@@ -203,7 +203,10 @@ import {
   withCachedController,
   withControllerTransportRecovery,
 } from "../controller-data-plane";
-import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  parseInteractionSessionListQuery,
+} from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -215,6 +218,8 @@ import {
 } from "../browser-state-authority";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { endBrowserDiscardingLostRuntime } from "../browser-lost-runtime-end";
+import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
+import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
 import { interactionControlApiError } from "../http/interaction-control-error";
@@ -309,6 +314,7 @@ export function registerBrowserSessionRoutes(
     const listed = await listBrowserSessions(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
     });
     return context.json(
       BrowserSessionListResponse.parse({
@@ -1003,11 +1009,13 @@ export function registerBrowserSessionRoutes(
   app.get(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation",
     async (context) => {
+      const stages = new InteractionRouteStages("observe");
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
         context,
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      stages.mark("auth");
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -1015,8 +1023,18 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => await sessionClient.observe(targetId),
+        async ({ sessionClient }) => {
+          stages.mark("placement");
+          try {
+            return await sessionClient.observe(targetId);
+          } finally {
+            stages.mark("dispatch");
+          }
+        },
+        true,
+        stages,
       );
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(result);
     },
   );
@@ -1024,11 +1042,13 @@ export function registerBrowserSessionRoutes(
   app.get(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/state",
     async (context) => {
+      const stages = new InteractionRouteStages("target_state");
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
         context,
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      stages.mark("auth");
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -1036,8 +1056,18 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
         "session.read",
         "browser.read",
-        async ({ sessionClient }) => await sessionClient.targetState(targetId),
+        async ({ sessionClient }) => {
+          stages.mark("placement");
+          try {
+            return await sessionClient.targetState(targetId);
+          } finally {
+            stages.mark("dispatch");
+          }
+        },
+        true,
+        stages,
       );
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(BrowserTargetState.parse(result));
     },
   );
@@ -1100,6 +1130,7 @@ export function registerBrowserSessionRoutes(
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions",
     async (context) => {
+      const stages = new InteractionRouteStages("act");
       const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
         context,
         "sessions:control",
@@ -1109,7 +1140,12 @@ export function registerBrowserSessionRoutes(
       if (workspaceFileIds.length > 0) {
         await requireAccessGrant(context, deps, workspaceId, "files:read");
       }
+      stages.mark("auth");
       const startedAtMs = performance.now();
+      // Omitted fences mean the target's current state. Read them once from the
+      // live controller in this request (a recovery retry of the callback must
+      // replay the same command digest, so it reuses the first read).
+      let resolvedFences: BrowserActionFences | null = null;
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -1118,15 +1154,18 @@ export function registerBrowserSessionRoutes(
         "session.control",
         "browser.action",
         async ({ sessionClient, binding, record, sourceAuthorization }) => {
+          stages.mark("placement");
+          resolvedFences ??= await resolveBrowserActionFences(request, () =>
+            sessionClient.targetState(request.targetId),
+          );
+          stages.mark("fences");
           const commandFields = {
             protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
             operationId: request.operationId,
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
             targetId: request.targetId,
-            expectedTargetGeneration: request.expectedTargetGeneration,
-            expectedDocumentGeneration: request.expectedDocumentGeneration,
-            expectedFrameId: request.expectedFrameId,
+            ...resolvedFences,
             actor: interactionActorForGrant(grant),
             observationMode: request.observationMode,
             action: request.action,
@@ -1193,6 +1232,7 @@ export function registerBrowserSessionRoutes(
             });
           // Before the action this browser takes over the principal's passkeys.
           await passkeySync(true);
+          stages.mark("passkey_pre");
           // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
           const secretValues = await resolveInteractionSecretValues({
             port: interactionSecrets,
@@ -1210,6 +1250,7 @@ export function registerBrowserSessionRoutes(
               record.session.placement,
             ),
           });
+          stages.mark("secrets");
           try {
             return await sessionClient.action(
               BrowserActionCommand.parse({
@@ -1218,11 +1259,16 @@ export function registerBrowserSessionRoutes(
               }),
             );
           } finally {
+            stages.mark("dispatch");
             await passkeySync(false);
+            stages.mark("passkey_post");
           }
         },
+        true,
+        stages,
       );
       observeBrowserActionResult(deps.observability, startedAtMs, request, result);
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(result);
     },
   );
@@ -3079,6 +3125,7 @@ export function registerBrowserSessionRoutes(
       sourceAuthorization: ResolvedSessionAuthorization | null;
     }) => Promise<T>,
     recoverMissing = true,
+    stages?: InteractionRouteStages,
   ): Promise<T> {
     try {
       const record = await getBrowserSessionControlRecord(deps.db, {
@@ -3116,6 +3163,7 @@ export function registerBrowserSessionRoutes(
       if (!admitted) {
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
+      stages?.mark("control");
       const safelyReplayable =
         browserSessionStorageMode(record.session) !== "ephemeral_context" &&
         (channelOperation === "browser.read" || channelOperation === "browser.action");

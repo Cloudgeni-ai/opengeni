@@ -322,7 +322,7 @@ by people outside the workspace (for example "$1.20 of $10 used this
 month") for invited and public Sites only.
 
 Existing Sites take the new defaults without being republished. Limits are
-resolved on every request from the stored profile. Migration 0789 is a no-write
+resolved on every request from the stored profile. Migration 0791 is a no-write
 compatibility checkpoint: it takes no table locks and performs no backfill.
 Previous-release readers do not understand `standard`, so new writers retain
 the stored spelling `free` and the public API reports it as `standard`:
@@ -352,7 +352,7 @@ override is preserved. No existing rows or CHECK constraints are rewritten.
 
 Old-pod writes remain unmarked and receive the same request-time normalization.
 
-Migration 0788 also marks existing conversations as using the legacy three-window
+Migration 0790 also marks existing conversations as using the legacy three-window
 reservation protocol. New starts explicitly use four windows; settlement and
 release subtract only reservations actually held in those windows, including
 old-pod writes during rollout. Legacy member conversations with budget key `*`

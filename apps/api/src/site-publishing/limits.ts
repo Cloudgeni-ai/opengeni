@@ -111,7 +111,7 @@ const braked = (value: number | null, brake: number) =>
  * The previous release's free defaults. Its custom form always saved the six
  * LEGACY_CUSTOM_FORM_FIELDS, prefilled with these, so in a profile of that
  * shape a field with exactly this value means "the default" and takes the
- * new standard value instead. Migration 0789 deliberately leaves stored rows
+ * new standard value instead. Migration 0791 deliberately leaves stored rows
  * intact for old readers. New writes mark explicit overrides with version 2;
  * unmarked old-pod writes keep normalizing throughout the rolling deploy.
  */

@@ -1141,3 +1141,31 @@ pub fn request_grants() {
         with_autorelease_pool(ffi::request_grants);
     }
 }
+
+/// One macOS screen-control permission, for asking about it on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopPermission {
+    /// Screen Recording, to see the screen.
+    ScreenRecording,
+    /// Accessibility, to click and type.
+    Accessibility,
+    /// Input Monitoring, so automated input yields to the person's own.
+    InputMonitoring,
+}
+
+/// Fires one permission's system prompt. A desktop app asks for them one at a
+/// time, each after explaining it. No-op on non-macOS.
+pub fn request_permission(permission: DesktopPermission) {
+    #[cfg(target_os = "macos")]
+    {
+        with_autorelease_pool(|| match permission {
+            DesktopPermission::ScreenRecording => ffi::request_screen_capture(),
+            DesktopPermission::Accessibility => ffi::request_accessibility(),
+            DesktopPermission::InputMonitoring => ffi::request_input_monitoring(),
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
+    }
+}
