@@ -3,6 +3,7 @@ export {
   bitwardenVaultId,
   createBitwardenBridge,
   validateBitwardenBridgeConfig,
+  type BitwardenAccountPinStore,
   type BitwardenBridge,
   type BitwardenBridgeConfig,
   type BitwardenBridgeOptions,
@@ -25,7 +26,7 @@ export {
   type BitwardenServeTransport,
   type BitwardenStatus,
 } from "./bw-serve";
-export { createFileExternalVaultReceiverStore } from "./file-store";
+export { createFileExternalVaultReceiverStore, type FileStoreSyncHooks } from "./file-store";
 export {
   FIELD_NOTES,
   FIELD_PASSWORD,

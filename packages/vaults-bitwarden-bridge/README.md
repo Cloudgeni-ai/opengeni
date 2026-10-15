@@ -99,6 +99,13 @@ the bridge does not install or redistribute it.
    During rotation, add `previousSigningSecretFile` until Opengeni uses the new
    secret.
 
+   The config is checked strictly: unknown keys are refused, lists must be
+   JSON arrays (`"subjectIds": "user_1"` is an error, not a match), and
+   `allowStaleReads` must be `true` or `false`, not a string. Secret files
+   must be regular `0600` files owned by the bridge user. Optionally set
+   `"bitwardenUserId"` (the `userId` from `bw status`) to bind the bridge to
+   that account up front.
+
 5. Run it and publish it through your own TLS reverse proxy, forwarding
    `POST /opengeni/vault` unchanged (the signature covers the exact body):
 
@@ -124,6 +131,13 @@ the bridge does not install or redistribute it.
   `collection:<collectionId>`. Items outside a configured vault are never
   listed, read, changed or trashed, and the same inventory is returned
   whoever is asking.
+- The bridge is bound to one Bitwarden account: `bitwardenUserId`, or the
+  first unlocked account it sees, pinned in the state directory. Every
+  request checks `bw status` first. If the CLI is signed in to another
+  account, every operation is refused with `provider_auth_invalid` before
+  anything is synced, listed, read or written; an unlocked CLI that reports
+  no account is `provider_unavailable`. To move to another Bitwarden
+  account, create a new connection with a fresh state directory.
 - Every request must name this connection, this Opengeni account and the
   owning workspace. The calling workspace must be in `workspaceIds` (default:
   only the owning workspace). With a `subjectIds` list, only those acting
@@ -182,6 +196,25 @@ left out of metadata and a read is `provider_permission_denied`.
 - The CLI does not expose per-user collection or item edit permissions, so
   collection write access is reported as `unknown`, and Bitwarden's own
   refusal is returned as `provider_permission_denied`.
+- Collections that hide passwords: the CLI returns the password, TOTP and
+  hidden custom fields as `null` and does not say whether they are hidden or
+  empty. Bitwarden CLIs released before the fix in bitwarden/clients#22287
+  (August 2026) save those nulls back over the real values. The bridge
+  does not depend on the CLI version:
+  - Personal items, and collection items where a password, TOTP, hidden
+    value or password history is visible, are fully editable.
+  - Otherwise, changes that touch neither the login (username, websites,
+    password, TOTP) nor the custom fields, such as renaming or editing
+    notes, are sent without those sections, so Bitwarden keeps its stored
+    values.
+  - A change to the login section must set both the password and the TOTP
+    explicitly. A change to the custom fields is refused while a hidden
+    field's value is withheld. These refusals are
+    `provider_permission_denied`, nothing is sent, and the bridge logs why.
+    Edit such items in Bitwarden, or give the account permission to view
+    passwords.
+  This is source- and fixture-tested against bitwarden/clients 57e52fcc;
+  it has not been checked against a live hide-passwords collection.
 - Mutations are claimed in the durable state directory under their
   idempotency key. A repeated key returns the recorded result; nothing is
   retried automatically. If `bw serve` fails after a change may have been
@@ -222,3 +255,8 @@ const bridge = createBitwardenBridge({
 await serveBitwardenBridge({ bridge, listen: { host: "127.0.0.1", port: 8788 } });
 // Or mount it in an existing server: bridge.fetch(request) / bridge.handle({ body, headers }).
 ```
+
+A custom store must also implement `BitwardenAccountPinStore`
+(`readBitwardenAccount`, `pinBitwardenAccount`) durably, unless the config
+sets `bitwardenUserId`. The file store writes the state file atomically and
+fsyncs both the file and its directory before acknowledging a decision.

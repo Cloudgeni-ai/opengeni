@@ -8,6 +8,14 @@
  * copies only names, kinds, websites and versions; values never enter the
  * projection. Fields whose value the CLI redacts to null (no view-password
  * permission) are omitted from metadata and refused on read.
+ *
+ * Redaction (`apps/cli/src/vault/models/cipher.response.ts`): when the user
+ * may not view passwords, the CLI returns `login.password`, `login.totp` and
+ * every hidden custom field as null and omits `passwordHistory`. It sends no
+ * `viewPassword` flag, so a null may be redacted or genuinely empty. CLIs
+ * before bitwarden/clients#22287 (2026-08-10) save such nulls back over the
+ * real values on `PUT /object/item/{id}`; `mergeUpdate` never relies on the
+ * CLI to undo that.
  */
 import { createHash } from "node:crypto";
 import { isValidTotpInput } from "@opengeni/contracts";
@@ -177,12 +185,30 @@ export function projectItem(item: BitwardenItem): VaultProviderWireItemMeta {
 }
 
 export class ProjectionError extends Error {
-  readonly reason: "not_found" | "permission_denied" | "conflict" | "unsupported";
+  readonly reason: "not_found" | "permission_denied" | "conflict" | "unsupported" | "redacted";
   constructor(reason: ProjectionError["reason"]) {
     super(reason);
     this.name = "ProjectionError";
     this.reason = reason;
   }
+}
+
+/**
+ * True when the CLI response proves this account can see the item's
+ * protected values, so a null password, TOTP or hidden field is really
+ * empty. Personal items always can (the server's `UserCipherDetails` gives
+ * user-owned ciphers `ViewPassword = 1`; hide-passwords is a collection
+ * permission). For collection items, a `passwordHistory` array or any
+ * non-null protected value proves it, because redaction clears them all.
+ */
+export function protectedValuesVisible(item: BitwardenItem): boolean {
+  if (item.organizationId == null) return true;
+  if (Array.isArray(item.passwordHistory)) return true;
+  const login = item.type === BW_CIPHER_LOGIN ? record(item.login) : null;
+  if (typeof login?.password === "string" || typeof login?.totp === "string") return true;
+  return customFields(item).some(
+    (field) => field.type === BW_FIELD_HIDDEN && typeof field.value === "string",
+  );
 }
 
 /** Values for exactly the requested ids. A redacted (null) value fails closed. */
@@ -236,10 +262,21 @@ function mergeWebsites(current: unknown, wanted: readonly string[]): unknown[] {
   return wanted.map((uri) => byUri.get(uri) ?? { uri, match: null });
 }
 
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
 /**
  * Apply an Opengeni write to the complete current item. Unmentioned fields,
  * unknown properties, password history and the revision precondition are
  * preserved; the result is sent whole to `PUT /object/item/{id}`.
+ *
+ * When the item's protected values may be redacted (see
+ * `protectedValuesVisible`), the `login` and `fields` sections the write does
+ * not change are left out of the body, so the CLI keeps its stored copy
+ * (`CipherExport.toView` only replaces sections that are present). A write
+ * that changes a section still holding a possibly redacted null is refused
+ * with reason `redacted` instead of saving that null.
  */
 export function mergeUpdate(
   current: BitwardenItem,
@@ -251,9 +288,16 @@ export function mergeUpdate(
     throw new ProjectionError("unsupported");
   const next = structuredClone(current) as Record<string, unknown>;
   next.name = write.name;
+  const visible = protectedValuesVisible(current);
+  let loginChanged = false;
+  let fieldsChanged = false;
   const login = current.type === BW_CIPHER_LOGIN ? (record(next.login) ?? {}) : null;
   if (login) {
-    login.uris = mergeWebsites(login.uris, write.websites);
+    // Unchanged websites keep the raw URIs, including any the projection omits.
+    if (!sameList(websites(current), write.websites)) {
+      login.uris = mergeWebsites(login.uris, write.websites);
+      loginChanged = true;
+    }
     next.login = login;
   } else if (write.websites.length > 0) {
     throw new ProjectionError("unsupported");
@@ -277,6 +321,7 @@ export function mergeUpdate(
         }
         if (!isValidTotpInput(field.value)) throw new ProjectionError("unsupported");
         login.totp = field.value;
+        loginChanged = true;
         continue;
       }
       fields.push({
@@ -285,16 +330,20 @@ export function mergeUpdate(
         type: customType(field.kind),
         linkedId: null,
       });
+      fieldsChanged = true;
       continue;
     }
     if (id === FIELD_USERNAME || id === FIELD_PASSWORD || id === FIELD_TOTP) {
       if (!login) throw new ProjectionError("not_found");
       const key = id === FIELD_USERNAME ? "username" : id === FIELD_PASSWORD ? "password" : "totp";
-      if (field.remove) login[key] = null;
-      else if (field.value !== undefined) {
+      if (field.remove) {
+        login[key] = null;
+        loginChanged = true;
+      } else if (field.value !== undefined) {
         if (key === "totp" && !isValidTotpInput(field.value))
           throw new ProjectionError("unsupported");
         login[key] = field.value;
+        loginChanged = true;
       }
       continue;
     }
@@ -309,6 +358,7 @@ export function mergeUpdate(
     if (!mapped.has(id)) throw new ProjectionError("permission_denied");
     if (field.remove) {
       removeIndexes.add(existing.index);
+      fieldsChanged = true;
       continue;
     }
     const target = fields[existing.index];
@@ -319,11 +369,41 @@ export function mergeUpdate(
       names.delete(nameKey(currentName));
       names.add(nameKey(field.name));
       target.name = field.name;
+      fieldsChanged = true;
     }
-    if (field.kind !== mapped.get(id)!.kind) target.type = customType(field.kind);
-    if (field.value !== undefined) target.value = field.value;
+    if (field.kind !== mapped.get(id)!.kind) {
+      target.type = customType(field.kind);
+      fieldsChanged = true;
+    }
+    if (field.value !== undefined) {
+      target.value = field.value;
+      fieldsChanged = true;
+    }
   }
   next.fields = fields.filter((_, index) => !removeIndexes.has(index));
+  if (!visible) {
+    if (loginChanged) {
+      // Both are null here (a value would prove visibility); only an explicit
+      // new value is safe to send.
+      if (typeof login?.password !== "string" || typeof login.totp !== "string") {
+        throw new ProjectionError("redacted");
+      }
+    } else {
+      delete next.login;
+    }
+    if (fieldsChanged) {
+      const fieldsAfter = next.fields as Array<Record<string, unknown> | null>;
+      if (
+        fieldsAfter.some(
+          (field) => field?.type === BW_FIELD_HIDDEN && typeof field.value !== "string",
+        )
+      ) {
+        throw new ProjectionError("redacted");
+      }
+    } else {
+      delete next.fields;
+    }
+  }
   return next;
 }
 

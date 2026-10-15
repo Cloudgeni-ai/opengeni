@@ -8,7 +8,11 @@ import { lstatSync, readFileSync } from "node:fs";
 import http from "node:http";
 import { isAbsolute } from "node:path";
 import { VAULT_PROVIDER_WIRE_LIMITS } from "@opengeni/sdk/external-vault-receiver";
-import type { BitwardenBridge, BitwardenBridgeConfig } from "./bridge";
+import {
+  validateBitwardenBridgeConfig,
+  type BitwardenBridge,
+  type BitwardenBridgeConfig,
+} from "./bridge";
 
 export type BitwardenBridgeListen =
   | { host?: string; port: number; allowNonLoopback?: boolean }
@@ -112,21 +116,111 @@ function readSecretFile(path: string): string {
   if (!stat.isFile() || (stat.mode & 0o077) !== 0) {
     throw new Error(`${path} must be a regular file with mode 0600`);
   }
+  // Same ownership rule as the bw serve socket and state directory.
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (uid !== null && stat.uid !== uid) {
+    throw new Error(`${path} must be owned by the bridge user`);
+  }
   return readFileSync(path, "utf8").trim();
+}
+
+const FILE_KEYS = new Set([
+  "connectionId",
+  "opengeni",
+  "vaults",
+  "accountLabel",
+  "readSyncTtlMs",
+  "minSyncIntervalMs",
+  "allowStaleReads",
+  "bitwardenUserId",
+  "snapshotTtlMs",
+  "maxSnapshots",
+  "signingSecretFile",
+  "previousSigningSecretFile",
+  "bwSocketPath",
+  "bwServePort",
+  "stateDir",
+  "listen",
+  "path",
+]);
+const BRIDGE_KEYS = [
+  "accountLabel",
+  "readSyncTtlMs",
+  "minSyncIntervalMs",
+  "allowStaleReads",
+  "bitwardenUserId",
+  "snapshotTtlMs",
+  "maxSnapshots",
+] as const;
+
+function port(value: unknown, key: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65_535) {
+    throw new Error(`${key} must be a port number`);
+  }
+  return value;
+}
+
+function parseListen(value: unknown): BitwardenBridgeListen {
+  if (value === undefined) return { host: "127.0.0.1", port: 8788 };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("listen must be an object");
+  }
+  const listen = value as Record<string, unknown>;
+  if ("path" in listen) {
+    if (
+      Object.keys(listen).length !== 1 ||
+      typeof listen.path !== "string" ||
+      !isAbsolute(listen.path)
+    ) {
+      throw new Error("listen.path must be the only key and an absolute path");
+    }
+    return { path: listen.path };
+  }
+  for (const key of Object.keys(listen)) {
+    if (key !== "host" && key !== "port" && key !== "allowNonLoopback") {
+      throw new Error(`unknown listen key ${key}`);
+    }
+  }
+  if (listen.host !== undefined && (typeof listen.host !== "string" || !listen.host)) {
+    throw new Error("listen.host must be text");
+  }
+  if (listen.allowNonLoopback !== undefined && typeof listen.allowNonLoopback !== "boolean") {
+    throw new Error("listen.allowNonLoopback must be true or false");
+  }
+  return {
+    port: port(listen.port, "listen.port"),
+    ...(listen.host !== undefined ? { host: listen.host as string } : {}),
+    ...(listen.allowNonLoopback !== undefined
+      ? { allowNonLoopback: listen.allowNonLoopback as boolean }
+      : {}),
+  };
 }
 
 /**
  * Load a JSON config. Signing secrets come from 0600 files
  * (`signingSecretFile`, optional `previousSigningSecretFile`) or the
  * `OPENGENI_VAULT_SIGNING_SECRET` environment variable; never from the JSON.
+ * Types are checked strictly and unknown keys are refused.
  */
 export function loadBitwardenBridgeConfigFile(
   path: string,
   env: Record<string, string | undefined> = process.env,
 ): BitwardenBridgeFileConfig {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("the bridge config must be a JSON object");
+  }
+  const raw = parsed as Record<string, any>;
   if ("signingSecrets" in raw || "signingSecret" in raw) {
     throw new Error("put signing secrets in signingSecretFile, not in the config JSON");
+  }
+  for (const key of Object.keys(raw)) {
+    if (!FILE_KEYS.has(key)) throw new Error(`unknown bridge config key ${key}`);
+  }
+  for (const key of ["signingSecretFile", "previousSigningSecretFile"] as const) {
+    if (raw[key] !== undefined && typeof raw[key] !== "string") {
+      throw new Error(`${key} must be an absolute path`);
+    }
   }
   const secrets: string[] = [];
   if (typeof raw.signingSecretFile === "string")
@@ -140,21 +234,25 @@ export function loadBitwardenBridgeConfigFile(
       throw new Error(`${key} must be an absolute path`);
     }
   }
+  if (raw.path !== undefined && (typeof raw.path !== "string" || !raw.path.startsWith("/"))) {
+    throw new Error("path must start with /");
+  }
+  const bridge: BitwardenBridgeConfig = {
+    connectionId: raw.connectionId,
+    signingSecrets: secrets,
+    opengeni: raw.opengeni,
+    vaults: raw.vaults,
+  };
+  for (const key of BRIDGE_KEYS) {
+    if (raw[key] !== undefined) (bridge as unknown as Record<string, unknown>)[key] = raw[key];
+  }
+  validateBitwardenBridgeConfig(bridge);
   return {
-    bridge: {
-      connectionId: raw.connectionId,
-      signingSecrets: secrets,
-      opengeni: raw.opengeni,
-      vaults: raw.vaults,
-      ...(raw.accountLabel !== undefined ? { accountLabel: raw.accountLabel } : {}),
-      ...(raw.readSyncTtlMs !== undefined ? { readSyncTtlMs: raw.readSyncTtlMs } : {}),
-      ...(raw.minSyncIntervalMs !== undefined ? { minSyncIntervalMs: raw.minSyncIntervalMs } : {}),
-      ...(raw.allowStaleReads !== undefined ? { allowStaleReads: raw.allowStaleReads } : {}),
-    },
+    bridge,
     bwSocketPath: raw.bwSocketPath,
-    ...(raw.bwServePort !== undefined ? { bwServePort: raw.bwServePort } : {}),
+    ...(raw.bwServePort !== undefined ? { bwServePort: port(raw.bwServePort, "bwServePort") } : {}),
     stateDir: raw.stateDir,
-    listen: raw.listen ?? { host: "127.0.0.1", port: 8788 },
+    listen: parseListen(raw.listen),
     ...(raw.path !== undefined ? { path: raw.path } : {}),
   };
 }

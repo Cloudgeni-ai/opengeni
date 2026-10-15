@@ -71,8 +71,25 @@ export interface BitwardenBridgeConfig {
   minSyncIntervalMs?: number;
   /** Default true: serve values from the local CLI cache when upstream sync fails, marked stale. */
   allowStaleReads?: boolean;
+  /**
+   * The Bitwarden user id (`bw status` userId) this bridge serves. When
+   * omitted, the first unlocked account seen is pinned in the store. Any
+   * other account is refused, whatever `bw serve` is signed in to.
+   */
+  bitwardenUserId?: string;
   snapshotTtlMs?: number;
   maxSnapshots?: number;
+}
+
+/**
+ * Durable binding of a bridge to one Bitwarden account. The file store
+ * implements it in the same state file as replay and idempotency records.
+ */
+export interface BitwardenAccountPinStore {
+  /** The pinned Bitwarden user id for this connection, or null. */
+  readBitwardenAccount(connectionId: string): Promise<string | null>;
+  /** Durably pin `userId` unless one is already pinned; returns the pinned id. */
+  pinBitwardenAccount(connectionId: string, userId: string): Promise<string>;
 }
 
 export const BITWARDEN_BRIDGE_PERSONAL_VAULT_ID = "personal";
@@ -83,10 +100,59 @@ export function bitwardenVaultId(scope: BitwardenBridgeVaultScope): string {
     : `collection:${scope.collectionId.toLowerCase()}`;
 }
 
+const CONFIG_KEYS = new Set([
+  "connectionId",
+  "signingSecrets",
+  "opengeni",
+  "vaults",
+  "accountLabel",
+  "readSyncTtlMs",
+  "minSyncIntervalMs",
+  "allowStaleReads",
+  "bitwardenUserId",
+  "snapshotTtlMs",
+  "maxSnapshots",
+]);
+const OPENGENI_KEYS = new Set(["accountId", "connectionWorkspaceId", "workspaceIds", "subjectIds"]);
+const PERSONAL_KEYS = new Set(["kind", "name", "mode"]);
+const COLLECTION_KEYS = new Set(["kind", "collectionId", "organizationId", "name", "mode"]);
+const DAY_MS = 86_400_000;
+
+/**
+ * Strict runtime check of a config from code or JSON: exact types, no
+ * unknown keys. A string where a list or boolean belongs is refused, never
+ * coerced (a string `subjectIds` would otherwise match by substring).
+ */
 export function validateBitwardenBridgeConfig(config: BitwardenBridgeConfig): void {
   const fail = (message: string): never => {
     throw new Error(`invalid Bitwarden bridge config: ${message}`);
   };
+  const isObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+  const onlyKeys = (value: Record<string, unknown>, allowed: Set<string>, where: string) => {
+    for (const key of Object.keys(value)) if (!allowed.has(key)) fail(`unknown ${where}${key}`);
+  };
+  const text = (value: unknown, max: number) =>
+    typeof value === "string" && value.trim().length > 0 && value.length <= max;
+  const textList = (value: unknown, where: string, minItems: number) => {
+    if (
+      !Array.isArray(value) ||
+      value.length < minItems ||
+      value.length > 1_000 ||
+      !value.every((entry) => text(entry, 200))
+    ) {
+      fail(`${where} must be an array of ids`);
+    }
+  };
+  const integer = (key: keyof BitwardenBridgeConfig, min: number, max: number) => {
+    const value = (config as unknown as Record<string, unknown>)[key];
+    if (value === undefined) return;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+      fail(`${key} must be an integer from ${min} to ${max}`);
+    }
+  };
+  if (!isObject(config)) fail("expected an object");
+  onlyKeys(config as unknown as Record<string, unknown>, CONFIG_KEYS, "key ");
   if (!isBitwardenGuid(config.connectionId)) fail("connectionId must be a UUID");
   if (
     !Array.isArray(config.signingSecrets) ||
@@ -96,26 +162,55 @@ export function validateBitwardenBridgeConfig(config: BitwardenBridgeConfig): vo
   ) {
     fail("signingSecrets needs one or two secrets of at least 32 characters");
   }
-  if (!config.opengeni?.accountId || !config.opengeni.connectionWorkspaceId) {
+  const opengeni = config.opengeni as unknown;
+  if (!isObject(opengeni)) fail("opengeni must be an object");
+  const bindings = opengeni as Record<string, unknown>;
+  onlyKeys(bindings, OPENGENI_KEYS, "key opengeni.");
+  if (!text(bindings.accountId, 200) || !text(bindings.connectionWorkspaceId, 200)) {
     fail("opengeni.accountId and opengeni.connectionWorkspaceId are required");
+  }
+  if (bindings.workspaceIds !== undefined)
+    textList(bindings.workspaceIds, "opengeni.workspaceIds", 1);
+  if (bindings.subjectIds !== undefined && bindings.subjectIds !== "any") {
+    textList(bindings.subjectIds, 'opengeni.subjectIds (or "any")', 0);
   }
   if (!Array.isArray(config.vaults) || config.vaults.length < 1 || config.vaults.length > 200) {
     fail("vaults needs 1 to 200 entries");
   }
   const ids = new Set<string>();
   for (const scope of config.vaults) {
+    if (!isObject(scope)) fail("each vault must be an object");
+    if (scope.kind !== "personal" && scope.kind !== "collection") fail("unknown vault kind");
+    onlyKeys(
+      scope as unknown as Record<string, unknown>,
+      scope.kind === "personal" ? PERSONAL_KEYS : COLLECTION_KEYS,
+      "vault key ",
+    );
     if (scope.mode !== "read_only" && scope.mode !== "read_write") fail("vault mode is required");
+    if (scope.name !== undefined && !text(scope.name, 300)) fail("vault name must be text");
     if (
       scope.kind === "collection" &&
       (!isBitwardenGuid(scope.collectionId) || !isBitwardenGuid(scope.organizationId))
     ) {
       fail("collection vaults need collectionId and organizationId UUIDs");
     }
-    if (scope.kind !== "personal" && scope.kind !== "collection") fail("unknown vault kind");
     const id = bitwardenVaultId(scope);
     if (ids.has(id)) fail(`duplicate vault ${id}`);
     ids.add(id);
   }
+  if (config.accountLabel !== undefined && !text(config.accountLabel, 300)) {
+    fail("accountLabel must be text");
+  }
+  if (config.allowStaleReads !== undefined && typeof config.allowStaleReads !== "boolean") {
+    fail("allowStaleReads must be true or false");
+  }
+  if (config.bitwardenUserId !== undefined && !isBitwardenGuid(config.bitwardenUserId)) {
+    fail("bitwardenUserId must be a UUID");
+  }
+  integer("readSyncTtlMs", 0, DAY_MS);
+  integer("minSyncIntervalMs", 0, DAY_MS);
+  integer("snapshotTtlMs", 1_000, DAY_MS);
+  integer("maxSnapshots", 1, 1_000);
 }
 
 const WRITE_OPERATIONS = {
@@ -156,8 +251,11 @@ type Snapshot<T> = { id: string; key: string; items: T[]; expiresAt: number };
 export interface BitwardenBridgeOptions {
   config: BitwardenBridgeConfig;
   client: BitwardenServeClient;
-  /** Use durable storage (see createFileExternalVaultReceiverStore). */
-  store: ExternalVaultReceiverStore;
+  /**
+   * Use durable storage (see createFileExternalVaultReceiverStore). Without
+   * `config.bitwardenUserId`, the store must also pin the account.
+   */
+  store: ExternalVaultReceiverStore & Partial<BitwardenAccountPinStore>;
   now?: () => number;
   onError?: Parameters<typeof createExternalVaultReceiver>[0]["onError"];
 }
@@ -170,6 +268,16 @@ export interface BitwardenBridge extends ExternalVaultReceiver {
 export function createBitwardenBridge(options: BitwardenBridgeOptions): BitwardenBridge {
   const { config, client } = options;
   validateBitwardenBridgeConfig(config);
+  const pinStore = options.store;
+  if (
+    config.bitwardenUserId === undefined &&
+    (typeof pinStore.readBitwardenAccount !== "function" ||
+      typeof pinStore.pinBitwardenAccount !== "function")
+  ) {
+    throw new Error(
+      "invalid Bitwarden bridge config: set bitwardenUserId or use a store that pins the account",
+    );
+  }
   const now = options.now ?? (() => Date.now());
   const readTtl = config.readSyncTtlMs ?? 300_000;
   const minSyncInterval = config.minSyncIntervalMs ?? 15_000;
@@ -180,8 +288,34 @@ export function createBitwardenBridge(options: BitwardenBridgeOptions): Bitwarde
     config.opengeni.workspaceIds ?? [config.opengeni.connectionWorkspaceId],
   );
   const subjects = config.opengeni.subjectIds ?? "any";
+  const subjectSet = subjects === "any" ? null : new Set(subjects);
+  const connectionKey = config.connectionId.toLowerCase();
   const scopes = new Map(config.vaults.map((scope) => [bitwardenVaultId(scope), scope]));
   const writable = config.vaults.some((scope) => scope.mode === "read_write");
+
+  /** A value-free local diagnostic for refusals the wire only reports as a code. */
+  function refuse(
+    op: "describe" | "read_fields" | "write_item" | "archive_item" | "list" | "refresh",
+    code: VaultProviderWireErrorCode,
+    message: string,
+    status: BitwardenStatus | null = null,
+  ): never {
+    const error = new ExternalVaultReceiverError(code, {
+      message,
+      freshness: freshness(status, "unavailable", "unknown", code),
+    });
+    try {
+      options.onError?.({
+        stage: "handler",
+        op: op === "list" ? "list_items" : op,
+        connectionId: connectionKey,
+        error,
+      });
+    } catch {
+      // Diagnostics never change the outcome.
+    }
+    throw error;
+  }
 
   // One bw serve per account; serialize its calls so sync never races a write.
   let queue: Promise<unknown> = Promise.resolve();
@@ -227,6 +361,16 @@ export function createBitwardenBridge(options: BitwardenBridgeOptions): Bitwarde
   ): never {
     if (error instanceof ExternalVaultReceiverError) throw error;
     if (error instanceof ProjectionError) {
+      if (error.reason === "redacted") {
+        refuse(
+          "write_item",
+          "provider_permission_denied",
+          "Bitwarden hides this item's password, TOTP or hidden field values from this account " +
+            "(collection set to hide passwords), so saving this change could erase them. Nothing " +
+            "was sent. Edit the item in Bitwarden, or grant this account permission to view passwords.",
+          status,
+        );
+      }
       throw new ExternalVaultReceiverError(
         error.reason === "not_found"
           ? "provider_not_found"
@@ -261,6 +405,60 @@ export function createBitwardenBridge(options: BitwardenBridgeOptions): Bitwarde
     );
   }
 
+  let pinned: string | null = config.bitwardenUserId?.toLowerCase() ?? null;
+
+  /**
+   * The CLI must still be signed in to the bound account. Checked on every
+   * status, before any read or write; the first unlocked account is pinned
+   * durably when none is configured.
+   */
+  async function checkAccount(status: BitwardenStatus): Promise<void> {
+    const userId = isBitwardenGuid(status.userId) ? status.userId.toLowerCase() : null;
+    // A store failure happens before anything is sent: definite, never ambiguous.
+    const fromStore = async <T>(run: () => Promise<T>): Promise<T> => {
+      try {
+        return await run();
+      } catch {
+        return refuse(
+          "describe",
+          "provider_unavailable",
+          "the bridge state store cannot read or record the bound Bitwarden account",
+          status,
+        );
+      }
+    };
+    if (pinned === null && config.bitwardenUserId === undefined) {
+      const stored = await fromStore(() => pinStore.readBitwardenAccount!(connectionKey));
+      pinned = stored?.toLowerCase() ?? null;
+    }
+    if (userId === null) {
+      if (status.status !== "unlocked") return; // Reported as locked / logged out below.
+      refuse(
+        "describe",
+        "provider_unavailable",
+        "bw serve reports no Bitwarden account; sign in with bw login and unlock locally.",
+        status,
+      );
+    }
+    if (pinned === null) {
+      if (status.status !== "unlocked") return;
+      const bound = userId;
+      pinned = (
+        await fromStore(() => pinStore.pinBitwardenAccount!(connectionKey, bound))
+      ).toLowerCase();
+    }
+    if (userId !== pinned) {
+      refuse(
+        "describe",
+        "provider_auth_invalid",
+        "bw serve is signed in to a different Bitwarden account than the one this bridge is " +
+          "bound to. Sign the CLI back in to the bound account, or reconnect with a new bridge.",
+        // Another account's sync time is not this connection's freshness.
+        null,
+      );
+    }
+  }
+
   async function unlockedStatus(): Promise<BitwardenStatus> {
     let status: BitwardenStatus;
     try {
@@ -268,6 +466,7 @@ export function createBitwardenBridge(options: BitwardenBridgeOptions): Bitwarde
     } catch (error) {
       return mapError(error, false);
     }
+    await checkAccount(status);
     if (status.status === "unlocked") return status;
     const code: VaultProviderWireErrorCode =
       status.status === "locked" ? "provider_locked" : "provider_auth_expired";
@@ -399,8 +598,8 @@ export function createBitwardenBridge(options: BitwardenBridgeOptions): Bitwarde
           operation.op === "archive_item";
         if (
           valueOperation &&
-          subjects !== "any" &&
-          (authority.subjectId === null || !subjects.includes(authority.subjectId))
+          subjectSet !== null &&
+          (authority.subjectId === null || !subjectSet.has(authority.subjectId))
         ) {
           return null;
         }

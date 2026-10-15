@@ -5,6 +5,7 @@
  * Runs next to a customer-run, already-unlocked `bw serve` on a private Unix
  * socket. The bridge never starts, logs in to or unlocks `bw`.
  */
+import { ExternalVaultReceiverError } from "@opengeni/sdk/external-vault-receiver";
 import { createBitwardenBridge } from "./bridge";
 import { BitwardenServeClient, createUnixSocketBitwardenTransport } from "./bw-serve";
 import { createFileExternalVaultReceiverStore } from "./file-store";
@@ -28,7 +29,13 @@ async function main(argv: string[]) {
     config: file.bridge,
     client: new BitwardenServeClient({ transport }),
     store: createFileExternalVaultReceiverStore({ directory: file.stateDir }),
-    onError: ({ stage, op }) => console.error(`bridge ${op} failed at ${stage}`),
+    onError: ({ stage, op, error }) =>
+      // The bridge's own refusal messages are value-free; other errors are not printed.
+      console.error(
+        error instanceof ExternalVaultReceiverError && error.message !== error.code
+          ? `bridge ${op} refused: ${error.message}`
+          : `bridge ${op} failed at ${stage}`,
+      ),
   });
   const health = await bridge.health();
   console.error(`bw serve: ${health.status}; last sync ${health.lastSync ?? "never"}`);

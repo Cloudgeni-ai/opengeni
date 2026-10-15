@@ -5,6 +5,7 @@ import {
   customFieldId,
   mergeUpdate,
   projectItem,
+  protectedValuesVisible,
   readValues,
 } from "../src/projection";
 import { COLLECTION_ID, ORG_ID, login } from "./fake-bw-serve";
@@ -177,6 +178,142 @@ describe("mergeUpdate", () => {
         ],
       }),
     ).toThrow(expect.objectContaining({ reason: "unsupported" }));
+  });
+
+  test("unchanged websites keep every raw URI, including ones the projection omits", () => {
+    const uris = Array.from({ length: 25 }, (_, index) => ({
+      uri: `https://h${index}.example.com`,
+      match: null,
+    }));
+    uris.push({ uri: "https://bad.example.com/\u0007", match: null });
+    const item = login({ login: { uris, username: "octo", password: "p", totp: null } });
+    const meta = projectItem(item);
+    expect(meta.websites).toHaveLength(20);
+    const body = mergeUpdate(item, {
+      externalItemId: item.id,
+      name: "renamed",
+      type: "login",
+      websites: meta.websites,
+      fields: [],
+    });
+    expect((body.login as Record<string, unknown>).uris).toEqual(uris);
+  });
+});
+
+describe("redacted values", () => {
+  const redacted = () =>
+    login({
+      organizationId: ORG_ID,
+      collectionIds: [COLLECTION_ID],
+      passwordHistory: undefined,
+      login: {
+        uris: [{ uri: "https://github.com", match: null }],
+        username: "octo",
+        password: null,
+        totp: null,
+      },
+      fields: [
+        { name: "api key", value: null, type: 1, linkedId: null },
+        { name: "team", value: "platform", type: 0, linkedId: null },
+      ],
+    });
+
+  test("visibility needs proof for collection items; personal items are always visible", () => {
+    expect(protectedValuesVisible(redacted())).toBe(false);
+    expect(protectedValuesVisible({ ...redacted(), organizationId: null })).toBe(true);
+    expect(protectedValuesVisible({ ...redacted(), passwordHistory: [] })).toBe(true);
+    expect(
+      protectedValuesVisible({
+        ...redacted(),
+        fields: [{ name: "api key", value: "v", type: 1, linkedId: null }],
+      }),
+    ).toBe(true);
+    expect(
+      protectedValuesVisible({
+        ...redacted(),
+        login: { uris: [], username: "octo", password: "p", totp: null },
+      }),
+    ).toBe(true);
+  });
+
+  test("untouched sections are omitted; changed sections with redacted nulls are refused", () => {
+    const item = redacted();
+    const base = {
+      externalItemId: item.id,
+      type: "login" as const,
+      websites: ["https://github.com"],
+    };
+    const renamed = mergeUpdate(item, { ...base, name: "renamed", fields: [] });
+    expect(renamed.name).toBe("renamed");
+    expect(renamed).not.toHaveProperty("login");
+    expect(renamed).not.toHaveProperty("fields");
+    // Changing a text field rewrites the list holding the redacted hidden value.
+    expect(() =>
+      mergeUpdate(item, {
+        ...base,
+        name: "x",
+        fields: [
+          { externalFieldId: customFieldId("team", 0), name: "team", kind: "text", value: "infra" },
+        ],
+      }),
+    ).toThrow(expect.objectContaining({ reason: "redacted" }));
+    const notesOnly = mergeUpdate(
+      { ...item, fields: [{ name: "team", value: "platform", type: 0, linkedId: null }] },
+      {
+        ...base,
+        name: "x",
+        fields: [
+          { externalFieldId: customFieldId("team", 0), name: "team", kind: "text", value: "infra" },
+        ],
+      },
+    );
+    expect(notesOnly).not.toHaveProperty("login");
+    expect(notesOnly.fields).toEqual([{ name: "team", value: "infra", type: 0, linkedId: null }]);
+    for (const fields of [
+      [{ externalFieldId: "login.username", name: "username", kind: "text" as const, value: "x" }],
+      [
+        {
+          externalFieldId: "login.password",
+          name: "password",
+          kind: "concealed" as const,
+          remove: true as const,
+        },
+      ],
+      [
+        {
+          externalFieldId: "login.password",
+          name: "password",
+          kind: "concealed" as const,
+          value: "only-password",
+        },
+      ],
+    ]) {
+      expect(() => mergeUpdate(item, { ...base, name: "x", fields })).toThrow(
+        expect.objectContaining({ reason: "redacted" }),
+      );
+    }
+    expect(() =>
+      mergeUpdate(item, {
+        ...base,
+        name: "x",
+        websites: ["https://other.example.com"],
+        fields: [],
+      }),
+    ).toThrow(expect.objectContaining({ reason: "redacted" }));
+    const both = mergeUpdate(item, {
+      ...base,
+      name: "x",
+      fields: [
+        { externalFieldId: "login.password", name: "password", kind: "concealed", value: "p2" },
+        { externalFieldId: "login.totp", name: "totp", kind: "totp", value: "GEZDGNBVGY3TQOJQ" },
+      ],
+    });
+    expect(both.login).toMatchObject({
+      username: "octo",
+      password: "p2",
+      totp: "GEZDGNBVGY3TQOJQ",
+    });
+    expect(both).not.toHaveProperty("fields");
   });
 });
 

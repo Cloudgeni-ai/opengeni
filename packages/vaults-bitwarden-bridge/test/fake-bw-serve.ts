@@ -57,12 +57,22 @@ export function login(overrides: Partial<FakeItem> = {}): FakeItem {
 
 export interface FakeBwState {
   status: "unlocked" | "locked" | "unauthenticated";
+  /** `bw status` userId; null when the CLI has no account. */
+  userId: string | null;
   lastSync: string | null;
   offline: boolean;
   items: FakeItem[];
   collections: Array<{ id: string; organizationId: string; name: string; externalId: null }>;
   /** Item ids the user cannot edit. */
   readOnly: Set<string>;
+  /**
+   * Item ids whose collection hides passwords from this user. Responses redact
+   * like CipherResponse; a PUT saves the body as sent, like CLIs before
+   * bitwarden/clients#22287, so redacted nulls sent back erase the values.
+   */
+  hidePasswords: Set<string>;
+  /** Last PUT body, for assertions. */
+  lastPut: Record<string, unknown> | null;
   /** Commit the next mutation, then drop the connection without a response. */
   dropAfterCommit: boolean;
   /** Fail the next mutation with this CLI message. */
@@ -77,6 +87,7 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
   let clock = Date.parse("2026-10-15T12:00:00.000Z");
   const state: FakeBwState = {
     status: "unlocked",
+    userId: USER_ID,
     lastSync: "2026-10-15T09:00:00.000Z",
     offline: false,
     items: options.items ?? [],
@@ -85,6 +96,8 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
       { id: OTHER_COLLECTION_ID, organizationId: ORG_ID, name: "Finance", externalId: null },
     ],
     readOnly: new Set(),
+    hidePasswords: new Set(),
+    lastPut: null,
     dropAfterCommit: false,
     failNext: null,
     requests: [],
@@ -93,6 +106,23 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
   const tick = () => {
     clock += 1_000;
     return new Date(clock).toISOString();
+  };
+  /** CipherResponse redaction when viewPassword is false. */
+  const view = (item: FakeItem): FakeItem => {
+    const copy = structuredClone(item);
+    if (!state.hidePasswords.has(item.id)) return copy;
+    delete copy.passwordHistory;
+    if (Array.isArray(copy.fields)) {
+      for (const field of copy.fields as Array<Record<string, unknown>>) {
+        if (field.type === 1) field.value = null;
+      }
+    }
+    const loginPart = copy.login as Record<string, unknown> | undefined;
+    if (copy.type === 1 && loginPart) {
+      loginPart.password = null;
+      loginPart.totp = null;
+    }
+    return copy;
   };
 
   const server = http.createServer((request, response) => {
@@ -127,7 +157,7 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
             serverUrl: "https://vault.bitwarden.eu",
             lastSync: state.lastSync,
             userEmail: state.status === "unauthenticated" ? null : "ops@example.com",
-            userId: state.status === "unauthenticated" ? null : USER_ID,
+            userId: state.status === "unauthenticated" ? null : state.userId,
             status: state.status,
           },
         });
@@ -153,7 +183,7 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
               ? item.organizationId == null
               : true,
         );
-        return ok({ object: "list", data: structuredClone(list) });
+        return ok({ object: "list", data: list.map(view) });
       }
       if (route === "GET /list/object/collections") {
         return ok({
@@ -166,7 +196,7 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
       const id = match[1];
       const index = id ? state.items.findIndex((item) => item.id === id) : -1;
       if (request.method === "GET") {
-        return index >= 0 ? ok(structuredClone(state.items[index])) : fail("Not found.");
+        return index >= 0 ? ok(view(state.items[index]!)) : fail("Not found.");
       }
       if (state.failNext) {
         const message = state.failNext;
@@ -196,6 +226,7 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
       if (index < 0) return fail("Not found.");
       const current = state.items[index]!;
       if (request.method === "PUT") {
+        state.lastPut = structuredClone(body);
         if (current.deletedDate != null)
           return fail("You may not edit a deleted item. Use the restore command first.");
         if (state.readOnly.has(current.id))
@@ -205,9 +236,21 @@ export async function startFakeBwServe(options: { items?: FakeItem[] } = {}) {
             "The cipher you are updating is out of date. Please save your work, sync your vault, and try again.",
           );
         }
-        const saved = { ...body, id: current.id, revisionDate: tick() } as FakeItem;
+        // CipherExport.toView keeps the stored login, fields and password history when the body omits them.
+        const saved = {
+          ...body,
+          ...(body.login === undefined && current.login !== undefined
+            ? { login: current.login }
+            : {}),
+          ...(body.fields === undefined ? { fields: current.fields } : {}),
+          ...(body.passwordHistory === undefined && current.passwordHistory !== undefined
+            ? { passwordHistory: current.passwordHistory }
+            : {}),
+          id: current.id,
+          revisionDate: tick(),
+        } as FakeItem;
         state.items[index] = saved;
-        return finish(structuredClone(saved));
+        return finish(view(saved));
       }
       if (request.method === "DELETE") {
         if (url.searchParams.get("permanent") === "true") {

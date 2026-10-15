@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -88,6 +88,73 @@ describe("file receiver store", () => {
     expect(() => createFileExternalVaultReceiverStore({ directory: corrupt })).toThrow(
       /cannot read/,
     );
+    const foreign = privateDir();
+    writeFileSync(join(foreign, "receiver-state.json"), JSON.stringify({ version: 2 }));
+    expect(() => createFileExternalVaultReceiverStore({ directory: foreign })).toThrow(
+      /cannot read/,
+    );
+    const badPin = privateDir();
+    writeFileSync(
+      join(badPin, "receiver-state.json"),
+      JSON.stringify({ version: 1, requests: {}, mutations: {}, accounts: { x: "nope" } }),
+    );
+    expect(() => createFileExternalVaultReceiverStore({ directory: badPin })).toThrow(
+      /cannot read/,
+    );
+  });
+
+  test("the directory is fsynced after every rename, before the decision returns", async () => {
+    const directory = join(privateDir(), "s");
+    const synced: string[] = [];
+    const store = createFileExternalVaultReceiverStore({
+      directory,
+      sync: {
+        async syncDirectory(path) {
+          // The rename has happened: the new state is already in place.
+          synced.push(`${path}:${readFileSync(join(path, "receiver-state.json"), "utf8").length}`);
+        },
+      },
+    });
+    await store.rememberRequest({
+      connectionId: CONNECTION,
+      requestId: "r1",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    expect(synced).toHaveLength(1);
+    expect(synced[0]).toStartWith(`${directory}:`);
+    await store.claimMutation(claim);
+    await store.pinBitwardenAccount(CONNECTION, "0b6d7a52-91a4-4f5e-8f7c-2e8f51b1c001");
+    expect(synced).toHaveLength(3);
+
+    // A failed directory sync is a failed decision; memory is not left ahead of it.
+    const failing = createFileExternalVaultReceiverStore({
+      directory: join(privateDir(), "f"),
+      sync: {
+        async syncDirectory() {
+          throw new Error("EIO");
+        },
+      },
+    });
+    await expect(failing.claimMutation(claim)).rejects.toThrow("EIO");
+    await expect(failing.claimMutation(claim)).rejects.toThrow("EIO");
+
+    // The default really fsyncs the directory.
+    const real = createFileExternalVaultReceiverStore({ directory: join(privateDir(), "r") });
+    expect(await real.rememberRequest({ ...claim, requestId: "r2" })).toBe(true);
+  });
+
+  test("the Bitwarden account pin is durable and first-seen wins", async () => {
+    const directory = join(privateDir(), "pins");
+    const first = "0b6d7a52-91a4-4f5e-8f7c-2e8f51b1c001";
+    const store = createFileExternalVaultReceiverStore({ directory });
+    expect(await store.readBitwardenAccount(CONNECTION)).toBeNull();
+    expect(await store.pinBitwardenAccount(CONNECTION, first.toUpperCase())).toBe(first);
+    expect(
+      await store.pinBitwardenAccount(CONNECTION, "7f000000-0000-4000-8000-0000000000aa"),
+    ).toBe(first);
+    const reopened = createFileExternalVaultReceiverStore({ directory });
+    expect(await reopened.readBitwardenAccount(CONNECTION.toUpperCase())).toBe(first);
+    await expect(reopened.pinBitwardenAccount("other", "not-a-guid")).rejects.toThrow();
   });
 });
 
@@ -133,6 +200,52 @@ describe("config file", () => {
     expect(() =>
       loadBitwardenBridgeConfigFile(write(dir, { ...base(dir), stateDir: "relative" }), {}),
     ).toThrow(/absolute/);
+  });
+
+  test("values are typed strictly: string booleans and lists are refused, not coerced", () => {
+    const dir = privateDir();
+    const env = { OPENGENI_VAULT_SIGNING_SECRET: SECRET };
+    const load = (value: unknown) => loadBitwardenBridgeConfigFile(write(dir, value), env);
+    expect(load({ ...base(dir), allowStaleReads: false }).bridge.allowStaleReads).toBe(false);
+    for (const bad of [
+      { ...base(dir), allowStaleReads: "false" },
+      {
+        ...base(dir),
+        opengeni: { accountId: "acct", connectionWorkspaceId: "ws", subjectIds: "user_10" },
+      },
+      {
+        ...base(dir),
+        opengeni: { accountId: "acct", connectionWorkspaceId: "ws", workspaceIds: "ws" },
+      },
+      { ...base(dir), allowStaleReadz: false },
+      { ...base(dir), bwServePort: "8087" },
+      { ...base(dir), listen: { port: "8788" } },
+      { ...base(dir), listen: { port: 8788, allowNonLoopback: "true" } },
+      { ...base(dir), listen: { path: "relative.sock" } },
+      { ...base(dir), path: "opengeni/vault" },
+      { ...base(dir), signingSecretFile: ["/tmp/x"] },
+      [base(dir)],
+    ]) {
+      expect(() => load(bad)).toThrow();
+    }
+    expect(load({ ...base(dir), listen: { path: join(dir, "bridge.sock") } }).listen).toEqual({
+      path: join(dir, "bridge.sock"),
+    });
+  });
+
+  test("signing secret files must be owned by the bridge user, like the socket", () => {
+    const dir = privateDir();
+    const secretFile = join(dir, "secret");
+    writeFileSync(secretFile, SECRET, { mode: 0o600 });
+    const path = write(dir, { ...base(dir), signingSecretFile: secretFile });
+    expect(loadBitwardenBridgeConfigFile(path, {}).bridge.signingSecrets).toEqual([SECRET]);
+    const uid = process.getuid!();
+    const spy = spyOn(process, "getuid").mockReturnValue(uid + 1);
+    try {
+      expect(() => loadBitwardenBridgeConfigFile(path, {})).toThrow(/owned by the bridge user/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

@@ -69,7 +69,11 @@ function config(overrides: Partial<BitwardenBridgeConfig> = {}): BitwardenBridge
 }
 
 async function harness(
-  options: { items?: FakeItem[]; config?: Partial<BitwardenBridgeConfig> } = {},
+  options: {
+    items?: FakeItem[];
+    config?: Partial<BitwardenBridgeConfig>;
+    pins?: Map<string, string>;
+  } = {},
 ) {
   const bw = await startFakeBwServe({ items: options.items ?? [login()] });
   cleanups.push(() => bw.close());
@@ -79,11 +83,21 @@ async function harness(
     transport: createUnixSocketBitwardenTransport({ socketPath: bw.socketPath }),
     timeoutMs: 2_000,
   });
+  const pins = options.pins ?? new Map<string, string>();
+  const diagnostics: string[] = [];
   const bridge = createBitwardenBridge({
     config: config(options.config),
     client,
-    store: createInMemoryExternalVaultReceiverStore({ now }),
+    store: {
+      ...createInMemoryExternalVaultReceiverStore({ now }),
+      readBitwardenAccount: async (connectionId) => pins.get(connectionId) ?? null,
+      pinBitwardenAccount: async (connectionId, userId) => {
+        if (!pins.has(connectionId)) pins.set(connectionId, userId);
+        return pins.get(connectionId)!;
+      },
+    },
     now,
+    onError: ({ error }) => diagnostics.push(error instanceof Error ? error.message : "?"),
   });
   const responses: string[] = [];
   const transport: RemoteVaultTransport = {
@@ -125,6 +139,8 @@ async function harness(
     ctx,
     responses,
     freshness,
+    pins,
+    diagnostics,
     advance: (ms: number) => (offset += ms),
   };
 }
@@ -549,5 +565,246 @@ describe("writes", () => {
     ]);
     expect(values).toHaveLength(1);
     expect((bw.state.items[0]!.fields as Array<{ value: string }>)[0]!.value).toBe("ghp_new");
+  });
+});
+
+describe("collections that hide passwords", () => {
+  function hiddenItem() {
+    return login({
+      organizationId: ORG_ID,
+      collectionIds: [COLLECTION_ID],
+      passwordHistory: null,
+    });
+  }
+  const collection = `collection:${COLLECTION_ID}`;
+
+  test("an unrelated edit leaves redacted values out of the update and keeps them", async () => {
+    const item = hiddenItem();
+    const { bw, provider, ctx } = await harness({ items: [item] });
+    bw.state.hidePasswords.add(item.id);
+    await provider.validate(ctx());
+    const [meta] = await provider.listItems(ctx(), collection);
+    expect(meta!.fields.map((field) => field.externalFieldId)).toEqual([
+      "login.username",
+      "notes",
+      customFieldId("team", 0),
+    ]);
+    await provider.writeItem(ctx(), collection, {
+      externalItemId: item.id,
+      name: "GitHub (renamed)",
+      type: "login",
+      websites: meta!.websites,
+      fields: [{ externalFieldId: "notes", name: "note", kind: "text", value: "new note" }],
+    });
+    expect(bw.state.lastPut).not.toHaveProperty("login");
+    expect(bw.state.lastPut).not.toHaveProperty("fields");
+    const stored = bw.state.items[0]!;
+    expect(stored.name).toBe("GitHub (renamed)");
+    expect(stored.notes).toBe("new note");
+    expect(stored.login).toMatchObject({ password: "hunter2", totp: "JBSWY3DPEHPK3PXP" });
+    expect((stored.fields as Array<{ value: unknown }>)[0]!.value).toBe("ghp_secret");
+  });
+
+  test("a change that would send redacted nulls back is refused before anything is sent", async () => {
+    const item = hiddenItem();
+    const { bw, provider, ctx, diagnostics } = await harness({ items: [item] });
+    bw.state.hidePasswords.add(item.id);
+    await provider.validate(ctx());
+    const base = { externalItemId: item.id, name: "GitHub", type: "login" as const };
+    const attempts = [
+      // Username lives in the login section next to the redacted password and TOTP.
+      {
+        ...base,
+        websites: ["https://github.com"],
+        fields: [
+          {
+            externalFieldId: "login.username",
+            name: "username",
+            kind: "text" as const,
+            value: "x",
+          },
+        ],
+      },
+      { ...base, websites: ["https://example.com"], fields: [] },
+      // A new custom field rewrites the field list holding the redacted hidden value.
+      {
+        ...base,
+        websites: ["https://github.com"],
+        fields: [{ name: "region", kind: "text" as const, value: "eu" }],
+      },
+    ];
+    for (const write of attempts) {
+      expect(await code(provider.writeItem(ctx(), collection, write))).toBe(
+        "provider_permission_denied",
+      );
+    }
+    expect(bw.state.lastPut).toBeNull();
+    expect(bw.state.items[0]!.login).toMatchObject({ password: "hunter2" });
+    expect(diagnostics.at(-1)).toContain("hides this item's password");
+  });
+
+  test("explicit new values are deliberate writes; visible collection items keep full editing", async () => {
+    const hidden = hiddenItem();
+    const visible = login({ organizationId: ORG_ID, collectionIds: [COLLECTION_ID] });
+    const { bw, provider, ctx } = await harness({ items: [hidden, visible] });
+    bw.state.hidePasswords.add(hidden.id);
+    await provider.validate(ctx());
+    await provider.writeItem(ctx(), collection, {
+      externalItemId: hidden.id,
+      name: "GitHub",
+      type: "login",
+      websites: ["https://github.com"],
+      fields: [
+        { externalFieldId: "login.username", name: "username", kind: "text", value: "new-user" },
+        { externalFieldId: "login.password", name: "password", kind: "concealed", value: "set" },
+        { externalFieldId: "login.totp", name: "totp", kind: "totp", value: "GEZDGNBVGY3TQOJQ" },
+      ],
+    });
+    expect(bw.state.items[0]!.login).toMatchObject({
+      username: "new-user",
+      password: "set",
+      totp: "GEZDGNBVGY3TQOJQ",
+    });
+    await provider.writeItem(ctx(), collection, {
+      externalItemId: visible.id,
+      name: "GitHub",
+      type: "login",
+      websites: ["https://github.com"],
+      fields: [
+        { externalFieldId: "login.username", name: "username", kind: "text", value: "v" },
+        { name: "region", kind: "text", value: "eu" },
+      ],
+    });
+    const stored = bw.state.items[1]!;
+    expect(stored.login).toMatchObject({ username: "v", password: "hunter2" });
+    expect((stored.fields as Array<{ value: unknown }>).map((field) => field.value)).toEqual([
+      "ghp_secret",
+      "platform",
+      null,
+      "eu",
+    ]);
+  });
+});
+
+describe("account pinning", () => {
+  const OTHER_USER = "7f000000-0000-4000-8000-0000000000aa";
+
+  test("the first unlocked account is pinned; a switched CLI account is refused for everything", async () => {
+    const item = login();
+    const { bw, provider, ctx, pins, diagnostics } = await harness({ items: [item] });
+    expect((await provider.validate(ctx())).accountId).toBe(`bitwarden:${USER_ID}`);
+    expect(pins.get(CONNECTION)).toBe(USER_ID);
+    bw.state.userId = OTHER_USER;
+    const before = bw.state.requests.length;
+    expect(await code(provider.validate(ctx()))).toBe("provider_auth_invalid");
+    expect(await code(provider.listItems(ctx(), "personal"))).toBe("provider_auth_invalid");
+    expect(await code(provider.readFields(ctx(), "personal", item.id, ["login.password"]))).toBe(
+      "provider_auth_invalid",
+    );
+    expect(
+      await code(
+        provider.writeItem(ctx(), "personal", {
+          name: "x",
+          type: "note",
+          websites: [],
+          fields: [],
+        }),
+      ),
+    ).toBe("provider_auth_invalid");
+    expect(await code(provider.archiveItem(ctx(), "personal", item.id))).toBe(
+      "provider_auth_invalid",
+    );
+    // Only status checks reached bw serve: no sync, list, get or write.
+    expect(bw.state.requests.slice(before).every((r) => r.path === "/status")).toBe(true);
+    expect(diagnostics.at(-1)).toContain("different Bitwarden account");
+    bw.state.userId = USER_ID;
+    expect(await code(provider.readFields(ctx(), "personal", item.id, ["login.password"]))).toBe(
+      "ok",
+    );
+  });
+
+  test("a stored or configured pin wins; an unlocked CLI without an account is refused", async () => {
+    const stored = await harness({ pins: new Map([[CONNECTION, OTHER_USER]]) });
+    expect(await code(stored.provider.listVaults(stored.ctx()))).toBe("provider_auth_invalid");
+    const configured = await harness({ config: { bitwardenUserId: OTHER_USER } });
+    expect(await code(configured.provider.validate(configured.ctx()))).toBe(
+      "provider_auth_invalid",
+    );
+    expect(configured.pins.size).toBe(0);
+    const empty = await harness();
+    empty.bw.state.userId = null;
+    expect(await code(empty.provider.validate(empty.ctx()))).toBe("provider_unavailable");
+    expect(empty.pins.size).toBe(0);
+    // Locked with a different account is still the wrong account.
+    const locked = await harness({ pins: new Map([[CONNECTION, OTHER_USER]]) });
+    locked.bw.state.status = "locked";
+    expect(await code(locked.provider.validate(locked.ctx()))).toBe("provider_auth_invalid");
+  });
+
+  test("a bridge needs a configured account or a store that can pin one", () => {
+    const client = new BitwardenServeClient({
+      transport: { request: async () => ({ status: 500, body: "" }) },
+    });
+    expect(() =>
+      createBitwardenBridge({
+        config: config(),
+        client,
+        store: createInMemoryExternalVaultReceiverStore(),
+      }),
+    ).toThrow(/bitwardenUserId/);
+    expect(() =>
+      createBitwardenBridge({
+        config: config({ bitwardenUserId: USER_ID }),
+        client,
+        store: createInMemoryExternalVaultReceiverStore(),
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("strict config", () => {
+  const client = new BitwardenServeClient({
+    transport: { request: async () => ({ status: 500, body: "" }) },
+  });
+  const build = (value: unknown) =>
+    createBitwardenBridge({
+      config: value as BitwardenBridgeConfig,
+      client,
+      store: createInMemoryExternalVaultReceiverStore(),
+    });
+  const ok = { ...config(), bitwardenUserId: USER_ID };
+
+  test("a string subject list is refused instead of matching by substring", () => {
+    // With `.includes` on a string, "user_1" would have matched "user_10_admin".
+    expect(() =>
+      build({ ...ok, opengeni: { ...ok.opengeni, subjectIds: "user_10_admin" } }),
+    ).toThrow(/subjectIds/);
+    expect(() => build({ ...ok, opengeni: { ...ok.opengeni, subjectIds: ["user_1", 7] } })).toThrow(
+      /subjectIds/,
+    );
+    expect(() => build({ ...ok, opengeni: { ...ok.opengeni, subjectIds: "any" } })).not.toThrow();
+    expect(() => build({ ...ok, opengeni: { ...ok.opengeni, subjectIds: [] } })).not.toThrow();
+  });
+
+  test("booleans, numbers, workspace lists and keys are typed exactly", () => {
+    for (const bad of [
+      { ...ok, allowStaleReads: "false" },
+      { ...ok, readSyncTtlMs: "300000" },
+      { ...ok, maxSnapshots: 0 },
+      { ...ok, bitwardenUserId: "not-a-guid" },
+      { ...ok, accountLabel: 5 },
+      { ...ok, unexpected: true },
+      { ...ok, opengeni: { ...ok.opengeni, workspaceIds: "ws_owner" } },
+      { ...ok, opengeni: { ...ok.opengeni, workspaceIds: [] } },
+      { ...ok, opengeni: { ...ok.opengeni, subjectId: "user_1" } },
+      { ...ok, opengeni: { ...ok.opengeni, accountId: 1 } },
+      { ...ok, opengeni: "acct_1" },
+      { ...ok, vaults: [{ kind: "personal", mode: "read_write", extra: 1 }] },
+      { ...ok, vaults: [{ kind: "personal", mode: "read_write", name: 3 }] },
+      { ...ok, vaults: ["personal"] },
+    ]) {
+      expect(() => build(bad)).toThrow(/invalid Bitwarden bridge config/);
+    }
+    expect(() => build({ ...ok, allowStaleReads: false, readSyncTtlMs: 0 })).not.toThrow();
   });
 });
