@@ -390,7 +390,8 @@ export function VaultPage({
                   <button
                     type="button"
                     onClick={providerAccount.onOpen}
-                    className="rounded-sm font-medium og-link outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+                    // A long account name wraps like the sentence it ends, not centered.
+                    className="rounded-sm text-left font-medium og-link outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
                   >
                     {providerAccount.name}
                   </button>

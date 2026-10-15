@@ -91,7 +91,29 @@ const ROLE_EMAIL: Record<string, string> = {
 const seedCredentials = readEnvFile(join(LS, "seed-credentials"));
 const states = new Map<string, string>();
 
+// One sign-in at a time, retried with backoff: the stack rate-limits bursts of sign-ins.
+let signInChain: Promise<unknown> = Promise.resolve();
+
 async function storageStateFor(browser: Browser, user: string): Promise<string> {
+  const cached = states.get(user);
+  if (cached) return cached;
+  const run = signInChain.then(async () => {
+    let failure: unknown;
+    for (const delay of [0, 20_000, 45_000]) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      try {
+        return await signIn(browser, user);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    throw failure;
+  });
+  signInChain = run.catch(() => undefined);
+  return run;
+}
+
+async function signIn(browser: Browser, user: string): Promise<string> {
   const cached = states.get(user);
   if (cached) return cached;
   const harnessState = flags.stack ? join(LS, "run", `auth-${flags.stack}-${user}.json`) : "";
@@ -108,14 +130,17 @@ async function storageStateFor(browser: Browser, user: string): Promise<string> 
   const path = join(OUT, ".auth", `${user.replace(/[^a-z0-9]/giu, "_")}.json`);
   mkdirSync(join(OUT, ".auth"), { recursive: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  const page = await context.newPage();
-  await page.goto(WEB);
-  await page.locator("input[type=email]").first().fill(email);
-  await page.locator("input[type=password]").first().fill(password);
-  await page.locator("button[type=submit]").first().click();
-  await page.waitForURL(/\/workspaces\//u, { timeout: 30_000 });
-  await context.storageState({ path });
-  await context.close();
+  try {
+    const page = await context.newPage();
+    await page.goto(WEB);
+    await page.locator("input[type=email]").first().fill(email);
+    await page.locator("input[type=password]").first().fill(password);
+    await page.locator("button[type=submit]").first().click();
+    await page.waitForURL(/\/workspaces\//u, { timeout: 30_000 });
+    await context.storageState({ path });
+  } finally {
+    await context.close();
+  }
   states.set(user, path);
   return path;
 }
@@ -1520,6 +1545,9 @@ async function capture(
     await state.steps?.(page, ids);
     const file = join(OUT, name);
     await page.screenshot({ path: file });
+    // Keep the newest tokens, so the next context doesn't replay a rotated refresh token.
+    if (storageState.startsWith(OUT))
+      await context.storageState({ path: storageState }).catch(() => {});
     const minTarget = width < 600 ? 44 : 40;
     const layout = await page.evaluate((min) => {
       const overflowPx = Math.max(0, document.documentElement.scrollWidth - window.innerWidth);
