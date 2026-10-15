@@ -101,3 +101,20 @@ erase historical charges. Keep usage, ledger, failed-settlement and funding-wait
 signals visible to operators. A rollback of the binary across new migration
 contracts may need the deployment-specific maintenance procedure; do not assume
 restarting an old image is safe.
+
+## Site platform usage
+
+Published Sites' platform usage (gateway requests, Site SQL rows and
+storage) follows the same ladder with `OPENGENI_SITES_PLATFORM_BILLING_MODE`:
+start in `usage_only` (the default) and compare the Usage page and the
+`site_platform_usage` rows with the Cloudflare bill, move to `shadow` and
+compare `shadow_micros` with what you expect to charge, then switch to
+`credits`. Set the values in the reviewed Helm values file
+(`config.OPENGENI_SITES_PLATFORM_*`) like the other modes. In credits mode a
+workspace past its monthly allowance with no credits (or with
+`OPENGENI_SITES_PLATFORM_OVERAGE_ENABLED=false`) gets 402
+`site_platform_quota_exhausted` on Site SQL calls, storage-adding Site Data
+writes and new publications; pages keep serving. Going back to `usage_only`
+stops new charges and refusals; it does not reverse charges already made.
+The Opengeni-wide brake (`OPENGENI_SITES_PLATFORM_MONTHLY_LIMIT_USD`) works
+in every mode; see "Platform usage" in [`published-sites.md`](published-sites.md).

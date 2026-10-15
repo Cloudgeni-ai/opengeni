@@ -603,22 +603,28 @@ migrations recorded (`details.migrations`).
 
 `siteSqlLimits` derives the effective limits from the Site's limit profile:
 
-| Setting (`OPENGENI_SITES_SQL_*`)    | Free default | Meaning                              |
+| Setting (`OPENGENI_SITES_SQL_*`)    | Default      | Meaning                              |
 | ----------------------------------- | ------------ | ------------------------------------ |
-| `FREE_STORAGE_BYTES`                | 50 MiB       | database size per Site               |
-| `FREE_ROWS_READ_PER_MONTH`          | 5,000,000    | rows read per Site per month         |
-| `FREE_ROWS_WRITTEN_PER_MONTH`       | 100,000      | rows written per Site per month      |
+| `FREE_STORAGE_BYTES`                | 5 GiB        | database size per Site               |
+| `FREE_ROWS_READ_PER_MONTH`          | unset (none) | optional rows read per Site per month |
+| `FREE_ROWS_WRITTEN_PER_MONTH`       | unset (none) | optional rows written per Site per month |
 | `FREE_CALLS_PER_MINUTE_PER_VIEWER`  | 60           | Site page calls per viewer           |
 | `FREE_CALLS_PER_MINUTE_PER_SITE`    | 600          | Site page calls per Site             |
 | `MAX_ROWS_PER_CALL`                 | 1,000        | rows one call returns (hard cap 5,000) |
 | `MAX_RESPONSE_BYTES`                | 1 MiB        | response size per call (hard cap 4 MiB) |
 | `TIMEOUT_MS`                        | 15,000       | API to gateway request timeout       |
 
-`credits` multiplies the free numbers by
+Rows and storage are metered per workspace as platform usage against the
+monthly allowance instead (see published-sites.md "Platform usage"); in
+credits mode a used-up allowance the workspace can't pay for refuses calls
+with 402 `site_platform_quota_exhausted`, and the Opengeni-wide platform
+brake refuses writes with 503 `site_platform_brake_engaged`.
+
+`credits` multiplies the standard numbers by
 `OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER` (default 10),
 `unlimited` lifts the monthly caps (5 GB storage, 600 calls per viewer and
-6,000 per Site per minute still apply), and `custom` profiles use the free
-Site SQL numbers. Managers share one window of 600 calls per minute per Site.
+6,000 per Site per minute still apply), and `custom` profiles use the
+standard Site SQL numbers. Managers share one window of 600 calls per minute per Site.
 On published hosts, guests' write queries also count against the Site's
 guest write limit shared with Site Data
 (`OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE`).
@@ -629,7 +635,8 @@ statements) is metered but neither counts toward nor stops at the monthly
 caps; the managers' call window and the storage cap bound it. Every call
 records `site_sql.rows_read`, `site_sql.rows_written` and
 `site_sql.storage_growth_bytes` usage events (source resource `site`) in
-`usage_only` mode like Site Data. Metering runs after the Durable Object
+`usage_only` mode like Site Data, and adds the rows and storage to the
+workspace's platform usage. Metering runs after the Durable Object
 answered; a metering failure is logged and does not fail the call.
 
 ## Tests

@@ -122,13 +122,19 @@ an agent may send writes only to:
   clamped), renaming, archiving or deleting one it reaches, and working in
   one (events, steer, control, queue, composer draft, retry, context, goal,
   artifacts, files, git, terminal, background commands);
-- files and content: uploads and download links, editable artifacts, new
-  Sites and uploads, Site Data and a Site's files (only for the Site it was
+- files and content: uploads and download links, new Sites and uploads, Site Data and a Site's files (only for the Site it was
   started from), and a Site's versions, rollback, status and audience (under
   the rule above);
 - reads sent as POST: Knowledge and document searches, download links, the
   Knowledge save dry run and a Connected Machine audience preview;
 - feedback.
+
+Documents, spreadsheets and presentations (`/editable-artifacts` writes, and
+the first-party `editable_artifact_create`, `_import` and `_apply` tools)
+are open only when a published Site the agent was started from declares one
+of those first-party tools in its current version's requested tools;
+otherwise they are refused like any other write. Its other tools are the
+Site's declared tools, intersected with what the person may use.
 
 Every other write, including `PATCH` or `DELETE` on the workspace itself, a
 session's agent, tools, servers, credentials, variable sets, vaults, Skills,
@@ -142,7 +148,10 @@ registered route table. A session started from a Site page cannot get
 session admin access (409), and an agent acting for a Site page cannot run
 `admin_action_call`.
 Published Sites start their agents as `site:<siteId>` with the publication's
-own tools and limits instead (see `docs/site-runtime-api.md`).
+own tools and limits instead (see `docs/site-runtime-api.md`): workspace
+tools only for members who may use connections, never for people outside
+the workspace, and the limits of the viewer's audience
+(`docs/published-sites.md`, "Limits and billing").
 
 ## Agent defaults
 
