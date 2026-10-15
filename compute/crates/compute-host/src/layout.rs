@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 
 use compute_engine::{Drive, SnapshotFiles, VmSpec};
 
+use crate::net::{Link, NetworkConfig, PoolFull};
 use crate::protocol::{Id, SandboxConfig};
 
 /// Directory name the jailer gives each VM's chroot, inside the sandbox
@@ -121,10 +122,32 @@ pub(crate) fn check_root(root: &Path) -> Result<(), String> {
 pub(crate) struct Images {
     /// The host's guest kernel, linked into each jail.
     pub kernel: PathBuf,
+    /// The kernel command line, including the guest's network
+    /// configuration when sandboxes are networked.
     pub boot_args: String,
     /// The user id of the sandbox with ordinal 0; each sandbox's VMM runs
     /// as `first_uid + ordinal`, with the same group id.
     pub first_uid: u32,
+    /// How sandboxes are networked; `None` leaves them without a network.
+    pub network: Option<NetworkConfig>,
+}
+
+impl Images {
+    /// The user and group id the VMM of the sandbox numbered `ordinal` runs as.
+    pub fn owner(&self, ordinal: u32) -> (u32, u32) {
+        let uid = self.first_uid.saturating_add(ordinal);
+        (uid, uid)
+    }
+
+    /// The network of the sandbox numbered `ordinal`, or `None` when
+    /// sandboxes are not networked.
+    pub fn link(&self, id: Id, ordinal: u32) -> Result<Option<Link>, PoolFull> {
+        let Some(config) = &self.network else {
+            return Ok(None);
+        };
+        let (uid, gid) = self.owner(ordinal);
+        Link::new(config, id, ordinal, uid, gid).map(Some)
+    }
 }
 
 /// The VM description for one sandbox, whose ordinal on this host is
@@ -136,13 +159,13 @@ pub(crate) fn vm_spec(
     paths: &Paths,
     images: &Images,
 ) -> VmSpec {
-    let uid = images.first_uid.saturating_add(ordinal);
+    let (uid, gid) = images.owner(ordinal);
     VmSpec {
         name: id.to_string(),
         dir: paths.jail.clone(),
         logs: paths.dir.clone(),
         uid,
-        gid: uid,
+        gid,
         vcpus: config.vcpus,
         memory_mib: config.memory_mib,
         kernel: paths.kernel.clone(),
@@ -153,7 +176,11 @@ pub(crate) fn vm_spec(
             root: true,
             read_only: false,
         }],
-        network: None,
+        network: images
+            .link(id, ordinal)
+            .ok()
+            .flatten()
+            .map(|link| link.vm_network()),
         free_page_reporting: true,
     }
 }

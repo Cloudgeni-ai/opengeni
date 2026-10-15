@@ -404,6 +404,7 @@ impl Lab {
             guest_ports: Vec::new(),
             restore_notice_port: None,
             first_uid: 1 << 30,
+            network: None,
         };
         configure(&mut config);
         let engine = Fake {

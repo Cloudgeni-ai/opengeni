@@ -31,6 +31,7 @@ use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root, copy_sparse, link_kernel, vm_spec};
+use crate::net::{NetworkConfig, Networks};
 use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
 use crate::state::{Change, Disk, Fence, Record, Records, StateError, Stray, check_generation};
 use crate::step::{After, Job, Live};
@@ -65,6 +66,9 @@ pub struct HostConfig {
     /// has its own ordinal, and its VMM runs as user and group
     /// `first_uid + ordinal`, so no two VMMs share a user.
     pub first_uid: u32,
+    /// How sandboxes reach the network (see [`crate::net`]). `None` gives
+    /// them none.
+    pub network: Option<NetworkConfig>,
 }
 
 /// A request the host could not carry out.
@@ -384,6 +388,7 @@ pub struct HostAgent<E: Engine, S: Store> {
     engine: Arc<E>,
     store: Arc<S>,
     records: Arc<Records>,
+    net: Option<Arc<Networks>>,
     root: PathBuf,
     base_image: PathBuf,
     images: Images,
@@ -445,16 +450,31 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
         check_root(&config.root).map_err(HostError::Invalid)?;
         let (records, strays) = Records::open(config.root.clone(), HANDOVER).await?;
+        let net = match config.network.clone() {
+            Some(network) => Some(Arc::new(
+                tokio::task::spawn_blocking(move || Networks::prepare(&network))
+                    .await
+                    .map_err(|error| HostError::Io(error.to_string()))?
+                    .map_err(|error| HostError::Io(error.to_string()))?,
+            )),
+            None => None,
+        };
+        let boot_args = match &config.network {
+            Some(network) => format!("{} {}", config.boot_args, network.boot_args()),
+            None => config.boot_args,
+        };
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
         let mut agent = Self {
             engine: Arc::new(engine),
             store: Arc::new(store),
             records: Arc::new(records),
+            net,
             images: Images {
                 kernel: config.kernel,
-                boot_args: config.boot_args,
+                boot_args,
                 first_uid: config.first_uid,
+                network: config.network,
             },
             root: config.root,
             base_image: config.base_image,
@@ -492,6 +512,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // Creation never finished or removal nearly had: nothing was
                 // promised, and no VM runs without a record.
                 None => {
+                    if let Err(error) = self.remove_network(stray.id).await {
+                        tracing::warn!(id = %stray.id, %error, "could not remove an unrecorded sandbox's network");
+                    }
                     if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
                         tracing::warn!(id = %stray.id, %error, "could not tidy an unrecorded sandbox");
                     }
@@ -501,6 +524,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
         }
+        self.ensure_networks().await;
         let mut adopted = 0_usize;
         for record in self.records.all() {
             let id = record.id;
@@ -521,6 +545,46 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         tracing::info!(sandboxes = self.slots.len(), adopted, "recovered");
+    }
+
+    /// Makes sure every recorded sandbox's network exists with the current
+    /// rules, all at once. A VM still running keeps its network untouched
+    /// but for the rules; after a host reboot every network is rebuilt.
+    async fn ensure_networks(&self) {
+        let Some(net) = &self.net else {
+            return;
+        };
+        let mut work = tokio::task::JoinSet::new();
+        for record in self.records.all() {
+            if record.removing {
+                continue;
+            }
+            let Ok(Some(link)) = self.images.link(record.id, record.ordinal) else {
+                tracing::error!(id = %record.id, "no room for the sandbox's network");
+                continue;
+            };
+            let net = Arc::clone(net);
+            work.spawn_blocking(move || (record.id, net.ensure(&link)));
+        }
+        while let Some(done) = work.join_next().await {
+            match done {
+                Ok((_, Ok(()))) => {}
+                Ok((id, Err(error))) => {
+                    tracing::error!(%id, %error, "could not set up the sandbox's network");
+                }
+                Err(error) => tracing::error!(%error, "network setup panicked"),
+            }
+        }
+    }
+
+    async fn remove_network(&self, id: Id) -> Result<(), HostError> {
+        let Some(net) = self.net.clone() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || net.remove_for(id))
+            .await
+            .map_err(|error| HostError::Io(error.to_string()))?
+            .map_err(|error| HostError::Io(error.to_string()))
     }
 
     /// Brings one recorded sandbox back under management. Returns whether
@@ -789,18 +853,33 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         self.preparing.insert(id.0);
         let ordinal = self.take_ordinal();
+        let link = match self.images.link(id, ordinal) {
+            Ok(link) => link,
+            Err(full) => {
+                self.preparing.remove(&id.0);
+                self.ordinals.remove(&ordinal);
+                let _ = reply.send(Err(HostError::Invalid(full.to_string())));
+                return;
+            }
+        };
         let record = Record::new(id, ordinal, config);
         let paths = Paths::new(&self.root, id);
         let dir = paths.dir.clone();
         let base = self.base_image.clone();
         let kernel = self.images.kernel.clone();
         let records = Arc::clone(&self.records);
+        let net = self.net.clone();
         let events = self.events_tx.clone();
         tokio::spawn(async move {
+            let networks = net.clone();
             let prepared = tokio::task::spawn_blocking(move || {
                 std::fs::create_dir_all(&paths.jail)?;
                 link_kernel(&kernel, &paths)?;
-                copy_sparse(&base, &paths.disk)
+                copy_sparse(&base, &paths.disk)?;
+                if let (Some(net), Some(link)) = (&networks, &link) {
+                    net.ensure(link)?;
+                }
+                Ok(())
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
@@ -812,7 +891,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             };
             if result.is_err() {
                 // The id stays reserved until this is done, so it cannot
-                // remove a newer sandbox's files.
+                // remove a newer sandbox's files or network.
+                if let Some(net) = net {
+                    let _ = tokio::task::spawn_blocking(move || net.remove_for(id)).await;
+                }
                 let _ = tokio::fs::remove_dir_all(&dir).await;
             }
             let _ = events.send(Event::Prepared {
@@ -1093,6 +1175,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let engine = Arc::clone(&self.engine);
         let store = Arc::clone(&self.store);
         let records = Arc::clone(&self.records);
+        let net = self.net.clone();
         let events = self.events_tx.clone();
         let (ordinal, fence) = (record.ordinal, record.fence());
         tokio::spawn(async move {
@@ -1100,6 +1183,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 engine: &*engine,
                 store: &*store,
                 records: &records,
+                net,
                 id,
             };
             let result = removal.run(fence, vm, &spec, &paths.dir).await;
@@ -1228,6 +1312,7 @@ struct Removal<'a, E, S> {
     engine: &'a E,
     store: &'a S,
     records: &'a Records,
+    net: Option<Arc<Networks>>,
     id: Id,
 }
 
@@ -1253,6 +1338,12 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             None => self.engine.clean_up(spec).await,
         };
         stopped.map_err(|error| HostError::Io(error.to_string()))?;
+        if let Some(net) = self.net.clone() {
+            tokio::task::spawn_blocking(move || net.remove_for(id))
+                .await
+                .map_err(|error| HostError::Io(error.to_string()))?
+                .map_err(|error| HostError::Io(error.to_string()))?;
+        }
         self.store
             .delete(id)
             .await

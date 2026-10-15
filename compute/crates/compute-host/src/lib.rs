@@ -15,6 +15,7 @@ mod chunked;
 pub mod client;
 pub mod guest_ports;
 mod layout;
+pub mod net;
 pub mod protocol;
 pub mod restore_notice;
 mod server;
