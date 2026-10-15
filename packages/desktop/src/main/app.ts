@@ -1,5 +1,6 @@
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   app,
@@ -43,6 +44,7 @@ import {
   removeLinuxAutostart,
 } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
+import { macLoginAgentName } from "./mac-login-agent";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
@@ -108,7 +110,10 @@ async function recordMemory(): Promise<void> {
   flushMarks(idle === null ? loadedMarks : { ...loadedMarks, idleMemoryMb: idle });
 }
 
-/** Opened by the system at login, to keep this computer available without a window. */
+/**
+ * Opened by the system at login, to keep this computer available without a
+ * window: with `--hidden` (the login item's argument), or by a macOS 12 login item.
+ */
 function openedAtLogin(): boolean {
   if (process.argv.includes("--hidden")) return true;
   return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
@@ -244,8 +249,12 @@ export class DesktopShell {
 
   start(): void {
     this.registerIpc();
-    const hidden = openedAtLogin() && this.store.active() !== null;
+    const hidden =
+      (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
+    if (process.platform === "darwin" && app.isPackaged && this.config.thisComputer) {
+      setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
+    }
     app.on("activate", () => this.reveal());
     powerMonitor.on("resume", () => this.retryUnreachable());
     app.on("before-quit", (event) => {
@@ -262,7 +271,10 @@ export class DesktopShell {
       this.quitConfirmed = true;
       app.quit();
     };
-    powerMonitor.on("shutdown", quitUnasked);
+    powerMonitor.on("shutdown", () => {
+      this.rememberClosedAtLogout();
+      quitUnasked();
+    });
     process.once("SIGTERM", quitUnasked);
     process.once("SIGINT", quitUnasked);
     // However the app ends, its agent doesn't outlive it.
@@ -340,6 +352,36 @@ export class DesktopShell {
     } finally {
       this.confirmingQuit = false;
     }
+  }
+
+  /**
+   * macOS reopens the apps that were running when the person logged out, with
+   * no arguments, before login items run. Whether the window was closed then
+   * is remembered here, so a connected computer comes back without a window
+   * as it would from its login item.
+   */
+  private rememberClosedAtLogout(): void {
+    // Closing only hides the window, so what counts is whether it is visible.
+    const windowShown = this.window?.window.isVisible() ?? false;
+    if (process.platform !== "darwin" || windowShown || !this.computer.opensAtLogin) return;
+    try {
+      writeFileSync(this.closedAtLogoutPath(), "");
+    } catch {
+      // Then the window shows again after login.
+    }
+  }
+
+  /** Reopened by macOS after a logout that left the window closed (see above). */
+  private reopenedWithoutWindow(): boolean {
+    if (process.platform !== "darwin") return false;
+    const path = this.closedAtLogoutPath();
+    if (!existsSync(path)) return false;
+    rmSync(path, { force: true });
+    return this.config.thisComputer && this.computer.opensAtLogin;
+  }
+
+  private closedAtLogoutPath(): string {
+    return join(app.getPath("userData"), "closed-at-logout");
   }
 
   reveal(): void {
@@ -928,7 +970,7 @@ export class DesktopShell {
         };
     if (this.config.thisComputer && app.isPackaged) {
       const change = this.computer.openAtLoginChange(summary.connected);
-      if (change) setOpenAtLogin(this.config.productName, change === "open");
+      if (change) setOpenAtLogin(this.config, change === "open");
     }
     // macOS keeps running without a window anyway; the menu bar item is for the
     // computer. Elsewhere the tray is how a closed window comes back.
@@ -951,13 +993,50 @@ export class DesktopShell {
 }
 
 /** Open the app, without a window, at login, or stop doing so. */
-function setOpenAtLogin(productName: string, open: boolean): void {
+function setOpenAtLogin(config: DesktopAppConfig, open: boolean): void {
   if (process.platform === "linux") {
-    if (open) installLinuxAutostart(productName);
-    else removeLinuxAutostart(productName);
+    if (open) installLinuxAutostart(config.productName);
+    else removeLinuxAutostart(config.productName);
+    return;
+  }
+  if (process.platform === "darwin") {
+    const agent = macLoginAgent(config.appId);
+    if (agent) {
+      app.setLoginItemSettings({ openAtLogin: open, ...agent });
+      // Earlier versions registered the app itself; macOS opens that with a window.
+      if (app.getLoginItemSettings().openAtLogin) app.setLoginItemSettings({ openAtLogin: false });
+      return;
+    }
+    // macOS 12 reports a login launch through `wasOpenedAtLogin`.
+    app.setLoginItemSettings({ openAtLogin: open });
     return;
   }
   app.setLoginItemSettings({ openAtLogin: open, args: ["--hidden"] });
+}
+
+/**
+ * The bundled launch agent that opens the app hidden at login (see
+ * mac-login-agent.ts), on macOS 13 and later when the build includes it.
+ */
+function macLoginAgent(appId: string): { type: "agentService"; serviceName: string } | null {
+  const major = Number.parseInt(process.getSystemVersion().split(".")[0] ?? "", 10);
+  if (!(major >= 13)) return null;
+  const serviceName = macLoginAgentName(appId);
+  // macOS reports an agent it hasn't registered yet as not found, so look in the bundle.
+  const contents = dirname(dirname(app.getPath("exe")));
+  if (!existsSync(join(contents, "Library", "LaunchAgents", serviceName))) return null;
+  return { type: "agentService", serviceName };
+}
+
+/**
+ * Moves a login item from an earlier version, which registered the app itself,
+ * to the launch agent. Login items the person turned off stay off.
+ */
+function migrateMacLoginItem(appId: string): void {
+  const agent = macLoginAgent(appId);
+  if (!agent || !app.getLoginItemSettings().openAtLogin) return;
+  app.setLoginItemSettings({ openAtLogin: true, ...agent });
+  app.setLoginItemSettings({ openAtLogin: false });
 }
 
 /** A Set-Cookie header as Electron cookie details. */

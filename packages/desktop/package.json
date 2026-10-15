@@ -21,6 +21,10 @@
       "types": "./src/contract.ts",
       "default": "./src/contract.ts"
     },
+    "./mac-login-agent": {
+      "types": "./src/main/mac-login-agent.ts",
+      "default": "./src/main/mac-login-agent.ts"
+    },
     "./preload": {
       "types": "./src/preload/content.ts",
       "default": "./src/preload/content.ts"
