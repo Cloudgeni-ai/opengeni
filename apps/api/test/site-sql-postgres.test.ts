@@ -1347,6 +1347,32 @@ test("a Site's own agent gets the Site's data tools, pinned to the Site and acti
       "artifacts:read",
     ]);
 
+    // The same member/invited/guest conversation must work after an upgrade,
+    // not only at creation. Reproduce the previous release's tool-less row,
+    // then continue through the real Site route before exercising real SQL.
+    await shared.admin`update session_turns set status='completed',sandbox_backend='docker' where session_id=${sessionId}`;
+    await shared.admin`update sessions set status='idle',active_turn_id=null,
+      first_party_mcp_tools='[]'::jsonb,
+      first_party_mcp_permissions='["sessions:read","sessions:control"]'::jsonb,
+      agent_config=jsonb_set(agent_config,'{capabilities,artifacts}','false'::jsonb),
+      sandbox_backend='docker',
+      metadata=metadata #- '{opengeniPublishedSite,agentDefaultsVersion}' where id=${sessionId}`;
+    const continued = await gateway("POST", `/sessions/${sessionId}/events`, viewer.who, {
+      type: "user.message",
+      payload: { text: "Read our existing board" },
+    });
+    expect(continued.status, JSON.stringify(continued.json)).toBeLessThan(300);
+    const [normalized] =
+      await shared.admin`select first_party_mcp_tools,first_party_mcp_permissions,
+      agent_config,sandbox_backend from sessions where id=${sessionId}`;
+    expect([...normalized!.first_party_mcp_tools].sort()).toEqual(viewer.tools);
+    expect(normalized!.first_party_mcp_permissions).toEqual([
+      "artifacts:read",
+      "artifacts:publish",
+    ]);
+    expect(normalized!.agent_config.capabilities.artifacts).toBe(true);
+    expect(normalized!.sandbox_backend).toBe("none");
+
     // The agent's tools, as the worker would hold them; management tools are
     // also listed here to prove the server refuses them for a Site agent.
     const agent = await agentTools(f, {

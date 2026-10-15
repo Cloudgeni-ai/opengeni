@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   OPENGENI_API_CONTRACT_HEADER,
+  SitePublishWarningFix,
   organizationAccessPresetPermissions,
   type OrganizationAccessPolicy,
 } from "@opengeni/contracts";
@@ -84,7 +85,7 @@ function person(access: OrganizationAccessPolicy): OrganizationMcpCaller {
 
 async function connect(
   caller: OrganizationMcpCaller,
-  respond: (request: Request) => Response = () => Response.json({ ok: true }),
+  respond: (request: Request) => Response | Promise<Response> = () => Response.json({ ok: true }),
 ) {
   const seen: Request[] = [];
   const server = buildOrganizationMcpServer({
@@ -360,6 +361,67 @@ describe("organization MCP server", () => {
     expect(described.pathParameters).toEqual(["workspaceId"]);
     expect(described.input[0]!.in).toBe("body");
     expect(described.input[0]!.schema).toMatchObject({ type: "object" });
+  });
+
+  test("publication fixes describe both required bodies and invoke the route contract", async () => {
+    const id = "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes";
+    const { client, call, seen } = await connect(person(full), async (request) => {
+      const parsed = SitePublishWarningFix.safeParse(await request.json());
+      return Response.json(parsed.success ? parsed.data : { message: "invalid fix" }, {
+        status: parsed.success ? 200 : 400,
+      });
+    });
+    try {
+      const described = await call("opengeni_action_describe", { id });
+      expect(described.isError).toBe(false);
+      expect(described.value).toMatchObject({
+        method: "POST",
+        pathParameters: ["workspaceId", "artifactId"],
+        input: [
+          {
+            name: "SitePublishWarningFix",
+            in: "body",
+            schema: {
+              oneOf: [
+                {
+                  required: ["kind", "collection", "guestAccess"],
+                  properties: {
+                    kind: { const: "site_data_guest_access" },
+                    guestAccess: { enum: ["read", "append", "own"] },
+                  },
+                },
+                {
+                  required: ["kind", "query", "audience"],
+                  properties: {
+                    kind: { const: "site_sql_query_audience" },
+                    audience: { enum: ["everyone", "signed_in"] },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const pathParameters = { workspaceId, artifactId: "44444444-4444-4444-8444-444444444444" };
+      for (const body of [
+        { kind: "site_data_guest_access", collection: "deals", guestAccess: "read" },
+        { kind: "site_sql_query_audience", query: "top_customers", audience: "everyone" },
+      ]) {
+        expect(await call("opengeni_action_call", { id, pathParameters, body })).toEqual({
+          isError: false,
+          value: { status: 200, body },
+        });
+      }
+      for (const body of [{}, { kind: "site_data_guest_access", collection: "deals" }]) {
+        expect(await call("opengeni_action_call", { id, pathParameters, body })).toEqual({
+          isError: true,
+          value: { status: 400, body: { message: "invalid fix" } },
+        });
+      }
+      expect(seen).toHaveLength(4);
+    } finally {
+      await client.close();
+    }
   });
 
   test("a person's call runs the route in process with the verified proof and nothing else", async () => {

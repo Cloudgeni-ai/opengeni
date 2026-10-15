@@ -43,6 +43,10 @@ merged refs intersect that ceiling and children cannot widen it. Console Site
 agents use it for the overlap of Site-declared tools and the viewer's permissions.
 Their editable-artifact writes also require immutable create/import provenance
 within the same Site-clamped session tree; read-created session links grant no edits.
+Published-host continuation normalizes legacy tool-less chats through
+`apps/api/src/site-publishing/agent-session.ts` before admission: the locked
+session update installs only viewer-bound Site data tools, matching permissions
+and no sandbox, without restoring workspace defaults or rewriting accepted work.
 Published-host Site funding retains a pending-admission token through dispatch.
 Its trusted async context locks the conversation before the session writer prefix;
 recovery revokes that token and checks the locked canonical queue before refunding,

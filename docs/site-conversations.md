@@ -174,6 +174,15 @@ Further sends, steering and resumes fund a top-up before execution; a single
 provider call can overshoot before metering. Data tools revalidate the current
 audience on every call, independently of best-effort cancellation.
 
+Existing published-host chats are normalized before their next admitted Send,
+Steer, queued-message Steer, composer submission or Resume. The trusted host
+atomically restores only this Site's viewer-bound data tools and permissions,
+the artifact capability and platform instructions, selects no sandbox, and
+stops inheriting workspace-default tools. It preserves only the conversation's
+still-authorized connector refs. A version marker and audit event commit with
+the configuration, so a failed write refuses admission and retries safely.
+Already accepted in-flight execution is not rewritten. No republish is needed.
+
 Funding admission retains a durable pending token across the gap before enqueue.
 Start, Send, Steer, queued-message Steer, composer submission and Resume carry that
 token through the in-process dispatch; session writer transactions lock and verify
