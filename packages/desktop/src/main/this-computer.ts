@@ -133,10 +133,17 @@ export class ThisComputer {
           }),
           "Couldn't connect this computer",
         );
-        await this.expect(
-          run(binary, ["start"], { timeoutMs: 60_000 }),
-          "Couldn't start the agent",
+        const started = await run(binary, ["start"], { timeoutMs: 60_000 });
+        if (started.code === 0) return;
+        // An installed agent that cannot run here (an older release, a damaged
+        // file) is replaced by the server's current one. The enrollment token
+        // was spent on the connection above, so the installer gets a fresh one.
+        const retryToken = await this.deps.mintEnrollToken(
+          accountId,
+          workspaceId,
+          options.screenControl,
         );
+        await this.install(baseUrl, { OPENGENI_API_URL: baseUrl, OPENGENI_ENROLL_TOKEN: retryToken });
         return;
       }
       await this.install(baseUrl, env);

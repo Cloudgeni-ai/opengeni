@@ -60,12 +60,12 @@ export function parseConnections(stdout: string): AgentConnection[] {
 
 /**
  * Whether `opengeni-agent status` reports the background agent running:
- * systemd prints `active`, launchd `loaded`, Windows `sc query` `RUNNING`.
+ * systemd prints `active`, launchd `loaded`, the Windows logon task `running`.
  */
 export function parseServiceRunning(stdout: string): boolean {
   if (/LaunchAgent:\s*loaded\b/iu.test(stdout)) return true;
   if (/service:\s*active\b/iu.test(stdout)) return true;
-  return /STATE\s*:\s*\d+\s+RUNNING/iu.test(stdout);
+  return /background task:\s*running\b/iu.test(stdout);
 }
 
 /** The connection that serves this server's workspace, if any. */

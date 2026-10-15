@@ -15,9 +15,13 @@
 //!     ai.opengeni.agent.plist`, `RunAtLoad`+`KeepAlive`). LaunchAgent NOT
 //!     LaunchDaemon deliberately: desktop/computer-use needs the user's GUI Aqua
 //!     session + TCC. Structured + compiling; the plist generation is pure + tested.
-//!   * **Windows** — a true Windows Service (`OpengeniAgent`) via the SCM, with
-//!     restart-on-failure recovery + Automatic-(Delayed) start. Structured +
-//!     compiling; the registration command is generated + tested.
+//!   * **Windows** — a per-user Task Scheduler task (`Opengeni Agent`) that starts
+//!     at logon in the user's own desktop session, NOT a Windows Service:
+//!     services run in session 0, where screenshots, input and the user's browser
+//!     are out of reach, and registering one needs elevation. The task runs the
+//!     agent inside a headless console host (no window), a one-minute repetition
+//!     restarts it if it ever exits, and pausing disables the task. Registering
+//!     it needs no elevation. The task XML is generated + tested.
 //!
 //! The coarse outer restart loop (the service manager) sits ABOVE the in-process
 //! full-jitter backoff (the fine loop) — two independent layers of resiliency.
@@ -35,8 +39,8 @@ pub enum ServiceBackend {
     Systemd,
     /// launchd (macOS).
     Launchd,
-    /// the Windows Service Control Manager.
-    WindowsScm,
+    /// a per-user logon task in the Windows Task Scheduler.
+    WindowsTask,
     /// no supported service manager on this target.
     Unsupported,
 }
@@ -94,7 +98,7 @@ impl ServiceSpec {
         }
         #[cfg(target_os = "windows")]
         {
-            ServiceBackend::WindowsScm
+            ServiceBackend::WindowsTask
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
@@ -109,8 +113,12 @@ pub mod ids {
     pub const SYSTEMD_UNIT: &str = "opengeni-agent.service";
     /// The launchd label (macOS) + the plist file stem.
     pub const LAUNCHD_LABEL: &str = "ai.opengeni.agent";
-    /// The Windows Service name (Windows).
-    pub const WINDOWS_SERVICE: &str = "OpengeniAgent";
+    /// The per-user Task Scheduler task (Windows).
+    pub const WINDOWS_TASK: &str = "Opengeni Agent";
+    /// The Windows Service earlier releases registered. It could never start (the
+    /// binary does not host the service control dispatcher), so `start` removes
+    /// it when it finds it.
+    pub const LEGACY_WINDOWS_SERVICE: &str = "OpengeniAgent";
 }
 
 /// Renders the systemd unit-file body for `spec`. PURE (no IO) so it is fully
@@ -407,28 +415,167 @@ pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformRes
     ))
 }
 
-/// Renders the `sc.exe create` command line registering the Windows Service. The
-/// recovery action (`sc failure … restart`) is a separate command, returned by
-/// [`windows_recovery_command`]. PURE + tested.
-#[must_use]
-pub fn windows_create_command(spec: &ServiceSpec) -> String {
-    let bin = spec.binary_path.to_string_lossy();
-    let args = spec.args.join(" ");
-    // binPath embeds the binary + its run args; Automatic-Delayed start; the
-    // service hosts itself via the windows-service crate's service_dispatcher.
-    format!(
-        "sc.exe create {name} binPath= \"\\\"{bin}\\\" {args}\" start= delayed-auto DisplayName= \"Opengeni Agent\"",
-        name = ids::WINDOWS_SERVICE,
-    )
+/// The account and folders a Windows logon task is rendered for.
+#[derive(Debug, Clone)]
+pub struct WindowsTaskHost {
+    /// The security identifier of the user the task runs as (`S-1-5-21-…`). A SID
+    /// rather than `DOMAIN\name`, which is ambiguous outside a desktop logon.
+    pub user_sid: String,
+    /// The user's profile folder, the agent's working directory.
+    pub user_home: PathBuf,
+    /// `%SystemRoot%`, where the console host lives.
+    pub system_root: PathBuf,
 }
 
-/// The `sc.exe failure` recovery command (restart on failure with a 5s delay).
-#[must_use]
-pub fn windows_recovery_command() -> String {
-    format!(
-        "sc.exe failure {name} reset= 0 actions= restart/5000/restart/5000/restart/5000",
-        name = ids::WINDOWS_SERVICE,
-    )
+/// Checks the SID and paths a task definition embeds, returning the trimmed SID.
+fn validate_windows_task_inputs<'a>(
+    spec: &ServiceSpec,
+    host: &'a WindowsTaskHost,
+) -> PlatformResult<&'a str> {
+    let sid = host.user_sid.trim();
+    let well_formed_sid = sid.starts_with("S-1-")
+        && sid.len() > 4
+        && sid[4..]
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    if !well_formed_sid {
+        return Err(PlatformError::os(format!(
+            "not a Windows user SID: {sid:?}"
+        )));
+    }
+    let windows_absolute = |path: &Path| {
+        let text = path.to_string_lossy();
+        let bytes = text.as_bytes();
+        (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/'))
+            || text.starts_with("\\\\")
+    };
+    for (label, path) in [
+        ("agent binary", spec.binary_path.as_path()),
+        ("user home", host.user_home.as_path()),
+        ("system root", host.system_root.as_path()),
+    ] {
+        if !windows_absolute(path) {
+            return Err(PlatformError::os(format!(
+                "the {label} must be an absolute Windows path: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(sid)
+}
+
+/// Renders the Task Scheduler definition for the per-user Windows agent. PURE +
+/// tested; `service install --print` shows it.
+///
+/// * It runs as the user with their interactive token, in their desktop session,
+///   so computer use and the user's browser work, and needs no elevation.
+/// * `conhost.exe --headless` gives the agent and every command it runs one
+///   hidden console, so nothing flashes on screen.
+/// * A logon trigger starts it at sign-in; a one-minute repetition starts it
+///   again if it ever exits (a running instance makes the repetition a no-op).
+///   Task Scheduler's own restart-on-failure only covers launch failures, not a
+///   process that exits, so the repetition is the restart loop.
+/// * No execution time limit (the default stops a task after three days), normal
+///   priority (the default is below normal), and battery power never stops it.
+///
+/// # Errors
+///
+/// Returns an OS error for a malformed SID or a relative path.
+pub fn render_windows_task_xml(
+    spec: &ServiceSpec,
+    host: &WindowsTaskHost,
+) -> PlatformResult<String> {
+    let sid = validate_windows_task_inputs(spec, host)?;
+    let console_host = format!(
+        "{}\\System32\\conhost.exe",
+        host.system_root
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+    );
+    let mut arguments = format!(
+        "--headless \"{}\"",
+        without_verbatim_prefix(&spec.binary_path.to_string_lossy())
+    );
+    for arg in &spec.args {
+        arguments.push(' ');
+        arguments.push_str(arg);
+    }
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         \x20 <RegistrationInfo>\n\
+         \x20   <Author>Opengeni</Author>\n\
+         \x20   <Description>Keeps the Opengeni agent running while you are signed in, so agents you allow can use this computer. Pause or remove it with opengeni-agent stop or opengeni-agent uninstall.</Description>\n\
+         \x20 </RegistrationInfo>\n\
+         \x20 <Triggers>\n\
+         \x20   <LogonTrigger>\n\
+         \x20     <Enabled>true</Enabled>\n\
+         \x20     <UserId>{sid}</UserId>\n\
+         \x20   </LogonTrigger>\n\
+         \x20   <TimeTrigger>\n\
+         \x20     <Enabled>true</Enabled>\n\
+         \x20     <StartBoundary>2000-01-01T00:00:00</StartBoundary>\n\
+         \x20     <Repetition>\n\
+         \x20       <Interval>PT1M</Interval>\n\
+         \x20       <StopAtDurationEnd>false</StopAtDurationEnd>\n\
+         \x20     </Repetition>\n\
+         \x20   </TimeTrigger>\n\
+         \x20 </Triggers>\n\
+         \x20 <Principals>\n\
+         \x20   <Principal id=\"Author\">\n\
+         \x20     <UserId>{sid}</UserId>\n\
+         \x20     <LogonType>InteractiveToken</LogonType>\n\
+         \x20     <RunLevel>LeastPrivilege</RunLevel>\n\
+         \x20   </Principal>\n\
+         \x20 </Principals>\n\
+         \x20 <Settings>\n\
+         \x20   <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
+         \x20   <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
+         \x20   <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n\
+         \x20   <AllowHardTerminate>true</AllowHardTerminate>\n\
+         \x20   <StartWhenAvailable>false</StartWhenAvailable>\n\
+         \x20   <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\n\
+         \x20   <IdleSettings>\n\
+         \x20     <StopOnIdleEnd>false</StopOnIdleEnd>\n\
+         \x20     <RestartOnIdle>false</RestartOnIdle>\n\
+         \x20   </IdleSettings>\n\
+         \x20   <AllowStartOnDemand>true</AllowStartOnDemand>\n\
+         \x20   <Enabled>true</Enabled>\n\
+         \x20   <Hidden>false</Hidden>\n\
+         \x20   <RunOnlyIfIdle>false</RunOnlyIfIdle>\n\
+         \x20   <WakeToRun>false</WakeToRun>\n\
+         \x20   <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n\
+         \x20   <Priority>5</Priority>\n\
+         \x20 </Settings>\n\
+         \x20 <Actions Context=\"Author\">\n\
+         \x20   <Exec>\n\
+         \x20     <Command>{command}</Command>\n\
+         \x20     <Arguments>{arguments}</Arguments>\n\
+         \x20     <WorkingDirectory>{working_directory}</WorkingDirectory>\n\
+         \x20   </Exec>\n\
+         \x20 </Actions>\n\
+         </Task>\n",
+        command = xml_escape(&console_host),
+        arguments = xml_escape(&arguments),
+        working_directory = xml_escape(&without_verbatim_prefix(
+            &host.user_home.to_string_lossy()
+        )),
+    ))
+}
+
+/// `canonicalize` on Windows returns `\\?\C:\…` paths; the plain form is what a
+/// user sees in Task Scheduler and what every program accepts as argv[0].
+fn without_verbatim_prefix(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => path.to_string(),
+    }
 }
 
 /// The systemd unit path for a scope.
@@ -501,13 +648,51 @@ pub fn render_for_host(spec: &ServiceSpec) -> PlatformResult<String> {
             let user_home = service_user_home()?;
             render_launchd_plist(spec, &user_home)
         }
-        ServiceBackend::WindowsScm => Ok(format!(
-            "{}\n{}",
-            windows_create_command(spec),
-            windows_recovery_command()
-        )),
+        ServiceBackend::WindowsTask => render_windows_task_xml(spec, &current_windows_task_host()?),
         ServiceBackend::Unsupported => Err(unsupported_backend()),
     }
+}
+
+/// The signed-in user's SID, profile folder and `%SystemRoot%`, for
+/// [`render_windows_task_xml`]. The SID comes from `whoami`, which reports the
+/// process token on every Windows edition without elevation.
+///
+/// # Errors
+///
+/// Returns an OS error when `whoami` cannot run or reports no SID, or when the
+/// profile folder cannot be resolved.
+pub fn current_windows_task_host() -> PlatformResult<WindowsTaskHost> {
+    let output = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .map_err(|error| PlatformError::os(format!("could not run whoami: {error}")))?;
+    if !output.status.success() {
+        return Err(PlatformError::os(format!(
+            "whoami /user exited with {}",
+            output.status
+        )));
+    }
+    let user_sid = parse_whoami_user_sid(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| PlatformError::os("whoami /user reported no SID"))?;
+    let system_root = std::env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
+    Ok(WindowsTaskHost {
+        user_sid,
+        user_home: service_user_home()?,
+        system_root,
+    })
+}
+
+/// The SID in `whoami /user /fo csv /nh` output: `"host\user","S-1-5-21-…"`.
+#[must_use]
+pub fn parse_whoami_user_sid(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().rsplit(',').next())
+        .map(|field| field.trim().trim_matches('"'))
+        .find(|sid| sid.starts_with("S-1-"))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -720,15 +905,104 @@ mod tests {
         );
     }
 
+    fn windows_spec() -> ServiceSpec {
+        ServiceSpec {
+            binary_path: PathBuf::from(
+                "C:\\Users\\Åsa & Co\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe",
+            ),
+            args: vec!["run".to_string()],
+            scope: ServiceScope::User,
+            environment_path: None,
+        }
+    }
+
+    fn windows_host() -> WindowsTaskHost {
+        WindowsTaskHost {
+            user_sid: "S-1-5-21-1945257197-2579421453-2829175806-1001".to_string(),
+            user_home: PathBuf::from("C:\\Users\\Åsa & Co"),
+            system_root: PathBuf::from("C:\\WINDOWS\\"),
+        }
+    }
+
     #[test]
-    fn windows_commands_register_and_set_recovery() {
-        let create = windows_create_command(&spec());
-        assert!(create.contains("sc.exe create OpengeniAgent"));
-        assert!(create.contains("start= delayed-auto"));
-        assert!(create.contains("opengeni-agent"));
-        let recovery = windows_recovery_command();
-        assert!(recovery.contains("sc.exe failure OpengeniAgent"));
-        assert!(recovery.contains("restart/5000"));
+    fn windows_task_runs_in_the_users_desktop_session_without_a_window() {
+        let xml = render_windows_task_xml(&windows_spec(), &windows_host()).unwrap();
+        // The signed-in user's own token, so computer use reaches their desktop.
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        assert_eq!(
+            xml.matches("<UserId>S-1-5-21-1945257197-2579421453-2829175806-1001</UserId>")
+                .count(),
+            2,
+            "both the logon trigger and the principal name the user by SID"
+        );
+        // One hidden console for the agent and every command it runs.
+        assert!(xml.contains("<Command>C:\\WINDOWS\\System32\\conhost.exe</Command>"));
+        assert!(xml.contains(
+            "<Arguments>--headless \"C:\\Users\\Åsa &amp; Co\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe\" run</Arguments>"
+        ));
+        assert!(xml.contains("<WorkingDirectory>C:\\Users\\Åsa &amp; Co</WorkingDirectory>"));
+    }
+
+    #[test]
+    fn windows_task_keeps_the_agent_running() {
+        let xml = render_windows_task_xml(&windows_spec(), &windows_host()).unwrap();
+        assert!(xml.contains("<LogonTrigger>"));
+        assert!(
+            xml.contains("<Interval>PT1M</Interval>"),
+            "restarts an exited agent"
+        );
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+        assert!(xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
+        assert!(xml.contains("<Priority>5</Priority>"));
+        assert!(!xml.contains("<Duration>"), "the repetition never ends");
+    }
+
+    #[test]
+    fn windows_task_refuses_a_bad_sid_or_relative_paths() {
+        let mut host = windows_host();
+        host.user_sid = "WORKGROUP\\asa".to_string();
+        assert!(render_windows_task_xml(&windows_spec(), &host).is_err());
+        host.user_sid = "S-1-5-21-x".to_string();
+        assert!(render_windows_task_xml(&windows_spec(), &host).is_err());
+        assert!(render_windows_task_xml(&spec(), &windows_host()).is_err());
+        let mut host = windows_host();
+        host.user_home = PathBuf::from("Users\\asa");
+        assert!(render_windows_task_xml(&windows_spec(), &host).is_err());
+    }
+
+    #[test]
+    fn windows_task_names_the_binary_without_the_verbatim_prefix() {
+        let mut spec = windows_spec();
+        spec.binary_path =
+            PathBuf::from(r"\\?\C:\Users\asa\AppData\Local\Opengeni\bin\opengeni-agent.exe");
+        let xml = render_windows_task_xml(&spec, &windows_host()).unwrap();
+        assert!(xml.contains(
+            "<Arguments>--headless \"C:\\Users\\asa\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe\" run</Arguments>"
+        ));
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\UNC\srv\share\a.exe"),
+            r"\\srv\share\a.exe"
+        );
+        assert_eq!(without_verbatim_prefix(r"C:\a.exe"), r"C:\a.exe");
+    }
+
+    #[test]
+    fn whoami_sid_is_parsed_from_csv() {
+        assert_eq!(
+            parse_whoami_user_sid(
+                "\"win-b0koha156e9\\ogstd\",\"S-1-5-21-1945-2579-2829-1001\"\r\n"
+            )
+            .as_deref(),
+            Some("S-1-5-21-1945-2579-2829-1001")
+        );
+        assert_eq!(
+            parse_whoami_user_sid("\r\n\"a\\b\",\"S-1-5-18\"\r\n").as_deref(),
+            Some("S-1-5-18")
+        );
+        assert_eq!(parse_whoami_user_sid("ERROR: something"), None);
     }
 
     #[test]
@@ -743,7 +1017,12 @@ mod tests {
     #[test]
     fn render_for_host_matches_the_compiled_backend() {
         // On the build host this returns the host's definition without error.
-        let out = render_for_host(&spec());
+        let spec = if ServiceSpec::backend() == ServiceBackend::WindowsTask {
+            windows_spec()
+        } else {
+            spec()
+        };
+        let out = render_for_host(&spec);
         match ServiceSpec::backend() {
             ServiceBackend::Unsupported => assert!(out.is_err()),
             _ => assert!(out.is_ok()),

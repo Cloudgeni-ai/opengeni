@@ -197,8 +197,9 @@ describe("agent command line", () => {
     expect(parseServiceRunning("opengeni-agent LaunchAgent: not loaded")).toBe(false);
     expect(parseServiceRunning("opengeni-agent service: active")).toBe(true);
     expect(parseServiceRunning("opengeni-agent service: inactive")).toBe(false);
-    expect(parseServiceRunning("        STATE              : 4  RUNNING")).toBe(true);
-    expect(parseServiceRunning("        STATE              : 1  STOPPED")).toBe(false);
+    expect(parseServiceRunning("opengeni-agent background task: running")).toBe(true);
+    expect(parseServiceRunning("opengeni-agent background task: paused")).toBe(false);
+    expect(parseServiceRunning("opengeni-agent background task: not installed")).toBe(false);
   });
 
   test("keeps the last meaningful error line", () => {

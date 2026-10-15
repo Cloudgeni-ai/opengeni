@@ -156,8 +156,10 @@ installer.
    environment, never on the command line, then starts the service. If not, it
    downloads the server's `install.sh` or `install.ps1` and runs it with the
    same token. Nothing to copy or paste.
-3. The agent runs as a per-user service (launchd, systemd, a Windows service)
-   and keeps running after the window closes.
+3. The agent runs as a per-user service (a launchd LaunchAgent, a systemd user
+   unit, a Windows logon task in the user's desktop session) and keeps running
+   after the window closes. If an installed agent cannot start, Connect replaces
+   it with the server's current release through the same installer.
 4. Screen control is a switch in the same dialog; the operating system's
    Screen Recording and Accessibility prompts name the agent app.
 5. A second account gets the same one-click offer but is never connected

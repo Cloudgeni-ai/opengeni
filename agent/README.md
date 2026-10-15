@@ -103,7 +103,8 @@ pages or guarantee graceful completion for a permanently stuck controller.
   cancellation, or removal of the owning link releases the upload reservation.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
-  systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
+  systemd user/system unit, a macOS LaunchAgent, or a per-user Windows logon task
+  that runs in the user's desktop session (so computer use works). Repeated `start`
   repairs the definition without disrupting a running same-version process;
   `start --restart` activates a real binary upgrade once. The generated service
   preserves the installer's command `PATH`; agent commands retain that normal
