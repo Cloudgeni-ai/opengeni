@@ -6140,6 +6140,14 @@ export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 /** Private marker for the compact attachment-reference carrier created by compaction. */
 export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
+ * Private marker on catalogs whose model-visible text is already complete in
+ * `content` (provenance and upload times were frozen when compaction created
+ * them). Projection must not append per-reference receipts to such a catalog.
+ * Catalogs without it keep their original projection byte for byte.
+ */
+export const MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD =
+  "opengeni_attachment_catalog_rendered" as const;
+/**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this Opengeni
  * extension field; the numbered projection in `content` remains model-visible.

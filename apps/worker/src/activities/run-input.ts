@@ -1,6 +1,7 @@
 import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
   FileResourceRef,
   resourceMountPath,
   readTurnExecutionPolicyV1,
@@ -496,6 +497,13 @@ export function createModelHistoryAttachmentProjector(
     const projected = [...items];
     for (const [index, refs] of refsByIndex) {
       const original = items[index]!;
+      if (original[MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD] === true) {
+        // Its complete, dated text was frozen when compaction created it.
+        const clone: Record<string, unknown> = { ...original };
+        delete clone[MODEL_ATTACHMENT_REFS_FIELD];
+        projected[index] = clone;
+        continue;
+      }
       const existingContent = Array.isArray(original.content)
         ? [...original.content]
         : [{ type: "input_text", text: String(original.content ?? "") }];

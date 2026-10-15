@@ -786,6 +786,8 @@ export {
   type CompactionProviderRejection,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  compactionAttachmentFileIds,
+  type AttachmentUploadTimes,
   compactionReplacementFingerprint,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
