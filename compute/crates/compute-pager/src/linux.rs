@@ -410,7 +410,13 @@ impl<S: Source> Pager<S> {
                 self.trace.push(page.offset);
                 self.state[page.index] |= RECORDED;
             }
-            match self.copy(Run { first: page, count: 1 }, true)? {
+            match self.copy(
+                Run {
+                    first: page,
+                    count: 1,
+                },
+                true,
+            )? {
                 Copied::Pages(_) => {}
                 Copied::Retry => {
                     self.faults.push_front(address);
@@ -769,14 +775,14 @@ mod tests {
         (fd, memory, peer, sender)
     }
 
-    fn image_file(fill: u8) -> File {
+    fn image_file(byte: u8) -> File {
         use std::io::Write;
         // SAFETY: nul-terminated name, valid memfd flags.
         let raw = unsafe { libc::memfd_create(c"pager-test".as_ptr(), libc::MFD_CLOEXEC) };
         assert!(raw >= 0);
         // SAFETY: memfd_create returned a new owned FD.
         let mut file = unsafe { File::from_raw_fd(raw) };
-        file.write_all(&[fill; 16384]).unwrap();
+        file.write_all(&[byte; 16384]).unwrap();
         file
     }
 
@@ -830,7 +836,9 @@ mod tests {
                 return Ok(None);
             }
             let start = usize::try_from(offset).unwrap();
-            Ok(Some(&self.bytes[start..start + usize::try_from(len).unwrap()]))
+            Ok(Some(
+                &self.bytes[start..start + usize::try_from(len).unwrap()],
+            ))
         }
 
         fn ready_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
