@@ -429,6 +429,8 @@ export const SITE_PUBLISH_WARNING_CODES = [
   /** No longer reported (the fallback shows as outsideAgentModel); kept for compatibility. */
   "agent_model_outside_fallback",
   "agent_model_outside_unavailable",
+  /** The page was too large to read, so what it uses was not checked. */
+  "page_not_checked",
 ] as const;
 
 /**

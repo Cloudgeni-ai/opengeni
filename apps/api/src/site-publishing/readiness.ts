@@ -44,6 +44,10 @@ const CHANGE_METHODS = new Set(["put", "patch", "delete", "increment"]);
 /** The most HTML read for the check. */
 export const SITE_READINESS_MAX_HTML_BYTES = 2 * 1024 * 1024;
 
+/** Page readings by version id (least recently used first). */
+const SITE_PAGE_USAGE_CACHE = new Map<string, SitePageUsage>();
+const SITE_PAGE_USAGE_CACHE_ENTRIES = 256;
+
 export type SitePageUsage = {
   /** Collections the page names, and how it writes them. */
   collections: Map<string, { writes: boolean; changes: boolean }>;
@@ -98,6 +102,8 @@ export type SiteReadinessInput = {
   /** Anonymous visitors are admitted (public, and not a login-only deployment). */
   guestsAllowed: boolean;
   page: SitePageUsage | null;
+  /** The page was too large to read (SITE_READINESS_MAX_HTML_BYTES). */
+  pageTooLarge?: boolean;
   requestedTools: number;
   agent: { enabled: boolean; tools: readonly string[] | null };
   collections: ReadonlyArray<{
@@ -189,6 +195,12 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
         fix: { kind: "site_sql_query_audience", query: name, audience: "everyone" },
       });
   }
+  if (input.pageTooLarge)
+    add({
+      code: "page_not_checked",
+      message: `The page is too large to check, so it may use things ${who} can't.`,
+      suggestion: "Open it with View as visitor to try it as they would.",
+    });
   // A working credit-billed fallback is not a problem: the publish dialog
   // shows it as one quiet line (outsideAgentModel), not as a warning.
   if (input.agent.enabled && input.outsideModel?.kind === "unavailable")
@@ -234,10 +246,22 @@ export async function readSitePublicationReadiness(
         site.currentVersionId,
       ).catch(() => null)
     : null;
+  const pageTooLarge = version !== null && version.sizeBytes > SITE_READINESS_MAX_HTML_BYTES;
   let page: SitePageUsage | null = null;
-  if (version && deps.objectStorage && version.sizeBytes <= SITE_READINESS_MAX_HTML_BYTES) {
-    const bytes = await deps.objectStorage.getObjectBytes(version.contentKey).catch(() => null);
-    if (bytes) page = scanSitePageUsage(new TextDecoder().decode(bytes.bytes));
+  if (version && deps.objectStorage && !pageTooLarge) {
+    // A version's content never changes, so its reading is cached by id.
+    page = SITE_PAGE_USAGE_CACHE.get(version.id) ?? null;
+    if (page) {
+      SITE_PAGE_USAGE_CACHE.delete(version.id);
+    } else {
+      const bytes = await deps.objectStorage.getObjectBytes(version.contentKey).catch(() => null);
+      if (bytes) page = scanSitePageUsage(new TextDecoder().decode(bytes.bytes));
+    }
+    if (page) {
+      SITE_PAGE_USAGE_CACHE.set(version.id, page);
+      if (SITE_PAGE_USAGE_CACHE.size > SITE_PAGE_USAGE_CACHE_ENTRIES)
+        SITE_PAGE_USAGE_CACHE.delete(SITE_PAGE_USAGE_CACHE.keys().next().value!);
+    }
   }
   const [described, queries] = await Promise.all([
     page && page.collections.size > 0
@@ -252,6 +276,7 @@ export async function readSitePublicationReadiness(
       access,
       guestsAllowed: siteGuestsAllowed(publication.access, deps.settings),
       page,
+      pageTooLarge,
       requestedTools: version?.requestedTools.length ?? 0,
       agent: { enabled: publication.agent.enabled, tools: publication.agent.tools },
       collections: described?.collections ?? [],

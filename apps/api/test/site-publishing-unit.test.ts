@@ -433,6 +433,18 @@ describe("readiness", () => {
     expect(siteReadinessWarnings({ ...base, access: "members" })).toEqual([]);
   });
 
+  test("a page too large to read says it was not checked", () => {
+    const skipped = siteReadinessWarnings({
+      ...base,
+      page: null,
+      pageTooLarge: true,
+      requestedTools: 0,
+      agent: { enabled: false, tools: null },
+    });
+    expect(skipped.map((warning) => warning.code)).toEqual(["page_not_checked"]);
+    expect(skipped[0]!.message).toContain("too large to check");
+  });
+
   test("a working credit-billed fallback is no warning; no model for outsiders is", () => {
     const fallback = siteReadinessWarnings({
       ...base,
