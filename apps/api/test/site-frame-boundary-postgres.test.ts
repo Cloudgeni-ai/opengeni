@@ -115,7 +115,7 @@ function memoryObjectStorage(): ObjectStorageDependency {
   } as unknown as ObjectStorageDependency;
 }
 
-async function fixture() {
+async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Site frame fixture') returning id`;
   const accountId = String(account!.id);
@@ -130,7 +130,7 @@ async function fixture() {
   });
   const settings = testSettings({
     productAccessMode: "configured",
-    sandboxBackend: "none",
+    sandboxBackend: overrides.sandboxBackend ?? "none",
     // Published Sites on, so their management routes are reachable.
     sitesDomain: "sites.example.test",
     sitesGatewaySecret: "c".repeat(40),
@@ -935,6 +935,12 @@ test("agents started from a Site leave the organization profile, machines, envir
     "run_on",
     "sandbox_provision",
   ];
+  // A Site page's session gets only the first-party tools its Site declares;
+  // this test is about the clamp, so its session holds the Site tools it uses.
+  await shared.admin`
+    update sessions
+    set first_party_mcp_tools = first_party_mcp_tools || ${shared.admin.json(tools)}::jsonb
+    where id = ${fromSite}`;
   // One running turn each: the agents the MCP calls and the HTTP calls run as.
   const clampedAgent = await f.liveAgentGrant(fromSite);
   const plainAgent = await f.liveAgentGrant(plain);
@@ -1680,6 +1686,47 @@ test("Site pages send message text only: no approvals, answers, resources or cre
   // Outside a frame the same person may still send resources and answers.
   const direct = await f.call("POST", `/sessions/${sessionId}/events`, {}, message({}));
   expect(direct.status, await direct.clone().text()).toBeLessThan(300);
+});
+
+test("a Site page's session gets only the declared first-party tools and the Site's own data tools, without a sandbox", async () => {
+  // The deployment default backend is a real sandbox; a Site page's agent still gets none.
+  const f = await fixture({ sandboxBackend: "docker" });
+  const declaring = await f.publish("Declaring Site", {
+    requestedTools: [{ serverId: "opengeni", toolName: "editable_artifact_create" }],
+  });
+  const plain = await f.publish("Plain Site");
+  const session = async (id: string) => {
+    const [row] = await shared.admin<
+      { first_party_mcp_tools: string[]; sandbox_backend: string; tools: Array<{ id: string }> }[]
+    >`select first_party_mcp_tools, sandbox_backend, tools from sessions where id = ${id}`;
+    return {
+      firstParty: [...row!.first_party_mcp_tools].sort(),
+      sandbox: row!.sandbox_backend,
+      servers: row!.tools.map((tool) => tool.id).sort(),
+    };
+  };
+  expect(await session(await f.startSession(declaring.frame("frame-d")))).toEqual({
+    firstParty: [
+      "editable_artifact_create",
+      "set_session_title",
+      "site_data_query",
+      "site_data_write",
+      "wait_for_input",
+    ],
+    sandbox: "none",
+    servers: [],
+  });
+  expect(await session(await f.startSession(plain.frame("frame-p")))).toEqual({
+    firstParty: ["set_session_title", "site_data_query", "site_data_write", "wait_for_input"],
+    sandbox: "none",
+    servers: [],
+  });
+  // An inline frame (no published Site) has no Site data to reach.
+  expect(await session(await f.startSession(f.inline("frame-i")))).toEqual({
+    firstParty: ["set_session_title", "wait_for_input"],
+    sandbox: "none",
+    servers: [],
+  });
 });
 
 test("a Site page starts a session with a message and a model only, on a minimal profile", async () => {
