@@ -11,14 +11,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use compute_engine::SnapshotFiles;
 use compute_host::protocol::Id;
-use compute_host::{CHUNK_BYTES, Chunked, SavedFiles, Store};
+use compute_host::{CHUNK_BYTES, Chunked, FetchInto, FetchedMemory, SavedFiles, SavedImage, Store};
+use compute_storage::manifest::{DiskManifest, ExtentSource};
 use compute_storage::store::ChunkStore;
 use object_store::StaticCredentialProvider;
 use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
 
-fn open(url: &str) -> Chunked {
+fn open(url: &str) -> (Chunked, ChunkStore) {
     if let (Ok(token), Some(rest)) = (
         std::env::var("COMPUTE_TEST_GCS_TOKEN"),
         url.strip_prefix("gs://"),
@@ -31,11 +31,13 @@ fn open(url: &str) -> Chunked {
             })))
             .build()
             .unwrap();
-        return Chunked::new(ChunkStore::new(Arc::new(backend), prefix.into()));
+        let chunks = ChunkStore::new(Arc::new(backend), prefix.into());
+        return (Chunked::new(chunks.clone()), chunks);
     }
-    Chunked::from_url(url)
+    let chunks = ChunkStore::from_url(url)
         .unwrap()
-        .expect("an object storage URL")
+        .expect("an object storage URL");
+    (Chunked::new(chunks.clone()), chunks)
 }
 
 /// A sparse file of `length` bytes holding pseudo-random data at `at`.
@@ -63,14 +65,16 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
         eprintln!("skipped: set COMPUTE_TEST_STORE to run against object storage");
         return;
     };
-    let store = open(&url);
+    let (store, chunks) = open(&url);
     let local = tempfile::tempdir().unwrap();
     let saved = SavedFiles {
         disk: local.path().join("disk"),
-        memory: Some(SnapshotFiles {
+        memory: Some(SavedImage {
             state: local.path().join("state"),
             memory: local.path().join("memory"),
+            chunks: None,
         }),
+        profile: None,
     };
     let memory = saved.memory.as_ref().unwrap();
     let gib = 1 << 30;
@@ -84,28 +88,52 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
         .parse()
         .unwrap();
     let started = Instant::now();
-    store.archive(id, &saved).await.unwrap();
+    let receipt = store.archive(id, &saved).await.unwrap();
     let first = started.elapsed();
     let started = Instant::now();
-    store.archive(id, &saved).await.unwrap();
+    let again_receipt = store.archive(id, &saved).await.unwrap();
     let again = started.elapsed();
+    assert_eq!(
+        receipt, again_receipt,
+        "an unchanged sandbox stores the same copy"
+    );
+    assert!(store.verify(id, &receipt).await.unwrap());
 
     let restored = tempfile::tempdir().unwrap();
-    let into = SavedFiles {
+    let into = FetchInto {
         disk: restored.path().join("disk"),
-        memory: Some(SnapshotFiles {
-            state: restored.path().join("state"),
-            memory: restored.path().join("memory"),
-        }),
+        scratch: restored.path().join("scratch"),
+        profile: restored.path().join("profile"),
+        memory: true,
     };
     let started = Instant::now();
-    store.fetch(id, &into).await.unwrap();
-    let fetched = started.elapsed();
-    let into_memory = into.memory.as_ref().unwrap();
+    let fetched = store.fetch(id, &into).await.unwrap();
+    let fetched_at = started.elapsed();
+    let FetchedMemory::Remote {
+        state, manifest, ..
+    } = fetched
+    else {
+        panic!("memory should stay in the store, to be paged in");
+    };
+    // Page every chunk in, as a fully hydrated wake would.
+    let started = Instant::now();
+    let manifest = DiskManifest::decode(&manifest).unwrap();
+    let paged = restored.path().join("memory");
+    {
+        let file = File::create(&paged).unwrap();
+        file.set_len(manifest.disk_len).unwrap();
+        for extent in &manifest.extents {
+            if let ExtentSource::Chunk { reference, .. } = &extent.source {
+                let bytes = chunks.get_chunk(reference).await.unwrap();
+                std::os::unix::fs::FileExt::write_all_at(&file, &bytes, extent.offset).unwrap();
+            }
+        }
+    }
+    let paged_in = started.elapsed();
     for (original, copy) in [
         (&saved.disk, &into.disk),
-        (&memory.state, &into_memory.state),
-        (&memory.memory, &into_memory.memory),
+        (&memory.state, &state),
+        (&memory.memory, &paged),
     ] {
         // Not assert_eq!: a mismatch would print gigabytes.
         let same = fs::read(original).unwrap() == fs::read(copy).unwrap();
@@ -113,7 +141,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
     }
     store.delete(id).await.unwrap();
     eprintln!(
-        "{} MiB of data: first archive {first:?}, unchanged archive {again:?}, fetch {fetched:?}",
+        "{} MiB of data: first archive {first:?}, unchanged archive {again:?}, fetch without memory {fetched_at:?}, paging all memory in {paged_in:?}",
         ((disk_at.len() + memory_at.len() + 1) as u64 * CHUNK_BYTES) >> 20
     );
 }

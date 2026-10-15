@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use compute_core::{HostPolicy, SandboxId, Step};
 use compute_engine::{
-    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, SnapshotFiles, VmSpec,
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
+    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -23,6 +24,10 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
+
+/// Bytes of fake guest memory, as a memory image is as long as the guest's
+/// memory.
+const FAKE_MEMORY: usize = 64 << 10;
 
 /// How long each fake operation takes.
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +64,8 @@ struct World {
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
+    /// Snapshots taken: full, then diff.
+    snapshots: [AtomicUsize; 2],
     next_vm: AtomicU64,
     /// Kill switches for every live VM, by name.
     killers: Mutex<Vec<(String, watch::Sender<bool>)>>,
@@ -230,13 +237,23 @@ impl Engine for Fake {
         Ok(self.launch(spec, String::new()))
     }
 
-    async fn restore(&self, spec: &VmSpec, files: &SnapshotFiles) -> Result<FakeVm, EngineError> {
+    fn memory_profile(&self) -> MemoryProfile {
+        MemoryProfile::bare_metal()
+    }
+
+    async fn restore(&self, spec: &VmSpec, files: &RestoreFiles) -> Result<FakeVm, EngineError> {
         let now = self.world.restoring.fetch_add(1, Ordering::SeqCst) + 1;
         self.world.max_restoring.fetch_max(now, Ordering::SeqCst);
         sleep(self.delays.restore).await;
         self.world.restoring.fetch_sub(1, Ordering::SeqCst);
-        let memory = std::fs::read_to_string(&files.memory)
+        let MemorySource::File(path) = &files.memory else {
+            panic!("a bare-metal host restores local images from files");
+        };
+        let memory = std::fs::read(path)
             .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, "restore", error))?;
+        let memory = String::from_utf8_lossy(&memory)
+            .trim_end_matches('\0')
+            .to_owned();
         self.world.restores.fetch_add(1, Ordering::Relaxed);
         let vm = self.launch(spec, memory);
         *vm.paused.lock().unwrap() = true;
@@ -275,14 +292,26 @@ impl Engine for Fake {
         Ok(Completion::Finished)
     }
 
-    async fn snapshot(&self, vm: &FakeVm, files: &SnapshotFiles) -> Result<(), EngineError> {
+    async fn snapshot(
+        &self,
+        vm: &FakeVm,
+        files: &SnapshotFiles,
+        kind: SnapshotKind,
+    ) -> Result<(), EngineError> {
         Self::alive(vm, "snapshot")?;
         self.expect_paused(vm, "snapshot", true);
         sleep(self.delays.snapshot).await;
         Self::alive(vm, "snapshot")?;
         let memory = vm.memory.lock().unwrap().clone();
         std::fs::write(&files.state, "state").unwrap();
-        std::fs::write(&files.memory, memory).unwrap();
+        // Like a real engine, the image is as long as guest memory. A diff
+        // holding every page is still a valid diff.
+        let mut image = memory.into_bytes();
+        assert!(image.len() <= FAKE_MEMORY, "fake guest memory overflow");
+        image.resize(FAKE_MEMORY, 0);
+        std::fs::write(&files.memory, image).unwrap();
+        self.world.snapshots[usize::from(kind == SnapshotKind::Diff)]
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 

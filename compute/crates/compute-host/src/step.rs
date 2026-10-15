@@ -3,22 +3,84 @@
 //! The core guarantees at most one step per sandbox at a time, so a step
 //! takes the sandbox's VM handle, owns it while it works and hands it back
 //! when it finishes. No locks are needed around a VM.
+//!
+//! Saving, restoring and moving memory images follow one rule: a copy of the
+//! sandbox's newest state is deleted or replaced only after another copy has
+//! been checked and found good, and a copy that fails a check is moved to
+//! quarantine rather than deleted. Local images are checked by
+//! [`Images::verify`]; the store's copy by [`Store::verify`].
 
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use compute_core::{Failure, Outcome, Step};
-use compute_engine::{CancellationToken, Completion, Engine, EngineError, ErrorKind, VmSpec};
+use compute_engine::{
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, MemoryProfile, MemorySource,
+    RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+};
+use serde::{Deserialize, Serialize};
 
-use crate::layout::{Paths, remove_durably, remove_if_present, sync_file, write_atomic};
+use crate::image::{Generation, Images, Parts, Suspect, Verified};
+use crate::layout::{Paths, remove_durably, remove_if_present, write_atomic};
+#[cfg(target_os = "linux")]
+use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging, WakeProfile};
 use crate::protocol::Id;
 use crate::restore_notice::tell_restored;
-use crate::store::{SavedFiles, Store};
+use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, SavedImage, Store};
 
 /// How long a restore waits for the guest to acknowledge the restore notice.
 /// A guest that listens answers in about a millisecond.
 const NOTICE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Longest a wake waits for its learned working set before resuming the
+/// guest anyway; whatever is missing then arrives on demand.
+const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
+
+/// What the VM's memory equals, page for page, apart from what it changed
+/// since: what a diff snapshot is relative to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Base {
+    /// All zeros: a VM booted fresh.
+    Zero,
+    /// A published image generation.
+    Image(Generation),
+    /// Unknown, for example after a failed snapshot or merge: the next
+    /// snapshot must hold every page.
+    Unknown,
+}
+
+/// What backs a live VM's memory.
+#[derive(Debug)]
+pub(crate) struct LiveMemory {
+    pub base: Base,
+    /// The pager thread serving its memory, if a pager does.
+    #[cfg(target_os = "linux")]
+    pub paging: Option<Paging>,
+}
+
+impl LiveMemory {
+    pub fn booted() -> Self {
+        Self {
+            base: Base::Zero,
+            #[cfg(target_os = "linux")]
+            paging: None,
+        }
+    }
+
+    /// Resolves if the VM's memory can no longer be served, so the VM must
+    /// be stopped.
+    pub fn failed(&self) -> impl Future<Output = ()> + Send + 'static {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            return futures::future::Either::Left(paging.failed());
+        }
+        futures::future::Either::Right(std::future::pending())
+    }
+}
 
 /// A VM process the host owns.
 #[derive(Debug)]
@@ -30,6 +92,7 @@ pub(crate) struct Live<V> {
     /// Set before the host stops the VM on purpose, so its exit is not
     /// reported as a crash.
     pub stopping: Arc<AtomicBool>,
+    pub memory: LiveMemory,
 }
 
 /// What a step leaves behind.
@@ -40,7 +103,15 @@ pub(crate) enum After<V> {
     /// The VM the step was given.
     Kept(Live<V>),
     /// A VM process the step started.
-    New(V),
+    New(V, LiveMemory),
+}
+
+/// What the `archived` marker records: which stored copy matches the local
+/// files.
+#[derive(Debug, Serialize, Deserialize)]
+struct Archived {
+    receipt: Receipt,
+    memory: bool,
 }
 
 /// Everything one step needs.
@@ -54,6 +125,10 @@ pub(crate) struct Job<E: Engine, S> {
     pub live: Option<Live<E::Vm>>,
     /// Guest port to tell about a restore, if any.
     pub restore_notice_port: Option<u32>,
+    /// Fetches remote memory for every VM on the host, when the store keeps
+    /// memory as chunks.
+    #[cfg(target_os = "linux")]
+    pub fetcher: Option<Arc<Fetcher>>,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -65,8 +140,57 @@ fn failure(error: &EngineError) -> Outcome {
     })
 }
 
-fn io_failure(operation: &'static str, error: std::io::Error) -> Outcome {
+fn io_failure(operation: &'static str, error: io::Error) -> Outcome {
     failure(&EngineError::io(operation, error))
+}
+
+fn suspect_error(operation: &'static str, suspect: Suspect) -> EngineError {
+    match suspect {
+        Suspect::Io(error) => EngineError::io(operation, error),
+        suspect => EngineError::caused_by(ErrorKind::MemoryLost, operation, suspect),
+    }
+}
+
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> io::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(io::Error::other)
+}
+
+/// The sandbox's memory images.
+pub(crate) fn images_of(paths: &Paths) -> Images {
+    Images::new(paths.dir.join("images"))
+}
+
+/// The learned order the guest touches memory after a wake.
+fn wake_profile(paths: &Paths) -> PathBuf {
+    paths.dir.join("wake-profile.json")
+}
+
+/// The files a diff snapshot is written to, inside the jail.
+fn diff_files(paths: &Paths) -> SnapshotFiles {
+    SnapshotFiles {
+        state: paths.in_jail("save.state"),
+        memory: paths.in_jail("save.mem"),
+    }
+}
+
+/// Makes the sandbox's images consistent after a host restart and reports
+/// whether a good current image exists.
+pub(crate) fn recover_images(paths: &Paths) -> bool {
+    match images_of(paths).recover() {
+        Ok(current) => current.is_some(),
+        Err(error) => {
+            tracing::error!(dir = %paths.dir.display(), %error, "could not check memory images");
+            false
+        }
+    }
+}
+
+/// Points `link` at `target` with a hard link, replacing what was there.
+fn link(target: &Path, link: &Path) -> io::Result<()> {
+    remove_if_present(link)?;
+    fs::hard_link(target, link)
 }
 
 impl<E: Engine, S: Store> Job<E, S> {
@@ -120,35 +244,40 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
-    /// Snapshot, make it durable, mark it valid, then end the VM process.
-    /// A wake that arrives before the process ends cancels the save and the
-    /// still-paused VM simply resumes.
-    async fn save(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+    /// Writes the pages that changed, merges them offline into a new
+    /// self-contained image, marks it valid, then ends the VM process. A
+    /// wake that arrives before the process ends cancels the save and the
+    /// still-paused VM simply resumes; the new image stays as the base of
+    /// its next save.
+    async fn save(&self, mut live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         let paths = &self.paths;
         if let Err(error) = remove_durably(&paths.saved) {
             return (io_failure("save", error), After::Kept(live));
         }
-        if let Err(error) = self.engine.snapshot(&live.vm, &paths.snapshot).await {
-            return (failure(&error), After::Kept(live));
-        }
-        let files = paths.snapshot.clone();
-        let synced = tokio::task::spawn_blocking(move || {
-            sync_file(&files.state)?;
-            sync_file(&files.memory)
-        })
-        .await
-        .unwrap_or_else(|error| Err(std::io::Error::other(error)));
-        if let Err(error) = synced {
-            return (io_failure("save", error), After::Kept(live));
-        }
-        if self.cancel.is_cancelled() {
-            // The image matches this paused VM but goes stale the moment it
-            // resumes, so drop it rather than leave a trap.
-            drop_snapshot(paths);
-            return (Outcome::Cancelled, After::Kept(live));
-        }
-        if let Err(error) = write_atomic(&paths.saved, b"") {
-            return (io_failure("save", error), After::Kept(live));
+        match self.write_image(&mut live).await {
+            Ok(image) => {
+                if self.cancel.is_cancelled() {
+                    // The image matches this paused VM but goes stale the
+                    // moment it resumes; it is not marked saved.
+                    return (Outcome::Cancelled, After::Kept(live));
+                }
+                if let Err(error) = write_atomic(&paths.saved, b"") {
+                    return (io_failure("save", error), After::Kept(live));
+                }
+                // The new image is good: older ones may go. The VM maps
+                // only the new one's content from now on.
+                let images = images_of(paths);
+                if let Err(error) = blocking(move || images.retire(&image, &[]))
+                    .await
+                    .and_then(|r| r)
+                {
+                    tracing::warn!(id = %self.id, %error, "old memory images not removed");
+                }
+            }
+            Err(error) => {
+                live.memory.base = Base::Unknown;
+                return (failure(&error), After::Kept(live));
+            }
         }
         live.stopping.store(true, Ordering::Release);
         match self.engine.stop(live.vm).await {
@@ -159,17 +288,130 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
-    /// Start from the saved image, mark the image stale before the guest
-    /// runs, then resume.
+    /// Snapshots the paused VM and publishes the result as a new image
+    /// generation, which becomes the VM's base.
+    async fn write_image(&self, live: &mut Live<E::Vm>) -> Result<Verified, EngineError> {
+        const OP: &str = "save";
+        let images = images_of(&self.paths);
+        // A lazily woken VM's image must be whole before a diff can be
+        // merged over it.
+        #[cfg(target_os = "linux")]
+        if let (Base::Image(generation), Some(hydration)) = (
+            live.memory.base,
+            live.memory
+                .paging
+                .as_ref()
+                .and_then(|paging| paging.hydration.clone()),
+        ) {
+            hydration
+                .finished()
+                .await
+                .map_err(|reason| EngineError::new(ErrorKind::MemoryLost, OP, reason))?;
+            let images = images.clone();
+            blocking(move || {
+                let image = images.verify(generation, crate::image::Depth::Light)?;
+                if image.meta().remote {
+                    images.mark_local(&image)?;
+                }
+                Ok::<_, Suspect>(())
+            })
+            .await
+            .map_err(|error| EngineError::io(OP, error))?
+            .map_err(|suspect| suspect_error(OP, suspect))?;
+        }
+        let base = live.memory.base;
+        let kind = if base == Base::Unknown {
+            SnapshotKind::Full
+        } else {
+            SnapshotKind::Diff
+        };
+        let files = diff_files(&self.paths);
+        let started = Instant::now();
+        // From here on the VM's dirty pages are being reset: any failure
+        // leaves its base unknown.
+        live.memory.base = Base::Unknown;
+        self.engine.snapshot(&live.vm, &files, kind).await?;
+        let snapshot = started.elapsed();
+        let published = blocking(move || {
+            let parts = match base {
+                Base::Image(generation) if kind == SnapshotKind::Diff => Parts::Diff {
+                    base: generation,
+                    state: &files.state,
+                    diff: &files.memory,
+                },
+                // A diff over zeros, or a full snapshot, is already whole.
+                _ => Parts::Whole {
+                    state: &files.state,
+                    memory: &files.memory,
+                },
+            };
+            let published = images.publish(parts);
+            if published.is_err() {
+                let _ = remove_if_present(&files.state);
+                let _ = remove_if_present(&files.memory);
+            }
+            published
+        })
+        .await
+        .map_err(|error| EngineError::io(OP, error))?
+        .map_err(|suspect| suspect_error(OP, suspect))?;
+        tracing::debug!(
+            id = %self.id,
+            ?kind,
+            snapshot_ms = snapshot.as_millis(),
+            merge_ms = started.elapsed().saturating_sub(snapshot).as_millis(),
+            generation = %published.generation(),
+            "memory image saved"
+        );
+        live.memory.base = Base::Image(published.generation());
+        Ok(published)
+    }
+
+    /// Starts from the saved image, marks the image stale before the guest
+    /// runs, then resumes.
     async fn restore(&self) -> (Outcome, After<E::Vm>) {
+        const OP: &str = "restore";
         let paths = &self.paths;
         if !paths.saved.exists() {
             return (Outcome::Failed(Failure::MemoryLost), After::NoVm);
         }
-        let vm = match self.engine.restore(&self.spec, &paths.snapshot).await {
+        let images = images_of(paths);
+        let checked = {
+            let images = images.clone();
+            blocking(move || images.current_verified()).await
+        };
+        let image = match checked {
+            Ok(Ok(Some(image))) => image,
+            Ok(Ok(None)) => {
+                let _ = remove_durably(&paths.saved);
+                return (Outcome::Failed(Failure::MemoryLost), After::NoVm);
+            }
+            Ok(Err(suspect)) => {
+                self.quarantine_current(&images, &suspect);
+                return (failure(&suspect_error(OP, suspect)), After::NoVm);
+            }
+            Err(error) => return (io_failure(OP, error), After::NoVm),
+        };
+        let generation = image.generation();
+        let (memory, live_memory) = match self.memory_source(&images, &image) {
+            Ok(prepared) => prepared,
+            Err(error) => return (failure(&error), After::NoVm),
+        };
+        let files = RestoreFiles {
+            state: paths.snapshot.state.clone(),
+            memory,
+        };
+        let vm = match self.engine.restore(&self.spec, &files).await {
             Ok(vm) => vm,
             Err(error) => {
                 if error.kind == ErrorKind::MemoryLost {
+                    // The VMM rejected the image: keep it for inspection,
+                    // never offer it again.
+                    let suspect = Suspect::Damaged {
+                        generation,
+                        reason: error.to_string(),
+                    };
+                    let _ = images.quarantine(generation, &suspect);
                     let _ = remove_durably(&paths.saved);
                 }
                 return (failure(&error), After::NoVm);
@@ -178,7 +420,11 @@ impl<E: Engine, S: Store> Job<E, S> {
         let unmarked = remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
         if let Err(error) = unmarked {
             let _ = self.engine.stop(vm).await;
-            return (io_failure("restore", error), After::NoVm);
+            return (io_failure(OP, error), After::NoVm);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &live_memory.paging {
+            paging.prefetched(PREFETCH_LIMIT).await;
         }
         if let Err(error) = self.engine.resume(&vm).await {
             // The guest never ran, so the image is still good: keep it.
@@ -187,7 +433,92 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (failure(&error), After::NoVm);
         }
         self.tell_guest_restored().await;
-        (Outcome::Done, After::New(vm))
+        (Outcome::Done, After::New(vm, live_memory))
+    }
+
+    /// Links `image` into the jail and decides how the VM's memory is
+    /// served: mapped straight from the file where the profile allows,
+    /// otherwise through a pager, fetching from the store if the image's
+    /// memory is still there.
+    fn memory_source(
+        &self,
+        images: &Images,
+        image: &Verified,
+    ) -> Result<(MemorySource, LiveMemory), EngineError> {
+        const OP: &str = "restore";
+        let paths = &self.paths;
+        let generation = image.generation();
+        let io = |error| EngineError::io(OP, error);
+        link(&images.state(generation), &paths.snapshot.state).map_err(io)?;
+        let profile: MemoryProfile = self.engine.memory_profile();
+        let mut live = LiveMemory {
+            base: Base::Image(generation),
+            #[cfg(target_os = "linux")]
+            paging: None,
+        };
+        if !image.meta().remote && !profile.needs_pager() {
+            link(&images.memory(generation), &paths.snapshot.memory).map_err(io)?;
+            return Ok((MemorySource::File(paths.snapshot.memory.clone()), live));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let socket = paths.in_jail("uffd.sock");
+            let learned = wake_profile(paths);
+            let wake = WakeProfile::load(&learned);
+            let (memory, hydration) = if image.meta().remote {
+                let Some(fetcher) = &self.fetcher else {
+                    return Err(EngineError::new(
+                        ErrorKind::MemoryLost,
+                        OP,
+                        "the memory image is in a store this host cannot page from",
+                    ));
+                };
+                let manifest = fs::read(images.remote(generation)).map_err(io)?;
+                let manifest = compute_storage::manifest::DiskManifest::decode(&manifest)
+                    .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, OP, error))?;
+                let refs = crate::chunked::chunk_refs(&manifest).ok_or_else(|| {
+                    EngineError::new(ErrorKind::MemoryLost, OP, "memory manifest not in chunks")
+                })?;
+                let hashes = images.chunk_map(image).map_err(io)?.0;
+                let hydration = Hydration::start(
+                    Arc::clone(fetcher),
+                    &images.memory(generation),
+                    refs,
+                    hashes,
+                    &wake.offsets,
+                )
+                .map_err(io)?;
+                let source = ChunkSource::new(Arc::clone(&hydration)).map_err(io)?;
+                (Memory::Remote(source), Some(hydration))
+            } else {
+                let file = fs::File::open(images.memory(generation)).map_err(io)?;
+                // SAFETY: published images are sealed read-only and never
+                // modified; a new save always writes a new generation.
+                let mapped = unsafe { compute_pager::MappedFile::new(&file) }.map_err(io)?;
+                (Memory::Local(mapped), None)
+            };
+            live.paging =
+                Some(Paging::start(&socket, memory, hydration, wake, learned).map_err(io)?);
+            Ok((MemorySource::Pager(socket), live))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = live;
+            Err(EngineError::new(
+                ErrorKind::Fatal,
+                OP,
+                "paged memory needs Linux",
+            ))
+        }
+    }
+
+    fn quarantine_current(&self, images: &Images, suspect: &Suspect) {
+        if let Ok(Some(generation)) = images.current()
+            && let Err(error) = images.quarantine(generation, suspect)
+        {
+            tracing::error!(id = %self.id, %error, "could not quarantine a bad image");
+        }
+        let _ = remove_durably(&self.paths.saved);
     }
 
     /// Lets the guest fix its clock and drop dead connections before the
@@ -217,65 +548,175 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         drop_snapshot(paths);
         match self.engine.boot(&self.spec).await {
-            Ok(vm) => (Outcome::Done, After::New(vm)),
+            Ok(vm) => (Outcome::Done, After::New(vm, LiveMemory::booted())),
             Err(error) => (failure(&error), After::NoVm),
         }
     }
 
-    fn saved_files(&self) -> SavedFiles {
-        SavedFiles {
-            disk: self.paths.disk.clone(),
-            memory: self
-                .paths
-                .saved
-                .exists()
-                .then(|| self.paths.snapshot.clone()),
-        }
-    }
-
     async fn archive(&self) -> Outcome {
-        let files = self.saved_files();
-        let marker: &[u8] = if files.memory.is_some() {
-            b"memory"
-        } else {
-            b"disk"
+        const OP: &str = "archive";
+        let paths = self.paths.clone();
+        let images = images_of(&paths);
+        let checked = blocking(move || -> Result<_, Suspect> {
+            if !paths.saved.exists() {
+                return Ok(None);
+            }
+            let Some(image) = images.current_verified()? else {
+                return Ok(None);
+            };
+            let chunks = images.chunk_map(&image)?;
+            Ok(Some((image, chunks)))
+        })
+        .await;
+        let memory = match checked {
+            Ok(Ok(memory)) => memory,
+            Ok(Err(suspect)) => {
+                self.quarantine_current(&images_of(&self.paths), &suspect);
+                return failure(&suspect_error(OP, suspect));
+            }
+            Err(error) => return io_failure(OP, error),
         };
-        if let Err(error) = self.store.archive(self.id, &files).await {
-            return failure(&error);
+        let images = images_of(&self.paths);
+        if memory
+            .as_ref()
+            .is_some_and(|(image, _)| image.meta().remote)
+        {
+            // Fetched but never woken: the store already holds this image.
+            return match self.archived_copy_holds().await {
+                Ok(true) => Outcome::Done,
+                Ok(false) => failure(&EngineError::new(
+                    ErrorKind::Fatal,
+                    OP,
+                    "memory image is only partly local and the store no longer holds it",
+                )),
+                Err(error) => failure(&error),
+            };
         }
-        match write_atomic(&self.paths.archived, marker) {
+        let profile = wake_profile(&self.paths);
+        let files = SavedFiles {
+            disk: self.paths.disk.clone(),
+            memory: memory.as_ref().map(|(image, chunks)| SavedImage {
+                state: images.state(image.generation()),
+                memory: images.memory(image.generation()),
+                chunks: Some(Arc::new(chunks.0.clone())),
+            }),
+            profile: profile.exists().then_some(profile),
+        };
+        let receipt = match self.store.archive(self.id, &files).await {
+            Ok(receipt) => receipt,
+            Err(error) => return failure(&error),
+        };
+        let marker = Archived {
+            receipt,
+            memory: files.memory.is_some(),
+        };
+        let bytes = serde_json::to_vec(&marker).unwrap_or_default();
+        match write_atomic(&self.paths.archived, &bytes) {
             Ok(()) => Outcome::Done,
-            Err(error) => io_failure("archive", error),
+            Err(error) => io_failure(OP, error),
         }
     }
 
+    /// Whether the store still holds the copy the `archived` marker names.
+    async fn archived_copy_holds(&self) -> Result<bool, EngineError> {
+        let Ok(bytes) = fs::read(&self.paths.archived) else {
+            return Ok(false);
+        };
+        let Ok(marker) = serde_json::from_slice::<Archived>(&bytes) else {
+            return Ok(false);
+        };
+        self.store.verify(self.id, &marker.receipt).await
+    }
+
+    /// Deletes the local copy, but only once the store is confirmed to hold
+    /// exactly the copy that was archived from it.
     async fn evict(&self) -> Outcome {
-        if !self.paths.archived.exists() {
-            return failure(&EngineError::new(
-                ErrorKind::Fatal,
-                "evict",
-                "no archived copy to fall back on",
-            ));
+        const OP: &str = "evict";
+        match self.archived_copy_holds().await {
+            Ok(true) => {}
+            Ok(false) => {
+                // The local files may be the only good copy: keep them, and
+                // forget the archive so the next one starts afresh.
+                let _ = remove_durably(&self.paths.archived);
+                return failure(&EngineError::new(
+                    ErrorKind::Fatal,
+                    OP,
+                    "the store does not hold the archived copy; keeping the local one",
+                ));
+            }
+            Err(error) => return failure(&error),
         }
         let paths = self.paths.clone();
-        let removed = tokio::task::spawn_blocking(move || {
+        let removed = blocking(move || {
             remove_if_present(&paths.disk)?;
             remove_if_present(&paths.snapshot.state)?;
-            remove_if_present(&paths.snapshot.memory)
+            remove_if_present(&paths.snapshot.memory)?;
+            images_of(&paths).clear()
         })
         .await
-        .unwrap_or_else(|error| Err(std::io::Error::other(error)));
+        .and_then(|removed| removed);
         match removed {
             Ok(()) => Outcome::Done,
-            Err(error) => io_failure("evict", error),
+            Err(error) => io_failure(OP, error),
         }
     }
 
+    /// Brings the stored copy back: the disk and device state whole, memory
+    /// left in the store where it can be paged in, as a new image.
     async fn fetch(&self) -> Outcome {
-        let files = self.saved_files();
-        match self.store.fetch(self.id, &files).await {
-            Ok(()) => Outcome::Done,
-            Err(error) => failure(&error),
+        const OP: &str = "fetch";
+        let paths = &self.paths;
+        let scratch = paths.dir.join("fetching");
+        let _ = fs::remove_dir_all(&scratch);
+        let into = FetchInto {
+            disk: paths.disk.clone(),
+            scratch: scratch.clone(),
+            profile: wake_profile(paths),
+            memory: paths.saved.exists(),
+        };
+        let fetched = match self.store.fetch(self.id, &into).await {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&scratch);
+                return failure(&error);
+            }
+        };
+        let images = images_of(paths);
+        let published = blocking(move || {
+            let published = match &fetched {
+                FetchedMemory::None => images.clear().map_err(Suspect::from).map(|()| None),
+                FetchedMemory::Local { state, memory } => {
+                    images.publish(Parts::Whole { state, memory }).map(Some)
+                }
+                FetchedMemory::Remote {
+                    state,
+                    memory_len,
+                    chunks,
+                    manifest,
+                } => images
+                    .publish(Parts::Remote {
+                        state,
+                        memory_len: *memory_len,
+                        chunks: crate::image::ChunkMap(chunks.clone()),
+                        manifest,
+                    })
+                    .map(Some),
+            };
+            let _ = fs::remove_dir_all(&scratch);
+            published
+        })
+        .await;
+        match published {
+            Ok(Ok(Some(image))) => {
+                let images = images_of(paths);
+                if let Err(error) = images.retire(&image, &[]) {
+                    tracing::warn!(id = %self.id, %error, "old memory images not removed");
+                }
+                Outcome::Done
+            }
+            Ok(Ok(None)) => Outcome::Done,
+            Ok(Err(suspect)) => failure(&suspect_error(OP, suspect)),
+            Err(error) => io_failure(OP, error),
         }
     }
 }
@@ -283,4 +724,8 @@ impl<E: Engine, S: Store> Job<E, S> {
 fn drop_snapshot(paths: &Paths) {
     let _ = remove_if_present(&paths.snapshot.state);
     let _ = remove_if_present(&paths.snapshot.memory);
+    let files = diff_files(paths);
+    let _ = remove_if_present(&files.state);
+    let _ = remove_if_present(&files.memory);
+    let _ = images_of(paths).clear();
 }

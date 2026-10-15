@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use compute_core::{HostPolicy, MemoryPolicy, SandboxId, Step};
+use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -109,6 +110,13 @@ struct ServeArgs {
     /// the guest can set its clock and reconnect.
     #[arg(long)]
     restore_notice_port: Option<u32>,
+    /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
+    /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
+    /// from the host's reserved huge-page pool, resident-page saves, no
+    /// compression). Nested hosts need the pool reserved first, for example
+    /// through `/proc/sys/vm/nr_hugepages`.
+    #[arg(long, default_value_t = MemoryProfile::bare_metal())]
+    memory_profile: MemoryProfile,
 }
 
 #[derive(Args)]
@@ -256,7 +264,10 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         jailer: args.jailer,
         cgroup_parent: args.cgroup.clone(),
     })
-    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?;
+    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
+    .with_memory_profile(args.memory_profile)
+    .with_context(|| format!("memory profile {}", args.memory_profile))?;
+    check_huge_pages(args.memory_profile)?;
     let mut policy = HostPolicy::default();
     for (step, limit) in args.limits {
         policy.limits = policy.limits.with(step, limit);
@@ -600,5 +611,37 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
             expect_done(result??)?;
         }
     }
+    Ok(())
+}
+
+/// Refuses a huge-page memory profile on a host without a reserved pool of
+/// 2 MiB pages: every VM's memory would fail to allocate.
+fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
+    if profile.pages != compute_engine::PageSize::Huge {
+        return Ok(());
+    }
+    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
+    let field = |name: &str| {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    if field("Hugepagesize:") != 2048 {
+        bail!("the {profile} memory profile needs 2 MiB default huge pages");
+    }
+    let total = field("HugePages_Total:");
+    if total == 0 {
+        bail!(
+            "the {profile} memory profile needs reserved huge pages; set /proc/sys/vm/nr_hugepages"
+        );
+    }
+    tracing::info!(
+        pool_mib = total * 2,
+        free_mib = field("HugePages_Free:") * 2,
+        "huge-page pool"
+    );
     Ok(())
 }

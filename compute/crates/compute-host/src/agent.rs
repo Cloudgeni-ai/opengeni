@@ -29,7 +29,7 @@ use crate::layout::{
     Images, Paths, check_root, copy_sparse, link_kernel, sandboxes_dir, vm_spec, write_atomic,
 };
 use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
-use crate::step::{After, Job, Live};
+use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
 
 /// How a host is set up.
@@ -339,6 +339,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     pressure: bool,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
+    #[cfg(target_os = "linux")]
+    fetcher: Option<Arc<crate::lazy::Fetcher>>,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
@@ -382,9 +384,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(|error| HostError::Io(error.to_string()))?;
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
+        #[cfg(target_os = "linux")]
+        let fetcher = store
+            .chunks()
+            .map(|chunks| Arc::new(crate::lazy::Fetcher::new(chunks.clone())));
         let mut agent = Self {
             engine: Arc::new(engine),
             store: Arc::new(store),
+            #[cfg(target_os = "linux")]
+            fetcher,
             images: Images {
                 kernel: config.kernel,
                 boot_args: config.boot_args,
@@ -467,8 +475,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.ordinals.remove(&ordinal);
             HostError::Io(error.to_string())
         })?;
-        let image =
-            paths.saved.exists() && paths.snapshot.state.exists() && paths.snapshot.memory.exists();
+        let image = paths.saved.exists() && crate::step::recover_images(&paths);
         let (level, memory_saved) = if paths.disk.exists() {
             let level = if paths.archived.exists() {
                 Level::Archived
@@ -642,6 +649,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
+        if policy.enables(Level::Compressed) && !self.engine.memory_profile().compress {
+            let _ = reply.send(Err(HostError::Invalid(format!(
+                "this host's {} memory profile does not compress memory",
+                self.engine.memory_profile()
+            ))));
+            return;
+        }
         if policy.enables(Level::Archived) && !self.store.is_configured() {
             let _ = reply.send(Err(HostError::Invalid(
                 "this host has no store, so sandboxes cannot be archived".into(),
@@ -777,6 +791,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             cancel,
             live: if needs_vm { slot.vm.take() } else { None },
             restore_notice_port: self.restore_notice_port,
+            #[cfg(target_os = "linux")]
+            fetcher: self.fetcher.clone(),
         };
         let events = self.events_tx.clone();
         tokio::spawn(async move {
@@ -792,7 +808,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn step_done(&mut self, id: Id, op: OpId, outcome: Outcome, after: After<E::Vm>) {
         let fresh = match after {
-            After::New(vm) => Some(self.adopt(id, vm)),
+            After::New(vm, memory) => Some(self.adopt(id, vm, memory)),
             After::Kept(live) => Some(live),
             After::NoVm => None,
         };
@@ -850,15 +866,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Takes ownership of a VM process a step started and watches for it
     /// dying on its own.
-    fn adopt(&mut self, id: Id, vm: E::Vm) -> Live<E::Vm> {
+    fn adopt(&mut self, id: Id, vm: E::Vm, memory: LiveMemory) -> Live<E::Vm> {
         let incarnation = self.next_incarnation;
         self.next_incarnation += 1;
         let stopping = Arc::new(AtomicBool::new(false));
         let exited = self.engine.exited(&vm);
         let events = self.events_tx.clone();
         let deliberate = Arc::clone(&stopping);
+        let memory_lost = memory.failed();
         tokio::spawn(async move {
-            exited.await;
+            let lost = memory_lost;
+            tokio::select! {
+                () = exited => {}
+                // Its memory can no longer be served: the next page fault
+                // would wait forever, so it counts as dead.
+                () = lost => {}
+            }
             if !deliberate.load(Ordering::Acquire) {
                 let _ = events.send(Event::Exited { id, incarnation });
             }
@@ -867,6 +890,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             vm,
             incarnation,
             stopping,
+            memory,
         }
     }
 
