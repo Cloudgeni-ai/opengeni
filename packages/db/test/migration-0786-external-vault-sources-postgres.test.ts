@@ -4,6 +4,7 @@
 // link only through an active connection of the same provider whose ownership
 // matches the vault, and linked vaults record provider operations, the
 // provider's own freshness observation and a durable value-cache epoch.
+// Mirror replacements of one vault run one at a time under its row lock.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,6 +32,7 @@ import {
   setVaultSyncStatus,
   upsertProviderVaultItems,
   type DbClient,
+  type Database,
   type ProviderVaultItemMirror,
   type VaultDbContext,
 } from "../src";
@@ -228,7 +230,9 @@ beforeAll(async () => {
   const url = new URL(database.ownerUrl);
   url.username = "opengeni_app";
   url.password = database.appPassword;
-  client = createDb(url.toString(), { max: 2 });
+  // Four connections: the concurrency test holds one transaction open while
+  // another replacement waits and a third tenant is turned away.
+  client = createDb(url.toString(), { max: 4 });
 
   // Before 0786: every kind of linked vault, through the old routines.
   const t = await tenant("legacy");
@@ -848,5 +852,101 @@ describe.skipIf(!realDb)("0786 external vault sources", () => {
       providerContentVersion: "3",
       providerCacheEpoch: "3",
     });
+  });
+
+  test("overlapping mirror replacements run one at a time, so an older listing never leaves a phantom under a newer version", async () => {
+    const t = await tenant("overlap");
+    const foreign = await tenant("overlap-foreign");
+    const keeper = await externalConnection(t);
+    const linked = await linkProviderVault(t.db, t.context, {
+      ownerKind: "workspace",
+      name: "Keeper overlap",
+      source: "keeper",
+      providerConnectionId: keeper.id,
+      providerVaultRef: "overlap-folder",
+      mode: "read_only",
+    });
+    const replace = async (db: Database, version: string, refs: string[]) =>
+      await upsertProviderVaultItems(db, t.context, {
+        vaultId: linked.id,
+        contentVersion: version,
+        items: refs.map((ref) => mirrorItem(ref, `Item ${ref}`)),
+      });
+    const mirror = async () => ({
+      names: (await listVaultItems(t.db, t.context, { vaultId: linked.id, limit: 200 })).items
+        .map((row) => row.name)
+        .sort(),
+      version: (await getProviderVaultSyncTarget(t.db, t.context, linked.id))
+        .providerContentVersion,
+    });
+    /** Resolves once a replacement in this database is waiting on a lock. */
+    const lockWait = async () => {
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const [row] = await database!.admin<{ waiting: number }[]>`
+          select count(*)::int as waiting from pg_stat_activity
+          where datname = current_database() and wait_event_type = 'Lock'
+            and query like ${"%upsert_provider_vault_items%"}`;
+        if (row!.waiting > 0) return;
+        await Bun.sleep(25);
+      }
+      throw new Error("the second replacement never waited for the first");
+    };
+    await replace(t.db, "0", ["a"]);
+
+    // An older sync listed {A, B} (version 1) and has written its mirror but
+    // not committed. A newer sync lists {A} (version 2): B was deleted upstream.
+    let commitOlder!: () => void;
+    const olderMayCommit = new Promise<void>((resolve) => {
+      commitOlder = resolve;
+    });
+    let olderWritten!: () => void;
+    const written = new Promise<void>((resolve) => {
+      olderWritten = resolve;
+    });
+    const older = t.db.transaction(async (tx) => {
+      await replace(tx as unknown as Database, "1", ["a", "b"]);
+      olderWritten();
+      await olderMayCommit;
+    });
+    await written;
+    const newer = replace(t.db, "2", ["a"]);
+    await lockWait();
+    // Another tenant is turned away by the reach check before the lock, not queued behind it.
+    await expectVaultError(
+      upsertProviderVaultItems(foreign.db, foreign.context, {
+        vaultId: linked.id,
+        contentVersion: "9",
+        items: [],
+      }),
+      "vault_not_found",
+    );
+    commitOlder();
+    await older;
+    await newer;
+    // The newer replacement saw the older one's commit: B is gone under version 2.
+    expect(await mirror()).toEqual({ names: ["Item a"], version: "2" });
+
+    // The other order leaves the older listing whole under its own version,
+    // which the next sync replaces because the provider's version differs.
+    let commitNewer!: () => void;
+    const newerMayCommit = new Promise<void>((resolve) => {
+      commitNewer = resolve;
+    });
+    let newerWritten!: () => void;
+    const newerDone = new Promise<void>((resolve) => {
+      newerWritten = resolve;
+    });
+    const first = t.db.transaction(async (tx) => {
+      await replace(tx as unknown as Database, "4", ["a"]);
+      newerWritten();
+      await newerMayCommit;
+    });
+    await newerDone;
+    const late = replace(t.db, "3", ["a", "b"]);
+    await lockWait();
+    commitNewer();
+    await first;
+    await late;
+    expect(await mirror()).toEqual({ names: ["Item a", "Item b"], version: "3" });
   });
 });

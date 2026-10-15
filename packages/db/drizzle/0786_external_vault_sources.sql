@@ -17,6 +17,10 @@
 --     or worker process notice a refresh made elsewhere.
 --   * A mirror replacement holds at most the native 2,000 items per vault; a
 --     larger inventory is refused whole, never stored as its first 2,000.
+--   * Mirror replacements of one vault run one at a time: each holds the
+--     vault row lock from before it reads the mirror until it commits, so an
+--     older listing cannot re-add an item that a newer one just removed and
+--     leave it under the newer content version.
 -- Existing rows keep their meaning: the new columns are NULL or 0 and the
 -- Only-me availability default of 0780 is unchanged.
 SET LOCAL lock_timeout = '5s';
@@ -176,12 +180,24 @@ $old$,
 $new$]
 ]);
 
--- Mirror replacement: a complete inventory of at most 2,000 items, and every
--- replacement advances the cache epoch.
+-- Mirror replacement: a complete inventory of at most 2,000 items, applied
+-- under the vault row lock, and every replacement advances the cache epoch.
+-- The lock is FOR NO KEY UPDATE, the strength the routine's own final UPDATE
+-- of the vault takes anyway, so it adds no new conflicts: it is only taken
+-- before the mirror is read rather than after it is rewritten. Every later
+-- statement sees what a replacement that held the lock before committed.
 SELECT pg_temp.patch_vault_routine_0786('upsert_provider_vault_items(uuid,text,jsonb,jsonb)'::regprocedure, ARRAY[
   ARRAY[$old$  kept_refs := ARRAY(SELECT element ->> 'providerItemRef'
 $old$,
-    $new$  IF pg_catalog.jsonb_typeof(coalesce(p_items, '[]'::jsonb)) <> 'array' THEN
+    $new$  SELECT locked.* INTO vault_row FROM vaults locked
+  WHERE locked.id = vault_row.id
+  FOR NO KEY UPDATE OF locked;
+  IF vault_row.id IS NULL THEN
+    PERFORM opengeni_private.vault_raise('vault_not_found', 'vault not found');
+  ELSIF vault_row.source = 'opengeni' THEN
+    PERFORM opengeni_private.vault_raise('vault_permission_denied', 'only connected vaults have a provider mirror');
+  END IF;
+  IF pg_catalog.jsonb_typeof(coalesce(p_items, '[]'::jsonb)) <> 'array' THEN
     PERFORM opengeni_private.vault_raise('provider_inventory_incomplete',
       'the provider inventory is malformed; the previous inventory was kept');
   ELSIF pg_catalog.jsonb_array_length(p_items) > 2000 THEN

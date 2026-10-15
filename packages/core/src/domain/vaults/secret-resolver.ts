@@ -6,11 +6,14 @@
  * batch is recorded. A call resolves all of its references or none (I2).
  *
  * A reference that finds nothing first refreshes the connected vaults that
- * could hold it. When one of those could not be checked (unreachable, rate
- * limited, needing reconnection or still refreshing), the failure names that
- * source instead of reporting the secret missing, so no missing-secret ask
- * card is made for a secret that may exist (external vaults §9). Hosted and
- * explicitly named healthy vaults are never blocked by unrelated outages.
+ * could change the answer: those that could hold it at the priority tier that
+ * decided the lookup or above, even when a hosted item matched without the
+ * field. When one of those could not be checked (unreachable, rate limited,
+ * needing reconnection or still refreshing), the failure names that source
+ * instead of reporting the secret missing, so no missing-secret ask card is
+ * made for a secret that may exist (external vaults §9). Hosted and
+ * explicitly named healthy vaults are never blocked by unrelated outages, and
+ * lower-priority vaults never block a miss a higher tier decided.
  */
 import {
   buildMissingSecretAskCard,
@@ -219,11 +222,21 @@ function providerFailureCode(code: VaultProviderErrorCode): SecretReferenceFailu
 }
 
 /**
- * The connected vaults that could hold what a reference did not find: the
- * vault of a matched connected item that lacks the field; otherwise the vault
- * a three-segment reference names; for two segments the named vault when the
- * first segment names one (else every connected vault, since it may be
- * `Item/field`); every connected vault for a bare item name; none for an ID.
+ * The connected vaults whose mirror decides a reference that found nothing.
+ *
+ * Where the item could be: the vault a three-segment reference names; for two
+ * segments the named vault when the first segment names one (else every
+ * connected vault, since it may be `Item/field`); every connected vault for a
+ * bare item name; none for an ID.
+ *
+ * When some item matched but lacks the field (or the one-time password), the
+ * lookup keeps the highest-priority tier, so only vaults at that tier or above
+ * can change the answer: the connected vaults of matched items there that lack
+ * the field, and the connected vaults that could hold the item there but have
+ * no match yet. A hosted match never hides a higher-priority connected vault
+ * whose provider gained the item or its one-time password, and a vault of a
+ * lower-priority tier that is out of date or unavailable never turns a
+ * definite miss into an unchecked one.
  */
 export function relevantProviderVaults(
   reference: SecretReference,
@@ -232,25 +245,41 @@ export function relevantProviderVaults(
 ): VaultRow[] {
   const connected = reachable.filter((vault) => vault.source !== "opengeni");
   if (connected.length === 0) return [];
+  const where = possibleProviderVaults(reference, reachable, connected);
   const live = candidates.filter((candidate) => !candidate.archived);
-  if (live.length > 0) {
-    const lacking = new Set(
-      live
-        .filter(
-          (candidate) =>
-            candidate.source !== "opengeni" &&
-            (candidate.missing === "field" || candidate.missing === "totp_field"),
-        )
-        .map((candidate) => candidate.vaultId),
-    );
-    return connected.filter((vault) => lacking.has(vault.id));
-  }
+  if (live.length === 0) return where;
+  const deciding = Math.min(...live.map((candidate) => candidate.tier));
+  const lacking = new Set(
+    live
+      .filter(
+        (candidate) =>
+          candidate.tier <= deciding &&
+          candidate.source !== "opengeni" &&
+          (candidate.missing === "field" || candidate.missing === "totp_field"),
+      )
+      .map((candidate) => candidate.vaultId),
+  );
+  const matched = new Set(live.map((candidate) => candidate.vaultId));
+  const unmatched = new Set(
+    where
+      .filter((vault) => vault.tier <= deciding && !matched.has(vault.id))
+      .map((vault) => vault.id),
+  );
+  return connected.filter((vault) => lacking.has(vault.id) || unmatched.has(vault.id));
+}
+
+/** The connected vaults a reference's path could point into, matched or not. */
+function possibleProviderVaults(
+  reference: SecretReference,
+  reachable: readonly VaultRow[],
+  connected: readonly VaultRow[],
+): VaultRow[] {
   if (reference.target.form !== "path") return [];
   const segments = reference.target.segments;
-  if (segments.length === 1) return connected;
+  if (segments.length === 1) return [...connected];
   const nameKey = secretNameKey(segments[0]!);
   const named = reachable.filter((vault) => secretNameKey(vault.name) === nameKey);
-  if (segments.length === 2 && named.length === 0) return connected;
+  if (segments.length === 2 && named.length === 0) return [...connected];
   return named.filter((vault) => vault.source !== "opengeni");
 }
 

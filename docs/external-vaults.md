@@ -115,12 +115,20 @@ reports the failure. Search returns `complete: false` when a relevant source
 cannot be checked. It does not manufacture a missing-secret question from
 that failure. An explicitly named healthy vault can still be used when an
 unrelated provider is unavailable.
+A miss checks the connected vaults that could change the answer: every
+connected vault at or above the priority tier that matched (task, Only me,
+workspace, organization). A hosted workspace item without a one-time password
+therefore does not stop an Only-me connected vault from being refreshed, and
+an outage in a lower-priority vault does not hide a miss decided above it.
 
 Provider pages are bounded and checked for duplicate IDs, repeating cursors,
 snapshot changes and excessive counts. Only a full consistent traversal may
 remove absent mirror rows: multiple pages must carry one stable non-null
 snapshot. The native limit remains 2,000 items per vault; the first 2,000 of a
 larger inventory are never certified as complete.
+Overlapping syncs replace a vault's mirror one at a time, keeping each
+replacement consistent with its recorded content version. An older complete
+listing can still finish last; a later sync checks the provider again.
 
 ## Moving and copying
 

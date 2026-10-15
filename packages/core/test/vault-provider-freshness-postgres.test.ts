@@ -560,6 +560,218 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       expect(w.host.calls.length).toBe(calls);
     });
 
+    test("a hosted match without a one-time password does not hide a higher-priority connected vault", async () => {
+      if (!client) return;
+      const w = await world();
+      // The workspace keeps a hosted GitHub login without a one-time password.
+      await w.hosted("GitHub", "login", [{ name: "password", kind: "concealed", value: "pw" }]);
+      // Only me: a Keeper vault behind the caller's personal connection.
+      const connection = await createConnection(w.db, {
+        accountId: w.actor.grant.accountId,
+        workspaceId: w.workspaceId,
+        subjectId: w.subjectId,
+        providerDomain: "vault:keeper",
+        kind: "api_key",
+        status: "active",
+        credentialEncrypted: encryptEnvironmentValue(
+          Buffer.from(key),
+          JSON.stringify({ provider: "keeper" }),
+        ),
+        grantedScopes: [],
+        expiresAt: null,
+        metadata: {
+          credentialRole: "external_vault_provider",
+          vaultProvider: {
+            version: 1,
+            provider: "keeper",
+            ownership: "user",
+            accountId: null,
+            accountName: "Mine",
+            label: null,
+            verifiedAt: new Date().toISOString(),
+            operations: LOGIN_ONLY,
+          },
+        },
+        createdBySubjectId: w.subjectId,
+      });
+      const mineSeed: FakeProviderSeed = {
+        failWith: null,
+        vaults: [
+          {
+            externalVaultId: "mine",
+            name: "Mine",
+            items: [{ name: "Other", type: "api_key", fields: [{ name: "value", value: "x" }] }],
+          },
+        ],
+      };
+      const keeper = createFakeVaultProvider(mineSeed);
+      const providers = createVaultProviderRegistry({
+        host: async () => w.host,
+        keeper: async () => keeper,
+      });
+      const mine = await linkProviderVault(w.db, w.context, {
+        ownerKind: "user",
+        name: "Mine",
+        source: "keeper",
+        providerConnectionId: connection.id,
+        providerVaultRef: "mine",
+        mode: "read_only",
+      });
+      await syncLinkedProviderVault({
+        db: w.db,
+        context: w.context,
+        vaultId: mine.id,
+        providers,
+        force: true,
+      });
+      expect((await w.reload(mine)).tier).toBe(1);
+      const resolver = () =>
+        createSecretResolver({ db: w.db, encryptionKey: key, providers }, w.principal, {
+          capabilityEnabled: true,
+        });
+      const resolveOtp = async (path: string) =>
+        [...(await resolver().resolve([reference(path)], use)).values()][0]!.material;
+      const failure = async (path: string): Promise<SecretReferenceError> => {
+        try {
+          await resolver().resolve([reference(path)], use);
+        } catch (error) {
+          if (isSecretReferenceError(error)) return error;
+          throw error;
+        }
+        throw new Error("expected the reference to fail");
+      };
+      const listings = () => keeper.calls.filter((call) => call.op === "listVaults").length;
+
+      // GitHub, with its one-time password, is added straight in the Only-me provider.
+      await keeper.writeItem(
+        { connectionId: connection.id, budget: createProviderCallBudget(5) },
+        "mine",
+        {
+          name: "GitHub",
+          type: "login",
+          websites: [],
+          fields: [
+            { name: "password", kind: "concealed", value: "mine-pw" },
+            { name: "one-time password", kind: "totp", value: "JBSWY3DPEHPK3PXP" },
+          ],
+        },
+      );
+      // A just-synced mirror is trusted: a definite miss asks, without a provider call.
+      const before = listings();
+      const fresh = await failure("GitHub/otp");
+      expect(fresh.failures).toEqual([expect.objectContaining({ code: "not_found" })]);
+      expect(fresh.askCard).not.toBeNull();
+      expect(listings()).toBe(before);
+
+      // Once the Only-me mirror is due, the miss refreshes it even though the
+      // hosted workspace GitHub matched, and the Only-me one-time password wins.
+      await w.age(mine, LINKED_VAULT_MISS_MAX_AGE_MS + 1_000);
+      expect(await resolveOtp("GitHub/otp")).toMatchObject({ type: "totp" });
+      expect(listings()).toBe(before + 1);
+
+      // The Only-me provider is down and its mirror is due again: the miss names
+      // it instead of asking for a secret that may be there.
+      const otherSite = (name: string) =>
+        keeper.writeItem(
+          { connectionId: connection.id, budget: createProviderCallBudget(5) },
+          "mine",
+          {
+            name,
+            type: "login",
+            websites: [],
+            fields: [{ name: "one-time password", kind: "totp", value: "JBSWY3DPEHPK3PXP" }],
+          },
+        );
+      await w.hosted("Linear", "login", [{ name: "password", kind: "concealed", value: "pw" }]);
+      await otherSite("Linear");
+      mineSeed.failWith = "provider_unavailable";
+      await w.age(mine, LINKED_VAULT_MISS_MAX_AGE_MS + 1_000);
+      const down = await failure("Linear/otp");
+      expect(down.failures).toEqual([expect.objectContaining({ code: "provider_unavailable" })]);
+      expect(down.failures[0]!.message).toContain("Mine");
+      expect(down.askCard).toBeNull();
+      // Rate limited or needing reconnection, it keeps its own code and still asks nothing.
+      mineSeed.failWith = null;
+      const until = new Date(Date.now() + 10 * 60_000);
+      await setVaultSyncStatus(w.db, w.context, {
+        vaultId: mine.id,
+        status: "rate_limited",
+        errorCode: "provider_rate_limited",
+        errorMessage: "slow down",
+        rateLimitedUntil: until.toISOString(),
+      });
+      const limited = await failure("Linear/otp");
+      expect(limited.failures[0]!.code).toBe("provider_rate_limited");
+      expect(limited.askCard).toBeNull();
+      await setVaultSyncStatus(w.db, w.context, {
+        vaultId: mine.id,
+        status: "auth_expired",
+        errorCode: "provider_auth_expired",
+        errorMessage: "reconnect",
+        rateLimitedUntil: null,
+      });
+      const expired = await failure("Linear/otp");
+      expect(expired.failures[0]!.code).toBe("provider_auth_expired");
+      expect(expired.askCard).toBeNull();
+      // Reconnected and current again.
+      await setVaultSyncStatus(w.db, w.context, {
+        vaultId: mine.id,
+        status: "ok",
+        rateLimitedUntil: null,
+      });
+      await syncLinkedProviderVault({
+        db: w.db,
+        context: w.context,
+        vaultId: mine.id,
+        providers,
+        force: true,
+      });
+      expect(await resolveOtp("Linear/otp")).toMatchObject({ type: "totp" });
+
+      // A lower-priority connected vault cannot change what a higher-priority
+      // match decided: an Only-me hosted Jira without a one-time password is a
+      // definite miss even while the workspace Company vault, which also has a
+      // Jira without one, is down and due.
+      const personal = await createVault(w.db, w.context, { name: "Personal", ownerKind: "user" });
+      await upsertVaultItem(w.db, w.context, {
+        vaultId: personal.id,
+        name: "Jira",
+        type: "login",
+        fields: [
+          {
+            name: "password",
+            kind: "concealed",
+            valueEncrypted: encryptEnvironmentValue(Buffer.from(key), "pw"),
+            valueSize: 2,
+          },
+        ],
+      });
+      await w.host.writeItem(
+        { connectionId: null, budget: createProviderCallBudget(5) },
+        "company",
+        {
+          name: "Jira",
+          type: "login",
+          websites: [],
+          fields: [{ name: "password", kind: "concealed", value: "company-pw" }],
+        },
+      );
+      await syncLinkedProviderVault({
+        db: w.db,
+        context: w.context,
+        vaultId: w.company.id,
+        providers,
+        force: true,
+      });
+      w.seed.failWith = "provider_unavailable";
+      await w.age(w.company, LINKED_VAULT_MISS_MAX_AGE_MS + 1_000);
+      const hostCalls = w.host.calls.length;
+      const definite = await failure("Jira/otp");
+      expect(definite.failures).toEqual([expect.objectContaining({ code: "not_found" })]);
+      expect(definite.askCard).not.toBeNull();
+      expect(w.host.calls.length).toBe(hostCalls);
+    });
+
     test("writes and moves a vault does not allow are refused before any value or provider mutation", async () => {
       if (!client) return;
       const w = await world({ operations: LOGIN_ONLY });

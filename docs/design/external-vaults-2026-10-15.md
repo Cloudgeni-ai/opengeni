@@ -155,7 +155,10 @@ characters per website) make the inventory incomplete as well; they are never
 cut down to fit. The native 2,000-item vault limit remains explicit; never
 describe the first 2,000 items of a larger provider vault as its complete
 contents. Agent discovery retains its 1,000-row scan budget and next-cursor
-behavior.
+behavior. Mirror replacements of one vault are serialized on the vault row
+lock, taken before the old mirror is read, so overlapping syncs apply whole
+inventories one after the other: an older listing never re-adds an item a
+newer one removed while the newer content version is recorded.
 
 ## 9. Freshness and deliberate refresh
 
@@ -175,6 +178,13 @@ replay a previously dispatched command after refreshing credentials.
 When a reference misses and relevant sources cannot be checked, report the
 source failure rather than manufacture a missing-secret ask card. Explicitly
 named healthy/hosted vaults should not be blocked by unrelated outages.
+Relevant sources are the connected vaults that could change the answer: the
+lookup keeps the highest-priority tier that matched (task, then Only me,
+workspace, organization), so a match there that lacks the field or one-time
+password makes every connected vault at that tier or above relevant, whether
+or not it matched yet. A hosted match never hides a higher-priority connected
+vault whose provider gained the item, and an outage in a lower-priority vault
+never turns a miss decided above it into an unchecked one.
 
 ## 10. Capabilities and write semantics
 
