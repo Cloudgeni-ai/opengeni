@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -249,7 +249,8 @@ export class DesktopShell {
 
   start(): void {
     this.registerIpc();
-    const hidden = openedAtLogin() && this.store.active() !== null;
+    const hidden =
+      (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
     if (process.platform === "darwin" && app.isPackaged && this.config.thisComputer) {
       setTimeout(() => migrateMacLoginItem(this.config.appId), 5_000);
@@ -270,7 +271,10 @@ export class DesktopShell {
       this.quitConfirmed = true;
       app.quit();
     };
-    powerMonitor.on("shutdown", quitUnasked);
+    powerMonitor.on("shutdown", () => {
+      this.rememberClosedAtLogout();
+      quitUnasked();
+    });
     process.once("SIGTERM", quitUnasked);
     process.once("SIGINT", quitUnasked);
     // However the app ends, its agent doesn't outlive it.
@@ -348,6 +352,34 @@ export class DesktopShell {
     } finally {
       this.confirmingQuit = false;
     }
+  }
+
+  /**
+   * macOS reopens the apps that were running when the person logged out, with
+   * no arguments, before login items run. Whether the window was closed then
+   * is remembered here, so a connected computer comes back without a window
+   * as it would from its login item.
+   */
+  private rememberClosedAtLogout(): void {
+    if (process.platform !== "darwin" || this.window || !this.computer.opensAtLogin) return;
+    try {
+      writeFileSync(this.closedAtLogoutPath(), "");
+    } catch {
+      // Then the window shows again after login.
+    }
+  }
+
+  /** Reopened by macOS after a logout that left the window closed (see above). */
+  private reopenedWithoutWindow(): boolean {
+    if (process.platform !== "darwin") return false;
+    const path = this.closedAtLogoutPath();
+    if (!existsSync(path)) return false;
+    rmSync(path, { force: true });
+    return this.config.thisComputer && this.computer.opensAtLogin;
+  }
+
+  private closedAtLogoutPath(): string {
+    return join(app.getPath("userData"), "closed-at-logout");
   }
 
   reveal(): void {

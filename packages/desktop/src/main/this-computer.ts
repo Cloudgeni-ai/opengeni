@@ -186,6 +186,11 @@ export class ThisComputer {
     return ["darwin", "linux", "win32"].includes(this.deps.platform);
   }
 
+  /** Whether the app opens at login, without a window, for this computer. */
+  get opensAtLogin(): boolean {
+    return this.state.openAtLogin;
+  }
+
   /**
    * Whether the app should now start ("open") or stop ("stop") opening at
    * login, given whether this computer is connected; null when nothing changes.
