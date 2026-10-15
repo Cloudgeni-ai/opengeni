@@ -4,6 +4,8 @@
 //! takes the sandbox's VM handle, owns it while it works and hands it back
 //! when it finishes. No locks are needed around a VM.
 
+use std::fs;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -19,6 +21,53 @@ use crate::store::{SavedFiles, Store};
 /// How long a restore waits for the guest to acknowledge the restore notice.
 /// A guest that listens answers in about a millisecond.
 const NOTICE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// The markers vouching for a paused VM's saved copies, taken away while its
+/// guest may run.
+#[derive(Debug)]
+struct Marks {
+    saved: bool,
+    /// The archived marker's contents, which say what the store holds.
+    archived: Option<Vec<u8>>,
+}
+
+impl Marks {
+    /// Removes both markers durably, remembering them. On failure every
+    /// marker is back in place.
+    fn take(paths: &Paths) -> io::Result<Self> {
+        let archived = match fs::read(&paths.archived) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let marks = Self {
+            saved: paths.saved.exists(),
+            archived,
+        };
+        if !marks.saved && marks.archived.is_none() {
+            return Ok(marks);
+        }
+        let removed = remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
+        if let Err(error) = removed {
+            if let Err(restoring) = marks.put_back(paths) {
+                tracing::error!(error = %restoring, "saved-copy markers not put back");
+            }
+            return Err(error);
+        }
+        Ok(marks)
+    }
+
+    /// Writes the markers back as they were.
+    fn put_back(&self, paths: &Paths) -> io::Result<()> {
+        if self.saved {
+            write_atomic(&paths.saved, b"")?;
+        }
+        if let Some(contents) = &self.archived {
+            write_atomic(&paths.archived, contents)?;
+        }
+        Ok(())
+    }
+}
 
 /// A VM process the host owns.
 #[derive(Debug)]
@@ -117,17 +166,24 @@ impl<E: Engine, S: Store> Job<E, S> {
     }
 
     /// Resumes a paused VM. A saved copy of it goes stale the moment the
-    /// guest runs and its disk moves on, so it is unmarked first.
+    /// guest runs and its disk moves on, so it is unmarked first, and marked
+    /// again if the resume was refused: the guest never ran, and the core
+    /// counts on a transient failure having changed nothing.
     async fn resume(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
-        let paths = &self.paths;
-        if paths.saved.exists() || paths.archived.exists() {
-            let unmarked =
-                remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
-            if let Err(error) = unmarked {
-                return (io_failure("resume", error), After::Kept(live));
-            }
+        let marks = match Marks::take(&self.paths) {
+            Ok(marks) => marks,
+            Err(error) => return (io_failure("resume", error), After::Kept(live)),
+        };
+        let result = self.engine.resume(&live.vm).await;
+        if let Err(error) = &result
+            && error.kind == ErrorKind::Transient
+            && let Err(error) = marks.put_back(&self.paths)
+        {
+            // The copy is still good but no longer marked, so the host just
+            // stops relying on it; nothing stale can be restored this way.
+            tracing::error!(id = %self.id, %error, "saved copy not marked again after a refused resume");
         }
-        self.simple(self.engine.resume(&live.vm).await, live)
+        self.simple(result, live)
     }
 
     async fn compress(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {

@@ -112,7 +112,8 @@ pub enum Input {
 pub enum Outcome {
     /// The sandbox reached the step's target level.
     Done,
-    /// The step was cancelled before it took effect; nothing changed.
+    /// The step was cancelled before it took effect; nothing changed. The
+    /// host agent reports this only when that is certain.
     Cancelled,
     /// The step failed.
     Failed(Failure),
@@ -121,7 +122,9 @@ pub enum Outcome {
 /// Why a step failed, which decides what happens next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// Nothing changed and a retry may succeed, after a backoff.
+    /// Nothing changed and a retry may succeed, after a backoff. The host
+    /// agent reports this only when that is certain; a failure whose effect
+    /// on the VM is unknown is [`Failure::MemoryLost`].
     Transient,
     /// For a step on a VM process: the process is gone. A current saved
     /// copy takes its place; without one, only the files survive. For any
@@ -455,10 +458,16 @@ impl Host {
         slot.in_flight = None;
         self.in_flight[flight.step.index()] -= 1;
         let before = slot.state;
-        if flight.step == Step::Resume && outcome != Outcome::Done {
-            // The guest may have run before the resume failed, so a saved
-            // copy may no longer match the VM's disk. The host agent stops
-            // trusting it before resuming; the next sleep saves afresh.
+        if flight.step == Step::Resume
+            && matches!(
+                outcome,
+                Outcome::Failed(Failure::MemoryLost | Failure::Fatal)
+            )
+        {
+            // The guest may have run before the resume broke down, so a
+            // saved copy may no longer match the VM's disk. The host agent
+            // stops trusting it before resuming and trusts it again only
+            // when the resume was refused, which is a transient failure.
             slot.state = State::new(slot.state.level, Durability::Volatile, false);
         }
         let mut lost = false;
@@ -528,7 +537,9 @@ impl Host {
             slot.floor = Level::Running;
             slot.floor_relief = 0;
         }
-        if slot.state.level >= slot.requested {
+        // A wake passes through deeper levels on its way up, such as Archived
+        // after a fetch; only a sleep step settles a request to sleep.
+        if !flight.step.wakes() && slot.state.level >= slot.requested {
             slot.requested = Level::Running;
         }
         if slot.state != before {
