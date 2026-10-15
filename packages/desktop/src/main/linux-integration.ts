@@ -5,9 +5,9 @@
 // the app, and the dock shows a generic icon.
 
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export interface AppImageEntryOptions {
   productName: string;
@@ -120,15 +120,21 @@ export function autostartDesktopEntry(productName: string, executable: string): 
  */
 export function installLinuxAutostart(productName: string): void {
   try {
-    const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-    const autostart = join(configHome, "autostart");
-    mkdirSync(autostart, { recursive: true });
+    const entry = autostartPath(productName);
+    mkdirSync(dirname(entry), { recursive: true });
     const executable = process.env.APPIMAGE || process.execPath;
-    writeIfChanged(
-      join(autostart, `${productName.toLowerCase()}.desktop`),
-      autostartDesktopEntry(productName, executable),
-    );
+    writeIfChanged(entry, autostartDesktopEntry(productName, executable));
   } catch {
     // The app still works; it just doesn't open at login.
   }
+}
+
+/** Stop opening the app at login. */
+export function removeLinuxAutostart(productName: string): void {
+  rmSync(autostartPath(productName), { force: true });
+}
+
+function autostartPath(productName: string): string {
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  return join(configHome, "autostart", `${productName.toLowerCase()}.desktop`);
 }

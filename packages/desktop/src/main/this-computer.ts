@@ -104,6 +104,12 @@ interface ComputerState {
   screenControl: boolean;
   /** Permissions whose system prompt has been shown; asking again opens System Settings. */
   requested: ThisComputerPermissionId[];
+  /**
+   * The app set itself to open at login because this computer is connected.
+   * Remembered so it happens once per connection: someone who then turns it
+   * off in the system's settings keeps it off.
+   */
+  openAtLogin: boolean;
 }
 
 const PERMISSION_ORDER: readonly ThisComputerPermissionId[] = [
@@ -176,6 +182,18 @@ export class ThisComputer {
 
   get supported(): boolean {
     return ["darwin", "linux", "win32"].includes(this.deps.platform);
+  }
+
+  /**
+   * Whether the app should now start ("open") or stop ("stop") opening at
+   * login, given whether this computer is connected; null when nothing changes.
+   * A connected computer stays available after a restart, and one that was
+   * disconnected no longer opens the app at login.
+   */
+  openAtLoginChange(connected: boolean): "open" | "stop" | null {
+    if (connected === this.state.openAtLogin) return null;
+    this.saveState({ openAtLogin: connected });
+    return connected ? "open" : "stop";
   }
 
   /**
@@ -625,6 +643,7 @@ export class ThisComputer {
       paused: false,
       screenControl: false,
       requested: [],
+      openAtLogin: false,
     };
     try {
       const saved = JSON.parse(readFileSync(this.statePath, "utf8")) as Partial<ComputerState>;
@@ -635,6 +654,7 @@ export class ThisComputer {
         requested: Array.isArray(saved.requested)
           ? saved.requested.filter((id) => PERMISSION_ORDER.includes(id))
           : [],
+        openAtLogin: saved.openAtLogin === true,
       };
     } catch {
       return fallback;

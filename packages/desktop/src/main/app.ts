@@ -37,7 +37,11 @@ import { AccountStore, type StoredAccount } from "./accounts";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
-import { installAppImageIntegration, installLinuxAutostart } from "./linux-integration";
+import {
+  installAppImageIntegration,
+  installLinuxAutostart,
+  removeLinuxAutostart,
+} from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
@@ -138,7 +142,6 @@ export class DesktopShell {
   /** Quitting was confirmed (or needs no confirmation); the agent is stopping. */
   private quitConfirmed = false;
   private confirmingQuit = false;
-  private loginItemSet = false;
   private readonly lastPaths = new Map<string, string>();
   /** Accounts whose page didn't load, with the address to try again. */
   private readonly failedLoads = new Map<string, string>();
@@ -923,7 +926,10 @@ export class DesktopShell {
           needsPermissions: false,
           missingPermissions: [],
         };
-    if (summary.connected) this.openAtLogin();
+    if (this.config.thisComputer && app.isPackaged) {
+      const change = this.computer.openAtLoginChange(summary.connected);
+      if (change) setOpenAtLogin(this.config.productName, change === "open");
+    }
     // macOS keeps running without a window anyway; the menu bar item is for the
     // computer. Elsewhere the tray is how a closed window comes back.
     const wanted = process.platform === "darwin" ? summary.connected : hasAccounts;
@@ -942,19 +948,16 @@ export class DesktopShell {
     });
     this.tray.update(summary);
   }
+}
 
-  /** A connected computer stays available after a restart: the app opens, without a window, at login. */
-  private openAtLogin(): void {
-    if (this.loginItemSet || !app.isPackaged) return;
-    this.loginItemSet = true;
-    if (process.platform === "linux") {
-      installLinuxAutostart(this.config.productName);
-      return;
-    }
-    if (!app.getLoginItemSettings().openAtLogin) {
-      app.setLoginItemSettings({ openAtLogin: true, args: ["--hidden"] });
-    }
+/** Open the app, without a window, at login, or stop doing so. */
+function setOpenAtLogin(productName: string, open: boolean): void {
+  if (process.platform === "linux") {
+    if (open) installLinuxAutostart(productName);
+    else removeLinuxAutostart(productName);
+    return;
   }
+  app.setLoginItemSettings({ openAtLogin: open, args: ["--hidden"] });
 }
 
 /** A Set-Cookie header as Electron cookie details. */

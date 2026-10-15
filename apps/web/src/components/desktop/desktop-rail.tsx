@@ -432,9 +432,8 @@ function ThisComputerDialog({
         <DialogHeader>
           <DialogTitle>Use this computer</DialogTitle>
           <DialogDescription>
-            Agents in this workspace can work on {status.machineName}: run commands, edit files and
-            use your browser. Only you can use it, and you can pause it any time from the{" "}
-            {trayName()}.
+            Your agents can work on {status.machineName}: run commands, edit files and use your
+            browser. No one else can use it, and you can pause it any time from the {trayName()}.
           </DialogDescription>
         </DialogHeader>
         <label className="mt-4 flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border p-3">
