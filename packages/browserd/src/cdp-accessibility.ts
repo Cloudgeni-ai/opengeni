@@ -162,11 +162,14 @@ export function normalizeCdpAccessibilityTree(options: {
     // control focused; a later ancestor must not replace that exact control.
     if (entry.states.includes("focused") && focusedRef === null) focusedRef = entry.ref;
     const description = accessibleStringValue(raw.description);
+    // Pages can compute accessible names from arbitrarily long text (a whole
+    // table cell or <pre> block). Clip to the semantic-node contract so one
+    // long node cannot make the entire observation invalid.
     const semantic: InteractionSemanticNodeValue = {
       ref: entry.ref,
       role: entry.role,
-      ...(entry.name !== null ? { name: entry.name } : {}),
-      ...(description ? { description } : {}),
+      ...(entry.name !== null ? { name: entry.name.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
+      ...(description ? { description: description.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
       ...safeValue(raw, entry.role),
       states: entry.states,
       actions: entry.actions,
@@ -241,8 +244,12 @@ function safeValue(
   const value = stringValue(node.value);
   if (!value) return {};
   if (["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) return {};
-  return { value: value.slice(0, 32_768) };
+  return { value: value.slice(0, SEMANTIC_VALUE_MAX_CHARS) };
 }
+
+/** Contract bounds for semantic node name/description and value. */
+const SEMANTIC_TEXT_MAX_CHARS = 8_192;
+const SEMANTIC_VALUE_MAX_CHARS = 32_768;
 
 function isEditableControlRole(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "spinbutton"].includes(role);
