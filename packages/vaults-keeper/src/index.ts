@@ -29,8 +29,16 @@ export {
   KEEPER_SDK_SHA256,
   KEEPER_SDK_VERSION,
   createKeeperSdkLoader,
+  type KeeperFetch,
   type KeeperFileFetcher,
   type KeeperQueryFunction,
   type KeeperSdkLoader,
 } from "./sdk";
 export { FILE_FIELD_PREFIX, NOTES_FIELD_ID } from "./mapping";
+export {
+  openKeeperConnection,
+  type KeeperConnectionCredentials,
+  type OpenKeeperConnectionOptions,
+  type PersistKeeperConfigurationRecord,
+} from "./connection";
+export { restrictToOperations } from "./operations";

@@ -16,8 +16,9 @@ import {
   type VaultProviderOperations,
   parseTotpInput,
 } from "./contract";
-import { type MappedField, type MappedItem, mapItem } from "./mapping";
+import { FILE_FIELD_PREFIX, type MappedField, type MappedItem, mapItem } from "./mapping";
 import { nameKey, safeSecretName, totpUri } from "./naming";
+import { restrictToOperations } from "./operations";
 import {
   FullItemList,
   ITEM_HAS_FILES,
@@ -53,6 +54,8 @@ export const PROTON_PASS_OPERATIONS: VaultProviderOperations = {
 };
 
 export type ProtonPassVaultProviderOptions = ProtonCliOptions & {
+  /** Operations verified at setup; the adapter narrows to them and never widens. */
+  operations?: VaultProviderOperations;
   /** Personal access token `pst_…::…`, scoped by the customer to vaults or items. */
   token: string;
   valueCacheMs?: number;
@@ -650,7 +653,7 @@ export function createProtonPassVaultProvider(
 
     close: () => session.close(),
   };
-  return provider;
+  return restrictToOperations(provider, options.operations, FILE_FIELD_PREFIX);
 }
 
 function incomplete(): never {

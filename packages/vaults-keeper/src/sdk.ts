@@ -207,14 +207,29 @@ function withDeadline(signal: AbortSignal | undefined, timeoutMs: number): Abort
 }
 
 /**
+ * The `fetch` the adapter's transports call. Servers pass a DNS-pinned fetch
+ * (for example `pinnedFetch` from `@opengeni/network`); the adapter still sets
+ * the method, headers, body, abort signal and `redirect: "error"`, and refuses
+ * any redirect status a manual-redirect fetch returns.
+ */
+export type KeeperFetch = (input: string | URL, init: RequestInit) => Promise<Response>;
+
+async function refuseRedirect(response: Response): Promise<void> {
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => {});
+    throw new VaultProviderError("provider_unavailable", "Keeper answered with a redirect");
+  }
+}
+
+/**
  * The SDK's request function, reimplemented over `fetch` so requests follow no
  * redirects, honour the caller's abort signal, and read bounded bodies. Headers
  * match the SDK's `postFunction` (PublicKeyId, TransmissionKey, Authorization).
  */
 export function createKeeperFetchTransport(
-  options: { fetch?: typeof fetch; maxResponseBytes?: number; signal?: AbortSignal } = {},
+  options: { fetch?: KeeperFetch; maxResponseBytes?: number; signal?: AbortSignal } = {},
 ): KeeperQueryFunction {
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl: KeeperFetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const maxBytes = options.maxResponseBytes ?? KEEPER_MAX_RESPONSE_BYTES;
   return async (url, transmissionKey, payload, _allowUnverifiedCertificate, timeoutMs) => {
     const response = await fetchImpl(url, {
@@ -230,6 +245,7 @@ export function createKeeperFetchTransport(
       redirect: "error",
       signal: withDeadline(options.signal, timeoutMs ?? KEEPER_REQUEST_TIMEOUT_MS),
     });
+    await refuseRedirect(response);
     const data = await readBounded(response, maxBytes);
     return { statusCode: response.status, headers: Object.fromEntries(response.headers), data };
   };
@@ -242,7 +258,7 @@ export type KeeperFileFetcher = (
 ) => Promise<Uint8Array>;
 
 export function createKeeperFileFetcher(
-  fetchImpl: typeof fetch = globalThis.fetch,
+  fetchImpl: KeeperFetch = (input, init) => globalThis.fetch(input, init),
 ): KeeperFileFetcher {
   return async (url, options) => {
     const parsed = new URL(url);
@@ -253,6 +269,7 @@ export function createKeeperFileFetcher(
       redirect: "error",
       signal: withDeadline(options.signal, options.timeoutMs),
     });
+    await refuseRedirect(response);
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       throw new VaultProviderError(

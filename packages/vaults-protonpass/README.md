@@ -36,7 +36,16 @@ await provider.close(); // logs out and wipes the session directory
 Other options: `expectedVersion`, `expectedSha256`, `commandTimeoutMs`
 (default 60 s), `maxStdoutBytes` (32 MB), `sessionMaxAgeMs` (105 minutes),
 `idleCloseMs` (15 minutes), `valueCacheMs` and `maxItemViewsPerList` (500).
-`runner`, `hostEnv` and `now` exist for tests.
+`operations` narrows the provider to the operations verified at setup and
+refuses the rest without running the CLI. `runner`, `hostEnv` and `now` exist
+for tests.
+
+Servers use `createProtonPassProviderPool({ binaryPath, … })` once per
+process. `pool.provider(token, operations?)` returns a provider; calls with the
+same token share one logged-in CLI session, different tokens never share a
+session, state directory or cache. Sessions unused for 15 minutes
+(`poolIdleMs`) are logged out, wiped and forgotten, at most 32
+(`maxSessions`) are kept, and `pool.close()` logs them all out.
 
 ## How it runs the CLI
 

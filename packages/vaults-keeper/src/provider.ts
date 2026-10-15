@@ -21,6 +21,7 @@ import {
 } from "./config";
 import { type MutationTracker, mapKeeperError, mapKeeperMutationError } from "./errors";
 import {
+  FILE_FIELD_PREFIX,
   type MappedKeeperField,
   type MappedKeeperRecord,
   applyPatch,
@@ -30,9 +31,11 @@ import {
   totpParamsFor,
 } from "./mapping";
 import { safeSecretName } from "./naming";
+import { restrictToOperations } from "./operations";
 import {
   type CapturedConsole,
   KEEPER_REQUEST_TIMEOUT_MS,
+  type KeeperFetch,
   type KeeperFileFetcher,
   type KeeperQueryFunction,
   type KeeperRecord,
@@ -79,6 +82,12 @@ export interface KeeperRuntimeOptions {
   allowedHosts?: readonly string[];
   /** Per-request deadline handed to the SDK (default 15 s). */
   requestTimeoutMs?: number;
+  /**
+   * The fetch both default transports use (KSM API and file downloads).
+   * Servers pass a DNS-pinned fetch; the per-call abort signal and deadline
+   * are still applied. Ignored where `queryFunction` or `fetchFile` is given.
+   */
+  fetch?: KeeperFetch;
   /** SDK request function (tests); defaults to a bounded, no-redirect fetch transport. */
   queryFunction?: KeeperQueryFunction;
   /** Encrypted file download (tests); defaults to a bounded HTTPS fetch. */
@@ -89,6 +98,8 @@ export interface KeeperRuntimeOptions {
 }
 
 export interface KeeperVaultProviderOptions extends KeeperRuntimeOptions {
+  /** Operations verified at setup; the adapter narrows to them and never widens. */
+  operations?: VaultProviderOperations;
   /**
    * The bound KSM configuration from bootstrap or Keeper tooling: JSON, base64
    * JSON, or the parsed string record.
@@ -145,7 +156,10 @@ export async function runKeeperOperation<T>(input: {
   const storage = memoryKeeperStorage(input.config);
   const transport =
     input.runtime.queryFunction ??
-    createKeeperFetchTransport(input.signal ? { signal: input.signal } : {});
+    createKeeperFetchTransport({
+      ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.runtime.fetch ? { fetch: input.runtime.fetch } : {}),
+    });
   const tracker = { sent: 0, lastStatus: null as number | null, mutating: false };
   const queryFunction: KeeperQueryFunction = async (
     url,
@@ -217,7 +231,7 @@ export function createKeeperVaultProvider(
   const loader = options.sdk ?? createKeeperSdkLoader();
   const now = options.now ?? Date.now;
   const valueCacheMs = options.valueCacheMs ?? KEEPER_VALUE_CACHE_MS;
-  const fetchFile = options.fetchFile ?? createKeeperFileFetcher();
+  const fetchFile = options.fetchFile ?? createKeeperFileFetcher(options.fetch);
   let queue: Promise<unknown> = Promise.resolve();
 
   async function flushPending() {
@@ -635,5 +649,5 @@ export function createKeeperVaultProvider(
     });
   }
 
-  return provider;
+  return restrictToOperations(provider, options.operations, FILE_FIELD_PREFIX);
 }

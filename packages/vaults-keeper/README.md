@@ -58,8 +58,20 @@ credential.
   read fails with `provider_unavailable` (a write that already happened still
   succeeds). `currentConfiguration()` returns the latest value.
 
-Other options: `allowedHosts`, `requestTimeoutMs` (default 15 s) and
-`valueCacheMs`. `queryFunction`, `fetchFile`, `sdk` and `now` exist for tests.
+Other options: `allowedHosts`, `requestTimeoutMs` (default 15 s),
+`valueCacheMs`, `operations` (the operations verified at setup; the provider
+narrows to them and refuses the rest before any request) and `fetch`. Servers
+pass a DNS-pinned `fetch` (the API and worker use `pinnedFetch` from
+`@opengeni/network`); both the KSM transport and file downloads use it and
+still apply the caller's abort signal, deadline, size bound and no-redirect
+rule. `queryFunction`, `fetchFile`, `sdk` and `now` exist for tests.
+
+Servers usually call `openKeeperConnection({ credentials, persistConfiguration,
+operations, fetch })` instead. `credentials` is either `{ oneTimeToken,
+hostname? }` or `{ configuration }` (a string record or JSON), and
+`persistConfiguration(record, { reason })` is required: without it the call
+refuses before any request. It returns `{ provider, configuration }`, the
+bound configuration as a string record, never the token.
 
 ## How it uses the SDK
 

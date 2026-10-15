@@ -15,4 +15,12 @@ export {
   type ProtonCliOptions,
 } from "./session";
 export { FILE_FIELD_PREFIX, LOGIN_FIELD_IDS, NOTE_FIELD_ID } from "./mapping";
+export {
+  PROTON_PASS_POOL_IDLE_MS,
+  PROTON_PASS_POOL_MAX_SESSIONS,
+  createProtonPassProviderPool,
+  type ProtonPassProviderPool,
+  type ProtonPassProviderPoolOptions,
+} from "./pool";
+export { restrictToOperations } from "./operations";
 export type { ProcessRequest, ProcessResult, ProcessRunner } from "./runner";
