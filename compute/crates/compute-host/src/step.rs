@@ -6,13 +6,19 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use compute_core::{Failure, Outcome, Step};
 use compute_engine::{CancellationToken, Completion, Engine, EngineError, ErrorKind, VmSpec};
 
 use crate::layout::{Paths, remove_durably, remove_if_present, sync_file, write_atomic};
 use crate::protocol::Id;
+use crate::restore_notice::tell_restored;
 use crate::store::{SavedFiles, Store};
+
+/// How long a restore waits for the guest to acknowledge the restore notice.
+/// A guest that listens answers in about a millisecond.
+const NOTICE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// A VM process the host owns.
 #[derive(Debug)]
@@ -46,6 +52,8 @@ pub(crate) struct Job<E: Engine, S> {
     pub paths: Paths,
     pub cancel: CancellationToken,
     pub live: Option<Live<E::Vm>>,
+    /// Guest port to tell about a restore, if any.
+    pub restore_notice_port: Option<u32>,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -178,7 +186,26 @@ impl<E: Engine, S: Store> Job<E, S> {
             let _ = write_atomic(&paths.saved, b"");
             return (failure(&error), After::NoVm);
         }
+        self.tell_guest_restored().await;
         (Outcome::Done, After::New(vm))
+    }
+
+    /// Lets the guest fix its clock and drop dead connections before the
+    /// sandbox counts as awake. Failing to is not fatal: a guest without an
+    /// agent still runs, just with a stale clock.
+    async fn tell_guest_restored(&self) {
+        let Some(port) = self.restore_notice_port else {
+            return;
+        };
+        let started = Instant::now();
+        match tell_restored(&self.spec.vsock_path(), port, NOTICE_TIMEOUT).await {
+            Ok(()) => tracing::debug!(
+                id = %self.id,
+                us = started.elapsed().as_micros(),
+                "guest acknowledged the restore"
+            ),
+            Err(error) => tracing::warn!(id = %self.id, %error, "guest not told of its restore"),
+        }
     }
 
     /// Boot fresh from the disk; any old memory image is meaningless now.

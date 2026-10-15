@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
+use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, copy_sparse, sandboxes_dir, vm_spec, write_atomic};
 use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
 use crate::step::{After, Job, Live};
@@ -44,6 +45,12 @@ pub struct HostConfig {
     pub policy: HostPolicy,
     /// How often to sample host and VM memory.
     pub sample_every: Duration,
+    /// Ports every sandbox may connect to on this host, and where they lead.
+    pub guest_ports: Vec<GuestPort>,
+    /// Guest vsock port told about every restore from a memory image, so the
+    /// guest can set its clock and reconnect (see [`crate::restore_notice`]).
+    /// `None` tells the guest nothing.
+    pub restore_notice_port: Option<u32>,
 }
 
 /// A request the host could not carry out.
@@ -149,6 +156,8 @@ struct Slot<V> {
     incarnation: Option<u64>,
     /// A VM that died while a step held it.
     dead: Option<u64>,
+    /// Listeners for connections the guest opens to the host.
+    _ports: Option<Listeners>,
     op: Option<Running>,
     destroy: bool,
     removers: Vec<Reply<()>>,
@@ -319,6 +328,29 @@ pub struct HostAgent<E: Engine, S: Store> {
     available_memory: Option<u64>,
     sample_every: Duration,
     pressure: bool,
+    guest_ports: Arc<[GuestPort]>,
+    restore_notice_port: Option<u32>,
+    /// Lets guest connections report activity without keeping the agent
+    /// alive once every [`Handle`] is gone.
+    commands_tx: mpsc::WeakUnboundedSender<Command>,
+}
+
+/// Reports a sandbox's guest traffic to the agent as a touch.
+#[derive(Clone, Debug)]
+struct Toucher {
+    id: Id,
+    commands: mpsc::WeakUnboundedSender<Command>,
+}
+
+impl Activity for Toucher {
+    fn report(&self, priority: Priority) {
+        if let Some(commands) = self.commands.upgrade() {
+            let _ = commands.send(Command::Touch {
+                id: self.id,
+                priority,
+            });
+        }
+    }
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
@@ -363,6 +395,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             stats: [StepStats::default(); Step::COUNT],
             available_memory: None,
             sample_every: config.sample_every,
+            guest_ports: config.guest_ports.into(),
+            restore_notice_port: config.restore_notice_port,
+            commands_tx: commands_tx.downgrade(),
         };
         agent.recover().await?;
         let handle = Handle {
@@ -441,6 +476,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     fn insert(&mut self, id: Id, paths: Paths, spec: VmSpec) {
+        let toucher = Toucher {
+            id,
+            commands: self.commands_tx.clone(),
+        };
+        let ports = match guest_ports::listen(&spec.vsock_path(), &self.guest_ports, &toucher) {
+            Ok(listeners) => Some(listeners),
+            Err(error) => {
+                tracing::error!(%id, %error, "could not listen for guest connections");
+                None
+            }
+        };
         self.slots.insert(
             id.0,
             Slot {
@@ -449,6 +495,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 vm: None,
                 incarnation: None,
                 dead: None,
+                _ports: ports,
                 op: None,
                 destroy: false,
                 removers: Vec::new(),
@@ -695,6 +742,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             paths: Paths::clone(&slot.paths),
             cancel,
             live: if needs_vm { slot.vm.take() } else { None },
+            restore_notice_port: self.restore_notice_port,
         };
         let events = self.events_tx.clone();
         tokio::spawn(async move {

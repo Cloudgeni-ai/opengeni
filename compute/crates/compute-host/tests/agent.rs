@@ -3,8 +3,9 @@
 //! crash and restart, and that the agent never drives a VM illegally.
 
 use std::collections::HashSet;
+use std::future::ready;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,9 +17,9 @@ use compute_host::client::Client;
 use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
 };
-use compute_host::{HostAgent, HostConfig, NoStore, serve};
+use compute_host::{GuestPort, HostAgent, HostConfig, NoStore, serve};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -111,6 +112,7 @@ impl Fake {
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
+            Arc::new(AtomicBool::new(false)),
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -155,12 +157,28 @@ impl Fake {
             ));
         }
     }
+
+    /// Pauses or resumes a live VM, recording a violation if it already was.
+    fn set_paused(&self, vm: &FakeVm, op: &'static str, paused: bool) -> Result<(), EngineError> {
+        Self::alive(vm, op)?;
+        self.expect_paused(vm, op, !paused);
+        *vm.paused.lock().unwrap() = paused;
+        Ok(())
+    }
 }
 
-async fn guest(listener: UnixListener, memory: Arc<Mutex<String>>, disk: PathBuf) {
+/// A guest: answers shell-like lines on any port, and remembers whether this
+/// VM process was told it was restored.
+async fn guest(
+    listener: UnixListener,
+    memory: Arc<Mutex<String>>,
+    disk: PathBuf,
+    told_restored: Arc<AtomicBool>,
+) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
+        let told_restored = Arc::clone(&told_restored);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -184,6 +202,11 @@ async fn guest(listener: UnixListener, memory: Arc<Mutex<String>>, disk: PathBuf
                         "ok".into()
                     }
                     ("disk", _) => std::fs::read_to_string(&disk).unwrap_or_default(),
+                    ("restored", _) => {
+                        told_restored.store(true, Ordering::SeqCst);
+                        "ok".into()
+                    }
+                    ("told-restored?", _) => told_restored.load(Ordering::SeqCst).to_string(),
                     (other, _) => format!("unknown {other}"),
                 };
                 if write
@@ -220,19 +243,16 @@ impl Engine for Fake {
         Ok(vm)
     }
 
-    async fn pause(&self, vm: &FakeVm) -> Result<(), EngineError> {
-        Self::alive(vm, "pause")?;
-        self.expect_paused(vm, "pause", false);
-        *vm.paused.lock().unwrap() = true;
-        Ok(())
+    fn pause(&self, vm: &FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
+        ready(self.set_paused(vm, "pause", true))
     }
 
-    async fn resume(&self, vm: &FakeVm) -> Result<(), EngineError> {
-        Self::alive(vm, "resume")?;
-        self.expect_paused(vm, "resume", true);
-        *vm.paused.lock().unwrap() = false;
-        self.world.resumes.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+    fn resume(&self, vm: &FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let resumed = self.set_paused(vm, "resume", false);
+        if resumed.is_ok() {
+            self.world.resumes.fetch_add(1, Ordering::Relaxed);
+        }
+        ready(resumed)
     }
 
     async fn compress(
@@ -266,12 +286,12 @@ impl Engine for Fake {
         Ok(())
     }
 
-    async fn stop(&self, vm: FakeVm) -> Result<(), EngineError> {
+    fn stop(&self, vm: FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
         let _ = vm.exit.send(true);
         vm.guest.abort();
         let _ = std::fs::remove_file(&vm.vsock);
         self.world.live.lock().unwrap().remove(&vm.name);
-        Ok(())
+        ready(Ok(()))
     }
 
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
@@ -321,14 +341,27 @@ impl Lab {
     }
 
     async fn start(root: PathBuf, world: Arc<World>, delays: Delays, policy: HostPolicy) -> Self {
-        let config = HostConfig {
+        Self::start_configured(root, world, delays, policy, |_| {}).await
+    }
+
+    async fn start_configured(
+        root: PathBuf,
+        world: Arc<World>,
+        delays: Delays,
+        policy: HostPolicy,
+        configure: impl FnOnce(&mut HostConfig),
+    ) -> Self {
+        let mut config = HostConfig {
             root: root.join("state"),
             kernel: root.join("vmlinux"),
             boot_args: String::new(),
             base_image: root.join("base.img"),
             policy,
             sample_every: Duration::from_millis(50),
+            guest_ports: Vec::new(),
+            restore_notice_port: None,
         };
+        configure(&mut config);
         let engine = Fake {
             world: Arc::clone(&world),
             delays,
@@ -340,10 +373,10 @@ impl Lab {
         let server = tokio::spawn(async move {
             let _ = serve(handle, &listening).await;
         });
-        for _ in 0..200 {
-            if socket.exists() {
-                break;
-            }
+        // Generous: on a loaded machine the server can take a while to bind.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !socket.exists() {
+            assert!(Instant::now() < deadline, "the host API never came up");
             sleep(Duration::from_millis(1)).await;
         }
         Self {
@@ -646,7 +679,7 @@ async fn remove_waits_for_a_running_save_and_deletes_everything() {
     assert_eq!(reply, Reply::Done);
     assert!(!lab.sandbox_dir(sandbox).exists());
     assert!(lab.world.live.lock().unwrap().is_empty());
-    assert!(lab.status().await.sandboxes.is_empty());
+    assert_eq!(lab.status().await.sandboxes.len(), 0);
     // The id is free again.
     lab.create(sandbox, &[]).await;
     assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
@@ -735,4 +768,73 @@ async fn bad_requests_are_refused() {
         .await
         .unwrap();
     assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn data_for_a_sleeping_sandbox_wakes_it() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let ports: Vec<GuestPort> = vec![format!("4222={address},wake").parse().unwrap()];
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.guest_ports = ports,
+    )
+    .await;
+    let sandbox = id(10);
+    lab.create(sandbox, &[(LevelName::Paused, 30)]).await;
+    lab.run(sandbox, &["set up"]).await;
+
+    // The test plays the guest: it opens a connection to its host, the way
+    // an agent inside the VM dials vsock address 2.
+    let socket = lab.sandbox_dir(sandbox).join("run/vsock.sock_4222");
+    let mut guest = UnixStream::connect(&socket).await.unwrap();
+    let (mut server, _) = upstream.accept().await.unwrap();
+    guest.write_all(b"hello").await.unwrap();
+    let mut hello = [0; 5];
+    server.read_exact(&mut hello).await.unwrap();
+    assert_eq!(&hello, b"hello");
+
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let resumes = lab.world.resumes.load(Ordering::SeqCst);
+    server.write_all(b"wake up").await.unwrap();
+    lab.wait_until("inbound data to wake the sandbox", |_| {
+        lab.world.resumes.load(Ordering::SeqCst) > resumes
+    })
+    .await;
+    let mut message = [0; 7];
+    guest.read_exact(&mut message).await.unwrap();
+    assert_eq!(&message, b"wake up");
+
+    // Removing the sandbox closes its listeners and their sockets.
+    lab.client
+        .call(&Request::Remove { id: sandbox })
+        .await
+        .unwrap();
+    assert!(!socket.exists());
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_guest_is_told_before_anything_else_reaches_it() {
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.restore_notice_port = Some(53),
+    )
+    .await;
+    let sandbox = id(11);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    // A freshly booted guest has nothing stale to fix.
+    assert_eq!(lab.run(sandbox, &["told-restored?"]).await, ["false"]);
+
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    // The first thing to reach the restored guest finds it already told.
+    assert_eq!(lab.run(sandbox, &["told-restored?"]).await, ["true"]);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
 }

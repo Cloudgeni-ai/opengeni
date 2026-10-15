@@ -96,7 +96,7 @@ fn only_start(actions: &[Action]) -> (Step, OpId) {
 #[test]
 fn idle_sandbox_walks_down_the_ladder_on_schedule() {
     let mut rig = Rig::new(HostPolicy::default());
-    assert!(rig.add(1, Level::Running, false, full_ladder()).is_empty());
+    assert_eq!(rig.add(1, Level::Running, false, full_ladder()), []);
     let expected = [
         (Step::Pause, 30),
         (Step::Compress, 120),
@@ -141,7 +141,7 @@ fn touch_cancels_a_sleep_step_in_flight() {
         }]
     );
     // Cancelled in time: still running, nothing more to do.
-    assert!(rig.finish(1, op, Outcome::Cancelled).is_empty());
+    assert_eq!(rig.finish(1, op, Outcome::Cancelled), []);
     let view = rig.host.sandbox(SandboxId(1)).unwrap();
     assert_eq!(view.level, Level::Running);
     assert!(!view.wants_awake);
@@ -229,7 +229,7 @@ fn holds_keep_a_sandbox_awake_and_their_expiry_counts_as_activity() {
         priority: Priority::Background,
     });
     assert_eq!(rig.host.next_deadline(), Some(At::from_duration(secs(100))));
-    assert!(rig.tick_at_deadline().is_empty());
+    assert_eq!(rig.tick_at_deadline(), []);
     assert_eq!(rig.host.next_deadline(), Some(At::from_duration(secs(130))));
     assert_eq!(only_start(&rig.tick_at_deadline()).0, Step::Pause);
 }
@@ -381,11 +381,11 @@ fn a_process_exit_during_a_successful_save_keeps_the_memory_image() {
     );
     let (step, op) = only_start(&rig.tick_at_deadline());
     assert_eq!(step, Step::Save);
-    assert!(
+    assert_eq!(
         rig.send(Input::Lost {
             sandbox: SandboxId(1)
-        })
-        .is_empty()
+        }),
+        []
     );
     let actions = rig.finish(1, op, Outcome::Done);
     assert!(!actions.contains(&Action::Notify {

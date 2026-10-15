@@ -6,6 +6,7 @@
 //! directory used for tests and single-machine setups.
 
 use std::fs;
+use std::future::ready;
 use std::path::{Path, PathBuf};
 
 use compute_engine::{EngineError, ErrorKind, SnapshotFiles};
@@ -58,24 +59,28 @@ impl Store for NoStore {
         false
     }
 
-    async fn archive(&self, _: Id, _: &SavedFiles) -> Result<(), EngineError> {
-        Err(EngineError::new(
+    fn archive(
+        &self,
+        _: Id,
+        _: &SavedFiles,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        ready(Err(EngineError::new(
             ErrorKind::Fatal,
             "archive",
             "no store configured",
-        ))
+        )))
     }
 
-    async fn fetch(&self, _: Id, _: &SavedFiles) -> Result<(), EngineError> {
-        Err(EngineError::new(
+    fn fetch(&self, _: Id, _: &SavedFiles) -> impl Future<Output = Result<(), EngineError>> + Send {
+        ready(Err(EngineError::new(
             ErrorKind::Fatal,
             "fetch",
             "no store configured",
-        ))
+        )))
     }
 
-    async fn delete(&self, _: Id) -> Result<(), EngineError> {
-        Ok(())
+    fn delete(&self, _: Id) -> impl Future<Output = Result<(), EngineError>> + Send {
+        ready(Ok(()))
     }
 }
 

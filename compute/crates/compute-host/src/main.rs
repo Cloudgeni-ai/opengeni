@@ -12,7 +12,7 @@ use compute_host::client::Client;
 use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule, step_name,
 };
-use compute_host::{Directory, HostAgent, HostConfig, NoStore, Store, serve};
+use compute_host::{Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -90,6 +90,15 @@ struct ServeArgs {
     /// ...until expected available memory reaches this.
     #[arg(long)]
     memory_high_mib: Option<u64>,
+    /// A port guests may connect to on this host, as `PORT=HOST:PORT`, with
+    /// `,wake` appended to wake a sleeping sandbox when data arrives for it.
+    /// Repeatable.
+    #[arg(long = "guest-port")]
+    guest_ports: Vec<GuestPort>,
+    /// Guest vsock port to tell about each restore from a memory image, so
+    /// the guest can set its clock and reconnect.
+    #[arg(long)]
+    restore_notice_port: Option<u32>,
 }
 
 #[derive(Args)]
@@ -252,6 +261,8 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         base_image: args.base_image,
         policy,
         sample_every: Duration::from_secs(1),
+        guest_ports: args.guest_ports,
+        restore_notice_port: args.restore_notice_port,
     };
     match args.store {
         Some(dir) => run_agent(config, engine, Directory::new(dir), socket).await,

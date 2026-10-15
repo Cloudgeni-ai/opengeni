@@ -97,7 +97,7 @@ async fn boot_pause_compress_snapshot_restore() {
     let (output, _) = exec(&uds, "echo marker > /root/marker && uname -r")
         .await
         .unwrap();
-    assert!(!output.trim().is_empty());
+    assert_ne!(output.trim(), "");
     let awake = engine.resident_bytes(&vm).unwrap();
 
     let started = Instant::now();

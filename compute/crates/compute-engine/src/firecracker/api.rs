@@ -155,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn parses_no_content() {
         let (_dir, api) = serve_once(b"HTTP/1.1 204 \r\nServer: Firecracker API\r\n\r\n");
-        assert!(api.call("PUT", "/actions", None).await.unwrap().is_empty());
+        assert_eq!(api.call("PUT", "/actions", None).await.unwrap(), b"");
     }
 
     #[tokio::test]

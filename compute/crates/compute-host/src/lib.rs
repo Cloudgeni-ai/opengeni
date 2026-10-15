@@ -12,12 +12,15 @@
 
 mod agent;
 pub mod client;
+pub mod guest_ports;
 mod layout;
 pub mod protocol;
+pub mod restore_notice;
 mod server;
 mod step;
 mod store;
 
 pub use agent::{Handle, HostAgent, HostConfig, HostError, Lease};
+pub use guest_ports::{GuestPort, Route};
 pub use server::serve;
 pub use store::{Directory, NoStore, SavedFiles, Store};
