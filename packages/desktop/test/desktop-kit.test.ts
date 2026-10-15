@@ -12,6 +12,7 @@ import {
   lastErrorLine,
   parseConnections,
   parseServiceRunning,
+  repairServer,
   windowsInstallCommand,
 } from "../src/main/agent-cli";
 import {
@@ -190,6 +191,15 @@ describe("agent command line", () => {
     expect(
       parseConnections("No Opengeni connections configured. Run `opengeni-agent connect`."),
     ).toEqual([]);
+  });
+
+  test("repairs a broken agent from the asking server, else its first connection", () => {
+    const connections = parseConnections(
+      "  c1  https://app.example.com  workspace=w1  agent=a1\n  c2  https://two.example  workspace=w2  agent=a2",
+    );
+    expect(repairServer(connections, "https://two.example/")).toBe("https://two.example");
+    expect(repairServer(connections)).toBe("https://app.example.com");
+    expect(repairServer([])).toBeNull();
   });
 
   test("reads the service status on each platform", () => {

@@ -10,6 +10,7 @@ import {
   lastErrorLine,
   parseConnections,
   parseServiceRunning,
+  repairServer,
   windowsInstallCommand,
   type AgentConnection,
   type AgentPlatform,
@@ -133,17 +134,7 @@ export class ThisComputer {
           }),
           "Couldn't connect this computer",
         );
-        const started = await run(binary, ["start"], { timeoutMs: 60_000 });
-        if (started.code === 0) return;
-        // An installed agent that cannot run here (an older release, a damaged
-        // file) is replaced by the server's current one. The enrollment token
-        // was spent on the connection above, so the installer gets a fresh one.
-        const retryToken = await this.deps.mintEnrollToken(
-          accountId,
-          workspaceId,
-          options.screenControl,
-        );
-        await this.install(baseUrl, { OPENGENI_API_URL: baseUrl, OPENGENI_ENROLL_TOKEN: retryToken });
+        await this.startOrRepair(binary, baseUrl, "Couldn't start the agent");
         return;
       }
       await this.install(baseUrl, env);
@@ -159,20 +150,45 @@ export class ThisComputer {
     });
   }
 
-  async resume(): Promise<void> {
+  /**
+   * Starts the background agent again. `baseUrl` is the server asking (the
+   * menu bar item has none); a broken agent is repaired from it, or from the
+   * first server the agent is connected to.
+   */
+  async resume(baseUrl?: string): Promise<void> {
     await this.act(async () => {
       const binary = this.binaryPath();
-      if (binary)
-        await this.expect(
-          run(binary, ["start"], { timeoutMs: 60_000 }),
-          "Couldn't resume the agent",
-        );
+      if (!binary) return;
+      const { connections } = await this.snapshot();
+      await this.startOrRepair(
+        binary,
+        repairServer(connections, baseUrl),
+        "Couldn't resume the agent",
+      );
     });
   }
 
   /** Forget the cached reading, e.g. when the window comes back to the front. */
   invalidate(): void {
     this.snapshotCache = null;
+  }
+
+  /**
+   * Starts the background agent. An installed agent that cannot start (an older
+   * release, a damaged file) is replaced by the server's current release, then
+   * started again. The installer runs without an enrollment token, so it only
+   * puts the binary in place; the saved connections are unchanged.
+   */
+  private async startOrRepair(
+    binary: string,
+    server: string | null,
+    failure: string,
+  ): Promise<void> {
+    const started = await run(binary, ["start"], { timeoutMs: 60_000 });
+    if (started.code === 0) return;
+    if (!server) throw new Error(failureMessage(failure, started));
+    await this.install(server, { OPENGENI_API_URL: server });
+    await this.expect(run(binary, ["start", "--restart"], { timeoutMs: 60_000 }), failure);
   }
 
   private async install(baseUrl: string, env: Record<string, string>): Promise<void> {

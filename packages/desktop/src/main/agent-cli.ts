@@ -83,6 +83,18 @@ export function connectionFor(
 }
 
 /**
+ * The server whose installer repairs an agent that cannot start: the signed-in
+ * server asking, else the first server the agent is connected to.
+ */
+export function repairServer(
+  connections: readonly AgentConnection[],
+  baseUrl?: string,
+): string | null {
+  const asking = baseUrl ? normalizeServerUrl(baseUrl) : null;
+  return asking ?? connections[0]?.apiUrl ?? null;
+}
+
+/**
  * The reason a command failed, for a plain error message: the line the
  * installer or agent marked as an error, else the last thing it printed, without
  * its tool prefix.
