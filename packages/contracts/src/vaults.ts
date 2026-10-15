@@ -16,7 +16,7 @@ export const VaultOwnerKind = /* @__PURE__ */ defineSchema(() =>
 );
 export type VaultOwnerKind = z.infer<typeof VaultOwnerKind>;
 export const VaultSource = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["opengeni", "onepassword", "host"]),
+  z.enum(["opengeni", "onepassword", "host", "external", "protonpass", "keeper", "bitwarden"]),
 );
 export type VaultSource = z.infer<typeof VaultSource>;
 export const VaultMode = /* @__PURE__ */ defineSchema(() => z.enum(["read_write", "read_only"]));
@@ -33,6 +33,44 @@ export const VaultFieldKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["text", "concealed", "totp", "file"]),
 );
 export type VaultFieldKind = z.infer<typeof VaultFieldKind>;
+
+/** Effective operations, not a promise that upstream permissions cannot change. */
+export const VaultProviderOperations = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      createItemTypes: z.array(VaultItemType).max(5),
+      updateItem: z.boolean(),
+      removeField: z.boolean(),
+      archiveItem: z.boolean(),
+      archiveKind: z.enum(["archive", "trash", "none"]),
+      /** Permanent provider deletion is deliberately not exposed. */
+      deleteItem: z.literal(false),
+      restoreItem: z.boolean(),
+      readFiles: z.boolean(),
+      writeFiles: z.boolean(),
+      createTotp: z.boolean(),
+      updateTotp: z.boolean(),
+      createVault: z.boolean(),
+      restoreFieldHistory: z.boolean(),
+    })
+    .strict(),
+);
+export type VaultProviderOperations = z.infer<typeof VaultProviderOperations>;
+
+/** A successful mirror check does not prove a customer's upstream cache is current. */
+export const VaultProviderFreshness = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.enum(["current", "stale", "refreshing", "unavailable"]),
+      lastCheckedAt: z.string().datetime().nullable(),
+      sourceSyncedAt: z.string().datetime().nullable(),
+      source: z.enum(["live", "cache", "unknown"]),
+      errorCode: z.string().max(100).nullable(),
+      retryAt: z.string().datetime().nullable(),
+    })
+    .strict(),
+);
+export type VaultProviderFreshness = z.infer<typeof VaultProviderFreshness>;
 /** Lookup order for references that name no vault; index = tier. */
 export const VAULT_LOOKUP_TIERS = ["task", "user", "workspace", "organization"] as const;
 export type VaultLookupTier = (typeof VAULT_LOOKUP_TIERS)[number];
@@ -170,6 +208,8 @@ export const VaultSummary = /* @__PURE__ */ defineSchema(() =>
     lastSyncedAt: z.string().nullable(),
     rateLimitedUntil: z.string().nullable(),
     providerConnectionId: z.string().uuid().nullable(),
+    providerOperations: VaultProviderOperations.optional(),
+    freshness: VaultProviderFreshness.optional(),
     /** Organization and Only-me vaults; null for workspace and task vaults. */
     availability: VaultAvailability.nullable(),
     isDefault: z.boolean(),
@@ -483,6 +523,9 @@ export const ProviderVaultMeta = /* @__PURE__ */ defineSchema(() =>
     name: z.string(),
     itemCount: z.number().int().nullable(),
     linkedVaultId: z.string().uuid().nullable(),
+    /** Unknown means the provider does not expose the grant; writes still check upstream. */
+    writeAccess: z.enum(["read_only", "read_write", "unknown"]).optional(),
+    operations: VaultProviderOperations.optional(),
   }),
 );
 export type ProviderVaultMeta = z.infer<typeof ProviderVaultMeta>;
@@ -542,11 +585,114 @@ export const DisconnectOnePasswordResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type DisconnectOnePasswordResponse = z.infer<typeof DisconnectOnePasswordResponse>;
 
+/** Providers installed through the generic connection lifecycle. */
+export const ExternalVaultProviderKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["external", "protonpass", "keeper", "bitwarden"]),
+);
+export type ExternalVaultProviderKind = z.infer<typeof ExternalVaultProviderKind>;
+
+/** Write-only setup material. Never included in connection summaries or logs. */
+export const VaultProviderCredentials = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("provider", [
+    z
+      .object({
+        provider: z.literal("external"),
+        endpoint: z.string().url().max(2_048),
+        signingSecret: z.string().min(32).max(4_096),
+      })
+      .strict(),
+    z
+      .object({
+        provider: z.literal("bitwarden"),
+        endpoint: z.string().url().max(2_048),
+        signingSecret: z.string().min(32).max(4_096),
+      })
+      .strict(),
+    z
+      .object({
+        provider: z.literal("protonpass"),
+        token: z.string().min(16).max(4_096),
+      })
+      .strict(),
+    z
+      .object({
+        provider: z.literal("keeper"),
+        oneTimeToken: z.string().min(16).max(4_096),
+        /** Optional region host for tokens that do not encode one. */
+        hostname: z.string().max(253).optional(),
+      })
+      .strict(),
+  ]),
+);
+export type VaultProviderCredentials = z.infer<typeof VaultProviderCredentials>;
+
+export const InstallVaultProviderRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      credentials: VaultProviderCredentials,
+      ownership: z.enum(["user", "workspace", "organization"]),
+      label: z.string().trim().min(1).max(120).optional(),
+    })
+    .strict(),
+);
+export type InstallVaultProviderRequest = z.infer<typeof InstallVaultProviderRequest>;
+
+export const ReplaceVaultProviderCredentialsRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ credentials: VaultProviderCredentials }).strict(),
+);
+export type ReplaceVaultProviderCredentialsRequest = z.infer<
+  typeof ReplaceVaultProviderCredentialsRequest
+>;
+
+/** Includes legacy 1Password connections; existing 1Password routes remain supported. */
+export const VaultProviderConnectionSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    provider: z.enum(["onepassword", "external", "protonpass", "keeper", "bitwarden"]),
+    ownership: z.enum(["user", "workspace", "organization"]),
+    accountName: z.string().nullable(),
+    label: z.string().nullable(),
+    verifiedAt: z.string(),
+    createdAt: z.string(),
+    createdBySubjectId: z.string().nullable(),
+    canManage: z.boolean(),
+    operations: VaultProviderOperations,
+    /** Only 1Password uses a plan tier. */
+    planTier: z.enum(["family", "teams", "business"]).optional(),
+    /** Unavailable means this deployment cannot run the adapter, not bad credentials. */
+    available: z.boolean(),
+  }),
+);
+export type VaultProviderConnectionSummary = z.infer<typeof VaultProviderConnectionSummary>;
+
+export const ListVaultProviderConnectionsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ connections: z.array(VaultProviderConnectionSummary) }),
+);
+export type ListVaultProviderConnectionsResponse = z.infer<
+  typeof ListVaultProviderConnectionsResponse
+>;
+
+export const InstallVaultProviderResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    connectionId: z.string().uuid(),
+    accountName: z.string().nullable(),
+    provider: ExternalVaultProviderKind,
+    operations: VaultProviderOperations,
+    vaults: z.array(ProviderVaultMeta),
+  }),
+);
+export type InstallVaultProviderResponse = z.infer<typeof InstallVaultProviderResponse>;
+
+export const DisconnectVaultProviderResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ unlinkedVaultIds: z.array(z.string().uuid()) }),
+);
+export type DisconnectVaultProviderResponse = z.infer<typeof DisconnectVaultProviderResponse>;
+
 export const LinkProviderVaultRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      provider: z.enum(["onepassword", "host"]),
-      /** Required for onepassword. */
+      provider: z.enum(["onepassword", "host", "external", "protonpass", "keeper", "bitwarden"]),
+      /** Required except for an in-process host provider. */
       connectionId: z.string().uuid().optional(),
       externalVaultId: z.string(),
       ownerKind: z.enum(["user", "workspace", "organization"]),
@@ -593,6 +739,9 @@ export const VaultErrorCode = /* @__PURE__ */ defineSchema(() =>
     "provider_rate_limited",
     "provider_unavailable",
     "provider_conflict",
+    "provider_locked",
+    "provider_inventory_incomplete",
+    "provider_outcome_unknown",
     "variable_sets_removed",
     "secret_save_forbidden",
     "invalid_secret_name",
@@ -637,6 +786,9 @@ export const VAULT_ERROR_HTTP_STATUS: Readonly<Record<VaultErrorCode, number>> =
   provider_rate_limited: 429,
   provider_auth_invalid: 401,
   provider_auth_expired: 401,
+  provider_locked: 423,
+  provider_inventory_incomplete: 503,
+  provider_outcome_unknown: 503,
 };
 
 // ---------------------------------------------------------------------------
@@ -668,6 +820,8 @@ export const SecretSearchInput = /* @__PURE__ */ defineSchema(() =>
       limit: z.number().int().min(1).max(VAULT_LIMITS.searchResultsMax).default(20),
       /** `nextCursor` from the previous call with the same filters. */
       cursor: z.string().max(VAULT_LIMITS.searchCursorMaxChars).optional(),
+      /** Refresh provider metadata and subsequent value reads; never bypass rate limits. */
+      refresh: z.boolean().optional(),
     })
     .strict(),
 );
@@ -705,6 +859,7 @@ export const SecretSearchVault = /* @__PURE__ */ defineSchema(() =>
     source: VaultSource,
     mode: VaultMode,
     itemCount: z.number().int().nonnegative(),
+    freshness: VaultProviderFreshness.optional(),
   }),
 );
 export type SecretSearchVault = z.infer<typeof SecretSearchVault>;
@@ -716,6 +871,17 @@ export const SecretSearchOutput = /* @__PURE__ */ defineSchema(() =>
     nextCursor: z.string().nullable(),
     /** Every vault the caller can reach, on the first page only. */
     vaults: z.array(SecretSearchVault).optional(),
+    /** False when a reachable provider could not be checked; empty items are not proof of absence. */
+    complete: z.boolean().optional(),
+    /** Included on every page so failures are not lost after page one. */
+    sources: z
+      .array(
+        z.object({
+          vaultId: z.string().uuid(),
+          freshness: VaultProviderFreshness,
+        }),
+      )
+      .optional(),
   }),
 );
 export type SecretSearchOutput = z.infer<typeof SecretSearchOutput>;

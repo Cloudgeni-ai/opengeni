@@ -6,11 +6,43 @@ import type { VaultPolicy } from "./types";
 export type { VaultPolicy };
 
 export type VaultOwnerKind = "user" | "workspace" | "organization" | "task";
-export type VaultSource = "opengeni" | "onepassword" | "host";
+export type VaultSource =
+  | "opengeni"
+  | "onepassword"
+  | "host"
+  | "external"
+  | "protonpass"
+  | "keeper"
+  | "bitwarden";
 export type VaultMode = "read_write" | "read_only";
 export type VaultSyncStatus = "ok" | "syncing" | "error" | "auth_expired" | "rate_limited";
 export type VaultItemType = "login" | "api_key" | "note" | "file" | "passkey";
 export type VaultFieldKind = "text" | "concealed" | "totp" | "file";
+
+export type VaultProviderOperations = {
+  createItemTypes: VaultItemType[];
+  updateItem: boolean;
+  removeField: boolean;
+  archiveItem: boolean;
+  archiveKind: "archive" | "trash" | "none";
+  deleteItem: false;
+  restoreItem: boolean;
+  readFiles: boolean;
+  writeFiles: boolean;
+  createTotp: boolean;
+  updateTotp: boolean;
+  createVault: boolean;
+  restoreFieldHistory: boolean;
+};
+
+export type VaultProviderFreshness = {
+  state: "current" | "stale" | "refreshing" | "unavailable";
+  lastCheckedAt: string | null;
+  sourceSyncedAt: string | null;
+  source: "live" | "cache" | "unknown";
+  errorCode: string | null;
+  retryAt: string | null;
+};
 
 export type VaultAvailability = {
   /** null = every workspace in the organization. */
@@ -34,6 +66,8 @@ export type VaultSummary = {
   lastSyncedAt: string | null;
   rateLimitedUntil: string | null;
   providerConnectionId: string | null;
+  providerOperations?: VaultProviderOperations | undefined;
+  freshness?: VaultProviderFreshness | undefined;
   availability: VaultAvailability | null;
   isDefault: boolean;
   itemCount: number;
@@ -215,6 +249,8 @@ export type ProviderVaultMeta = {
   name: string;
   itemCount: number | null;
   linkedVaultId: string | null;
+  writeAccess?: "read_only" | "read_write" | "unknown" | undefined;
+  operations?: VaultProviderOperations | undefined;
 };
 
 export type InstallOnePasswordResponse = {
@@ -252,7 +288,7 @@ export type DisconnectOnePasswordResponse = {
 };
 
 export type LinkProviderVaultRequest = {
-  provider: "onepassword" | "host";
+  provider: Exclude<VaultSource, "opengeni">;
   connectionId?: string | undefined;
   externalVaultId: string;
   ownerKind: "user" | "workspace" | "organization";
@@ -285,9 +321,50 @@ export type VaultErrorCode =
   | "provider_rate_limited"
   | "provider_unavailable"
   | "provider_conflict"
+  | "provider_locked"
+  | "provider_inventory_incomplete"
+  | "provider_outcome_unknown"
   | "variable_sets_removed"
   | "secret_save_forbidden"
   | "invalid_secret_name"
   | "secret_value_too_large"
   | "human_auth_required"
   | "secret_search_cursor_invalid";
+
+export type ExternalVaultProviderKind = "external" | "protonpass" | "keeper" | "bitwarden";
+export type VaultProviderCredentials =
+  | { provider: "external"; endpoint: string; signingSecret: string }
+  | { provider: "bitwarden"; endpoint: string; signingSecret: string }
+  | { provider: "protonpass"; token: string }
+  | { provider: "keeper"; oneTimeToken: string; hostname?: string | undefined };
+export type InstallVaultProviderRequest = {
+  credentials: VaultProviderCredentials;
+  ownership: "user" | "workspace" | "organization";
+  label?: string | undefined;
+};
+export type ReplaceVaultProviderCredentialsRequest = { credentials: VaultProviderCredentials };
+export type VaultProviderConnectionSummary = {
+  id: string;
+  provider: "onepassword" | ExternalVaultProviderKind;
+  ownership: "user" | "workspace" | "organization";
+  accountName: string | null;
+  label: string | null;
+  verifiedAt: string;
+  createdAt: string;
+  createdBySubjectId: string | null;
+  canManage: boolean;
+  operations: VaultProviderOperations;
+  planTier?: OnePasswordPlanTier | undefined;
+  available: boolean;
+};
+export type ListVaultProviderConnectionsResponse = {
+  connections: VaultProviderConnectionSummary[];
+};
+export type InstallVaultProviderResponse = {
+  connectionId: string;
+  accountName: string | null;
+  provider: ExternalVaultProviderKind;
+  operations: VaultProviderOperations;
+  vaults: ProviderVaultMeta[];
+};
+export type DisconnectVaultProviderResponse = { unlinkedVaultIds: string[] };

@@ -4,6 +4,8 @@ import type {
   VaultFieldKind,
   VaultItemType,
   VaultSource,
+  VaultProviderOperations,
+  VaultProviderFreshness,
 } from "@opengeni/contracts";
 
 export interface VaultProviderCapabilities {
@@ -14,12 +16,16 @@ export interface VaultProviderCapabilities {
   groupGrants: boolean;
   /** Passkeys live only in Opengeni-hosted vaults (D20). */
   passkeys: false;
+  /** Additive: older in-process providers retain the legacy capability flags. */
+  operations?: VaultProviderOperations;
 }
 export interface ProviderVault {
   externalVaultId: string;
   name: string;
   contentVersion: string | null;
   itemCount: number | null;
+  writeAccess?: "read_only" | "read_write" | "unknown";
+  operations?: VaultProviderOperations;
 }
 export interface ProviderFieldMeta {
   externalFieldId: string;
@@ -63,13 +69,63 @@ export interface VaultProviderContext {
   connectionId: string | null;
   budget: ProviderCallBudget;
   signal?: AbortSignal;
+  /** Trusted native scope, supplied by the authorized registry, never model arguments. */
+  authority?: VaultProviderAuthority;
+  /** Last successful mirror-check identity; changes invalidate attempt value caches. */
+  cacheEpoch?: string | null;
+  /** Recheck upstream, without retrying a mutation or bypassing provider throttling. */
+  forceRefresh?: boolean;
+  /** Stable caller operation identity when available. No automatic replay is implied. */
+  idempotencyKey?: string;
+  /** Runtime-only observation; never supplied by an agent or persisted with values. */
+  onFreshness?: (freshness: VaultProviderFreshness) => void;
 }
+
+export interface VaultProviderAuthority {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+  /** Where the encrypted connection is owned, not a replacement for the calling workspace. */
+  connectionWorkspaceId: string;
+  sessionId?: string;
+  turnId?: string;
+  attemptId?: string;
+  siteId?: string;
+}
+
+export interface ProviderPageRequest {
+  cursor?: string;
+  limit: number;
+  snapshot?: string;
+}
+
+export interface ProviderPage<T> {
+  items: T[];
+  nextCursor: string | null;
+  /** Null only when upstream cannot supply snapshot consistency. */
+  snapshot: string | null;
+  freshness?: VaultProviderFreshness;
+}
+
 export interface VaultProvider {
-  readonly id: "onepassword" | "host" | "fake";
+  readonly id: Exclude<VaultSource, "opengeni"> | "fake";
   capabilities(): VaultProviderCapabilities;
-  validate(ctx: VaultProviderContext): Promise<{ accountName: string | null }>;
+  validate(ctx: VaultProviderContext): Promise<{
+    accountName: string | null;
+    /** Stable identity, when supplied by the upstream account or bridge. */
+    accountId?: string;
+  }>;
   listVaults(ctx: VaultProviderContext): Promise<ProviderVault[]>;
   listItems(ctx: VaultProviderContext, externalVaultId: string): Promise<ProviderItemMeta[]>;
+  listVaultPage?(
+    ctx: VaultProviderContext,
+    page: ProviderPageRequest,
+  ): Promise<ProviderPage<ProviderVault>>;
+  listItemPage?(
+    ctx: VaultProviderContext,
+    externalVaultId: string,
+    page: ProviderPageRequest,
+  ): Promise<ProviderPage<ProviderItemMeta>>;
   readFields(
     ctx: VaultProviderContext,
     externalVaultId: string,
@@ -105,6 +161,9 @@ export const VAULT_PROVIDER_ERROR_CODES = [
    * service reports `vault_read_only` for writes, `vault_permission_denied` otherwise.
    */
   "provider_permission_denied",
+  "provider_locked",
+  "provider_inventory_incomplete",
+  "provider_outcome_unknown",
 ] as const;
 export type VaultProviderErrorCode = (typeof VAULT_PROVIDER_ERROR_CODES)[number];
 
@@ -149,6 +208,10 @@ export interface VaultProviderRegistry {
 export function createVaultProviderRegistry(factories: {
   onepassword?: (connectionId: string | null) => Promise<VaultProvider>;
   host?: () => Promise<VaultProvider>;
+  external?: (connectionId: string | null) => Promise<VaultProvider>;
+  protonpass?: (connectionId: string | null) => Promise<VaultProvider>;
+  keeper?: (connectionId: string | null) => Promise<VaultProvider>;
+  bitwarden?: (connectionId: string | null) => Promise<VaultProvider>;
 }): VaultProviderRegistry {
   return {
     async forVault(vault) {
@@ -156,6 +219,14 @@ export function createVaultProviderRegistry(factories: {
         return factories.onepassword(vault.providerConnectionId);
       }
       if (vault.source === "host" && factories.host) return factories.host();
+      if (
+        vault.source !== "opengeni" &&
+        vault.source !== "host" &&
+        vault.source !== "onepassword"
+      ) {
+        const factory = factories[vault.source];
+        if (factory) return factory(vault.providerConnectionId);
+      }
       throw new VaultProviderError(
         "provider_unavailable",
         vault.source === "opengeni"

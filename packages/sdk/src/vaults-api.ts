@@ -22,6 +22,11 @@ import type {
   VaultItem,
   VaultItemSummary,
   VaultSummary,
+  InstallVaultProviderRequest,
+  InstallVaultProviderResponse,
+  ReplaceVaultProviderCredentialsRequest,
+  VaultProviderConnectionSummary,
+  DisconnectVaultProviderResponse,
 } from "./vault-types";
 
 /**
@@ -195,6 +200,32 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
           signal,
         )
       ).vaults,
+    installVaultProvider: (request: InstallVaultProviderRequest) =>
+      json<InstallVaultProviderResponse>("POST", `${base}/vault-providers/connections`, request),
+    listVaultProviderConnections: async (signal?: AbortSignal) =>
+      (
+        await json<{ connections: VaultProviderConnectionSummary[] }>(
+          "GET",
+          `${base}/vault-providers/connections`,
+          undefined,
+          {},
+          signal,
+        )
+      ).connections,
+    replaceVaultProviderCredentials: (
+      connectionId: string,
+      request: ReplaceVaultProviderCredentialsRequest,
+    ) =>
+      json<InstallVaultProviderResponse>(
+        "PUT",
+        `${base}/vault-providers/connections/${enc(connectionId)}/credentials`,
+        request,
+      ),
+    disconnectVaultProvider: (connectionId: string) =>
+      json<DisconnectVaultProviderResponse>(
+        "DELETE",
+        `${base}/vault-providers/connections/${enc(connectionId)}`,
+      ),
     linkProviderVault: (request: LinkProviderVaultRequest) =>
       json<VaultSummary>("POST", `${base}/vaults/link`, request),
     createManagedProviderVault: (
@@ -229,6 +260,9 @@ const VAULT_ERROR_CODES: ReadonlySet<string> = new Set<VaultErrorCode>([
   "provider_rate_limited",
   "provider_unavailable",
   "provider_conflict",
+  "provider_locked",
+  "provider_inventory_incomplete",
+  "provider_outcome_unknown",
   "variable_sets_removed",
   "secret_save_forbidden",
   "invalid_secret_name",

@@ -792,7 +792,7 @@ export async function linkProviderVault(
     ownerKind: "user" | "workspace" | "organization";
     name: string;
     description?: string | null;
-    source: "onepassword" | "host";
+    source: Exclude<VaultSource, "opengeni">;
     providerConnectionId?: string | null;
     providerVaultRef: string;
     mode: VaultMode;
