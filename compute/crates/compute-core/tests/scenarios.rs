@@ -97,6 +97,11 @@ fn started(actions: &[Action]) -> Vec<(u128, Step, OpId)> {
         .collect()
 }
 
+fn assert_nothing_started(actions: &[Action]) {
+    let nothing: Vec<(u128, Step, OpId)> = Vec::new();
+    assert_eq!(started(actions), nothing);
+}
+
 fn only_start(actions: &[Action]) -> (Step, OpId) {
     let starts = started(actions);
     assert_eq!(starts.len(), 1, "expected exactly one start in {actions:?}");
@@ -149,7 +154,7 @@ fn an_idle_sandbox_pauses_gets_protected_in_memory_and_leaves_disk_after_days() 
         actions = rig.finish(1, op, Outcome::Done);
         assert_eq!(notices(&actions, 1), [Notice::State(after)]);
     }
-    assert!(started(&actions).is_empty());
+    assert_nothing_started(&actions);
     assert_eq!(rig.host.next_deadline(), None);
     // A month later it still wakes: fetch the files, boot fresh.
     let (step, op) = only_start(&rig.touch(1));
@@ -376,7 +381,7 @@ fn memory_pressure_compresses_the_least_recently_used_idle_sandboxes_first() {
         [(2, Step::Compress), (3, Step::Compress)]
     );
     for (id, _, op) in starts {
-        assert!(started(&rig.finish(id, op, Outcome::Done)).is_empty());
+        assert_nothing_started(&rig.finish(id, op, Outcome::Done));
         rig.send(Input::Resident {
             sandbox: SandboxId(id),
             bytes: 3 * GIB / 10,
@@ -384,7 +389,7 @@ fn memory_pressure_compresses_the_least_recently_used_idle_sandboxes_first() {
     }
     // Until a new reading arrives, the freed memory is assumed to be on its
     // way, so nothing more happens.
-    assert!(started(&rig.send(Input::Tick)).is_empty());
+    assert_nothing_started(&rig.send(Input::Tick));
     // A larger shortfall than compression can cover ends processes outright,
     // oldest first; their saved copies make that instant.
     let actions = rig.send(Input::Memory {
