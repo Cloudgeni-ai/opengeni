@@ -24,6 +24,7 @@ use compute_core::{
     SandboxId, Step,
 };
 use compute_engine::{CancellationToken, Engine, Found, VmSpec, vsock};
+use futures::StreamExt;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -524,8 +525,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
         }
-        self.ensure_networks().await;
-        let mut adopted = 0_usize;
+        let mut recovering = Vec::new();
         for record in self.records.all() {
             let id = record.id;
             if !self.ordinals.insert(record.ordinal) {
@@ -536,7 +536,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.remove_recorded(&record, None, Vec::new());
                 continue;
             }
-            match self.recover_one(record).await {
+            recovering.push(record);
+        }
+        // Finding VMs and checking networks touch only their own sandbox,
+        // so they run for every sandbox at once; the results are taken in
+        // one by one.
+        let (mut found, ()) = tokio::join!(self.find_vms(&recovering), self.ensure_networks());
+        let mut adopted = 0_usize;
+        for record in recovering {
+            let id = record.id;
+            let vm = found
+                .remove(&id.0)
+                .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
+            match self.recover_one(record, vm).await {
                 Ok(true) => adopted += 1,
                 Ok(false) => {}
                 Err(error) => {
@@ -545,6 +557,40 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         tracing::info!(sandboxes = self.slots.len(), adopted, "recovered");
+    }
+
+    /// Looks for every recorded sandbox's VM, taking back those still
+    /// running and clearing what dead ones left. Sandboxes whose disk is
+    /// remote have no VM to find.
+    async fn find_vms(
+        &self,
+        records: &[Record],
+    ) -> HashMap<SandboxId, Result<Option<(E::Vm, Found)>, HostError>> {
+        /// Enough to hide each lookup's round trip to its VMM without
+        /// opening thousands of descriptors at once.
+        const CONCURRENT: usize = 64;
+        futures::stream::iter(records)
+            .map(|record| async move {
+                let paths = Paths::new(&self.root, record.id);
+                let spec = vm_spec(
+                    record.id,
+                    record.ordinal,
+                    &record.config,
+                    &paths,
+                    &self.images,
+                );
+                let found = match record.disk {
+                    Disk::Local => self.engine.adopt(&spec).await,
+                    Disk::Remote => self.engine.clean_up(&spec).await.map(|()| None),
+                };
+                (
+                    record.id.0,
+                    found.map_err(|error| HostError::Io(error.to_string())),
+                )
+            })
+            .buffer_unordered(CONCURRENT)
+            .collect()
+            .await
     }
 
     /// Makes sure every recorded sandbox's network exists with the current
@@ -589,17 +635,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Brings one recorded sandbox back under management. Returns whether
     /// a VM was still running it.
-    async fn recover_one(&mut self, record: Record) -> Result<bool, HostError> {
+    async fn recover_one(
+        &mut self,
+        record: Record,
+        found: Result<Option<(E::Vm, Found)>, HostError>,
+    ) -> Result<bool, HostError> {
         let id = record.id;
         let policy = record.config.validate().map_err(HostError::Invalid)?;
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
-        let found = match record.disk {
-            Disk::Local => self.engine.adopt(&spec).await,
-            Disk::Remote => self.engine.clean_up(&spec).await.map(|()| None),
-        }
-        .map_err(|error| HostError::Io(error.to_string()))?;
-        let (level, memory_saved, vm) = if let Some((vm, found)) = found {
+        let (level, memory_saved, vm) = if let Some((vm, found)) = found? {
             // The VM may have run since its image was taken.
             if record.image || record.archived {
                 let stale = Change::new().image(false).archived(false);
@@ -1050,6 +1095,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     u64::try_from(running.started.elapsed().as_micros()).unwrap_or(u64::MAX);
                 stats.total_us = stats.total_us.saturating_add(micros);
                 stats.max_us = stats.max_us.max(micros);
+                tracing::debug!(%id, step = ?running.step, micros, ?outcome, "step finished");
                 match outcome {
                     Outcome::Done => stats.done += 1,
                     Outcome::Cancelled => stats.cancelled += 1,
