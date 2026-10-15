@@ -31,7 +31,8 @@ pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
 use crate::cgroup::Cgroup;
 use crate::error::{EngineError, ErrorKind};
-use crate::spec::{SnapshotFiles, VmSpec};
+use crate::profile::{MemoryProfile, PageSize, ProfileError};
+use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 use crate::{CancellationToken, Completion, Engine, Found};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
@@ -71,15 +72,52 @@ fn boot_args(requested: &str) -> String {
     }
 }
 
+/// Firecracker's name for a page size.
+fn huge_pages(pages: PageSize) -> &'static str {
+    match pages {
+        PageSize::Base => "None",
+        PageSize::Huge => "2M",
+    }
+}
+
+/// The memory part of `/machine-config` for a fresh boot.
+fn machine_config(spec: &VmSpec, profile: MemoryProfile) -> Value {
+    json!({
+        "vcpu_count": spec.vcpus,
+        "mem_size_mib": spec.memory_mib,
+        "smt": false,
+        "track_dirty_pages": profile.tracks_dirty_pages(),
+        "huge_pages": huge_pages(profile.pages),
+    })
+}
+
 /// The `/snapshot/load` request for restoring `files` as the VM in `spec`.
 ///
 /// Host-side paths and devices are taken from `spec`, not from the snapshot, so
 /// a snapshot restores the same way on another host or in another directory.
-/// Paths are the ones the jailed VMM sees.
-fn load_request(spec: &VmSpec, jail: &Jail, files: &SnapshotFiles) -> Result<Value, String> {
+/// Paths are the ones the jailed VMM sees. Page size and dirty tracking come
+/// from this host's profile, not from the host that took the snapshot: the
+/// image is plain memory either way. The profile must already allow
+/// `files.memory` (see [`check_source`]).
+fn load_request(
+    spec: &VmSpec,
+    jail: &Jail,
+    files: &RestoreFiles,
+    profile: MemoryProfile,
+) -> Result<Value, String> {
+    let backend = match &files.memory {
+        MemorySource::File(path) => {
+            json!({ "backend_type": "File", "backend_path": jail.inside(path)? })
+        }
+        MemorySource::Pager(socket) => {
+            json!({ "backend_type": "Uffd", "backend_path": jail.inside(socket)? })
+        }
+    };
     let mut body = json!({
         "snapshot_path": jail.inside(&files.state)?,
-        "mem_backend": { "backend_type": "File", "backend_path": jail.inside(&files.memory)? },
+        "mem_backend": backend,
+        "huge_pages": huge_pages(profile.pages),
+        "track_dirty_pages": profile.tracks_dirty_pages(),
         "resume_vm": false,
         "clock_realtime": true,
         "vsock_override": { "uds_path": jail.inside(&spec.vsock_path())? },
@@ -88,6 +126,29 @@ fn load_request(spec: &VmSpec, jail: &Jail, files: &SnapshotFiles) -> Result<Val
         body["network_overrides"] = json!([{ "iface_id": "eth0", "host_dev_name": network.tap }]);
     }
     Ok(body)
+}
+
+/// Refuses memory sources the profile cannot back: Firecracker maps
+/// huge-page memory only through a fault handler.
+fn check_source(memory: &MemorySource, profile: MemoryProfile) -> Result<(), ProfileError> {
+    match memory {
+        MemorySource::File(_) if profile.needs_pager() => Err(ProfileError::FileBackedHugePages),
+        _ => Ok(()),
+    }
+}
+
+/// The `/snapshot/create` request writing `files`, as the jailed VMM sees
+/// them.
+fn create_request(jail: &Jail, files: &SnapshotFiles, kind: SnapshotKind) -> Result<Value, String> {
+    Ok(json!({
+        "snapshot_type": match kind {
+            SnapshotKind::Diff => "Diff",
+            SnapshotKind::Full => "Full",
+        },
+        "snapshot_path": jail.inside(&files.state)?,
+        "mem_file_path": jail.inside(&files.memory)?,
+        "sync_snapshot_files": true,
+    }))
 }
 
 /// How [`Firecracker`] runs VMs.
@@ -111,10 +172,13 @@ pub struct Firecracker {
     /// `cgroups` relative to the cgroup v2 mount, as the jailer names it.
     cgroup_relative: PathBuf,
     startup_timeout: Duration,
+    memory: MemoryProfile,
 }
 
 impl Firecracker {
     /// Checks `config` and creates the parent cgroup.
+    /// VMs use the bare-metal memory profile unless
+    /// [`Firecracker::with_memory_profile`] says otherwise.
     pub fn new(config: FirecrackerConfig) -> io::Result<Self> {
         if config
             .firecracker
@@ -156,7 +220,15 @@ impl Firecracker {
             cgroups: Cgroup::create_parent(config.cgroup_parent)?,
             cgroup_relative,
             startup_timeout: Duration::from_secs(5),
+            memory: MemoryProfile::bare_metal(),
         })
+    }
+
+    /// Backs, saves and compresses every VM's memory as `profile` says.
+    /// Refuses an unsafe profile.
+    pub fn with_memory_profile(mut self, profile: MemoryProfile) -> Result<Self, ProfileError> {
+        self.memory = profile.validate()?;
+        Ok(self)
     }
 
     /// The VM's own cgroup; it exists only while the jailer's work does.
@@ -493,6 +565,10 @@ impl FirecrackerVm {
 impl Engine for Firecracker {
     type Vm = FirecrackerVm;
 
+    fn memory_profile(&self) -> MemoryProfile {
+        self.memory
+    }
+
     async fn boot(&self, spec: &VmSpec) -> Result<FirecrackerVm, EngineError> {
         const OP: &str = "boot";
         let owned = spec
@@ -531,11 +607,7 @@ impl Engine for Firecracker {
                 )
                 .await?;
             }
-            put(
-                "/machine-config",
-                json!({ "vcpu_count": spec.vcpus, "mem_size_mib": spec.memory_mib, "smt": false }),
-            )
-            .await?;
+            put("/machine-config", machine_config(spec, self.memory)).await?;
             if spec.free_page_reporting {
                 put(
                     "/balloon",
@@ -576,12 +648,16 @@ impl Engine for Firecracker {
     async fn restore(
         &self,
         spec: &VmSpec,
-        files: &SnapshotFiles,
+        files: &RestoreFiles,
     ) -> Result<FirecrackerVm, EngineError> {
         const OP: &str = "restore";
+        // Checked before starting a process: a refused combination is a
+        // configuration error, not a failed restore.
+        check_source(&files.memory, self.memory)
+            .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         let jail =
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let body = load_request(spec, &jail, files)
+        let body = load_request(spec, &jail, files, self.memory)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         let mut owned: Vec<PathBuf> = spec
             .drives
@@ -589,7 +665,12 @@ impl Engine for Firecracker {
             .filter(|drive| !drive.read_only)
             .map(|drive| drive.path.clone())
             .collect();
-        owned.extend([files.state.clone(), files.memory.clone()]);
+        // Saved state and memory are only read; they stay the host's, so the
+        // VMM cannot change an image it restores from. A pager's socket must
+        // be the VMM's to connect to.
+        if let MemorySource::Pager(socket) = &files.memory {
+            owned.push(socket.clone());
+        }
         let vm = self.launch(spec, OP, owned).await?;
         // A rejected image means the memory state is unusable; the disk is not
         // involved.
@@ -625,6 +706,13 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
         cancel: &CancellationToken,
     ) -> Result<Completion, EngineError> {
+        if !self.memory.compress {
+            return Err(EngineError::caused_by(
+                ErrorKind::Fatal,
+                "compress",
+                ProfileError::CompressionDisabled,
+            ));
+        }
         let cgroup = vm.cgroup.clone();
         let cancel = cancel.clone();
         let finished = tokio::task::spawn_blocking(move || {
@@ -640,8 +728,15 @@ impl Engine for Firecracker {
         })
     }
 
-    async fn snapshot(&self, vm: &FirecrackerVm, files: &SnapshotFiles) -> Result<(), EngineError> {
+    async fn snapshot(
+        &self,
+        vm: &FirecrackerVm,
+        files: &SnapshotFiles,
+        kind: SnapshotKind,
+    ) -> Result<(), EngineError> {
         const OP: &str = "snapshot";
+        // Firecracker merges a diff into an existing file of the right size,
+        // so a leftover file would silently become part of this snapshot.
         for file in [&files.state, &files.memory] {
             remove_if_present(file)
                 .await
@@ -652,11 +747,8 @@ impl Engine for Firecracker {
             ErrorKind::Transient,
             "PUT",
             "/snapshot/create",
-            &json!({
-                "snapshot_type": "Full",
-                "snapshot_path": vm.inside(OP, &files.state)?,
-                "mem_file_path": vm.inside(OP, &files.memory)?,
-            }),
+            &create_request(&vm.jail, files, kind)
+                .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?,
         )
         .await
     }
@@ -753,12 +845,13 @@ mod tests {
             network: None,
             free_page_reporting: true,
         };
-        let files = SnapshotFiles {
+        let files = RestoreFiles {
             state: format!("{jail_dir}/vm.state").into(),
-            memory: format!("{jail_dir}/vm.mem").into(),
+            memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
         };
         let jail = Jail::new(&spec).unwrap();
-        let body = load_request(&spec, &jail, &files).unwrap();
+        let bare = MemoryProfile::bare_metal();
+        let body = load_request(&spec, &jail, &files, bare).unwrap();
         assert_eq!(body["clock_realtime"], true);
         assert_eq!(body["resume_vm"], false);
         assert_eq!(body["snapshot_path"], "/vm.state");
@@ -771,16 +864,86 @@ mod tests {
             mac: "06:00:ac:10:00:02".into(),
             namespace: None,
         });
-        let body = load_request(&spec, &jail, &files).unwrap();
+        let body = load_request(&spec, &jail, &files, bare).unwrap();
         assert_eq!(
             body["network_overrides"],
             json!([{ "iface_id": "eth0", "host_dev_name": "tap0" }])
         );
 
-        let outside = SnapshotFiles {
+        let outside = RestoreFiles {
             state: "/elsewhere/vm.state".into(),
-            memory: format!("{jail_dir}/vm.mem").into(),
+            memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
         };
-        assert!(load_request(&spec, &jail, &outside).is_err());
+        assert!(load_request(&spec, &jail, &outside, bare).is_err());
+    }
+
+    fn spec() -> VmSpec {
+        VmSpec {
+            name: "a".into(),
+            dir: "/lab/vm/firecracker/a/root".into(),
+            logs: "/lab/vm/firecracker/a".into(),
+            uid: 4_000_000,
+            gid: 4_000_000,
+            vcpus: 2,
+            memory_mib: 512,
+            kernel: "/lab/vm/firecracker/a/root/vmlinux".into(),
+            boot_args: String::new(),
+            drives: Vec::new(),
+            network: None,
+            free_page_reporting: true,
+        }
+    }
+
+    #[test]
+    fn the_profile_decides_page_size_and_dirty_tracking() {
+        let bare = machine_config(&spec(), MemoryProfile::bare_metal());
+        assert_eq!(bare["track_dirty_pages"], true);
+        assert_eq!(bare["huge_pages"], "None");
+        let nested = machine_config(&spec(), MemoryProfile::nested());
+        assert_eq!(nested["track_dirty_pages"], false);
+        assert_eq!(nested["huge_pages"], "2M");
+
+        let jail = Jail::new(&spec()).unwrap();
+        let paged = RestoreFiles {
+            state: "/lab/vm/firecracker/a/root/vm.state".into(),
+            memory: MemorySource::Pager("/lab/vm/firecracker/a/root/uffd.sock".into()),
+        };
+        let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested()).unwrap();
+        assert_eq!(body["mem_backend"]["backend_type"], "Uffd");
+        assert_eq!(body["mem_backend"]["backend_path"], "/uffd.sock");
+        assert_eq!(body["huge_pages"], "2M");
+        assert_eq!(body["track_dirty_pages"], false);
+        let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal()).unwrap();
+        assert_eq!(body["huge_pages"], "None");
+        assert_eq!(body["track_dirty_pages"], true);
+    }
+
+    #[test]
+    fn huge_pages_are_never_restored_from_a_mapped_file() {
+        let mapped = MemorySource::File("/lab/vm/firecracker/a/root/vm.mem".into());
+        assert_eq!(
+            check_source(&mapped, MemoryProfile::nested()),
+            Err(ProfileError::FileBackedHugePages)
+        );
+        assert_eq!(check_source(&mapped, MemoryProfile::bare_metal()), Ok(()));
+        let paged = MemorySource::Pager("/lab/vm/firecracker/a/root/uffd.sock".into());
+        assert_eq!(check_source(&paged, MemoryProfile::nested()), Ok(()));
+    }
+
+    #[test]
+    fn snapshots_are_durable_and_name_their_kind() {
+        let jail = Jail::new(&spec()).unwrap();
+        let files = SnapshotFiles {
+            state: "/lab/vm/firecracker/a/root/diff.state".into(),
+            memory: "/lab/vm/firecracker/a/root/diff.mem".into(),
+        };
+        let diff = create_request(&jail, &files, SnapshotKind::Diff).unwrap();
+        assert_eq!(diff["snapshot_type"], "Diff");
+        assert_eq!(diff["sync_snapshot_files"], true);
+        assert_eq!(diff["mem_file_path"], "/diff.mem");
+        assert_eq!(
+            create_request(&jail, &files, SnapshotKind::Full).unwrap()["snapshot_type"],
+            "Full"
+        );
     }
 }
