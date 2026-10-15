@@ -742,7 +742,7 @@ export class DesktopShell {
       }),
     );
     handle(DESKTOP_IPC.computerPause, () => this.computer.pause());
-    handle(DESKTOP_IPC.computerResume, () => this.computer.resume());
+    handle(DESKTOP_IPC.computerResume, (account) => this.computer.resume(account.baseUrl));
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
