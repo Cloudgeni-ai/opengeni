@@ -1975,6 +1975,181 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  test("an interrupted launch is set aside intact only when no browser runs its profile", async () => {
+    await withInterruptedLaunchFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      const profileDirectory = join(sessionDirectory, "profile");
+      await writeFile(join(profileDirectory, "synthetic-profile-state"), "retained");
+      let profileUnused = false;
+      const proofs: string[] = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        assertProfileUnused: async (profile) => {
+          proofs.push(profile);
+          if (!profileUnused) throw new Error("synthetic profile owner");
+        },
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        // The launch never recorded completion, so it can't be adopted, and
+        // ordinary cleanup keeps refusing because its profile was retained.
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow("preserved");
+        await expect(supervisor.endSession(exact, { removeState: true })).rejects.toThrow(
+          "preserved",
+        );
+        // Setting aside needs removeState, the exact generation and a proof
+        // that no browser runs the profile; otherwise nothing moves.
+        await expect(
+          supervisor.endSession(exact, { setAsideInterruptedLaunch: true }),
+        ).rejects.toThrow("preserved");
+        await expect(
+          supervisor.endSession(
+            { ...exact, controllerGeneration: "controller-other" },
+            { removeState: true, setAsideInterruptedLaunch: true },
+          ),
+        ).rejects.toThrow("preserved");
+        await expect(
+          supervisor.endSession(exact, { removeState: true, setAsideInterruptedLaunch: true }),
+        ).rejects.toThrow("preserved");
+        expect(proofs).toEqual([profileDirectory]);
+        expect(await readFile(join(profileDirectory, "synthetic-profile-state"), "utf8")).toBe(
+          "retained",
+        );
+
+        profileUnused = true;
+        const identity = await stat(sessionDirectory);
+        await supervisor.endSession(exact, { removeState: true, setAsideInterruptedLaunch: true });
+        const setAside = join(
+          rootDirectory,
+          "set-aside",
+          options.browserSessionId,
+          options.controllerGeneration,
+        );
+        expect(await exists(sessionDirectory)).toBe(false);
+        // The whole directory moved as is: same inode, profile bytes and receipts.
+        expect((await stat(setAside)).ino).toBe(identity.ino);
+        expect(await readFile(join(setAside, "profile", "synthetic-profile-state"), "utf8")).toBe(
+          "retained",
+        );
+        const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+          { ...exact, sessionDirectory: setAside },
+          true,
+        );
+        try {
+          expect(journal.latest()).toMatchObject({
+            intent: "launch",
+            state: "dispatched",
+            process: null,
+          });
+        } finally {
+          journal.close();
+        }
+
+        // A retry finds nothing left, which the control plane treats as ended,
+        // and never touches the set-aside copy.
+        await expect(
+          supervisor.endSession(exact, { removeState: true, setAsideInterruptedLaunch: true }),
+        ).rejects.toMatchObject({ code: "resource_not_found" });
+        // The same browser can launch again under a new generation.
+        const next = await supervisor.createSession({
+          ...options,
+          controllerGeneration: "controller-97",
+        });
+        expect(next.controllerGeneration).toBe("controller-97");
+        expect(await readFile(join(setAside, "profile", "synthetic-profile-state"), "utf8")).toBe(
+          "retained",
+        );
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("a completed launch is never set aside", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const proofs: string[] = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        assertProfileUnused: async (profile) => {
+          proofs.push(profile);
+        },
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+        await expect(
+          supervisor.endSession(
+            {
+              browserSessionId: options.browserSessionId,
+              controllerGeneration: options.controllerGeneration,
+            },
+            { removeState: true, setAsideInterruptedLaunch: true },
+          ),
+        ).rejects.toThrow("preserved");
+        expect(proofs).toEqual([]);
+        expect(await exists(join(sessionDirectory, "working-runtime.sqlite"))).toBe(true);
+        expect(await exists(join(rootDirectory, "set-aside"))).toBe(false);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("an existing set-aside copy is never overwritten", async () => {
+    await withInterruptedLaunchFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      await writeFile(join(sessionDirectory, "profile", "synthetic-profile-state"), "current");
+      // A copy of this generation was already set aside (for example by an
+      // earlier attempt whose session directory was later recreated).
+      const setAside = join(
+        rootDirectory,
+        "set-aside",
+        options.browserSessionId,
+        options.controllerGeneration,
+      );
+      await mkdir(join(setAside, "profile"), { recursive: true });
+      await writeFile(join(setAside, "profile", "synthetic-profile-state"), "retained earlier");
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        await expect(
+          supervisor.endSession(
+            {
+              browserSessionId: options.browserSessionId,
+              controllerGeneration: options.controllerGeneration,
+            },
+            { removeState: true, setAsideInterruptedLaunch: true },
+          ),
+        ).rejects.toThrow("preserved");
+        // Both copies stay exactly where and as they were.
+        expect(
+          await readFile(join(sessionDirectory, "profile", "synthetic-profile-state"), "utf8"),
+        ).toBe("current");
+        expect(await exists(join(sessionDirectory, "working-runtime.sqlite"))).toBe(true);
+        expect(await readFile(join(setAside, "profile", "synthetic-profile-state"), "utf8")).toBe(
+          "retained earlier",
+        );
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   test("update idle proof admits quiescent preserved sessions and blocks in-flight or unrecoverable ones", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
       const dispatched = deferred(),
@@ -2674,6 +2849,42 @@ async function withWorkingCrashFixture(
     const result = JSON.parse(stdout) as { created: boolean; action: BrowserActionCommand };
     expect(result.created).toBe(true);
     await fn({ options, action: result.action, rootDirectory, socketRootDirectory });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/** A controller that wrote its launch receipt and then died before the
+ * browser launch recorded completion (for example the machine went down). */
+async function withInterruptedLaunchFixture(
+  fn: (fixture: {
+    options: Parameters<BrowserSupervisor["createSession"]>[0];
+    rootDirectory: string;
+    socketRootDirectory: string;
+  }) => Promise<void>,
+) {
+  const directory = await mkdtemp("/tmp/ogi-");
+  const rootDirectory = join(directory, "state"),
+    socketRootDirectory = join(directory, "sockets");
+  const options = { ...reference(96), headed: false, workingRuntimeAuthority: workingAuthority };
+  const childPath = join(directory, "interrupted-controller.ts");
+  const script = `import {BrowserSupervisor} from ${JSON.stringify(new URL("../src/supervisor.ts", import.meta.url).href)};
+    const supervisor=await BrowserSupervisor.open({rootDirectory:${JSON.stringify(rootDirectory)},socketRootDirectory:${JSON.stringify(socketRootDirectory)},
+      createDriver:async()=>{console.log(JSON.stringify({interrupted:true}));process.exit(0)}});
+    await supervisor.createSession(${JSON.stringify(options)});
+    process.exit(3);`;
+  await writeFile(childPath, script, { mode: 0o600 });
+  try {
+    const child = Bun.spawn([process.execPath, childPath], { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({ interrupted: true });
+    await fn({ options, rootDirectory, socketRootDirectory });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

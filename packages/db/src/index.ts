@@ -69,6 +69,8 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
+export { effectiveSessionPolicyQuery } from "./session-execution-policy";
+
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   parseSecretReference,
@@ -513,6 +515,8 @@ export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./site-data";
 export * from "./site-publishing";
+export { withSiteRuntimeAdmission } from "./site-runtime-admission";
+export * from "./site-platform";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
 export * from "./site-sql";
@@ -31703,6 +31707,38 @@ async function withCurrentSessionInputWait(
       row.status === "idle" && !row.activeTurnId && row.inputWaitTurnId && row.inputWaitUntil,
   );
   if (!candidates.length) return rows.map((row) => ({ ...row, currentInputWait: null }));
+  const matches = await currentSessionInputWaitTurnsQuery(
+    db,
+    workspaceId,
+    candidates.map((row) => row.id),
+  );
+  const byId = new Map(matches.map((row) => [row.id, row.turnId]));
+  return rows.map((row) => ({
+    ...row,
+    currentInputWait:
+      row.status === "idle" &&
+      !row.activeTurnId &&
+      row.inputWaitUntil &&
+      row.inputWaitReason &&
+      row.inputWaitTurnId &&
+      byId.get(row.id) === row.inputWaitTurnId
+        ? { deadlineAt: row.inputWaitUntil.toISOString(), reason: row.inputWaitReason }
+        : null,
+  }));
+}
+
+/**
+ * Each listed session's newest finished turn that decides its held wait. The
+ * lateral walks `session_turns_finished_order_idx` newest-first and stops at
+ * the first match, and probes consumed machine input through
+ * `session_system_updates_delivered_turn_idx`, so a long session costs about
+ * the same as a new one. Call inside the caller's RLS scope.
+ */
+export function currentSessionInputWaitTurnsQuery(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+) {
   const latest = db
     .select({ id: schema.sessionTurns.id })
     .from(schema.sessionTurns)
@@ -31721,32 +31757,16 @@ async function withCurrentSessionInputWait(
     )
     .limit(1)
     .as("latest_wait_turn");
-  const matches = await db
+  return db
     .select({ id: schema.sessions.id, turnId: latest.id })
     .from(schema.sessions)
     .leftJoinLateral(latest, sql`true`)
     .where(
       and(
         eq(schema.sessions.workspaceId, workspaceId),
-        inArray(
-          schema.sessions.id,
-          candidates.map((row) => row.id),
-        ),
+        inArray(schema.sessions.id, [...sessionIds]),
       ),
     );
-  const byId = new Map(matches.map((row) => [row.id, row.turnId]));
-  return rows.map((row) => ({
-    ...row,
-    currentInputWait:
-      row.status === "idle" &&
-      !row.activeTurnId &&
-      row.inputWaitUntil &&
-      row.inputWaitReason &&
-      row.inputWaitTurnId &&
-      byId.get(row.id) === row.inputWaitTurnId
-        ? { deadlineAt: row.inputWaitUntil.toISOString(), reason: row.inputWaitReason }
-        : null,
-  }));
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   createDb,
   createOrganizationApiKey,
   createSession,
+  createSiteViewerSession,
   createWorkspace,
   ensureExternalIdentity,
   type DbClient,
@@ -547,19 +548,20 @@ test("limits refuse past the monthly write cap and the storage cap", async () =>
   expect(counted.json.rows).toEqual([{ n: stored }]);
 }, 120_000);
 
-test("free, credits and unlimited profiles shape the limits", () => {
+test("standard, credits and unlimited profiles shape the limits", () => {
   const settings = testSettings({ sitesCreditsLimitMultiplier: 10 } as Partial<Settings>);
-  const free = siteSqlLimits(settings, "free");
-  expect(free).toMatchObject({
-    storageBytesPerSite: 50 * 1024 * 1024,
-    rowsReadPerSitePerMonth: 5_000_000,
-    rowsWrittenPerSitePerMonth: 100_000,
+  const standard = siteSqlLimits(settings, "standard");
+  // Rows are platform usage per workspace now: no per-Site row quotas by default.
+  expect(standard).toMatchObject({
+    storageBytesPerSite: 5 * 1024 * 1024 * 1024,
+    rowsReadPerSitePerMonth: null,
+    rowsWrittenPerSitePerMonth: null,
     callsPerMinutePerViewer: 60,
     maxRowsPerCall: 1_000,
   });
+  expect(siteSqlLimits(settings, "free")).toEqual(standard);
   expect(siteSqlLimits(settings, "credits")).toMatchObject({
-    storageBytesPerSite: 500 * 1024 * 1024,
-    rowsWrittenPerSitePerMonth: 1_000_000,
+    rowsWrittenPerSitePerMonth: null,
     callsPerMinutePerViewer: 600,
   });
   expect(siteSqlLimits(settings, "unlimited")).toMatchObject({
@@ -568,7 +570,22 @@ test("free, credits and unlimited profiles shape the limits", () => {
     storageBytesPerSite: 5 * 1024 * 1024 * 1024,
     callsPerMinutePerViewer: 600,
   });
-  expect(siteSqlLimits(settings, "custom")).toEqual(free);
+  expect(siteSqlLimits(settings, "custom")).toEqual(standard);
+  // Optional per-Site quotas still apply when configured, multiplied by credits.
+  const quotas = testSettings({
+    sitesCreditsLimitMultiplier: 10,
+    sitesSqlFreeRowsReadPerMonth: 5_000_000,
+    sitesSqlFreeRowsWrittenPerMonth: 100_000,
+    sitesSqlFreeStorageBytes: 50 * 1024 * 1024,
+  } as Partial<Settings>);
+  expect(siteSqlLimits(quotas, "standard")).toMatchObject({
+    rowsReadPerSitePerMonth: 5_000_000,
+    rowsWrittenPerSitePerMonth: 100_000,
+  });
+  expect(siteSqlLimits(quotas, "credits")).toMatchObject({
+    storageBytesPerSite: 500 * 1024 * 1024,
+    rowsWrittenPerSitePerMonth: 1_000_000,
+  });
 });
 
 test("published hosts run named queries as the verified viewer; guests only everyone", async () => {
@@ -710,8 +727,10 @@ test("published hosts run named queries as the verified viewer; guests only ever
   const guestVote = await run("cast_vote", { poll: "lunch", choice: "soup" }, guest);
   expect(guestVote.status).toBe(403);
   expect(guestVote.json.error.details).toMatchObject({
-    code: "forbidden",
+    code: "not_available_for_viewer",
+    feature: "site_sql",
     reason: "sign_in_required",
+    legacyCode: "forbidden",
   });
   const guestMine = await run("my_vote", {}, guest);
   expect(guestMine.status).toBe(403);
@@ -776,7 +795,9 @@ test("published hosts run named queries as the verified viewer; guests only ever
 
   // The publication's limit profile decides the Site SQL limits.
   expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
-    rowsReadPerSitePerMonth: 5_000_000,
+    rowsReadPerSitePerMonth: null,
+    storageBytesPerSite: 5 * 1024 * 1024 * 1024,
+    callsPerMinutePerSite: 600,
   });
   const unlimited = await f.app.request(`${f.base}/${siteId}/publication`, {
     method: "PUT",
@@ -787,6 +808,7 @@ test("published hosts run named queries as the verified viewer; guests only ever
   expect((await s.request(f.owner, "GET", "")).json.limits).toMatchObject({
     rowsReadPerSitePerMonth: null,
     rowsWrittenPerSitePerMonth: null,
+    callsPerMinutePerSite: 6_000,
   });
 }, 120_000);
 
@@ -832,8 +854,15 @@ async function agentTools(
     metadata?: Record<string, unknown>;
     surface?: string | null;
     parentSessionId?: string;
+    /** Attach to this existing session (a Site agent conversation) and its first turn. */
+    existingSessionId?: string;
+    /** The session's first-party tool selection (SQL_TOOLS by default). */
+    tools?: readonly string[];
+    permissions?: AccessGrant["permissions"];
   } = {},
 ) {
+  if (options.existingSessionId)
+    return await attachAgentTools(f, options.existingSessionId, options);
   const session = await createSession(db.db, {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
@@ -878,18 +907,60 @@ async function agentTools(
         WHERE id = ${session.id}`;
     });
   }
+  return await connectAgentTools(f, { id: session.id }, turn!.id, attemptId, 1, options);
+}
+
+/** An agent attempt on an existing session: its first turn runs this attempt. */
+async function attachAgentTools(
+  f: Awaited<ReturnType<typeof fixture>>,
+  sessionId: string,
+  options: { tools?: readonly string[]; permissions?: AccessGrant["permissions"] },
+) {
+  const [turn] = await shared.admin<{ id: string }[]>`
+    select id from session_turns where session_id = ${sessionId} order by position limit 1`;
+  const attemptId = crypto.randomUUID();
+  await shared.admin.begin(async (tx) => {
+    // Stage the queued turn as running in generation 1, as the worker would.
+    await tx`set local session_replication_role = replica`;
+    await tx`UPDATE session_turns SET status = 'running', execution_generation = 1
+      WHERE id = ${turn!.id}`;
+  });
+  await shared.admin.begin(async (tx) => {
+    await tx`UPDATE sessions SET active_turn_id = ${turn!.id} WHERE id = ${sessionId}`;
+    await tx`UPDATE session_turns SET active_attempt_id = ${attemptId} WHERE id = ${turn!.id}`;
+    await tx`
+      INSERT INTO session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) VALUES (
+        ${attemptId}, ${f.accountId}, ${f.workspace.id}, ${sessionId}, ${turn!.id}, 1,
+        'running', 'site-sql-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
+      )`;
+  });
+  return await connectAgentTools(f, { id: sessionId }, turn!.id, attemptId, 1, options);
+}
+
+async function connectAgentTools(
+  f: Awaited<ReturnType<typeof fixture>>,
+  session: { id: string },
+  turnId: string,
+  attemptId: string,
+  executionGeneration: number,
+  options: { tools?: readonly string[]; permissions?: AccessGrant["permissions"] },
+) {
   const grant: AccessGrant = {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
     subjectId: "worker:first-party-mcp",
-    permissions: ["artifacts:read", "artifacts:publish"],
+    permissions: options.permissions ?? ["artifacts:read", "artifacts:publish"],
     principalKind: "agent_attempt",
     metadata: {
       sessionId: session.id,
-      turnId: turn!.id,
+      turnId,
       attemptId,
-      executionGeneration: 1,
-      firstPartyMcpTools: SQL_TOOLS,
+      executionGeneration,
+      firstPartyMcpTools: options.tools ?? SQL_TOOLS,
     },
   };
   const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, grant);
@@ -1023,13 +1094,21 @@ test("agents started from a Site page run only the queries the page could", asyn
   const origin = { _opengeniSiteOrigin: { siteId, title: "Notes" } };
 
   const checkClamped = async (agent: Awaited<ReturnType<typeof agentTools>>, note: string) => {
+    const read = await agent.callTool("site_sql_query", { siteId, sql: "SELECT * FROM notes" });
+    expect(read.isError).toBe(false);
+    const crossSite = await agent.callTool("site_sql_query", {
+      siteId: otherId,
+      sql: "SELECT * FROM notes",
+    });
+    expect(crossSite.value.error.code).toBe("forbidden");
+    const write = await agent.callTool("site_sql_query", { siteId, sql: "DELETE FROM notes" });
+    expect(write.value.error.code).toBe("validation");
     // Every management tool refuses an agent started from the page.
     for (const [tool, args] of [
       ["site_sql_inspect", {}],
       ["site_sql_enable", { enabled: false }],
       ["site_sql_migrate", { name: "more", sql: "CREATE TABLE more (a);" }],
       ["site_sql_define_query", { name: "x", sql: "SELECT 1 AS one" }],
-      ["site_sql_query", { sql: "SELECT * FROM notes" }],
       ["site_sql_execute", { sql: "DELETE FROM notes" }],
       ["site_sql_export", { format: "json" }],
       ["site_sql_import", { format: "json", table: "notes", rows: [{ who: "x", note: "y" }] }],
@@ -1101,6 +1180,291 @@ test("agents started from a Site page run only the queries the page could", asyn
     await plain.mcp.close();
   }
 }, 120_000);
+
+test("a Site's own agent gets the Site's data tools, pinned to the Site and acting as the viewer", async () => {
+  const f = await fixture({
+    ...SQL_SETTINGS,
+    sitesDomain: DOMAIN,
+    delegationSecret: randomBytes(32).toString("hex"),
+    sessionUsageLimitsEnabled: true,
+  } as Partial<Settings>);
+  const siteId = await f.publish("Team notes");
+  const otherId = await f.publish("Other team notes");
+  for (const id of [siteId, otherId]) {
+    const s = f.sql(id);
+    expect((await s.enable(f.owner)).status).toBe(200);
+    expect(
+      (await s.migrate(f.owner, "init", "CREATE TABLE notes (who TEXT NOT NULL, note TEXT);"))
+        .status,
+    ).toBe(201);
+    for (const [name, definition] of [
+      [
+        "add",
+        { sql: "INSERT INTO notes (who, note) VALUES (:viewer, :note)", audience: "signed_in" },
+      ],
+      ["mine", { sql: "SELECT note FROM notes WHERE who = :viewer ORDER BY rowid" }],
+      ["board", { sql: "SELECT note FROM notes ORDER BY rowid", audience: "everyone" }],
+      ["everything", { sql: "SELECT who, note FROM notes ORDER BY rowid", audience: "managers" }],
+    ] as const)
+      expect((await s.define(f.owner, name, definition)).status).toBe(201);
+  }
+  // A per-viewer collection guests may add to and read their own records of.
+  const defined = await f.app.request(`${f.base}/${siteId}/data/collections/wishes`, {
+    method: "PUT",
+    headers: f.owner.headers,
+    body: JSON.stringify({ accessMode: "per_viewer", guestAccess: "own" }),
+  });
+  expect(defined.status, await defined.clone().text()).toBeLessThan(300);
+
+  const invitedEmail = "invited@example.com";
+  const published = await f.app.request(`${f.base}/${siteId}/publication`, {
+    method: "PUT",
+    headers: f.admin.headers,
+    body: JSON.stringify({
+      access: "public",
+      invitedEmails: [invitedEmail],
+      agent: { enabled: true },
+    }),
+  });
+  expect(published.status, await published.clone().text()).toBe(201);
+  const host = String(((await published.json()) as { hostname: string }).hostname);
+  const gateway = async (
+    method: string,
+    path: string,
+    who: { visitor?: string; session?: string },
+    body?: unknown,
+  ) => {
+    const pathWithQuery = `/v1/site-runtime${path}`;
+    const text = body === undefined ? "" : JSON.stringify(body);
+    const signed = signSiteGatewayRequest({
+      secret: SECRET,
+      method,
+      pathWithQuery,
+      host,
+      body: text,
+      ...who,
+      clientIp: "198.51.100.9",
+    });
+    const response = await f.app.request(pathWithQuery, {
+      method,
+      headers: { ...signed, ...(text ? { "content-type": "application/json" } : {}) },
+      ...(text ? { body: text } : {}),
+    });
+    return { status: response.status, json: (await response.json().catch(() => null)) as any };
+  };
+  // A workspace member signs in on the Site.
+  const verifier = randomBytes(32).toString("base64url");
+  const authorized = await f.app.request("/v1/site-auth/authorize", {
+    method: "POST",
+    headers: f.member.headers,
+    body: JSON.stringify({
+      host,
+      state: randomBytes(16).toString("base64url"),
+      codeChallenge: createHash("sha256").update(verifier).digest("base64url"),
+      codeChallengeMethod: "S256",
+      redirectUri: `https://${host}${SITE_GATEWAY_CALLBACK_PATH}`,
+    }),
+  });
+  expect(authorized.status, await authorized.clone().text()).toBe(200);
+  const exchanged = await gateway(
+    "POST",
+    "/auth/exchange",
+    {},
+    {
+      code: new URL(
+        ((await authorized.json()) as { redirectTo: string }).redirectTo,
+      ).searchParams.get("code"),
+      codeVerifier: verifier,
+      redirectUri: `https://${host}${SITE_GATEWAY_CALLBACK_PATH}`,
+    },
+  );
+  expect(exchanged.status, JSON.stringify(exchanged.json)).toBe(200);
+  // An invited person from outside the workspace.
+  const invitedSubject = `site-invited-${crypto.randomUUID()}`;
+  const invitedToken = randomBytes(32).toString("base64url");
+  await createSiteViewerSession(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    {
+      siteId,
+      tokenHash: createHash("sha256").update(invitedToken).digest("hex"),
+      subjectId: invitedSubject,
+      kind: "invited",
+      email: invitedEmail,
+      displayName: "Invited",
+      absoluteSeconds: 3_600,
+    },
+  );
+  const guestVisitor = randomBytes(18).toString("base64url");
+  const viewers = {
+    member: {
+      who: { session: String(exchanged.json.sessionToken) },
+      principal: `user:${f.member.subjectId}`,
+      tools: ["site_data_query", "site_data_write", "site_sql_query", "site_sql_run"],
+    },
+    invited: {
+      who: { session: invitedToken },
+      principal: `user:${invitedSubject}`,
+      tools: ["site_data_query", "site_data_write", "site_sql_run"],
+    },
+    guest: {
+      who: { visitor: guestVisitor },
+      principal: `guest:${guestVisitor}`,
+      tools: ["site_data_query", "site_data_write", "site_sql_run"],
+    },
+  };
+  const MANAGEMENT: [string, Record<string, unknown>][] = [
+    ["site_sql_inspect", {}],
+    ["site_sql_enable", { enabled: false }],
+    ["site_sql_migrate", { name: "more", sql: "CREATE TABLE more (a);" }],
+    ["site_sql_define_query", { name: "x", sql: "SELECT 1 AS one" }],
+    ["site_sql_execute", { sql: "DELETE FROM notes" }],
+    ["site_sql_export", { format: "json" }],
+    ["site_sql_reset", { confirm: true }],
+    ["site_data_describe", {}],
+    ["site_data_define_collection", { name: "x", accessMode: "shared" }],
+    ["site_data_export", { collection: "wishes" }],
+    ["site_data_reset", { collection: "wishes", confirm: true }],
+    ["site_files_list", {}],
+  ];
+  for (const [kind, viewer] of Object.entries(viewers)) {
+    const created = await gateway("POST", "/sessions", viewer.who, { initialMessage: "Hello" });
+    expect({ kind, status: created.status, body: created.json }).toMatchObject({
+      kind,
+      status: 202,
+    });
+    const sessionId = String(created.json.id);
+    const [row] = await shared.admin`select first_party_mcp_tools, first_party_mcp_permissions,
+        sandbox_backend from sessions where id = ${sessionId}`;
+    // Exactly the Site's own data tools for this viewer, and no sandbox.
+    expect({ kind, tools: [...row!.first_party_mcp_tools].sort() }).toEqual({
+      kind,
+      tools: viewer.tools,
+    });
+    expect(row!.sandbox_backend).toBe("none");
+    expect([...(row!.first_party_mcp_permissions ?? [])].sort()).toEqual([
+      "artifacts:publish",
+      "artifacts:read",
+    ]);
+
+    // The agent's tools, as the worker would hold them; management tools are
+    // also listed here to prove the server refuses them for a Site agent.
+    const agent = await agentTools(f, {
+      existingSessionId: sessionId,
+      tools: [
+        ...SQL_TOOLS,
+        ...MANAGEMENT.map(([tool]) => tool),
+        "site_data_query",
+        "site_data_write",
+      ],
+    });
+    try {
+      const ok = async (tool: string, args: Record<string, unknown>) => {
+        const result = await agent.callTool(tool, { siteId, ...args });
+        expect({ kind, tool, isError: result.isError, value: result.value }).toMatchObject({
+          kind,
+          tool,
+          isError: false,
+        });
+        return result.value;
+      };
+      const refused = async (tool: string, args: Record<string, unknown>, site = siteId) => {
+        const result = await agent.callTool(tool, { siteId: site, ...args });
+        expect({ kind, tool, isError: result.isError }).toEqual({ kind, tool, isError: true });
+        return result.value?.error;
+      };
+      // Named queries run as the viewer: :viewer is the conversation's viewer.
+      if (kind === "guest") {
+        const signInFirst = await refused("site_sql_run", { name: "add", params: { note: "x" } });
+        expect(signInFirst).toMatchObject({ code: "forbidden" });
+        expect(JSON.stringify(signInFirst)).toContain("sign_in_required");
+      } else {
+        await ok("site_sql_run", { name: "add", params: { note: `from ${kind}` } });
+        expect((await ok("site_sql_run", { name: "mine" })).rows).toEqual([
+          { note: `from ${kind}` },
+        ]);
+      }
+      expect((await ok("site_sql_run", { name: "board" })).rows.length).toBeGreaterThan(0);
+      expect(await refused("site_sql_run", { name: "everything" })).toMatchObject({
+        code: "forbidden",
+      });
+      // Members also read the database with SQL; nobody writes with it.
+      if (kind === "member") {
+        expect(
+          (await ok("site_sql_query", { sql: "SELECT count(*) AS n FROM notes" })).rows,
+        ).toEqual([{ n: 1 }]);
+        expect(await refused("site_sql_query", { sql: "DELETE FROM notes" })).toMatchObject({
+          code: "validation",
+        });
+      } else {
+        expect(await refused("site_sql_query", { sql: "SELECT 1 AS one" })).toMatchObject({
+          code: "forbidden",
+        });
+      }
+      // Site Data under the viewer's own access rules: records belong to the viewer.
+      await ok("site_data_write", {
+        operations: [{ op: "insert", collection: "wishes", data: { wish: kind } }],
+      });
+      const wishes = await ok("site_data_query", { collection: "wishes" });
+      expect(wishes.records.map((record: { owner: string }) => record.owner)).toEqual([
+        viewer.principal,
+      ]);
+      // Never another Site, never management.
+      for (const tool of ["site_sql_run", "site_data_query"])
+        expect(
+          await refused(
+            tool,
+            tool === "site_sql_run" ? { name: "board" } : { collection: "wishes" },
+            otherId,
+          ),
+        ).toMatchObject({ code: "forbidden" });
+      for (const [tool, args] of MANAGEMENT)
+        expect({ tool, error: await refused(tool, args) }).toMatchObject({
+          tool,
+          error: { code: "forbidden" },
+        });
+      // Direct database changes deliberately skip cancellation entirely: live
+      // tool authority must not depend on best-effort session cancellation.
+      if (kind !== "member") {
+        if (kind === "invited")
+          await shared.admin`update site_publications set access = 'invited', invited_emails = '[]'::jsonb where site_id = ${siteId}`;
+        else
+          await shared.admin`update site_publications set access = 'members' where site_id = ${siteId}`;
+        try {
+          for (const [tool, args] of [
+            ["site_sql_run", { name: "board" }],
+            ["site_data_query", { collection: "wishes" }],
+            [
+              "site_data_write",
+              { operations: [{ op: "insert", collection: "wishes", data: { wish: "revoked" } }] },
+            ],
+          ] as const)
+            expect(await refused(tool, args)).toMatchObject({ code: "forbidden" });
+        } finally {
+          await shared.admin`update site_publications set access = 'public', invited_emails = ${shared.admin.json([invitedEmail])}::jsonb where site_id = ${siteId}`;
+        }
+      }
+    } finally {
+      await agent.mcp.close();
+    }
+  }
+  // The members' and invited person's notes carry their own principals.
+  const stored = await f.sql(siteId).request(f.owner, "POST", "/query", {
+    sql: "SELECT who FROM notes ORDER BY rowid",
+  });
+  expect(stored.json.rows).toEqual([
+    { who: viewers.member.principal },
+    { who: viewers.invited.principal },
+  ]);
+  // An ordinary agent of the owner is unaffected: manager reach on any Site.
+  const plain = await agentTools(f);
+  try {
+    const everything = await plain.callTool("site_sql_run", { siteId, name: "everything" });
+    expect(everything.isError, JSON.stringify(everything.value)).toBe(false);
+  } finally {
+    await plain.mcp.close();
+  }
+}, 180_000);
 
 /** Calls the API makes to the gateway while `fn` runs: the operation and its JSON body. */
 async function gatewayCalls(fn: () => Promise<unknown>) {

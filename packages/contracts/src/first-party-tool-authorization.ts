@@ -278,6 +278,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   site_files_delete: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_publication_get: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_publication_update: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_publication_apply_fix: { sessionRequired: true, allOf: ["artifacts:publish"] },
   site_hostname_check: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_sql_inspect: { sessionRequired: true, allOf: ["artifacts:read"] },
   site_sql_enable: { sessionRequired: true, allOf: ["artifacts:publish"] },

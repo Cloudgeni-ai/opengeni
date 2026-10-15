@@ -1,14 +1,16 @@
 import {
-  DEFAULT_FREE_SITE_LIMITS,
+  DEFAULT_SITE_LIMITS,
   SITE_HOSTNAME_PROBLEM_MESSAGES,
-  UNLIMITED_SITE_FLOOD_BRAKES,
+  SITE_PLATFORM_BRAKE_ERROR_CODE,
+  SITE_PLATFORM_QUOTA_ERROR_CODE,
   siteHostnameLabelProblem,
   suggestSiteHostnameLabel,
   type SiteAccessMode,
   type SiteHostnameAvailability,
-  type SiteLimitProfileKind,
   type SiteLimits,
+  type SitePlatformMeter,
   type SitePublication,
+  type SitePublishWarning,
   type UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
 
@@ -130,50 +132,6 @@ export const ACCESS_CHOICES: readonly {
   },
 ];
 
-export const LIMIT_PROFILE_OPTIONS: readonly { value: SiteLimitProfileKind; label: string }[] = [
-  { value: "free", label: "Free" },
-  { value: "credits", label: "Credits" },
-  { value: "unlimited", label: "Unlimited" },
-  { value: "custom", label: "Custom" },
-];
-
-export function limitProfileDescription(kind: SiteLimitProfileKind): string {
-  switch (kind) {
-    case "free":
-      return "Strict limits that keep a busy Site cheap.";
-    case "credits":
-      return "Larger limits, paid from your organization's credits.";
-    case "unlimited":
-      return "No spending caps. Flood protection and a cap per conversation still apply.";
-    case "custom":
-      return "Your own limits. Leave a field empty for no limit.";
-  }
-}
-
-/** The limits the page can say for sure for a profile; null when only the server knows. */
-export function knownLimits(
-  kind: SiteLimitProfileKind,
-  saved: SitePublication | null,
-  overrides: Partial<SiteLimits>,
-): SiteLimits | null {
-  if (saved && saved.limitProfile.kind === kind && kind !== "custom") return saved.effectiveLimits;
-  if (kind === "free") return { ...DEFAULT_FREE_SITE_LIMITS };
-  if (kind === "custom") return { ...DEFAULT_FREE_SITE_LIMITS, ...overrides };
-  if (kind === "unlimited")
-    return {
-      ...DEFAULT_FREE_SITE_LIMITS,
-      requestsPerMinutePerVisitor: UNLIMITED_SITE_FLOOD_BRAKES.requestsPerMinutePerVisitor,
-      guestWritesPerMinute: null,
-      conversationsPerVisitorPerDay: null,
-      conversationsPerSitePerDay: UNLIMITED_SITE_FLOOD_BRAKES.conversationsPerSitePerDay,
-      turnsPerConversation: null,
-      agentMicrosPerConversation: UNLIMITED_SITE_FLOOD_BRAKES.agentMicrosPerConversation,
-      agentMicrosPerVisitorPerDay: null,
-      agentMicrosPerSitePerMonth: null,
-    };
-  return null;
-}
-
 export function formatUsdMicros(micros: number): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -182,54 +140,6 @@ export function formatUsdMicros(micros: number): string {
     maximumFractionDigits: micros > 0 && micros < 10_000 ? 4 : 2,
   }).format(micros / 1_000_000);
 }
-
-/** The few numbers that decide what a Site can cost, in words. */
-export function limitSummary(limits: SiteLimits): { label: string; value: string }[] {
-  const count = (value: number | null, unit: string) =>
-    value === null ? "No limit" : `${value.toLocaleString("en-US")} ${unit}`;
-  const money = (value: number | null, unit: string) =>
-    value === null ? "No limit" : `${formatUsdMicros(value)} ${unit}`;
-  return [
-    {
-      label: "Conversations",
-      value: [
-        count(limits.conversationsPerVisitorPerDay, "per visitor a day"),
-        count(limits.conversationsPerSitePerDay, "per Site a day"),
-      ].join(", "),
-    },
-    { label: "Messages", value: count(limits.turnsPerConversation, "per conversation") },
-    {
-      label: "Agent spend",
-      value: [
-        money(limits.agentMicrosPerConversation, "per conversation"),
-        money(limits.agentMicrosPerVisitorPerDay, "per visitor a day"),
-        money(limits.agentMicrosPerSitePerMonth, "per month"),
-      ].join(", "),
-    },
-  ];
-}
-
-/** Custom-profile fields people edit, money in dollars. */
-export const CUSTOM_LIMIT_FIELDS: readonly {
-  key: keyof Pick<
-    SiteLimits,
-    | "conversationsPerVisitorPerDay"
-    | "conversationsPerSitePerDay"
-    | "turnsPerConversation"
-    | "agentMicrosPerConversation"
-    | "agentMicrosPerVisitorPerDay"
-    | "agentMicrosPerSitePerMonth"
-  >;
-  label: string;
-  money: boolean;
-}[] = [
-  { key: "conversationsPerVisitorPerDay", label: "Conversations per visitor a day", money: false },
-  { key: "conversationsPerSitePerDay", label: "Conversations per Site a day", money: false },
-  { key: "turnsPerConversation", label: "Messages per conversation", money: false },
-  { key: "agentMicrosPerConversation", label: "Spend per conversation", money: true },
-  { key: "agentMicrosPerVisitorPerDay", label: "Spend per visitor a day", money: true },
-  { key: "agentMicrosPerSitePerMonth", label: "Spend per month", money: true },
-];
 
 export function limitFieldText(value: number | null | undefined, money: boolean): string {
   if (value === null || value === undefined) return "";
@@ -247,6 +157,19 @@ export function parseLimitField(text: string, money: boolean): number | null | u
   return Number.isInteger(value) ? value : undefined;
 }
 
+/** "Limit: [$10] per [month]" and "[amount] per [day]": the two spend periods a limit can use. */
+export type SpendPeriod = "day" | "month";
+
+export const SPEND_PERIOD_OPTIONS: readonly { value: SpendPeriod; label: string }[] = [
+  { value: "day", label: "day" },
+  { value: "month", label: "month" },
+];
+
+/** Invited and public Sites have people outside the workspace; members-only Sites don't. */
+export function hasOutsideViewers(access: SiteAccessMode): boolean {
+  return access !== "members";
+}
+
 export type SitePublishDraft = {
   label: string;
   access: SiteAccessMode;
@@ -254,53 +177,134 @@ export type SitePublishDraft = {
   agentEnabled: boolean;
   /** null uses the workspace default model. */
   agentModel: string | null;
-  /** Guests' conversations get the agent's workspace tools. */
-  guestTools: boolean;
-  profile: SiteLimitProfileKind;
-  /** Custom fields as typed. */
-  custom: Record<(typeof CUSTOM_LIMIT_FIELDS)[number]["key"], string>;
+  /** "Agent for people outside the workspace" (members always keep the agent). */
+  outsideAgent: boolean;
+  /** The Site limit for everyone outside the workspace together, dollars as typed. */
+  siteLimit: string;
+  sitePeriod: SpendPeriod;
+  /** The optional limit for each person or visitor outside the workspace. */
+  personLimitOn: boolean;
+  personLimit: string;
+  personPeriod: SpendPeriod;
   noindex: boolean;
 };
+
+/** The spend limits a Site applies to people outside the workspace. */
+export type OutsideSpendLimits = Pick<
+  SiteLimits,
+  | "agentsEnabled"
+  | "agentMicrosPerSitePerMonth"
+  | "agentMicrosPerSitePerDay"
+  | "agentMicrosPerVisitorPerDay"
+  | "agentMicrosPerVisitorPerMonth"
+>;
+
+function outsideSpendLimits(limits: SiteLimits): OutsideSpendLimits {
+  return {
+    agentsEnabled: limits.agentsEnabled,
+    agentMicrosPerSitePerMonth: limits.agentMicrosPerSitePerMonth,
+    agentMicrosPerSitePerDay: limits.agentMicrosPerSitePerDay,
+    agentMicrosPerVisitorPerDay: limits.agentMicrosPerVisitorPerDay,
+    agentMicrosPerVisitorPerMonth: limits.agentMicrosPerVisitorPerMonth,
+  };
+}
+
+/** The Site limit's period and amount: per day only when that is the one set. */
+export function siteSpendLimit(limits: OutsideSpendLimits): {
+  period: SpendPeriod;
+  micros: number | null;
+} {
+  if (limits.agentMicrosPerSitePerMonth === null && limits.agentMicrosPerSitePerDay !== null)
+    return { period: "day", micros: limits.agentMicrosPerSitePerDay };
+  return { period: "month", micros: limits.agentMicrosPerSitePerMonth };
+}
+
+/** The per-person limit's period and amount, or null when it is off. */
+export function personSpendLimit(
+  limits: OutsideSpendLimits,
+): { period: SpendPeriod; micros: number } | null {
+  if (limits.agentMicrosPerVisitorPerDay !== null)
+    return { period: "day", micros: limits.agentMicrosPerVisitorPerDay };
+  if (limits.agentMicrosPerVisitorPerMonth !== null)
+    return { period: "month", micros: limits.agentMicrosPerVisitorPerMonth };
+  return null;
+}
 
 export function draftFromPublication(
   publication: SitePublication | null,
   fallbackLabel: string,
   forceNoindex = false,
 ): SitePublishDraft {
-  const overrides = publication?.limitProfile.overrides ?? {};
-  const base = { ...DEFAULT_FREE_SITE_LIMITS, ...overrides };
+  const limits = outsideSpendLimits(publication?.effectiveLimits ?? DEFAULT_SITE_LIMITS);
+  const site = siteSpendLimit(limits);
+  const person = personSpendLimit(limits);
   return {
     label: publication?.label ?? fallbackLabel,
     access: publication?.access ?? "members",
     invitedEmails: publication?.invitedEmails ?? [],
     agentEnabled: publication?.agent.enabled ?? false,
     agentModel: publication?.agent.model ?? null,
-    guestTools: publication?.agent.guestTools ?? false,
-    profile: publication?.limitProfile.kind ?? "free",
-    custom: Object.fromEntries(
-      CUSTOM_LIMIT_FIELDS.map((field) => [field.key, limitFieldText(base[field.key], field.money)]),
-    ) as SitePublishDraft["custom"],
+    outsideAgent: limits.agentsEnabled,
+    siteLimit: limitFieldText(site.micros, true),
+    sitePeriod: site.period,
+    personLimitOn: person !== null,
+    personLimit: limitFieldText(person?.micros ?? null, true),
+    personPeriod: person?.period ?? "day",
     noindex: forceNoindex || (publication?.noindex ?? true),
   };
 }
 
-/** Custom overrides from the typed fields, or the name of the first field that isn't a number. */
-export function customOverrides(
+/**
+ * The outside spend limits from the typed fields, or which field isn't a
+ * dollar amount. An empty Site limit means no Site limit.
+ */
+export function outsideLimitsFromDraft(
   draft: SitePublishDraft,
-): { overrides: Partial<SiteLimits> } | { invalid: string } {
-  const overrides: Partial<SiteLimits> = {};
-  for (const field of CUSTOM_LIMIT_FIELDS) {
-    const value = parseLimitField(draft.custom[field.key], field.money);
-    if (value === undefined) return { invalid: field.key };
-    overrides[field.key] = value;
-  }
-  return { overrides };
+): { limits: OutsideSpendLimits } | { invalid: "siteLimit" | "personLimit" } {
+  const site = parseLimitField(draft.siteLimit, true);
+  if (site === undefined) return { invalid: "siteLimit" };
+  const person = draft.personLimitOn ? parseLimitField(draft.personLimit, true) : null;
+  if (person === undefined) return { invalid: "personLimit" };
+  return {
+    limits: {
+      agentsEnabled: draft.outsideAgent,
+      agentMicrosPerSitePerMonth: draft.sitePeriod === "month" ? site : null,
+      agentMicrosPerSitePerDay: draft.sitePeriod === "day" ? site : null,
+      agentMicrosPerVisitorPerDay: draft.personPeriod === "day" ? person : null,
+      agentMicrosPerVisitorPerMonth: draft.personPeriod === "month" ? person : null,
+    },
+  };
+}
+
+/** "$1.20 of $10 used this month": the Site's outside spend in its limit's period. */
+export function outsideUsageLine(publication: SitePublication): string {
+  const site = siteSpendLimit(outsideSpendLimits(publication.effectiveLimits));
+  const used =
+    site.period === "day"
+      ? publication.usage.agentMicrosToday
+      : publication.usage.agentMicrosThisMonth;
+  const when = site.period === "day" ? "today" : "this month";
+  return site.micros === null
+    ? `${formatLimitAmount(used)} used ${when}`
+    : `${formatLimitAmount(used)} of ${formatLimitAmount(site.micros)} used ${when}`;
+}
+
+/** "$10" for whole dollars, "$1.20" otherwise (credits are dollar amounts). */
+export function formatLimitAmount(micros: number): string {
+  return Number.isInteger(micros / 1_000_000)
+    ? new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: "USD",
+        maximumFractionDigits: 0,
+      }).format(micros / 1_000_000)
+    : formatUsdMicros(micros);
 }
 
 /**
  * The PUT body for a draft: the fields that differ from the saved
  * publication (every field on a first publish), plus `status: "active"`
- * when publishing.
+ * when publishing. Changed outside spend limits are saved as overrides on the
+ * Site's profile, keeping its kind and any other overrides.
  */
 export function publicationRequest(
   draft: SitePublishDraft,
@@ -313,29 +317,28 @@ export function publicationRequest(
   const emails = draft.access === "invited" ? draft.invitedEmails : (saved?.invitedEmails ?? []);
   if (!saved ? emails.length > 0 : !sameList(saved.invitedEmails, emails))
     request.invitedEmails = emails;
-  const guestToolsChanged = (saved?.agent.guestTools ?? false) !== draft.guestTools;
   if (
     !saved ||
     saved.agent.enabled !== draft.agentEnabled ||
-    (draft.agentEnabled && saved.agent.model !== draft.agentModel) ||
-    guestToolsChanged
+    (draft.agentEnabled && saved.agent.model !== draft.agentModel)
   )
     request.agent = {
       enabled: draft.agentEnabled,
       ...(draft.agentEnabled ? { model: draft.agentModel } : {}),
-      ...(guestToolsChanged ? { guestTools: draft.guestTools } : {}),
     };
-  const custom = draft.profile === "custom" ? customOverrides(draft) : null;
-  const overrides = custom && "overrides" in custom ? custom.overrides : null;
   // Only workspace admins change limits; everyone else keeps the current ones.
-  if (
-    options.canChangeLimits !== false &&
-    (!saved ||
-      saved.limitProfile.kind !== draft.profile ||
-      (draft.profile === "custom" &&
-        JSON.stringify(saved.limitProfile.overrides ?? {}) !== JSON.stringify(overrides ?? {})))
-  )
-    request.limitProfile = { kind: draft.profile, overrides };
+  const outside = outsideLimitsFromDraft(draft);
+  if (options.canChangeLimits !== false && hasOutsideViewers(draft.access) && "limits" in outside) {
+    const current = outsideSpendLimits(saved?.effectiveLimits ?? DEFAULT_SITE_LIMITS);
+    const changed = (Object.keys(outside.limits) as (keyof OutsideSpendLimits)[]).some(
+      (key) => outside.limits[key] !== current[key],
+    );
+    if (changed)
+      request.limitProfile = {
+        kind: saved?.limitProfile.kind ?? "standard",
+        overrides: { ...(saved?.limitProfile.overrides ?? {}), ...outside.limits },
+      };
+  }
   if (!saved || saved.noindex !== draft.noindex) request.noindex = draft.noindex;
   if (options.publish && saved?.status !== "active") request.status = "active";
   return request;
@@ -379,4 +382,71 @@ export function suspendedByLabel(by: SitePublication["moderation"]["suspendedBy"
 export function sentence(text: string): string {
   const trimmed = text.trim();
   return /[.!?…]$/u.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/** The specific error code (`details.code`) of an API error, else its code. */
+export function siteErrorCode(error: unknown): string | undefined {
+  const details = (error as { details?: { code?: unknown } } | null)?.details;
+  return typeof details?.code === "string" ? details.code : apiErrorFacts(error).code;
+}
+
+/** "2 things won't work for public visitors". */
+export function readinessTitle(
+  warnings: readonly SitePublishWarning[],
+  access: SiteAccessMode,
+): string {
+  const skipped = warnings.some((warning) => warning.code === "page_not_checked");
+  const count = warnings.filter((warning) => warning.code !== "page_not_checked").length;
+  const who = access === "public" ? "public visitors" : "invited people";
+  if (count === 0 && skipped) return "Readiness check incomplete";
+  return `${count} ${count === 1 ? "thing" : "things"} won't work for ${who}${skipped ? " · check incomplete" : ""}`;
+}
+
+/** The published Site opened as the role its visitors have ("View as visitor"). */
+export function viewAsVisitorUrl(publication: Pick<SitePublication, "url" | "access">) {
+  if (publication.access === "members") return null;
+  const url = new URL(publication.url);
+  url.searchParams.set("og_view_as", publication.access === "public" ? "public" : "invited");
+  return url.toString();
+}
+
+/** A platform refusal (Opengeni-wide brake or the workspace's allowance), in words. */
+export function platformRefusal(error: unknown): { title: string; body: string } | null {
+  const code = siteErrorCode(error);
+  if (code === SITE_PLATFORM_QUOTA_ERROR_CODE)
+    return {
+      title: "Sites allowance used up",
+      body: "This workspace has used this month's Sites allowance and has no credits left. Add credits to publish again.",
+    };
+  if (code === SITE_PLATFORM_BRAKE_ERROR_CODE)
+    return {
+      title: "Publishing is paused",
+      body: "Opengeni paused publishing while it reviews unusual Site usage. Try again later.",
+    };
+  return null;
+}
+
+export const PLATFORM_METER_LABELS: Record<SitePlatformMeter, string> = {
+  requests: "Requests",
+  sql_rows_read: "Rows read",
+  sql_rows_written: "Rows written",
+  storage_bytes: "Storage",
+};
+
+/** "1.2M", "640K", "980" for counts; "1.4 GB" for storage (GB = 10^9 bytes). */
+export function formatPlatformAmount(meter: SitePlatformMeter, value: number): string {
+  if (meter === "storage_bytes") {
+    const units = ["B", "kB", "MB", "GB", "TB"];
+    let amount = value;
+    let unit = 0;
+    while (amount >= 1000 && unit < units.length - 1) {
+      amount /= 1000;
+      unit += 1;
+    }
+    return `${unit === 0 ? amount : Number(amount.toFixed(amount < 10 ? 1 : 0))} ${units[unit]}`;
+  }
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
 }

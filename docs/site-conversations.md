@@ -80,8 +80,12 @@ Site profile: no vault access, the workspace's default agent capabilities with
 workspace administration and browser and computer control turned off (so the
 page cannot reach the viewer's sandboxes, Connected Machines or Chrome through
 `run_on`, `sandbox_attach`, `sandbox_swap`, `sandbox_provision`, `browser_*` or
-`computer_*`), and the workspace defaults for everything else. Workers it starts
-can only narrow that.
+`computer_*`), with `sandboxBackend: "none"`. First-party tools are explicit:
+the Site's requested tools plus its own data tools, not workspace defaults.
+Registry connections carry `allowedTools` with the exact names declared by the
+Site, intersected with the connection's allowlist and member permissions at
+execution. Empty means none; duplicate references intersect their lists.
+Workers it starts can only narrow that.
 An agent started from a Site page is also clamped (`assertNotSiteClampedAgent`):
 it cannot create or change schedules, automations, Site publications,
 workspace instructions, Skills, Knowledge or secrets, so it does not learn.
@@ -122,13 +126,19 @@ an agent may send writes only to:
   clamped), renaming, archiving or deleting one it reaches, and working in
   one (events, steer, control, queue, composer draft, retry, context, goal,
   artifacts, files, git, terminal, background commands);
-- files and content: uploads and download links, editable artifacts, new
-  Sites and uploads, Site Data and a Site's files (only for the Site it was
+- files and content: uploads and download links, new Sites and uploads, Site Data and a Site's files (only for the Site it was
   started from), and a Site's versions, rollback, status and audience (under
   the rule above);
 - reads sent as POST: Knowledge and document searches, download links, the
   Knowledge save dry run and a Connected Machine audience preview;
 - feedback.
+
+Documents, spreadsheets and presentations (`/editable-artifacts` writes, and
+the first-party `editable_artifact_create`, `_import`, `_apply` and `_export` tools)
+are open only when a published Site the agent was started from declares one
+of those first-party tools in its current version's requested tools;
+otherwise they are refused like any other write. Its other tools are the
+Site's declared tools, intersected with what the person may use.
 
 Every other write, including `PATCH` or `DELETE` on the workspace itself, a
 session's agent, tools, servers, credentials, variable sets, vaults, Skills,
@@ -142,9 +152,45 @@ registered route table. A session started from a Site page cannot get
 session admin access (409), and an agent acting for a Site page cannot run
 `admin_action_call`.
 Published Sites start their agents as `site:<siteId>` with the publication's
-own tools and limits instead (see `docs/site-runtime-api.md`).
+own tools and limits instead (see `docs/site-runtime-api.md`): workspace
+tools only for members who may use connections, never for people outside
+the workspace, and the limits of the viewer's audience
+(`docs/published-sites.md`, "Limits and billing").
 
 ## Agent defaults
+
+Every published-host conversation gets this Site's `site_data_query` and
+`site_data_write`; enabled SQL adds `site_sql_run`, and members also get read-only
+`site_sql_query`. Calls act as the conversation's viewer and refuse other Site ids
+and management operations. There is no sandbox, and publication settings offer no
+sandbox opt-in. Members get no Site budget or stamped session usage limit, even
+after a previous conversation; they retain normal model selection and subscriptions.
+Non-members receive an explicit credit-billed model, one Site budget and an optional
+per-person budget; anonymous guests additionally meet bot guards. Admission reserves
+a $0.25 turn estimate by default, not the entire conversation cap; outstanding
+reservations return retryable `site_budget_busy`.
+The executable session ceiling is metered spend plus that funded reservation.
+Further sends, steering and resumes fund a top-up before execution; a single
+provider call can overshoot before metering. Data tools revalidate the current
+audience on every call, independently of best-effort cancellation.
+
+Funding admission retains a durable pending token across the gap before enqueue.
+Start, Send, Steer, queued-message Steer, composer submission and Resume carry that
+token through the in-process dispatch; session writer transactions lock and verify
+it before accepting work. Idle settlement cannot release pending funding. A returned
+refusal revokes the token and reconciles the locked canonical queue; a lost response
+retains it. After ten minutes, recovery may revoke an abandoned token, but releases
+funds only if the locked queue has no accepted work or physical writers. A delayed
+dispatch with the revoked token cannot enqueue. Neither timeout nor an idle status
+alone proves that funding can be released.
+
+An idempotent Start replay checks the canonical `session.created` marker, not
+merely whether a session row exists. A committed but uninitialized keyed shell
+gets a funded repair admission and re-enters core's existing keyed Start repair.
+The original prompt and model remain accepted; repair counts no extra conversation
+or turn and stamps only the newly funded allowance. The initialization marker is
+checked again under the admission lock so a concurrent successful repair is replayed
+without reserving more money.
 
 The Sites skill recommends a selector for this Site's conversations plus New
 conversation. First Send creates one session with a retry-stable idempotency key;

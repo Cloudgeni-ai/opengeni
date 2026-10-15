@@ -76,29 +76,98 @@ const shots: Shot[] = [
     },
   },
   {
-    name: "publish-public-agent-free",
+    name: "publish-members-agent",
+    scenario: "members",
+    narrow: true,
+    ready: (page) => text(page, "Let people chat with the Site's agent"),
+  },
+  {
+    name: "publish-invited-agent",
+    scenario: "invited",
+    narrow: true,
+    ready: (page) => text(page, "used this month"),
+  },
+  {
+    name: "publish-public-agent",
     scenario: "public",
     narrow: true,
-    ready: (page) => text(page, "Agent spend this month"),
+    ready: (page) => text(page, "used this month"),
   },
   {
-    name: "publish-agent-guest-tools-nonadmin",
-    scenario: "agent-nonadmin",
-    ready: (page) => text(page, "Let everyone use these tools"),
-  },
-  {
-    name: "publish-custom-limits",
+    name: "publish-public-add-per-person",
     scenario: "public",
-    ready: (page) => text(page, "Agent spend this month"),
+    ready: (page) => text(page, "used this month"),
     act: async (page) => {
-      await page.getByRole("radio", { name: "Custom" }).click();
-      await text(page, "Spend per month");
+      await page.getByRole("button", { name: "Limit per person" }).click();
+      await text(page, "Per person");
     },
   },
   {
-    name: "publish-invited",
-    scenario: "invited",
-    ready: (page) => text(page, "grace@compiler.example"),
+    name: "publish-public-per-person",
+    scenario: "public-person",
+    narrow: true,
+    ready: (page) => text(page, "Per person"),
+  },
+  {
+    name: "publish-agent-nonadmin",
+    scenario: "agent-nonadmin",
+    ready: (page) => text(page, "Only workspace admins change this."),
+  },
+  {
+    name: "publish-warnings-collapsed",
+    scenario: "warnings",
+    narrow: true,
+    ready: (page) => text(page, "2 things won't work for public visitors"),
+  },
+  {
+    name: "publish-warnings-expanded",
+    scenario: "warnings",
+    narrow: true,
+    ready: (page) => text(page, "2 things won't work for public visitors"),
+    act: async (page) => {
+      await page.getByRole("button", { name: /2 things won't work/ }).click();
+      await page.getByRole("button", { name: "Fix" }).waitFor({ timeout: 90_000 });
+    },
+  },
+  {
+    name: "publish-codex-outside-model",
+    scenario: "codex",
+    narrow: true,
+    ready: (page) => text(page, /People outside the workspace use .+ \(paid with credits\)/),
+    act: async (page) => {
+      const picker = page.getByRole("button", { name: "Agent model", exact: true });
+      await picker.getByText("Codex", { exact: true }).waitFor({ timeout: 90_000 });
+      assert.match(await picker.innerText(), /GPT-6 Astra/);
+      assert.doesNotMatch(await picker.innerText(), /Opengeni credits/);
+    },
+  },
+  {
+    name: "publish-quota-refused",
+    scenario: "quota",
+    narrow: true,
+    ready: (page) => text(page, /is available/),
+    act: async (page) => {
+      await page.getByRole("button", { name: "Publish", exact: true }).last().click();
+      await text(page, "Sites allowance used up");
+      await page.evaluate(() => scrollTo(0, 0));
+    },
+  },
+  {
+    name: "usage-platform",
+    scenario: "usage",
+    narrow: true,
+    ready: (page) => text(page, "Rows written"),
+  },
+  {
+    name: "usage-platform-credits",
+    scenario: "usage-credits",
+    ready: (page) => text(page, "charged this month"),
+  },
+  {
+    name: "usage-platform-brake",
+    scenario: "usage-brake",
+    narrow: true,
+    ready: (page) => text(page, "Sites are paused"),
   },
   {
     name: "publish-moderation-reports",
@@ -148,6 +217,8 @@ const shots: Shot[] = [
   },
 ];
 
+// OPENGENI_SITE_PUBLISHING_ONLY=name,name captures only those shots.
+const only = process.env.OPENGENI_SITE_PUBLISHING_ONLY?.split(",").filter(Boolean);
 try {
   for (const [width, height] of [
     [1440, 1500],
@@ -155,6 +226,7 @@ try {
   ] as const) {
     for (const shot of shots) {
       if (width < 600 && !shot.narrow) continue;
+      if (only?.length && !only.includes(shot.name)) continue;
       const context = await browser.newContext({ viewport: { width, height } });
       const page = await context.newPage();
       const errors: string[] = [];

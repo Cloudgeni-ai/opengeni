@@ -64,6 +64,9 @@ describe("interaction attempt tools", () => {
           getBrowserTargetState: async () => {
             throw failure;
           },
+          actInBrowser: async () => {
+            throw failure;
+          },
         }),
       });
       const result = await definitions[0]!.execute(
@@ -360,6 +363,57 @@ describe("interaction attempt tools", () => {
     expect(requests).toEqual([
       { workspace: workspaceId, options: { includeDisconnected: false } },
       { workspace: workspaceId, options: { includeDisconnected: true } },
+    ]);
+  });
+
+  test("browser_open, computer_open and discovery narrow inventories in the query", async () => {
+    const requests: Array<{ kind: string; options: unknown }> = [];
+    const record = (kind: string) => async (_workspace: string, options?: unknown) => {
+      requests.push({ kind, options });
+      return { revision: 1, sessions: [] };
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: record("browser") as never,
+        listComputerSessions: record("computer") as never,
+        listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+        listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+        createBrowserSession: async () => ({ session: { lifecycle: "starting" } }) as never,
+        createComputerSession: async () => ({ session: { lifecycle: "starting" } }) as never,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover", "browser_open", "computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const tool = (name: string) =>
+      definitions.find((entry) => entry.modelName === `interaction__${name}`)!;
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    const own = { associatedSessionId: sessionId, includeTerminal: false };
+
+    await tool("browser_open").execute({}, context());
+    await tool("computer_open").execute({}, context());
+    expect(requests.splice(0)).toEqual([
+      { kind: "browser", options: own },
+      { kind: "computer", options: own },
+    ]);
+
+    await tool("interaction_discover").execute({}, context());
+    expect(requests.splice(0)).toEqual([
+      { kind: "browser", options: own },
+      { kind: "computer", options: own },
+    ]);
+
+    await tool("interaction_discover").execute(
+      { scope: "workspace", includeTerminal: true },
+      context(),
+    );
+    expect(requests.splice(0)).toEqual([
+      { kind: "browser", options: {} },
+      { kind: "computer", options: {} },
     ]);
   });
 
@@ -916,25 +970,16 @@ describe("interaction attempt tools", () => {
     }
   });
 
-  test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
+  test("sends a fence-free Browser action as one request for the API to fence", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);
     let request: BrowserActionRequest | null = null;
-    let stateCalls = 0;
     const transport = partialTransport({
       observeBrowserTarget: async () => {
         throw new Error("unexpected full AX read");
       },
       getBrowserTargetState: async () => {
-        stateCalls += 1;
-        return {
-          browserSessionId,
-          controllerGeneration: target.controllerGeneration,
-          targetId: target.id,
-          targetGeneration: target.targetGeneration,
-          documentGeneration: target.documentGeneration,
-          frameId: observation.frameId,
-        };
+        throw new Error("unexpected separate target-state request");
       },
       actInBrowser: async (_workspaceId, _browserSessionId, value) => {
         request = value;
@@ -976,12 +1021,8 @@ describe("interaction attempt tools", () => {
     expect(request).toEqual({
       operationId,
       targetId: target.id,
-      expectedTargetGeneration: target.targetGeneration,
-      expectedDocumentGeneration: target.documentGeneration,
-      expectedFrameId: observation.frameId,
       action: { type: "scroll", deltaX: 0, deltaY: 480 },
     });
-    expect(stateCalls).toBe(1);
     expect(result.structuredContent).toMatchObject({
       operationId,
       browserSessionId,

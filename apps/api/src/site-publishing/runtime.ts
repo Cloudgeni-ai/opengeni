@@ -3,8 +3,11 @@ import { isIP } from "node:net";
 import {
   parseSiteHostname,
   siteHostname,
+  SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE,
+  type Permission,
   type SiteLimitProfileKind,
   type SiteLimits,
+  type SiteViewerCapabilities,
 } from "@opengeni/contracts";
 import { sessionUsageLimitsProducerEnabled, type ApiRouteDeps } from "@opengeni/core";
 import {
@@ -20,8 +23,11 @@ import {
   recordUsageEvent,
   releaseSiteRuntimeConversationStart,
   setSessionUsageLimitInTransaction,
+  siteRuntimeFundedLimitInTransaction,
   settleSiteRuntimeConversationSpend,
   SITE_RUNTIME_ABANDONED_START_MINUTES,
+  SITE_RUNTIME_MEMBERS_PRINCIPAL,
+  SITE_RUNTIME_SITE_PRINCIPAL,
   withRlsContext,
   withWorkspaceSessionActivityRls,
   type PublishedSiteRecord,
@@ -34,7 +40,7 @@ import {
   type SiteRuntimeReservation,
 } from "@opengeni/db";
 import type { SiteGatewayFields } from "./gateway-signature";
-import { effectiveSiteLimits, sourceSiteLimitProfile } from "./limits";
+import { effectiveSiteLimits, siteViewerLimits, sourceSiteLimitProfile } from "./limits";
 import {
   siteLimitInputs,
   sitePublishingError,
@@ -113,13 +119,30 @@ export function sha256Text(value: string): string {
  * Who is viewing: a live site-session of this Site whose person the Site
  * still admits (membership and invitations are re-read every call), else an
  * anonymous guest of a public Site, else sign-in is required.
+ *
+ * "View as visitor": a workspace member whose site-session previews another
+ * role is resolved as exactly that role, and only ever downgraded: `public`
+ * is an anonymous guest (refused where guests are not admitted), `invited`
+ * a signed-in person outside the workspace (refused on members-only Sites).
+ * A preview role on the session of anyone who is not a member is ignored, so
+ * it can never grant more than the person already has. `ignoreViewAs`
+ * resolves the real viewer (to start or end a preview).
  */
 export async function resolveSiteRuntimeViewer(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
   fields: SiteGatewayFields,
+  options: { ignoreViewAs?: boolean } = {},
 ): Promise<SiteRuntimeViewer> {
   const { scope, publication, site } = host;
+  const denied = () =>
+    sitePublishingError(
+      403,
+      "forbidden",
+      "site_access_denied",
+      "You do not have access to this Site",
+    );
+  const access = effectiveSiteAccess(publication.access, deps.settings);
   if (fields.session) {
     const session = await findSiteViewerSession(deps.db, scope, {
       siteId: site.id,
@@ -127,19 +150,43 @@ export async function resolveSiteRuntimeViewer(
       idleSeconds: deps.settings.sitesViewerSessionIdleSeconds,
     });
     if (session) {
+      const member = await isSiteWorkspaceMember(deps.db, scope, session.subjectId);
       const kind = signedInSiteViewerKind({
-        access: effectiveSiteAccess(publication.access, deps.settings),
-        member: await isSiteWorkspaceMember(deps.db, scope, session.subjectId),
+        access,
+        member,
         email: session.email,
         invitedEmails: publication.invitedEmails,
       });
-      if (!kind)
-        throw sitePublishingError(
-          403,
-          "forbidden",
-          "site_access_denied",
-          "You do not have access to this Site",
-        );
+      if (!kind) throw denied();
+      const viewAs = !options.ignoreViewAs && kind === "member" ? (session.viewAs ?? null) : null;
+      if (viewAs === "public") {
+        if (
+          !siteGuestsAllowed(publication.access, deps.settings) ||
+          !SITE_VISITOR_ID.test(fields.visitor)
+        )
+          throw denied();
+        return {
+          kind: "guest",
+          principal: `guest:${fields.visitor}`,
+          subjectId: null,
+          name: null,
+          email: null,
+          sessionId: null,
+          viewAs,
+        };
+      }
+      if (viewAs === "invited") {
+        if (access === "members") throw denied();
+        return {
+          kind: "invited",
+          principal: `user:${session.subjectId}`,
+          subjectId: session.subjectId,
+          name: session.displayName,
+          email: session.email,
+          sessionId: session.id,
+          viewAs,
+        };
+      }
       return {
         kind,
         principal: `user:${session.subjectId}`,
@@ -147,6 +194,7 @@ export async function resolveSiteRuntimeViewer(
         name: session.displayName,
         email: session.email,
         sessionId: session.id,
+        viewAs: null,
       };
     }
   }
@@ -158,6 +206,7 @@ export async function resolveSiteRuntimeViewer(
       name: null,
       email: null,
       sessionId: null,
+      viewAs: null,
     };
   throw sitePublishingError(
     401,
@@ -167,21 +216,78 @@ export async function resolveSiteRuntimeViewer(
   );
 }
 
+/** What a viewer cannot do on a Site: 403 with `details.code` `not_available_for_viewer`. */
+export type SiteViewerFeature =
+  | "agent"
+  | "agent_model"
+  | "workspace_tools"
+  | "site_data"
+  | "site_sql";
+
+/**
+ * The `details.code` each feature answered before `not_available_for_viewer`,
+ * retained as `details.legacyCode` for migration. Clients matching
+ * `details.code` must adopt the new code; the alias is not automatic compatibility.
+ */
+const SITE_VIEWER_FEATURE_LEGACY_CODES: Partial<Record<SiteViewerFeature, string>> = {
+  agent: "site_agents_unavailable",
+  workspace_tools: "site_tools_unavailable",
+  site_data: "forbidden",
+  site_sql: "forbidden",
+};
+
+export function siteNotAvailableForViewer(
+  feature: SiteViewerFeature,
+  message: string,
+  extra: Record<string, unknown> = {},
+) {
+  const legacyCode = SITE_VIEWER_FEATURE_LEGACY_CODES[feature];
+  return sitePublishingError(403, "forbidden", SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE, message, {
+    ...extra,
+    feature,
+    ...(legacyCode ? { legacyCode } : {}),
+  });
+}
+
+/** The viewer capabilities a page reads from `site.config` to hide what won't work. */
+export function siteViewerCapabilities(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+  viewer: SiteRuntimeViewer,
+  limits: SiteLimits,
+): SiteViewerCapabilities {
+  return {
+    agent: siteAgentRefusal(deps, host, viewer, limits) === null,
+    workspaceTools: viewer.kind === "member" && (host.publication.agent.tools?.length ?? 0) > 0,
+    siteData: viewer.kind === "guest" ? "guest" : "viewer",
+    sqlQueryAudiences: viewer.kind === "guest" ? ["everyone"] : ["everyone", "signed_in"],
+    viewAs: viewer.viewAs ?? null,
+  };
+}
+
 export async function siteRuntimeLimits(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
+  viewer?: Pick<SiteRuntimeViewer, "kind">,
 ): Promise<SiteLimits> {
-  return (await siteRuntimeLimitProfile(deps, host)).limits;
+  return (await siteRuntimeLimitProfile(deps, host, viewer)).limits;
 }
 
-/** The Site's effective limits and the kind of limit profile they come from. */
+/**
+ * The limits that govern a viewer and the kind of limit profile they come
+ * from: workspace members are never limited by Site limits (flood brakes
+ * only); everyone else gets the Site's limits (siteViewerLimits). Without a
+ * viewer: the Site's limits.
+ */
 export async function siteRuntimeLimitProfile(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
+  viewer?: Pick<SiteRuntimeViewer, "kind">,
 ): Promise<{ limits: SiteLimits; kind: SiteLimitProfileKind }> {
   const profiles = await siteLimitInputs(deps, host.scope, host.publication);
+  const limits = effectiveSiteLimits(deps.settings, profiles.site, profiles.workspace);
   return {
-    limits: effectiveSiteLimits(deps.settings, profiles.site, profiles.workspace),
+    limits: viewer ? siteViewerLimits(limits, viewer.kind) : limits,
     kind: sourceSiteLimitProfile(profiles.site, profiles.workspace).kind,
   };
 }
@@ -311,14 +417,24 @@ export function siteAgentRefusal(
   limits: SiteLimits,
 ): string | null {
   if (!host.publication.agent.enabled || !limits.agentsEnabled) return "agent_disabled";
-  // Every conversation is capped by its own task usage limit; without the
-  // producer that cap cannot be stored, so Site agents stay off.
-  if (!sessionUsageLimitsProducerEnabled(deps.settings)) return "usage_limits_disabled";
+  // A conversation of a viewer outside the workspace is capped by its own
+  // task usage limit; without the producer that cap cannot be stored, so
+  // their Site agents stay off. Members run under the workspace's normal
+  // session limits and need no Site cap.
+  if (viewer.kind !== "member" && !sessionUsageLimitsProducerEnabled(deps.settings))
+    return "usage_limits_disabled";
   if (viewer.kind === "guest" && !limits.guestAgentsEnabled) return "guest_agents_disabled";
   if (viewer.kind === "user" && !deps.settings.sitesPublicAgentsEnabled)
     return "public_agents_disabled";
   return null;
 }
+
+const AGENT_REFUSAL_MESSAGES: Record<string, string> = {
+  agent_disabled: "This Site's assistant is not available to you",
+  usage_limits_disabled: "This Site's assistant is not available to you",
+  guest_agents_disabled: "Sign in to use this Site's assistant",
+  public_agents_disabled: "This Site's assistant is only available to invited people",
+};
 
 export function requireSiteAgent(
   deps: SiteRuntimeDeps,
@@ -328,11 +444,9 @@ export function requireSiteAgent(
 ): void {
   const reason = siteAgentRefusal(deps, host, viewer, limits);
   if (reason)
-    throw sitePublishingError(
-      403,
-      "forbidden",
-      "site_agents_unavailable",
-      "This Site's assistant is not available to you",
+    throw siteNotAvailableForViewer(
+      "agent",
+      AGENT_REFUSAL_MESSAGES[reason] ?? "This Site's assistant is not available to you",
       { reason },
     );
 }
@@ -350,7 +464,10 @@ const BUDGET_MESSAGES: Record<SiteRuntimeBudget, string> = {
   agent_micros_per_conversation: "This conversation has reached its budget; start a new one",
   agent_micros_per_visitor_per_day:
     "You have used this Site's assistant as much as it allows today",
-  agent_micros_per_site_per_month: "This Site's assistant has reached its budget for this month",
+  agent_micros_per_visitor_per_month:
+    "You have used this Site's assistant as much as it allows this month",
+  agent_micros_per_site_per_day: "This Site's assistant has reached its limit for today",
+  agent_micros_per_site_per_month: "This Site's assistant has reached its limit for this month",
 };
 
 /** The 429 for a refused reservation. */
@@ -358,21 +475,74 @@ export function siteBudgetExhausted(budget: SiteRuntimeBudget) {
   return budgetExhausted(budget, BUDGET_MESSAGES[budget]);
 }
 
-/** The budgets a conversation start or message is reserved against. */
-export function siteRuntimeBudgetLimits(limits: SiteLimits): SiteRuntimeBudgetLimits {
+/** Seconds a viewer waits before retrying a start or message refused as busy. */
+export const SITE_BUDGET_BUSY_RETRY_SECONDS = 30;
+
+/**
+ * The 429 when only other running conversations' reservations refuse a
+ * reservation: the budget has room once their spend settles, so it is worth
+ * retrying shortly (`site_budget_busy`, with `retryAfterSeconds`).
+ */
+export function siteBudgetBusy(budget: SiteRuntimeBudget) {
+  return sitePublishingError(
+    429,
+    "limit_exceeded",
+    "site_budget_busy",
+    "This Site's assistant is busy right now; try again in a moment",
+    { budget, retryAfterSeconds: SITE_BUDGET_BUSY_RETRY_SECONDS },
+  );
+}
+
+/** The 429 for a refused reservation, busy or exhausted. */
+export function siteReservationRefused(result: Extract<SiteRuntimeReservation, { ok: false }>) {
+  return result.busy ? siteBudgetBusy(result.budget) : siteBudgetExhausted(result.budget);
+}
+
+/**
+ * The budgets a conversation start or message is reserved against. Members
+ * reserve nothing (their caps are all null). For everyone else a
+ * conversation is bounded by the per-conversation cap, else by the smallest
+ * spend limit that applies, so a session usage limit always holds it.
+ */
+export function siteRuntimeBudgetLimits(
+  limits: SiteLimits,
+  settings: Pick<SiteRuntimeDeps["settings"], "sitesAgentReservationMicrosPerTurn">,
+): SiteRuntimeBudgetLimits {
+  const spend = [
+    limits.agentMicrosPerVisitorPerDay,
+    limits.agentMicrosPerVisitorPerMonth,
+    limits.agentMicrosPerSitePerDay,
+    limits.agentMicrosPerSitePerMonth,
+  ].filter((value): value is number => value !== null && value !== undefined);
   return {
     conversationsPerVisitorPerDay: limits.conversationsPerVisitorPerDay,
     conversationsPerSitePerDay: limits.conversationsPerSitePerDay,
     turnsPerConversation: limits.turnsPerConversation,
-    agentMicrosPerConversation: limits.agentMicrosPerConversation,
+    agentMicrosPerConversation:
+      limits.agentMicrosPerConversation ?? (spend.length > 0 ? Math.min(...spend) : null),
     agentMicrosPerVisitorPerDay: limits.agentMicrosPerVisitorPerDay,
+    agentMicrosPerVisitorPerMonth: limits.agentMicrosPerVisitorPerMonth,
+    agentMicrosPerSitePerDay: limits.agentMicrosPerSitePerDay,
     agentMicrosPerSitePerMonth: limits.agentMicrosPerSitePerMonth,
+    turnReservationMicros: settings.sitesAgentReservationMicrosPerTurn,
   };
+}
+
+/**
+ * The Site-wide usage windows a viewer's conversations count in: members
+ * count apart (`*members`), so they never use up the Site limit.
+ */
+export function siteRuntimeBudgetKey(viewer: Pick<SiteRuntimeViewer, "kind">): string {
+  return viewer.kind === "member" ? SITE_RUNTIME_MEMBERS_PRINCIPAL : SITE_RUNTIME_SITE_PRINCIPAL;
 }
 
 /** Whether a refusal is a Site-wide budget (stale reservations of others may free it). */
 export function siteWideBudget(result: SiteRuntimeReservation): boolean {
-  return !result.ok && result.budget === "agent_micros_per_site_per_month";
+  return (
+    !result.ok &&
+    (result.budget === "agent_micros_per_site_per_month" ||
+      result.budget === "agent_micros_per_site_per_day")
+  );
 }
 
 const IDLE_SESSION_STATUSES = new Set(["idle", "failed", "cancelled"]);
@@ -439,17 +609,74 @@ export async function settleSiteRuntimeSpend(
 }
 
 /**
- * Lower a conversation's session usage limit to `limitMicros` (a
- * per-conversation limit lowered after it started), before more work runs in
- * it. The Site's host identity writes it, compare-and-set on the version
- * read while settling. Refuses the work (503) when the limit cannot be
- * lowered, so a conversation never runs above its Site's current cap.
+ * Lift the session usage limit a Site stamped on a workspace member's
+ * conversation before members were kept out of Site limits: cleared only
+ * while it is still exactly the Site's cap (`siteCapMicros`), so a limit
+ * someone set on the session since is kept. Failure refuses admission; the
+ * caller retains its durable normalization marker and retries next time.
+ */
+export async function liftSiteConversationUsageLimit(
+  deps: SiteRuntimeDeps,
+  host: SiteRuntimeHost,
+  sessionId: string,
+  siteCapMicros: number,
+  usage: SiteConversationUsage | null,
+): Promise<void> {
+  let current = usage;
+  if (current === null) {
+    const read = await readSessionUsageLimit(deps.db, {
+      ...host.scope,
+      sessionId,
+      runtime: true,
+    }).catch(() => null);
+    if (read?.outcome !== "ok")
+      throw sitePublishingError(
+        503,
+        "upstream_unavailable",
+        "site_conversation_unavailable",
+        "The conversation cannot continue right now",
+      );
+    current = {
+      usedMicros: read.state.usedMicros ?? 0,
+      limitMicros: read.state.limitMicros,
+      version: read.state.version,
+    };
+  }
+  if (current.limitMicros !== siteCapMicros) return;
+  const { version } = current;
+  const result = await withWorkspaceSessionActivityRls(
+    deps.db,
+    host.scope.workspaceId,
+    async (tx) =>
+      await setSessionUsageLimitInTransaction(tx, {
+        ...host.scope,
+        sessionId,
+        limitMicros: null,
+        expectedVersion: version,
+        operationId: `site-runtime-member-uncap:${sessionId}:${version}`,
+        actor: { type: "host", subjectId: `site:${host.site.id}` },
+        producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
+      }),
+  ).catch(() => null);
+  if (result?.outcome !== "ok" && result?.outcome !== "replayed")
+    throw sitePublishingError(
+      503,
+      "upstream_unavailable",
+      "site_conversation_unavailable",
+      "The conversation cannot continue right now",
+    );
+}
+
+/**
+ * Stamp only funded execution: cumulative spend plus the current reservation,
+ * bounded by the conversation cap. Top-ups reserve atomically before this
+ * raises the ceiling; reread under the reservation lock so overlapping
+ * admissions cannot stamp a stale larger allowance. Failure refuses work.
  */
 export async function capSiteConversationUsageLimit(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost,
   sessionId: string,
-  limitMicros: number,
   usage: SiteConversationUsage | null,
 ): Promise<void> {
   let current = usage;
@@ -470,21 +697,23 @@ export async function capSiteConversationUsageLimit(
           : null;
       if (current === null) break;
     }
-    if (current.limitMicros !== null && current.limitMicros <= limitMicros) return;
     const { version } = current;
     const result = await withWorkspaceSessionActivityRls(
       deps.db,
       host.scope.workspaceId,
-      async (tx) =>
-        await setSessionUsageLimitInTransaction(tx, {
+      async (tx) => {
+        const funded = await siteRuntimeFundedLimitInTransaction(tx, host.scope, sessionId);
+        if (funded === null) throw new Error("Non-member conversation has no funded ceiling");
+        return await setSessionUsageLimitInTransaction(tx, {
           ...host.scope,
           sessionId,
-          limitMicros,
+          limitMicros: funded,
           expectedVersion: version,
-          operationId: `site-runtime-cap:${sessionId}:${version}:${limitMicros}`,
+          operationId: `site-runtime-cap:${sessionId}:${version}:${funded}`,
           actor: { type: "host", subjectId: `site:${host.site.id}` },
           producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
-        }),
+        });
+      },
     ).catch(() => null);
     if (result?.outcome === "ok" || result?.outcome === "replayed") return;
     current = null;
@@ -576,7 +805,13 @@ export async function siteRuntimeSessionRequest(
   deps: SiteRuntimeDeps,
   host: SiteRuntimeHost & { versionId: string },
   viewer: SiteRuntimeViewer,
-  input: { origin: string; method: string; path: string; body?: unknown },
+  input: {
+    origin: string;
+    method: string;
+    path: string;
+    body?: unknown;
+    extraPermissions?: readonly Permission[];
+  },
 ): Promise<Request> {
   return await siteServiceSessionRequest(
     deps,

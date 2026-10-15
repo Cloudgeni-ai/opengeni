@@ -70,10 +70,19 @@ export type {
   SiteLimitProfile,
   SiteLimitProfileKind,
   SiteLimits,
+  SitePlatformBillingMode,
+  SitePlatformBrakeState,
+  SitePlatformMeter,
+  SitePlatformMeterUsage,
+  SitePlatformUsage,
   SitePublication,
   SitePublicationStatus,
+  SitePublishWarning,
+  SitePublishWarningFix,
   SiteTakedownRequest,
+  SiteViewAs,
   SiteViewer,
+  SiteViewerCapabilities,
   UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
 export {
@@ -235,6 +244,7 @@ export type {
   FetchLike,
   FetchResponse,
   GetSessionOptions,
+  InteractionSessionListOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
@@ -271,6 +281,7 @@ export type {
   OpenGeniSiteToolCatalog,
   OpenGeniSiteToolCallRequest,
   OpenGeniSiteViewer,
+  OpenGeniSiteCapabilities,
   OpenGeniSiteWorkspaceTools,
 } from "./site";
 export type {

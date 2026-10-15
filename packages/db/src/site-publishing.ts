@@ -1,5 +1,9 @@
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
+import type { Permission } from "@opengeni/contracts";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { lockSessionEventWriteRows } from "./session-control";
+import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 
 /**
  * Published Sites storage (migration 0782). Every read and write runs in the
@@ -39,7 +43,8 @@ export class SitePublishingError extends Error {
 export type SitePublicationAccess = "members" | "invited" | "public";
 export type SitePublicationStatusValue = "active" | "unpublished" | "suspended";
 export type SiteSuspendedBy = "owner" | "admin" | "platform";
-export type SiteLimitProfileKindValue = "free" | "credits" | "unlimited" | "custom";
+/** Public `standard` retains the stored spelling `free` for previous-release readers. */
+export type SiteLimitProfileKindValue = "standard" | "free" | "credits" | "unlimited" | "custom";
 export type SiteViewerKindValue = "member" | "invited" | "user";
 
 export type StoredSiteLimitProfile = {
@@ -516,6 +521,7 @@ export async function getPublishedSiteVersion(
   contentKey: string;
   contentSha256: string | null;
   sizeBytes: number;
+  requestedTools: Array<{ serverId: string; toolName: string }>;
 } | null> {
   if (!UUID.test(siteId) || !UUID.test(versionId)) return null;
   return await withRlsContext(db, scope, async (tx) => {
@@ -524,9 +530,11 @@ export async function getPublishedSiteVersion(
       content_key: string;
       content_sha256: string | null;
       size_bytes: string | number;
+      requested_tools: unknown;
     }>(
       tx,
-      sql`select id, content_key, content_sha256, size_bytes from workspace_artifact_versions
+      sql`select id, content_key, content_sha256, size_bytes, requested_tools
+        from workspace_artifact_versions
         where workspace_id = ${scope.workspaceId} and artifact_id = ${siteId} and id = ${versionId}`,
     );
     return row
@@ -535,6 +543,9 @@ export async function getPublishedSiteVersion(
           contentKey: row.content_key,
           contentSha256: row.content_sha256,
           sizeBytes: Number(row.size_bytes),
+          requestedTools: Array.isArray(row.requested_tools)
+            ? (row.requested_tools as Array<{ serverId: string; toolName: string }>)
+            : [],
         }
       : null;
   });
@@ -555,6 +566,7 @@ export async function getServableSiteVersion(
   contentKey: string;
   contentSha256: string | null;
   sizeBytes: number;
+  requestedTools: Array<{ serverId: string; toolName: string }>;
 } | null> {
   if (!UUID.test(input.siteId) || !UUID.test(input.versionId)) return null;
   if (input.versionId !== input.currentVersionId) {
@@ -738,7 +750,11 @@ export async function upsertSitePublication(
     const overridesJson =
       limitProfile?.overrides === null || limitProfile?.overrides === undefined
         ? null
-        : JSON.stringify(limitProfile.overrides);
+        : JSON.stringify(
+            changes.limitProfile === undefined
+              ? limitProfile.overrides
+              : { ...limitProfile.overrides, __siteLimitsVersion: 2 },
+          );
     const [row] = existing
       ? await rawRows<PublicationRow>(
           tx,
@@ -746,7 +762,7 @@ export async function upsertSitePublication(
               noindex = ${noindex}, agent_enabled = ${agent.enabled}, agent_model = ${agent.model},
               agent_instructions = ${agent.instructions}, agent_tools = ${toolsJson}::jsonb,
               agent_guest_tools = ${agent.guestTools},
-              limit_profile_kind = ${limitProfile?.kind ?? null},
+              limit_profile_kind = ${storedSiteLimitKind(limitProfile?.kind ?? null)},
               limit_overrides = ${overridesJson}::jsonb,
               invited_emails = ${JSON.stringify(invited)}::jsonb,
               generation = nextval('site_host_generation_seq'), updated_by = ${input.actor},
@@ -761,7 +777,7 @@ export async function upsertSitePublication(
               limit_profile_kind, limit_overrides, invited_emails, created_by, updated_by)
             values (${input.siteId}, ${scope.accountId}, ${scope.workspaceId}, ${label}, ${access},
               ${status}, ${noindex}, ${agent.enabled}, ${agent.model}, ${agent.instructions},
-              ${toolsJson}::jsonb, ${agent.guestTools}, ${limitProfile?.kind ?? null},
+              ${toolsJson}::jsonb, ${agent.guestTools}, ${storedSiteLimitKind(limitProfile?.kind ?? null)},
               ${overridesJson}::jsonb,
               ${JSON.stringify(invited)}::jsonb, ${input.actor}, ${input.actor})
             returning ${PUBLICATION_COLUMNS}`,
@@ -1111,7 +1127,11 @@ export type SiteViewerSessionRecord = SiteViewerIdentity & {
   id: string;
   siteId: string;
   expiresAt: Date;
+  /** The role the owner previews the Site as ("View as visitor"); null when not previewing. */
+  viewAs?: SiteViewAsValue | null;
 };
+
+export type SiteViewAsValue = "invited" | "public";
 
 export async function createSiteViewerSession(
   db: Database,
@@ -1167,10 +1187,11 @@ export async function findSiteViewerSession(
       email: string | null;
       display_name: string | null;
       expires_at: unknown;
+      view_as: SiteViewAsValue | null;
       stale: boolean;
     }>(
       tx,
-      sql`select id, site_id, subject_id, viewer_kind, email, display_name, expires_at,
+      sql`select id, site_id, subject_id, viewer_kind, email, display_name, expires_at, view_as,
           last_used_at < now() - interval '1 minute' as stale
         from site_viewer_sessions
         where workspace_id = ${scope.workspaceId} and token_hash = ${input.tokenHash}
@@ -1191,7 +1212,31 @@ export async function findSiteViewerSession(
       email: row.email,
       displayName: row.display_name,
       expiresAt: date(row.expires_at),
+      viewAs: row.view_as ?? null,
     };
+  });
+}
+
+/**
+ * Start (`invited`, `public`) or end (null) previewing a Site as another
+ * role on one live viewer session. The API applies it only while the
+ * session's person is a workspace member, and only to see less.
+ */
+export async function setSiteViewerSessionViewAs(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { siteId: string; sessionId: string; viewAs: SiteViewAsValue | null },
+): Promise<boolean> {
+  if (!UUID.test(input.siteId) || !UUID.test(input.sessionId)) return false;
+  return await withRlsContext(db, scope, async (tx) => {
+    const rows = await rawRows<{ id: string }>(
+      tx,
+      sql`update site_viewer_sessions set view_as = ${input.viewAs}
+        where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
+          and id = ${input.sessionId} and revoked_at is null
+        returning id`,
+    );
+    return rows.length > 0;
   });
 }
 
@@ -1247,7 +1292,34 @@ export async function isSiteWorkspaceMember(
   });
 }
 
+/**
+ * The subject's workspace permissions (normalized), or null when they hold
+ * no membership. A Site conversation of a member gets only the Site's tools
+ * that member may use themselves.
+ */
+export async function getSiteWorkspaceMemberPermissions(
+  db: Database,
+  scope: SitePublishingScope,
+  subjectId: string,
+): Promise<Permission[] | null> {
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{ permissions: unknown }>(
+      tx,
+      sql`select permissions from workspace_memberships
+        where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
+    );
+    return row
+      ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions))
+      : null;
+  });
+}
+
 // --- limit profiles --------------------------------------------------------------
+
+/** Keep the on-disk spelling readable by the previous release during rollout. */
+function storedSiteLimitKind(kind: SiteLimitProfileKindValue | null) {
+  return kind === "standard" ? "free" : kind;
+}
 
 export async function getWorkspaceSiteLimitProfile(
   db: Database,
@@ -1275,10 +1347,13 @@ export async function putWorkspaceSiteLimitProfile(
   actor: string,
 ): Promise<StoredSiteLimitProfile> {
   await withRlsContext(db, scope, async (tx) => {
-    const overrides = profile.overrides === null ? null : JSON.stringify(profile.overrides);
+    const overrides =
+      profile.overrides === null
+        ? null
+        : JSON.stringify({ ...profile.overrides, __siteLimitsVersion: 2 });
     await tx.execute(
       sql`insert into site_limit_profiles (workspace_id, account_id, kind, overrides, updated_by)
-        values (${scope.workspaceId}, ${scope.accountId}, ${profile.kind}, ${overrides}::jsonb, ${actor})
+        values (${scope.workspaceId}, ${scope.accountId}, ${storedSiteLimitKind(profile.kind)}, ${overrides}::jsonb, ${actor})
         on conflict (workspace_id) do update set kind = excluded.kind,
           overrides = excluded.overrides, updated_by = excluded.updated_by, updated_at = now()`,
     );
@@ -1287,6 +1362,28 @@ export async function putWorkspaceSiteLimitProfile(
 }
 
 // --- conversations and budgets ---------------------------------------------------
+
+/** Verified identity retained at start; legacy conversations use a matching signed-in Site session. */
+export async function siteRuntimeConversationViewerEmail(
+  db: Database,
+  scope: SitePublishingScope,
+  sessionId: string,
+): Promise<string | null> {
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{ email: string | null }>(
+      tx,
+      sql`
+      select coalesce(c.viewer_email, (
+        select v.email from site_viewer_sessions v
+        where v.workspace_id = c.workspace_id and v.site_id = c.site_id
+          and 'user:' || v.subject_id = c.viewer_principal
+        order by v.created_at desc limit 1
+      )) as email from site_runtime_conversations c
+      where c.workspace_id = ${scope.workspaceId} and c.session_id = ${sessionId}`,
+    );
+    return row?.email ?? null;
+  });
+}
 
 /** Who started a Site conversation, as the Site saw them then. */
 export type SiteRuntimeConversationViewerKind = "member" | "invited" | "user" | "guest";
@@ -1298,10 +1395,15 @@ export type SiteRuntimeConversationRecord = {
   viewerKind: SiteRuntimeConversationViewerKind;
   /** The workspace tools (MCP connection ids) the conversation was started with. */
   toolIds: string[];
+  /**
+   * The Site-wide usage windows it counts in: `*` for viewers outside the
+   * workspace (the Site's budgets), `*members` for workspace members.
+   */
+  budgetKey: string;
   versionId: string | null;
   turns: number;
   meteredMicros: number;
-  /** The conversation's own spend cap, fixed at start (its session usage limit). */
+  /** The conversation's total spend cap; execution receives only funded increments. */
   limitMicros: number | null;
   reservedMicros: number;
   /** Work admitted so far (start, messages, steering, resumes). */
@@ -1317,6 +1419,7 @@ type ConversationRow = {
   viewer_principal: string;
   viewer_kind: string;
   tool_ids: unknown;
+  budget_key: string | null;
   version_id: string | null;
   turns: number;
   metered_micros: string | number;
@@ -1324,15 +1427,74 @@ type ConversationRow = {
   reserved_micros: string | number;
   reserved_day: unknown;
   reserved_month: unknown;
+  reservation_windows_complete: boolean;
+  pending_admission_id: string | null;
+  pending_admission_until: unknown;
   admissions: string | number;
   created_at: unknown;
   updated_at: unknown;
 };
 
 const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, viewer_kind, tool_ids,
-  version_id, turns,
+  budget_key, version_id, turns,
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
-  reserved_month::text as reserved_month, admissions, created_at, updated_at`;
+  reserved_month::text as reserved_month, reservation_windows_complete,
+  pending_admission_id, pending_admission_until, admissions, created_at, updated_at`;
+
+/** A timeout is only permission to reconcile, never proof that enqueue failed. */
+const SITE_ADMISSION_RECOVERY_MS = 10 * 60 * 1000;
+
+/** Caller holds the conversation lock, before the canonical session lock. */
+async function conversationCanRelease(
+  tx: Database,
+  scope: SitePublishingScope,
+  row: ConversationRow,
+  now: Date,
+): Promise<boolean> {
+  if (row.pending_admission_id !== null) {
+    if (new Date(String(row.pending_admission_until)).getTime() > now.getTime()) return false;
+    // Revocation and queue reconciliation are atomic with release. A dispatch
+    // that has not committed must acquire this row and will reject the old token.
+    await tx.execute(sql`update site_runtime_conversations
+      set pending_admission_id = null, pending_admission_until = null
+      where workspace_id = ${scope.workspaceId} and session_id = ${row.session_id}`);
+  }
+  const locks = await lockSessionEventWriteRows(tx, {
+    workspaceId: scope.workspaceId,
+    sessionIds: [row.session_id],
+    controlLock: "none",
+  });
+  return (
+    locks.sessions.length === 0 ||
+    (await sessionQueueIsEmptyInTransaction(tx, scope.workspaceId, row.session_id))
+  );
+}
+
+/** A returned dispatch has finished; exceptions retain the pending marker for reconciliation. */
+export async function finishSiteRuntimeAdmission(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { sessionId: string; admissionId: string },
+): Promise<void> {
+  await withRlsContext(db, scope, async (tx) => {
+    await tx.execute(sql`update site_runtime_conversations
+      set pending_admission_id = null, pending_admission_until = null
+      where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
+        and pending_admission_id = ${input.admissionId}::uuid`);
+  });
+}
+
+/** Previous-release writers reserved all windows except viewer-month. */
+function conversationReservedInWindow(
+  row: ConversationRow,
+  window: { principal: string; period: "day" | "month" },
+): boolean {
+  return (
+    row.reservation_windows_complete ||
+    window.principal !== row.viewer_principal ||
+    window.period === "day"
+  );
+}
 
 function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
   return {
@@ -1341,6 +1503,7 @@ function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
     viewerPrincipal: row.viewer_principal,
     viewerKind: row.viewer_kind as SiteRuntimeConversationViewerKind,
     toolIds: jsonValue<string[] | null>(row.tool_ids) ?? [],
+    budgetKey: row.budget_key ?? SITE_RUNTIME_SITE_PRINCIPAL,
     versionId: row.version_id,
     turns: Number(row.turns),
     meteredMicros: Number(row.metered_micros),
@@ -1370,6 +1533,44 @@ export async function getOwnedSiteRuntimeConversation(
   });
 }
 
+/**
+ * Whether an agent session belongs to a published Site's agent, and which
+ * conversation (Site and viewer) it serves. A session tree whose root was
+ * started by a Site's service principal (`site:<siteId>`) is a Site agent;
+ * its conversation row names the viewer. `siteAgent` without a conversation
+ * (a row that is gone or never written) must fail closed. A session that
+ * cannot be read is reported as a Site agent without a conversation too.
+ */
+export async function findSiteRuntimeAgentConversation(
+  db: Database,
+  scope: SitePublishingScope,
+  sessionId: string,
+): Promise<{ siteAgent: boolean; conversation: SiteRuntimeConversationRecord | null }> {
+  if (!UUID.test(sessionId)) return { siteAgent: true, conversation: null };
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<
+      { root_creator: string | null; root_id: string | null } & Partial<ConversationRow>
+    >(
+      tx,
+      sql`select r.created_by_subject_id as root_creator, r.id as root_id,
+            c.session_id, c.site_id, c.viewer_principal, c.viewer_kind, c.tool_ids,
+            c.budget_key, c.version_id, c.turns, c.metered_micros, c.limit_micros,
+            c.reserved_micros, c.reserved_day::text as reserved_day,
+            c.reserved_month::text as reserved_month, c.admissions, c.created_at, c.updated_at
+          from sessions s
+          left join sessions r on r.workspace_id = s.workspace_id
+            and r.id = coalesce(s.root_session_id, s.id)
+          left join site_runtime_conversations c on c.workspace_id = s.workspace_id
+            and c.session_id = r.id
+          where s.workspace_id = ${scope.workspaceId} and s.id = ${sessionId}`,
+    );
+    if (!row || !row.root_id) return { siteAgent: true, conversation: null };
+    const conversation = row.session_id ? toConversation(row as ConversationRow) : null;
+    const siteAgent = conversation !== null || (row.root_creator ?? "").startsWith("site:");
+    return { siteAgent, conversation };
+  });
+}
+
 export async function listOwnedSiteRuntimeConversations(
   db: Database,
   scope: SitePublishingScope,
@@ -1390,7 +1591,7 @@ export async function listOwnedSiteRuntimeConversations(
 
 /** Statuses of a session with no turn running or queued. */
 const IDLE_SESSION_STATUSES = ["idle", "failed", "cancelled"];
-/** A reservation with no admitted work or counted spend for this long is released. */
+/** Age triggers reconciliation; the canonical queue still decides whether funding can be released. */
 export const SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS = 6;
 /** A sweep revisits a conversation at most this often. */
 const SWEEP_REVISIT_SECONDS = 30;
@@ -1436,6 +1637,7 @@ export async function claimSiteRuntimeReservationSweep(
               )})
                 or (s.id is null and c.created_at < ${now}::timestamptz
                   - make_interval(mins => ${SITE_RUNTIME_ABANDONED_START_MINUTES}))
+                or c.pending_admission_until <= ${now}::timestamptz
                 or c.updated_at < ${now}::timestamptz
                   - make_interval(hours => ${SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS}))
             order by c.swept_at asc nulls first, c.updated_at asc
@@ -1505,12 +1707,15 @@ export async function listActiveSiteRuntimeConversations(
 
 export type SiteRuntimeUsageSnapshot = {
   visitorDay: { conversations: number; agentMicros: number; reservedMicros: number };
+  visitorMonth: { conversations: number; agentMicros: number; reservedMicros: number };
   siteDay: { conversations: number; agentMicros: number; reservedMicros: number };
   siteMonth: { conversations: number; agentMicros: number; reservedMicros: number };
 };
 
 /** The Site-wide principal key in usage windows. */
 export const SITE_RUNTIME_SITE_PRINCIPAL = "*";
+/** The Site-wide key of workspace members' conversations (apart from the Site's budgets). */
+export const SITE_RUNTIME_MEMBERS_PRINCIPAL = "*members";
 
 function periodStarts(now: Date): { day: string; month: string } {
   const iso = now.toISOString();
@@ -1521,9 +1726,16 @@ function periodStarts(now: Date): { day: string; month: string } {
 export async function readSiteRuntimeUsage(
   db: Database,
   scope: SitePublishingScope,
-  input: { siteId: string; viewerPrincipal: string; now?: Date },
+  input: {
+    siteId: string;
+    viewerPrincipal: string;
+    /** The Site-wide key to read (default `*`, the Site's budgets). */
+    sitePrincipal?: string;
+    now?: Date;
+  },
 ): Promise<SiteRuntimeUsageSnapshot> {
   const periods = periodStarts(input.now ?? new Date());
+  const sitePrincipal = input.sitePrincipal ?? SITE_RUNTIME_SITE_PRINCIPAL;
   return await withRlsContext(db, scope, async (tx) => {
     const rows = await rawRows<UsageRow & { principal_key: string; period: "day" | "month" }>(
       tx,
@@ -1531,7 +1743,7 @@ export async function readSiteRuntimeUsage(
           agent_micros, reserved_micros
         from site_runtime_usage
         where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
-          and principal_key in (${input.viewerPrincipal}, ${SITE_RUNTIME_SITE_PRINCIPAL})`,
+          and principal_key in (${input.viewerPrincipal}, ${sitePrincipal})`,
     );
     const pick = (principal: string, period: "day" | "month") => {
       const row = rows.find(
@@ -1548,8 +1760,9 @@ export async function readSiteRuntimeUsage(
     };
     return {
       visitorDay: pick(input.viewerPrincipal, "day"),
-      siteDay: pick(SITE_RUNTIME_SITE_PRINCIPAL, "day"),
-      siteMonth: pick(SITE_RUNTIME_SITE_PRINCIPAL, "month"),
+      visitorMonth: pick(input.viewerPrincipal, "month"),
+      siteDay: pick(sitePrincipal, "day"),
+      siteMonth: pick(sitePrincipal, "month"),
     };
   });
 }
@@ -1573,7 +1786,8 @@ type UsageWindow = {
 /**
  * Lock one usage window row for this transaction, creating it or rolling it
  * to the current period first (a new period starts from zero, reservations
- * included). Locks are always taken visitor-day, Site-day, Site-month.
+ * included). Locks are always taken visitor-day, visitor-month, Site-day,
+ * Site-month (lockConversationWindows).
  */
 async function lockUsageWindow(
   tx: Database,
@@ -1634,6 +1848,65 @@ async function adjustUsageWindow(
   );
 }
 
+type ConversationWindows = {
+  visitorDay: UsageWindow;
+  visitorMonth: UsageWindow;
+  siteDay: UsageWindow;
+  siteMonth: UsageWindow;
+};
+
+/** Lock a conversation's four usage windows in the one fixed order. */
+async function lockConversationWindows(
+  tx: Database,
+  scope: SitePublishingScope,
+  siteId: string,
+  viewerPrincipal: string,
+  budgetKey: string,
+  periods: { day: string; month: string },
+): Promise<ConversationWindows> {
+  const visitorDay = await lockUsageWindow(tx, scope, siteId, viewerPrincipal, "day", periods.day);
+  const visitorMonth = await lockUsageWindow(
+    tx,
+    scope,
+    siteId,
+    viewerPrincipal,
+    "month",
+    periods.month,
+  );
+  const siteDay = await lockUsageWindow(tx, scope, siteId, budgetKey, "day", periods.day);
+  const siteMonth = await lockUsageWindow(tx, scope, siteId, budgetKey, "month", periods.month);
+  return { visitorDay, visitorMonth, siteDay, siteMonth };
+}
+
+/** The spend budgets with the window each one is counted in, in check order. */
+function spendBudgets(
+  limits: SiteRuntimeBudgetLimits,
+  windows: ConversationWindows,
+): Array<{ budget: SiteRuntimeBudget; limit: number | null; window: UsageWindow }> {
+  return [
+    {
+      budget: "agent_micros_per_visitor_per_day",
+      limit: limits.agentMicrosPerVisitorPerDay,
+      window: windows.visitorDay,
+    },
+    {
+      budget: "agent_micros_per_visitor_per_month",
+      limit: limits.agentMicrosPerVisitorPerMonth ?? null,
+      window: windows.visitorMonth,
+    },
+    {
+      budget: "agent_micros_per_site_per_day",
+      limit: limits.agentMicrosPerSitePerDay ?? null,
+      window: windows.siteDay,
+    },
+    {
+      budget: "agent_micros_per_site_per_month",
+      limit: limits.agentMicrosPerSitePerMonth,
+      window: windows.siteMonth,
+    },
+  ];
+}
+
 /** The budgets a reservation is checked against (the Site's effective limits). */
 export type SiteRuntimeBudgetLimits = {
   conversationsPerVisitorPerDay: number | null;
@@ -1641,7 +1914,15 @@ export type SiteRuntimeBudgetLimits = {
   turnsPerConversation: number | null;
   agentMicrosPerConversation: number | null;
   agentMicrosPerVisitorPerDay: number | null;
+  agentMicrosPerVisitorPerMonth?: number | null;
+  agentMicrosPerSitePerDay?: number | null;
   agentMicrosPerSitePerMonth: number | null;
+  /**
+   * What one turn holds against the spend budgets while it runs (its actual
+   * spend replaces it when settled), at most the conversation's own cap.
+   * Unset: the whole cap.
+   */
+  turnReservationMicros?: number | null;
 };
 
 export type SiteRuntimeBudget =
@@ -1650,25 +1931,70 @@ export type SiteRuntimeBudget =
   | "turns_per_conversation"
   | "agent_micros_per_conversation"
   | "agent_micros_per_visitor_per_day"
+  | "agent_micros_per_visitor_per_month"
+  | "agent_micros_per_site_per_day"
   | "agent_micros_per_site_per_month";
 
 export type SiteRuntimeReservation =
-  | { ok: true; limitMicros: number | null; reservedMicros: number }
-  | { ok: false; budget: SiteRuntimeBudget };
+  | {
+      ok: true;
+      limitMicros: number | null;
+      executionLimitMicros: number | null;
+      reservedMicros: number;
+      /** A keyed Start was initialized while its repair request was being prepared. */
+      alreadyStarted?: boolean;
+    }
+  | {
+      ok: false;
+      budget: SiteRuntimeBudget;
+      /**
+       * Only what running conversations hold refuses it: the budget has room
+       * once their spend settles, so a retry shortly may succeed.
+       */
+      busy?: boolean;
+    };
+
+/** Hold the reservation row while its funded execution ceiling is stamped. */
+export async function siteRuntimeFundedLimitInTransaction(
+  tx: Database,
+  scope: SitePublishingScope,
+  sessionId: string,
+): Promise<number | null> {
+  const [row] = await rawRows<ConversationRow>(
+    tx,
+    sql`
+    select ${CONVERSATION_COLUMNS} from site_runtime_conversations
+    where workspace_id = ${scope.workspaceId} and session_id = ${sessionId} for update`,
+  );
+  if (!row) throw new SitePublishingError("not_found", "Conversation not found");
+  return row.limit_micros === null
+    ? null
+    : Math.min(Number(row.limit_micros), Number(row.metered_micros) + Number(row.reserved_micros));
+}
 
 /** A conversation is not started on less than this (or its cap, when smaller). */
 export const SITE_RUNTIME_MIN_RESERVATION_MICROS = 1_000;
 
 const remaining = (limit: number | null, window: UsageWindow) =>
   limit === null ? Number.POSITIVE_INFINITY : limit - window.agentMicros - window.reservedMicros;
+/** What a budget has left counting settled spend only (no reservations). */
+const unspent = (limit: number | null, window: UsageWindow) =>
+  limit === null ? Number.POSITIVE_INFINITY : limit - window.agentMicros;
+/** One turn's reservation: the per-turn estimate, within what the conversation may still spend. */
+const turnReservation = (limits: SiteRuntimeBudgetLimits, mayStillSpend: number) =>
+  Math.max(
+    0,
+    Math.floor(Math.min(mayStillSpend, limits.turnReservationMicros ?? Number.POSITIVE_INFINITY)),
+  );
 
 /**
  * Start a conversation: in one transaction, count the start against the
- * visitor's and the Site's daily starts, and reserve its whole spend cap in
- * the visitor's day and the Site's day and month, refusing when any budget
- * would be exceeded. The cap is the per-conversation limit, lowered to what
- * the budgets still have; it becomes the session's usage limit, so settled
- * plus reserved spend never exceeds a budget whoever the visitors are.
+ * visitor's and the Site's daily starts, and reserve its first turn (the
+ * per-turn estimate, at most its cap) in the visitor's day and month and the
+ * Site's day and month, refusing when any budget would be exceeded (`busy`
+ * when only other running conversations' reservations are in the way). The
+ * cap is the per-conversation limit, lowered to what the budgets still have;
+ * the separate executionLimitMicros funds only this first increment.
  * The conversation row records the owner (Site and viewer) before the
  * session exists; `releaseSiteRuntimeConversationStart` undoes all of it.
  */
@@ -1680,9 +2006,14 @@ export async function reserveSiteRuntimeConversationStart(
     siteId: string;
     viewerPrincipal: string;
     viewerKind: SiteRuntimeConversationViewerKind;
+    /** Verified at sign-in, never taken from tool arguments. */
+    viewerEmail?: string | null;
     toolIds: readonly string[];
     versionId: string | null;
     limits: SiteRuntimeBudgetLimits;
+    /** The Site-wide windows to count in (default `*`; members use `*members`). */
+    budgetKey?: string;
+    admissionId?: string;
     now?: Date;
   },
 ): Promise<SiteRuntimeReservation> {
@@ -1690,62 +2021,55 @@ export async function reserveSiteRuntimeConversationStart(
     throw new SitePublishingError("validation", "Invalid conversation");
   const periods = periodStarts(input.now ?? new Date());
   const { limits } = input;
+  const budgetKey = input.budgetKey ?? SITE_RUNTIME_SITE_PRINCIPAL;
   return await withRlsContext(db, scope, async (tx) => {
-    const visitorDay = await lockUsageWindow(
+    const windows = await lockConversationWindows(
       tx,
       scope,
       input.siteId,
       input.viewerPrincipal,
-      "day",
-      periods.day,
-    );
-    const siteDay = await lockUsageWindow(
-      tx,
-      scope,
-      input.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
-      "day",
-      periods.day,
-    );
-    const siteMonth = await lockUsageWindow(
-      tx,
-      scope,
-      input.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
-      "month",
-      periods.month,
+      budgetKey,
+      periods,
     );
     if (
       limits.conversationsPerVisitorPerDay !== null &&
-      visitorDay.conversations >= limits.conversationsPerVisitorPerDay
+      windows.visitorDay.conversations >= limits.conversationsPerVisitorPerDay
     )
       return { ok: false, budget: "conversations_per_visitor_per_day" } as const;
     if (
       limits.conversationsPerSitePerDay !== null &&
-      siteDay.conversations >= limits.conversationsPerSitePerDay
+      windows.siteDay.conversations >= limits.conversationsPerSitePerDay
     )
       return { ok: false, budget: "conversations_per_site_per_day" } as const;
     const cap = limits.agentMicrosPerConversation;
     const floor =
       cap === null ? 1 : Math.max(1, Math.min(cap, SITE_RUNTIME_MIN_RESERVATION_MICROS));
-    const visitorLeft = remaining(limits.agentMicrosPerVisitorPerDay, visitorDay);
-    if (visitorLeft < floor)
-      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
-    const siteLeft = remaining(limits.agentMicrosPerSitePerMonth, siteMonth);
-    if (siteLeft < floor) return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
-    const reserve =
-      cap === null ? 0 : Math.max(0, Math.floor(Math.min(cap, visitorLeft, siteLeft)));
-    const limitMicros = cap === null ? null : reserve;
+    let left = Number.POSITIVE_INFINITY;
+    for (const budget of spendBudgets(limits, windows)) {
+      const budgetLeft = remaining(budget.limit, budget.window);
+      if (budgetLeft < floor)
+        return {
+          ok: false,
+          budget: budget.budget,
+          ...(unspent(budget.limit, budget.window) >= floor ? { busy: true } : {}),
+        } as const;
+      left = Math.min(left, budgetLeft);
+    }
+    const limitMicros = cap === null ? null : Math.max(0, Math.floor(Math.min(cap, left)));
+    const reserve = limitMicros === null ? 0 : turnReservation(limits, limitMicros);
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
-          viewer_principal, viewer_kind, tool_ids, version_id, turns, limit_micros,
-          reserved_micros, reserved_day, reserved_month, admissions)
+          viewer_principal, viewer_kind, tool_ids, budget_key, version_id, turns, limit_micros,
+          reserved_micros, reserved_day, reserved_month, admissions, reservation_windows_complete, viewer_email,
+          pending_admission_id, pending_admission_until)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
           ${input.viewerPrincipal}, ${input.viewerKind}, ${JSON.stringify(input.toolIds)}::jsonb,
-          ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
-          ${periods.month}::date, 1)`,
+          ${budgetKey}, ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
+          ${periods.month}::date, 1, true, ${input.viewerEmail ?? null},
+          ${input.admissionId ?? null}::uuid,
+          ${input.admissionId ? new Date(Date.now() + SITE_ADMISSION_RECOVERY_MS).toISOString() : null}::timestamptz)`,
     );
-    for (const window of [visitorDay, siteDay, siteMonth])
+    for (const window of Object.values(windows))
       await adjustUsageWindow(tx, scope, input.siteId, window, {
         conversations: 1,
         reservedMicros: reserve,
@@ -1759,7 +2083,12 @@ export async function reserveSiteRuntimeConversationStart(
               or (period = 'month' and period_start < (${periods.month}::date - interval '1 month')::date))
           limit 100))`,
     );
-    return { ok: true, limitMicros, reservedMicros: reserve } as const;
+    return {
+      ok: true,
+      limitMicros,
+      executionLimitMicros: limitMicros === null ? null : reserve,
+      reservedMicros: reserve,
+    } as const;
   });
 }
 
@@ -1776,21 +2105,26 @@ export async function releaseSiteRuntimeConversationStart(
   await withRlsContext(db, scope, async (tx) => {
     const [row] = await rawRows<ConversationRow>(
       tx,
-      sql`delete from site_runtime_conversations
+      sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
-        returning ${CONVERSATION_COLUMNS}`,
+        for update`,
     );
     if (!row) return;
+    if (!(await conversationCanRelease(tx, scope, row, new Date()))) return;
+    await tx.execute(sql`delete from site_runtime_conversations
+      where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`);
     const reserved = Number(row.reserved_micros);
     const day = String(row.reserved_day ?? "").slice(0, 10);
     const month = String(row.reserved_month ?? "").slice(0, 10);
+    const budgetKey = row.budget_key ?? SITE_RUNTIME_SITE_PRINCIPAL;
     const windows = [
       { principal: row.viewer_principal, period: "day" as const, periodStart: day },
-      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "day" as const, periodStart: day },
-      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "month" as const, periodStart: month },
+      { principal: row.viewer_principal, period: "month" as const, periodStart: month },
+      { principal: budgetKey, period: "day" as const, periodStart: day },
+      { principal: budgetKey, period: "month" as const, periodStart: month },
     ];
     for (const window of windows)
-      if (window.periodStart)
+      if (window.periodStart && conversationReservedInWindow(row, window))
         await adjustUsageWindow(tx, scope, row.site_id, window, {
           conversations: -1,
           reservedMicros: -reserved,
@@ -1801,16 +2135,28 @@ export async function releaseSiteRuntimeConversationStart(
 /**
  * Admit agent work in an existing conversation (a new message when
  * `newTurn`, else steering, resuming or running a queued message): under the
- * turn cap and its own spend cap, and top its reservation back up to what
- * the conversation may still spend, refusing when a budget cannot hold it.
- * A per-conversation limit lowered since the start lowers the conversation's
- * cap (returned as `limitMicros`; the caller lowers the session usage limit
- * to it before the work runs).
+ * turn cap and its own spend cap, and set its reservation to one turn's
+ * estimate (at most what the conversation may still spend), refusing when a
+ * budget cannot hold it (`busy` when only other conversations' reservations
+ * are in the way). A per-conversation limit lowered since the start lowers
+ * the conversation's cap (returned as `limitMicros`; the caller stamps only
+ * executionLimitMicros, cumulative spend plus funding, before work). `uncapped` (a workspace
+ * member's conversation, including one started before members were uncapped)
+ * drops the conversation's own cap and holds no reservation.
  */
 export async function reserveSiteRuntimeConversationWork(
   db: Database,
   scope: SitePublishingScope,
-  input: { sessionId: string; limits: SiteRuntimeBudgetLimits; newTurn: boolean; now?: Date },
+  input: {
+    sessionId: string;
+    limits: SiteRuntimeBudgetLimits;
+    newTurn: boolean;
+    uncapped?: boolean;
+    admissionId?: string;
+    /** Repair only the first Start; do not fund a replay that already initialized. */
+    repairStart?: boolean;
+    now?: Date;
+  },
 ): Promise<SiteRuntimeReservation> {
   if (!UUID.test(input.sessionId)) throw new SitePublishingError("not_found", "Not found");
   const periods = periodStarts(input.now ?? new Date());
@@ -1824,81 +2170,102 @@ export async function reserveSiteRuntimeConversationWork(
     );
     if (!row) throw new SitePublishingError("not_found", "Conversation not found");
     const conversation = toConversation(row);
+    if (input.repairStart) {
+      // Initial enqueue takes this same conversation lock through commit. Check
+      // its canonical marker here, not just at the earlier HTTP read boundary.
+      const [initialized] = await rawRows<{ started: boolean }>(
+        tx,
+        sql`select exists (
+        select 1 from session_events where workspace_id = ${scope.workspaceId}
+          and session_id = ${input.sessionId} and type = 'session.created'
+      ) as started`,
+      );
+      if (initialized?.started)
+        return {
+          ok: true,
+          alreadyStarted: true,
+          limitMicros: conversation.limitMicros,
+          executionLimitMicros:
+            conversation.limitMicros === null
+              ? null
+              : Math.min(
+                  conversation.limitMicros,
+                  conversation.meteredMicros + conversation.reservedMicros,
+                ),
+          reservedMicros: conversation.reservedMicros,
+        } as const;
+    }
+    if (row.pending_admission_id !== null)
+      return { ok: false, budget: "agent_micros_per_conversation", busy: true } as const;
     if (
       input.newTurn &&
       limits.turnsPerConversation !== null &&
       conversation.turns >= limits.turnsPerConversation
     )
       return { ok: false, budget: "turns_per_conversation" } as const;
-    const cap =
-      conversation.limitMicros === null
+    const cap = input.uncapped
+      ? null
+      : conversation.limitMicros === null
         ? limits.agentMicrosPerConversation
         : limits.agentMicrosPerConversation === null
           ? conversation.limitMicros
           : Math.min(conversation.limitMicros, limits.agentMicrosPerConversation);
     if (cap !== null && conversation.meteredMicros >= cap)
       return { ok: false, budget: "agent_micros_per_conversation" } as const;
-    const target = cap === null ? 0 : cap - conversation.meteredMicros;
-    const visitorDay = await lockUsageWindow(
+    let target = cap === null ? 0 : turnReservation(limits, cap - conversation.meteredMicros);
+    const windows = await lockConversationWindows(
       tx,
       scope,
       conversation.siteId,
       conversation.viewerPrincipal,
-      "day",
-      periods.day,
-    );
-    const siteDay = await lockUsageWindow(
-      tx,
-      scope,
-      conversation.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
-      "day",
-      periods.day,
-    );
-    const siteMonth = await lockUsageWindow(
-      tx,
-      scope,
-      conversation.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
-      "month",
-      periods.month,
+      conversation.budgetKey,
+      periods,
     );
     const reservedDay = String(row.reserved_day ?? "").slice(0, 10);
     const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
     // A reservation counted in an earlier period vanished when that window rolled.
-    const dayDelta = target - (reservedDay === periods.day ? conversation.reservedMicros : 0);
-    const monthDelta = target - (reservedMonth === periods.month ? conversation.reservedMicros : 0);
-    // A message spends at least something: an exhausted budget refuses it even
-    // when this conversation's reservation already covers it.
-    if (remaining(limits.agentMicrosPerVisitorPerDay, visitorDay) - Math.max(0, dayDelta) < 0)
-      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
-    if (remaining(limits.agentMicrosPerSitePerMonth, siteMonth) - Math.max(0, monthDelta) < 0)
-      return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
-    if (
-      limits.agentMicrosPerVisitorPerDay !== null &&
-      visitorDay.agentMicros >= limits.agentMicrosPerVisitorPerDay
-    )
-      return { ok: false, budget: "agent_micros_per_visitor_per_day" } as const;
-    if (
-      limits.agentMicrosPerSitePerMonth !== null &&
-      siteMonth.agentMicros >= limits.agentMicrosPerSitePerMonth
-    )
-      return { ok: false, budget: "agent_micros_per_site_per_month" } as const;
-    await adjustUsageWindow(tx, scope, conversation.siteId, visitorDay, {
-      reservedMicros: dayDelta,
-    });
-    await adjustUsageWindow(tx, scope, conversation.siteId, siteDay, { reservedMicros: dayDelta });
-    await adjustUsageWindow(tx, scope, conversation.siteId, siteMonth, {
-      reservedMicros: monthDelta,
-    });
+    const ownReservation = (window: UsageWindow) =>
+      conversationReservedInWindow(row, window) &&
+      (window.period === "day" ? reservedDay === periods.day : reservedMonth === periods.month)
+        ? conversation.reservedMicros
+        : 0;
+    const budgets = spendBudgets(limits, windows);
+    const floor = Math.min(SITE_RUNTIME_MIN_RESERVATION_MICROS, target);
+    // Reserve the estimate capped by what remains, including this conversation's
+    // own existing reservation, rather than refusing a smaller last turn.
+    for (const budget of budgets) {
+      const room = remaining(budget.limit, budget.window) + ownReservation(budget.window);
+      if (room < floor)
+        return {
+          ok: false,
+          budget: budget.budget,
+          // Settled spend alone leaves room for this turn: others' reservations refuse it.
+          ...(unspent(budget.limit, budget.window) >= floor ? { busy: true } : {}),
+        } as const;
+      target = Math.min(target, Math.max(0, room));
+    }
+    for (const budget of budgets)
+      if (budget.limit !== null && budget.window.agentMicros >= budget.limit)
+        return { ok: false, budget: budget.budget } as const;
+    for (const window of Object.values(windows))
+      await adjustUsageWindow(tx, scope, conversation.siteId, window, {
+        reservedMicros: target - ownReservation(window),
+      });
     await tx.execute(
       sql`update site_runtime_conversations set reserved_micros = ${target},
           reserved_day = ${periods.day}::date, reserved_month = ${periods.month}::date,
           limit_micros = ${cap}, turns = turns + ${input.newTurn ? 1 : 0},
-          admissions = admissions + 1, updated_at = now()
+          admissions = admissions + 1, reservation_windows_complete = true, updated_at = now(),
+          pending_admission_id = ${input.admissionId ?? null}::uuid,
+          pending_admission_until = ${input.admissionId ? new Date(Date.now() + SITE_ADMISSION_RECOVERY_MS).toISOString() : null}::timestamptz
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
     );
-    return { ok: true, limitMicros: cap, reservedMicros: target } as const;
+    return {
+      ok: true,
+      limitMicros: cap,
+      executionLimitMicros: cap === null ? null : conversation.meteredMicros + target,
+      reservedMicros: target,
+    } as const;
   });
 }
 
@@ -1939,22 +2306,40 @@ export async function settleSiteRuntimeConversationSpend(
     const delta = Math.max(0, used - conversation.meteredMicros);
     const unchanged =
       input.expected === undefined || input.expected.admissions === conversation.admissions;
-    const release =
-      input.idle && unchanged
-        ? conversation.reservedMicros
-        : Math.min(conversation.reservedMicros, delta);
+    // Even an aged reservation or an idle status can have queued work. Pending
+    // admission and the locked canonical queue, not those hints, decide release.
+    const expiredAdmission =
+      row.pending_admission_id !== null &&
+      new Date(String(row.pending_admission_until)).getTime() <=
+        (input.now ?? new Date()).getTime();
+    const canRelease =
+      ((input.idle && unchanged) || expiredAdmission) &&
+      (await conversationCanRelease(tx, scope, row, input.now ?? new Date()));
+    const release = canRelease
+      ? conversation.reservedMicros
+      : Math.min(conversation.reservedMicros, delta);
     if (delta === 0 && release === 0) return 0;
     const reservedDay = String(row.reserved_day ?? "").slice(0, 10);
     const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
     const windows = [
       { principal: conversation.viewerPrincipal, period: "day" as const, reservedIn: reservedDay },
-      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "day" as const, reservedIn: reservedDay },
       {
-        principal: SITE_RUNTIME_SITE_PRINCIPAL,
+        principal: conversation.viewerPrincipal,
+        period: "month" as const,
+        reservedIn: reservedMonth,
+      },
+      { principal: conversation.budgetKey, period: "day" as const, reservedIn: reservedDay },
+      {
+        principal: conversation.budgetKey,
         period: "month" as const,
         reservedIn: reservedMonth,
       },
     ];
+    // Legacy member rows retain the original reservation key for safe release,
+    // but their newly settled spend must never consume the non-member budget.
+    const legacyMember =
+      conversation.viewerKind === "member" &&
+      conversation.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
     for (const window of windows) {
       const current = await lockUsageWindow(
         tx,
@@ -1967,9 +2352,27 @@ export async function settleSiteRuntimeConversationSpend(
       // Spend lands in the current period; the release only in the period the
       // reservation was counted in (gone if that window has rolled since).
       await adjustUsageWindow(tx, scope, conversation.siteId, current, {
-        agentMicros: delta,
-        reservedMicros: current.periodStart === window.reservedIn ? -release : 0,
+        agentMicros: legacyMember && window.principal === SITE_RUNTIME_SITE_PRINCIPAL ? 0 : delta,
+        reservedMicros:
+          current.periodStart === window.reservedIn && conversationReservedInWindow(row, window)
+            ? -release
+            : 0,
       });
+    }
+    if (legacyMember && delta > 0) {
+      for (const period of ["day", "month"] as const) {
+        const memberWindow = await lockUsageWindow(
+          tx,
+          scope,
+          conversation.siteId,
+          SITE_RUNTIME_MEMBERS_PRINCIPAL,
+          period,
+          periods[period],
+        );
+        await adjustUsageWindow(tx, scope, conversation.siteId, memberWindow, {
+          agentMicros: delta,
+        });
+      }
     }
     await tx.execute(
       sql`update site_runtime_conversations set metered_micros = ${Math.max(

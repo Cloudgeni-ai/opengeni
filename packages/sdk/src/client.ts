@@ -58,7 +58,9 @@ import type {
   SiteAuthAuthorizeResponse,
   SiteHostnameAvailability,
   SiteLimitProfile,
+  SitePlatformUsage,
   SitePublication,
+  SitePublishWarningFix,
   SiteTakedownRequest,
   UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
@@ -925,6 +927,29 @@ export type OpenGeniRequestOptions = {
   /** Opt-in void response handling for focused helpers using the shared transport. */
   responseType?: "json" | "void";
 };
+
+/** Narrowing filters for BrowserSession/ComputerSession inventories. Filters
+ *  never grant access; omitted filters return the complete workspace history. */
+export type InteractionSessionListOptions = OpenGeniRequestOptions & {
+  /** Only sessions associated with this agent session. */
+  associatedSessionId?: string | undefined;
+  /** false omits ended and failed sessions. */
+  includeTerminal?: boolean | undefined;
+};
+
+function interactionSessionListQuery(options: InteractionSessionListOptions): {
+  query: Record<string, string>;
+  request: OpenGeniRequestOptions;
+} {
+  const { associatedSessionId, includeTerminal, ...request } = options;
+  return {
+    query: {
+      ...(associatedSessionId ? { associatedSessionId } : {}),
+      ...(includeTerminal !== undefined ? { includeTerminal: String(includeTerminal) } : {}),
+    },
+    request,
+  };
+}
 
 export type SharedSessionReadOptions = {
   /**
@@ -4378,14 +4403,15 @@ export class OpenGeniClient {
    *  not access: peers and child agents intentionally remain discoverable. */
   async listBrowserSessions(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<BrowserSessionListResponse> {
+    const { query, request } = interactionSessionListQuery(options);
     return await this.requestJson<BrowserSessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/browser-sessions`,
       undefined,
-      {},
-      options,
+      query,
+      request,
     );
   }
 
@@ -4821,14 +4847,15 @@ export class OpenGeniClient {
    * relevance, not access; peer sessions intentionally remain discoverable. */
   async listComputerSessions(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<ComputerSessionListResponse> {
+    const { query, request } = interactionSessionListQuery(options);
     return await this.requestJson<ComputerSessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/computer-sessions`,
       undefined,
-      {},
-      options,
+      query,
+      request,
     );
   }
 
@@ -8707,6 +8734,46 @@ export class OpenGeniClient {
     return await this.requestJson<SitePublication>(
       "DELETE",
       sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Apply a readiness warning's one-click fix (`publication.warnings[].fix`):
+   * a Site Data collection's guest access or a Site SQL query's audience.
+   * Answers the publication with fresh warnings. 404
+   * `site_fix_target_missing` when the collection or query no longer exists.
+   */
+  async applySitePublicationFix(
+    workspaceId: string,
+    siteId: string,
+    fix: SitePublishWarningFix,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/fixes`,
+      fix,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * This month's Site platform usage of the workspace (gateway requests,
+   * Site SQL rows read and written, Site SQL and Site Data storage) against
+   * its monthly allowance, with the billing mode and the Opengeni-wide
+   * brake state.
+   */
+  async getSitePlatformUsage(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePlatformUsage> {
+    return await this.requestJson<SitePlatformUsage>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-platform-usage`,
       undefined,
       undefined,
       options,

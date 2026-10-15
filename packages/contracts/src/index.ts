@@ -1098,6 +1098,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_delete",
   "site_publication_get",
   "site_publication_update",
+  "site_publication_apply_fix",
   "site_hostname_check",
   "site_sql_inspect",
   "site_sql_enable",
@@ -6141,6 +6142,14 @@ export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 /** Private marker for the compact attachment-reference carrier created by compaction. */
 export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
+ * Private marker on catalogs whose model-visible text is already complete in
+ * `content` (provenance and upload times were frozen when compaction created
+ * them). Projection must not append per-reference receipts to such a catalog.
+ * Catalogs without it keep their original projection byte for byte.
+ */
+export const MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD =
+  "opengeni_attachment_catalog_rendered" as const;
+/**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this Opengeni
  * extension field; the numbered projection in `content` remains model-visible.
@@ -7028,6 +7037,9 @@ export const ToolRef = /* @__PURE__ */ defineSchema(() =>
     // configure the id, validation drops the ref. Auto-attached workspace-default
     // capability MCPs also use this marker.
     optional: z.boolean().optional(),
+    // Optional narrowing of this connection's tools. Empty means no tools;
+    // omission preserves the connection's authorized catalog.
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   }),
 );
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -7337,11 +7349,18 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
     const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const allowedTools =
+      prior.allowedTools === undefined
+        ? tool.allowedTools
+        : tool.allowedTools === undefined
+          ? prior.allowedTools
+          : prior.allowedTools.filter((name) => tool.allowedTools!.includes(name));
     byKey.set(key, {
       kind: "mcp",
       id: prior.id,
       ...(optional ? { optional } : {}),
       ...(eager ? { eager } : {}),
+      ...(allowedTools !== undefined ? { allowedTools } : {}),
     });
   }
   return order.map((key) => byKey.get(key)!);
@@ -20862,6 +20881,8 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "unsupported_backend_context",
         "transient_establishment",
         "concurrent_swap",
+        "personal_machine_permission_required",
+        "personal_machine_not_permitted",
         "recovery_in_progress",
         "recovery_degraded",
         "recovery_unrecoverable",

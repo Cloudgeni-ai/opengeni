@@ -21,12 +21,15 @@ import {
 import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   collapseRepeatedSessionGoalContexts,
   expandUnchangedSessionGoalContexts,
+  formatModelContextTimestamp,
   isTransientSessionSystemUpdateBatch,
   latestSkillCatalogContext,
   readSkillCatalogContext,
+  resourceMountPath,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
@@ -1683,12 +1686,15 @@ function isPortableRetentionCandidate(item: CompactionItem): boolean {
  * (prior summaries excluded, retained images preserved) plus one marked summary item.
  * Each distinct session goal context is kept once, and answered transient
  * machine-status batches are left to the summary.
+ * Attachments of messages that were not retained are listed in one dated
+ * platform catalog placed before the retained messages, never after them.
  */
 export function buildCompactionReplacementHistory(
   items: readonly CompactionItem[],
   summaryBody: string,
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
   retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
 ): CompactionItem[] {
   const retainedReversed: CompactionItem[] = [];
   let remaining = Math.max(
@@ -1717,12 +1723,13 @@ export function buildCompactionReplacementHistory(
     remaining -= textTokens + nonTextTokens;
   }
   const currentCatalog = latestSkillCatalogContext(items);
+  const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
+  const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
   const history = [
     ...(currentCatalog ? [currentCatalog] : []),
-    ...collapseRepeatedSessionGoalContexts(retainedReversed.reverse()),
+    ...(attachmentCatalog ? [attachmentCatalog] : []),
+    ...retained,
   ];
-  const attachmentCatalog = buildAttachmentCatalogItem(items, history);
-  if (attachmentCatalog) history.push(attachmentCatalog);
   history.push(buildSummaryItem(summaryBody));
   const reasoning = latestReasoningConfiguration(items);
   if (reasoning) history.push(reasoningConfigurationItem(reasoning));
@@ -1763,6 +1770,7 @@ export function buildRemoteV2ReplacementHistory(
   items: readonly CompactionItem[],
   compactionItem: CompactionItem,
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
 ): CompactionItem[] {
   if (!isRemoteCompactionItem(compactionItem)) {
     throw new EmptyCompactionSummaryError({
@@ -1796,12 +1804,13 @@ export function buildRemoteV2ReplacementHistory(
     break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
+  const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
+  const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
   const history = [
     ...(currentCatalog ? [currentCatalog] : []),
-    ...collapseRepeatedSessionGoalContexts(retainedReversed.reverse()),
+    ...(attachmentCatalog ? [attachmentCatalog] : []),
+    ...retained,
   ];
-  const attachmentCatalog = buildAttachmentCatalogItem(items, history);
-  if (attachmentCatalog) history.push(attachmentCatalog);
   history.push({
     type: "compaction",
     encrypted_content: compactionItem.encrypted_content,
@@ -1836,21 +1845,67 @@ function attachmentRefsFromCompactionItems(items: readonly CompactionItem[]): Fi
   return refs;
 }
 
+/** Upload time of each referenced file, frozen into a catalog when compaction creates it. */
+export type AttachmentUploadTimes = ReadonlyMap<string, Date | string>;
+
+/** File ids whose upload times a compaction may need for its attachment catalog. */
+export function compactionAttachmentFileIds(items: readonly CompactionItem[]): string[] {
+  return attachmentRefsFromCompactionItems(items).map((ref) => ref.fileId);
+}
+
+const ATTACHMENT_CATALOG_HEADER = "[Opengeni earlier attachments]";
+
+function attachmentCatalogUploadText(value: Date | string | undefined): string {
+  if (value === undefined) return "upload time unknown";
+  try {
+    return `uploaded ${formatModelContextTimestamp(value)}`;
+  } catch {
+    return "upload time unknown";
+  }
+}
+
+/**
+ * The complete model-visible catalog text. It is frozen into canonical history
+ * when compaction creates the catalog, so later turns replay it unchanged.
+ */
+function renderAttachmentCatalogText(
+  refs: readonly FileResourceRef[],
+  uploadTimes: AttachmentUploadTimes,
+): string {
+  return [
+    ATTACHMENT_CATALOG_HEADER,
+    "Files from earlier in this conversation whose messages are now summarized or no longer shown. " +
+      "This list is a platform record, not a message or attachment from the user. " +
+      "Treat a file as part of the current request only when the latest user message refers to it.",
+    ...refs.map(
+      (ref) =>
+        `- fileId=${ref.fileId}; ${attachmentCatalogUploadText(uploadTimes.get(ref.fileId))}; ` +
+        `mountDirectory=${resourceMountPath(ref)}`,
+    ),
+    "To open one, use the existing file in its mountDirectory, or call " +
+      "files__files_get_download_url with its fileId and download it with the shell.",
+  ].join("\n");
+}
+
 function buildAttachmentCatalogItem(
   original: readonly CompactionItem[],
   retained: readonly CompactionItem[],
+  uploadTimes: AttachmentUploadTimes,
 ): CompactionItem | null {
   const retainedIds = new Set(attachmentRefsFromCompactionItems(retained).map((ref) => ref.fileId));
   const omittedRefs = attachmentRefsFromCompactionItems(original).filter(
     (ref) => !retainedIds.has(ref.fileId),
   );
   if (omittedRefs.length === 0) return null;
+  // A platform record, not user input: system role, complete text, and placed
+  // before the retained messages so it cannot read as part of the latest one.
   return {
     type: "message",
-    role: "user",
-    content: "[Opengeni retained attachment references]",
+    role: "system",
+    content: renderAttachmentCatalogText(omittedRefs, uploadTimes),
     [MODEL_ATTACHMENT_REFS_FIELD]: omittedRefs,
     [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+    [MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD]: true,
   };
 }
 

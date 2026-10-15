@@ -1262,7 +1262,7 @@ describe("BrowserSession route discipline", () => {
     ).toBe(false);
 
     const source = await readFile(routeUrl, "utf8");
-    expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(3);
+    expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(4);
     expect(source).toContain(
       'nativeBrowserControl: typeof session.ensureBrowserControl === "function"',
     );
@@ -1400,10 +1400,52 @@ describe("BrowserSession route discipline", () => {
       settle.indexOf("withBrowserPlacement("),
     );
     expect(settle).toContain("binding.placementInstanceId");
-    expect(settle.indexOf("endCapturedBrowserController(")).toBeLessThan(
+    // An interrupted launch is set aside intact, never discarded.
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeGreaterThan(-1);
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeLessThan(
       settle.indexOf("settleExpiredBrowserSessionResume(deps.db"),
     );
+    expect(settle).not.toContain("discardWorkingRuntime");
     expect(settle).toContain("expectedControllerGeneration: expired.controllerGeneration");
+  });
+
+  test("continues an expired resume on its retained working copy before restoring over it", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    // Continuation is tried first; only a refusal falls back to settle + restore.
+    expect(resume.indexOf("continueExpiredBrowserResume(")).toBeGreaterThan(-1);
+    expect(resume.indexOf("continueExpiredBrowserResume(")).toBeLessThan(
+      resume.indexOf("settleExpiredBrowserResume("),
+    );
+    expect(resume.indexOf("if (continued)")).toBeLessThan(
+      resume.indexOf("settleExpiredBrowserResume("),
+    );
+    const continuation = source.slice(
+      source.indexOf("async function continueExpiredBrowserResume"),
+      source.indexOf("async function settleExpiredBrowserResume"),
+    );
+    expect(continuation).toContain("if (!expired?.controllerGeneration) return null;");
+    expect(continuation).toContain(
+      'browserSessionStorageMode(record.session) !== "private_profile"',
+    );
+    // The same generation is re-adopted from its own working directory on the
+    // controller instance that holds it; nothing is restored or discarded.
+    expect(continuation).toContain("binding.placementInstanceId");
+    expect(continuation).toContain("controllerGeneration: binding.controllerGeneration");
+    expect(continuation).toContain("recoverExistingWorkingDirectory: true");
+    expect(continuation).not.toContain("restore:");
+    expect(continuation).not.toContain("endSession");
+    expect(continuation).not.toContain("removeState");
+    expect(continuation).toContain('error.error.code === "resource_unavailable"');
+    expect(continuation.indexOf("client.createSession(")).toBeLessThan(
+      continuation.indexOf("continueExpiredBrowserSessionResume(deps.db"),
+    );
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {

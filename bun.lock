@@ -542,6 +542,7 @@
       "name": "@opengeni/desktop",
       "version": "0.1.0",
       "dependencies": {
+        "@noble/hashes": "1.8.0",
         "@opengeni/sdk": "workspace:*",
       },
       "devDependencies": {

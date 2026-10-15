@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  DEFAULT_FREE_SITE_LIMITS,
+  DEFAULT_SITE_LIMITS,
   SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_SIGNATURE_HEADER,
   SITE_GATEWAY_TIMESTAMP_HEADER,
@@ -8,6 +8,7 @@ import {
   type SiteHostMapRecord,
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
+import { resolveWorkspaceModelSelection } from "@opengeni/core";
 import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/content-scanner";
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";
 import {
@@ -17,7 +18,19 @@ import {
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
 import { siteAgentToolRefs } from "../src/routes/site-runtime";
-import { effectiveSiteLimits, freeSiteLimits } from "../src/site-publishing/limits";
+import { siteAgentInstructions } from "../src/site-publishing/agent-data-tools";
+import {
+  isSubscriptionBilledModel,
+  siteOutsideModelChoice,
+} from "../src/site-publishing/agent-model";
+import {
+  effectiveSiteLimits,
+  freeSiteLimits,
+  normalizedSiteLimitProfileKind,
+  siteViewerLimits,
+  standardSiteLimits,
+} from "../src/site-publishing/limits";
+import { scanSitePageUsage, siteReadinessWarnings } from "../src/site-publishing/readiness";
 import { siteClientAddressKey } from "../src/site-publishing/runtime";
 import { siteAccessNarrowed, siteAgentToolsNarrowed } from "../src/site-publishing/service";
 import {
@@ -166,9 +179,39 @@ describe("gateway signature", () => {
 describe("limits", () => {
   const settings = testSettings();
 
-  test("the free profile is the strict platform default", () => {
-    expect(freeSiteLimits(settings)).toEqual({ ...DEFAULT_FREE_SITE_LIMITS });
-    expect(effectiveSiteLimits(settings, null, null)).toEqual({ ...DEFAULT_FREE_SITE_LIMITS });
+  test("the standard profile is the default; free is its legacy name", () => {
+    expect(standardSiteLimits(settings)).toEqual({ ...DEFAULT_SITE_LIMITS });
+    expect(freeSiteLimits(settings)).toEqual({ ...DEFAULT_SITE_LIMITS });
+    expect(effectiveSiteLimits(settings, null, null)).toEqual({ ...DEFAULT_SITE_LIMITS });
+    expect(effectiveSiteLimits(settings, { kind: "free", overrides: null }, null)).toEqual({
+      ...DEFAULT_SITE_LIMITS,
+    });
+    expect(normalizedSiteLimitProfileKind("free")).toBe("standard");
+    expect(normalizedSiteLimitProfileKind("credits")).toBe("credits");
+    // One Site limit of $10 a month; no per-person limit until an admin sets one.
+    expect(DEFAULT_SITE_LIMITS.agentMicrosPerSitePerMonth).toBe(10_000_000);
+    expect(DEFAULT_SITE_LIMITS.agentMicrosPerVisitorPerDay).toBeNull();
+    expect(DEFAULT_SITE_LIMITS.agentMicrosPerVisitorPerMonth).toBeNull();
+  });
+
+  test("settings change the standard limits; the deprecated free settings still apply", () => {
+    const tuned = standardSiteLimits(
+      testSettings({
+        sitesAgentMicrosPerSitePerMonth: 25_000_000,
+        sitesAgentMicrosPerPersonPerDay: 400_000,
+        sitesGuestConversationsPerVisitorPerDay: 5,
+      }),
+    );
+    expect(tuned.agentMicrosPerSitePerMonth).toBe(25_000_000);
+    expect(tuned.agentMicrosPerVisitorPerDay).toBe(400_000);
+    expect(tuned.conversationsPerVisitorPerDay).toBe(5);
+    const legacy = standardSiteLimits(
+      testSettings({
+        sitesAgentMicrosPerSitePerMonth: null,
+        sitesFreeAgentMicrosPerSitePerMonth: 7_000_000,
+      }),
+    );
+    expect(legacy.agentMicrosPerSitePerMonth).toBe(7_000_000);
   });
 
   test("the Site profile wins over the workspace default", () => {
@@ -178,12 +221,26 @@ describe("limits", () => {
       { kind: "credits", overrides: null },
     );
     expect(site.turnsPerConversation).toBe(3);
-    expect(site.requestsPerMinutePerVisitor).toBe(
-      DEFAULT_FREE_SITE_LIMITS.requestsPerMinutePerVisitor,
-    );
+    expect(site.requestsPerMinutePerVisitor).toBe(DEFAULT_SITE_LIMITS.requestsPerMinutePerVisitor);
     const workspace = effectiveSiteLimits(settings, null, { kind: "credits", overrides: null });
     expect(workspace.agentMicrosPerSitePerMonth).toBe(
-      DEFAULT_FREE_SITE_LIMITS.agentMicrosPerSitePerMonth! * settings.sitesCreditsLimitMultiplier,
+      DEFAULT_SITE_LIMITS.agentMicrosPerSitePerMonth! * settings.sitesCreditsLimitMultiplier,
+    );
+  });
+
+  test("overrides adjust any kind's limits, so editing a spend limit keeps the kind", () => {
+    const credits = effectiveSiteLimits(
+      settings,
+      {
+        kind: "credits",
+        overrides: { __siteLimitsVersion: 2, agentMicrosPerSitePerMonth: 40_000_000 },
+      },
+      null,
+    );
+    expect(credits.agentMicrosPerSitePerMonth).toBe(40_000_000);
+    // The multiplied guest guards stay.
+    expect(credits.conversationsPerSitePerDay).toBe(
+      DEFAULT_SITE_LIMITS.conversationsPerSitePerDay! * settings.sitesCreditsLimitMultiplier,
     );
   });
 
@@ -212,11 +269,268 @@ describe("limits", () => {
     );
   });
 
+  test("the previous release's prefilled free defaults read as the new defaults", () => {
+    // The old custom form saved every field prefilled with the old free values.
+    const prefilled = effectiveSiteLimits(
+      settings,
+      {
+        kind: "custom",
+        overrides: {
+          conversationsPerVisitorPerDay: 10,
+          conversationsPerSitePerDay: 50,
+          turnsPerConversation: 20,
+          agentMicrosPerConversation: 20_000,
+          agentMicrosPerVisitorPerDay: 200_000,
+          agentMicrosPerSitePerMonth: 5_000_000,
+        },
+      },
+      null,
+    );
+    // No $0.02 conversation cap and no per-person limit; the owner's own value stays.
+    expect(prefilled).toEqual({ ...DEFAULT_SITE_LIMITS, agentMicrosPerSitePerMonth: 5_000_000 });
+    // A guest's conversation is capped by the standard guard, not $0.02.
+    expect(siteViewerLimits(prefilled, "guest").agentMicrosPerConversation).toBe(
+      DEFAULT_SITE_LIMITS.agentMicrosPerConversation,
+    );
+    // A profile saved field by field (the current form, API callers) is read as stored.
+    const chosen = effectiveSiteLimits(
+      settings,
+      { kind: "custom", overrides: { __siteLimitsVersion: 2, agentMicrosPerConversation: 20_000 } },
+      null,
+    );
+    expect(chosen.agentMicrosPerConversation).toBe(20_000);
+  });
+
   test("turning public agents off turns guest agents off everywhere", () => {
     const off = testSettings({ sitesPublicAgentsEnabled: false });
     expect(
       effectiveSiteLimits(off, { kind: "unlimited", overrides: null }, null).guestAgentsEnabled,
     ).toBe(false);
+  });
+});
+
+describe("limits per viewer", () => {
+  const limits = effectiveSiteLimits(
+    testSettings(),
+    {
+      kind: "custom",
+      overrides: { agentMicrosPerVisitorPerDay: 500_000, agentsEnabled: false },
+    },
+    null,
+  );
+
+  test("members are never capped by the Site and keep its agent when outsiders lose it", () => {
+    const member = siteViewerLimits(limits, "member");
+    expect(member.agentsEnabled).toBe(true);
+    expect(member.guestAgentsEnabled).toBe(true);
+    for (const key of [
+      "conversationsPerVisitorPerDay",
+      "conversationsPerSitePerDay",
+      "turnsPerConversation",
+      "agentMicrosPerConversation",
+      "agentMicrosPerVisitorPerDay",
+      "agentMicrosPerVisitorPerMonth",
+      "agentMicrosPerSitePerDay",
+      "agentMicrosPerSitePerMonth",
+    ] as const)
+      expect({ key, value: member[key] }).toEqual({ key, value: null });
+    // The request flood brake still holds.
+    expect(member.requestsPerMinutePerVisitor).toBe(
+      DEFAULT_SITE_LIMITS.requestsPerMinutePerVisitor,
+    );
+  });
+
+  test("invited and signed-in people share the Site limit and their per-person limit", () => {
+    for (const kind of ["invited", "user"] as const) {
+      const viewer = siteViewerLimits(limits, kind);
+      expect(viewer.agentsEnabled).toBe(false);
+      expect(viewer.agentMicrosPerSitePerMonth).toBe(10_000_000);
+      expect(viewer.agentMicrosPerVisitorPerDay).toBe(500_000);
+      // No bot guards; the flood brakes are their only conversation caps.
+      expect(viewer.conversationsPerVisitorPerDay).toBeNull();
+      expect(viewer.turnsPerConversation).toBeNull();
+      expect(viewer.conversationsPerSitePerDay).toBe(
+        UNLIMITED_SITE_FLOOD_BRAKES.conversationsPerSitePerDay,
+      );
+      expect(viewer.agentMicrosPerConversation).toBe(
+        UNLIMITED_SITE_FLOOD_BRAKES.agentMicrosPerConversation,
+      );
+    }
+  });
+
+  test("anonymous guests also meet the bot guards", () => {
+    const guest = siteViewerLimits(limits, "guest");
+    expect(guest.conversationsPerVisitorPerDay).toBe(20);
+    expect(guest.conversationsPerSitePerDay).toBe(500);
+    expect(guest.turnsPerConversation).toBe(50);
+    expect(guest.agentMicrosPerConversation).toBe(1_000_000);
+    expect(guest.agentMicrosPerVisitorPerDay).toBe(500_000);
+  });
+});
+
+describe("readiness", () => {
+  const page = scanSitePageUsage(`
+    const deals = site.data.collection("deals");
+    await deals.insert({ name: "Ada" });
+    await site.data.collection('notes').patch("1", {});
+    const rows = await site.data.collection("prices").query();
+    await site.sql.run("top_customers", {});
+    await tools.linear.list_issues({});
+  `);
+  const base = {
+    access: "public" as const,
+    guestsAllowed: true,
+    page,
+    requestedTools: 0,
+    agent: { enabled: true, tools: ["linear"] },
+    collections: [
+      { name: "deals", accessMode: "shared" as const, guestAccess: "none" as const },
+      { name: "notes", accessMode: "shared" as const, guestAccess: "append" as const },
+      { name: "prices", accessMode: "shared_read" as const, guestAccess: "none" as const },
+    ],
+    queries: [{ name: "top_customers", audience: "signed_in" as const }],
+    outsideModel: null,
+  };
+
+  test("reads what the page source uses", () => {
+    expect(Object.fromEntries(page.collections)).toEqual({
+      deals: { writes: true, changes: false },
+      notes: { writes: true, changes: true },
+      prices: { writes: false, changes: false },
+    });
+    expect([...page.queries]).toEqual(["top_customers"]);
+    expect(page.workspaceTools).toBe(true);
+  });
+
+  test("names what public visitors can't do, with safe fixes where they exist", () => {
+    const warnings = siteReadinessWarnings(base);
+    expect(warnings.map((warning) => [warning.code, warning.fix])).toEqual([
+      ["workspace_tools_members_only", null],
+      ["agent_tools_members_only", null],
+      [
+        "site_data_guest_write",
+        { kind: "site_data_guest_access", collection: "deals", guestAccess: "append" },
+      ],
+      [
+        "site_data_guest_write",
+        { kind: "site_data_guest_access", collection: "notes", guestAccess: "own" },
+      ],
+      [
+        "site_data_guest_read",
+        { kind: "site_data_guest_access", collection: "prices", guestAccess: "read" },
+      ],
+      [
+        "site_sql_query_signed_in",
+        { kind: "site_sql_query_audience", query: "top_customers", audience: "everyone" },
+      ],
+    ]);
+    expect(warnings[0]!.message).toContain("public visitors");
+  });
+
+  test("invited Sites skip the guest rules and members-only Sites have no warnings", () => {
+    const invited = siteReadinessWarnings({ ...base, access: "invited", guestsAllowed: false });
+    expect(invited.map((warning) => warning.code)).toEqual([
+      "workspace_tools_members_only",
+      "agent_tools_members_only",
+    ]);
+    expect(invited[0]!.message).toContain("invited people");
+    expect(siteReadinessWarnings({ ...base, access: "members" })).toEqual([]);
+  });
+
+  test("a page too large to read says it was not checked", () => {
+    const skipped = siteReadinessWarnings({
+      ...base,
+      page: null,
+      pageTooLarge: true,
+      requestedTools: 0,
+      agent: { enabled: false, tools: null },
+    });
+    expect(skipped.map((warning) => warning.code)).toEqual(["page_not_checked"]);
+    expect(skipped[0]!.message).toContain("too large to check");
+  });
+
+  test("a working credit-billed fallback is no warning; no model for outsiders is", () => {
+    const fallback = siteReadinessWarnings({
+      ...base,
+      page: null,
+      agent: { enabled: true, tools: null },
+      outsideModel: { kind: "fallback", model: "gpt-6" },
+    });
+    expect(fallback).toEqual([]);
+    const none = siteReadinessWarnings({
+      ...base,
+      page: null,
+      agent: { enabled: true, tools: null },
+      outsideModel: { kind: "unavailable" },
+    });
+    expect(none.map((warning) => warning.code)).toEqual(["agent_model_outside_unavailable"]);
+  });
+});
+
+describe("Site agent instructions", () => {
+  test("name the viewer and say plainly what a person outside the workspace can't get", () => {
+    const host = { site: { id: "site-1", title: "Shop" } } as never;
+    const tools = ["site_data_query", "site_data_write"];
+    const guest = siteAgentInstructions(host, { kind: "guest" }, tools, "Be brief.");
+    expect(guest).toContain("an anonymous visitor");
+    expect(guest).toContain("only use this Site's own data");
+    expect(guest).toContain("say plainly that you can't do it here");
+    expect(guest.endsWith("\n\nBe brief.")).toBe(true);
+    const member = siteAgentInstructions(host, { kind: "member" }, tools, null);
+    expect(member).toContain("a member of the workspace that owns this Site");
+    expect(member).not.toContain("only use this Site's own data");
+  });
+});
+
+describe("agent model for people outside the workspace", () => {
+  test("subscription models are recognised by catalog cost or provider prefix", () => {
+    expect(isSubscriptionBilledModel([], "codex/gpt-6-astra")).toBe(true);
+    expect(isSubscriptionBilledModel([], "supergrok/grok-5")).toBe(true);
+    expect(isSubscriptionBilledModel([], "gpt-6")).toBe(false);
+  });
+
+  test("credit-billed models stay; a subscription with no credit-billed default is refused", () => {
+    const input = {
+      settings: testSettings(),
+      selections: [],
+      workspaceDefaults: null,
+      organizationDefaults: null,
+    };
+    const selections = resolveWorkspaceModelSelection({
+      settings: input.settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      xaiSubscriptionActive: false,
+    });
+    expect(
+      siteOutsideModelChoice({ ...input, selections, agentModel: input.settings.openaiModel }),
+    ).toEqual({
+      kind: "same",
+      model: input.settings.openaiModel,
+    });
+    expect(siteOutsideModelChoice({ ...input, agentModel: "codex/gpt-6-astra" })).toEqual({
+      kind: "unavailable",
+    });
+  });
+
+  test("the workspace default is resolved to a concrete model, never left to the session", () => {
+    const settings = testSettings();
+    const choice = siteOutsideModelChoice({
+      settings,
+      selections: resolveWorkspaceModelSelection({
+        settings,
+        policy: null,
+        codexSubscriptionActive: false,
+        xaiSubscriptionActive: false,
+      }),
+      agentModel: null,
+      workspaceDefaults: null,
+      organizationDefaults: null,
+    });
+    expect(choice.kind).toBe("same");
+    expect(
+      choice.kind === "same" && typeof choice.model === "string" && choice.model.length > 0,
+    ).toBe(true);
   });
 });
 
@@ -336,17 +650,22 @@ describe("content scanner", () => {
 });
 
 describe("Site agents", () => {
-  test("workspace tools reach members and invited viewers; everyone else only when an admin opted in", () => {
-    const tools = { tools: ["crm", "bad id!"], guestTools: false };
+  test("workspace tools reach only members who may use connections; guestTools is ignored", () => {
+    const tools = { tools: ["crm", "bad id!"] };
     const crm = [{ kind: "mcp", id: "crm", optional: true }];
-    expect(siteAgentToolRefs(tools, { kind: "member" })).toEqual(crm);
-    expect(siteAgentToolRefs(tools, { kind: "invited" })).toEqual(crm);
-    // A signed-in person outside the workspace on a public Site is not a member.
-    expect(siteAgentToolRefs(tools, { kind: "user" })).toEqual([]);
-    expect(siteAgentToolRefs(tools, { kind: "guest" })).toEqual([]);
-    expect(siteAgentToolRefs({ ...tools, guestTools: true }, { kind: "user" })).toEqual(crm);
-    expect(siteAgentToolRefs({ ...tools, guestTools: true }, { kind: "guest" })).toEqual(crm);
-    expect(siteAgentToolRefs({ tools: null, guestTools: true }, { kind: "member" })).toEqual([]);
+    expect(siteAgentToolRefs(tools, { kind: "member" }, ["mcp_servers:attach"])).toEqual(crm);
+    expect(siteAgentToolRefs(tools, { kind: "member" }, ["workspace:admin"])).toEqual(crm);
+    // A member without permission to use connections, or with unknown permissions, gets none.
+    expect(siteAgentToolRefs(tools, { kind: "member" }, ["sessions:create"])).toEqual([]);
+    expect(siteAgentToolRefs(tools, { kind: "member" })).toEqual([]);
+    // Nobody outside the workspace gets workspace tools, whatever the retired opt-in says.
+    for (const kind of ["invited", "user", "guest"] as const)
+      expect(
+        siteAgentToolRefs({ ...tools, guestTools: true } as typeof tools, { kind }, [
+          "workspace:admin",
+        ]),
+      ).toEqual([]);
+    expect(siteAgentToolRefs({ tools: null }, { kind: "member" }, ["workspace:admin"])).toEqual([]);
   });
 
   test("viewers stop when a Site is unpublished, its access narrows or its agent turns off", () => {
@@ -371,19 +690,13 @@ describe("Site agents", () => {
     );
   });
 
-  test("tools narrow when one is removed or they are no longer for everyone", () => {
-    const tools = { tools: ["crm", "billing"], guestTools: true };
+  test("tools narrow when one is removed", () => {
+    const tools = { tools: ["crm", "billing"] };
     expect(siteAgentToolsNarrowed(tools, tools)).toBe(false);
-    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: ["crm", "billing", "docs"] })).toBe(
-      false,
-    );
-    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: ["crm"] })).toBe(true);
-    expect(siteAgentToolsNarrowed(tools, { ...tools, tools: null })).toBe(true);
-    expect(siteAgentToolsNarrowed(tools, { ...tools, guestTools: false })).toBe(true);
-    // Without tools, the opt-in changes nothing.
-    expect(
-      siteAgentToolsNarrowed({ tools: null, guestTools: true }, { tools: null, guestTools: false }),
-    ).toBe(false);
+    expect(siteAgentToolsNarrowed(tools, { tools: ["crm", "billing", "docs"] })).toBe(false);
+    expect(siteAgentToolsNarrowed(tools, { tools: ["crm"] })).toBe(true);
+    expect(siteAgentToolsNarrowed(tools, { tools: null })).toBe(true);
+    expect(siteAgentToolsNarrowed({ tools: null }, { tools: null })).toBe(false);
   });
 });
 

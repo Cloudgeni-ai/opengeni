@@ -12,7 +12,7 @@ import {
   pageCsp,
   shellCsp,
 } from "../src/headers";
-import { shellHtml } from "../src/shell";
+import { exitPreviewHref, shellHtml } from "../src/shell";
 import { SITE_GATEWAY_SHELL_SCRIPT } from "../src/shell/shell-script.gen";
 
 describe("shell page", () => {
@@ -49,6 +49,24 @@ describe("shell page", () => {
   test("the inline bundle never terminates its own script element", () => {
     const body = html.slice(html.indexOf(`<script nonce="${nonce}">`));
     expect(body.match(/<\/script/giu)?.length).toBe(1);
+  });
+
+  test("shows no preview banner unless a member previews the Site as a visitor", () => {
+    expect(html).not.toContain(`id="og-preview"`);
+    const href = exitPreviewHref(new URL("https://a.sites.test/p?q=<x>"));
+    expect(href).toBe("/p?q=%3Cx%3E&og_view_as=off");
+    const previewing = shellHtml({
+      nonce,
+      title: "Site",
+      versionId: "11111111-1111-4111-8111-111111111111",
+      noindex: false,
+      config: { viewer: null, turnstileSiteKey: null },
+      preview: { viewAs: "invited", exitHref: href },
+    });
+    expect(previewing).toContain(
+      'Viewing as an invited person · <a href="/p?q=%3Cx%3E&amp;og_view_as=off">Exit preview</a>',
+    );
+    expect(previewing).toContain('<footer id="og-footer" class="og-previewing">');
   });
 });
 

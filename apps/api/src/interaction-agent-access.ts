@@ -1,4 +1,6 @@
 import type { AccessGrant } from "@opengeni/contracts";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -8,6 +10,36 @@ import {
 type AssociatedInteractionSession = {
   associations: ReadonlyArray<{ sessionId: string; relationship: string }>;
 };
+
+const InteractionSessionListQuery = z
+  .object({
+    associatedSessionId: z.string().uuid().optional(),
+    includeTerminal: z.enum(["true", "false"]).optional(),
+  })
+  .strict();
+
+/**
+ * Optional narrowing filters for BrowserSession/ComputerSession inventories,
+ * applied in SQL before per-source authorization. They narrow, never grant:
+ * every returned row still passes filterInteractionSessionsForGrant.
+ */
+export function parseInteractionSessionListQuery(query: Record<string, string>): {
+  associatedSessionId?: string;
+  includeTerminal?: boolean;
+} {
+  const parsed = InteractionSessionListQuery.safeParse(query);
+  if (!parsed.success) {
+    throw new HTTPException(400, { message: "Invalid interaction session list query" });
+  }
+  return {
+    ...(parsed.data.associatedSessionId
+      ? { associatedSessionId: parsed.data.associatedSessionId.toLowerCase() }
+      : {}),
+    ...(parsed.data.includeTerminal
+      ? { includeTerminal: parsed.data.includeTerminal === "true" }
+      : {}),
+  };
+}
 
 /**
  * Apply the same source-chat authorization as get/control routes, for every

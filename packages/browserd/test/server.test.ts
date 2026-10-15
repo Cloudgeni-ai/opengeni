@@ -852,6 +852,20 @@ describe("BrowserControlServer", () => {
         ).status,
       ).toBe(200);
 
+      const malformedSetAside = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/end`,
+        {
+          method: "POST",
+          token: adminToken,
+          body: {
+            controllerGeneration: reference.controllerGeneration,
+            removeState: true,
+            setAsideInterruptedLaunch: "yes",
+          },
+        },
+      );
+      expect(malformedSetAside.status).toBe(400);
       const ended = await request(
         server,
         `/v1/browser-sessions/${reference.browserSessionId}/end`,
@@ -861,6 +875,9 @@ describe("BrowserControlServer", () => {
           body: {
             controllerGeneration: reference.controllerGeneration,
             removeState: true,
+            // A resident browser ends normally; the flag only affects a
+            // preserved interrupted launch.
+            setAsideInterruptedLaunch: true,
           },
         },
       );

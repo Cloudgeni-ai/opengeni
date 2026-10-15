@@ -58,7 +58,7 @@ mod unix {
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt;
-    use std::path::Component;
+    use std::path::{Component, PathBuf};
     use xattr::FileExt as _;
 
     fn io(error: impl std::fmt::Display) -> PlatformError {
@@ -86,6 +86,42 @@ mod unix {
         .map_err(|_| {
             unsupported("transactional write parent must be an accessible non-symlink directory")
         })
+    }
+
+    // Resolve symlinks in the parent directory spelling exactly once, as the
+    // shell does (macOS /tmp is a symlink to /private/tmp). The transaction then
+    // works only on the resulting physical path: traversal never follows a
+    // symlink, so a symlink swapped in later fails closed, and commit re-checks
+    // the same physical parent. The destination name itself is never resolved.
+    fn physical_parent(path: &Path) -> PlatformResult<(PathBuf, File, OsString)> {
+        if !path.is_absolute() {
+            return Err(unsupported("transactional path must be absolute"));
+        }
+        let spelling = path.as_os_str().as_bytes();
+        if spelling.ends_with(b"/") || spelling.ends_with(b"/.") {
+            return Err(unsupported(
+                "transactional destination must not use directory spelling",
+            ));
+        }
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(unsupported(
+                "transactional paths may not contain parent traversal",
+            ));
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| unsupported("transactional destination must name a file"))?;
+        let parent = path.parent().ok_or_else(|| unsupported("missing parent"))?;
+        let physical = std::fs::canonicalize(parent)
+            .map_err(|_| {
+                unsupported("transactional write parent must be an existing accessible directory")
+            })?
+            .join(name);
+        let (dir, name) = self::parent(&physical)?;
+        Ok((physical, dir, name))
     }
 
     // Traverse without following any symlink, then retain the directory handle.
@@ -297,7 +333,7 @@ mod unix {
         if request.mode & !0o777 != 0 {
             return Err(unsupported("special file modes are not supported"));
         }
-        let (parent, name) = parent(path)?;
+        let (path, parent, name) = physical_parent(path)?;
         let base = match fs::openat(
             &parent,
             &name,
@@ -354,7 +390,7 @@ mod unix {
             }
         };
         let staged = Staged {
-            path: path.to_path_buf(),
+            path,
             parent,
             name,
             stage_name,
@@ -704,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_spelling_symlink_parent_and_missing_parent_fail_closed() {
+    fn directory_spelling_parent_traversal_and_missing_parent_fail_closed() {
         use std::os::unix::fs::symlink;
         let dir = tempdir();
         let path = dir.path().join("document");
@@ -714,15 +750,69 @@ mod tests {
             spelling.push(suffix);
             assert!(begin(Path::new(&spelling), &request(b"new", Some(b"old"))).is_err());
         }
+        std::fs::create_dir(dir.path().join("child")).unwrap();
+        let traversal = dir.path().join("child").join("..").join("document");
+        assert!(begin(&traversal, &request(b"new", Some(b"old"))).is_err());
         let alias = dir.path().join("alias");
-        symlink(dir.path(), &alias).unwrap();
-        assert!(begin(&alias.join("document"), &request(b"new", Some(b"old"))).is_err());
+        symlink(&path, &alias).unwrap();
+        assert!(begin(&alias, &request(b"new", Some(b"old"))).is_err());
         let missing = dir.path().join("missing");
         let mut create = request(b"new", None);
         create.create_parents = true;
         assert!(begin(&missing.join("document"), &create).is_err());
         assert!(!missing.exists());
         assert_eq!(std::fs::read(path).unwrap(), b"old");
+    }
+
+    #[test]
+    fn symlinked_parent_directories_resolve_once_like_the_shell() {
+        use std::os::unix::fs::symlink;
+        // Like macOS /tmp -> /private/tmp: writing through the alias works.
+        let dir = tempdir();
+        let physical = dir.path().join("physical");
+        std::fs::create_dir(&physical).unwrap();
+        let alias = dir.path().join("alias");
+        symlink(&physical, &alias).unwrap();
+        let mut create = begin(&alias.join("new.ts"), &request(b"created", None)).unwrap();
+        create.append(b"created").unwrap();
+        create.commit(&|| true).unwrap();
+        drop(create);
+        assert_eq!(std::fs::read(physical.join("new.ts")).unwrap(), b"created");
+
+        let mut replace = begin(
+            &alias.join("new.ts"),
+            &request(b"replaced", Some(b"created")),
+        )
+        .unwrap();
+        replace.append(b"replaced").unwrap();
+        replace.commit(&|| true).unwrap();
+        drop(replace);
+        assert_eq!(std::fs::read(physical.join("new.ts")).unwrap(), b"replaced");
+
+        // The alias is resolved once. Retargeting it mid-transaction cannot
+        // redirect the commit, and swapping the physical parent still conflicts.
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let mut pinned = begin(&alias.join("pinned"), &request(b"pinned", None)).unwrap();
+        pinned.append(b"pinned").unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&other, &alias).unwrap();
+        pinned.commit(&|| true).unwrap();
+        drop(pinned);
+        assert_eq!(std::fs::read(physical.join("pinned")).unwrap(), b"pinned");
+        assert!(!other.join("pinned").exists());
+
+        let mut swapped = begin(&alias.join("swapped"), &request(b"swapped", None)).unwrap();
+        swapped.append(b"swapped").unwrap();
+        std::fs::rename(&other, dir.path().join("moved")).unwrap();
+        symlink(&physical, &other).unwrap();
+        assert!(swapped.commit(&|| true).is_err());
+        drop(swapped);
+        assert!(!physical.join("swapped").exists());
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("moved")).unwrap().count(),
+            0
+        );
     }
 
     #[test]

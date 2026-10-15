@@ -1461,6 +1461,10 @@ export function browserLaunchArguments(
     // Chromium's free-disk-derived default can retain gigabytes per actor.
     // Bound disposable HTTP caching without limiting cookies or site storage.
     "--disk-cache-size=67108864",
+    // Chromium reports navigator.webdriver=true whenever it is remotely
+    // debugged. Managed browsers act for a signed-in person, and sites treat
+    // that flag as a bot signal (rate-limited or refused logins).
+    "--disable-blink-features=AutomationControlled",
     // Chromium's presentation-fenced screenshot path can wait indefinitely for
     // hidden headed tabs. Copy a freshly repainted surface without raising the
     // browser or changing the shared desktop's active tab.
@@ -1891,6 +1895,18 @@ export async function stopEndedManagedBrowserProcess(
     "process_failed",
     "a browser kept running the ended session's private profile",
   );
+}
+
+/** Read-only proof that no process is running a browser on this exact private
+ * profile, with the same standard as an exact-directory relaunch: a complete
+ * process inventory on Linux; elsewhere absence is unproven and refused. */
+export async function assertManagedBrowserProfileUnused(profileDirectory: string): Promise<void> {
+  if (process.platform !== "linux") {
+    throw new AgentBrowserCommandError("process_failed", "exact profile absence is unproven");
+  }
+  if (await findLinuxManagedBrowserProcess(profileDirectory, null, true)) {
+    throw new AgentBrowserCommandError("process_failed", "another process owns the exact profile");
+  }
 }
 
 async function stopIdentifiedProcess(pid: number): Promise<void> {

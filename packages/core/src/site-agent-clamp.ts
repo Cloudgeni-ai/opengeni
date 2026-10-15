@@ -140,6 +140,7 @@ export type SiteClampedResource =
   | "Connected Machines"
   | "sandbox environments"
   | "browser or computer sessions"
+  | "documents, spreadsheets or presentations the Site did not declare"
   | "workspace settings";
 
 /** The refusal message for a Site-clamped agent. */

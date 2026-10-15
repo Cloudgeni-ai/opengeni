@@ -489,6 +489,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   site_files_delete: "artifacts",
   site_publication_get: "artifacts",
   site_publication_update: "artifacts",
+  site_publication_apply_fix: "artifacts",
   site_hostname_check: "artifacts",
   site_sql_inspect: "artifacts",
   site_sql_enable: "artifacts",

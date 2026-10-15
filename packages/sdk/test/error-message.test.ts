@@ -20,6 +20,22 @@ test("neutral formatter is available through the core and browser entry points",
 });
 
 describe("brand-neutral error presentation", () => {
+  test("Site refusals are friendly before a conversation exists too", () => {
+    for (const [code, status, text] of [
+      ["not_available_for_viewer", 403, "not available for this viewer"],
+      ["site_budget_exhausted", 429, "usage limit for now"],
+      ["site_budget_busy", 429, "busy. Try again"],
+      ["site_platform_brake_engaged", 503, "paused for visitors"],
+    ] as const) {
+      const error = new OpenGeniApiError(
+        status,
+        JSON.stringify({ error: { code: "forbidden", message: "diagnostic", details: { code } } }),
+        { mutation: false },
+      );
+      expect(formatErrorMessage(error)).toContain(text);
+      expect(error.details?.code).toBe(code);
+    }
+  });
   test("keeps API diagnostics and references without displaying API prose", () => {
     const body = JSON.stringify({
       error: {

@@ -603,7 +603,12 @@ export function readEditableArtifactMaterializerSidecarEnvironment(
       );
     }
     assertLoopbackDatabaseUrl(databaseUrl);
-    assertLoopbackObjectStorageUrl(required(environment, "OPENGENI_OBJECT_STORAGE_ENDPOINT"));
+    // Materialization uses authenticated server-side storage requests, whose
+    // endpoint can differ from the browser-facing presigned URL origin.
+    assertLoopbackObjectStorageUrl(
+      optional(environment, "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT") ??
+        required(environment, "OPENGENI_OBJECT_STORAGE_ENDPOINT"),
+    );
   }
   const httpHostname =
     optional(environment, "OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST") ?? "0.0.0.0";

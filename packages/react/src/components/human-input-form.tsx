@@ -31,6 +31,7 @@ import {
   type HumanInputFormMessages,
 } from "../human-input-model";
 import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
+import { linkifyText } from "./linkified-text";
 
 export {
   answersFromDrafts,
@@ -503,8 +504,11 @@ function HumanInputRequestForm({
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <h2 id={titleId} className="text-og-md font-semibold text-og-fg">
-                {resolvedTitle}
+              <h2
+                id={titleId}
+                className="min-w-0 text-og-md font-semibold text-og-fg [overflow-wrap:anywhere]"
+              >
+                {linkifyText(resolvedTitle)}
                 {singleQuestion?.required && !request.allowSkip && !decision ? (
                   <span aria-hidden className="ml-1 text-og-status-failed">
                     *
@@ -523,7 +527,9 @@ function HumanInputRequestForm({
               ) : null}
             </div>
             {resolvedDescription ? (
-              <div className="mt-0.5 text-og-sm text-og-fg-muted">{resolvedDescription}</div>
+              <div className="mt-0.5 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
+                {linkifyText(resolvedDescription)}
+              </div>
             ) : null}
             {request.expiresAt ? (
               <p className="mt-1 text-og-xs text-og-fg-subtle">
@@ -557,9 +563,9 @@ function HumanInputRequestForm({
           {decision.question.helpText ||
           decision.accept.description ||
           decision.decline.description ? (
-            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted">
+            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
               {decision.question.label && decision.question.helpText ? (
-                <p>{decision.question.helpText}</p>
+                <p>{linkifyText(decision.question.helpText)}</p>
               ) : null}
               {[decision.accept, decision.decline].map((option) =>
                 option.description ? (
@@ -866,13 +872,13 @@ function QuestionControls({
             <label
               id={labelId}
               htmlFor={question.kind === "text" ? fieldId : undefined}
-              className="text-og-sm font-medium text-og-fg"
+              className="min-w-0 text-og-sm font-medium text-og-fg [overflow-wrap:anywhere]"
             >
               {questionNumber === null ? null : (
                 <span className="mr-1.5 tabular-nums text-og-fg-muted">{questionNumber}.</span>
               )}
               {questionNumber === null ? null : " "}
-              {visibleLabel}
+              {linkifyText(visibleLabel)}
               {question.required && !allowSkip ? (
                 <span aria-hidden className="ml-1 text-og-status-failed">
                   *
@@ -885,13 +891,13 @@ function QuestionControls({
             </label>
           </div>
           {question.label ? (
-            <p id={promptId} className="text-og-sm text-og-fg-muted">
-              {question.prompt}
+            <p id={promptId} className="text-og-sm text-og-fg-muted [overflow-wrap:anywhere]">
+              {linkifyText(question.prompt)}
             </p>
           ) : null}
           {question.helpText ? (
-            <p id={helpId} className="text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              {linkifyText(question.helpText)}
             </p>
           ) : null}
           {hint ? (
@@ -906,8 +912,8 @@ function QuestionControls({
             <p className="text-og-xs text-og-fg-subtle">{messages.optional}</p>
           ) : null}
           {question.helpText && question.label ? (
-            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle">
-              {question.helpText}
+            <p id={helpId} className="mb-1.5 text-og-xs text-og-fg-subtle [overflow-wrap:anywhere]">
+              {linkifyText(question.helpText)}
             </p>
           ) : null}
           {hint ? (

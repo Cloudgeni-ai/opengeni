@@ -689,6 +689,8 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  /** Narrow this connection's authorized tool names; an empty list allows none. */
+  allowedTools?: string[] | undefined;
   /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
   /**
@@ -3911,6 +3913,7 @@ export type FirstPartyMcpToolName =
   | "site_files_delete"
   | "site_publication_get"
   | "site_publication_update"
+  | "site_publication_apply_fix"
   | "site_hostname_check"
   | "site_sql_inspect"
   | "site_sql_enable"
@@ -9992,6 +9995,8 @@ export type SwapActiveSandboxResponse = {
     | "unsupported_backend_context"
     | "transient_establishment"
     | "concurrent_swap"
+    | "personal_machine_permission_required"
+    | "personal_machine_not_permitted"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";

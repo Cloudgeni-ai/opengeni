@@ -27,8 +27,14 @@ export interface DesktopAppConfig {
   appIconPath: string;
   /** Window background before the web app paints, per appearance. */
   background: { light: string; dark: string };
-  /** Connect this computer through the server's agent installer. */
+  /** Let people connect this computer, running the connected-machine agent. */
   thisComputer: boolean;
+  /**
+   * The minisign public key (the `RW…` line) that signs the agent's releases.
+   * The app downloads the agent from the server and runs it only with this
+   * key's signature.
+   */
+  agentSigningKey: string;
   /** Where packaged builds look for app updates, or false for none. */
   updates: DesktopUpdateFeed | false;
 }

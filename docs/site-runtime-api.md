@@ -34,14 +34,14 @@ forceNoindex }`. It is `null` when `OPENGENI_SITES_DOMAIN` is unset.
 | `OPENGENI_SITES_FORCE_NOINDEX` | `false` | Forces `noindex` on every Site |
 | `OPENGENI_SITES_ABUSE_EMAIL` | unset (`abuse@<domain>` shown) | Abuse contact shown in `SiteRuntimeConfig` and takedown pages; also where operator notices are emailed |
 | `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` | `false` | A guest agent start needs the gateway's human header (recommended for public Sites with guest agents) |
-| `OPENGENI_SITES_FREE_REQUESTS_PER_MINUTE_PER_VISITOR` | 120 | Free limit |
-| `OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE` | 30 | Free limit |
-| `OPENGENI_SITES_FREE_CONVERSATIONS_PER_VISITOR_PER_DAY` | 10 | Free limit |
-| `OPENGENI_SITES_FREE_CONVERSATIONS_PER_SITE_PER_DAY` | 50 | Free limit, every visitor together (unlimited still stops at 10000) |
-| `OPENGENI_SITES_FREE_TURNS_PER_CONVERSATION` | 20 | Free limit |
-| `OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION` | 20000 | Free limit (USD micros) |
-| `OPENGENI_SITES_FREE_AGENT_MICROS_PER_VISITOR_PER_DAY` | 200000 | Free limit |
-| `OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH` | 2000000 | Free limit |
+| `OPENGENI_SITES_AGENT_MICROS_PER_SITE_PER_MONTH` | 10000000 ($10) | Standard Site limit for people outside the workspace (USD micros) |
+| `OPENGENI_SITES_AGENT_MICROS_PER_PERSON_PER_DAY` | unset (off) | Standard per-person daily limit |
+| `OPENGENI_SITES_GUEST_CONVERSATIONS_PER_VISITOR_PER_DAY` | 20 | Guest bot guard |
+| `OPENGENI_SITES_GUEST_CONVERSATIONS_PER_SITE_PER_DAY` | 500 | Guest bot guard, every guest together (unlimited still stops at 10000) |
+| `OPENGENI_SITES_GUEST_TURNS_PER_CONVERSATION` | 50 | Guest bot guard |
+| `OPENGENI_SITES_GUEST_AGENT_MICROS_PER_CONVERSATION` | 1000000 ($1) | Guest bot guard |
+| `OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN` | 250000 ($0.25) | Held per running turn against the Site's spend limits |
+| `OPENGENI_SITES_FREE_*` | unset | Deprecated fallbacks, used only when the settings above are unset. A leftover `OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION=20000` keeps a $0.02 guest guard, so remove it |
 | `OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER` | 10 | `credits` profile multiplies the conversation and spend limits |
 | `OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR` | 5 | Abuse report rate |
 | `OPENGENI_SITES_VIEWER_SESSION_IDLE_SECONDS` | 43200 (12 h) | Viewer session idle expiry |
@@ -54,10 +54,13 @@ forceNoindex }`. It is `null` when `OPENGENI_SITES_DOMAIN` is unset.
 | `OPENGENI_SITES_HOST_MAP_TTL_SECONDS` | 300 (60 to 86400) | KV expiry of host-map records |
 | `OPENGENI_SITES_WEB_RISK_API_KEY` | unset (scanner `none`) | Enables the Google Web Risk URL scanner |
 
-Agents on Sites also need `OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true`,
-because each conversation is capped with a session usage limit. Without it,
-agent starts fail with `403 site_agents_unavailable` and
-`reason: "usage_limits_disabled"`.
+Agents for people outside the workspace also need
+`OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true`, because each of their
+conversations is capped with a session usage limit. Without it, their agent
+starts fail with `403 not_available_for_viewer` and
+`reason: "usage_limits_disabled"`. Workspace members' conversations carry no
+Site cap and no stamped session usage limit: only the workspace's normal
+limits apply to them.
 
 ## Management
 
@@ -69,11 +72,12 @@ managers. The Site must be shared with the workspace, not "Only me".
 | Method and path | Success | Errors |
 | --- | --- | --- |
 | `GET` | 200 `SitePublication` | 404 `site_not_published` |
-| `PUT` (`UpsertSitePublicationRequest`) | 201 when it first publishes, otherwise 200 | 403 `site_manager_required`, `site_admin_required` (limit profile, new `agent.tools`, `agent.guestTools`, access changed to `public` while `agent.guestTools` is on with tools, or more invitees getting the agent's tools while it has them: invitees added on an `invited` or `public` Site, or a `members` Site that lists invitees opened), `site_public_disabled`; 409 `site_not_shared`, `site_archived`, `site_suspended` (status or label change while taken down), `site_taken`, `site_held`, `site_reserved`; 400 `site_model_not_allowed`, `site_tool_invalid`, `site_invalid_request` |
+| `PUT` (`UpsertSitePublicationRequest`) | 201 when it first publishes, otherwise 200 | 403 `site_manager_required`, `site_admin_required` (limit profile or new `agent.tools`), `site_public_disabled`; 402 `site_platform_quota_exhausted` and 503 `site_platform_brake_engaged` (a new publication, see published-sites.md "Platform usage"); 409 `site_not_shared`, `site_archived`, `site_suspended` (status or label change while taken down), `site_taken`, `site_held`, `site_reserved`; 400 `site_model_not_allowed`, `site_tool_invalid`, `site_invalid_request` |
 | `DELETE` (unpublish) | 200 | 409 `site_suspended` |
 | `POST /takedown` (`SiteTakedownRequest`) | 200 | 403 `site_owner_or_admin_required` |
 | `POST /restore` | 200 | 403 `site_forbidden` when an admin (owner restoring) or the platform took the Site down |
 | `GET /reports?status=` | 200 list | |
+| `POST /fixes` (`SitePublishWarningFix`) | 200 `SitePublication` with fresh `warnings` | 404 `site_not_published`, `site_fix_target_missing`; the Site Data or Site SQL error of the change |
 | `PATCH /reports/:reportId` | 200 | 404 `site_report_not_found` |
 
 Every changing route (`PUT`, `DELETE`, takedown, restore, report status and
@@ -128,9 +132,9 @@ Takedown:
   again. The sign-out is prompt cleanup, not the boundary: every
   site-runtime request re-checks the viewer's access.
 - A conversation's workspace tools are fixed when it starts and recorded
-  with it. Removing a tool, or turning **Let everyone use these tools**
-  (`guestTools`) off, cancels the running conversations that hold tools
-  they would not get now, without signing anyone out. Such a conversation
+  with it. Removing a tool cancels the running conversations that hold it,
+  without signing anyone out. (`guestTools` is retired: accepted, ignored
+  and always `false`.) Such a conversation
   (also one whose viewer has since left the workspace) takes no more
   messages: `409 site_conversation_outdated`; the viewer starts a new one.
 - An owner's takedown is restored by the owner or an admin; an admin's
@@ -249,7 +253,9 @@ signature.
 | `POST /auth/exchange` | `SiteAuthExchangeResponse`. 400 `site_auth_code_invalid` (wrong verifier, host or redirect URI, expired, or already used) |
 | `POST /auth/logout` | 200 `{ revoked }`, even when the Site no longer exists |
 | `POST /site/reports` | 201. Rate limited per reporter, per client address and per Site |
-| `POST /tools/:method` | 403 `site_tools_unavailable` (direct tools need a person's session in the console) |
+| `POST /tools/:method` | 403 `not_available_for_viewer` with `feature: "workspace_tools"` (direct tools need a person's session in the console) |
+| `POST /auth/view-as` (`{ viewAs: "invited" \| "public" \| null }`) | 200 `{ viewAs }`: a workspace member starts or ends previewing the Site as that role on their own site session. 403 `site_view_as_members_only` for anyone else |
+| `POST /platform/requests` | Gateway request counts (`{ v: 1, reportId, hosts: [{ host, requests }] }`, at most 500 hosts), signed on the Sites domain apex; 200 `{ counted }`. Each report id counts once per host; unknown hosts are skipped. 400 when signed for a Site host |
 | `SITE_OPERATIONS` suffixes | Served for the viewer, as below. Anything else returns 404 `site_operation_unsupported` |
 
 Old versions stop being served ten minutes after they are replaced, so
@@ -274,25 +280,39 @@ Operations:
     `site:<siteId>`, through in-process dispatch with a short-lived delegated
     token.
     - It uses `agentAccess: "session"`, the publication's model,
-      instructions and MCP servers, no first-party tools, and memory off.
+      instructions and MCP servers, memory off and no sandbox
+      (`sandboxBackend: "none"`; a publication has no sandbox setting).
+    - Its only first-party tools are the Site's own data tools, pinned on
+      the server to this Site and acting as the conversation's viewer (the
+      same audience checks and row binding as the page): `site_data_query`
+      and `site_data_write`, `site_sql_run` when Site SQL is on, and the
+      read-only `site_sql_query` for members when Site SQL is on. A call for
+      another Site, or any Site management tool, is refused. Platform
+      instructions tell the agent whom it is talking with and, for people
+      outside the workspace, that it can only use this Site's own data.
     - The viewer is the end-user label. The Site, its title and the served
       version are recorded as the session's origin and on every turn
       (`SiteSessionOrigin`). The call runs inside
       `withSiteSessionOrigin` and carries the Site and version headers, which
       the Site frame guard validates again.
     - Its workspace tools are the publication's `agent.tools` for workspace
-      members and invited viewers. Everyone else (signed-in `user` viewers
-      on a public Site and guests) gets them only when `agent.guestTools` is
-      on: tools for everyone who isn't a workspace member or invited (the
-      name is kept for compatibility). They are optional references, so an
-      unknown connection is skipped.
+      members who may use connections (`mcp_servers:attach` or admins).
+      Invited, `user` and guest viewers never get workspace tools. They are
+      optional references, so an unknown connection is skipped.
+    - Its model is the publication's model for members. For everyone else a
+      subscription-billed model is replaced by the workspace's default
+      credit-billed model, or the start is refused with
+      `not_available_for_viewer` (`feature: "agent_model"`) when there is
+      none.
     - The create body may not choose tools, MCP servers, first-party tools
       or permissions, approval policies, vault policy or connection
       accounts for any other caller acting from a Site page: the session
       routes return 403 `SITE_SESSION_TOOLS_FORBIDDEN`.
-    - It is capped with a per-conversation session usage limit, set in the
-      create transaction (the host actor `site:<siteId>`), so the first
-      turn is capped.
+    - For people outside the workspace it is capped with a per-conversation
+      session usage limit, set in the create transaction (the host actor
+      `site:<siteId>`), so the first turn is capped. Members' conversations
+      get no stamped limit; a member conversation from before this rule has
+      its unchanged Site cap lifted on its next message.
     - The conversation is recorded as owned by this Site and this viewer
       before the session is created, with a session id derived from the
       viewer's idempotency key; a retry returns the same conversation.
@@ -338,17 +358,19 @@ Operations:
   - **Queue items** (move, edit, steer, delete) are forwarded with the
     API's own request schemas. Steering a queued message also passes the
     agent and spend checks; the message was already counted when sent.
-  - **Budgets.** A start reserves the conversation's whole spend cap
-    against the visitor's day, the Site's day and the Site's month, and
-    counts the conversation against the visitor's and the Site's starts per
-    day, in one transaction that refuses when any is over. A Site-wide
+  - **Budgets** (people outside the workspace only). A start reserves one
+    turn's estimate (`OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN`,
+    $0.25, capped by the conversation cap and what is left) against the
+    visitor's day and month and the Site's day and month, and counts the
+    conversation against the visitor's and the Site's starts per day, in one
+    transaction that refuses when any is over. A Site-wide
     refusal first sweeps reservations conversations no longer need and
     retries once: a bounded batch of conversations whose session is idle,
     failed or cancelled, starts whose session never appeared, and
     reservations with no work for six hours, least recently visited first
     (each at most every 30 seconds; an empty sweep pauses sweeping that Site
     for a few seconds). Sending, steering and resuming re-check the turn
-    count and top the reservation up to the conversation's cap; a
+    count and reserve one more turn's estimate; a
     per-conversation limit lowered since the start lowers the cap and the
     session's own usage limit before the work runs. Settling (on reads,
     later starts and pause or cancel) brings counted spend up to the
@@ -356,11 +378,21 @@ Operations:
     needs. Over budget returns 429
     `site_budget_exhausted` with `{ budget }`: `conversations_per_visitor_per_day`,
     `conversations_per_site_per_day`, `turns_per_conversation`,
-    `agent_micros_per_conversation`, `agent_micros_per_visitor_per_day` or
-    `agent_micros_per_site_per_month`.
-  - **Unavailable agents** return 403 `site_agents_unavailable` with a
-    `reason` of `agent_disabled`, `public_agents_disabled`,
-    `guest_agents_disabled` or `usage_limits_disabled`.
+    `agent_micros_per_conversation`, `agent_micros_per_visitor_per_day`,
+    `agent_micros_per_visitor_per_month`, `agent_micros_per_site_per_day` or
+    `agent_micros_per_site_per_month`. When only other conversations'
+    outstanding reservations stand in the way, the refusal is a retryable
+    429 `site_budget_busy` with `retryAfterSeconds`. Members' conversations
+    are recorded with `budget_key` `*members` and never count toward or
+    meet these; a member conversation recorded under `*` before this rule
+    keeps working, uncapped.
+  - **Unavailable agents** return 403 `not_available_for_viewer` with
+    `feature: "agent"` and a `reason` of `agent_disabled`,
+    `public_agents_disabled`, `guest_agents_disabled` or
+    `usage_limits_disabled`.
+  - **Platform brake.** While the Opengeni-wide platform brake is engaged,
+    guest and `user` starts and messages return 503
+    `site_platform_brake_engaged`.
   - **Human check.** When `OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK` is on, a
     guest agent start without the human header (`1`) returns 403
     `site_human_check_required`. It is optional (Turnstile is optional), but
@@ -371,15 +403,42 @@ Operations:
 
 ## Limits and metering
 
-The effective limits come from the first profile that exists, in this
-order: the publication's profile, the workspace default, then the free
-defaults from settings.
+The Site's limits come from the first profile that exists, in this order:
+the publication's profile, the workspace default, then the standard
+defaults from settings (`free` is the former name of `standard`). They
+govern people outside the workspace; `siteViewerLimits` then picks what
+applies to each viewer:
+
+- Members: no Site limits (agent on, nothing capped); only the request
+  flood brake.
+- Invited and signed-in `user` viewers: the Site limit (per month or per
+  day) and the optional per-person limit, with the flood brakes
+  (`conversationsPerSitePerDay` 10,000 and `agentMicrosPerConversation` $5)
+  as their conversation caps.
+- Guests: everything, including the bot guards (conversations per visitor
+  and per Site per day, messages per conversation, spend per conversation).
+
+Profiles:
 
 - `credits` multiplies the conversation and spend limits by
   `OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER`.
-- `unlimited` removes the budgets but keeps `UNLIMITED_SITE_FLOOD_BRAKES`.
-- `custom` merges valid overrides over the free defaults.
+- `unlimited` removes the spend limits but keeps `UNLIMITED_SITE_FLOOD_BRAKES`.
+- `custom` merges valid overrides over the standard defaults.
+- Any profile may carry overrides; they adjust that kind's limits (the
+  Publish page edits the spend limits this way and keeps the kind).
 - The flood brakes apply under every profile.
+
+`GET /site/config` also returns the viewer's `capabilities`
+(`SiteViewerCapabilities`: `agent`, `workspaceTools`, `siteData`,
+`sqlQueryAudiences`, `viewAs`), computed from the same checks the routes
+enforce (the agent also reflects the platform brake and whether a
+credit-billed model exists for people outside the workspace;
+`workspaceTools` needs a member who may use connections). Anything the
+viewer's audience can't do answers 403 `not_available_for_viewer` with a
+`feature`, and `details.legacyCode` carries the code older Site code matched
+on (`site_agents_unavailable`, `site_tools_unavailable` or `forbidden`)
+in this release. Per-record Site Data refusals (a record the viewer
+doesn't own) keep their own Site Data code.
 
 Counters are single-row upserts in `site_runtime_rate_windows` (per minute)
 and `site_runtime_usage` (per day and month). Rate windows can overshoot by

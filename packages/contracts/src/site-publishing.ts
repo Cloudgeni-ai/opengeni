@@ -254,9 +254,9 @@ export type SitePublicationStatus = z.infer<typeof SitePublicationStatus>;
 
 export const SiteLimitProfileKind = /* @__PURE__ */ defineSchema(() =>
   z
-    .enum(["free", "credits", "unlimited", "custom"])
+    .enum(["standard", "free", "credits", "unlimited", "custom"])
     .describe(
-      "free: strict platform defaults. credits: larger defaults paid from organization credits. unlimited: no Opengeni budget caps (flood brakes and per-conversation caps still apply). custom: explicit values.",
+      "Limits for people outside the workspace (workspace members are never limited by Site limits). standard: platform defaults ($10 per Site per month, no per-person limit). free: accepted alias of standard, stored and returned as standard. credits: the standard limits and guest guards multiplied. unlimited: no spend limits (flood brakes still apply). custom: explicit values over the standard defaults. Any kind may carry overrides, which adjust that kind's limits.",
     ),
 );
 export type SiteLimitProfileKind = z.infer<typeof SiteLimitProfileKind>;
@@ -266,25 +266,50 @@ const NullableLimit = (description: string) =>
 
 /**
  * Effective limits for a published Site. Money is in micro-USD
- * (1_000_000 = $1). Cloudflare cannot cap spend, so the edge applies only
+ * (1_000_000 = $1). They apply to people outside the workspace only
+ * (invited people and public visitors, signed in or anonymous); workspace
+ * members are never limited by them and use the workspace's normal session
+ * limits, on any Site. Cloudflare cannot cap spend, so the edge applies only
  * flood brakes; Opengeni enforces these values.
  */
 export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    requestsPerMinutePerVisitor: NullableLimit("Site runtime requests per visitor per minute."),
+    requestsPerMinutePerVisitor: NullableLimit(
+      "Site runtime requests per viewer per minute (flood brake; members too).",
+    ),
     guestWritesPerMinute: NullableLimit("Data writes per guest visitor per minute."),
-    agentsEnabled: z.boolean().describe("Viewers may start embedded agent conversations."),
+    agentsEnabled: z
+      .boolean()
+      .describe(
+        "People outside the workspace may use the Site's embedded agent. Members always may when the agent is on.",
+      ),
     guestAgentsEnabled: z
       .boolean()
-      .describe("Anonymous guests may start embedded agent conversations (public Sites)."),
-    conversationsPerVisitorPerDay: NullableLimit("New agent conversations per visitor per day."),
-    conversationsPerSitePerDay: NullableLimit(
-      "New agent conversations per Site per UTC day, from every visitor together.",
+      .describe("Anonymous guests may use the embedded agent too (public Sites)."),
+    conversationsPerVisitorPerDay: NullableLimit(
+      "Bot guard for anonymous guests: new conversations per visitor per UTC day.",
     ),
-    turnsPerConversation: NullableLimit("Messages a viewer may send in one conversation."),
-    agentMicrosPerConversation: NullableLimit("Agent spend per conversation, micro-USD."),
-    agentMicrosPerVisitorPerDay: NullableLimit("Agent spend per visitor per UTC day, micro-USD."),
-    agentMicrosPerSitePerMonth: NullableLimit("Agent spend per Site per UTC month, micro-USD."),
+    conversationsPerSitePerDay: NullableLimit(
+      "Bot guard for anonymous guests: new conversations per Site per UTC day.",
+    ),
+    turnsPerConversation: NullableLimit(
+      "Bot guard for anonymous guests: messages in one conversation.",
+    ),
+    agentMicrosPerConversation: NullableLimit(
+      "Bot guard for anonymous guests: spend per conversation, micro-USD.",
+    ),
+    agentMicrosPerVisitorPerDay: NullableLimit(
+      "Optional per-person limit: spend per person or visitor outside the workspace per UTC day, micro-USD.",
+    ),
+    agentMicrosPerVisitorPerMonth: NullableLimit(
+      "Optional per-person limit: spend per person or visitor outside the workspace per UTC month, micro-USD.",
+    ).default(null),
+    agentMicrosPerSitePerDay: NullableLimit(
+      "The Site limit as a daily amount: spend of everyone outside the workspace together per UTC day, micro-USD.",
+    ).default(null),
+    agentMicrosPerSitePerMonth: NullableLimit(
+      "The Site limit: spend of everyone outside the workspace together per UTC month, micro-USD.",
+    ),
     agentModels: z
       .array(z.string().min(1).max(200))
       .max(20)
@@ -294,20 +319,30 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteLimits = z.infer<typeof SiteLimits>;
 
-/** Platform default for the free profile; deployments override through settings. */
-export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
+/**
+ * The standard limits: $10 per Site per month for everyone outside the
+ * workspace together, no per-person limit, and internal bot guards for
+ * anonymous guests (conversation and message counts are not shown to Site
+ * owners). Deployments override them through settings.
+ */
+export const DEFAULT_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
   requestsPerMinutePerVisitor: 120,
   guestWritesPerMinute: 30,
   agentsEnabled: true,
   guestAgentsEnabled: true,
-  conversationsPerVisitorPerDay: 10,
-  conversationsPerSitePerDay: 50,
-  turnsPerConversation: 20,
-  agentMicrosPerConversation: 20_000,
-  agentMicrosPerVisitorPerDay: 200_000,
-  agentMicrosPerSitePerMonth: 2_000_000,
+  conversationsPerVisitorPerDay: 20,
+  conversationsPerSitePerDay: 500,
+  turnsPerConversation: 50,
+  agentMicrosPerConversation: 1_000_000,
+  agentMicrosPerVisitorPerDay: null,
+  agentMicrosPerVisitorPerMonth: null,
+  agentMicrosPerSitePerDay: null,
+  agentMicrosPerSitePerMonth: 10_000_000,
   agentModels: null,
 });
+
+/** @deprecated The former `free` profile; now the standard limits (DEFAULT_SITE_LIMITS). */
+export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = DEFAULT_SITE_LIMITS;
 
 /** Hard caps that still apply under every profile, unlimited included. */
 export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
@@ -319,7 +354,10 @@ export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
 export const SiteLimitProfile = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: SiteLimitProfileKind,
-    /** Only for custom; ignored otherwise. Missing fields take the free defaults. */
+    /**
+     * Explicit values over the kind's limits (custom: over the standard
+     * defaults). Missing fields keep the kind's values.
+     */
     overrides: SiteLimits.partial().nullable().default(null),
   }),
 );
@@ -333,16 +371,17 @@ export const SiteEmbeddedAgent = /* @__PURE__ */ defineSchema(() =>
     /** Extra instructions for the Site's agent, appended to the platform's. */
     instructions: z.string().max(8000).nullable().default(null),
     /**
-     * Workspace MCP connections (server ids) the agent may use. null or empty:
-     * no workspace tools. Setting a non-empty list needs a workspace admin.
+     * Workspace MCP connections (server ids) the agent may use for workspace
+     * members, further limited to what each member may do. null or empty: no
+     * workspace tools. People outside the workspace never get them. Setting a
+     * non-empty list needs a workspace admin.
      */
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().default(null),
     /**
-     * Tools for everyone who isn't a workspace member or invited: whether
-     * conversations of signed-in people outside the workspace (on a public
-     * Site) and of anonymous guests get `tools` too. Off by default: only
-     * members and invited viewers get workspace tools. The name is kept for
-     * compatibility. Setting it needs a workspace admin.
+     * Retired; always false. People outside the workspace (invited people and
+     * public visitors) never get workspace tools: only the Site's own data
+     * (Site Data, Site SQL and its named queries) and the page. Accepted and
+     * ignored on input for compatibility.
      */
     guestTools: z.boolean().default(false),
   }),
@@ -356,10 +395,61 @@ export const SiteEmbeddedAgentChanges = /* @__PURE__ */ defineSchema(() =>
     model: z.string().min(1).max(200).nullable().optional(),
     instructions: z.string().max(8000).nullable().optional(),
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().optional(),
+    /** Retired: accepted and ignored (people outside the workspace never get workspace tools). */
     guestTools: z.boolean().optional(),
   }),
 );
 export type SiteEmbeddedAgentChanges = z.infer<typeof SiteEmbeddedAgentChanges>;
+
+/** A safe one-click fix for a readiness warning (applied through the ordinary APIs). */
+export const SitePublishWarningFix = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("site_data_guest_access"),
+      collection: z.string().min(1).max(64),
+      guestAccess: z.enum(["read", "append", "own"]),
+    }),
+    z.object({
+      kind: z.literal("site_sql_query_audience"),
+      query: z.string().min(1).max(64),
+      audience: z.enum(["everyone", "signed_in"]),
+    }),
+  ]),
+);
+export type SitePublishWarningFix = z.infer<typeof SitePublishWarningFix>;
+
+export const SITE_PUBLISH_WARNING_CODES = [
+  "workspace_tools_members_only",
+  "agent_tools_members_only",
+  "site_data_guest_read",
+  "site_data_guest_write",
+  "site_data_members_write",
+  "site_sql_query_signed_in",
+  "site_sql_query_managers",
+  /** No longer reported (the fallback shows as outsideAgentModel); kept for compatibility. */
+  "agent_model_outside_fallback",
+  "agent_model_outside_unavailable",
+  /** The page was too large to read, so what it uses was not checked. */
+  "page_not_checked",
+] as const;
+
+/**
+ * Something the published version uses that its audience may not do. Found
+ * by a conservative static reading of the page source and the Site's
+ * declared tools, collections and queries (docs/published-sites.md).
+ */
+export const SitePublishWarning = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    code: z.enum(SITE_PUBLISH_WARNING_CODES),
+    /** Plain language: what won't work and for whom. */
+    message: z.string().max(500),
+    /** What to change. */
+    suggestion: z.string().max(500),
+    /** A safe one-click fix, when one exists. */
+    fix: SitePublishWarningFix.nullable().default(null),
+  }),
+);
+export type SitePublishWarning = z.infer<typeof SitePublishWarning>;
 
 export const SitePublication = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -374,7 +464,10 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
     noindex: z.boolean(),
     agent: SiteEmbeddedAgent,
     limitProfile: SiteLimitProfile,
-    /** Limits after workspace and platform defaults are applied. */
+    /**
+     * Limits for people outside the workspace after workspace and platform
+     * defaults are applied. Workspace members are never limited by them.
+     */
     effectiveLimits: SiteLimits,
     invitedEmails: z.array(z.string().email()).max(500),
     moderation: z.object({
@@ -384,9 +477,23 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
       suspendedReason: z.string().max(2000).nullable(),
     }),
     usage: z.object({
+      /** Spend of people outside the workspace this UTC month (members never count). */
       agentMicrosThisMonth: z.number().int().nonnegative(),
+      /** The same, this UTC day. */
+      agentMicrosToday: z.number().int().nonnegative().default(0),
       conversationsToday: z.number().int().nonnegative(),
     }),
+    /**
+     * What won't work for the audience (invited or public Sites): the
+     * readiness check of the current version. Never blocks publishing.
+     */
+    warnings: z.array(SitePublishWarning).max(50).default([]),
+    /**
+     * The model people outside the workspace use when the agent's model is a
+     * subscription model (they never use subscriptions); null when they use
+     * the agent's model or no credit-billed model exists (then they are refused).
+     */
+    outsideAgentModel: z.string().nullable().default(null),
     createdAt: z.string(),
     updatedAt: z.string(),
   }),
@@ -480,6 +587,37 @@ export const SiteViewer = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteViewer = z.infer<typeof SiteViewer>;
 
+/** The roles an owner may preview their published Site as ("View as visitor"). */
+export const SiteViewAs = /* @__PURE__ */ defineSchema(() => z.enum(["invited", "public"]));
+export type SiteViewAs = z.infer<typeof SiteViewAs>;
+
+/** The query parameter that starts (`invited`, `public`) or ends (`off`) a preview. */
+export const SITE_VIEW_AS_QUERY = "og_view_as";
+
+/**
+ * What this viewer may do, cheaply, so a page can hide features instead of
+ * failing. Anything refused at call time still answers with the error
+ * `not_available_for_viewer`.
+ */
+export const SiteViewerCapabilities = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The viewer may talk to the Site's embedded agent. */
+    agent: z.boolean(),
+    /** The agent may use declared workspace tools (authorized members only); the published page bridge cannot. */
+    workspaceTools: z.boolean(),
+    /** Site Data rules that apply: the collection's access mode, or its guest access. */
+    siteData: z.enum(["viewer", "guest"]),
+    /** Named Site SQL query audiences this viewer may call. */
+    sqlQueryAudiences: z.array(z.enum(["everyone", "signed_in"])),
+    /** Set while the owner previews the Site as another role. */
+    viewAs: SiteViewAs.nullable(),
+  }),
+);
+export type SiteViewerCapabilities = z.infer<typeof SiteViewerCapabilities>;
+
+/** The error code (`error.details.code`) when the viewer may not do something on a Site. */
+export const SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE = "not_available_for_viewer";
+
 /** GET /_og/api/site/config (gateway shell and `site.viewer`). */
 export const SiteRuntimeConfig = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -489,6 +627,7 @@ export const SiteRuntimeConfig = /* @__PURE__ */ defineSchema(() =>
     versionId: z.string().uuid(),
     access: SiteAccessMode,
     viewer: SiteViewer,
+    capabilities: SiteViewerCapabilities,
     agent: z.object({ enabled: z.boolean(), model: z.string().nullable() }),
     siteData: z.boolean(),
     noindex: z.boolean(),
@@ -646,6 +785,77 @@ export type SiteHostMapRecord = z.infer<typeof SiteHostMapRecord>;
 export function siteHostMapKey(hostname: string): string {
   return `host:${hostname.toLowerCase()}`;
 }
+
+// ---------------------------------------------------------------------------
+// Platform usage (Site infrastructure, metered apart from model spend)
+// ---------------------------------------------------------------------------
+
+/**
+ * usage_only: meter, never charge (the default). shadow: compute what
+ * credits mode would charge, without charging. credits: charge organization
+ * credits for usage above the workspace's monthly allowance.
+ */
+export const SitePlatformBillingMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["usage_only", "shadow", "credits"]),
+);
+export type SitePlatformBillingMode = z.infer<typeof SitePlatformBillingMode>;
+
+/** Gateway requests, Site SQL rows read and written, and Site SQL plus Site Data storage. */
+export const SitePlatformMeter = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["requests", "sql_rows_read", "sql_rows_written", "storage_bytes"]),
+);
+export type SitePlatformMeter = z.infer<typeof SitePlatformMeter>;
+
+export const SitePlatformMeterUsage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    meter: SitePlatformMeter,
+    /** This UTC month (storage: the current level). */
+    used: z.number().int().nonnegative(),
+    /** The highest storage level this month (equals `used` for other meters). */
+    peak: z.number().int().nonnegative(),
+    /** Included every month before credits are charged (only shadow and credits modes charge). */
+    allowance: z.number().int().nonnegative(),
+    /** Price in micro-USD per `priceUnit` units (storage: per GB-month, GB = 10^9 bytes). */
+    priceMicros: z.number().int().nonnegative(),
+    priceUnit: z.number().int().positive(),
+    /** Estimated cost of all usage this month, micro-USD, before the allowance. */
+    estimatedMicros: z.number().int().nonnegative(),
+  }),
+);
+export type SitePlatformMeterUsage = z.infer<typeof SitePlatformMeterUsage>;
+
+/** The Opengeni-wide brake on Site platform usage (see docs/published-sites.md). */
+export const SitePlatformBrakeState = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    engaged: z.boolean(),
+    engagedAt: z.string().nullable(),
+  }),
+);
+export type SitePlatformBrakeState = z.infer<typeof SitePlatformBrakeState>;
+
+/** GET /v1/workspaces/:ws/site-platform-usage */
+export const SitePlatformUsage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    /** First day of the UTC month, YYYY-MM-DD. */
+    periodStart: z.string(),
+    billingMode: SitePlatformBillingMode,
+    meters: z.array(SitePlatformMeterUsage),
+    /** Estimated cost of this month's usage, micro-USD, before the allowance. */
+    estimatedMicros: z.number().int().nonnegative(),
+    /** Credits charged this month (credits mode). */
+    chargedMicros: z.number().int().nonnegative(),
+    /** What credits mode would have charged this month (shadow mode). */
+    shadowMicros: z.number().int().nonnegative(),
+    brake: SitePlatformBrakeState,
+  }),
+);
+export type SitePlatformUsage = z.infer<typeof SitePlatformUsage>;
+
+/** details.code of the 503 every brake refusal carries. */
+export const SITE_PLATFORM_BRAKE_ERROR_CODE = "site_platform_brake_engaged" as const;
+/** details.code of the 402 a workspace past its allowance without credits gets (credits mode). */
+export const SITE_PLATFORM_QUOTA_ERROR_CODE = "site_platform_quota_exhausted" as const;
 
 export * from "./site-operations";
 

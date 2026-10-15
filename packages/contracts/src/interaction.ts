@@ -2959,9 +2959,11 @@ export const BrowserActionRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       operationId: z.string().uuid(),
       targetId: boundedOpaqueId,
-      expectedTargetGeneration: opaqueGeneration,
-      expectedDocumentGeneration: opaqueGeneration.nullable(),
-      expectedFrameId: opaqueGeneration.nullable(),
+      // Omitted fences mean "the target's current state at dispatch": the API
+      // reads them from the live controller in the same request.
+      expectedTargetGeneration: opaqueGeneration.optional(),
+      expectedDocumentGeneration: opaqueGeneration.nullable().optional(),
+      expectedFrameId: opaqueGeneration.nullable().optional(),
       observationMode: z.enum(["full", "none", "input"]).default("full"),
       action: z.union([BrowserAction, BrowserActionBatch]),
     })

@@ -135,6 +135,9 @@ async function startWorker(
     });
     if (!build.success) throw new AggregateError(build.logs, "Worker build failed");
     const instance = new Miniflare({
+      port: process.env.SITE_GATEWAY_TEST_WORKER_PORT
+        ? Number(process.env.SITE_GATEWAY_TEST_WORKER_PORT) + (options.siteDb === false ? 1 : 0)
+        : 0,
       modules: true,
       scriptPath: join(buildDir, "worker.js"),
       modulesRoot: buildDir,

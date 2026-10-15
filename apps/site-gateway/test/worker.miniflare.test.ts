@@ -64,6 +64,7 @@ const RECORDS = new Map<string, SiteHostMapRecord>(
     record("off", { status: "unpublished", versionId: null }),
     record("hidden", { noindex: true }),
     record("limit"),
+    record("counted", { siteId: "66666666-6666-4666-8666-666666666666" }),
   ].map((entry) => [entry.hostname, entry]),
 );
 
@@ -78,6 +79,8 @@ const viewer = {
 const received: Received[] = [];
 let htmlFetches = 0;
 let pendingChallenge = "";
+/** The fake API's "View as visitor" state for SESSION (one session in these tests). */
+let previewAs: "invited" | "public" | null = null;
 let server: ReturnType<typeof Bun.serve> | null = null;
 let mf: Miniflare | null = null;
 
@@ -103,25 +106,48 @@ async function fakeApi(request: Request): Promise<Response> {
   const suffix = url.pathname.slice(SITE_RUNTIME_API_PREFIX.length);
   const host = request.headers.get(SITE_GATEWAY_HOST_HEADER) ?? "";
   const session = request.headers.get(SITE_GATEWAY_SESSION_HEADER) ?? "";
+  if (suffix === "/platform/requests") {
+    if (host !== DOMAIN) return json({ error: { code: "invalid" } }, { status: 400 });
+    const report = JSON.parse(entry.body) as { hosts: { requests: number }[] };
+    return json({ counted: report.hosts.reduce((sum, item) => sum + item.requests, 0) });
+  }
   const site = RECORDS.get(host);
   if (suffix === "/host") return site ? json(site) : new Response(null, { status: 404 });
   if (!site) return new Response(null, { status: 404 });
+  if (suffix === "/auth/view-as") {
+    if (session !== SESSION)
+      return json({ error: { code: "site_view_as_members_only" } }, { status: 403 });
+    previewAs = (JSON.parse(entry.body) as { viewAs: typeof previewAs }).viewAs;
+    return json({ viewAs: previewAs });
+  }
   if (suffix === "/site/config") {
     if (site.access !== "public" && session === NO_ACCESS_SESSION)
       return json({ error: { code: "forbidden" } }, { status: 403 });
     if (site.access !== "public" && session !== SESSION)
       return json({ error: { code: "site_sign_in_required" } }, { status: 401 });
+    const previewing = session === SESSION ? previewAs : null;
+    // A preview as a public visitor on a members Site is refused like a guest.
+    if (previewing === "public" && site.access !== "public")
+      return json({ error: { code: "forbidden" } }, { status: 403 });
     return json({
       siteId: site.siteId,
       title: site.title,
       hostname: site.hostname,
       versionId: site.versionId,
       access: site.access,
-      viewer: session === SESSION ? viewer : { ...viewer, kind: "guest", signedIn: false },
+      viewer:
+        session === SESSION && !previewing
+          ? viewer
+          : {
+              ...viewer,
+              kind: previewing === "invited" ? "invited" : "guest",
+              signedIn: !!previewing,
+            },
       agent: { enabled: true, model: null },
       siteData: false,
       noindex: site.noindex,
       abuseEmail: null,
+      capabilities: { viewAs: previewing },
     });
   }
   if (suffix.startsWith("/versions/")) {
@@ -223,6 +249,11 @@ function cookiePair(setCookie: string): string {
   return setCookie.split(";")[0]!;
 }
 
+/** API calls made for Site requests (background platform reports excluded). */
+function siteCalls(): number {
+  return received.filter((entry) => !entry.path.endsWith("/platform/requests")).length;
+}
+
 function lastTo(suffix: string): Received | undefined {
   return [...received]
     .reverse()
@@ -256,6 +287,7 @@ async function startWorkerFrom(buildDir: string): Promise<void> {
   });
   if (!build.success) throw new AggregateError(build.logs, "Worker build failed");
   mf = new Miniflare({
+    port: Number(process.env.SITE_GATEWAY_TEST_WORKER_PORT ?? 0),
     modules: true,
     scriptPath: join(buildDir, "worker.js"),
     modulesRoot: buildDir,
@@ -266,6 +298,7 @@ async function startWorkerFrom(buildDir: string): Promise<void> {
       APP_ORIGIN: "https://app.test",
       GATEWAY_SECRET: TEST_SECRET,
       ENVIRONMENT: "production",
+      PLATFORM_REPORT_INTERVAL_SECONDS: "1",
     },
     kvNamespaces: ["HOST_MAP"],
     ratelimits: {
@@ -662,7 +695,7 @@ describe("site gateway in workerd", () => {
   });
 
   test("disallowed operations and cross-origin calls are refused before forwarding", async () => {
-    const count = received.length;
+    const count = siteCalls();
     for (const [method, path] of [
       ["GET", "/_og/api/secrets"],
       ["DELETE", "/_og/api/sessions"],
@@ -692,7 +725,7 @@ describe("site gateway in workerd", () => {
     });
     expect(membersAnonymous.status).toBe(401);
     await membersAnonymous.text();
-    expect(received.length).toBe(count);
+    expect(siteCalls()).toBe(count);
   });
 
   test("the rate-limit binding answers 429, and fresh visitor cookies don't reset it", async () => {
@@ -787,5 +820,130 @@ describe("site gateway in workerd", () => {
     });
     expect(response.status).toBe(404);
     await response.text();
+  });
+
+  test("view as visitor: members start and end a preview; nobody else can", async () => {
+    const session = `__Host-og_session=${SESSION}`;
+    try {
+      // Without a site session the viewer signs in first; the parameter survives.
+      const anonymous = await get("pub", "/page?og_view_as=public");
+      expect(anonymous.status).toBe(302);
+      expect(anonymous.headers.get("location")).toBe(
+        `/_og/auth/login?return=${encodeURIComponent("/page?og_view_as=public")}`,
+      );
+
+      // An unknown value is dropped without asking the API.
+      const calls = siteCalls();
+      const bogus = await get("pub", "/page?og_view_as=admin&x=1", {
+        headers: { cookie: session },
+      });
+      expect(bogus.status).toBe(302);
+      expect(bogus.headers.get("location")).toBe("/page?x=1");
+      expect(siteCalls()).toBe(calls);
+
+      // A member starts the preview: signed with the session, then the same page without the parameter.
+      const start = await get("pub", "/page?x=1&og_view_as=public", {
+        headers: { cookie: session },
+      });
+      expect(start.status).toBe(302);
+      expect(start.headers.get("location")).toBe("/page?x=1");
+      const call = lastTo("/auth/view-as")!;
+      expect(call.verified).toBe(true);
+      expect(call.headers.get(SITE_GATEWAY_SESSION_HEADER)).toBe(SESSION);
+      expect(JSON.parse(call.body)).toEqual({ viewAs: "public" });
+      const viewCookie = setCookies(start).find((cookie) => cookie.startsWith("__Host-og_view="))!;
+      expect(cookiePair(viewCookie)).toBe("__Host-og_view=public");
+      for (const attribute of ["HttpOnly", "Secure", "SameSite=Lax", "Path=/"])
+        expect(viewCookie).toContain(attribute);
+
+      // The shell shows the preview with a way out, and the viewer as the API sees it.
+      const shell = await get("pub", "/page?x=1", {
+        headers: { cookie: `${session}; ${cookiePair(viewCookie)}` },
+      });
+      expect(shell.status).toBe(200);
+      const html = await shell.text();
+      expect(html).toContain("Viewing as a public visitor");
+      expect(html).toContain('href="/page?x=1&amp;og_view_as=off">Exit preview</a>');
+      expect(html).toContain('"kind":"guest"');
+
+      // A members Site previewed as a public visitor is refused, with Exit preview.
+      const team = await get("team", "/", {
+        headers: { cookie: `${session}; ${cookiePair(viewCookie)}` },
+      });
+      expect(team.status).toBe(403);
+      const teamHtml = await team.text();
+      expect(teamHtml).toContain("Exit preview");
+      expect(teamHtml).not.toContain("/_og/v/");
+
+      // Exit: the API is told, the cookie is cleared, and the banner is gone.
+      const exit = await get("pub", "/page?x=1&og_view_as=off", {
+        headers: { cookie: `${session}; ${cookiePair(viewCookie)}` },
+      });
+      expect(exit.status).toBe(302);
+      expect(exit.headers.get("location")).toBe("/page?x=1");
+      expect(JSON.parse(lastTo("/auth/view-as")!.body)).toEqual({ viewAs: null });
+      expect(setCookies(exit).some((cookie) => /^__Host-og_view=;.*Max-Age=0/u.test(cookie))).toBe(
+        true,
+      );
+      const after = await get("pub", "/page?x=1", { headers: { cookie: session } });
+      expect(await after.text()).not.toContain("Viewing as");
+
+      // A stale preview cookie (the preview ended elsewhere) is cleared, with no banner.
+      const stale = await get("pub", "/", {
+        headers: { cookie: `${session}; __Host-og_view=invited` },
+      });
+      expect(stale.status).toBe(200);
+      expect(await stale.text()).not.toContain("Viewing as");
+      expect(setCookies(stale).some((cookie) => /^__Host-og_view=;.*Max-Age=0/u.test(cookie))).toBe(
+        true,
+      );
+
+      // Someone the API does not treat as a member gets a 403 page, not a preview.
+      const outsider = await get("pub", "/?og_view_as=public", {
+        headers: { cookie: `__Host-og_session=${NO_ACCESS_SESSION}` },
+      });
+      expect(outsider.status).toBe(403);
+      expect(await outsider.text()).toContain("Preview not available");
+      expect(setCookies(outsider).some((cookie) => cookie.startsWith("__Host-og_view="))).toBe(
+        false,
+      );
+    } finally {
+      previewAs = null;
+    }
+  });
+
+  test("served requests are counted and reported in signed batches on the Sites apex", async () => {
+    const reportsBefore = received.filter((entry) =>
+      entry.path.endsWith("/platform/requests"),
+    ).length;
+    for (let index = 0; index < 3; index += 1) {
+      const response = await get("counted", "/robots.txt");
+      await response.text();
+    }
+    const reported = async (): Promise<Received[]> =>
+      received
+        .filter((entry) => entry.path.endsWith("/platform/requests"))
+        .slice(reportsBefore)
+        .filter((entry) => entry.body.includes(`counted.${DOMAIN}`));
+    const deadline = Date.now() + 8_000;
+    while ((await reported()).length === 0 && Date.now() < deadline) await Bun.sleep(100);
+    const reports = await reported();
+    expect(reports.length).toBeGreaterThan(0);
+    let counted = 0;
+    for (const report of reports) {
+      expect(report.verified).toBe(true);
+      expect(report.method).toBe("POST");
+      expect(report.headers.get(SITE_GATEWAY_HOST_HEADER)).toBe(DOMAIN);
+      expect(report.headers.get(SITE_GATEWAY_SESSION_HEADER)).toBeNull();
+      const body = JSON.parse(report.body) as {
+        v: number;
+        reportId: string;
+        hosts: { host: string; requests: number }[];
+      };
+      expect(body.v).toBe(1);
+      expect(body.reportId).toMatch(/^[A-Za-z0-9_-]{8,64}$/u);
+      counted += body.hosts.find((item) => item.host === `counted.${DOMAIN}`)?.requests ?? 0;
+    }
+    expect(counted).toBe(3);
   });
 });
