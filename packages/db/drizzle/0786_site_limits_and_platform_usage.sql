@@ -1,14 +1,8 @@
 -- deployment-mode: rolling
 -- Site limits by access mode and Site platform usage (docs/published-sites.md).
 --
--- 1. Limit profiles: `standard` replaces `free` (the API still accepts `free`
---    as an alias). Both CHECKs are widened (added NOT VALID: every existing
---    row already satisfies the wider predicate, and new rows are checked) and
---    stored `free` rows become `standard`. The two tables are FORCE RLS, so
---    the backfill relaxes the owner-only posture around it. A pod of the
---    previous release that reads a `standard` row during the rollout does not
---    know the kind; published Sites were not yet generally available, and the
---    window is the rollout itself.
+-- 1. Limit profiles move to the new model in 0787 (kept apart so this
+--    migration takes no lock on site_publications).
 -- 2. site_runtime_conversations.budget_key: the Site-wide usage windows a
 --    conversation counts in. `*` (every existing row) is the Site's budgets
 --    for viewers outside the workspace; workspace members' conversations
@@ -25,31 +19,14 @@
 --    never touch them by accident. Writers lock a workspace row before a
 --    shard row.
 -- 4. site_viewer_sessions.view_as: the owner's "View as visitor" preview role.
--- New tables and two added columns (no rewrite); the
--- constraint swaps take a brief lock on the two profile tables.
+-- New tables and two added columns (no rewrite).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
-ALTER TABLE site_publications
-  DROP CONSTRAINT IF EXISTS site_publications_limit_profile_kind_check;
-ALTER TABLE site_publications
-  ADD CONSTRAINT site_publications_limit_profile_kind_check CHECK (
-    limit_profile_kind IS NULL
-    OR limit_profile_kind IN ('standard', 'free', 'credits', 'unlimited', 'custom')
-  ) NOT VALID;
-ALTER TABLE site_limit_profiles DROP CONSTRAINT IF EXISTS site_limit_profiles_kind_check;
-ALTER TABLE site_limit_profiles
-  ADD CONSTRAINT site_limit_profiles_kind_check
-  CHECK (kind IN ('standard', 'free', 'credits', 'unlimited', 'custom')) NOT VALID;
-
-ALTER TABLE site_publications NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE site_limit_profiles NO FORCE ROW LEVEL SECURITY;
-UPDATE site_publications SET limit_profile_kind = 'standard' WHERE limit_profile_kind = 'free';
-UPDATE site_limit_profiles SET kind = 'standard' WHERE kind = 'free';
-ALTER TABLE site_publications FORCE ROW LEVEL SECURITY;
-ALTER TABLE site_limit_profiles FORCE ROW LEVEL SECURITY;
-
 ALTER TABLE site_runtime_conversations ADD COLUMN budget_key text NOT NULL DEFAULT '*';
+ALTER TABLE site_runtime_conversations
+  ADD CONSTRAINT site_runtime_conversations_budget_key_check
+  CHECK (budget_key IN ('*', '*members')) NOT VALID;
 
 -- "View as visitor": the role a workspace member previews the Site as on
 -- this viewer session. The API applies it only to see less.
@@ -57,9 +34,6 @@ ALTER TABLE site_viewer_sessions ADD COLUMN view_as text;
 ALTER TABLE site_viewer_sessions
   ADD CONSTRAINT site_viewer_sessions_view_as_check
   CHECK (view_as IS NULL OR view_as IN ('invited', 'public')) NOT VALID;
-ALTER TABLE site_runtime_conversations
-  ADD CONSTRAINT site_runtime_conversations_budget_key_check
-  CHECK (budget_key IN ('*', '*members')) NOT VALID;
 
 -- This month's platform usage of one workspace. Counters restart when
 -- period_start moves to a new month; storage_bytes is the latest level (Site

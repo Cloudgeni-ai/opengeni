@@ -251,6 +251,31 @@ describe("limits", () => {
     );
   });
 
+  test("the previous release's prefilled free defaults read as the new defaults", () => {
+    // The old custom form saved every field prefilled with the old free values.
+    const prefilled = effectiveSiteLimits(
+      settings,
+      {
+        kind: "custom",
+        overrides: {
+          conversationsPerVisitorPerDay: 10,
+          conversationsPerSitePerDay: 50,
+          turnsPerConversation: 20,
+          agentMicrosPerConversation: 20_000,
+          agentMicrosPerVisitorPerDay: 200_000,
+          agentMicrosPerSitePerMonth: 5_000_000,
+        },
+      },
+      null,
+    );
+    // No $0.02 conversation cap and no per-person limit; the owner's own value stays.
+    expect(prefilled).toEqual({ ...DEFAULT_SITE_LIMITS, agentMicrosPerSitePerMonth: 5_000_000 });
+    // A guest's conversation is capped by the standard guard, not $0.02.
+    expect(siteViewerLimits(prefilled, "guest").agentMicrosPerConversation).toBe(
+      DEFAULT_SITE_LIMITS.agentMicrosPerConversation,
+    );
+  });
+
   test("turning public agents off turns guest agents off everywhere", () => {
     const off = testSettings({ sitesPublicAgentsEnabled: false });
     expect(
