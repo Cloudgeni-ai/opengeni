@@ -16,9 +16,20 @@ export type InteractionRouteStage =
   | "passkey_pre"
   | "secrets"
   | "dispatch"
-  | "passkey_post";
+  | "passkey_post"
+  // Browser creation (open) stages.
+  | "replay_check"
+  | "prepare"
+  | "restore"
+  | "network_route"
+  | "holder"
+  | "generation"
+  | "provision"
+  | "display"
+  | "launch"
+  | "activate";
 
-export type InteractionRouteStageOperation = "act" | "observe" | "target_state";
+export type InteractionRouteStageOperation = "act" | "observe" | "target_state" | "create";
 
 /**
  * Wall-clock split of one browser control request into its sequential stages.
