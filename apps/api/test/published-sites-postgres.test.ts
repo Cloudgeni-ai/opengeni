@@ -18,6 +18,8 @@ import {
   engageSitePlatformBrake,
   ensureExternalIdentity,
   liftSitePlatformBrake,
+  readSitePlatformTotals,
+  recordSitePlatformUsage,
   setSessionUsageLimitInTransaction,
   withWorkspaceSessionActivityRls,
   type DbClient,
@@ -3011,6 +3013,34 @@ test("platform usage: gateway counts once per report, billing modes, the quota e
     reason: "overage_disabled",
   });
 }, 120_000);
+
+test("platform storage: the Opengeni-wide level is each workspace's level, set rather than added", async () => {
+  const f = await fixture();
+  const site = await f.live("Stored", { access: "public" });
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  const level = async () =>
+    Number(
+      (
+        await shared.admin`select storage_bytes from site_platform_storage
+          where workspace_id = ${f.workspace.id}`
+      )[0]?.storage_bytes ?? 0,
+    );
+  const before = (await readSitePlatformTotals(db.db)).storageBytes;
+  await shared.admin`insert into site_data_usage (account_id, workspace_id, site_id, record_bytes)
+    values (${f.accountId}, ${f.workspace.id}, ${site.id}, 1000)
+    on conflict (workspace_id, site_id) do update set record_bytes = 1000`;
+  // Refreshing the same level twice records it once.
+  await recordSitePlatformUsage(db.db, scope, { refreshStorage: true });
+  await recordSitePlatformUsage(db.db, scope, { refreshStorage: true });
+  expect(await level()).toBe(1000);
+  expect((await readSitePlatformTotals(db.db)).storageBytes).toBe(before + 1000);
+  // A smaller level replaces it.
+  await shared.admin`update site_data_usage set record_bytes = 400
+    where workspace_id = ${f.workspace.id} and site_id = ${site.id}`;
+  await recordSitePlatformUsage(db.db, scope, { refreshStorage: true });
+  expect(await level()).toBe(400);
+  expect((await readSitePlatformTotals(db.db)).storageBytes).toBe(before + 400);
+});
 
 test("the platform brake: alert, engage at the monthly limit, refuse writes, operator lift", async () => {
   // A tiny limit: $0.50 a month at $0.60 per million requests.

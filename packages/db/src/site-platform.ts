@@ -182,12 +182,13 @@ export async function recordSitePlatformUsageInTransaction(
             sql_rows_written = site_platform_totals.sql_rows_written + excluded.sql_rows_written,
             updated_at = now()`,
       );
+    // The workspace's own level row (no shared row is locked here).
     if (storageDelta !== 0)
       await tx.execute(
-        sql`insert into site_platform_storage (shard, storage_bytes)
-          values (${shard}, ${Math.max(0, storageDelta)})
-          on conflict (shard) do update set
-            storage_bytes = greatest(0, site_platform_storage.storage_bytes + ${storageDelta}),
+        sql`insert into site_platform_storage (workspace_id, storage_bytes)
+          values (${scope.workspaceId}, ${storage})
+          on conflict (workspace_id) do update set
+            storage_bytes = excluded.storage_bytes,
             updated_at = now()`,
       );
   }

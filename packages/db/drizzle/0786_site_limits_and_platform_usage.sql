@@ -69,9 +69,11 @@ CREATE TABLE site_platform_totals (
   PRIMARY KEY (period_start, shard)
 );
 
--- The Opengeni-wide storage level, moved by each workspace's level changes.
+-- Each workspace's current Site storage level, readable on the platform lane;
+-- the Opengeni-wide level is their sum. Levels are set, not added to, so they
+-- cannot drift, and each workspace writes only its own row.
 CREATE TABLE site_platform_storage (
-  shard smallint PRIMARY KEY CHECK (shard BETWEEN 0 AND 7),
+  workspace_id uuid PRIMARY KEY,
   storage_bytes bigint NOT NULL DEFAULT 0 CHECK (storage_bytes >= 0),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
