@@ -691,15 +691,57 @@ fn readings_taken_together_are_all_applied_before_any_timer_fires() {
 }
 
 #[test]
-fn a_resume_that_fails_stops_trusting_the_saved_copy() {
+fn a_refused_or_cancelled_resume_keeps_the_saved_copy() {
     let mut rig = Rig::new(HostPolicy::default());
     rig.add(1, paused(Durability::Local), recommended());
     let (step, op) = only_start(&rig.touch(1));
     assert_eq!(step, Step::Resume);
     let actions = rig.finish(1, op, Outcome::Failed(Failure::Transient));
+    // Refused before the guest ran: the copy still matches the VM.
+    assert_eq!(rig.state(1), paused(Durability::Local));
+    assert!(
+        !notices(&actions, 1)
+            .iter()
+            .any(|notice| matches!(notice, Notice::State(_))),
+        "nothing changed"
+    );
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Resume, "the retry resumes the same VM");
+    rig.finish(1, op, Outcome::Cancelled);
+    assert_eq!(
+        rig.state(1),
+        paused(Durability::Local),
+        "a cancel changes nothing"
+    );
+
+    rig.add(2, paused(Durability::Remote), recommended());
+    let (_, op) = only_start(&rig.touch(2));
+    rig.finish(2, op, Outcome::Cancelled);
+    assert_eq!(
+        rig.state(2),
+        paused(Durability::Remote),
+        "a cancel changes nothing"
+    );
+}
+
+#[test]
+fn a_resume_that_breaks_down_stops_trusting_the_saved_copy() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Local), recommended());
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    let actions = rig.finish(1, op, Outcome::Failed(Failure::Fatal));
     // The guest may have run before the failure, so the copy may be stale.
     assert_eq!(rig.state(1), paused(Durability::Volatile));
-    assert!(notices(&actions, 1).contains(&Notice::State(paused(Durability::Volatile))));
+    assert!(notices(&actions, 1).contains(&Notice::Broken));
+}
+
+#[test]
+fn a_resume_retried_after_a_refusal_runs_and_saves_afresh() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Local), recommended());
+    let (_, op) = only_start(&rig.touch(1));
+    rig.finish(1, op, Outcome::Failed(Failure::Transient));
     let (step, op) = only_start(&rig.tick_at_deadline());
     assert_eq!(step, Step::Resume, "the retry resumes the same VM");
     rig.finish(1, op, Outcome::Done);
@@ -717,7 +759,7 @@ fn a_resume_that_fails_stops_trusting_the_saved_copy() {
 }
 
 #[test]
-fn a_resume_that_fails_with_its_process_gone_boots_from_the_files() {
+fn a_resume_that_fails_with_its_process_gone_falls_back_on_what_is_trusted() {
     let mut rig = Rig::new(HostPolicy::default());
     rig.add(1, paused(Durability::Remote), recommended());
     rig.add(2, paused(Durability::Local), recommended());
@@ -730,13 +772,14 @@ fn a_resume_that_fails_with_its_process_gone_boots_from_the_files() {
     assert_eq!(rig.state(1), state(Level::Saved, Durability::Local, false));
     assert_eq!(only_start(&actions).0, Step::Boot);
 
-    // The process exit is noticed first, then the resume fails.
+    // The process exit is noticed first, then the resume is refused: the
+    // guest never ran, so the saved copy takes the process's place.
     assert_nothing_started(&rig.send(Input::Lost {
         sandbox: SandboxId(2),
     }));
     let actions = rig.finish(2, second, Outcome::Failed(Failure::Transient));
-    assert!(notices(&actions, 2).contains(&Notice::MemoryLost));
-    assert_eq!(rig.state(2), state(Level::Saved, Durability::Local, false));
+    assert!(!notices(&actions, 2).contains(&Notice::MemoryLost));
+    assert_eq!(rig.state(2), state(Level::Saved, Durability::Local, true));
 }
 
 #[test]
@@ -767,6 +810,57 @@ fn a_sleep_request_made_during_a_wake_applies_after_it() {
         hold: HoldId(1),
     }));
     assert_eq!(step, Step::Pause);
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Save);
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Drop);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), saved());
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Running
+    );
+}
+
+#[test]
+fn a_sleep_request_made_while_a_wake_passes_a_deeper_level_survives_it() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(
+        1,
+        state(Level::Remote, Durability::Remote, true),
+        SleepPolicy::NEVER,
+    );
+    let hold = Input::Hold {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+        until: None,
+        priority: Priority::Interactive,
+    };
+    let (step, fetch) = only_start(&rig.send(hold));
+    assert_eq!(step, Step::Fetch);
+    assert_nothing_started(&rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    }));
+    // The fetch lands on Archived, deeper than Saved, but only on the way up.
+    let (step, restore) = only_start(&rig.finish(1, fetch, Outcome::Done));
+    assert_eq!(step, Step::Restore);
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Saved
+    );
+    assert_nothing_started(&rig.finish(1, restore, Outcome::Done));
+    assert_eq!(rig.state(1), State::RUNNING);
+
+    let (step, op) = only_start(&rig.send(Input::Release {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+    }));
+    assert_eq!(
+        step,
+        Step::Pause,
+        "the request applies once the wake is done"
+    );
     let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
     assert_eq!(step, Step::Save);
     let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));

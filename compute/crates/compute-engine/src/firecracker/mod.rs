@@ -282,6 +282,85 @@ impl FirecrackerVm {
             Err(error) => Err(EngineError::caused_by(kind, operation, error)),
         }
     }
+
+    /// Pauses or resumes the processors; see [`set_run_state`].
+    async fn set_state(&self, operation: &'static str, run: RunState) -> Result<(), EngineError> {
+        set_run_state(&self.api, || self.is_running(), operation, run).await
+    }
+}
+
+/// Pauses or resumes the processors so that a failure always means nothing
+/// changed. A request refused or never sent is a transient failure. A
+/// request whose answer was lost may still have taken effect, so the VMM is
+/// asked which state the VM is in; if it cannot say, the VM is beyond
+/// control and counts as lost, since its guest may or may not be running.
+async fn set_run_state(
+    api: &Api,
+    alive: impl Fn() -> bool,
+    operation: &'static str,
+    run: RunState,
+) -> Result<(), EngineError> {
+    let body = json!({ "state": run.request() });
+    let error = match api.call("PATCH", "/vm", Some(&body)).await {
+        Ok(_) => return Ok(()),
+        Err(error @ (ApiError::Connect(_) | ApiError::Status { .. })) if alive() => {
+            return Err(EngineError::caused_by(
+                ErrorKind::Transient,
+                operation,
+                error,
+            ));
+        }
+        Err(error) => error,
+    };
+    let reported = api
+        .call("GET", "/", None)
+        .await
+        .ok()
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .and_then(|info| info.get("state")?.as_str().map(str::to_owned));
+    match reported.as_deref() {
+        Some(state) if state == run.reported() => Ok(()),
+        Some(_) if alive() => Err(EngineError::caused_by(
+            ErrorKind::Transient,
+            operation,
+            error,
+        )),
+        _ if !alive() => Err(EngineError::new(
+            ErrorKind::MemoryLost,
+            operation,
+            "the VMM process has exited",
+        )),
+        _ => Err(EngineError::caused_by(
+            ErrorKind::MemoryLost,
+            operation,
+            error,
+        )),
+    }
+}
+
+/// The processor state asked of the VMM.
+#[derive(Clone, Copy)]
+enum RunState {
+    Paused,
+    Running,
+}
+
+impl RunState {
+    /// The value `PATCH /vm` takes.
+    const fn request(self) -> &'static str {
+        match self {
+            Self::Paused => "Paused",
+            Self::Running => "Resumed",
+        }
+    }
+
+    /// The value `GET /` reports once the change took effect.
+    const fn reported(self) -> &'static str {
+        match self {
+            Self::Paused => "Paused",
+            Self::Running => "Running",
+        }
+    }
 }
 
 impl Engine for Firecracker {
@@ -374,25 +453,11 @@ impl Engine for Firecracker {
     }
 
     async fn pause(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
-        vm.call(
-            "pause",
-            ErrorKind::Transient,
-            "PATCH",
-            "/vm",
-            &json!({ "state": "Paused" }),
-        )
-        .await
+        vm.set_state("pause", RunState::Paused).await
     }
 
     async fn resume(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
-        vm.call(
-            "resume",
-            ErrorKind::Transient,
-            "PATCH",
-            "/vm",
-            &json!({ "state": "Resumed" }),
-        )
-        .await
+        vm.set_state("resume", RunState::Running).await
     }
 
     async fn compress(
@@ -501,6 +566,81 @@ async fn remove_if_present(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::spec::Network;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
+
+    /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
+    /// `get`; `None` drops the connection without answering.
+    fn vmm(patch: Option<&'static str>, get: Option<&'static str>) -> (Socket, Api) {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let socket = std::env::temp_dir().join(format!(
+            "compute-engine-vmm-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0_u8; 4096];
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                let reply = if request[..read].starts_with(b"PATCH") {
+                    patch
+                } else {
+                    get
+                };
+                if let Some(reply) = reply {
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                }
+            }
+        });
+        let api = Api::new(&socket);
+        (Socket(socket), api)
+    }
+
+    /// Removes the socket file when the test ends.
+    struct Socket(PathBuf);
+
+    impl Drop for Socket {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    const NO_CONTENT: &str = "HTTP/1.1 204 \r\n\r\n";
+    const REFUSED: &str = "HTTP/1.1 400 \r\ncontent-length: 2\r\n\r\n{}";
+    const RUNNING: &str = "HTTP/1.1 200 \r\ncontent-length: 19\r\n\r\n{\"state\":\"Running\"}";
+    const PAUSED: &str = "HTTP/1.1 200 \r\ncontent-length: 18\r\n\r\n{\"state\":\"Paused\"}";
+
+    async fn resume(api: &Api, alive: bool) -> Result<(), ErrorKind> {
+        set_run_state(api, || alive, "resume", RunState::Running)
+            .await
+            .map_err(|error| error.kind)
+    }
+
+    #[tokio::test]
+    async fn a_run_state_change_fails_only_when_nothing_changed() {
+        let (_s1, api) = vmm(Some(NO_CONTENT), None);
+        assert_eq!(resume(&api, true).await, Ok(()));
+        let (_s2, api) = vmm(Some(REFUSED), Some(PAUSED));
+        assert_eq!(
+            resume(&api, true).await,
+            Err(ErrorKind::Transient),
+            "refused"
+        );
+        // The answer is lost: the VMM says what actually happened.
+        let (_s3, api) = vmm(None, Some(RUNNING));
+        assert_eq!(resume(&api, true).await, Ok(()), "it did resume");
+        let (_s4, api) = vmm(None, Some(PAUSED));
+        assert_eq!(resume(&api, true).await, Err(ErrorKind::Transient));
+        // Nobody can say whether the guest ran.
+        let (_s5, api) = vmm(None, None);
+        assert_eq!(resume(&api, true).await, Err(ErrorKind::MemoryLost));
+        assert_eq!(resume(&api, false).await, Err(ErrorKind::MemoryLost));
+        // Never sent: nothing changed.
+        let gone = Api::new(std::env::temp_dir().join("compute-engine-no-such-vmm.sock"));
+        assert_eq!(resume(&gone, true).await, Err(ErrorKind::Transient));
+    }
 
     #[test]
     fn boot_pins_the_clock_source_restore_can_correct() {
