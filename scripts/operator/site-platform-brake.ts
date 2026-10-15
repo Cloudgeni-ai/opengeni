@@ -35,7 +35,9 @@ const { values, positionals } = parseArgs({
 });
 const command = positionals[0] ?? "status";
 if (!["status", "lift", "engage"].includes(command))
-  throw new Error("Use status, lift --operator <name> --reason <why>, or engage --operator <name> --reason <why>");
+  throw new Error(
+    "Use status, lift --operator <name> --reason <why>, or engage --operator <name> --reason <why>",
+  );
 if (command !== "status" && (!values.operator?.trim() || (values.reason?.trim().length ?? 0) < 6))
   throw new Error("lift and engage need --operator <name> and --reason (at least six characters)");
 
