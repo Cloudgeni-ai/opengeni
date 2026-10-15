@@ -390,6 +390,20 @@ describe("external vault receiver outputs", () => {
     expect(crashed.body).not.toContain("hunter2");
     expect((await json(crashed)).error.code).toBe("provider_unavailable");
     expect(errors).toHaveLength(1);
+
+    const malformed = receiver(
+      {},
+      {
+        async readFields() {
+          throw new ExternalVaultReceiverError("provider_locked", {
+            freshness: { ...freshness, state: "secret: hunter2" } as never,
+          });
+        },
+      },
+    );
+    const dropped = await malformed.instance.handle(await read(["password"]));
+    expect(dropped.body).not.toContain("hunter2");
+    expect(await json(dropped)).toMatchObject({ ok: false, freshness: null });
   });
 
   test("pages larger than requested are refused", async () => {

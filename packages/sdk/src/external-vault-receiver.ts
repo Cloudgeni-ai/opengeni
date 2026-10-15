@@ -603,7 +603,11 @@ export function createExternalVaultReceiver<TConnection, TPrincipal>(
         ok: false,
         op,
         error: { code, retryAfterMs: extra.retryAfterMs ?? null },
-        freshness: extra.freshness ?? null,
+        // Host-supplied freshness is validated like handler output; invalid is dropped.
+        freshness:
+          extra.freshness == null
+            ? null
+            : (VaultProviderWireFreshness.safeParse(extra.freshness).data ?? null),
       });
 
     try {
