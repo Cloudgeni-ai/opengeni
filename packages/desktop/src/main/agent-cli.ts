@@ -15,26 +15,75 @@ export interface AgentConnection {
   agentId: string;
 }
 
-/** Where the deployment's installer puts the agent, most specific first. */
-export function agentBinaryCandidates(
+/**
+ * Where the app keeps the agent it runs: the same place the command-line
+ * installer uses, so there is one agent per person, `opengeni-agent` keeps
+ * working in a terminal, and the agent's own signed updates replace it there.
+ */
+export function hostedAgentPath(
   platform: AgentPlatform,
   home: string,
   env: Record<string, string | undefined>,
-): string[] {
+): string {
   if (platform === "win32") {
     const localAppData = env.LOCALAPPDATA ?? win32.join(home, "AppData", "Local");
-    return [win32.join(localAppData, "Opengeni", "bin", "opengeni-agent.exe")];
+    return win32.join(localAppData, "Opengeni", "bin", "opengeni-agent.exe");
   }
   // The target platform's separators, whatever platform computes the paths.
-  const join = posix.join;
-  const candidates: string[] = [];
-  if (platform === "darwin") {
-    candidates.push(
-      join(home, "Applications", "OpenGeni Agent.app", "Contents", "MacOS", "opengeni-agent"),
-    );
+  return posix.join(home, ".local", "bin", "opengeni-agent");
+}
+
+/**
+ * The standalone macOS agent app the command-line installer used to create.
+ * Its background service and its own entries in Privacy & Security are what the
+ * app replaces.
+ */
+export function standaloneMacAgentApp(home: string): string {
+  return posix.join(home, "Applications", "OpenGeni Agent.app");
+}
+
+/** `opengeni-agent --version` prints `opengeni-agent 0.1.65`. */
+export function parseAgentVersion(output: string): string | null {
+  return /\bopengeni-agent\s+v?(\d+\.\d+\.\d+)\b/u.exec(output)?.[1] ?? null;
+}
+
+export type AgentPermissionId = "screenRecording" | "accessibility" | "inputMonitoring";
+
+/**
+ * `opengeni-agent permissions` prints one JSON line. Screen control on a Mac
+ * needs Screen Recording (to see), Accessibility (to click and type) and Input
+ * Monitoring (so the agent's input gives way to the person's own); other
+ * systems need nothing. Null when the agent is too old to answer.
+ */
+export function parsePermissions(
+  output: string,
+): { required: false } | { required: true; granted: Record<AgentPermissionId, boolean> } | null {
+  for (const line of output.split(/\r?\n/u).reverse()) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const value = JSON.parse(trimmed) as Record<string, unknown>;
+      if (value.required === false) return { required: false };
+      if (
+        value.required === true &&
+        typeof value.screenRecording === "boolean" &&
+        typeof value.accessibility === "boolean" &&
+        typeof value.inputMonitoring === "boolean"
+      ) {
+        return {
+          required: true,
+          granted: {
+            screenRecording: value.screenRecording,
+            accessibility: value.accessibility,
+            inputMonitoring: value.inputMonitoring,
+          },
+        };
+      }
+    } catch {
+      // Not the line we want.
+    }
   }
-  candidates.push(join(home, ".local", "bin", "opengeni-agent"));
-  return candidates;
+  return null;
 }
 
 /**
@@ -58,16 +107,6 @@ export function parseConnections(stdout: string): AgentConnection[] {
   return connections;
 }
 
-/**
- * Whether `opengeni-agent status` reports the background agent running:
- * systemd prints `active`, launchd `loaded`, the Windows logon task `running`.
- */
-export function parseServiceRunning(stdout: string): boolean {
-  if (/LaunchAgent:\s*loaded\b/iu.test(stdout)) return true;
-  if (/service:\s*active\b/iu.test(stdout)) return true;
-  return /background task:\s*running\b/iu.test(stdout);
-}
-
 /** The connection that serves this server's workspace, if any. */
 export function connectionFor(
   connections: readonly AgentConnection[],
@@ -80,18 +119,6 @@ export function connectionFor(
       (connection) => connection.apiUrl === origin && connection.workspaceId === workspaceId,
     ) ?? null
   );
-}
-
-/**
- * The server whose installer repairs an agent that cannot start: the signed-in
- * server asking, else the first server the agent is connected to.
- */
-export function repairServer(
-  connections: readonly AgentConnection[],
-  baseUrl?: string,
-): string | null {
-  const asking = baseUrl ? normalizeServerUrl(baseUrl) : null;
-  return asking ?? connections[0]?.apiUrl ?? null;
 }
 
 /**
@@ -112,16 +139,4 @@ export function lastErrorLine(output: string): string | null {
         .replace(/^error:\s*/iu, "")
         .slice(0, 300)
     : null;
-}
-
-/**
- * The PowerShell command that runs a server's installer script. Windows
- * PowerShell 5.1 redraws a progress bar for every downloaded chunk, which
- * turns a minute-long agent download into many minutes; the preference is
- * inherited by the script, including from servers whose script predates its
- * own fix. The script's exit code is passed through.
- */
-export function windowsInstallCommand(scriptPath: string): string {
-  const quoted = scriptPath.replaceAll("'", "''");
-  return `$ProgressPreference = 'SilentlyContinue'; & '${quoted}'; exit $LASTEXITCODE`;
 }

@@ -16,6 +16,8 @@ export type DesktopCapability =
   | "accounts"
   /** Connect this computer to a workspace, pause and resume it. */
   | "thisComputer"
+  /** Report and ask for the system permissions screen control needs. */
+  | "thisComputerPermissions"
   /** Open a URL in the default browser. */
   | "openExternal"
   /** Menu bar and keyboard commands for the web app to carry out. */
@@ -64,6 +66,14 @@ export type ThisComputerState =
   | "connected"
   | "paused";
 
+/** A system permission screen control needs on this computer. */
+export type ThisComputerPermissionId = "screenRecording" | "accessibility" | "inputMonitoring";
+
+export interface ThisComputerPermission {
+  id: ThisComputerPermissionId;
+  granted: boolean;
+}
+
 export interface ThisComputerStatus {
   state: ThisComputerState;
   /** A connect, pause or resume is in progress. */
@@ -72,6 +82,13 @@ export interface ThisComputerStatus {
   error: string | null;
   /** The computer's name as agents see it. */
   machineName: string;
+  /** While the agent downloads during setup, how much has arrived, from 0 to 1. */
+  setupProgress?: number;
+  /**
+   * When connected with screen control on a system that asks for permissions
+   * (macOS), each one in the order to ask for it. Absent elsewhere.
+   */
+  permissions?: ThisComputerPermission[];
 }
 
 export interface ThisComputerConnectOptions {
@@ -109,6 +126,11 @@ export interface DesktopBridge {
     connect(workspaceId: string, options: ThisComputerConnectOptions): Promise<ThisComputerStatus>;
     pause(): Promise<void>;
     resume(): Promise<void>;
+    /**
+     * Ask for one permission: the system prompt the first time, then its list
+     * in System Settings. With the `thisComputerPermissions` capability.
+     */
+    requestPermission?(id: ThisComputerPermissionId): Promise<void>;
     onChange(listener: () => void): Unsubscribe;
   };
   /** Open a page in the default browser. Only http(s) URLs are accepted. */
@@ -149,6 +171,7 @@ export const DESKTOP_IPC = {
   computerConnect: "og:computer:connect",
   computerPause: "og:computer:pause",
   computerResume: "og:computer:resume",
+  computerRequestPermission: "og:computer:request-permission",
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
   command: "og:command",

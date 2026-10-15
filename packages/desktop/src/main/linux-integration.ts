@@ -100,3 +100,35 @@ export function installAppImageIntegration(options: {
   run("update-desktop-database", [applications]);
   run("xdg-mime", ["default", `${name}.desktop`, `x-scheme-handler/${options.scheme}`]);
 }
+
+/** The XDG autostart entry that opens the app, without a window, at login. */
+export function autostartDesktopEntry(productName: string, executable: string): string {
+  return [
+    "[Desktop Entry]",
+    "Type=Application",
+    `Name=${productName}`,
+    `Exec=${desktopExecQuote(executable)} --hidden`,
+    "Terminal=false",
+    "X-GNOME-Autostart-enabled=true",
+    "",
+  ].join("\n");
+}
+
+/**
+ * Open the app at login (`$XDG_CONFIG_HOME/autostart`), the way Linux desktops
+ * start programs for the signed-in person. An AppImage starts from its own file.
+ */
+export function installLinuxAutostart(productName: string): void {
+  try {
+    const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+    const autostart = join(configHome, "autostart");
+    mkdirSync(autostart, { recursive: true });
+    const executable = process.env.APPIMAGE || process.execPath;
+    writeIfChanged(
+      join(autostart, `${productName.toLowerCase()}.desktop`),
+      autostartDesktopEntry(productName, executable),
+    );
+  } catch {
+    // The app still works; it just doesn't open at login.
+  }
+}
