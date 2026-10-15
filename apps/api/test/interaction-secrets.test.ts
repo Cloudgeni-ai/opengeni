@@ -528,9 +528,7 @@ describe("syncBrowserPasskeys", () => {
     expect(await takeover).toEqual({ saved: 0, asserted: 0 });
     expect(await writeBack).toEqual({ saved: 0, asserted: 1 });
     // The assertion was written back once, by the first sync only.
-    expect(calls.filter((call) => call.startsWith("count:"))).toEqual([
-      `count:${stored.itemId}:7`,
-    ]);
+    expect(calls.filter((call) => call.startsWith("count:"))).toEqual([`count:${stored.itemId}:7`]);
     expect(order.slice(0, 4)).toEqual(["start:load", "end", "start:keep", "end"]);
     expect(pending).toEqual([]);
   });
