@@ -1,6 +1,6 @@
-// Migration 0786: external vault sources. Linked vaults of every existing
+// Migration 0789: external vault sources. Linked vaults of every existing
 // kind are staged on a database migrated as its non-bypass owner without
-// 0786; then 0786 is applied. Existing links keep their meaning, new sources
+// 0789; then 0789 is applied. Existing links keep their meaning, new sources
 // link only through an active connection of the same provider whose ownership
 // matches the vault, and linked vaults record provider operations, the
 // provider's own freshness observation and a durable value-cache epoch.
@@ -42,7 +42,7 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const MIGRATION = "0786_external_vault_sources.sql";
+const MIGRATION = "0789_external_vault_sources.sql";
 const key = Buffer.alloc(32, 7);
 
 let database: OwnerMigratedTestDatabase | null = null;
@@ -72,7 +72,7 @@ async function tenant(label: string) {
   const access = await ensureManagedAccessForUser(db, {
     userId: user,
     email: `${user}@example.test`,
-    name: "Vault 0786",
+    name: "Vault 0789",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
   const subjectId = `user:${user}`;
@@ -234,7 +234,7 @@ beforeAll(async () => {
   // another replacement waits and a third tenant is turned away.
   client = createDb(url.toString(), { max: 4 });
 
-  // Before 0786: every kind of linked vault, through the old routines.
+  // Before 0789: every kind of linked vault, through the old routines.
   const t = await tenant("legacy");
   const shared = await onePasswordConnection(t);
   const personal = await onePasswordConnection(t, { personal: true });
@@ -285,7 +285,7 @@ beforeAll(async () => {
     organizationVaultId: organization!.id,
   };
 
-  // Apply 0786 (and anything after it) as the owner.
+  // Apply 0789 (and anything after it) as the owner.
   await database.admin`delete from schema_migrations where name >= ${MIGRATION}`;
   await migrate(database.ownerUrl);
   await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
@@ -296,7 +296,7 @@ afterAll(async () => {
   await database?.release();
 }, 180_000);
 
-describe.skipIf(!realDb)("0786 external vault sources", () => {
+describe.skipIf(!realDb)("0789 external vault sources", () => {
   test("existing links keep their meaning and gain empty provider metadata", async () => {
     const { tenant: t, ...ids } = legacy!;
     const onePassword = await getVault(t.db, t.context, { vaultId: ids.onePasswordVaultId });

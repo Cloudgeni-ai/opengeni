@@ -114,7 +114,7 @@ export interface ProviderVaultSyncTarget {
   /** `contentVersion` recorded by the last successful mirror, if any. */
   mirroredContentVersion: string | null;
   rateLimitedUntil: Date | null;
-  /** The vault's durable value-cache epoch (0786), passed to the provider as `cacheEpoch`. */
+  /** The vault's durable value-cache epoch (0789), passed to the provider as `cacheEpoch`. */
   cacheEpoch?: string | null;
 }
 

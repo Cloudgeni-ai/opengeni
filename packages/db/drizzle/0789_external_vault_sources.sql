@@ -63,7 +63,7 @@ BEGIN
   FOREACH patch SLICE 1 IN ARRAY p_patches LOOP
     IF (pg_catalog.length(definition) - pg_catalog.length(pg_catalog.replace(definition, patch[1], '')))
       <> pg_catalog.length(patch[1]) THEN
-      RAISE EXCEPTION '0786 external vault sources: % changed near: %', p_routine, patch[1];
+      RAISE EXCEPTION '0789 external vault sources: % changed near: %', p_routine, patch[1];
     END IF;
     definition := pg_catalog.replace(definition, patch[1], patch[2]);
   END LOOP;

@@ -139,7 +139,7 @@ function json(value: unknown): string | null {
 
 /**
  * What a provider (or its bridge) said about its own upstream freshness at
- * the last successful check (0786). Opengeni's own check time is
+ * the last successful check (0789). Opengeni's own check time is
  * `lastSyncedAt`; it never stands in for `sourceSyncedAt`.
  */
 export type StoredProviderFreshness = {
@@ -164,12 +164,12 @@ export type VaultRow = {
   rateLimitedUntil: string | null;
   providerConnectionId: string | null;
   providerVaultRef: string | null;
-  /** Effective operations the provider last reported (0786); null before the first check. */
+  /** Effective operations the provider last reported (0789); null before the first check. */
   providerOperations?: VaultProviderOperations | null;
-  /** The provider's own freshness observation from the last successful check (0786). */
+  /** The provider's own freshness observation from the last successful check (0789). */
   providerFreshness?: StoredProviderFreshness | null;
   /**
-   * Durable value-cache epoch (0786, bigint as text). Every complete mirror
+   * Durable value-cache epoch (0789, bigint as text). Every complete mirror
    * replacement advances it; provider value caches compare it before reuse.
    */
   providerCacheEpoch?: string;
@@ -242,7 +242,7 @@ export type VaultFieldCiphertext = {
   source: VaultSource;
   providerConnectionId: string | null;
   providerVaultRef: string | null;
-  /** The vault's value-cache epoch (0786). */
+  /** The vault's value-cache epoch (0789). */
   providerCacheEpoch?: string;
   providerItemRef: string | null;
   providerFieldRef: string | null;
@@ -285,7 +285,7 @@ export type SecretReferenceCandidate = {
   source: VaultSource;
   providerConnectionId: string | null;
   providerVaultRef: string | null;
-  /** The vault's value-cache epoch (0786). */
+  /** The vault's value-cache epoch (0789). */
   providerCacheEpoch?: string;
   itemId: string;
   itemName: string;
@@ -780,7 +780,7 @@ export type ProviderVaultItemMirror = {
  * Replace a connected vault's metadata mirror with one complete inventory
  * (at most `VAULT_LIMITS.itemsPerVault` items; more is refused with
  * `provider_inventory_incomplete` and the old mirror kept). Items missing
- * from `items` are removed, and the vault's cache epoch advances (0786).
+ * from `items` are removed, and the vault's cache epoch advances (0789).
  */
 export async function upsertProviderVaultItems(
   db: Database,
@@ -797,7 +797,7 @@ export async function upsertProviderVaultItems(
 
 /**
  * Record a connected vault's sync state. `operations` and `freshness` are
- * optional (0786): absent keeps the stored value, null clears it.
+ * optional (0789): absent keeps the stored value, null clears it.
  */
 export async function setVaultSyncStatus(
   db: Database,
@@ -823,7 +823,7 @@ export async function setVaultSyncStatus(
 }
 
 /**
- * Link a connected vault (W5, 0786). Every source but `host` needs an active
+ * Link a connected vault (W5, 0789). Every source but `host` needs an active
  * `api_key` connection in the caller's workspace whose provider identity
  * matches (`1password.com` with the 1Password service-account role, or
  * `vault:<source>` with the `external_vault_provider` role and
@@ -865,7 +865,7 @@ export type ProviderVaultSyncTargetRow = {
   providerVaultRef: string;
   providerContentVersion: string | null;
   rateLimitedUntil: string | null;
-  /** The vault's value-cache epoch (0786). */
+  /** The vault's value-cache epoch (0789). */
   providerCacheEpoch?: string;
 };
 

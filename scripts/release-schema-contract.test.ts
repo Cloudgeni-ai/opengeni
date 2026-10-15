@@ -2801,7 +2801,7 @@ describe("release schema contract", () => {
       "0773_session_usage_limits.sql",
       "0774_session_usage_limit_attention_index.sql",
       "0775_session_usage_limit_attention_cursor.sql",
-      "0786_external_vault_sources.sql",
+      "0789_external_vault_sources.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
