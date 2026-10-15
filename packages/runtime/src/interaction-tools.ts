@@ -1028,29 +1028,23 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     execute: async (value, context) => {
-      const current =
-        value.expectedTargetGeneration !== undefined &&
-        value.expectedDocumentGeneration !== undefined &&
-        value.expectedFrameId !== undefined
-          ? null
-          : await input.transport.getBrowserTargetState(
-              input.workspaceId,
-              value.browserSessionId,
-              value.targetId,
-            );
+      // Omitted fences are resolved by the API from the live target in the same
+      // request, so acting on the current document costs one round trip.
       const receipt = await input.transport.actInBrowser(
         input.workspaceId,
         value.browserSessionId,
         {
           operationId: context.operationId,
           targetId: value.targetId,
-          expectedTargetGeneration: value.expectedTargetGeneration ?? current!.targetGeneration,
-          expectedDocumentGeneration:
-            value.expectedDocumentGeneration === undefined
-              ? current!.documentGeneration
-              : value.expectedDocumentGeneration,
-          expectedFrameId:
-            value.expectedFrameId === undefined ? current!.frameId : value.expectedFrameId,
+          ...(value.expectedTargetGeneration === undefined
+            ? {}
+            : { expectedTargetGeneration: value.expectedTargetGeneration }),
+          ...(value.expectedDocumentGeneration === undefined
+            ? {}
+            : { expectedDocumentGeneration: value.expectedDocumentGeneration }),
+          ...(value.expectedFrameId === undefined
+            ? {}
+            : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
           action: value.action,
         },
