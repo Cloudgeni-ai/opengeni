@@ -38,6 +38,7 @@ import {
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { buildOrganizationMcpServer } from "../src/organization-mcp";
 import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { siteRuntimeBudgetLimits } from "../src/site-publishing/runtime";
@@ -3790,6 +3791,45 @@ test("readiness warnings name what outsiders can't do and fixes apply through th
     fix: { kind: "site_data_guest_access", collection: "deals", guestAccess: "read" },
   });
   expect(found.message).toContain("deals");
+  // Describe and apply the actual readiness fix through organization MCP, not a
+  // hand-built HTTP payload. This must expose the route's required body schema.
+  const server = buildOrganizationMcpServer({
+    caller: { kind: "key", authorization: f.owner.headers.authorization!, accessKey: null },
+    origin: "http://localhost",
+    dispatch: async (request) => await f.app.fetch(request),
+  });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "publication-fixes-test", version: "1.0.0" });
+  await client.connect(clientSide);
+  try {
+    const id = "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes";
+    const described = await client.callTool({
+      name: "opengeni_action_describe",
+      arguments: { id },
+    });
+    expect(described.isError).not.toBe(true);
+    const description = JSON.parse((described.content as Array<{ text: string }>)[0]!.text);
+    expect(description.input).toHaveLength(1);
+    expect(description.input[0]).toMatchObject({ name: "SitePublishWarningFix", in: "body" });
+    expect(description.input[0].schema.oneOf).toHaveLength(2);
+    const invoked = await client.callTool({
+      name: "opengeni_action_call",
+      arguments: {
+        id,
+        pathParameters: { workspaceId: f.workspace.id, artifactId: siteId },
+        body: found.fix,
+      },
+    });
+    expect(invoked.isError, JSON.stringify(invoked)).not.toBe(true);
+    const result = JSON.parse((invoked.content as Array<{ text: string }>)[0]!.text);
+    expect(result.status).toBe(200);
+    expect(result.body.warnings.map((warning: { code: string }) => warning.code)).not.toContain(
+      "site_data_guest_read",
+    );
+  } finally {
+    await client.close();
+  }
   // A members-only manager may not apply fixes; the Site's manager may.
   const fixed = await f.publication(f.owner, siteId, "POST", found.fix, "/fixes");
   expect(fixed.status, JSON.stringify(fixed.json)).toBe(200);

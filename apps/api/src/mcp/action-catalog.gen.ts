@@ -5373,7 +5373,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
-    "request": [],
+    "request": [
+      "SitePublishWarningFix"
+    ],
     "response": []
   },
   {
