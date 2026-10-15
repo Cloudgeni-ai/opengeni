@@ -25,6 +25,7 @@ import {
 } from "@opengeni/testing";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import type { OpStreamConnection } from "@opengeni/events";
+import type { AccessGrant } from "@opengeni/contracts";
 import {
   createDb,
   createEnrollment,
@@ -32,6 +33,7 @@ import {
   createSession,
   getEnrollment,
   getLiveEnrollmentConnection,
+  getSession,
   claimEnrollmentConnection,
   readActiveSandbox,
   setEnrollmentOpStreamState,
@@ -52,6 +54,7 @@ import {
   type FleetContext,
   type FleetServices,
 } from "@opengeni/core";
+import { withChannelA } from "../src/sandbox/channel-a";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -95,7 +98,9 @@ function busWithAgent(opts: {
     subjectFor(opts.workspaceId, opts.agentId, CONNECTION_INSTANCE_ID),
     async (payload, subject) => {
       const req = ControlRequest.decode(payload);
-      const res = await stream.controlRpc.request(subject, req, { timeoutMs: 0 });
+      const res = await stream.controlRpc.request(subject, req, {
+        timeoutMs: 0,
+      });
       return ControlResponse.encode(res).finish();
     },
   );
@@ -136,7 +141,11 @@ function opStreamConnectionFor(transport: InMemoryOpStreamTransport): OpStreamCo
             next() {
               const value = values.shift();
               if (value) return Promise.resolve({ done: false as const, value });
-              if (done) return Promise.resolve({ done: true as const, value: undefined });
+              if (done)
+                return Promise.resolve({
+                  done: true as const,
+                  value: undefined,
+                });
               return new Promise<IteratorResult<{ data: Uint8Array }>>((resolve) =>
                 readers.push(resolve),
               );
@@ -288,47 +297,48 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
-  test("a personal Connected Machine remains operational from another authorized workspace", async () => {
-    if (!available) return;
-    const subjectId = `human:${crypto.randomUUID()}`;
-    const [account] = await admin<Array<{ id: string }>>`
+/** One person's online personal (Only me) machine, connected from an origin
+ *  workspace, and a running agent attempt in a chat of theirs in another
+ *  workspace. The chat has no per-chat permission until `allowThisChat`. */
+async function seedPersonalMachineChat(sandboxBackend: "none" | "selfhosted") {
+  const subjectId = `human:${crypto.randomUUID()}`;
+  const [account] = await admin<Array<{ id: string }>>`
       insert into managed_accounts (name) values (${`cross-workspace-${crypto.randomUUID()}`})
       returning id
     `;
-    const workspaces = await Promise.all(
-      ["personal", "origin", "target"].map(async (name) => {
-        const [workspace] = await admin<Array<{ id: string }>>`
+  const workspaces = await Promise.all(
+    ["personal", "origin", "target"].map(async (name) => {
+      const [workspace] = await admin<Array<{ id: string }>>`
           insert into workspaces (account_id, name) values (${account!.id}, ${name})
           returning id
         `;
-        return workspace!;
-      }),
-    );
-    const [personalWorkspace, originWorkspace, targetWorkspace] = workspaces;
-    await admin`
+      return workspace!;
+    }),
+  );
+  const [personalWorkspace, originWorkspace, targetWorkspace] = workspaces;
+  await admin`
       insert into workspace_inference_controls (workspace_id, account_id) values
         (${personalWorkspace!.id}, ${account!.id}),
         (${originWorkspace!.id}, ${account!.id}),
         (${targetWorkspace!.id}, ${account!.id})
     `;
-    await admin`
+  await admin`
       insert into organization_memberships (
         account_id, subject_id, status, personal_workspace_id, authorization_revision
       ) values (${account!.id}, ${subjectId}, 'active', ${personalWorkspace!.id}, 1)
     `;
-    await admin`
+  await admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id) values
         (${account!.id}, ${originWorkspace!.id}, ${subjectId}),
         (${account!.id}, ${targetWorkspace!.id}, ${subjectId})
     `;
-    const machine = await admin.begin(async (tx) => {
-      await tx`select
+  const machine = await admin.begin(async (tx) => {
+    await tx`select
         set_config('opengeni.account_id', ${account!.id}, true),
         set_config('opengeni.workspace_id', ${originWorkspace!.id}, true),
         set_config('opengeni.subject_id', ${subjectId}, true),
         set_config('opengeni.initiating_human_subject_id', ${subjectId}, true)`;
-      const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+    const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
         select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
         from finalize_scoped_enrollment(
           ${account!.id}::uuid, ${originWorkspace!.id}::uuid, 'user',
@@ -336,67 +346,67 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
           'Personal laptop', false
         )
       `;
-      return row!;
-    });
-    const connectionInstanceId = CONNECTION_INSTANCE_ID;
-    const enrollment = await getEnrollment(db, originWorkspace!.id, machine.enrollmentId);
-    expect(enrollment).not.toBeNull();
-    expect(
-      (
-        await claimEnrollmentConnection(db, {
-          workspaceId: originWorkspace!.id,
-          enrollmentId: machine.enrollmentId,
-          credentialGeneration: enrollment!.credentialGeneration,
-          connectionInstanceId,
-          leaseMs: 60_000,
-        })
-      ).claimed,
-    ).toBe(true);
-    expect(
-      (
-        await setEnrollmentOpStreamState(db, {
-          accountId: account!.id,
-          workspaceId: originWorkspace!.id,
-          enrollmentId: machine.enrollmentId,
-          opStream: true,
-          connectionInstanceId,
-        })
-      ).updated,
-    ).toBe(true);
-    await admin`
+    return row!;
+  });
+  const connectionInstanceId = CONNECTION_INSTANCE_ID;
+  const enrollment = await getEnrollment(db, originWorkspace!.id, machine.enrollmentId);
+  expect(enrollment).not.toBeNull();
+  expect(
+    (
+      await claimEnrollmentConnection(db, {
+        workspaceId: originWorkspace!.id,
+        enrollmentId: machine.enrollmentId,
+        credentialGeneration: enrollment!.credentialGeneration,
+        connectionInstanceId,
+        leaseMs: 60_000,
+      })
+    ).claimed,
+  ).toBe(true);
+  expect(
+    (
+      await setEnrollmentOpStreamState(db, {
+        accountId: account!.id,
+        workspaceId: originWorkspace!.id,
+        enrollmentId: machine.enrollmentId,
+        opStream: true,
+        connectionInstanceId,
+      })
+    ).updated,
+  ).toBe(true);
+  await admin`
       update enrollments
       set last_seen_at = now(), workspace_root = '/home/user/project'
       where id = ${machine.enrollmentId}
     `;
-    const session = await createSession(db, {
-      accountId: account!.id,
-      workspaceId: targetWorkspace!.id,
-      initialMessage: "use my personal laptop",
-      resources: [],
-      metadata: {},
-      model: "gpt-test",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      createdBy: { kind: "subject", subjectId },
-      subjectId,
-    });
-    const [machineAuthority] = await admin<Array<{ id: string }>>`
+  const session = await createSession(db, {
+    accountId: account!.id,
+    workspaceId: targetWorkspace!.id,
+    initialMessage: "use my personal laptop",
+    resources: [],
+    metadata: {},
+    model: "gpt-test",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend,
+    createdBy: { kind: "subject", subjectId },
+    subjectId,
+  });
+  const [machineAuthority] = await admin<Array<{ id: string }>>`
       select id from organization_user_resource_authorities
       where account_id = ${account!.id} and resource_kind = 'connected_machine'
         and resource_id = ${machine.enrollmentId}
     `;
-    const [sessionAuthority] = await admin<
-      Array<{
-        authorityEpoch: number;
-        visibility: "user_private" | "workspace_shared";
-      }>
-    >`
+  const [sessionAuthority] = await admin<
+    Array<{
+      authorityEpoch: number;
+      visibility: "user_private" | "workspace_shared";
+    }>
+  >`
       select authority_epoch as "authorityEpoch", visibility
       from sessions where id = ${session.id}
     `;
-    const executionGeneration = 1;
-    const [turn] = await admin<Array<{ id: string }>>`
+  const executionGeneration = 1;
+  const [turn] = await admin<Array<{ id: string }>>`
       insert into session_turns (
         account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
         status, position, prompt, model, reasoning_effort, sandbox_backend,
@@ -405,22 +415,22 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       ) values (
         ${account!.id}, ${targetWorkspace!.id}, ${session.id}, gen_random_uuid(),
         ${`fleet-${crypto.randomUUID()}`}, 'running', 0, 'use personal machine',
-        'gpt-test', 'medium', 'none', ${executionGeneration}, 'subject', ${subjectId},
+        'gpt-test', 'medium', ${sandboxBackend}, ${executionGeneration}, 'subject', ${subjectId},
         ${subjectId}
       ) returning id
     `;
-    const attemptId = crypto.randomUUID();
-    await admin.begin(async (tx) => {
-      await tx.unsafe("set local opengeni.session_inference_claim = '1'");
-      await tx`
+  const attemptId = crypto.randomUUID();
+  await admin.begin(async (tx) => {
+    await tx.unsafe("set local opengeni.session_inference_claim = '1'");
+    await tx`
         update sessions set active_turn_id = ${turn!.id}, status = 'running'
         where id = ${session.id}
       `;
-      await tx`
+    await tx`
         update session_turns set active_attempt_id = ${attemptId}, status = 'running'
         where id = ${turn!.id}
       `;
-      await tx`
+    await tx`
         insert into session_turn_attempts (
           id, account_id, workspace_id, session_id, turn_id, execution_generation,
           state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
@@ -433,34 +443,89 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
           ${sessionAuthority!.visibility}, '{}'::jsonb, '[]'::jsonb
         )
       `;
+  });
+  const ctx: FleetContext = {
+    accountId: account!.id,
+    workspaceId: targetWorkspace!.id,
+    subjectId,
+    sessionId: session.id,
+    sessionBackend: sandboxBackend,
+    sessionGroupId: session.sandboxGroupId,
+    attemptAuthority: {
+      turnId: turn!.id,
+      attemptId,
+      executionGeneration,
+      initiatingHumanSubjectId: subjectId,
+    },
+  };
+  const services: FleetServices = {
+    db,
+    settings,
+    bus: busWithAgent({
+      workspaceId: originWorkspace!.id,
+      agentId: machine.enrollmentId,
+      online: true,
+      hostname: "personal-cross-workspace",
+    }) as never,
+  };
+  let chatGrantId: string | null = null;
+  const asOwner = (tx: postgres.TransactionSql) => tx`select
+          set_config('opengeni.account_id', ${account!.id}, true),
+          set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true),
+          set_config('opengeni.subject_id', ${subjectId}, true)`;
+  const allowThisChat = async (): Promise<void> => {
+    await admin.begin(async (tx) => {
+      await asOwner(tx);
+      const [granted] = await tx<Array<{ grantId: string }>>`
+          select grant_id as "grantId" from issue_self_user_resource_grant(
+            ${account!.id}::uuid, ${machineAuthority!.id}::uuid,
+            ${targetWorkspace!.id}::uuid, 'connected_machine.use', 'session',
+            ${sessionAuthority!.visibility}, ${session.id}::uuid, true
+          )
+        `;
+      chatGrantId = granted!.grantId;
     });
-    const ctx: FleetContext = {
-      accountId: account!.id,
-      workspaceId: targetWorkspace!.id,
+  };
+  const revokeThisChat = async (): Promise<void> => {
+    await admin.begin(async (tx) => {
+      await asOwner(tx);
+      await tx`
+          select grant_id from revoke_self_user_resource_grant(
+            ${account!.id}::uuid, ${targetWorkspace!.id}::uuid, ${chatGrantId}::uuid
+          )
+        `;
+    });
+  };
+  return {
+    accountId: account!.id,
+    targetWorkspaceId: targetWorkspace!.id,
+    subjectId,
+    machine,
+    session,
+    connectionInstanceId,
+    ctx,
+    services,
+    allowThisChat,
+    revokeThisChat,
+  };
+}
+
+describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
+  test("a personal Connected Machine remains operational from another authorized workspace", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      targetWorkspaceId,
       subjectId,
-      sessionId: session.id,
-      sessionBackend: "none",
-      sessionGroupId: session.sandboxGroupId,
-      attemptAuthority: {
-        turnId: turn!.id,
-        attemptId,
-        executionGeneration,
-        initiatingHumanSubjectId: subjectId,
-      },
-    };
-    const services: FleetServices = {
-      db,
-      settings,
-      bus: busWithAgent({
-        workspaceId: originWorkspace!.id,
-        agentId: machine.enrollmentId,
-        online: true,
-        hostname: "personal-cross-workspace",
-      }) as never,
-    };
+      machine,
+      connectionInstanceId,
+      ctx,
+      services,
+      allowThisChat,
+    } = await seedPersonalMachineChat("none");
     // Before the owner allows this chat, the agent's swap is a typed refusal
     // with a plain reason, never a raw database error, and the route is unchanged.
-    const before = await readActiveSandbox(db, targetWorkspace!.id, session.id);
+    const before = await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId);
     const refused = await swapActiveSandbox(services, ctx, machine.sandboxId);
     expect(refused).toMatchObject({
       swapped: false,
@@ -476,19 +541,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     });
     expect(refusedRun.ok).toBe(false);
     expect(refusedRun.reason).toContain("its owner has not allowed this chat");
-    await admin.begin(async (tx) => {
-      await tx`select
-        set_config('opengeni.account_id', ${account!.id}, true),
-        set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true),
-        set_config('opengeni.subject_id', ${subjectId}, true)`;
-      await tx`
-        select grant_id from issue_self_user_resource_grant(
-          ${account!.id}::uuid, ${machineAuthority!.id}::uuid,
-          ${targetWorkspace!.id}::uuid, 'connected_machine.use', 'session',
-          ${sessionAuthority!.visibility}, ${session.id}::uuid, true
-        )
-      `;
-    });
+    await allowThisChat();
     const withoutAttempt: FleetContext = {
       accountId: ctx.accountId,
       workspaceId: ctx.workspaceId,
@@ -514,8 +567,8 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
         await getLiveEnrollmentConnection(
           db,
           {
-            accountId: account!.id,
-            workspaceId: targetWorkspace!.id,
+            accountId,
+            workspaceId: targetWorkspaceId,
             subjectId,
           },
           machine.enrollmentId,
@@ -538,6 +591,62 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       ok: true,
       stdout: "personal-cross-workspace\n",
     });
+  }, 60_000);
+
+  test("an agent's API requests reach the personal machine its chat may use, as its owner", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      targetWorkspaceId,
+      machine,
+      session,
+      ctx,
+      services,
+      allowThisChat,
+      revokeThisChat,
+    } = await seedPersonalMachineChat("selfhosted");
+    await allowThisChat();
+    expect((await swapActiveSandbox(services, ctx, machine.sandboxId)).swapped).toBe(true);
+    const agentGrant: AccessGrant = {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      subjectId: `agent:${crypto.randomUUID()}`,
+      permissions: ["sessions:read", "sessions:write"],
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: session.id,
+        turnId: ctx.attemptAuthority!.turnId,
+        attemptId: ctx.attemptAuthority!.attemptId,
+        executionGeneration: ctx.attemptAuthority!.executionGeneration,
+      },
+    };
+    const agentRequest = async () =>
+      await withChannelA(
+        { db, settings, bus: services.bus as never },
+        {
+          accountId,
+          workspaceId: targetWorkspaceId,
+          session: (await getSession(db, targetWorkspaceId, session.id))!,
+          subjectId: agentGrant.subjectId,
+          grant: agentGrant,
+          operation: "terminal.exec",
+        },
+        async ({ service }) =>
+          await service.terminalExec({
+            command: "hostname",
+            cwd: "",
+            timeoutMs: 5_000,
+            emitStream: false,
+          }),
+      );
+
+    // The agent acts for the person who started its turn, never as itself, so
+    // the owner's personal machine its chat may use is reachable.
+    expect(JSON.stringify(await agentRequest())).toContain("personal-cross-workspace");
+
+    // Without the chat's permission the same request is refused.
+    await revokeThisChat();
+    await expect(agentRequest()).rejects.toThrow();
   }, 60_000);
 
   test("a backend:none session lists and attaches an owned Connected Machine without inventing a home box", async () => {
@@ -574,7 +683,10 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       settings: testSettings({ ...services.settings, sandboxBackend: "modal" }),
     };
     const attached = await swapActiveSandbox(managedServices, ctx, sandbox.id);
-    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandbox.id });
+    expect(attached).toMatchObject({
+      swapped: true,
+      activeSandboxId: sandbox.id,
+    });
 
     const listed = await listFleet(managedServices, ctx);
     const group = listed.sandboxes.find((entry) => entry.isSessionGroup);
