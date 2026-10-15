@@ -127,14 +127,27 @@ pub(crate) struct Images {
     /// The host's guest kernel, linked into each jail.
     pub kernel: PathBuf,
     pub boot_args: String,
+    /// The user id of the sandbox with ordinal 0; each sandbox's VMM runs
+    /// as `first_uid + ordinal`, with the same group id.
+    pub first_uid: u32,
 }
 
-/// The VM description for one sandbox.
-pub(crate) fn vm_spec(id: Id, config: &SandboxConfig, paths: &Paths, images: &Images) -> VmSpec {
+/// The VM description for one sandbox, whose ordinal on this host is
+/// `ordinal`.
+pub(crate) fn vm_spec(
+    id: Id,
+    ordinal: u32,
+    config: &SandboxConfig,
+    paths: &Paths,
+    images: &Images,
+) -> VmSpec {
+    let uid = images.first_uid.saturating_add(ordinal);
     VmSpec {
         name: id.to_string(),
         dir: paths.jail.clone(),
         logs: paths.dir.clone(),
+        uid,
+        gid: uid,
         vcpus: config.vcpus,
         memory_mib: config.memory_mib,
         kernel: paths.kernel.clone(),

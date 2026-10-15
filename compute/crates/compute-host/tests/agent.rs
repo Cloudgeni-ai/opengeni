@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use compute_core::{HostPolicy, SandboxId, Step};
 use compute_engine::{
-    CancellationToken, Completion, Engine, EngineError, ErrorKind, SnapshotFiles, VmSpec,
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, SnapshotFiles, VmSpec,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -294,6 +294,13 @@ impl Engine for Fake {
         ready(Ok(()))
     }
 
+    fn adopt(
+        &self,
+        _: &VmSpec,
+    ) -> impl Future<Output = Result<Option<(FakeVm, Found)>, EngineError>> + Send {
+        ready(Ok(None))
+    }
+
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
         self.world.crash(&spec.name);
         // Give the crash watcher a moment to release the name.
@@ -361,6 +368,7 @@ impl Lab {
             sample_every: Duration::from_millis(50),
             guest_ports: Vec::new(),
             restore_notice_port: None,
+            first_uid: 1 << 30,
         };
         configure(&mut config);
         let engine = Fake {
