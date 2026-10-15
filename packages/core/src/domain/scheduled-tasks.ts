@@ -219,14 +219,12 @@ function workspaceCustomModelCommitGuard(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       reference,
-      ...(input.claudeAuthoritySnapshot
+      claudeAuthority: input.claudeAuthoritySnapshot
         ? {
-            claudeAuthority: {
-              authoritySnapshot: input.claudeAuthoritySnapshot,
-              ...(input.scheduledTaskId ? { scheduledTaskId: input.scheduledTaskId } : {}),
-            },
+            authoritySnapshot: input.claudeAuthoritySnapshot,
+            ...(input.scheduledTaskId ? { scheduledTaskId: input.scheduledTaskId } : {}),
           }
-        : {}),
+        : null,
     });
     if (!active) {
       throw modelUnavailableHttpException(input.modelId);
