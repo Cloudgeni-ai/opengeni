@@ -84421,6 +84421,9 @@ type LockedSessionUpdateResult = {
     resources?: ResourceRef[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
+    /** Trusted host normalization; never accepted directly from a public update body. */
+    firstPartyMcpPermissions?: Permission[];
+    sandboxBackend?: "none";
     /** Agent configuration (migration 0559); written with the tool-policy CAS. */
     agentConfig?: ResolvedAgentConfig | null;
     /** Session instructions (the `agent.instructions` alias). */
@@ -84599,6 +84602,12 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
             ...(update.firstPartyMcpTools !== undefined
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
+              : {}),
+            ...(update.firstPartyMcpPermissions !== undefined
+              ? { firstPartyMcpPermissions: update.firstPartyMcpPermissions }
+              : {}),
+            ...(update.sandboxBackend !== undefined
+              ? { sandboxBackend: update.sandboxBackend }
               : {}),
             ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
             ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),

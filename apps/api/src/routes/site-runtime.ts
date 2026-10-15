@@ -66,6 +66,10 @@ import {
   sitePublishedDataViewer,
 } from "../site-publishing/agent-data-tools";
 import {
+  normalizeSiteAgentSession,
+  SITE_AGENT_DEFAULTS_VERSION,
+} from "../site-publishing/agent-session";
+import {
   isSubscriptionBilledModel,
   resolveSiteOutsideModel,
   siteCreditModelIds,
@@ -1451,6 +1455,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             siteId: host.site.id,
             versionId: host.versionId,
             viewerKind: viewer.kind,
+            agentDefaultsVersion: SITE_AGENT_DEFAULTS_VERSION,
           },
         },
         ...(input.idempotencyKey ? { idempotencyKey: `site-runtime:${requestedSessionId}` } : {}),
@@ -1618,6 +1623,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             { reason: "subscription_model" },
           );
       }
+      await normalizeSiteAgentSession(
+        deps,
+        host,
+        viewer,
+        conversation.sessionId,
+        conversation.toolIds,
+      );
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
       // Clear the stamped session cap before dropping the durable conversation
       // marker. Failure refuses admission and preserves the marker for retry.

@@ -11,6 +11,7 @@ import {
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
 import {
   appendSessionEvents,
+  claimSessionWorkForAttempt,
   createDb,
   createOrganizationApiKey,
   createSession,
@@ -2930,6 +2931,181 @@ test("Site agent sessions run without a sandbox, whatever the deployment default
     expect([...row!.first_party_mcp_tools].sort()).toEqual(["site_data_query", "site_data_write"]);
   }
 });
+
+test("legacy Site continuations restore only viewer-bound data tools and no sandbox, atomically", async () => {
+  const f = await fixture({ sandboxBackend: "docker" });
+  const site = await f.live("Legacy board", { access: "public", agent: { enabled: true } });
+  const other = await f.live("Other board", { access: "public" });
+  for (const id of [site.id, other.id]) {
+    expect(
+      (
+        await f.api(f.owner, "PUT", `${f.sites}/${id}/data/collections/board`, {
+          accessMode: "shared_read",
+          guestAccess: "read",
+        })
+      ).status,
+    ).toBe(201);
+    expect(
+      (
+        await f.api(f.owner, "POST", `${f.sites}/${id}/data/write`, {
+          operations: [
+            {
+              op: "insert",
+              collection: "board",
+              data: { title: id === site.id ? "Real board row" : "Other Site row" },
+            },
+          ],
+        })
+      ).status,
+    ).toBe(200);
+  }
+  const member = await f.signIn(f.member, site.host);
+  for (const who of [{ session: member }, { visitor: visitorId() }]) {
+    const created = await f.gateway(site.host, "POST", "/sessions", {
+      ...who,
+      body: { initialMessage: "Hi" },
+    });
+    expect(created.status).toBe(202);
+    const id = String(created.json.id);
+    await finishConversation(id);
+    await shared.admin`update session_turns set sandbox_backend='docker' where session_id=${id}`;
+    // Actual previous-release create shape: empty tools, disabled artifacts,
+    // inherited backend, and only the Site service's session permissions.
+    await shared.admin`update sessions set first_party_mcp_tools = '[]'::jsonb,
+      first_party_mcp_permissions = '["sessions:read","sessions:control"]'::jsonb,
+      agent_config = jsonb_set(agent_config, '{capabilities,artifacts}', 'false'::jsonb),
+      tools = '[{"kind":"mcp","id":"docs","optional":true},{"kind":"mcp","id":"opengeni"}]'::jsonb,
+      tool_policy = '{"mode":"workspace_default","inheritedFromSessionId":null}'::jsonb,
+      sandbox_backend = 'docker', instructions = 'Old owner instructions',
+      metadata = metadata #- '{opengeniPublishedSite,agentDefaultsVersion}'
+      where id = ${id}`;
+    const snapshot = async () =>
+      (
+        await shared.admin`select first_party_mcp_tools,first_party_mcp_permissions,tools,tool_policy,
+      agent_config,sandbox_backend,instructions,metadata,tool_policy_version from sessions where id=${id}`
+      )[0]!;
+    const before = await snapshot();
+    const fault = `site_defaults_${id.replaceAll("-", "")}`;
+    await shared.admin.unsafe(`create function ${fault}() returns trigger language plpgsql as $f$
+      begin if new.id='${id}'::uuid and new.metadata #>> '{opengeniPublishedSite,agentDefaultsVersion}' = '1'
+      then raise exception 'injected defaults failure'; end if; return new; end $f$`);
+    await shared.admin.unsafe(
+      `create trigger ${fault} before update on sessions for each row execute function ${fault}()`,
+    );
+    const send = () =>
+      f.gateway(site.host, "POST", `/sessions/${id}/events`, {
+        ...who,
+        body: { type: "user.message", payload: { text: "Read the board" } },
+      });
+    try {
+      expect((await send()).status).toBeGreaterThanOrEqual(500);
+      expect(await snapshot()).toEqual(before);
+      const [count] =
+        await shared.admin`select count(*)::int n from session_turns where session_id=${id}`;
+      expect(count!.n).toBe(1);
+    } finally {
+      await shared.admin.unsafe(`drop trigger ${fault} on sessions`);
+      await shared.admin.unsafe(`drop function ${fault}()`);
+    }
+    const sent = await send();
+    expect(sent.status, JSON.stringify(sent.json)).toBeLessThan(300);
+    const after = await snapshot();
+    expect(after.first_party_mcp_tools).toEqual(["site_data_query", "site_data_write"]);
+    expect(after.first_party_mcp_permissions).toEqual(["artifacts:read", "artifacts:publish"]);
+    expect(after.tools).toEqual([{ kind: "mcp", id: "opengeni" }]);
+    expect(after.tool_policy).toEqual({
+      mode: "explicit",
+      firstPartyMode: "explicit",
+      inheritedFromSessionId: null,
+    });
+    expect(after.agent_config.capabilities).toMatchObject({
+      artifacts: true,
+      humanInput: false,
+      skills: false,
+      browser: false,
+      workspaceFiles: false,
+      workspaceAdmin: false,
+    });
+    expect(after.sandbox_backend).toBe("none");
+    expect(after.instructions).toContain(site.id);
+    expect(Number(after.tool_policy_version)).toBe(Number(before.tool_policy_version) + 1);
+    const [turn] =
+      await shared.admin`select * from session_turns where session_id=${id} and status='queued' order by position desc limit 1`;
+    expect(turn!.sandbox_backend).toBe("none");
+    // Exercise the actual first-party MCP boundary using the normalized stored
+    // tools/permissions. It must read real rows as this viewer, never another Site.
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db.db, f.workspace.id, {
+      sessionId: id,
+      workflowId: turn!.temporal_workflow_id,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("Site continuation was not claimable");
+    expect(claimed.turn.sandboxBackend).toBe("none");
+    const [historical] =
+      await shared.admin`select sandbox_backend from session_turns where session_id=${id} and status='completed' order by position limit 1`;
+    expect(historical!.sandbox_backend).toBe("docker");
+    const grant: AccessGrant = {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: "worker:first-party-mcp",
+      permissions: after.first_party_mcp_permissions,
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: id,
+        turnId: turn!.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: after.first_party_mcp_tools,
+      },
+    };
+    const server = buildOpenGeniMcpServer(f.deps as unknown as ApiRouteDeps, grant);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "legacy-site-data", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = await client.listTools();
+      expect(
+        tools.tools.map((tool) => tool.name).filter((name) => name.startsWith("site_")),
+      ).toEqual(["site_data_query", "site_data_write"]);
+      const own = await client.callTool({
+        name: "site_data_query",
+        arguments: { siteId: site.id, collection: "board" },
+      });
+      expect(own.isError, JSON.stringify(own)).not.toBe(true);
+      expect(JSON.stringify(own)).toContain("Real board row");
+      const foreign = await client.callTool({
+        name: "site_data_query",
+        arguments: { siteId: other.id, collection: "board" },
+      });
+      expect(foreign.isError).toBe(true);
+      // Live audience revocation still wins even when cancellation never ran.
+      if ("visitor" in who) {
+        await shared.admin`update site_publications set access='members' where site_id=${site.id}`;
+        const denied = await client.callTool({
+          name: "site_data_query",
+          arguments: { siteId: site.id, collection: "board" },
+        });
+        expect(denied.isError).toBe(true);
+        await shared.admin`update site_publications set access='public' where site_id=${site.id}`;
+      }
+    } finally {
+      await client.close();
+    }
+    await shared.admin`update session_turn_attempts set state='closed',outcome='completed',closed_at=now() where id=${attemptId}`;
+    await finishConversation(id);
+    expect((await send()).status).toBeLessThan(300);
+    expect((await snapshot()).tool_policy_version).toBe(after.tool_policy_version);
+    const [events] =
+      await shared.admin`select count(*)::int n from session_events where session_id=${id} and type='session.agent.updated'`;
+    expect(events!.n).toBe(1);
+  }
+}, 90_000);
 
 test("a later turn reserves only the budget remaining below the estimate", async () => {
   const f = await fixture();
