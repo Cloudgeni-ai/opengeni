@@ -253,6 +253,15 @@ export class DesktopShell {
       event.preventDefault();
       void this.confirmQuit();
     });
+    // Nobody is there to answer when the system logs out, restarts or stops
+    // the app: quit without asking, so the app never holds that up.
+    const quitUnasked = (): void => {
+      this.quitConfirmed = true;
+      app.quit();
+    };
+    powerMonitor.on("shutdown", quitUnasked);
+    process.once("SIGTERM", quitUnasked);
+    process.once("SIGINT", quitUnasked);
     // However the app ends, its agent doesn't outlive it.
     app.on("will-quit", () => this.computer.shutdownNow());
     app.on("window-all-closed", () => {
