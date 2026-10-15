@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   app,
@@ -986,8 +987,11 @@ function setOpenAtLogin(config: DesktopAppConfig, open: boolean): void {
 function macLoginAgent(appId: string): { type: "agentService"; serviceName: string } | null {
   const major = Number.parseInt(process.getSystemVersion().split(".")[0] ?? "", 10);
   if (!(major >= 13)) return null;
-  const agent = { type: "agentService", serviceName: macLoginAgentName(appId) } as const;
-  return app.getLoginItemSettings(agent).status === "not-found" ? null : agent;
+  const serviceName = macLoginAgentName(appId);
+  // macOS reports an agent it hasn't registered yet as not found, so look in the bundle.
+  const contents = dirname(dirname(app.getPath("exe")));
+  if (!existsSync(join(contents, "Library", "LaunchAgents", serviceName))) return null;
+  return { type: "agentService", serviceName };
 }
 
 /**
