@@ -11,13 +11,17 @@ backend needs to mint and renew access for each run. You can use both.
 
 ## Supported connections
 
-| Provider | What you connect | Important difference |
-| --- | --- | --- |
-| 1Password | A service-account token | Existing connections and references keep working. |
-| Proton Pass | A scoped personal access token | Creates and Trash are supported; updates are not. The deployment operator installs the official CLI. |
-| Keeper Secrets Manager | A one-time setup token | Shared folders become vaults. No Archive or permanent-delete action is exposed. |
-| Bitwarden Password Manager | Your customer-controlled bridge | The master password and unlocked CLI session stay with the customer. This is not Bitwarden Secrets Manager. |
-| Your product | A signed external-vault endpoint | One connection can provide multiple vaults with their own capabilities. |
+- **1Password:** connect a service-account token. Existing connections and
+  references keep working.
+- **Proton Pass:** connect a scoped personal access token. Creates and Trash
+  are supported; updates are not. The deployment operator installs the official CLI.
+- **Keeper Secrets Manager:** connect a one-time setup token. Shared folders
+  become vaults. No Archive or permanent-delete action is exposed.
+- **Bitwarden Password Manager:** connect your customer-controlled bridge.
+  The master password and unlocked CLI session stay with the customer. This is
+  not Bitwarden Secrets Manager.
+- **Your product:** connect a signed external-vault endpoint. One connection
+  can provide multiple vaults with their own capabilities.
 
 The UI only offers supported operations. A read-write connection does not
 automatically support every item type, TOTP update, file upload or history
