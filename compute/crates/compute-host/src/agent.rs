@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, Notice, OpId, Outcome,
-    Priority, SandboxId, State, Step,
+    Priority, SandboxId, SleepPolicy, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec, vsock};
 use tokio::net::UnixStream;
@@ -51,6 +51,43 @@ pub struct HostConfig {
     /// guest can set its clock and reconnect (see [`crate::restore_notice`]).
     /// `None` tells the guest nothing.
     pub restore_notice_port: Option<u32>,
+    /// When a running sandbox counts as busy with work of its own, which
+    /// keeps it awake like any other activity. `None` ignores such work.
+    pub busy: Option<BusyRule>,
+    /// Whether this host can compress a paused VM's memory. Hosts that back
+    /// guest memory with huge pages cannot, so they ignore every sandbox's
+    /// `compress` setting.
+    pub can_compress: bool,
+}
+
+/// When a running sandbox counts as busy: its VM used at least
+/// `cpu_percent` of one processor, averaged over `window`.
+///
+/// This is how the host sees work nobody told it about, such as a build or
+/// test run an agent left in the background. A quiet guest uses well under
+/// one percent; short periodic jobs average out over the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BusyRule {
+    /// Percent of one processor.
+    pub cpu_percent: u32,
+    /// Averaging window. Readings come every [`HostConfig::sample_every`],
+    /// so the effective window is at least that long.
+    pub window: Duration,
+}
+
+impl BusyRule {
+    /// A quarter of one processor over five seconds.
+    pub const DEFAULT: Self = Self {
+        cpu_percent: 25,
+        window: Duration::from_secs(5),
+    };
+
+    /// Whether using `used` processor time over `elapsed` counts as busy.
+    #[must_use]
+    pub fn is_busy(&self, used: Duration, elapsed: Duration) -> bool {
+        !elapsed.is_zero()
+            && used.as_micros() * 100 >= elapsed.as_micros() * u128::from(self.cpu_percent)
+    }
 }
 
 /// A request the host could not carry out.
@@ -104,6 +141,20 @@ enum Command {
         level: Level,
         reply: Reply<()>,
     },
+    /// A named hold from the API, with an optional expiry.
+    Hold {
+        id: Id,
+        hold: HoldId,
+        ttl: Option<Duration>,
+        priority: Priority,
+        reply: Reply<()>,
+    },
+    /// Ends a named hold from the API.
+    Unhold {
+        id: Id,
+        hold: HoldId,
+        reply: Reply<()>,
+    },
     Acquire {
         id: Id,
         hold: HoldId,
@@ -151,6 +202,14 @@ struct Running {
     started: Instant,
 }
 
+/// The start of one VM's current processor-use window.
+#[derive(Clone, Copy, Debug)]
+struct CpuWindow {
+    incarnation: u64,
+    started: Instant,
+    cpu: Duration,
+}
+
 #[derive(Debug)]
 struct Slot<V> {
     paths: Arc<Paths>,
@@ -167,6 +226,8 @@ struct Slot<V> {
     destroy: bool,
     removers: Vec<Reply<()>>,
     waiters: Vec<Reply<PathBuf>>,
+    /// Processor use measured so far, while the VM runs.
+    cpu: Option<CpuWindow>,
 }
 
 /// Talks to a running host agent. Cheap to clone.
@@ -277,6 +338,44 @@ impl Handle {
         self.ask(|reply| Command::Sleep { id, level, reply })
             .await?
     }
+
+    /// Keeps a sandbox awake for a named reason, such as an agent turn in
+    /// progress, waking it if it sleeps. Holding again under the same name
+    /// refreshes the hold; with a `ttl` it lapses on its own unless
+    /// refreshed, so a caller that dies cannot keep a sandbox awake forever.
+    pub async fn hold(
+        &self,
+        id: Id,
+        name: &str,
+        ttl: Option<Duration>,
+        priority: Priority,
+    ) -> Result<(), HostError> {
+        let hold = named_hold(name);
+        self.ask(|reply| Command::Hold {
+            id,
+            hold,
+            ttl,
+            priority,
+            reply,
+        })
+        .await?
+    }
+
+    /// Ends a named hold. Ending one that does not exist does nothing.
+    pub async fn release(&self, id: Id, name: &str) -> Result<(), HostError> {
+        let hold = named_hold(name);
+        self.ask(|reply| Command::Unhold { id, hold, reply })
+            .await?
+    }
+}
+
+/// The hold id for a hold named through the API. Leases count up from one,
+/// so named holds take the upper half of the id space.
+fn named_hold(name: &str) -> HoldId {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    HoldId(hasher.finish() | 1 << 63)
 }
 
 impl Lease {
@@ -343,12 +442,14 @@ pub struct HostAgent<E: Engine, S: Store> {
     pressure: bool,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
+    busy: Option<BusyRule>,
+    can_compress: bool,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
 }
 
-/// Reports a sandbox's guest traffic to the agent as a touch.
+/// Wakes a sandbox when data arrives for it on a guest port.
 #[derive(Clone, Debug)]
 struct Toucher {
     id: Id,
@@ -356,11 +457,11 @@ struct Toucher {
 }
 
 impl Activity for Toucher {
-    fn report(&self, priority: Priority) {
+    fn wake(&self) {
         if let Some(commands) = self.commands.upgrade() {
             let _ = commands.send(Command::Touch {
                 id: self.id,
-                priority,
+                priority: Priority::Interactive,
             });
         }
     }
@@ -410,6 +511,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sample_every: config.sample_every,
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
+            busy: config.busy,
+            can_compress: config.can_compress,
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover().await?;
@@ -458,7 +561,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let config: SandboxConfig =
             serde_json::from_slice(&record).map_err(|error| HostError::Io(error.to_string()))?;
-        let policy = config.validate().map_err(HostError::Invalid)?;
+        let policy = self.sleep_policy(&config).map_err(HostError::Invalid)?;
         let spec = vm_spec(id, &config, &paths, &self.images);
         self.engine
             .clean_up(&spec)
@@ -511,8 +614,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 destroy: false,
                 removers: Vec::new(),
                 waiters: Vec::new(),
+                cpu: None,
             },
         );
+    }
+
+    /// Validates a sandbox's settings and fits its sleep policy to this
+    /// host.
+    fn sleep_policy(&self, config: &SandboxConfig) -> Result<SleepPolicy, String> {
+        config.validate()?;
+        let mut rules = config.sleep.rules();
+        rules.compress_under_pressure &= self.can_compress;
+        SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
     }
 
     async fn run(mut self) {
@@ -575,18 +688,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Command::Sleep { id, level, reply } => {
-                let result = if !self.slots.contains_key(&id.0) {
-                    Err(HostError::NotFound(id))
-                } else if level >= Level::Archived && !self.store.is_configured() {
-                    Err(HostError::Invalid(
-                        "this host has no store, so sandboxes cannot be archived".into(),
-                    ))
-                } else {
-                    self.input(Input::Sleep {
+                let _ = reply.send(self.request_sleep(id, level));
+            }
+            Command::Hold {
+                id,
+                hold,
+                ttl,
+                priority,
+                reply,
+            } => {
+                let _ = reply.send(self.hold(id, hold, ttl, priority));
+            }
+            Command::Unhold { id, hold, reply } => {
+                let result = if self.slots.contains_key(&id.0) {
+                    self.input(Input::Release {
                         sandbox: id.0,
-                        level,
+                        hold,
                     });
                     Ok(())
+                } else {
+                    Err(HostError::NotFound(id))
                 };
                 let _ = reply.send(result);
             }
@@ -623,6 +744,47 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    fn request_sleep(&mut self, id: Id, level: Level) -> Result<(), HostError> {
+        if !self.slots.contains_key(&id.0) {
+            return Err(HostError::NotFound(id));
+        }
+        if level >= Level::Archived && !self.store.is_configured() {
+            return Err(HostError::Invalid(
+                "this host has no store, so sandboxes cannot be archived".into(),
+            ));
+        }
+        if level == Level::Compressed && !self.can_compress {
+            return Err(HostError::Invalid(
+                "this host cannot compress memory; ask for saved instead".into(),
+            ));
+        }
+        self.input(Input::Sleep {
+            sandbox: id.0,
+            level,
+        });
+        Ok(())
+    }
+
+    fn hold(
+        &mut self,
+        id: Id,
+        hold: HoldId,
+        ttl: Option<Duration>,
+        priority: Priority,
+    ) -> Result<(), HostError> {
+        if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
+            return Err(HostError::NotFound(id));
+        }
+        let until = ttl.map(|ttl| self.now() + ttl);
+        self.input(Input::Hold {
+            sandbox: id.0,
+            hold,
+            until,
+            priority,
+        });
+        Ok(())
+    }
+
     fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
@@ -631,7 +793,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Exists(id)));
             return;
         }
-        let policy = match config.validate() {
+        let policy = match self.sleep_policy(&config) {
             Ok(policy) => policy,
             Err(error) => {
                 let _ = reply.send(Err(HostError::Invalid(error)));
@@ -683,7 +845,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     let _ = reply.send(Err(HostError::Io(error.to_string())));
                     return;
                 }
-                let Ok(policy) = config.validate() else {
+                let Ok(policy) = self.sleep_policy(&config) else {
                     return;
                 };
                 let spec = vm_spec(id, &config, &paths, &self.images);
@@ -972,12 +1134,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn sample(&mut self) {
         self.available_memory = read_available_memory();
-        if !self.pressure {
-            return;
+        if let Some(rule) = self.busy {
+            self.sample_busy(rule);
         }
-        if let Some(available) = self.available_memory {
-            self.input(Input::Memory { available });
-        }
+        // Resident sizes always, so the status can report reclaimable
+        // memory; they go in before the host total so relief is planned
+        // from fresh numbers.
         let readings: Vec<(SandboxId, u64)> = self
             .slots
             .iter()
@@ -988,6 +1150,53 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .collect();
         for (sandbox, bytes) in readings {
             self.input(Input::Resident { sandbox, bytes });
+        }
+        if self.pressure
+            && let Some(available) = self.available_memory
+        {
+            self.input(Input::Memory { available });
+        }
+    }
+
+    /// Reports running sandboxes whose VMs used enough processor time over
+    /// the last window. A window starts afresh whenever the sandbox is not
+    /// simply running, so time spent waking or pausing never counts.
+    fn sample_busy(&mut self, rule: BusyRule) {
+        let now = Instant::now();
+        let mut busy = Vec::new();
+        for (id, slot) in &mut self.slots {
+            let running = self
+                .core
+                .sandbox(*id)
+                .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
+            let Some(live) = slot.vm.as_ref().filter(|_| running) else {
+                slot.cpu = None;
+                continue;
+            };
+            let Ok(cpu) = self.engine.cpu_time(&live.vm) else {
+                slot.cpu = None;
+                continue;
+            };
+            let fresh = CpuWindow {
+                incarnation: live.incarnation,
+                started: now,
+                cpu,
+            };
+            match slot.cpu {
+                Some(window) if window.incarnation == live.incarnation => {
+                    let elapsed = now.duration_since(window.started);
+                    if elapsed >= rule.window {
+                        if rule.is_busy(cpu.saturating_sub(window.cpu), elapsed) {
+                            busy.push(*id);
+                        }
+                        slot.cpu = Some(fresh);
+                    }
+                }
+                _ => slot.cpu = Some(fresh),
+            }
+        }
+        for sandbox in busy {
+            self.input(Input::Busy { sandbox });
         }
     }
 
@@ -1025,6 +1234,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandboxes,
             steps,
             available_memory: self.available_memory,
+            reclaimable_memory: self.core.reclaimable_memory(),
         }
     }
 }

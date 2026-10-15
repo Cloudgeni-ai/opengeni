@@ -287,6 +287,31 @@ pub enum Request {
         /// The least depth to reach.
         level: LevelName,
     },
+    /// Keep a sandbox awake for a named reason, such as an agent turn in
+    /// progress, waking it if it sleeps. Replies at once. Holding again
+    /// under the same name refreshes the hold, and with `ttl_ms` it lapses
+    /// on its own unless refreshed in time, so a caller that disappears
+    /// cannot keep a sandbox awake forever.
+    Hold {
+        /// Its id.
+        id: Id,
+        /// The reason, unique within the sandbox.
+        hold: String,
+        /// Milliseconds until the hold lapses; omitted, it lasts until
+        /// released.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_ms: Option<u64>,
+        /// How urgently to wake for it.
+        #[serde(default)]
+        priority: PriorityName,
+    },
+    /// End a named hold. Ending one that does not exist does nothing.
+    Release {
+        /// Its id.
+        id: Id,
+        /// The reason that ended.
+        hold: String,
+    },
     /// Report every sandbox and host counters.
     Status,
 }
@@ -367,6 +392,10 @@ pub struct HostStatus {
     pub steps: Vec<(String, StepStats)>,
     /// Host memory available, as last sampled.
     pub available_memory: Option<u64>,
+    /// Host memory that ending idle, saved VM processes would free at once
+    /// without losing anything. Placement can count it as available.
+    #[serde(default)]
+    pub reclaimable_memory: u64,
 }
 
 /// A step's name on the wire.

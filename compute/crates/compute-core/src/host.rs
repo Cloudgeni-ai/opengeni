@@ -55,6 +55,15 @@ pub enum Input {
         /// The reason that ended.
         hold: HoldId,
     },
+    /// The sandbox did work on its own while running, such as a build using
+    /// its processors. Counts as activity only while it runs with no step in
+    /// progress: it never wakes the sandbox, never cancels an
+    /// [`Input::Sleep`] request, and a step already putting the sandbox to
+    /// sleep goes ahead.
+    Busy {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
     /// A started step finished.
     Finished {
         /// The sandbox.
@@ -352,6 +361,15 @@ impl Host {
             Input::Release { sandbox, hold } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox)
                     && slot.holds.remove(&hold).is_some()
+                {
+                    slot.touch(now);
+                    self.mark(sandbox);
+                }
+            }
+            Input::Busy { sandbox } => {
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox)
+                    && slot.state.level == Level::Running
+                    && slot.in_flight.is_none()
                 {
                     slot.touch(now);
                     self.mark(sandbox);

@@ -12,7 +12,9 @@ use compute_host::client::Client;
 use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
-use compute_host::{Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve};
+use compute_host::{
+    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve,
+};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -60,6 +62,17 @@ enum Command {
         #[arg(value_parser = parse_level)]
         level: LevelName,
     },
+    /// Keep a sandbox awake for a named reason, waking it if it sleeps.
+    Hold {
+        id: Id,
+        /// The reason, such as `turn`.
+        name: String,
+        /// Let the hold lapse after this long unless held again.
+        #[arg(long, value_parser = parse_duration)]
+        ttl: Option<Duration>,
+    },
+    /// End a named hold.
+    Release { id: Id, name: String },
     /// Show every sandbox and the host's step counters.
     Status,
     /// Run a shell script inside a sandbox, waking it first.
@@ -117,6 +130,17 @@ struct ServeArgs {
     /// the guest can set its clock and reconnect.
     #[arg(long)]
     restore_notice_port: Option<u32>,
+    /// A running sandbox whose VM uses at least this percent of one
+    /// processor counts as busy and stays awake; 0 ignores processor use.
+    #[arg(long, default_value_t = BusyRule::DEFAULT.cpu_percent)]
+    busy_cpu_percent: u32,
+    /// ...averaged over this long.
+    #[arg(long, default_value = "5s", value_parser = parse_duration)]
+    busy_window: Duration,
+    /// This host cannot compress paused VMs' memory, for example because
+    /// guest memory uses huge pages.
+    #[arg(long)]
+    no_compress: bool,
 }
 
 #[derive(Args)]
@@ -303,6 +327,19 @@ async fn main() -> anyhow::Result<()> {
         Command::Sleep { id, level } => {
             expect_done(client.call(&Request::Sleep { id, level }).await?)
         }
+        Command::Hold { id, name, ttl } => expect_done(
+            client
+                .call(&Request::Hold {
+                    id,
+                    hold: name,
+                    ttl_ms: ttl.map(millis),
+                    priority: PriorityName::Interactive,
+                })
+                .await?,
+        ),
+        Command::Release { id, name } => {
+            expect_done(client.call(&Request::Release { id, hold: name }).await?)
+        }
         Command::Status => {
             let reply = client.call(&Request::Status).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
@@ -352,6 +389,11 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         sample_every: Duration::from_secs(1),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
+        busy: (args.busy_cpu_percent > 0).then_some(BusyRule {
+            cpu_percent: args.busy_cpu_percent,
+            window: args.busy_window,
+        }),
+        can_compress: !args.no_compress,
     };
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;

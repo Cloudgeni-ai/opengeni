@@ -631,3 +631,40 @@ fn a_sleep_request_waits_for_holds_and_a_touch_cancels_it() {
     let (step, _) = only_start(&rig.finish(1, save, Outcome::Cancelled));
     assert_eq!(step, Step::Resume);
 }
+
+#[test]
+fn work_inside_a_running_sandbox_keeps_it_awake_but_never_wakes_it() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, State::RUNNING, recommended());
+    let busy = Input::Busy {
+        sandbox: SandboxId(1),
+    };
+    // A build keeps running past the pause threshold.
+    rig.at(secs(8));
+    assert_eq!(rig.send(busy), []);
+    assert_eq!(rig.host.next_deadline(), Some(At::from_duration(secs(18))));
+    let (step, pause) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Pause);
+
+    // Work reported after the pause started changes nothing: the step goes
+    // ahead, and once paused the sandbox does no work of its own.
+    assert_eq!(rig.send(busy), []);
+    rig.finish(1, pause, Outcome::Done);
+    assert_eq!(rig.state(1).level, Level::Paused);
+    assert_eq!(rig.send(busy), []);
+    assert!(!rig.host.sandbox(SandboxId(1)).unwrap().wants_awake);
+
+    // It does not cancel a sleep request either.
+    let (_, resume) = only_start(&rig.touch(1));
+    rig.finish(1, resume, Outcome::Done);
+    let decided = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    });
+    assert_eq!(only_start(&decided).0, Step::Pause, "{decided:?}");
+    assert_eq!(rig.send(busy), []);
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Saved
+    );
+}

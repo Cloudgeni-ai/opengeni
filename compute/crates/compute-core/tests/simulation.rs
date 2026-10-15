@@ -450,6 +450,7 @@ impl World {
                 let level = self.rng.pick(&Level::ALL);
                 self.send(Input::Sleep { sandbox: id, level });
             }
+            98..100 => self.send(Input::Busy { sandbox: id }),
             _ => {}
         }
     }
