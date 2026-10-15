@@ -775,7 +775,12 @@ mod tests {
             Some(Command::Permissions(args)) => assert_eq!(args.request, None),
             other => panic!("expected permissions, got {other:?}"),
         }
-        let cli = Cli::parse_from(["opengeni-agent", "permissions", "--request", "input-monitoring"]);
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "permissions",
+            "--request",
+            "input-monitoring",
+        ]);
         match cli.command {
             Some(Command::Permissions(args)) => {
                 assert_eq!(args.request, Some(PermissionRequest::InputMonitoring));
