@@ -2,7 +2,7 @@
 //! state, so tests can check exactly what survives each kind of sleep,
 //! crash and restart, and that the agent never drives a VM illegally.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::ready;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -16,13 +16,14 @@ use compute_engine::{
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
+    ErrorCode, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SandboxStatus, SleepRule,
 };
 use compute_host::{GuestPort, HostAgent, HostConfig, NoStore, serve};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 /// Bytes of fake guest memory, as a memory image is as long as the guest's
@@ -61,14 +62,26 @@ struct World {
     boots: AtomicUsize,
     restores: AtomicUsize,
     resumes: AtomicUsize,
+    adopted: AtomicUsize,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
     /// Snapshots taken: full, then diff.
     snapshots: [AtomicUsize; 2],
     next_vm: AtomicU64,
-    /// Kill switches for every live VM, by name.
-    killers: Mutex<Vec<(String, watch::Sender<bool>)>>,
+    /// The latest VM process of every sandbox, by name, so a restarted
+    /// agent can take it back and a test can crash it.
+    vms: Mutex<HashMap<String, Process>>,
+}
+
+/// What a fake VM process is, independent of any agent's handle to it.
+#[derive(Clone, Debug)]
+struct Process {
+    vsock: PathBuf,
+    memory: Arc<Mutex<String>>,
+    paused: Arc<Mutex<bool>>,
+    exit: watch::Sender<bool>,
+    guest: AbortHandle,
 }
 
 impl World {
@@ -78,11 +91,8 @@ impl World {
 
     /// Simulates a VMM crash.
     fn crash(&self, name: &str) {
-        let killers = self.killers.lock().unwrap();
-        for (vm, kill) in killers.iter() {
-            if vm == name {
-                let _ = kill.send(true);
-            }
+        if let Some(process) = self.vms.lock().unwrap().get(name) {
+            let _ = process.exit.send(true);
         }
     }
 }
@@ -96,11 +106,15 @@ struct Fake {
 #[derive(Debug)]
 struct FakeVm {
     name: String,
-    vsock: PathBuf,
-    memory: Arc<Mutex<String>>,
-    paused: Mutex<bool>,
-    exit: watch::Sender<bool>,
-    guest: JoinHandle<()>,
+    process: Process,
+}
+
+impl std::ops::Deref for FakeVm {
+    type Target = Process;
+
+    fn deref(&self) -> &Process {
+        &self.process
+    }
 }
 
 impl Fake {
@@ -131,20 +145,20 @@ impl Fake {
             let _ = std::fs::remove_file(&socket);
             world.live.lock().unwrap().remove(&dead);
         });
-        self.world
-            .killers
-            .lock()
-            .unwrap()
-            .push((name.clone(), exit.clone()));
-        self.world.next_vm.fetch_add(1, Ordering::Relaxed);
-        FakeVm {
-            name,
+        let process = Process {
             vsock,
             memory,
-            paused: Mutex::new(false),
+            paused: Arc::default(),
             exit,
-            guest,
-        }
+            guest: guest.abort_handle(),
+        };
+        self.world
+            .vms
+            .lock()
+            .unwrap()
+            .insert(name.clone(), process.clone());
+        self.world.next_vm.fetch_add(1, Ordering::Relaxed);
+        FakeVm { name, process }
     }
 
     fn alive(vm: &FakeVm, op: &'static str) -> Result<(), EngineError> {
@@ -325,9 +339,30 @@ impl Engine for Fake {
 
     fn adopt(
         &self,
-        _: &VmSpec,
+        spec: &VmSpec,
     ) -> impl Future<Output = Result<Option<(FakeVm, Found)>, EngineError>> + Send {
-        ready(Ok(None))
+        let process = self
+            .world
+            .vms
+            .lock()
+            .unwrap()
+            .get(&spec.name)
+            .filter(|process| !*process.exit.borrow())
+            .cloned();
+        let found = process.map(|process| {
+            self.world.adopted.fetch_add(1, Ordering::Relaxed);
+            let found = if *process.paused.lock().unwrap() {
+                Found::Paused
+            } else {
+                Found::Running
+            };
+            let vm = FakeVm {
+                name: spec.name.clone(),
+                process,
+            };
+            (vm, found)
+        });
+        ready(Ok(found))
     }
 
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
@@ -513,6 +548,26 @@ impl Lab {
     fn sandbox_dir(&self, id: Id) -> PathBuf {
         self.root.join("state/vm/firecracker").join(id.to_string())
     }
+
+    /// The sandbox's durable record, as the agent last wrote it.
+    fn record(&self, id: Id) -> serde_json::Value {
+        let bytes = std::fs::read(self.sandbox_dir(id).join("sandbox.json")).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Whether the record vouches for a saved memory image.
+    fn image(&self, id: Id) -> bool {
+        self.record(id)["image"].as_bool().unwrap()
+    }
+
+    async fn sandbox(&self, id: Id) -> SandboxStatus {
+        self.status()
+            .await
+            .sandboxes
+            .into_iter()
+            .find(|sandbox| sandbox.id == id)
+            .unwrap()
+    }
 }
 
 fn id(n: u128) -> Id {
@@ -536,7 +591,7 @@ async fn sleeping_through_save_keeps_memory_and_disk() {
     assert_eq!(first, ["ok", "ok", "hello"]);
 
     lab.wait_level(sandbox, LevelName::Saved).await;
-    assert!(lab.sandbox_dir(sandbox).join("saved").exists());
+    assert!(lab.image(sandbox));
     assert!(
         lab.world.live.lock().unwrap().is_empty(),
         "a saved sandbox has no VM"
@@ -545,7 +600,7 @@ async fn sleeping_through_save_keeps_memory_and_disk() {
     let again = lab.run(sandbox, &["get", "disk"]).await;
     assert_eq!(again, ["hello", "on-disk"]);
     assert!(
-        !lab.sandbox_dir(sandbox).join("saved").exists(),
+        !lab.image(sandbox),
         "a restored guest makes the old image stale"
     );
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
@@ -660,7 +715,7 @@ async fn a_wake_during_save_resumes_the_paused_vm() {
         "no restore needed"
     );
     assert!(
-        !lab.sandbox_dir(sandbox).join("saved").exists(),
+        !lab.image(sandbox),
         "a cancelled save must not leave a valid-looking image"
     );
     lab.assert_clean();
@@ -711,7 +766,10 @@ async fn remove_waits_for_a_running_save_and_deletes_everything() {
     .await;
     let reply = lab
         .client
-        .call(&Request::Remove { id: sandbox })
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
         .await
         .unwrap();
     assert_eq!(reply, Reply::Done);
@@ -725,29 +783,154 @@ async fn remove_waits_for_a_running_save_and_deletes_everything() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_restarted_agent_recovers_every_sandbox() {
+async fn a_restarted_agent_takes_back_running_vms_and_recovers_the_rest() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
-    let (saved, running) = (id(6), id(7));
+    let (saved, running, paused) = (id(6), id(7), id(12));
     lab.create(saved, SAVE_QUICKLY).await;
     lab.create(running, &[]).await;
+    lab.create(paused, &[(LevelName::Paused, 30)]).await;
     lab.run(saved, &["set kept", "write saved-disk"]).await;
-    lab.run(running, &["set gone", "write running-disk"]).await;
+    lab.run(running, &["set alive", "write running-disk"]).await;
+    lab.run(paused, &["set asleep"]).await;
     lab.wait_level(saved, LevelName::Saved).await;
+    lab.wait_level(paused, LevelName::Paused).await;
+    let before = lab.status().await;
     let (root, world) = lab.stop().await;
 
-    // The running sandbox's VM is still alive; the new agent must end it.
+    // VMs outlive the agent.
     assert!(world.live.lock().unwrap().contains(&vm_name(running)));
+    assert!(world.live.lock().unwrap().contains(&vm_name(paused)));
     let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
-    let status = lab.status().await;
-    assert_eq!(status.sandboxes.len(), 2);
+    let after = lab.status().await;
+    assert_eq!(after.sandboxes.len(), 3);
+    for (old, new) in before.sandboxes.iter().zip(&after.sandboxes) {
+        assert_eq!(
+            (old.id, old.level, old.generation),
+            (new.id, new.level, new.generation),
+            "a restart changed a sandbox"
+        );
+    }
+    assert_eq!(lab.world.adopted.load(Ordering::Relaxed), 2);
     assert_eq!(
         lab.run(saved, &["get", "disk"]).await,
         ["kept", "saved-disk"]
     );
     assert_eq!(
         lab.run(running, &["get", "disk"]).await,
-        ["", "running-disk"]
+        ["alive", "running-disk"],
+        "the running VM was taken back as it was"
     );
+    assert_eq!(lab.run(paused, &["get"]).await, ["asleep"]);
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        3,
+        "nothing rebooted"
+    );
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_for_a_replaced_execution_are_refused() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(13);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    assert_eq!(lab.sandbox(sandbox).await.generation, 0, "not yet run");
+    lab.run(sandbox, &["set first"]).await;
+    let first = lab.sandbox(sandbox).await.generation;
+    assert_eq!(first, 1);
+    let wake = |generation| Request::Wake {
+        id: sandbox,
+        generation: Some(generation),
+        priority: PriorityName::Interactive,
+    };
+    assert!(matches!(
+        lab.client.call(&wake(first)).await.unwrap(),
+        Reply::Woken { .. }
+    ));
+
+    // A save and restore keep the guest's programs but replace the
+    // execution.
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["first"]);
+    let second = lab.sandbox(sandbox).await.generation;
+    assert_eq!(second, first + 1);
+    let reply = lab.client.call(&wake(first)).await.unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Stale,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: Some(first),
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Stale,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(lab.status().await.sandboxes.len(), 1, "a stale remove ran");
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: Some(second),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_cut_short_finishes_on_the_next_start() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (doomed, kept) = (id(14), id(15));
+    lab.create(doomed, &[]).await;
+    lab.create(kept, &[]).await;
+    lab.run(doomed, &["set x"]).await;
+    let dir = lab.sandbox_dir(doomed);
+    let (root, world) = lab.stop().await;
+
+    // The agent died right after recording that removal began.
+    let path = dir.join("sandbox.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["removing"] = true.into();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    // And an unfinished creation left a directory without a record.
+    let unfinished = root.join("state/vm/firecracker").join(id(16).to_string());
+    std::fs::create_dir_all(unfinished.join("root")).unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    lab.wait_until("the removal to finish", |_| !dir.exists())
+        .await;
+    let status = lab.status().await;
+    assert_eq!(status.sandboxes.len(), 1);
+    assert_eq!(status.sandboxes[0].id, kept);
+    assert!(!unfinished.exists());
+    assert!(
+        !lab.world.live.lock().unwrap().contains(&vm_name(doomed)),
+        "the removed sandbox's VM still runs"
+    );
+    // Its id is free again.
+    lab.create(doomed, &[]).await;
+    assert_eq!(lab.run(doomed, &["get"]).await, [""]);
     lab.assert_clean();
 }
 
@@ -759,11 +942,21 @@ async fn bad_requests_are_refused() {
         .client
         .call(&Request::Wake {
             id: missing,
+            generation: None,
             priority: PriorityName::Interactive,
         })
         .await
         .unwrap();
-    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
     let archived = &[
         (LevelName::Paused, 10),
         (LevelName::Saved, 20),
@@ -789,7 +982,7 @@ async fn bad_requests_are_refused() {
         .await
         .unwrap();
     assert!(
-        matches!(&reply, Reply::Error { message } if message.contains("store")),
+        matches!(&reply, Reply::Error { message, .. } if message.contains("store")),
         "{reply:?}"
     );
     lab.create(missing, &[]).await;
@@ -848,7 +1041,10 @@ async fn data_for_a_sleeping_sandbox_wakes_it() {
 
     // Removing the sandbox closes its listeners and their sockets.
     lab.client
-        .call(&Request::Remove { id: sandbox })
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
         .await
         .unwrap();
     assert!(!socket.exists());

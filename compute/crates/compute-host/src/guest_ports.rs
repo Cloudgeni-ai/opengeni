@@ -142,6 +142,7 @@ pub fn socket_path(vsock: &Path, port: u32) -> PathBuf {
 /// inside a Tokio runtime.
 pub(crate) fn listen<A: Activity>(
     vsock: &Path,
+    owner: (u32, u32),
     ports: &Arc<[GuestPort]>,
     activity: &A,
 ) -> io::Result<Listeners> {
@@ -163,6 +164,7 @@ pub(crate) fn listen<A: Activity>(
             Err(error) => return Err(error),
         }
         let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+        give_to(&socket, owner)?;
         listeners.sockets.push(socket);
         listener.set_nonblocking(true)?;
         let listener = UnixListener::from_std(listener)?;
@@ -174,6 +176,16 @@ pub(crate) fn listen<A: Activity>(
         )));
     }
     Ok(listeners)
+}
+
+/// Hands a listener's socket to the sandbox's own user, the only one its
+/// jailed VMM runs as, so the VMM may connect to it. An agent that is not
+/// root runs VMMs as itself and has nothing to hand over.
+fn give_to(socket: &Path, (uid, gid): (u32, u32)) -> io::Result<()> {
+    match std::os::unix::fs::chown(socket, Some(uid), Some(gid)) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(()),
+        result => result,
+    }
 }
 
 async fn accept<A: Activity>(
@@ -338,7 +350,7 @@ mod tests {
         let vsock = dir.join("run").join("vsock.sock");
         let ports: Arc<[GuestPort]> = vec![format!("4222={address},wake").parse().unwrap()].into();
         let recorder = Recorder::default();
-        let listeners = listen(&vsock, &ports, &recorder).unwrap();
+        let listeners = listen(&vsock, (0, 0), &ports, &recorder).unwrap();
 
         let mut guest = UnixStream::connect(socket_path(&vsock, 4222))
             .await
@@ -370,7 +382,7 @@ mod tests {
         let vsock = dir.join("vsock.sock");
         let ports: Arc<[GuestPort]> = vec![format!("7={address}").parse().unwrap()].into();
         let recorder = Recorder::default();
-        let _listeners = listen(&vsock, &ports, &recorder).unwrap();
+        let _listeners = listen(&vsock, (0, 0), &ports, &recorder).unwrap();
         let mut guest = UnixStream::connect(socket_path(&vsock, 7)).await.unwrap();
         let mut reply = String::new();
         guest.read_to_string(&mut reply).await.unwrap();

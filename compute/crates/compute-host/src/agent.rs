@@ -6,6 +6,11 @@
 //! save never delays a wake. Everything that changes a sandbox's state goes
 //! through this one task, in order, which is what makes it safe without
 //! locks.
+//!
+//! VM processes are not the agent's children and outlive it. A new agent
+//! reads every sandbox's [record](crate::state) and takes back the VMs
+//! still running, so restarting, upgrading or killing the agent costs the
+//! guests nothing.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
@@ -18,19 +23,22 @@ use compute_core::{
     Action, At, Failure, HoldId, Host, HostPolicy, Input, Level, Notice, OpId, Outcome, Priority,
     SandboxId, Step,
 };
-use compute_engine::{CancellationToken, Engine, VmSpec, vsock};
+use compute_engine::{CancellationToken, Engine, Found, VmSpec, vsock};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
-use crate::layout::{
-    Images, Paths, check_root, copy_sparse, link_kernel, sandboxes_dir, vm_spec, write_atomic,
-};
+use crate::layout::{Images, Paths, check_root, copy_sparse, link_kernel, vm_spec};
 use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
+use crate::state::{Change, Disk, Fence, Record, Records, StateError, Stray, check_generation};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
+
+/// How long a starting agent waits for the previous one to let go of the
+/// state root.
+const HANDOVER: Duration = Duration::from_secs(10);
 
 /// How a host is set up.
 #[derive(Clone, Debug)]
@@ -80,12 +88,42 @@ pub enum HostError {
     /// The request is malformed.
     #[error("invalid request: {0}")]
     Invalid(String),
+    /// The request names an execution of the sandbox that has since been
+    /// replaced by a boot or restore.
+    #[error("sandbox {id} is at generation {found}, not {expected}")]
+    Stale {
+        /// The sandbox.
+        id: Id,
+        /// The generation the request names.
+        expected: u64,
+        /// The sandbox's generation now.
+        found: u64,
+    },
     /// Host storage failed.
     #[error("host I/O failed: {0}")]
     Io(String),
     /// The host agent has shut down.
     #[error("the host agent stopped")]
     Stopped,
+}
+
+impl From<StateError> for HostError {
+    fn from(error: StateError) -> Self {
+        match error {
+            StateError::Generation {
+                id,
+                expected,
+                found,
+            } => Self::Stale {
+                id,
+                expected,
+                found,
+            },
+            StateError::NotFound(id) => Self::NotFound(id),
+            StateError::Exists(id) => Self::Exists(id),
+            other => Self::Io(other.to_string()),
+        }
+    }
 }
 
 type Reply<T> = oneshot::Sender<Result<T, HostError>>;
@@ -99,14 +137,17 @@ enum Command {
     },
     Remove {
         id: Id,
+        generation: Option<u64>,
         reply: Reply<()>,
     },
     Touch {
         id: Id,
+        generation: Option<u64>,
         priority: Priority,
     },
     Acquire {
         id: Id,
+        generation: Option<u64>,
         hold: HoldId,
         priority: Priority,
         reply: Reply<PathBuf>,
@@ -124,8 +165,8 @@ enum Command {
 enum Event<V> {
     Prepared {
         id: Id,
-        config: SandboxConfig,
-        result: io::Result<()>,
+        ordinal: u32,
+        result: Result<Record, HostError>,
         reply: Reply<()>,
     },
     StepDone {
@@ -140,6 +181,7 @@ enum Event<V> {
     },
     Destroyed {
         id: Id,
+        ordinal: u32,
         result: Result<(), HostError>,
     },
 }
@@ -154,8 +196,6 @@ struct Running {
 
 #[derive(Debug)]
 struct Slot<V> {
-    /// The sandbox's number on this host, unique among its sandboxes.
-    ordinal: u32,
     paths: Arc<Paths>,
     spec: Arc<VmSpec>,
     /// The VM, when one exists and no step holds it.
@@ -227,21 +267,44 @@ impl Handle {
     }
 
     /// Deletes a sandbox and everything it stores, waiting until it is gone.
-    pub async fn remove(&self, id: Id) -> Result<(), HostError> {
-        self.ask(|reply| Command::Remove { id, reply }).await?
+    /// With a `generation`, only while the sandbox is still at it.
+    pub async fn remove(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        self.ask(|reply| Command::Remove {
+            id,
+            generation,
+            reply,
+        })
+        .await?
     }
 
     /// Starts waking a sandbox without waiting, for example when a turn
-    /// starts and a command will probably follow.
-    pub fn touch(&self, id: Id, priority: Priority) -> Result<(), HostError> {
+    /// starts and a command will probably follow. With a `generation`,
+    /// only while the sandbox is still at it.
+    pub fn touch(
+        &self,
+        id: Id,
+        generation: Option<u64>,
+        priority: Priority,
+    ) -> Result<(), HostError> {
         self.commands
-            .send(Command::Touch { id, priority })
+            .send(Command::Touch {
+                id,
+                generation,
+                priority,
+            })
             .map_err(|_| HostError::Stopped)
     }
 
     /// Wakes a sandbox and keeps it awake until the lease is dropped.
-    /// Dropping the returned future early releases the sandbox too.
-    pub async fn acquire(&self, id: Id, priority: Priority) -> Result<Lease, HostError> {
+    /// Dropping the returned future early releases the sandbox too. With a
+    /// `generation`, only while the sandbox is still at it, so a caller
+    /// that relies on programs it started can tell they are gone.
+    pub async fn acquire(
+        &self,
+        id: Id,
+        generation: Option<u64>,
+        priority: Priority,
+    ) -> Result<Lease, HostError> {
         let hold = HoldId(self.holds.fetch_add(1, Ordering::Relaxed));
         let started = Instant::now();
         let mut guard = ReleaseOnDrop {
@@ -253,6 +316,7 @@ impl Handle {
         let vsock = self
             .ask(|reply| Command::Acquire {
                 id,
+                generation,
                 hold,
                 priority,
                 reply,
@@ -319,6 +383,7 @@ impl Drop for Lease {
 pub struct HostAgent<E: Engine, S: Store> {
     engine: Arc<E>,
     store: Arc<S>,
+    records: Arc<Records>,
     root: PathBuf,
     base_image: PathBuf,
     images: Images,
@@ -358,6 +423,7 @@ impl Activity for Toucher {
         if let Some(commands) = self.commands.upgrade() {
             let _ = commands.send(Command::Touch {
                 id: self.id,
+                generation: None,
                 priority,
             });
         }
@@ -365,12 +431,13 @@ impl Activity for Toucher {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
-    /// Recovers every sandbox found under the root, then runs the agent
-    /// until every [`Handle`] is dropped.
+    /// Takes over the state root, recovers every sandbox recorded under it,
+    /// then runs the agent until every [`Handle`] is dropped.
     ///
-    /// VM processes left by an earlier run are ended; sandboxes come back
-    /// at the level their files show, so a saved sandbox restores with its
-    /// programs intact and one that only lived in memory boots from disk.
+    /// VMs an earlier run left running are taken back as they are, running
+    /// or paused, with their programs intact. Every other sandbox comes back
+    /// at the level its record shows, and removals that were under way
+    /// finish.
     pub async fn start(
         config: HostConfig,
         engine: E,
@@ -379,9 +446,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
         check_root(&config.root).map_err(HostError::Invalid)?;
-        tokio::fs::create_dir_all(sandboxes_dir(&config.root))
-            .await
-            .map_err(|error| HostError::Io(error.to_string()))?;
+        let (records, strays) = Records::open(config.root.clone(), HANDOVER).await?;
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
         #[cfg(target_os = "linux")]
@@ -393,6 +458,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             store: Arc::new(store),
             #[cfg(target_os = "linux")]
             fetcher,
+            records: Arc::new(records),
             images: Images {
                 kernel: config.kernel,
                 boot_args: config.boot_args,
@@ -419,7 +485,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             restore_notice_port: config.restore_notice_port,
             commands_tx: commands_tx.downgrade(),
         };
-        agent.recover().await?;
+        agent.recover(strays).await;
         let handle = Handle {
             commands: commands_tx,
             holds: Arc::new(AtomicU64::new(1)),
@@ -427,76 +493,140 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok((handle, tokio::spawn(agent.run())))
     }
 
-    async fn recover(&mut self) -> Result<(), HostError> {
-        let dir = sandboxes_dir(&self.root);
-        let mut entries = tokio::fs::read_dir(&dir)
-            .await
-            .map_err(|error| HostError::Io(error.to_string()))?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|error| HostError::Io(error.to_string()))?
-        {
-            let Some(id) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<Id>().ok())
-            else {
-                continue;
-            };
-            if let Err(error) = self.recover_one(id).await {
-                tracing::error!(%id, %error, "could not recover sandbox; leaving it on disk");
+    async fn recover(&mut self, strays: Vec<Stray>) {
+        for stray in strays {
+            let dir = Paths::new(&self.root, stray.id).dir;
+            match stray.problem {
+                // Creation never finished or removal nearly had: nothing was
+                // promised, and no VM runs without a record.
+                None => {
+                    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+                        tracing::warn!(id = %stray.id, %error, "could not tidy an unrecorded sandbox");
+                    }
+                }
+                Some(problem) => {
+                    tracing::error!(id = %stray.id, %problem, "unreadable record; leaving the sandbox on disk");
+                }
             }
         }
-        tracing::info!(sandboxes = self.slots.len(), "recovered");
-        Ok(())
+        let mut adopted = 0_usize;
+        for record in self.records.all() {
+            let id = record.id;
+            if !self.ordinals.insert(record.ordinal) {
+                tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
+                continue;
+            }
+            if record.removing {
+                self.remove_recorded(&record, None, Vec::new());
+                continue;
+            }
+            match self.recover_one(record).await {
+                Ok(true) => adopted += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::error!(%id, %error, "could not recover sandbox; leaving it on disk");
+                }
+            }
+        }
+        tracing::info!(sandboxes = self.slots.len(), adopted, "recovered");
     }
 
-    async fn recover_one(&mut self, id: Id) -> Result<(), HostError> {
+    /// Brings one recorded sandbox back under management. Returns whether
+    /// a VM was still running it.
+    async fn recover_one(&mut self, record: Record) -> Result<bool, HostError> {
+        let id = record.id;
+        let policy = record.config.validate().map_err(HostError::Invalid)?;
         let paths = Paths::new(&self.root, id);
-        let record = match tokio::fs::read(&paths.record).await {
-            Ok(record) => record,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                // Creation never finished; nothing was promised yet.
-                let _ = tokio::fs::remove_dir_all(&paths.dir).await;
-                return Ok(());
+        let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
+        let found = match record.disk {
+            Disk::Local => self.engine.adopt(&spec).await,
+            Disk::Remote => self.engine.clean_up(&spec).await.map(|()| None),
+        }
+        .map_err(|error| HostError::Io(error.to_string()))?;
+        let found = match found {
+            Some((vm, _)) if crate::step::paged(&paths) => {
+                // The previous agent's pager served this VM's memory and
+                // went with it: the guest would stall on its next page
+                // fault. Its record still says whether a saved image
+                // stands in for it.
+                tracing::warn!(%id, "the VM's memory pager is gone; stopping the VM");
+                self.engine
+                    .stop(vm)
+                    .await
+                    .map_err(|error| HostError::Io(error.to_string()))?;
+                None
             }
-            Err(error) => return Err(HostError::Io(error.to_string())),
+            found => found,
         };
-        let config: SandboxConfig =
-            serde_json::from_slice(&record).map_err(|error| HostError::Io(error.to_string()))?;
-        let policy = config.validate().map_err(HostError::Invalid)?;
-        // A kernel upgrade on the host reaches the sandbox on its next boot.
-        link_kernel(&self.images.kernel, &paths)
-            .map_err(|error| HostError::Io(error.to_string()))?;
-        let ordinal = self.take_ordinal();
-        let spec = vm_spec(id, ordinal, &config, &paths, &self.images);
-        self.engine.clean_up(&spec).await.map_err(|error| {
-            self.ordinals.remove(&ordinal);
-            HostError::Io(error.to_string())
-        })?;
-        let image = paths.saved.exists() && crate::step::recover_images(&paths);
-        let (level, memory_saved) = if paths.disk.exists() {
-            let level = if paths.archived.exists() {
-                Level::Archived
-            } else {
-                Level::Saved
+        let (level, memory_saved, vm) = if let Some((vm, found)) = found {
+            // The VM may have run since its image was taken.
+            if record.image || record.archived {
+                let stale = Change::new().image(false).archived(false);
+                self.records.commit(id, record.fence(), stale).await?;
+            }
+            let level = match found {
+                Found::Running => Level::Running,
+                Found::Paused => Level::Paused,
             };
-            (level, image)
-        } else if paths.archived.exists() {
-            (Level::Remote, paths.saved.exists())
+            (level, false, Some(vm))
         } else {
-            self.ordinals.remove(&ordinal);
-            return Err(HostError::Io("disk missing and no archived copy".into()));
+            // A kernel upgrade on the host reaches the sandbox on its next
+            // boot.
+            if record.disk == Disk::Local {
+                link_kernel(&self.images.kernel, &paths)
+                    .map_err(|error| HostError::Io(error.to_string()))?;
+            }
+            let (level, image) = self.sleeping_level(&record, &paths).await?;
+            (level, image, None)
         };
-        self.insert(id, ordinal, paths, spec);
+        let adopted = vm.is_some();
+        self.insert(id, paths, spec);
+        if let Some(vm) = vm {
+            // What its memory was based on is unknown, so its next save
+            // holds every page.
+            let live = self.own(id, vm, LiveMemory::adopted());
+            if let Some(slot) = self.slots.get_mut(&id.0) {
+                slot.incarnation = Some(live.incarnation);
+                slot.vm = Some(live);
+            }
+        }
         self.input(Input::Add {
             sandbox: id.0,
             level,
             memory_saved,
             policy,
         });
-        Ok(())
+        Ok(adopted)
+    }
+
+    /// Where a sandbox without a VM stands, from its record, checked
+    /// against the files the record relies on.
+    async fn sleeping_level(
+        &self,
+        record: &Record,
+        paths: &Paths,
+    ) -> Result<(Level, bool), HostError> {
+        match record.disk {
+            Disk::Remote => Ok((Level::Remote, record.image)),
+            Disk::Local => {
+                if !paths.disk.exists() {
+                    return Err(HostError::Io("the recorded local disk is missing".into()));
+                }
+                let mut image = record.image;
+                if image && !crate::step::recover_images(paths) {
+                    tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
+                    let lost = Change::new().image(false);
+                    self.records.commit(record.id, record.fence(), lost).await?;
+                    image = false;
+                }
+                let level = if record.archived {
+                    Level::Archived
+                } else {
+                    Level::Saved
+                };
+                Ok((level, image))
+            }
+        }
     }
 
     /// The lowest ordinal no sandbox holds.
@@ -512,22 +642,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         free
     }
 
-    fn insert(&mut self, id: Id, ordinal: u32, paths: Paths, spec: VmSpec) {
+    fn insert(&mut self, id: Id, paths: Paths, spec: VmSpec) {
         let toucher = Toucher {
             id,
             commands: self.commands_tx.clone(),
         };
-        let ports = match guest_ports::listen(&spec.vsock_path(), &self.guest_ports, &toucher) {
-            Ok(listeners) => Some(listeners),
-            Err(error) => {
-                tracing::error!(%id, %error, "could not listen for guest connections");
-                None
-            }
-        };
+        let owner = (spec.uid, spec.gid);
+        let ports =
+            match guest_ports::listen(&spec.vsock_path(), owner, &self.guest_ports, &toucher) {
+                Ok(listeners) => Some(listeners),
+                Err(error) => {
+                    tracing::error!(%id, %error, "could not listen for guest connections");
+                    None
+                }
+            };
         self.slots.insert(
             id.0,
             Slot {
-                ordinal,
                 paths: Arc::new(paths),
                 spec: Arc::new(spec),
                 vm: None,
@@ -581,7 +712,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     fn on_command(&mut self, command: Command) {
         match command {
             Command::Create { id, config, reply } => self.create(id, config, reply),
-            Command::Remove { id, reply } => {
+            Command::Remove {
+                id,
+                generation,
+                reply,
+            } => {
+                if let Err(error) = self.check(id, generation) {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
                 if let Some(slot) = self.slots.get_mut(&id.0) {
                     slot.removers.push(reply);
                     self.input(Input::Remove { sandbox: id.0 });
@@ -593,8 +732,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     let _ = reply.send(Err(HostError::NotFound(id)));
                 }
             }
-            Command::Touch { id, priority } => {
-                if self.slots.contains_key(&id.0) {
+            Command::Touch {
+                id,
+                generation,
+                priority,
+            } => {
+                if self.slots.contains_key(&id.0) && self.check(id, generation).is_ok() {
                     self.input(Input::Touch {
                         sandbox: id.0,
                         priority,
@@ -603,10 +746,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             Command::Acquire {
                 id,
+                generation,
                 hold,
                 priority,
                 reply,
             } => {
+                if let Err(error) = self.check(id, generation) {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
                 let Some(slot) = self.slots.get_mut(&id.0).filter(|slot| !slot.destroy) else {
                     let _ = reply.send(Err(HostError::NotFound(id)));
                     return;
@@ -631,6 +779,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Command::Status { reply } => {
                 let _ = reply.send(self.status());
             }
+        }
+    }
+
+    /// Refuses a request that names an execution the sandbox no longer
+    /// runs.
+    fn check(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        match self.records.get(id) {
+            Some(record) => Ok(check_generation(&record, generation)?),
+            None => Ok(()),
         }
     }
 
@@ -663,25 +820,36 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         self.preparing.insert(id.0);
+        let ordinal = self.take_ordinal();
+        let record = Record::new(id, ordinal, config);
         let paths = Paths::new(&self.root, id);
+        let dir = paths.dir.clone();
         let base = self.base_image.clone();
         let kernel = self.images.kernel.clone();
-        let record = serde_json::to_vec(&config).unwrap_or_default();
+        let records = Arc::clone(&self.records);
         let events = self.events_tx.clone();
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
+            let prepared = tokio::task::spawn_blocking(move || {
                 std::fs::create_dir_all(&paths.jail)?;
                 link_kernel(&kernel, &paths)?;
-                copy_sparse(&base, &paths.disk)?;
-                // The record goes last: a directory without one is an
-                // unfinished creation and is cleaned up on recovery.
-                write_atomic(&paths.record, &record)
+                copy_sparse(&base, &paths.disk)
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
+            // The record goes last: a directory without one is an
+            // unfinished creation and is cleaned up on recovery.
+            let result = match prepared {
+                Ok(()) => records.insert(record).await.map_err(HostError::from),
+                Err(error) => Err(HostError::Io(error.to_string())),
+            };
+            if result.is_err() {
+                // The id stays reserved until this is done, so it cannot
+                // remove a newer sandbox's files.
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
             let _ = events.send(Event::Prepared {
                 id,
-                config,
+                ordinal,
                 result,
                 reply,
             });
@@ -692,23 +860,25 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         match event {
             Event::Prepared {
                 id,
-                config,
+                ordinal,
                 result,
                 reply,
             } => {
                 self.preparing.remove(&id.0);
-                let paths = Paths::new(&self.root, id);
-                if let Err(error) = result {
-                    let _ = std::fs::remove_dir_all(&paths.dir);
-                    let _ = reply.send(Err(HostError::Io(error.to_string())));
-                    return;
-                }
-                let Ok(policy) = config.validate() else {
+                let record = match result {
+                    Ok(record) => record,
+                    Err(error) => {
+                        self.ordinals.remove(&ordinal);
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+                let Ok(policy) = record.config.validate() else {
                     return;
                 };
-                let ordinal = self.take_ordinal();
-                let spec = vm_spec(id, ordinal, &config, &paths, &self.images);
-                self.insert(id, ordinal, paths, spec);
+                let paths = Paths::new(&self.root, id);
+                let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
+                self.insert(id, paths, spec);
                 // A new sandbox is a disk without a memory image: its first
                 // wake boots it, under the same admission limits as any wake.
                 self.input(Input::Add {
@@ -726,7 +896,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 after,
             } => self.step_done(id, op, outcome, after),
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
-            Event::Destroyed { id, result } => {
+            Event::Destroyed {
+                id,
+                ordinal,
+                result,
+            } => {
+                // A removal that stopped part way keeps its ordinal and
+                // record until the next start of the agent finishes it.
+                if result.is_ok() {
+                    self.ordinals.remove(&ordinal);
+                }
                 for remover in self.destroying.remove(&id.0).unwrap_or_default() {
                     let _ = remover.send(result.clone());
                 }
@@ -760,7 +939,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     fn start_step(&mut self, id: Id, op: OpId, step: Step) {
-        let Some(slot) = self.slots.get_mut(&id.0) else {
+        let (Some(slot), Some(record)) = (self.slots.get_mut(&id.0), self.records.get(id)) else {
             tracing::error!(%id, ?step, "step for a sandbox the host does not have");
             let _ = self.events_tx.send(Event::StepDone {
                 id,
@@ -785,6 +964,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let job = Job {
             engine: Arc::clone(&self.engine),
             store: Arc::clone(&self.store),
+            records: Arc::clone(&self.records),
+            record,
             id,
             spec: VmSpec::clone(&slot.spec),
             paths: Paths::clone(&slot.paths),
@@ -808,7 +989,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn step_done(&mut self, id: Id, op: OpId, outcome: Outcome, after: After<E::Vm>) {
         let fresh = match after {
-            After::New(vm, memory) => Some(self.adopt(id, vm, memory)),
+            After::New(vm, memory) => Some(self.own(id, vm, memory)),
             After::Kept(live) => Some(live),
             After::NoVm => None,
         };
@@ -864,9 +1045,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Takes ownership of a VM process a step started and watches for it
-    /// dying on its own.
-    fn adopt(&mut self, id: Id, vm: E::Vm, memory: LiveMemory) -> Live<E::Vm> {
+    /// Takes charge of a VM process, started by a step or found still
+    /// running, and watches for it dying on its own.
+    fn own(&mut self, id: Id, vm: E::Vm, memory: LiveMemory) -> Live<E::Vm> {
         let incarnation = self.next_incarnation;
         self.next_incarnation += 1;
         let stopping = Arc::new(AtomicBool::new(false));
@@ -926,35 +1107,52 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(mut slot) = self.slots.remove(&id.0) else {
             return;
         };
-        self.ordinals.remove(&slot.ordinal);
         for waiter in slot.waiters.drain(..) {
             let _ = waiter.send(Err(HostError::Removed(id)));
         }
-        self.destroying
-            .insert(id.0, std::mem::take(&mut slot.removers));
         let live = slot.vm.take();
         if let Some(live) = &live {
             live.stopping.store(true, Ordering::Release);
         }
+        let removers = std::mem::take(&mut slot.removers);
+        if let Some(record) = self.records.get(id) {
+            self.remove_recorded(&record, live.map(|live| live.vm), removers);
+        } else {
+            tracing::error!(%id, "removing a sandbox without a record");
+            for remover in removers {
+                let _ = remover.send(Err(HostError::NotFound(id)));
+            }
+        }
+    }
+
+    /// Deletes a recorded sandbox in the background. Its ordinal and id
+    /// stay taken until nothing of it is left.
+    fn remove_recorded(&mut self, record: &Record, vm: Option<E::Vm>, removers: Vec<Reply<()>>) {
+        let id = record.id;
+        self.destroying.insert(id.0, removers);
+        let paths = Paths::new(&self.root, id);
+        let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
         let engine = Arc::clone(&self.engine);
         let store = Arc::clone(&self.store);
+        let records = Arc::clone(&self.records);
         let events = self.events_tx.clone();
-        let dir = slot.paths.dir.clone();
+        let (ordinal, fence) = (record.ordinal, record.fence());
         tokio::spawn(async move {
-            if let Some(live) = live {
-                let _ = engine.stop(live.vm).await;
+            let removal = Removal {
+                engine: &*engine,
+                store: &*store,
+                records: &records,
+                id,
+            };
+            let result = removal.run(fence, vm, &spec, &paths.dir).await;
+            if let Err(error) = &result {
+                tracing::error!(%id, %error, "removal stopped; the next start of the agent finishes it");
             }
-            let stored = store.delete(id).await;
-            let removed = match tokio::fs::remove_dir_all(&dir).await {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-                _ => Ok(()),
-            };
-            let result = match (stored, removed) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(error), _) => Err(HostError::Io(error.to_string())),
-                (_, Err(error)) => Err(HostError::Io(error.to_string())),
-            };
-            let _ = events.send(Event::Destroyed { id, result });
+            let _ = events.send(Event::Destroyed {
+                id,
+                ordinal,
+                result,
+            });
         });
     }
 
@@ -1025,8 +1223,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .iter()
             .filter_map(|(id, slot)| {
                 let view = self.core.sandbox(*id)?;
+                let record = self.records.get(Id(*id));
                 Some(SandboxStatus {
                     id: Id(*id),
+                    generation: record.as_ref().map_or(0, |record| record.generation),
+                    revision: record.as_ref().map_or(0, |record| record.revision),
                     level: view.level.into(),
                     memory_saved: view.level.has_process() || view.memory_saved,
                     step: view.step.map(|step| step_name(step).to_owned()),
@@ -1060,6 +1261,51 @@ async fn sleep_until_some(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => sleep_until(deadline).await,
         None => std::future::pending().await,
+    }
+}
+
+/// Deleting one sandbox, in an order that a crash at any point leaves
+/// either finishable on the next start or finished.
+struct Removal<'a, E, S> {
+    engine: &'a E,
+    store: &'a S,
+    records: &'a Records,
+    id: Id,
+}
+
+impl<E: Engine, S: Store> Removal<'_, E, S> {
+    /// Records that removal began, ends the VM, deletes the store's copy,
+    /// then the record, then the files. Until the record is gone a restart
+    /// resumes the removal; after, the directory is an unrecorded stray
+    /// that recovery deletes.
+    async fn run(
+        &self,
+        fence: Fence,
+        vm: Option<E::Vm>,
+        spec: &VmSpec,
+        dir: &Path,
+    ) -> Result<(), HostError> {
+        let id = self.id;
+        let record = self
+            .records
+            .commit(id, fence, Change::new().removing())
+            .await?;
+        let stopped = match vm {
+            Some(vm) => self.engine.stop(vm).await,
+            None => self.engine.clean_up(spec).await,
+        };
+        stopped.map_err(|error| HostError::Io(error.to_string()))?;
+        self.store
+            .delete(id)
+            .await
+            .map_err(|error| HostError::Io(error.to_string()))?;
+        self.records.remove(id, record.fence()).await?;
+        match tokio::fs::remove_dir_all(dir).await {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                Err(HostError::Io(error.to_string()))
+            }
+            _ => Ok(()),
+        }
     }
 }
 

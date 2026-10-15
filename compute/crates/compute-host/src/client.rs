@@ -55,6 +55,12 @@ impl Client {
         port: u32,
         priority: PriorityName,
     ) -> io::Result<(Reply, BufReader<UnixStream>)> {
-        self.send(&Request::Connect { id, port, priority }).await
+        self.send(&Request::Connect {
+            id,
+            generation: None,
+            port,
+            priority,
+        })
+        .await
     }
 }
