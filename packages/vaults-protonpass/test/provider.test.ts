@@ -206,6 +206,21 @@ describe("sign-in lifecycle", () => {
     expect(error.message).not.toContain("422");
   });
 
+  test("local and unexpected sign-in failures are unavailable, not a bad token", async () => {
+    for (const stderr of [
+      "Error: Error getting key provider\n\nCaused by:\n    Permission denied (os error 13)\n",
+      "Error: Error opening session database\n\nCaused by:\n    No space left on device (os error 28)\n",
+      "thread 'main' panicked at src/main.rs:1:1\n",
+    ]) {
+      const { provider } = setup((state) => {
+        state.failures.push({ match: "login", stderr });
+      });
+      const error = await errorOf(provider.validate(ctx()));
+      expect(error.code).toBe("provider_unavailable");
+      expect(error.message).not.toMatch(/token|reconnect|os error/i);
+    }
+  });
+
   test("validate reports the token name", async () => {
     const { provider } = setup();
     expect(await provider.validate(ctx())).toEqual({ accountName: "opengeni-ci" });
@@ -361,6 +376,60 @@ describe("items", () => {
     );
   });
 
+  test("only the requested share's items count against the file-view budget", async () => {
+    const { fake, provider } = setup(
+      (state) => {
+        const own = state.items["rwShare=="]!;
+        const foreign = (id: string) => ({
+          ...structuredClone(own[1]!),
+          id,
+          share_id: "otherShare==",
+          vault_id: "v-otherShare==",
+        });
+        own.push(foreign("foreign1"), foreign("foreign2"));
+      },
+      { maxItemViewsPerList: 1 },
+    );
+    const items = await provider.listItems(ctx(), RW);
+    expect(items.map((item) => item.externalItemId)).toEqual(["loginItem1", "customItem1"]);
+    expect(commands(fake).filter((command) => command.startsWith("item view"))).toEqual([
+      `item view --share-id=${RW} --item-id=customItem1 --output json`,
+    ]);
+  });
+
+  test("items with more fields or websites than Opengeni mirrors make the listing incomplete", async () => {
+    const tooManyFields = setup((state) => {
+      const login = state.items["rwShare=="]![0]! as { content: { extra_fields: unknown[] } };
+      for (let index = 0; index < 50; index += 1) {
+        login.content.extra_fields.push({ name: `extra ${index}`, content: { Text: "v" } });
+      }
+    });
+    expect((await errorOf(tooManyFields.provider.listItems(ctx(), RW))).code).toBe(
+      "provider_inventory_incomplete",
+    );
+    const tooManySites = setup((state) => {
+      const login = state.items["rwShare=="]![0]! as {
+        content: { content: { Login: { urls: string[] } } };
+      };
+      login.content.content.Login.urls = Array.from(
+        { length: 21 },
+        (_, index) => `https://site${index}.example.test`,
+      );
+    });
+    expect((await errorOf(tooManySites.provider.listItems(ctx(), RW))).code).toBe(
+      "provider_inventory_incomplete",
+    );
+    const longSite = setup((state) => {
+      const login = state.items["rwShare=="]![0]! as {
+        content: { content: { Login: { urls: string[] } } };
+      };
+      login.content.content.Login.urls = [`https://example.test/${"a".repeat(2_048)}`];
+    });
+    expect((await errorOf(longSite.provider.listItems(ctx(), RW))).code).toBe(
+      "provider_inventory_incomplete",
+    );
+  });
+
   test("oversized or malformed listings are incomplete inventories", async () => {
     const big = setup(undefined, { maxStdoutBytes: 64 });
     expect((await errorOf(big.provider.listItems(ctx(), RW))).code).toBe(
@@ -431,6 +500,29 @@ describe("items", () => {
       "login.password",
     ]);
     expect(views()).toBe(3);
+  });
+
+  test("providers sharing one attempt budget never share cached values", async () => {
+    // Core shares one budget across every provider in an attempt; two
+    // connections can see the same share and item ids.
+    const a = setup();
+    const revoked = createProtonPassVaultProvider({
+      token: "pst_fedcba9876543210::cmV2b2tlZC1rZXk",
+      binaryPath: a.fake.binaryPath,
+      stateRoot: a.fake.stateRoot,
+      hostEnv: { PATH: "/usr/bin:/bin" },
+    });
+    open.push({ fake: a.fake, provider: revoked });
+    const shared = ctx();
+    const values = await a.provider.readFields(shared, RW, "loginItem1", ["login.password"]);
+    expect(values[0]!.material).toEqual({ type: "text", value: "pw-123" });
+    const error = await errorOf(revoked.readFields(shared, RW, "loginItem1", ["login.password"]));
+    expect(error.code).toBe("provider_auth_invalid");
+    const before = a.fake.log().length;
+    expect(await a.provider.readFields(shared, RW, "loginItem1", ["login.password"])).toEqual(
+      values,
+    );
+    expect(a.fake.log().length).toBe(before);
   });
 
   test("charges the attempt budget per CLI call and stops before spawning", async () => {
@@ -557,6 +649,13 @@ describe("writes", () => {
         type: "login" as const,
         websites: [],
         fields: [{ name: "one-time password", kind: "totp" as const, value: "not base32 !" }],
+      },
+      // A lone concealed field is not silently renamed to the password.
+      {
+        name: "e",
+        type: "login" as const,
+        websites: [],
+        fields: [{ name: "api secret", kind: "concealed" as const, value: "s3cr3t" }],
       },
     ]) {
       expect((await errorOf(provider.writeItem(ctx(), RW, item))).code).toBe(

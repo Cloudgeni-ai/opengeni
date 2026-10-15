@@ -210,8 +210,6 @@ export async function runKeeperOperation<T>(input: {
 
 type CachedRecords = { at: number; records: Promise<KeeperRecord[]> };
 type CachedRecord = { at: number; record: Promise<MappedKeeperRecord> };
-const attemptListCaches = new WeakMap<ProviderCallBudget, Map<string, CachedRecords>>();
-const attemptRecordCaches = new WeakMap<ProviderCallBudget, Map<string, CachedRecord>>();
 
 function cacheFor<V>(map: WeakMap<ProviderCallBudget, Map<string, V>>, budget: ProviderCallBudget) {
   let cache = map.get(budget);
@@ -233,6 +231,12 @@ export function createKeeperVaultProvider(
   const valueCacheMs = options.valueCacheMs ?? KEEPER_VALUE_CACHE_MS;
   const fetchFile = options.fetchFile ?? createKeeperFileFetcher(options.fetch);
   let queue: Promise<unknown> = Promise.resolve();
+  // Per provider instance (one bound application) and per attempt budget.
+  // Core shares one budget across every provider in an attempt, so a
+  // module-level cache keyed only by budget would let one connection reuse
+  // another's records for the same folder and record uids.
+  const attemptListCaches = new WeakMap<ProviderCallBudget, Map<string, CachedRecords>>();
+  const attemptRecordCaches = new WeakMap<ProviderCallBudget, Map<string, CachedRecord>>();
 
   async function flushPending() {
     if (pending === null) return;
@@ -497,7 +501,13 @@ export function createKeeperVaultProvider(
       const metas = records
         .filter((record) => record.folderUid === externalVaultId)
         .map((record) => mapRecord(record).meta);
-      if (metas.length > VAULT_LIMITS.itemsPerVault) incomplete();
+      if (metas.length > VAULT_LIMITS.itemsPerVault) {
+        throw new VaultProviderError(
+          "provider_inventory_incomplete",
+          "The Keeper shared folder has more records than Opengeni mirrors at once",
+        );
+      }
+      for (const meta of metas) assertMirrorable(meta);
       reportFresh(ctx);
       return metas;
     },
@@ -650,4 +660,22 @@ export function createKeeperVaultProvider(
   }
 
   return restrictToOperations(provider, options.operations, FILE_FIELD_PREFIX);
+}
+
+/**
+ * Opengeni mirrors at most `fieldsPerItem` fields and `websitesPerItem`
+ * websites of up to `websiteMaxChars` each. A larger record would be cut down
+ * and then look complete, so the listing is reported incomplete instead.
+ */
+function assertMirrorable(meta: ProviderItemMeta): void {
+  if (
+    meta.fields.length > VAULT_LIMITS.fieldsPerItem ||
+    meta.websites.length > VAULT_LIMITS.websitesPerItem ||
+    meta.websites.some((website) => website.length > VAULT_LIMITS.websiteMaxChars)
+  ) {
+    throw new VaultProviderError(
+      "provider_inventory_incomplete",
+      `A Keeper record has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than Opengeni mirrors`,
+    );
+  }
 }

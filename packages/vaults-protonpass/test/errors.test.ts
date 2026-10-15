@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isDefiniteMutationFailure, mapProtonFailure } from "../src/errors";
+import { isDefiniteMutationFailure, loginFailure, mapProtonFailure } from "../src/errors";
 import type { ProcessResult } from "../src/runner";
 
 function failed(stderr: string, extra: Partial<ProcessResult> = {}): ProcessResult {
@@ -140,5 +140,36 @@ describe("isDefiniteMutationFailure", () => {
     expect(isDefiniteMutationFailure(failed("Your session has been invalidated\n"), create)).toBe(
       false,
     );
+  });
+});
+
+describe("loginFailure", () => {
+  const LOGIN = "Error logging in with personal access token";
+
+  test("only Proton's refusal of the token asks for a new one", () => {
+    for (const code of [400, 401, 403, 422]) {
+      expect(loginFailure(failed(status(LOGIN, code))).code).toBe("provider_auth_invalid");
+    }
+    expect(loginFailure(failed(api(LOGIN, "PermissionDenied"))).code).toBe("provider_auth_invalid");
+  });
+
+  test("throttling, server errors, network, local and unknown failures are not", () => {
+    const rateLimited = loginFailure(failed(status(LOGIN, 429)));
+    expect(rateLimited.code).toBe("provider_rate_limited");
+    for (const result of [
+      failed(status(LOGIN, 503)),
+      failed(api(LOGIN, "SomethingNew")),
+      failed(`Error: ${LOGIN}\n\nCaused by:\n    error sending request for url\n`),
+      failed("Error: Error getting key provider\n\nCaused by:\n    Permission denied\n"),
+      // A 422 outside the token-login context is not a verdict on the token.
+      failed(status("Error opening session database", 422)),
+      failed("", { spawnError: "ENOENT" }),
+      failed("", { timedOut: true, exitCode: null }),
+      failed("Your session has been invalidated\n"),
+    ]) {
+      const error = loginFailure(result);
+      expect(error.code).toBe("provider_unavailable");
+      expect(error.message).not.toMatch(/token|sign in again|reconnect/i);
+    }
   });
 });

@@ -98,7 +98,6 @@ function assertIds(...ids: string[]) {
 const TOKEN_SHAPE = /^[\x21-\x7e]{8,4096}$/;
 
 type CachedDetails = { at: number; details: Promise<ItemDetails> };
-const attemptCaches = new WeakMap<ProviderCallBudget, Map<string, CachedDetails>>();
 
 function writeAccessFor(role: ShareRole): "read_only" | "read_write" {
   if (typeof role === "string") return role === "Viewer" ? "read_only" : "read_write";
@@ -166,7 +165,6 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
     let email: string | null = null;
     let password: string | null = null;
     let totp: string | null = null;
-    const concealed = item.fields.filter((field) => field.kind === "concealed");
     for (const field of item.fields) {
       const key = nameKey(field.name);
       if (field.kind === "totp") {
@@ -176,11 +174,9 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
         username = fieldValue(field);
       } else if (field.kind === "text" && key === "email" && email === null) {
         email = fieldValue(field);
-      } else if (
-        field.kind === "concealed" &&
-        password === null &&
-        (key === "password" || concealed.length === 1)
-      ) {
+      } else if (field.kind === "concealed" && key === "password" && password === null) {
+        // Only a field named "password" becomes the login password; any other
+        // name is refused before the create rather than silently renamed.
         password = fieldValue(field);
       } else {
         refuse(
@@ -278,6 +274,11 @@ export function createProtonPassVaultProvider(
   const session = new ProtonCliSession(token, options);
   const now = options.now ?? Date.now;
   const valueCacheMs = options.valueCacheMs ?? PROTON_PASS_VALUE_CACHE_MS;
+  // Per provider instance (one token, one session) and per attempt budget.
+  // Core shares one budget across every provider in an attempt, so a
+  // module-level cache keyed only by budget would let one connection read
+  // another's values for the same share and item ids.
+  const attemptCaches = new WeakMap<ProviderCallBudget, Map<string, CachedDetails>>();
   const maxViews = options.maxItemViewsPerList ?? PROTON_PASS_MAX_ITEM_VIEWS_PER_LIST;
   /** Last observed access per share; lets a known read-only vault refuse writes locally. */
   const shareAccess = new Map<string, "read_only" | "read_write" | "unknown">();
@@ -522,7 +523,10 @@ export function createProtonPassVaultProvider(
           FullItemList,
           "provider_inventory_incomplete",
         );
-        const withFiles = list.items.filter((item) => item.flags.includes(ITEM_HAS_FILES));
+        // Only this share's items are viewed, so only they count against the view budget.
+        const withFiles = list.items.filter(
+          (item) => item.share_id === externalVaultId && item.flags.includes(ITEM_HAS_FILES),
+        );
         if (withFiles.length > maxViews) incomplete();
         for (const item of list.items) {
           if (item.share_id !== externalVaultId) continue;
@@ -552,6 +556,7 @@ export function createProtonPassVaultProvider(
         }
       }
       if (metas.length > VAULT_LIMITS.itemsPerVault) incomplete();
+      for (const meta of metas) assertMirrorable(meta);
       reportFresh(ctx);
       return metas;
     },
@@ -664,4 +669,22 @@ function incomplete(): never {
     "provider_inventory_incomplete",
     "The Proton Pass vault has more items than Opengeni mirrors at once",
   );
+}
+
+/**
+ * Opengeni mirrors at most `fieldsPerItem` fields and `websitesPerItem`
+ * websites of up to `websiteMaxChars` each. A larger item would be cut down
+ * and then look complete, so the listing is reported incomplete instead.
+ */
+function assertMirrorable(meta: ProviderItemMeta): void {
+  if (
+    meta.fields.length > VAULT_LIMITS.fieldsPerItem ||
+    meta.websites.length > VAULT_LIMITS.websitesPerItem ||
+    meta.websites.some((website) => website.length > VAULT_LIMITS.websiteMaxChars)
+  ) {
+    throw new VaultProviderError(
+      "provider_inventory_incomplete",
+      `A Proton Pass item has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than Opengeni mirrors`,
+    );
+  }
 }

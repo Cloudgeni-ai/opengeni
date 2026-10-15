@@ -18,9 +18,9 @@ import {
   NOT_AUTHENTICATED,
   SESSION_INVALIDATED,
   isDefiniteMutationFailure,
+  loginFailure,
   mapProtonFailure,
   outcomeUnknown,
-  protonStatus,
 } from "./errors";
 import { type ProcessResult, type ProcessRunner, runProcess } from "./runner";
 import { InfoOutput } from "./schema";
@@ -91,32 +91,66 @@ export interface ProtonSessionInfo {
 
 // --- process-wide bookkeeping ------------------------------------------------
 
-let activeProcesses = 0;
-const processWaiters: Array<() => void> = [];
-async function acquireProcessSlot(signal?: AbortSignal): Promise<() => void> {
-  if (activeProcesses >= PROTON_PASS_MAX_PROCESSES) {
-    await new Promise<void>((resolveSlot, reject) => {
-      const ready = () => {
-        signal?.removeEventListener("abort", onAbort);
-        resolveSlot();
-      };
-      const onAbort = () => {
-        const index = processWaiters.indexOf(ready);
-        if (index >= 0) processWaiters.splice(index, 1);
-        reject(signal?.reason ?? new Error("aborted"));
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      processWaiters.push(ready);
-    });
+export interface SlotSemaphore {
+  /** Resolves with a release function once a slot is held; rejects if `signal` aborts first. */
+  acquire(signal?: AbortSignal): Promise<() => void>;
+  /** Slots held, including ones handed to a waiter that has not resumed yet. */
+  active(): number;
+  waiting(): number;
+}
+
+/**
+ * A FIFO counting semaphore. A released slot is handed straight to the next
+ * waiter (the count never drops in between), so a caller arriving while the
+ * waiter resumes cannot take the same slot and exceed `limit`.
+ */
+export function createSlotSemaphore(limit: number): SlotSemaphore {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  function releaser(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = waiters.shift();
+      if (next) next();
+      else active -= 1;
+    };
   }
-  activeProcesses += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    activeProcesses -= 1;
-    processWaiters.shift()?.();
+  return {
+    async acquire(signal) {
+      if (active < limit) {
+        active += 1;
+        return releaser();
+      }
+      await new Promise<void>((resolveSlot, reject) => {
+        if (signal?.aborted) {
+          reject(signal.reason ?? new Error("aborted"));
+          return;
+        }
+        const ready = () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolveSlot();
+        };
+        const onAbort = () => {
+          const index = waiters.indexOf(ready);
+          if (index >= 0) waiters.splice(index, 1);
+          reject(signal?.reason ?? new Error("aborted"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        waiters.push(ready);
+      });
+      // The releasing caller transferred its slot; `active` already counts it.
+      return releaser();
+    },
+    active: () => active,
+    waiting: () => waiters.length,
   };
+}
+
+const processSlots = createSlotSemaphore(PROTON_PASS_MAX_PROCESSES);
+function acquireProcessSlot(signal?: AbortSignal): Promise<() => void> {
+  return processSlots.acquire(signal);
 }
 
 const liveStateDirs = new Set<string>();
@@ -199,9 +233,6 @@ function succeeded(result: ProcessResult): boolean {
     result.spawnError === null
   );
 }
-
-const LOGIN_TRANSIENT =
-  /error sending request|dns error|failed to lookup address|Connection refused|operation timed out|tcp connect error/i;
 
 /**
  * One logged-in pass-cli state for one personal access token. Every call is
@@ -462,21 +493,7 @@ export class ProtonCliSession {
     );
     if (!succeeded(result)) {
       signal?.throwIfAborted();
-      const status = protonStatus(result.stderr);
-      if (
-        result.spawnError ||
-        result.timedOut ||
-        result.aborted ||
-        status === 429 ||
-        (status !== null && status >= 500) ||
-        LOGIN_TRANSIENT.test(result.stderr)
-      ) {
-        throw mapProtonFailure(result, "sign in");
-      }
-      throw new VaultProviderError(
-        "provider_auth_invalid",
-        "Proton Pass rejected the personal access token (revoked, expired or mistyped)",
-      );
+      throw loginFailure(result);
     }
     this.loggedInAt = this.now();
     const infoResult = await this.spawn(

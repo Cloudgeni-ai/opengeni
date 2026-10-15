@@ -59,7 +59,9 @@ out and refuses later calls.
 - **No shell, bounded output.** Every command is spawned with an argument
   list, a deadline, bounded stdout and stderr, and a process-group kill. At
   most `PROTON_PASS_MAX_PROCESSES` (4) CLI processes run at once per process,
-  and commands for one connection are serialized.
+  and commands for one connection are serialized. A finished process hands
+  its slot straight to the next waiting command, so the limit holds under
+  contention.
 - **Secrets never go on argv.** The PAT is passed only in the environment of
   `pass-cli login`. Item values for create go in on stdin
   (`item create … --from-template -`).
@@ -78,10 +80,16 @@ out and refuses later calls.
   caller supplies it, the requesting authority. Agent tokens cannot list
   item values in bulk, so listing views each item (at most 500 per list, else
   `provider_inventory_incomplete`); each view is an audit event in Proton.
+  Bulk listings view only this share's items that have files, under the same
+  bound.
 - **Errors.** Failures map to `VaultProviderError` codes from the CLI's
   `Reason:` lines and HTTP status. Raw stderr is never surfaced. A failed
   write is definite only when the server's verdict is tied to that write;
-  otherwise it is `provider_outcome_unknown`.
+  otherwise it is `provider_outcome_unknown`. A failed login is
+  `provider_auth_invalid` only when Proton refused the token (400, 401, 403
+  or 422, or a permission or not-found reason, in the token-login context);
+  local, network, server and unrecognised failures are
+  `provider_unavailable` (429 is `provider_rate_limited`).
 
 ## What it can do
 
@@ -92,13 +100,19 @@ out and refuses later calls.
 | List vaults | yes | `share list --only-vaults`; write access from the share role. Falls back to `vault list` (access unknown) when shares cannot be listed. |
 | List items, read values | yes | Values read live, cached per attempt; `forceRefresh` bypasses the cache. |
 | Read files | yes | Downloaded to a private directory, at most 256 KiB. |
-| Create | login, note, custom (`api_key`) | Including a TOTP seed on logins. |
+| Create | login, note, custom (`api_key`) | Including a TOTP seed on logins. A login takes only fields named `username`, `email` and `password` plus one TOTP; any other field is refused before running anything (use an `api_key` item). |
 | Update | **no** | The CLI's update takes values only as `--field` arguments and cannot change TOTP or time fields, so updates would put secrets on argv. Reported as `provider_unavailable` without running anything. |
 | Archive | trash (recoverable) | `item trash`. Permanent delete and restore are not exposed. |
 | Create vault, write files | no | |
 
 Writes to a share whose role is read-only are refused locally; Proton
 enforces the rest.
+
+The per-attempt value cache belongs to one provider instance (one token and
+session), so providers that share an attempt budget never see each other's
+values. Items with more than 50 fields or 20 websites (or a website over
+2,048 characters) make the listing `provider_inventory_incomplete` instead of
+being mirrored cut down.
 
 Field ids: `@note`, `login.username`, `login.email`, `login.password`,
 `login.totp`, `x:<name>` (extra fields), `s:<section>/<field>` (custom item

@@ -41,7 +41,9 @@ credential.
   `reason: "bind"`), even if something after the bind failed. If that save
   fails, bootstrap reports `provider_unavailable` (without the configuration)
   and the customer generates a new token. A lost bind response is
-  `provider_outcome_unknown` and is never retried. A definite refusal is
+  `provider_outcome_unknown` and is never retried, and so is a 5xx or any
+  other unexpected status (Keeper may have applied the bind behind a failing
+  gateway). A definite refusal is
   `provider_auth_invalid`. If the application is IP-locked, the first request
   locks it to the Opengeni egress address.
 - **Configuration.** JSON, base64 JSON (as Keeper tools export it) or a
@@ -118,7 +120,15 @@ part of their shared folder.
 
 Read-only shared folders and other permission checks are enforced by
 Keeper; a refused write is `provider_permission_denied`. A write whose
-response is lost is `provider_outcome_unknown` and is never retried.
+response is lost, or answered with anything but 400, 401, 403, 404, 409 or
+429 (`KEEPER_DEFINITE_REJECTION_STATUSES`), is `provider_outcome_unknown`
+and is never retried.
+
+The per-attempt record cache belongs to one provider instance (one bound
+application), so providers that share an attempt budget never reuse each
+other's records. Records with more than 50 fields or 20 websites (or a
+website over 2,048 characters) make the listing
+`provider_inventory_incomplete` instead of being mirrored cut down.
 
 Field ids: `f:<type>` (standard fields), `c:<label or type>` (custom
 fields), `@notes` and `@file:<fileUid>`, with `#n` on repeated names.

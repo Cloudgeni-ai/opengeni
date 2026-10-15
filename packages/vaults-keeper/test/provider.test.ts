@@ -154,6 +154,55 @@ describe("bootstrap", () => {
     expect(error.message).toContain("generate a new one");
   });
 
+  test("a bind answered by a gateway error after Keeper applied it is ambiguous", async () => {
+    for (const body of ["<html><body>502 Bad Gateway</body></html>", ""]) {
+      const fake = new FakeKsm();
+      const token = fake.createToken();
+      fake.hooks.answerAfterApply = { path: "get_secret", status: 502, body };
+      const saved: string[] = [];
+      const error = await errorOf(
+        bootstrapKeeperConfiguration({
+          oneTimeToken: token,
+          queryFunction: fake.queryFunction,
+          persistConfiguration: async (configuration) => {
+            saved.push(configuration);
+          },
+        }),
+      );
+      expect(error.code).toBe("provider_outcome_unknown");
+      expect(error.message).toContain("generate a new one");
+      expect(saved).toHaveLength(0);
+      expect(fake.requests.filter((request) => request.path === "get_secret")).toHaveLength(1);
+      // The token really was spent: it cannot bind again.
+      expect(
+        (
+          await errorOf(
+            bootstrapKeeperConfiguration({
+              oneTimeToken: token,
+              queryFunction: fake.queryFunction,
+            }),
+          )
+        ).code,
+      ).toBe("provider_auth_invalid");
+    }
+  });
+
+  test("a bind refused with a known rejection status stays definite", async () => {
+    const fake = new FakeKsm();
+    fake.hooks.failNext = {
+      path: "get_secret",
+      status: 403,
+      body: { result_code: "access_denied", message: "One-time token was already used" },
+    };
+    const error = await errorOf(
+      bootstrapKeeperConfiguration({
+        oneTimeToken: fake.createToken(),
+        queryFunction: fake.queryFunction,
+      }),
+    );
+    expect(error.code).toBe("provider_auth_invalid");
+  });
+
   test("bootstrapKeeperVaultProvider returns a working provider", async () => {
     const fake = new FakeKsm();
     fake.addFolder("Ops");
@@ -376,6 +425,42 @@ describe("reads", () => {
     expect(fetched).toBe(0);
   });
 
+  test("file downloads go through the runtime fetch (the server's pinned fetch) by default", async () => {
+    const { provider, fake, rw, login } = await world();
+    const meta = (await provider.listItems(ctx(), rw)).find(
+      (item) => item.externalItemId === login,
+    )!;
+    const fileId = meta.fields.find((field) => field.name === "cert.pem")!.externalFieldId;
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const pinned = createKeeperVaultProvider({
+      configuration: provider.currentConfiguration(),
+      persistConfiguration: async () => {},
+      queryFunction: fake.queryFunction,
+      // No fetchFile: production relies on this default.
+      fetch: async (input, init) => {
+        calls.push({ url: String(input), init });
+        // The encrypted bytes Keeper's file storage serves for this URL.
+        const bytes = await fake.fetchFile(String(input), {
+          maxBytes: 1_000_000,
+          timeoutMs: 1_000,
+        });
+        return new Response(Buffer.from(bytes));
+      },
+    });
+    const controller = new AbortController();
+    const [value] = await pinned.readFields(ctx({ signal: controller.signal }), rw, login, [
+      fileId,
+    ]);
+    expect(value!.material.type === "bytes" && Buffer.from(value!.material.value).toString()).toBe(
+      "hello",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toStartWith("https://files.keeper.test/");
+    expect(calls[0]!.init.redirect).toBe("error");
+    controller.abort();
+    expect(calls[0]!.init.signal!.aborted).toBe(true);
+  });
+
   test("never reads a record through another folder, and unknown ids are not found", async () => {
     const { provider, ro, rw, login } = await world();
     expect((await errorOf(provider.readFields(ctx(), ro, login, ["f:password"]))).code).toBe(
@@ -400,6 +485,38 @@ describe("reads", () => {
     );
     expect((await errorOf(provider.readFields(ctx(), rw, bad.uid, ["f:password"]))).code).toBe(
       "provider_unavailable",
+    );
+  });
+
+  test("records with more fields or websites than Opengeni mirrors make the listing incomplete", async () => {
+    const fields = await world();
+    fields.fake.addRecord(fields.rw, {
+      type: "login",
+      title: "Many fields",
+      fields: [],
+      custom: Array.from({ length: 51 }, (_, index) => ({
+        type: "text",
+        label: `field ${index}`,
+        value: ["v"],
+      })),
+    });
+    expect((await errorOf(fields.provider.listItems(ctx(), fields.rw))).code).toBe(
+      "provider_inventory_incomplete",
+    );
+    const sites = await world();
+    sites.fake.addRecord(sites.rw, {
+      type: "login",
+      title: "Many sites",
+      fields: [
+        {
+          type: "url",
+          value: Array.from({ length: 21 }, (_, index) => `https://s${index}.example.test`),
+        },
+      ],
+      custom: [],
+    });
+    expect((await errorOf(sites.provider.listItems(ctx(), sites.rw))).code).toBe(
+      "provider_inventory_incomplete",
     );
   });
 
@@ -460,6 +577,38 @@ describe("reads", () => {
     expect(clientsA.size).toBe(1);
     expect(clientsB.size).toBe(1);
     expect([...clientsA][0]).not.toBe([...clientsB][0]);
+  });
+
+  test("providers sharing one attempt budget never share cached records or values", async () => {
+    // Core shares one budget across every provider in an attempt; two
+    // connections to the same application see the same folder and record uids.
+    const a = await world();
+    const { configuration } = await bootstrapKeeperConfiguration({
+      oneTimeToken: a.fake.createToken(),
+      queryFunction: a.fake.queryFunction,
+    });
+    const b = createKeeperVaultProvider({
+      configuration,
+      persistConfiguration: async () => {},
+      queryFunction: a.fake.queryFunction,
+      fetchFile: a.fake.fetchFile,
+    });
+    const shared = ctx();
+    expect((await a.provider.listItems(shared, a.rw)).length).toBeGreaterThan(0);
+    const values = await a.provider.readFields(shared, a.rw, a.login, ["f:password"]);
+    expect(values[0]!.material).toEqual({ type: "text", value: "pw-123" });
+
+    a.fake.revoke(keeperConfigurationRecord(configuration).clientId!);
+    const before = a.fake.requests.length;
+    expect((await errorOf(b.readFields(shared, a.rw, a.login, ["f:password"]))).code).toBe(
+      "provider_auth_invalid",
+    );
+    expect((await errorOf(b.listItems(shared, a.rw))).code).toBe("provider_auth_invalid");
+    expect(a.fake.requests.length - before).toBe(2);
+    // A's own cache is unaffected.
+    const again = await a.provider.readFields(shared, a.rw, a.login, ["f:password"]);
+    expect(again).toEqual(values);
+    expect(a.fake.requests.length - before).toBe(2);
   });
 });
 
@@ -535,6 +684,55 @@ describe("writes", () => {
     expect(error.code).toBe("provider_outcome_unknown");
     expect(fake.records.size).toBe(count + 1);
     expect(fake.requests.filter((request) => request.path === "create_secret")).toHaveLength(1);
+  });
+
+  test("a create applied and then answered with 502 is ambiguous, not unavailable", async () => {
+    const { fake, provider, rw } = await world();
+    fake.hooks.answerAfterApply = {
+      path: "create_secret",
+      status: 502,
+      body: "<html><body>502 Bad Gateway</body></html>",
+    };
+    const count = fake.records.size;
+    const error = await errorOf(
+      provider.writeItem(ctx(), rw, { name: "maybe", type: "note", websites: [], fields: [] }),
+    );
+    expect(error.code).toBe("provider_outcome_unknown");
+    expect(fake.records.size).toBe(count + 1);
+    expect(fake.requests.filter((request) => request.path === "create_secret")).toHaveLength(1);
+  });
+
+  test("an update applied and then answered with 503 is ambiguous", async () => {
+    const { fake, provider, rw, login } = await world();
+    fake.hooks.answerAfterApply = { path: "update_secret", status: 503, body: "" };
+    const error = await errorOf(
+      provider.writeItem(ctx(), rw, {
+        externalItemId: login,
+        name: "Test Login",
+        type: "login",
+        websites: ["https://login.example.test"],
+        fields: [
+          { externalFieldId: "f:password", name: "password", kind: "concealed", value: "maybe" },
+        ],
+      }),
+    );
+    expect(error.code).toBe("provider_outcome_unknown");
+    expect(fake.records.get(login)!.revision).toBe(2);
+  });
+
+  test("known rejections before applying stay definite", async () => {
+    const { fake, provider, rw } = await world();
+    fake.hooks.failNext = {
+      path: "create_secret",
+      status: 400,
+      body: { result_code: "error", message: "Record data is invalid" },
+    };
+    const count = fake.records.size;
+    const error = await errorOf(
+      provider.writeItem(ctx(), rw, { name: "no", type: "note", websites: [], fields: [] }),
+    );
+    expect(error.code).not.toBe("provider_outcome_unknown");
+    expect(fake.records.size).toBe(count);
   });
 
   test("updates by field patch with revision checks", async () => {

@@ -162,9 +162,21 @@ export interface MutationTracker {
 }
 
 /**
+ * Statuses with which Keeper refuses a request before applying it: a bad or
+ * unauthorised request (400, 401, 403), a missing target (404), a revision
+ * conflict (409) or throttling (429). Any other status after the request was
+ * sent (5xx from Keeper or a proxy, an unexpected 2xx or 3xx) may follow an
+ * applied change.
+ */
+export const KEEPER_DEFINITE_REJECTION_STATUSES: ReadonlySet<number> = new Set([
+  400, 401, 403, 404, 409, 429,
+]);
+
+/**
  * A mutation failure is definite only when nothing was sent, or Keeper
- * answered the request with an error. A transport failure, deadline or abort
- * after sending, or any failure after a 200, leaves the outcome unknown.
+ * answered the last request with a known rejection status. A transport
+ * failure, deadline or abort after sending, any other status (502 included),
+ * or any failure after a 200, leaves the outcome unknown.
  */
 export function mapKeeperMutationError(
   error: unknown,
@@ -172,7 +184,8 @@ export function mapKeeperMutationError(
   tracker: MutationTracker,
 ): VaultProviderError {
   const definite =
-    tracker.sent === 0 || (tracker.lastStatus !== null && tracker.lastStatus !== 200);
+    tracker.sent === 0 ||
+    (tracker.lastStatus !== null && KEEPER_DEFINITE_REJECTION_STATUSES.has(tracker.lastStatus));
   if (!definite) {
     return new VaultProviderError(
       "provider_outcome_unknown",

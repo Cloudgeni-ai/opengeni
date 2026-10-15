@@ -170,3 +170,41 @@ export function outcomeUnknown(subject: string): VaultProviderError {
     `Proton Pass may or may not have completed "${subject}"; check the vault before retrying`,
   );
 }
+
+/** pass-cli's context for a token login the API answered (`Error logging in with personal access token`). */
+const LOGIN_CONTEXT = /Error logging in with personal access token/;
+/** Statuses with which Proton's API refuses the token itself. */
+const LOGIN_REJECTED_STATUSES = new Set([400, 401, 403, 422]);
+
+/**
+ * Maps a failed `pass-cli login`. Only Proton's own refusal of the token
+ * (a 400, 401, 403 or 422 answer, or a permission or not-found reason, in
+ * the token-login context) asks the customer for a new token. Local
+ * failures (key provider, disk, an unexpected CLI error), network trouble,
+ * throttling and server errors are `provider_unavailable` or
+ * `provider_rate_limited`; reconnecting would not help with them.
+ */
+export function loginFailure(result: ProcessResult): VaultProviderError {
+  const stderr = result.stderr;
+  const answered =
+    !result.spawnError && !result.timedOut && !result.aborted && LOGIN_CONTEXT.test(stderr);
+  if (answered) {
+    const status = protonStatus(stderr);
+    const reason = protonReason(stderr);
+    if (
+      (status !== null && LOGIN_REJECTED_STATUSES.has(status)) ||
+      (reason !== null && (PERMISSION_REASONS.has(reason) || NOT_FOUND_REASONS.has(reason)))
+    ) {
+      return new VaultProviderError(
+        "provider_auth_invalid",
+        "Proton Pass rejected the personal access token (revoked, expired or mistyped)",
+      );
+    }
+  }
+  const mapped = mapProtonFailure(result, "sign in");
+  // Outside the API's verdict on the token, no other mapping (expired
+  // session, permission, not found) describes a failed login accurately.
+  if (mapped.code === "provider_rate_limited") return mapped;
+  if (mapped.code === "provider_unavailable") return mapped;
+  return new VaultProviderError("provider_unavailable", "Proton Pass could not sign in");
+}

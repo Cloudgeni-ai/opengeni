@@ -77,6 +77,12 @@ export type FakeHooks = {
   failNext?: { path: string; status: number; body: Record<string, unknown> } | null;
   /** Process the next mutation on `path`, then lose the response. */
   dropResponse?: string | null;
+  /**
+   * Process the next request on `path` (bind, create, update), then answer
+   * with this status and raw body instead, as a failing gateway in front of
+   * Keeper would.
+   */
+  answerAfterApply?: { path: string; status: number; body: string } | null;
   /** Require this transmission key id; others get a `key` rotation error. */
   requireKeyId?: number | null;
   /** Send app data the client cannot decrypt (fails after a bind completes). */
@@ -117,6 +123,11 @@ export class FakeKsm {
     );
     this.tokens.set(clientId, { clientKey, publicKey: null });
     return region === null ? webSafe(clientKey) : `${region}:${webSafe(clientKey)}`;
+  }
+
+  /** Removes a device, as revoking it in the Keeper vault does; its requests are then refused. */
+  revoke(clientId: string): void {
+    this.tokens.delete(clientId);
   }
 
   addFolder(name: string, options: { editable?: boolean; parent?: string } = {}): FakeFolder {
@@ -189,7 +200,18 @@ export class FakeKsm {
     return { statusCode: status, headers: {}, data: new Uint8Array(json(body)) };
   }
 
-  readonly queryFunction: KeeperQueryFunction = async (url, transmissionKey, payload) => {
+  readonly queryFunction: KeeperQueryFunction = async (...args) => {
+    const response = await this.handle(...args);
+    const after = this.hooks.answerAfterApply;
+    const path = new URL(args[0]).pathname.replace("/api/rest/sm/v1/", "");
+    if (after && after.path === path && response.statusCode === 200) {
+      this.hooks.answerAfterApply = null;
+      return { statusCode: after.status, headers: {}, data: new TextEncoder().encode(after.body) };
+    }
+    return response;
+  };
+
+  private readonly handle: KeeperQueryFunction = async (url, transmissionKey, payload) => {
     const parsed = new URL(url);
     if (parsed.hostname !== this.host)
       throw new Error(`fake KSM: unexpected host ${parsed.hostname}`);
