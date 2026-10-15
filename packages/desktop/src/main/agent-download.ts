@@ -4,7 +4,8 @@
 // time someone connects this computer, from the server they connect to, and
 // trusts it only when its minisign signature checks out against the pinned key.
 
-import { createHash, createPublicKey, verify, type Hash } from "node:crypto";
+import { blake2b } from "@noble/hashes/blake2b";
+import { createPublicKey, verify } from "node:crypto";
 
 import type { AgentPlatform } from "./agent-cli";
 
@@ -62,9 +63,19 @@ export function parseSignatureFile(text: string): Signature {
   };
 }
 
-/** The hash the release signs, fed as the file streams in. */
-export function signedHash(): Hash {
-  return createHash("blake2b512");
+/** A hash fed as the file streams in. */
+export interface StreamingHash {
+  update(chunk: Uint8Array): unknown;
+  digest(): Uint8Array;
+}
+
+/**
+ * The hash the release signs (BLAKE2b-512), fed as the file streams in.
+ * Electron's BoringSSL has no BLAKE2b-512, so `createHash("blake2b512")`
+ * throws inside the app even though it works under Node; this one is pure JS.
+ */
+export function signedHash(): StreamingHash {
+  return blake2b.create({ dkLen: 64 });
 }
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -77,7 +88,7 @@ const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 export function verifyAgentSignature(
   publicKeyLine: string,
   signatureText: string,
-  fileHash: Buffer,
+  fileHash: Uint8Array,
   fileName: string,
 ): void {
   const pinned = parsePublicKey(publicKeyLine);
