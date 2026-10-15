@@ -1659,12 +1659,66 @@ export function createInteractionAttemptToolDefinitions(
   return definitions;
 }
 
-/** Preserve exact platform alternatives instead of flattening away constraints. */
-function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
+/**
+ * One top-level object schema for every platform variant of a native CUA tool.
+ * Model providers require a plain object at the top level of a function schema
+ * (a top-level anyOf is rejected or ignored, so the model loses every argument
+ * type). Properties are the union across platforms; a property whose platform
+ * schemas differ in more than wording keeps those alternatives at property
+ * level. Only properties every platform requires stay required. The session's
+ * CUA worker still validates arguments against its own exact platform schema.
+ */
+export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
   const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
-  return (
-    unique.length === 1 ? unique[0] : { type: "object", anyOf: unique }
-  ) as AttemptToolJsonSchema;
+  if (unique.length === 1) return unique[0] as AttemptToolJsonSchema;
+  const properties: Record<string, unknown> = {};
+  const names = [...new Set(unique.flatMap((schema) => Object.keys(objectProperties(schema))))];
+  for (const name of names) {
+    const alternatives = unique
+      .map((schema) => objectProperties(schema)[name])
+      .filter((value): value is Record<string, unknown> => isJsonObject(value));
+    // The first platform's wording wins for constraint-identical schemas.
+    const distinct = new Map<string, Record<string, unknown>>();
+    for (const schema of alternatives) {
+      const key = JSON.stringify(withoutWording(schema));
+      if (!distinct.has(key)) distinct.set(key, schema);
+    }
+    const options = [...distinct.values()];
+    properties[name] = options.length === 1 ? options[0] : { anyOf: options };
+  }
+  const required = names.filter((name) =>
+    unique.every((schema) =>
+      Array.isArray(schema.required) ? schema.required.includes(name) : false,
+    ),
+  );
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+    ...(unique.every((schema) => schema.additionalProperties === false)
+      ? { additionalProperties: false }
+      : {}),
+  } as AttemptToolJsonSchema;
+}
+
+function objectProperties(schema: Record<string, unknown>): Record<string, unknown> {
+  return isJsonObject(schema.properties) ? schema.properties : {};
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Compare platform property schemas by constraint, not by explanatory text. */
+function withoutWording(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutWording);
+  if (!isJsonObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "description" && key !== "title" && key !== "default")
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, withoutWording(entry)]),
+  );
 }
 
 function filterDiscoveredSessions<
