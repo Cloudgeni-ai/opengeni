@@ -21,15 +21,38 @@ function incomplete(): never {
 }
 
 /**
- * A full traversal or a refusal, never a silently truncated mirror. A caller
- * may replace missing items only after this resolves successfully.
+ * A bounded provider inventory and what it proves (external vaults §8).
  */
-export async function collectProviderPages<T>(input: {
+export interface ProviderInventory<T> {
+  items: T[];
+  /**
+   * Whether the listing also proves which items are absent. It does when it
+   * was one response (a single page or a legacy array listing), or when
+   * every page carried the same provider snapshot token. Offset or position
+   * cursors without a snapshot can skip an existing item that moved across
+   * a page boundary while the pages were read (an earlier item was deleted
+   * meanwhile), so such a multi-page listing proves only what it contains.
+   * Never remove, or report as missing, anything absent from an inventory
+   * that is not consistent.
+   */
+  consistent: boolean;
+}
+
+export interface ProviderPageTraversal<T> {
   page: (request: ProviderPageRequest) => Promise<ProviderPage<T>>;
   identity: (item: T) => string;
   maxItems: number;
   signal?: AbortSignal;
-}): Promise<T[]> {
+}
+
+/**
+ * A full traversal or a refusal (`provider_inventory_incomplete`), never a
+ * prefix presented as the whole. A caller may remove items absent from it
+ * only when it is `consistent`.
+ */
+export async function traverseProviderPages<T>(
+  input: ProviderPageTraversal<T>,
+): Promise<ProviderInventory<T>> {
   if (!Number.isSafeInteger(input.maxItems) || input.maxItems < 1 || input.maxItems > 10_000)
     incomplete();
   const items: T[] = [];
@@ -70,12 +93,23 @@ export async function collectProviderPages<T>(input: {
       ids.add(id);
       items.push(item);
     }
-    if (page.nextCursor === null) return items;
+    // One page is one response; later pages are consistent only under the
+    // same snapshot (a changed snapshot was refused above).
+    if (page.nextCursor === null) return { items, consistent: count === 0 || snapshot !== null };
     if (items.length >= input.maxItems || cursors.has(page.nextCursor)) incomplete();
     cursors.add(page.nextCursor);
     cursor = page.nextCursor;
   }
   return incomplete();
+}
+
+/**
+ * Enumeration: everything a complete bounded traversal listed, or a refusal.
+ * It does not say whether absence is proven; use `traverseProviderPages`
+ * before removing anything that is not listed.
+ */
+export async function collectProviderPages<T>(input: ProviderPageTraversal<T>): Promise<T[]> {
+  return (await traverseProviderPages(input)).items;
 }
 
 function validateLegacyInventory<T>(items: T[], identity: (item: T) => string, max: number): T[] {
@@ -89,14 +123,18 @@ function validateLegacyInventory<T>(items: T[], identity: (item: T) => string, m
   return items;
 }
 
-/** Legacy array providers remain compatible; new remote providers page natively. */
-export async function listProviderVaults(
+/**
+ * The provider's vaults and whether absence is proven. Legacy array
+ * providers remain compatible (one response is consistent); new remote
+ * providers page natively.
+ */
+export async function readProviderVaultInventory(
   provider: VaultProvider,
   ctx: VaultProviderContext,
-): Promise<ProviderVault[]> {
+): Promise<ProviderInventory<ProviderVault>> {
   const identity = (vault: ProviderVault) => vault.externalVaultId;
   if (provider.listVaultPage) {
-    return collectProviderPages({
+    return traverseProviderPages({
       page: async (page) => {
         const result = await provider.listVaultPage!(ctx, page);
         if (result.freshness) ctx.onFreshness?.(result.freshness);
@@ -110,17 +148,32 @@ export async function listProviderVaults(
   ctx.signal?.throwIfAborted();
   const items = await provider.listVaults(ctx);
   ctx.signal?.throwIfAborted();
-  return validateLegacyInventory(items, identity, VAULT_LIMITS.vaultsPerOwnerScope);
+  return {
+    items: validateLegacyInventory(items, identity, VAULT_LIMITS.vaultsPerOwnerScope),
+    consistent: true,
+  };
 }
 
-export async function listProviderItems(
+/** Enumeration of the provider's vaults (discovery and linking). */
+export async function listProviderVaults(
+  provider: VaultProvider,
+  ctx: VaultProviderContext,
+): Promise<ProviderVault[]> {
+  return (await readProviderVaultInventory(provider, ctx)).items;
+}
+
+/**
+ * A provider vault's item metadata and whether absence is proven: only a
+ * consistent inventory may replace a mirror.
+ */
+export async function readProviderItemInventory(
   provider: VaultProvider,
   ctx: VaultProviderContext,
   externalVaultId: string,
-): Promise<ProviderItemMeta[]> {
+): Promise<ProviderInventory<ProviderItemMeta>> {
   const identity = (item: ProviderItemMeta) => item.externalItemId;
   if (provider.listItemPage) {
-    return collectProviderPages({
+    return traverseProviderPages({
       page: async (page) => {
         const result = await provider.listItemPage!(ctx, externalVaultId, page);
         if (result.freshness) ctx.onFreshness?.(result.freshness);
@@ -134,5 +187,20 @@ export async function listProviderItems(
   ctx.signal?.throwIfAborted();
   const items = await provider.listItems(ctx, externalVaultId);
   ctx.signal?.throwIfAborted();
-  return validateLegacyInventory(items, identity, VAULT_LIMITS.itemsPerVault);
+  return {
+    items: validateLegacyInventory(items, identity, VAULT_LIMITS.itemsPerVault),
+    consistent: true,
+  };
+}
+
+/**
+ * Enumeration of a provider vault's item metadata. It does not prove which
+ * items are absent; mirror replacement uses `readProviderItemInventory`.
+ */
+export async function listProviderItems(
+  provider: VaultProvider,
+  ctx: VaultProviderContext,
+  externalVaultId: string,
+): Promise<ProviderItemMeta[]> {
+  return (await readProviderItemInventory(provider, ctx, externalVaultId)).items;
 }

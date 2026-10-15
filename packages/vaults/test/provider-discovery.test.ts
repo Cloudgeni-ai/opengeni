@@ -4,16 +4,40 @@ import {
   createProviderCallBudget,
   listProviderItems,
   providerOperations,
+  readProviderItemInventory,
+  traverseProviderPages,
+  type ProviderItemMeta,
+  type ProviderPage,
+  type ProviderPageRequest,
   type VaultProviderCapabilities,
 } from "../src/index";
 import { createFakeVaultProvider } from "../src/testing/index";
 
 const identity = (item: { id: string }) => item.id;
 
+/**
+ * An upstream that pages by position (offset cursors) without a snapshot.
+ * `afterFirstPage` runs once the first page is served, before the next.
+ */
+function offsetPages<T>(
+  upstream: T[],
+  pageSize: number,
+  afterFirstPage: () => void = () => undefined,
+): (request: ProviderPageRequest) => Promise<ProviderPage<T>> {
+  return async (request) => {
+    const offset = request.cursor ? Number(request.cursor) : 0;
+    const size = Math.min(pageSize, request.limit);
+    const items = upstream.slice(offset, offset + size);
+    const nextCursor = offset + size < upstream.length ? String(offset + size) : null;
+    if (offset === 0) afterFirstPage();
+    return { items, nextCursor, snapshot: null };
+  };
+}
+
 describe("complete provider inventories", () => {
   test("traverses bounded pages with their snapshot", async () => {
     const requests: unknown[] = [];
-    const result = await collectProviderPages({
+    const result = await traverseProviderPages({
       maxItems: 3,
       identity,
       page: async (request) => {
@@ -23,8 +47,65 @@ describe("complete provider inventories", () => {
           : { items: [{ id: "a" }], nextCursor: "page2", snapshot: "version1" };
       },
     });
-    expect(result).toEqual([{ id: "a" }, { id: "b" }]);
+    // Every page under one snapshot: absence is proven.
+    expect(result).toEqual({ items: [{ id: "a" }, { id: "b" }], consistent: true });
     expect(requests).toEqual([{ limit: 3 }, { limit: 2, cursor: "page2", snapshot: "version1" }]);
+  });
+
+  test("a multi-page listing without a snapshot is enumerated but never proves absence", async () => {
+    // Offset cursors: "a" is deleted after the first page, so every later
+    // item moves up one position and "c" (which still exists) is never listed.
+    const upstream = ["a", "b", "c", "d"].map((id) => ({ id }));
+    const page = offsetPages(upstream, 2, () => upstream.splice(0, 1));
+    const inventory = await traverseProviderPages({ maxItems: 10, identity, page });
+    expect(inventory.items.map(identity)).toEqual(["a", "b", "d"]);
+    expect(upstream.map(identity)).toContain("c");
+    expect(inventory.consistent).toBe(false);
+
+    // Discovery keeps the bounded enumeration; it only lacks the proof.
+    const again = ["a", "b", "c", "d"].map((id) => ({ id }));
+    expect(
+      await collectProviderPages({ maxItems: 10, identity, page: offsetPages(again, 2) }),
+    ).toEqual(again);
+  });
+
+  test("a single page needs no snapshot to be consistent", async () => {
+    expect(
+      await traverseProviderPages({
+        maxItems: 10,
+        identity,
+        page: offsetPages([{ id: "a" }, { id: "b" }], 5),
+      }),
+    ).toEqual({ items: [{ id: "a" }, { id: "b" }], consistent: true });
+  });
+
+  test("item inventories report consistency for paged and array providers alike", async () => {
+    const item = (index: number): ProviderItemMeta => ({
+      externalItemId: `item-${index}`,
+      name: `Item ${index}`,
+      type: "login",
+      websites: [],
+      fields: [],
+      version: null,
+      updatedAt: null,
+    });
+    const ctx = { connectionId: null, budget: createProviderCallBudget(10) };
+    const provider = createFakeVaultProvider({
+      vaults: [{ externalVaultId: "v", name: "V", items: [{ name: "Only", fields: [] }] }],
+    });
+    // One array response is one consistent inventory.
+    expect(await readProviderItemInventory(provider, ctx, "v")).toMatchObject({
+      consistent: true,
+      items: [expect.objectContaining({ name: "Only" })],
+    });
+    // 150 items in offset pages without a snapshot: listed, but not proven.
+    const upstream = Array.from({ length: 150 }, (_, index) => item(index));
+    provider.listItemPage = async (_ctx, _vaultId, request) =>
+      await offsetPages(upstream, 100)(request);
+    const inventory = await readProviderItemInventory(provider, ctx, "v");
+    expect(inventory.consistent).toBe(false);
+    expect(inventory.items).toHaveLength(150);
+    expect(await listProviderItems(provider, ctx, "v")).toHaveLength(150);
   });
 
   test("refuses oversized, duplicate, changed and looping pages without certifying completion", async () => {

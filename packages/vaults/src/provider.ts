@@ -102,7 +102,13 @@ export interface ProviderPageRequest {
 export interface ProviderPage<T> {
   items: T[];
   nextCursor: string | null;
-  /** Null only when upstream cannot supply snapshot consistency. */
+  /**
+   * Null only when upstream cannot supply snapshot consistency. A single page
+   * needs none, but a multi-page listing without a snapshot proves only what
+   * it contains: Opengeni lists it for discovery, yet never replaces a mirror
+   * from it (that would drop items skipped while the pages were read). Every
+   * page of one listing carries the same snapshot.
+   */
   snapshot: string | null;
   freshness?: VaultProviderFreshness;
 }
@@ -115,6 +121,11 @@ export interface VaultProvider {
     /** Stable identity, when supplied by the upstream account or bridge. */
     accountId?: string;
   }>;
+  /**
+   * One complete response, trusted as a consistent inventory. An adapter
+   * that pages upstream should implement `listVaultPage`/`listItemPage`, so
+   * page consistency is checked, rather than join pages here.
+   */
   listVaults(ctx: VaultProviderContext): Promise<ProviderVault[]>;
   listItems(ctx: VaultProviderContext, externalVaultId: string): Promise<ProviderItemMeta[]>;
   listVaultPage?(

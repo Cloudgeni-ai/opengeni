@@ -2,7 +2,9 @@
 // §8–§10), against PostgreSQL: every search page names the connected sources
 // and whether they are current; an outage is never an empty healthy vault or
 // a missing-secret ask card; a deliberate refresh re-lists and advances the
-// durable value-cache epoch but never bypasses a provider rate limit; a write
+// durable value-cache epoch but never bypasses a provider rate limit; an
+// inventory that cannot be mirrored as listed (an item beyond the mirror
+// limits, or pages without a snapshot) keeps the previous mirror; a write
 // the vault does not allow is refused before any value is resolved or any
 // provider mutation; and an unconfirmed or not-yet-listed write is never
 // presented as safe to repeat.
@@ -13,6 +15,7 @@ import {
   SecretSaveInput,
   SecretSearchInput,
   SecretSearchOutput,
+  VAULT_LIMITS,
   VaultSummary,
   type SecretPrincipal,
   type SecretReferenceError,
@@ -20,6 +23,7 @@ import {
   type VaultProviderOperations,
 } from "@opengeni/contracts";
 import {
+  createConnection,
   createDb,
   createVault,
   encryptEnvironmentValue,
@@ -37,6 +41,7 @@ import {
   createProviderCallBudget,
   createVaultProviderRegistry,
   VaultProviderError,
+  type ProviderItemMeta,
   type ProviderVault,
   type VaultProvider,
 } from "@opengeni/vaults";
@@ -259,6 +264,7 @@ async function world(options: { operations?: VaultProviderOperations } = {}) {
   return {
     db,
     context,
+    subjectId,
     principal,
     actor,
     workspaceId,
@@ -864,6 +870,171 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       // One provider call per principal, not one per caller.
       expect(w.calls("listVaults")).toBe(lists + 2);
       w.controls.gate = null;
+    });
+
+    test("an inventory that cannot be mirrored as listed keeps the previous mirror, for host and external vaults", async () => {
+      if (!client) return;
+      const w = await world();
+      // A remote bridge (`external`) vault over a workspace connection, beside the host vault.
+      const connection = await createConnection(w.db, {
+        accountId: w.actor.grant.accountId,
+        workspaceId: w.workspaceId,
+        subjectId: null,
+        providerDomain: "vault:external",
+        kind: "api_key",
+        status: "active",
+        credentialEncrypted: encryptEnvironmentValue(
+          Buffer.from(key),
+          JSON.stringify({ provider: "external" }),
+        ),
+        grantedScopes: [],
+        expiresAt: null,
+        metadata: {
+          credentialRole: "external_vault_provider",
+          vaultProvider: {
+            version: 1,
+            provider: "external",
+            ownership: "workspace",
+            accountId: null,
+            accountName: "Bridge",
+            label: null,
+            verifiedAt: new Date().toISOString(),
+            operations: LOGIN_ONLY,
+          },
+        },
+        createdBySubjectId: w.subjectId,
+      });
+      const remote = createFakeVaultProvider({
+        vaults: [
+          {
+            externalVaultId: "bridge",
+            name: "Bridge",
+            items: [
+              {
+                name: "Bridge token",
+                type: "api_key",
+                fields: [{ name: "value", value: "bridge-secret" }],
+              },
+              { name: "Deploy key", type: "api_key", fields: [{ name: "value", value: "deploy" }] },
+            ],
+          },
+        ],
+      });
+      const providers = createVaultProviderRegistry({
+        host: async () => w.host,
+        external: async () => remote,
+      });
+      const bridge = await linkProviderVault(w.db, w.context, {
+        ownerKind: "workspace",
+        name: "Bridge",
+        source: "external",
+        providerConnectionId: connection.id,
+        providerVaultRef: "bridge",
+        mode: "read_only",
+      });
+      const sync = async (vault: { id: string }) =>
+        await syncLinkedProviderVault({
+          db: w.db,
+          context: w.context,
+          vaultId: vault.id,
+          providers,
+          force: true,
+        });
+      expect(await sync(bridge)).toMatchObject({ status: "synced", itemCount: 2 });
+      const mirrored = async (vault: { id: string }) =>
+        (await w.service.listItems(w.actor, w.workspaceId, vault.id, {})).items
+          .map((item) => item.name)
+          .sort();
+      const epochOf = async (vault: { id: string }) =>
+        BigInt((await w.reload(vault)).providerCacheEpoch!);
+      const oversized = (patch: Partial<ProviderItemMeta>): ProviderItemMeta => ({
+        externalItemId: "oversized",
+        name: "Payroll export",
+        type: "login",
+        websites: [],
+        fields: [],
+        version: "1",
+        updatedAt: null,
+        ...patch,
+      });
+      const filler = (index: number): ProviderItemMeta => ({
+        ...oversized({}),
+        externalItemId: `filler-${index}`,
+        name: `Filler ${index}`,
+      });
+
+      for (const [vault, provider, externalVaultId, before] of [
+        [w.company, w.host, "company", ["Company card"]],
+        [bridge, remote, "bridge", ["Bridge token", "Deploy key"]],
+      ] as const) {
+        expect(await mirrored(vault)).toEqual([...before]);
+        const epoch = await epochOf(vault);
+        const expectKept = async () => {
+          expect(await mirrored(vault)).toEqual([...before]);
+          expect(await epochOf(vault)).toBe(epoch);
+          const row = await w.reload(vault);
+          expect(row.syncStatus).toBe("error");
+          expect(row.syncErrorCode).toBe("provider_inventory_incomplete");
+          expect(row.syncErrorMessage).not.toContain("Payroll");
+        };
+
+        // An item beyond the mirror limits is refused whole, never cut down.
+        const listItems = provider.listItems;
+        for (const big of [
+          oversized({
+            fields: Array.from({ length: VAULT_LIMITS.fieldsPerItem + 1 }, (_, index) => ({
+              externalFieldId: `field-${index}`,
+              name: `field ${index}`,
+              kind: "concealed" as const,
+            })),
+          }),
+          oversized({
+            websites: Array.from(
+              { length: VAULT_LIMITS.websitesPerItem + 1 },
+              (_, index) => `https://site-${index}.example`,
+            ),
+          }),
+          oversized({ websites: [`https://${"a".repeat(VAULT_LIMITS.websiteMaxChars)}`] }),
+        ]) {
+          provider.listItems = async (ctx, id) => [...(await listItems(ctx, id)), big];
+          expect(await sync(vault)).toMatchObject({
+            status: "failed",
+            code: "provider_inventory_incomplete",
+          });
+          await expectKept();
+        }
+        provider.listItems = listItems;
+
+        // Review regression: offset pages without a snapshot. A filler is
+        // deleted after the first page, every later item moves up one place,
+        // and an item that still exists is never listed.
+        const existing = await listItems(
+          { connectionId: null, budget: createProviderCallBudget(5) },
+          externalVaultId,
+        );
+        const upstream = [...Array.from({ length: 100 }, (_, index) => filler(index)), ...existing];
+        provider.listItemPage = async (_ctx, _id, page) => {
+          const offset = page.cursor ? Number(page.cursor) : 0;
+          const items = upstream.slice(offset, offset + page.limit);
+          const nextCursor =
+            offset + page.limit < upstream.length ? String(offset + page.limit) : null;
+          if (offset === 0) upstream.splice(0, 1);
+          return { items, nextCursor, snapshot: null };
+        };
+        expect(await sync(vault)).toMatchObject({
+          status: "failed",
+          code: "provider_inventory_incomplete",
+        });
+        expect(upstream.map((item) => item.name)).toContain(existing[0]!.name);
+        await expectKept();
+        delete provider.listItemPage;
+
+        // A consistent listing replaces the mirror again.
+        expect(await sync(vault)).toMatchObject({ status: "synced" });
+        expect(await mirrored(vault)).toEqual([...before]);
+        expect(await epochOf(vault)).toBe(epoch + 1n);
+        expect((await w.reload(vault)).syncStatus).toBe("ok");
+      }
     });
   },
 );

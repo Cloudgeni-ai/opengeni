@@ -136,10 +136,18 @@ external IDs, malformed pages and excessive page/item counts.
 
 Only a complete successful traversal may replace the mirror or remove absent
 items. Interrupted, expired or over-limit traversals retain the old mirror
-and report incomplete/unavailable state. The native 2,000-item vault limit
-remains explicit; never describe the first 2,000 items of a larger provider
-vault as its complete contents. Agent discovery retains its 1,000-row scan
-budget and next-cursor behavior.
+and report incomplete/unavailable state. A traversal proves absence only when
+it is one page or every page carries the same snapshot. Offset cursors
+without a snapshot can skip an existing item when an earlier one is deleted
+between pages, so such a multi-page listing serves discovery but never
+replaces the mirror; the vault reports `provider_inventory_incomplete`, keeps
+its previous mirror, and is not reported removed when absent from such a
+vault listing. Items beyond the mirror limits (50 fields, 20 websites, 2,048
+characters per website) make the inventory incomplete as well; they are never
+cut down to fit. The native 2,000-item vault limit remains explicit; never
+describe the first 2,000 items of a larger provider vault as its complete
+contents. Agent discovery retains its 1,000-row scan budget and next-cursor
+behavior.
 
 ## 9. Freshness and deliberate refresh
 

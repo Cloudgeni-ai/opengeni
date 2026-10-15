@@ -41,6 +41,41 @@ function memoryStore() {
 const ctx = () => ({ connectionId: null, budget: createProviderCallBudget(50) });
 const NOW = new Date("2026-10-12T12:00:00.000Z");
 
+const meta = (index: number, patch: Partial<ProviderItemMeta> = {}): ProviderItemMeta => ({
+  externalItemId: `item-${index}`,
+  name: `Item ${index}`,
+  type: "login",
+  websites: [],
+  fields: [],
+  version: "1",
+  updatedAt: null,
+  ...patch,
+});
+
+const fieldsOf = (count: number): ProviderItemMeta["fields"] =>
+  Array.from({ length: count }, (_, index) => ({
+    externalFieldId: `field-${index}`,
+    name: `field ${index}`,
+    kind: "concealed",
+  }));
+
+const sites = (count: number) =>
+  Array.from({ length: count }, (_, index) => `https://site-${index}.example`);
+
+/** A position-paged listing (offset cursors) without a snapshot. */
+function offsetPage<T>(
+  upstream: T[],
+  cursor: string | undefined,
+  limit: number,
+  afterFirstPage: () => void = () => undefined,
+): ProviderPage<T> {
+  const offset = cursor ? Number(cursor) : 0;
+  const items = upstream.slice(offset, offset + limit);
+  const nextCursor = offset + limit < upstream.length ? String(offset + limit) : null;
+  if (offset === 0) afterFirstPage();
+  return { items, nextCursor, snapshot: null };
+}
+
 describe("provider mirror planning", () => {
   test("sanitizes and de-duplicates item names deterministically", () => {
     const field = { externalFieldId: "p", name: "password", kind: "concealed" as const };
@@ -190,6 +225,36 @@ describe("provider mirror planning", () => {
     expect(() => planProviderMirror([...atLimit, item(VAULT_LIMITS.itemsPerVault)], "8")).toThrow(
       expect.objectContaining({ code: "provider_inventory_incomplete" }),
     );
+  });
+
+  test("an item beyond the field or website limits is refused whole, never cut down", () => {
+    const atLimits = meta(1, {
+      fields: fieldsOf(VAULT_LIMITS.fieldsPerItem),
+      websites: [
+        `https://${"a".repeat(VAULT_LIMITS.websiteMaxChars - "https://".length)}`,
+        ...sites(VAULT_LIMITS.websitesPerItem - 1),
+      ],
+    });
+    const plan = planProviderMirror([atLimits], "1");
+    expect(plan.items[0]!.fields).toHaveLength(VAULT_LIMITS.fieldsPerItem);
+    expect(plan.items[0]!.websites).toEqual(atLimits.websites);
+    expect(plan.truncated).toBe(0);
+    for (const oversized of [
+      meta(2, { fields: fieldsOf(VAULT_LIMITS.fieldsPerItem + 1) }),
+      meta(2, { websites: sites(VAULT_LIMITS.websitesPerItem + 1) }),
+      meta(2, { websites: [`https://${"a".repeat(VAULT_LIMITS.websiteMaxChars)}`] }),
+    ]) {
+      const named = { ...oversized, name: "Payroll export" };
+      expect(() => planProviderMirror([atLimits, named], "2")).toThrow(
+        expect.objectContaining({ code: "provider_inventory_incomplete" }),
+      );
+      try {
+        planProviderMirror([named], "2");
+      } catch (error) {
+        // Provider item names are untrusted and never echoed.
+        expect((error as Error).message).not.toContain("Payroll");
+      }
+    }
   });
 });
 
@@ -476,6 +541,129 @@ describe("syncProviderVault", () => {
       expect(plans).toHaveLength(0);
       expect(statuses.at(-1)!.lastSyncedAt).toBeNull();
       expect(statuses.at(-1)!.syncErrorMessage).not.toContain("secret-bearing");
+    }
+  });
+
+  test("an item beyond the mirror limits keeps the previous mirror and records why", async () => {
+    const fake = createFakeVaultProvider({
+      vaults: [
+        {
+          externalVaultId: "rw",
+          name: "RW",
+          items: [{ name: "Fine", fields: [{ name: "password", value: "p" }] }],
+        },
+      ],
+    });
+    const oversized = meta(9, {
+      name: "Payroll export",
+      fields: fieldsOf(VAULT_LIMITS.fieldsPerItem + 1),
+    });
+    const provider: VaultProvider = {
+      ...fake,
+      async listItems(listCtx, externalVaultId) {
+        return [...(await fake.listItems(listCtx, externalVaultId)), oversized];
+      },
+    };
+    const { store, plans, statuses } = memoryStore();
+    const result = await syncProviderVault({
+      provider,
+      ctx: ctx(),
+      target: { externalVaultId: "rw", mirroredContentVersion: null, rateLimitedUntil: null },
+      store,
+      now: () => NOW,
+    });
+    expect(result).toMatchObject({
+      status: "failed",
+      syncStatus: "error",
+      code: "provider_inventory_incomplete",
+    });
+    expect(plans).toHaveLength(0);
+    expect(statuses.at(-1)).toMatchObject({
+      syncErrorCode: "provider_inventory_incomplete",
+      lastSyncedAt: null,
+    });
+    expect(statuses.at(-1)!.syncErrorMessage).toContain(`${VAULT_LIMITS.fieldsPerItem} fields`);
+    expect(statuses.at(-1)!.syncErrorMessage).not.toContain("Payroll");
+  });
+
+  test("an offset-paged listing without a snapshot never replaces the mirror", async () => {
+    // Review regression: the first page is read, then "Item 0" is deleted, so
+    // every later item moves up one position and "Item 100" (which still
+    // exists) is never listed. Replacing the mirror would delete it.
+    const upstream = Array.from({ length: 101 }, (_, index) => meta(index));
+    const fake = createFakeVaultProvider({ vaults: [{ externalVaultId: "rw", name: "RW" }] });
+    const provider: VaultProvider = {
+      ...fake,
+      async listItemPage(_pageCtx, _externalVaultId, page) {
+        return offsetPage(upstream, page.cursor, page.limit, () => upstream.splice(0, 1));
+      },
+    };
+    const target = { externalVaultId: "rw", mirroredContentVersion: null, rateLimitedUntil: null };
+    const { store, plans, statuses } = memoryStore();
+    const result = await syncProviderVault({ provider, ctx: ctx(), target, store, now: () => NOW });
+    expect(result).toMatchObject({
+      status: "failed",
+      syncStatus: "error",
+      code: "provider_inventory_incomplete",
+    });
+    expect(upstream.some((item) => item.externalItemId === "item-100")).toBe(true);
+    expect(plans).toHaveLength(0);
+    expect(statuses.at(-1)!.syncErrorMessage).toContain("several pages without a snapshot");
+
+    // One page needs no snapshot, and pages under one snapshot are consistent.
+    for (const snapshot of [null, "s1"]) {
+      const pages = Array.from({ length: snapshot ? 150 : 100 }, (_, index) => meta(index));
+      const consistent: VaultProvider = {
+        ...fake,
+        async listItemPage(_pageCtx, _externalVaultId, page) {
+          return { ...offsetPage(pages, page.cursor, page.limit), snapshot };
+        },
+      };
+      const memory = memoryStore();
+      expect(
+        await syncProviderVault({
+          provider: consistent,
+          ctx: ctx(),
+          target,
+          store: memory.store,
+          now: () => NOW,
+        }),
+      ).toMatchObject({ status: "synced", itemCount: pages.length });
+      expect(memory.plans[0]!.items).toHaveLength(pages.length);
+    }
+  });
+
+  test("a vault missing from a multi-page vault listing without a snapshot is not reported removed", async () => {
+    const vaults = Array.from(
+      { length: 150 },
+      (_, index): ProviderVault => ({
+        externalVaultId: `vault-${index}`,
+        name: `Vault ${index}`,
+        contentVersion: "1",
+        itemCount: 0,
+      }),
+    );
+    const fake = createFakeVaultProvider();
+    for (const [snapshot, code] of [
+      [null, "provider_inventory_incomplete"],
+      ["s1", "provider_not_found"],
+    ] as const) {
+      const provider: VaultProvider = {
+        ...fake,
+        async listVaultPage(_pageCtx, page) {
+          return { ...offsetPage(vaults, page.cursor, page.limit), snapshot };
+        },
+      };
+      const { store, plans } = memoryStore();
+      const result = await syncProviderVault({
+        provider,
+        ctx: ctx(),
+        target: { externalVaultId: "gone", mirroredContentVersion: "1", rateLimitedUntil: null },
+        store,
+        now: () => NOW,
+      });
+      expect(result).toMatchObject({ status: "failed", code });
+      expect(plans).toHaveLength(0);
     }
   });
 });

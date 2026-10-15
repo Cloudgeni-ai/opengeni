@@ -26,3 +26,11 @@ This package owns:
 
 Providers never see principals: access is decided before a provider is called.
 Provider errors always map to a `VaultProviderErrorCode`; nothing is swallowed.
+
+Listings are read with `listProviderVaults` and `listProviderItems` (bounded
+enumeration for discovery), or with `readProviderVaultInventory` and
+`readProviderItemInventory`, which also report whether the listing is
+`consistent`: one response, or every page under one snapshot. Only a
+consistent inventory may remove items from a mirror. A multi-page listing
+without a snapshot proves only what it contains, so a vault served without
+snapshots is mirrored only while its listing fits in one page.

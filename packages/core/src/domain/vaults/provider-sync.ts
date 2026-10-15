@@ -18,9 +18,9 @@ import {
 } from "@opengeni/db";
 import {
   isVaultProviderError,
-  listProviderItems,
-  listProviderVaults,
   providerOperations,
+  readProviderItemInventory,
+  readProviderVaultInventory,
   VaultProviderError,
   type ProviderItemMeta,
   type VaultProvider,
@@ -37,10 +37,12 @@ import {
  * `contentVersion` is unchanged, so FAMILY-plan quotas are not burnt on
  * no-op refreshes.
  *
- * Only a complete, successful traversal replaces the mirror: interrupted,
+ * Only a complete, consistent traversal replaces the mirror: interrupted,
  * malformed or over-limit inventories (more than `VAULT_LIMITS.itemsPerVault`
- * items) keep the previous mirror and record the failure. An active provider
- * rate limit is never bypassed, not even by a forced refresh.
+ * items, or an item beyond the per-item field and website limits) and
+ * multi-page listings without a snapshot keep the previous mirror and record
+ * `provider_inventory_incomplete`. Nothing is cut down to fit. An active
+ * provider rate limit is never bypassed, not even by a forced refresh.
  *
  * The engine is storage-agnostic: the vault service binds `ProviderMirrorStore`
  * to its tables (`vault_items`, `vault_item_fields`, `vaults.sync_status`,
@@ -74,8 +76,9 @@ export interface ProviderMirrorPlan {
   items: ProviderMirrorItem[];
   /**
    * Always 0. A provider vault with more than `VAULT_LIMITS.itemsPerVault`
-   * items is refused whole (`provider_inventory_incomplete`), never mirrored
-   * as its first items. Kept for compatibility with earlier callers.
+   * items, or an item beyond the field or website limits, is refused whole
+   * (`provider_inventory_incomplete`), never mirrored as its first items or
+   * fields. Kept for compatibility with earlier callers.
    */
   truncated: number;
 }
@@ -134,6 +137,43 @@ function incompleteInventory(): VaultProviderError {
     "provider_inventory_incomplete",
     `This vault has more than ${VAULT_LIMITS.itemsPerVault} items, more than Opengeni mirrors. The previous inventory was kept.`,
   );
+}
+
+function oversizedItem(): VaultProviderError {
+  // Never name the item: provider names are untrusted and may be sensitive.
+  return new VaultProviderError(
+    "provider_inventory_incomplete",
+    `An item in this vault has more than ${VAULT_LIMITS.fieldsPerItem} fields or ${VAULT_LIMITS.websitesPerItem} websites (or a website over ${VAULT_LIMITS.websiteMaxChars} characters), more than Opengeni mirrors. The previous inventory was kept.`,
+  );
+}
+
+function unprovenInventory(listing: "vaults" | "items"): VaultProviderError {
+  return new VaultProviderError(
+    "provider_inventory_incomplete",
+    listing === "items"
+      ? "The provider listed this vault in several pages without a snapshot, so Opengeni cannot tell which items were removed. The previous inventory was kept."
+      : "The provider listed its vaults in several pages without a snapshot and this vault was not among them, so Opengeni cannot confirm it was removed.",
+  );
+}
+
+/**
+ * Every item fits the mirror as it is: at most `fieldsPerItem` fields and
+ * `websitesPerItem` websites of at most `websiteMaxChars` each (the limits
+ * the native adapters and the remote protocol enforce). Cutting an item down
+ * would present it as complete without the fields or websites it lost.
+ */
+function assertMirrorable(item: ProviderItemMeta): void {
+  if (
+    !Array.isArray(item.fields) ||
+    !Array.isArray(item.websites) ||
+    item.fields.length > VAULT_LIMITS.fieldsPerItem ||
+    item.websites.length > VAULT_LIMITS.websitesPerItem ||
+    item.websites.some(
+      (website) => typeof website !== "string" || website.length > VAULT_LIMITS.websiteMaxChars,
+    )
+  ) {
+    throw oversizedItem();
+  }
 }
 
 // Same forbidden set as `isValidSecretName` (Q-10).
@@ -204,15 +244,17 @@ export function providerPrimaryFieldId(
  * Deterministic mirror projection. Items are ordered by provider name then
  * external id before de-duplication, so the same provider state always yields
  * the same Opengeni names; field names are de-duplicated within each item.
- * More than `VAULT_LIMITS.itemsPerVault` items is refused with
- * `provider_inventory_incomplete`: a partial mirror would present the first
- * items of a larger vault as its complete contents.
+ * More than `VAULT_LIMITS.itemsPerVault` items, or any item beyond the field
+ * or website limits, is refused with `provider_inventory_incomplete`: a
+ * partial mirror would present the first items (or fields, or websites) of a
+ * larger vault as its complete contents.
  */
 export function planProviderMirror(
   items: readonly ProviderItemMeta[],
   contentVersion: string | null,
 ): ProviderMirrorPlan {
   if (items.length > VAULT_LIMITS.itemsPerVault) throw incompleteInventory();
+  for (const item of items) assertMirrorable(item);
   const ordered = [...items].sort(
     (a, b) =>
       nameKey(a.name).localeCompare(nameKey(b.name)) ||
@@ -222,29 +264,25 @@ export function planProviderMirror(
   const mirrored = ordered.map((item): ProviderMirrorItem => {
     const name = uniqueProviderName(providerSecretName(item.name), takenItems);
     const takenFields = new Set<string>();
-    const fields = item.fields
-      .slice(0, VAULT_LIMITS.fieldsPerItem)
-      .map((field, position): ProviderMirrorField => {
-        let fieldName = providerSecretName(
-          field.name,
-          field.kind === "totp" ? "one-time password" : "field",
-        );
-        if (nameKey(fieldName) === "otp") fieldName = "otp code";
-        return {
-          externalFieldId: field.externalFieldId,
-          name: uniqueProviderName(fieldName, takenFields),
-          kind: field.kind,
-          position,
-        };
-      });
+    const fields = item.fields.map((field, position): ProviderMirrorField => {
+      let fieldName = providerSecretName(
+        field.name,
+        field.kind === "totp" ? "one-time password" : "field",
+      );
+      if (nameKey(fieldName) === "otp") fieldName = "otp code";
+      return {
+        externalFieldId: field.externalFieldId,
+        name: uniqueProviderName(fieldName, takenFields),
+        kind: field.kind,
+        position,
+      };
+    });
     return {
       externalItemId: item.externalItemId,
       name,
       providerName: item.name,
       type: item.type,
-      websites: item.websites
-        .filter((website) => website.length <= VAULT_LIMITS.websiteMaxChars)
-        .slice(0, VAULT_LIMITS.websitesPerItem),
+      websites: [...item.websites],
       fields,
       primaryExternalFieldId: providerPrimaryFieldId({ type: item.type, fields: item.fields }),
       hasTotp: item.fields.some((field) => field.kind === "totp"),
@@ -395,14 +433,20 @@ export async function syncProviderVault(input: {
     };
   };
   try {
-    const vaults = await providerStep(() => listProviderVaults(input.provider, ctx));
-    const vault = vaults.find((candidate) => candidate.externalVaultId === target.externalVaultId);
+    const vaults = await providerStep(() => readProviderVaultInventory(input.provider, ctx));
+    const vault = vaults.items.find(
+      (candidate) => candidate.externalVaultId === target.externalVaultId,
+    );
     if (!vault) {
+      // Absence is concluded only from a consistent listing; a multi-page
+      // listing without a snapshot may have skipped the vault.
       const failure = providerSyncFailure(
-        new VaultProviderError(
-          "provider_not_found",
-          "the linked provider vault no longer exists or is no longer shared with this connection",
-        ),
+        vaults.consistent
+          ? new VaultProviderError(
+              "provider_not_found",
+              "the linked provider vault no longer exists or is no longer shared with this connection",
+            )
+          : unprovenInventory("vaults"),
         now(),
       );
       await input.store.setSyncStatus(failure);
@@ -422,10 +466,13 @@ export async function syncProviderVault(input: {
       await input.store.setSyncStatus({ ...succeeded(), operations });
       return { status: "unchanged", contentVersion: vault.contentVersion };
     }
-    const items = await providerStep(() =>
-      listProviderItems(input.provider, ctx, target.externalVaultId),
+    const inventory = await providerStep(() =>
+      readProviderItemInventory(input.provider, ctx, target.externalVaultId),
     );
-    const plan = planProviderMirror(items, vault.contentVersion);
+    // Replacing the mirror drops every item the listing lacks: an
+    // inconsistent listing may lack items that still exist.
+    if (!inventory.consistent) throw unprovenInventory("items");
+    const plan = planProviderMirror(inventory.items, vault.contentVersion);
     await input.store.replaceMirror(plan);
     await input.store.setSyncStatus({ ...succeeded(), operations });
     return {
