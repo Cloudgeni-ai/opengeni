@@ -14,6 +14,7 @@ import { SecretsLoadFailure, SyncStatus, VaultChips, VaultTile } from "./vault-p
 import { groupVaults, isMissingKeyError, itemsLabel, VAULT_GROUP_TITLE } from "./vault-model";
 import {
   connectionName,
+  everListed,
   needsAttention,
   providerOfVault,
   PROVIDERS,
@@ -118,7 +119,9 @@ export function SecretsListPage({
       description={describe(vault)}
       status={needsAttention(vaultHealth(vault)) ? <SyncStatus vault={vault} /> : undefined}
       cells={{
-        items: itemsLabel(vault.itemCount),
+        // A password manager vault that never listed has no count yet, not zero items.
+        items:
+          providerOfVault(vault) && !everListed(vault) ? "Not listed" : itemsLabel(vault.itemCount),
         updated: <RelativeTime date={vault.updatedAt} />,
       }}
       indicator="open"

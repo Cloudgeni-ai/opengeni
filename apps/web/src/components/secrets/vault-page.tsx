@@ -380,7 +380,8 @@ export function VaultPage({
         // Sync status is the banner below, so the header doesn't repeat it.
         chips={<VaultChips vault={vault} inHeader />}
         meta={[
-          <span key="count">{itemsLabel(vault.itemCount)}</span>,
+          // Never listed: no count or update time to report yet.
+          ...(unlisted ? [] : [<span key="count">{itemsLabel(vault.itemCount)}</span>]),
           <span key="audience">{vaultAudience(vault, organizationName)}</span>,
           ...(providerAccount
             ? [
@@ -396,9 +397,13 @@ export function VaultPage({
                 </span>,
               ]
             : []),
-          <span key="updated">
-            updated <RelativeTime date={vault.updatedAt} inSentence />
-          </span>,
+          ...(unlisted
+            ? []
+            : [
+                <span key="updated">
+                  updated <RelativeTime date={vault.updatedAt} inSentence />
+                </span>,
+              ]),
         ]}
         actions={headerActions}
       />

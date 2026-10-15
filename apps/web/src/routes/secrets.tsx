@@ -51,6 +51,7 @@ import {
   LEGACY_PROVIDER_OPERATIONS,
   PROVIDERS,
   sourceHome,
+  stillPending,
   vaultOperations,
   type ExternalVaultProviderKind,
   type VaultConnection,
@@ -428,6 +429,11 @@ export function SecretsRoute({
             back: () => openList(),
             chooseVaults: () => openConnection(connection.id, "choose-vaults"),
             renew: () => openConnection(connection.id, "replace-token"),
+            finish: async () => {
+              stillPending(await api.verifyVaultProviderConnection(connection.id));
+              await Promise.all([vaults.refresh(), refreshConnections()]);
+              toast.success(`Connected ${connectionName(connection)}`);
+            },
             disconnect: () => setDisconnecting(true),
             openVault: (linked) => openVault(linked.id),
             retry: () => {
@@ -495,6 +501,7 @@ export function SecretsRoute({
           onConnected={() => void refreshConnections()}
           actions={{
             install: (request) => api.installVaultProvider(request),
+            verify: (id) => api.verifyVaultProviderConnection(id),
             ...linkActions,
           }}
         />

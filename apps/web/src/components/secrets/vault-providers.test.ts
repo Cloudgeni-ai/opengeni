@@ -9,10 +9,12 @@ import {
   everListed,
   healthLabel,
   HOSTED_OPERATIONS,
+  isPending,
   LEGACY_PROVIDER_OPERATIONS,
   needsAttention,
   removalLabel,
   sourceHome,
+  stillPending,
   vaultHealth,
   vaultOperations,
   type VaultProviderOperations,
@@ -195,6 +197,37 @@ describe("a linked vault's health", () => {
       ]),
     ).toBe("auth_expired");
     expect(connectionAttention([ok], { available: false })).toBe("unavailable_here");
+  });
+
+  test("a pending connection asks to finish connecting, after a server without it", () => {
+    const ok = vault({ source: "keeper" });
+    expect(connectionAttention([], { available: true, verificationStatus: "pending" })).toBe(
+      "pending",
+    );
+    expect(connectionAttention([ok], { available: false, verificationStatus: "pending" })).toBe(
+      "unavailable_here",
+    );
+    expect(connectionAttention([ok], { available: true, verificationStatus: "ready" })).toBeNull();
+    expect(isPending({ verificationStatus: "pending" })).toBe(true);
+    expect(isPending({})).toBe(false);
+  });
+
+  test("a verify that is still pending fails with the provider's reason", () => {
+    const ready = { discoveryPending: false } as Parameters<typeof stillPending>[0];
+    expect(stillPending(ready)).toBe(ready);
+    const pending = {
+      discoveryPending: true,
+      errorCode: "provider_auth_expired",
+    } as Parameters<typeof stillPending>[0];
+    expect(() => stillPending(pending)).toThrow();
+    try {
+      stillPending(pending);
+    } catch (error) {
+      expect((error as { code?: string; status?: number }).code).toBe("provider_auth_expired");
+      expect((error as { status?: number }).status).toBe(409);
+    }
+    const unknown = { discoveryPending: true } as Parameters<typeof stillPending>[0];
+    expect(() => stillPending(unknown)).toThrow();
   });
 
   test("a connection's name falls back from label to account to provider", () => {

@@ -16,6 +16,7 @@ import { Notice } from "@/components/ui/notice";
 import { SelectMenu } from "@/components/ui/select-menu";
 import { userErrorText } from "@/lib/api-error";
 
+import { FinishConnectingNotice } from "./provider-connections";
 import { ProviderTile } from "./provider-marks";
 import {
   causeOf,
@@ -30,6 +31,7 @@ import {
   connectionName,
   PROVIDER_IDS,
   PROVIDERS,
+  stillPending,
   type ExternalVaultProviderKind,
   type VaultConnection,
   type VaultProviderId,
@@ -437,6 +439,8 @@ function useCredentialForm(provider: ExternalVaultProviderKind) {
 
 export interface ConnectProviderActions extends LinkVaultActions {
   install: (request: InstallVaultProviderRequest) => Promise<InstallVaultProviderResponse>;
+  /** Checks a saved-but-pending connection again, with its saved access. */
+  verify: (connectionId: string) => Promise<InstallVaultProviderResponse>;
 }
 
 export function ConnectProviderPage({
@@ -460,14 +464,17 @@ export function ConnectProviderPage({
 }) {
   const info = PROVIDERS[provider];
   const [connection, setConnection] = useState<InstallVaultProviderResponse | null>(null);
-  const [owner, setOwner] = useState<ConnectionOwner>(() => initialOwner(owners, defaultOwner));
+  // A Bitwarden account is one person's vault, unlocked on their machine: Only me first.
+  const [owner, setOwner] = useState<ConnectionOwner>(() =>
+    initialOwner(owners, defaultOwner ?? (provider === "bitwarden" ? "user" : undefined)),
+  );
   const [linked, setLinked] = useState<VaultSummary[] | null>(null);
   const form = useCredentialForm(provider);
 
   if (!connection) {
     return (
       <FlushFormPage
-        backLabel="Connect a password manager"
+        backLabel="Secrets"
         onClose={onClose}
         title={provider === "external" ? "Connect your vault service" : `Connect ${info.name}`}
         description={DESCRIPTION[provider]}
@@ -499,12 +506,40 @@ export function ConnectProviderPage({
       </FlushFormPage>
     );
   }
+  if (connection.discoveryPending) {
+    // The access is saved (a Keeper token is already spent): never ask for it again here.
+    return (
+      <FlushFormPage
+        backLabel="Secrets"
+        onClose={onClose}
+        title={provider === "external" ? "Connect your vault service" : `Connect ${info.name}`}
+        description={DESCRIPTION[provider]}
+        submitLabel="Done"
+        cancelLabel={null}
+        onSubmit={(event) => {
+          event.preventDefault();
+          onClose();
+          return true;
+        }}
+      >
+        <FinishConnectingNotice
+          provider={provider}
+          canManage
+          onFinish={async () => {
+            const result = stillPending(await actions.verify(connection.connectionId));
+            onConnected?.();
+            setConnection(result);
+          }}
+        />
+      </FlushFormPage>
+    );
+  }
   if (!linked) {
     const account = connection.accountName ?? info.home;
     return (
       <VaultChooser
         provider={provider}
-        title={provider === "keeper" ? "Choose shared folders" : "Choose vaults"}
+        title={`Choose ${info.vaultNoun.many}`}
         description={`Connected to ${account}. Pick what agents can use; you can change this later.`}
         providerVaults={connection.vaults}
         linkedVaults={[]}

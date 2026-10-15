@@ -1,8 +1,10 @@
-import type {
-  ExternalVaultProviderKind,
-  VaultProviderConnectionSummary,
-  VaultProviderFreshness,
-  VaultProviderOperations,
+import {
+  OpenGeniApiError,
+  type ExternalVaultProviderKind,
+  type InstallVaultProviderResponse,
+  type VaultProviderConnectionSummary,
+  type VaultProviderFreshness,
+  type VaultProviderOperations,
 } from "@opengeni/sdk";
 import type { VaultItem, VaultItemType, VaultSummary } from "@opengeni/react";
 
@@ -311,6 +313,7 @@ export function healthLabel(health: VaultHealth, provider: VaultProviderId | nul
 /** What a connection needs, judged from its linked vaults. Worst first; null while fine. */
 export type ConnectionAttention =
   | "unavailable_here"
+  | "pending"
   | "auth_expired"
   | "locked"
   | "unavailable"
@@ -320,9 +323,10 @@ export type ConnectionAttention =
 
 export function connectionAttention(
   vaults: HealthInput[],
-  connection?: Pick<VaultConnection, "available">,
+  connection?: Pick<VaultConnection, "available" | "verificationStatus">,
 ): ConnectionAttention | null {
   if (connection && connection.available === false) return "unavailable_here";
+  if (connection?.verificationStatus === "pending") return "pending";
   const kinds = new Set(vaults.map((vault) => vaultHealth(vault).kind));
   if (kinds.has("auth_expired")) return "auth_expired";
   if (kinds.has("locked")) return "locked";
@@ -331,4 +335,21 @@ export function connectionAttention(
   if (kinds.has("incomplete")) return "incomplete";
   if (kinds.has("rate_limited")) return "rate_limited";
   return null;
+}
+
+/** Setup saved the access but couldn't finish checking it; linking waits for Finish connecting. */
+export function isPending(connection: Pick<VaultConnection, "verificationStatus">): boolean {
+  return connection.verificationStatus === "pending";
+}
+
+/**
+ * A verify that came back still pending, as the error its code describes,
+ * so callers show the same copy as for any other provider refusal.
+ */
+export function stillPending(result: InstallVaultProviderResponse): InstallVaultProviderResponse {
+  if (!result.discoveryPending) return result;
+  const code = result.errorCode ?? "provider_unavailable";
+  throw new OpenGeniApiError(409, JSON.stringify({ error: { code, message: code } }), {
+    mutation: true,
+  });
 }

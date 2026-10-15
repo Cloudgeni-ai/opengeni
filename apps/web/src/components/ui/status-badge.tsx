@@ -61,6 +61,7 @@ export const PRODUCT_STATUSES = {
   token_expired: { label: "Token expired", tone: "attention" },
   locked: { label: "Locked", tone: "attention", icon: LockIcon },
   incomplete: { label: "Incomplete", tone: "attention" },
+  not_finished: { label: "Not finished", tone: "attention" },
   expiring: { label: "Expiring", tone: "attention", icon: ClockIcon },
   pending_review: { label: "Pending review", tone: "attention" },
   near_limit: { label: "Near limit", tone: "attention" },

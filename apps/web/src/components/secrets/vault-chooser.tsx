@@ -220,9 +220,9 @@ export function ChooseVaultsPage({
       <FlushFormPage
         backLabel={name}
         onClose={onClose}
-        title="Choose vaults"
+        title={`Choose ${info.vaultNoun.many}`}
         description={description}
-        submitLabel="Link vaults"
+        submitLabel={`Link ${info.vaultNoun.many}`}
         submitDisabled
       >
         {state.error ? (
@@ -250,7 +250,7 @@ export function ChooseVaultsPage({
   return (
     <VaultChooser
       provider={provider}
-      title="Choose vaults"
+      title={`Choose ${info.vaultNoun.many}`}
       description={description}
       backLabel={name}
       providerVaults={state.vaults}
@@ -312,8 +312,8 @@ export function VaultChooser({
     chosen.length === 0
       ? "Done"
       : chosen.length === 1
-        ? "Link 1 vault"
-        : `Link ${chosen.length} vaults`;
+        ? `Link 1 ${info.vaultNoun.one}`
+        : `Link ${chosen.length} ${info.vaultNoun.many}`;
 
   return (
     <FlushFormPage

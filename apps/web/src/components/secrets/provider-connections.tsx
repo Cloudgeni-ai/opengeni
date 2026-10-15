@@ -1,6 +1,6 @@
-import type { VaultSummary } from "@opengeni/react";
+import { vaultErrorCode, type VaultSummary } from "@opengeni/react";
 import { KeyRoundIcon, LinkIcon, RotateCcwIcon, UnplugIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
@@ -22,6 +22,7 @@ import {
   itemsLabel,
   MODE_LABEL,
   PLAN_LABEL,
+  vaultErrorText,
   vaultsOfConnection,
 } from "./vault-model";
 import { SecretsLoadFailure, SyncStatus, VaultTile } from "./vault-parts";
@@ -75,6 +76,14 @@ function attentionBadge(connection: VaultConnection, attention: ConnectionAttent
   switch (attention) {
     case null:
       return null;
+    case "pending":
+      return (
+        <StatusBadge
+          status="not_finished"
+          variant="dot"
+          reason="Its access is saved but not checked yet. Open it to finish connecting."
+        />
+      );
     case "unavailable_here":
       return (
         <StatusBadge
@@ -213,9 +222,79 @@ export interface ConnectionPageActions {
   chooseVaults: () => void;
   /** Replace token, Reconnect, Update bridge: the provider's renewal page. */
   renew: () => void;
+  /** Checks a pending connection again with its saved access (never a spent setup token). */
+  finish: () => Promise<void>;
   disconnect: () => void;
   openVault: (vault: VaultSummary) => void;
   retry: () => void;
+}
+
+const AUTH_FAILURES = new Set(["provider_auth_invalid", "provider_auth_expired"]);
+
+/**
+ * A connection whose access was saved but not yet checked: one action,
+ * Finish connecting, which retries with what's saved. When the saved access
+ * itself is refused, the action becomes the provider's renewal instead.
+ */
+export function FinishConnectingNotice({
+  provider,
+  canManage,
+  onFinish,
+  onRenew,
+}: {
+  provider: VaultProviderId;
+  canManage: boolean;
+  onFinish: () => Promise<void>;
+  onRenew?: (() => void) | undefined;
+}) {
+  const info = PROVIDERS[provider];
+  const [pending, setPending] = useState(false);
+  const [failure, setFailure] = useState<{ refused: boolean; text: string } | null>(null);
+  const saved =
+    provider === "keeper"
+      ? "Keeper accepted the one-time token and Opengeni saved this device, but couldn't finish checking its shared folders. You don't need a new token."
+      : `${info.name} accepted the access, but Opengeni couldn't finish checking it.`;
+  const refused = failure?.refused ?? false;
+  const action = !canManage ? undefined : refused && onRenew ? (
+    <Button type="button" size="sm" onClick={onRenew}>
+      {info.renewLabel}
+    </Button>
+  ) : (
+    <Button
+      type="button"
+      size="sm"
+      disabled={pending}
+      onClick={() => {
+        setPending(true);
+        setFailure(null);
+        void onFinish()
+          .catch((caught: unknown) => {
+            const error = (caught as { cause?: unknown } | null)?.cause ?? caught;
+            const code = vaultErrorCode(error);
+            setFailure({
+              refused: Boolean(code && AUTH_FAILURES.has(code)),
+              text: vaultErrorText(error, `Couldn't finish connecting ${info.name}.`, info.home),
+            });
+          })
+          .finally(() => setPending(false));
+      }}
+    >
+      {pending ? "Checking…" : "Finish connecting"}
+    </Button>
+  );
+  return (
+    <Notice tone="waiting" title="Not finished" actionLayout="responsive" action={action}>
+      {refused
+        ? `${info.name} no longer accepts the saved access. ${info.renewLabel} to connect it again.`
+        : `${saved} Agents can't use it until it's checked.`}{" "}
+      {canManage ? null : "Someone who manages this connection can finish it."}
+      {failure && !refused ? (
+        <span className="mt-1 block text-danger" role="alert">
+          {failure.text}
+        </span>
+      ) : null}
+    </Notice>
+  );
 }
 
 /** How someone who manages the connection renews its access, as one sentence. */
@@ -259,7 +338,14 @@ export function ConnectionPage({
   const linked = vaultsOfConnection(vaults, connection.id);
   const attention = connectionAttention(linked, connection);
   const manage = connection.canManage;
-  const canChoose = manage && connection.available;
+  // Choosing lists the provider's vaults, which needs working access.
+  const canChoose =
+    manage &&
+    attention !== "unavailable_here" &&
+    attention !== "pending" &&
+    attention !== "auth_expired" &&
+    attention !== "locked" &&
+    attention !== "unavailable";
   const name = connectionName(connection);
 
   const chooseButton = (primary: boolean) => (
@@ -271,13 +357,13 @@ export function ConnectionPage({
       className="pointer-coarse:h-11"
     >
       <LinkIcon aria-hidden="true" />
-      Choose vaults
+      Choose {info.vaultNoun.many}
     </Button>
   );
 
   const headerActions = manage ? (
     <div className="flex items-center gap-2">
-      {linked.length > 0 && canChoose && attention !== "auth_expired" ? chooseButton(true) : null}
+      {linked.length > 0 && canChoose ? chooseButton(true) : null}
       <MoreMenu label={`More actions for ${name}`}>
         <DropdownMenuItem onSelect={actions.renew}>
           <KeyRoundIcon aria-hidden="true" />
@@ -300,6 +386,16 @@ export function ConnectionPage({
 
   let notice: ReactNode = null;
   switch (attention) {
+    case "pending":
+      notice = (
+        <FinishConnectingNotice
+          provider={provider}
+          canManage={manage}
+          onFinish={actions.finish}
+          onRenew={actions.renew}
+        />
+      );
+      break;
     case "unavailable_here":
       notice = (
         <Notice tone="muted" title="Not available on this server">
@@ -444,9 +540,13 @@ export function ConnectionPage({
                   ? provider === "onepassword"
                     ? "Choose which of this account's vaults agents can use, and whether they can save to them."
                     : `Choose which ${info.vaultNoun.many} agents can use, and whether they can save to them.`
-                  : manage
-                    ? `Vaults can be linked once this server can run ${info.name} connections.`
-                    : "Someone who can manage this connection can link its vaults."
+                  : !manage
+                    ? "Someone who can manage this connection can link its vaults."
+                    : attention === "unavailable_here"
+                      ? `Vaults can be linked once this server can run ${info.name} connections.`
+                      : attention === "pending"
+                        ? `Finish connecting first, then choose ${info.vaultNoun.many}.`
+                        : `Choose ${info.vaultNoun.many} once ${info.home} can be reached again.`
               }
               action={canChoose ? chooseButton(true) : undefined}
             />
