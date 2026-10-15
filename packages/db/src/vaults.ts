@@ -14,6 +14,7 @@ import {
   type VaultMode,
   type VaultOwnerKind,
   type VaultPolicy,
+  type VaultProviderOperations,
   type VaultSource,
   type VaultSyncStatus,
   type VaultVersionCreatedByKind,
@@ -136,6 +137,16 @@ function json(value: unknown): string | null {
 // Row shapes (as the routines return them; values encrypted)
 // ---------------------------------------------------------------------------
 
+/**
+ * What a provider (or its bridge) said about its own upstream freshness at
+ * the last successful check (0786). Opengeni's own check time is
+ * `lastSyncedAt`; it never stands in for `sourceSyncedAt`.
+ */
+export type StoredProviderFreshness = {
+  source: "live" | "cache" | "unknown";
+  sourceSyncedAt: string | null;
+};
+
 export type VaultRow = {
   id: string;
   workspaceId: string;
@@ -153,6 +164,15 @@ export type VaultRow = {
   rateLimitedUntil: string | null;
   providerConnectionId: string | null;
   providerVaultRef: string | null;
+  /** Effective operations the provider last reported (0786); null before the first check. */
+  providerOperations?: VaultProviderOperations | null;
+  /** The provider's own freshness observation from the last successful check (0786). */
+  providerFreshness?: StoredProviderFreshness | null;
+  /**
+   * Durable value-cache epoch (0786, bigint as text). Every complete mirror
+   * replacement advances it; provider value caches compare it before reuse.
+   */
+  providerCacheEpoch?: string;
   availability: { allowedWorkspaceIds: string[] | null; allowPersonalWorkspaces: boolean } | null;
   isDefault: boolean;
   itemCount: number;
@@ -222,6 +242,8 @@ export type VaultFieldCiphertext = {
   source: VaultSource;
   providerConnectionId: string | null;
   providerVaultRef: string | null;
+  /** The vault's value-cache epoch (0786). */
+  providerCacheEpoch?: string;
   providerItemRef: string | null;
   providerFieldRef: string | null;
 };
@@ -263,6 +285,8 @@ export type SecretReferenceCandidate = {
   source: VaultSource;
   providerConnectionId: string | null;
   providerVaultRef: string | null;
+  /** The vault's value-cache epoch (0786). */
+  providerCacheEpoch?: string;
   itemId: string;
   itemName: string;
   itemType: VaultItemType;
@@ -752,6 +776,12 @@ export type ProviderVaultItemMirror = {
   fields: Array<{ providerFieldRef: string; name: string; kind: VaultFieldKind }>;
 };
 
+/**
+ * Replace a connected vault's metadata mirror with one complete inventory
+ * (at most `VAULT_LIMITS.itemsPerVault` items; more is refused with
+ * `provider_inventory_incomplete` and the old mirror kept). Items missing
+ * from `items` are removed, and the vault's cache epoch advances (0786).
+ */
 export async function upsertProviderVaultItems(
   db: Database,
   context: VaultDbContext,
@@ -765,6 +795,10 @@ export async function upsertProviderVaultItems(
   });
 }
 
+/**
+ * Record a connected vault's sync state. `operations` and `freshness` are
+ * optional (0786): absent keeps the stored value, null clears it.
+ */
 export async function setVaultSyncStatus(
   db: Database,
   context: VaultDbContext,
@@ -774,6 +808,10 @@ export async function setVaultSyncStatus(
     errorCode?: string | null;
     errorMessage?: string | null;
     rateLimitedUntil?: string | null;
+    /** The provider's effective operations for this vault. */
+    operations?: VaultProviderOperations | null;
+    /** The provider's own upstream freshness observation (never Opengeni's check time). */
+    freshness?: StoredProviderFreshness | null;
   },
 ): Promise<void> {
   const { vaultId, ...status } = input;
@@ -784,7 +822,16 @@ export async function setVaultSyncStatus(
   });
 }
 
-/** Link a 1Password or host vault (W5). The mirror is filled by the first sync. */
+/**
+ * Link a connected vault (W5, 0786). Every source but `host` needs an active
+ * `api_key` connection in the caller's workspace whose provider identity
+ * matches (`1password.com` with the 1Password service-account role, or
+ * `vault:<source>` with the `external_vault_provider` role and
+ * `metadata.vaultProvider.provider = source`, version 1, not pending
+ * verification) and whose ownership matches `ownerKind`: a personal
+ * connection backs only its owner's Only-me vaults. The mirror is filled by
+ * the first sync.
+ */
 export async function linkProviderVault(
   db: Database,
   context: VaultDbContext,
@@ -818,6 +865,8 @@ export type ProviderVaultSyncTargetRow = {
   providerVaultRef: string;
   providerContentVersion: string | null;
   rateLimitedUntil: string | null;
+  /** The vault's value-cache epoch (0786). */
+  providerCacheEpoch?: string;
 };
 
 /** The provider refs and mirror version of one reachable connected vault. */
