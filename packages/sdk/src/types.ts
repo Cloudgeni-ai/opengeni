@@ -689,6 +689,8 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  /** Narrow this connection's authorized tool names; an empty list allows none. */
+  allowedTools?: string[] | undefined;
   /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
   /**

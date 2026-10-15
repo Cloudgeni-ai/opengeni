@@ -59,6 +59,7 @@ export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolR
       id: tool.id,
       ...(optional ? { optional: true } : {}),
       ...(tool.eager === true ? { eager: true } : {}),
+      ...(tool.allowedTools !== undefined ? { allowedTools: [...new Set(tool.allowedTools)] } : {}),
     });
   }
   return mergeToolRefs([], out);
@@ -160,8 +161,18 @@ export function assertToolRefsSubset(
   allowed: ToolRef[],
   message = "requested tools exceed the session tool policy",
 ): void {
-  const allowedIds = new Set(allowed.map((tool) => `${tool.kind}:${tool.id}`));
-  const widened = requested.find((tool) => !allowedIds.has(`${tool.kind}:${tool.id}`));
+  const allowedById = new Map(
+    mergeToolRefs([], allowed).map((tool) => [`${tool.kind}:${tool.id}`, tool]),
+  );
+  const widened = requested.find((tool) => {
+    const ceiling = allowedById.get(`${tool.kind}:${tool.id}`);
+    return (
+      !ceiling ||
+      (ceiling.allowedTools !== undefined &&
+        (tool.allowedTools === undefined ||
+          tool.allowedTools.some((name) => !ceiling.allowedTools!.includes(name))))
+    );
+  });
   if (widened) {
     throw new HTTPException(403, { message: `${message}: ${widened.id}` });
   }

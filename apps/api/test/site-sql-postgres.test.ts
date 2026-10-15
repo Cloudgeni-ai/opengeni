@@ -1094,13 +1094,21 @@ test("agents started from a Site page run only the queries the page could", asyn
   const origin = { _opengeniSiteOrigin: { siteId, title: "Notes" } };
 
   const checkClamped = async (agent: Awaited<ReturnType<typeof agentTools>>, note: string) => {
+    const read = await agent.callTool("site_sql_query", { siteId, sql: "SELECT * FROM notes" });
+    expect(read.isError).toBe(false);
+    const crossSite = await agent.callTool("site_sql_query", {
+      siteId: otherId,
+      sql: "SELECT * FROM notes",
+    });
+    expect(crossSite.value.error.code).toBe("forbidden");
+    const write = await agent.callTool("site_sql_query", { siteId, sql: "DELETE FROM notes" });
+    expect(write.value.error.code).toBe("validation");
     // Every management tool refuses an agent started from the page.
     for (const [tool, args] of [
       ["site_sql_inspect", {}],
       ["site_sql_enable", { enabled: false }],
       ["site_sql_migrate", { name: "more", sql: "CREATE TABLE more (a);" }],
       ["site_sql_define_query", { name: "x", sql: "SELECT 1 AS one" }],
-      ["site_sql_query", { sql: "SELECT * FROM notes" }],
       ["site_sql_execute", { sql: "DELETE FROM notes" }],
       ["site_sql_export", { format: "json" }],
       ["site_sql_import", { format: "json", table: "notes", rows: [{ who: "x", note: "y" }] }],

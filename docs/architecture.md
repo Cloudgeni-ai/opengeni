@@ -38,6 +38,9 @@ retain catalog floors, granting no capabilities/credentials.
 owns turn refs: ordinary work uses session policy; scheduled work retains frozen
 selection. Credential-provider targeting/MCP preparation consume these refs,
 never omitted-tools queue arrays. Connection-backed MCPs use native authentication, including historical work.
+An optional `ToolRef.allowedTools` narrows a connection's catalog and direct calls;
+merged refs intersect that ceiling and children cannot widen it. Console Site
+agents use it for the overlap of Site-declared tools and the viewer's permissions.
 Signed callbacks retain accepted initiators; children inherit bounded lineage.
 Continuations freeze causal-turn provenance at claim; renewals preserve snapshots
 and service principals. See

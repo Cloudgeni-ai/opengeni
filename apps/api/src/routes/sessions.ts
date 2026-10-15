@@ -24,6 +24,7 @@ import {
   resolveWorkspaceAgentDefaults,
   SessionMessageSearchRequest,
   type AgentCapabilities,
+  type ToolRef,
 } from "@opengeni/contracts";
 import {
   SITE_FRAME_SESSION_CREATE_FIELDS,
@@ -6399,11 +6400,7 @@ async function siteFrameSessionProfile(
   // use: only the workspace MCP connections the Site version requests (the
   // person's own access to each still applies), never the workspace
   // default set. A frame with no published Site declares none.
-  profile.tools = (await siteFrameDeclaredServerIds(deps, workspaceId, frame)).map((id) => ({
-    kind: "mcp",
-    id,
-    optional: true,
-  }));
+  profile.tools = await siteFrameDeclaredTools(deps, workspaceId, frame);
   const unavailable = agentConfigDeploymentPolicy(deps.settings).unavailable;
   const capabilities = siteFrameCapabilities(
     resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
@@ -6464,11 +6461,11 @@ async function siteFrameFirstPartyTools(
 }
 
 /** The workspace MCP connections (not the first-party server) a Site version declares. */
-async function siteFrameDeclaredServerIds(
+async function siteFrameDeclaredTools(
   deps: ApiRouteDeps,
   workspaceId: string,
   frame: { accountId: string; siteId: string | null; versionId: string | null },
-): Promise<string[]> {
+): Promise<ToolRef[]> {
   if (!frame.siteId || !frame.versionId) return [];
   const version = await getPublishedSiteVersion(
     deps.db,
@@ -6476,13 +6473,19 @@ async function siteFrameDeclaredServerIds(
     frame.siteId,
     frame.versionId,
   ).catch(() => null);
-  return [
-    ...new Set(
-      (version?.requestedTools ?? [])
-        .map((tool) => tool.serverId)
-        .filter((serverId) => serverId !== "opengeni" && /^[A-Za-z0-9_-]{1,200}$/u.test(serverId)),
-    ),
-  ];
+  const declared = new Map<string, Set<string>>();
+  for (const { serverId, toolName } of version?.requestedTools ?? []) {
+    if (serverId === "opengeni" || !/^[A-Za-z0-9_-]{1,200}$/u.test(serverId)) continue;
+    const names = declared.get(serverId) ?? new Set<string>();
+    names.add(toolName);
+    declared.set(serverId, names);
+  }
+  return [...declared].map(([id, names]) => ({
+    kind: "mcp",
+    id,
+    optional: true,
+    allowedTools: [...names].sort(),
+  }));
 }
 
 /**

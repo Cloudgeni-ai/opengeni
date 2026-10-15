@@ -134,6 +134,7 @@ async function fixture(overrides: { sandboxBackend?: "none" | "docker" } = {}) {
     // Published Sites on, so their management routes are reachable.
     sitesDomain: "sites.example.test",
     sitesGatewaySecret: "c".repeat(40),
+    mcpServers: [{ id: "crm", url: "https://crm.example.test/mcp" }],
   });
   const objectStorage = memoryObjectStorage();
   // Every workflow call is a no-op: these tests only check what is admitted.
@@ -1462,12 +1463,30 @@ test("a Site-started agent edits documents only when its Site declared an editin
   });
   const fromPlain = await f.liveAgentGrant(await f.startSession(plainSite.frame("frame-plain")));
   const fromEditor = await f.liveAgentGrant(await f.startSession(editorSite.frame("frame-editor")));
+  const writes: string[] = [];
+  const artifactId = crypto.randomUUID().replaceAll("-", "");
   const deps = {
     db: db.db,
     bus: new MemoryEventBus(),
     settings: f.settings,
     objectStorage: f.objectStorage,
     workflowClient: new Proxy({}, { get: () => noop }),
+    editableArtifactAgent: {
+      async create() {
+        writes.push("create");
+        return {
+          id: artifactId,
+          artifactReference: `artifact:${artifactId}`,
+          modality: "document",
+          title: "Notes",
+          lifecycle: "active",
+          headSequence: 0,
+          stateHash: `sha256:${"a".repeat(64)}`,
+          createdAt: "2026-10-15T00:00:00.000Z",
+          updatedAt: "2026-10-15T00:00:00.000Z",
+        };
+      },
+    },
   } as unknown as ApiRouteDeps;
   const connect = async (live: AccessGrant) => {
     const server = buildOpenGeniMcpServer(deps, {
@@ -1508,18 +1527,16 @@ test("a Site-started agent edits documents only when its Site declared an editin
       code: "site_agent_clamped",
     });
   }
-  // The Site declares editable_artifact_create: the clamp lets writes through
-  // (whatever the artifact service then answers is not a clamp refusal).
+  expect(writes).toEqual([]);
+  // A declared editing tool actually reaches the application and returns a
+  // successful MCP artifact result; unrelated failures cannot pass this test.
   const editorClient = await connect(fromEditor);
-  for (const call of [create, exportCall]) {
-    const result = await editorClient
-      .callTool(call)
-      .catch((error: unknown) => ({ content: [{ text: String(error) }] }));
-    expect({ tool: call.name, code: errorCode(result as never) }).not.toEqual({
-      tool: call.name,
-      code: "site_agent_clamped",
-    });
-  }
+  const result = await editorClient.callTool(create);
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({ id: artifactId });
+  expect(writes).toEqual(["create"]);
+  await plainClient.close();
+  await editorClient.close();
   const bearer = async (grant: AccessGrant) => {
     const metadata = grant.metadata as {
       sessionId: string;
@@ -1727,6 +1744,21 @@ test("a Site page's session gets only the declared first-party tools and the Sit
     sandbox: "none",
     servers: [],
   });
+});
+
+test("a Site frame freezes tool names, not the whole declared MCP connection", async () => {
+  const f = await fixture();
+  const site = await f.publish("CRM reader", {
+    requestedTools: [
+      { serverId: "crm", toolName: "read_contact" },
+      { serverId: "crm", toolName: "search_contacts" },
+    ],
+  });
+  const id = await f.startSession(site.frame("frame-crm"));
+  const [row] = await shared.admin`select tools from sessions where id = ${id}`;
+  expect(row!.tools).toEqual([
+    { kind: "mcp", id: "crm", optional: true, allowedTools: ["read_contact", "search_contacts"] },
+  ]);
 });
 
 test("a Site page starts a session with a message and a model only, on a minimal profile", async () => {
