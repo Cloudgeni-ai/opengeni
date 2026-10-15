@@ -6154,6 +6154,17 @@ export const MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD =
  * extension field; the numbered projection in `content` remains model-visible.
  */
 export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
+/**
+ * Private durable field on user history items: the longest side, in pixels,
+ * at which this message's image attachments are shown to the model. It is
+ * stamped when the message is accepted, so a later change of the bound never
+ * re-renders images that an earlier request already sent. Items without it
+ * keep their original full-resolution projection.
+ */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD =
+  "opengeni_attachment_image_max_dimension" as const;
+/** Bound stamped on newly accepted user messages with attachments. */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION = 2000;
 
 export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),

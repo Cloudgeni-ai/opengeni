@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   type FileAsset,
 } from "@opengeni/contracts";
@@ -9,6 +10,7 @@ import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createHash } from "node:crypto";
+import sharp from "sharp";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import {
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
@@ -1123,5 +1125,66 @@ describe("attachments outside the current requester's file access", () => {
       expect(receipt).not.toContain("not available to the current requester");
     }
     expect(lookups).toBe(0);
+  });
+});
+
+// Regression: user photos were replayed at full camera resolution to every
+// provider except Anthropic, costing about 14k tokens each on current models.
+describe("photo resolution sent to the model", () => {
+  const photoId = "00000000-0000-4000-8000-0000000000a1";
+  const photo = async (width: number, height: number) =>
+    new Uint8Array(
+      await sharp({
+        create: { width, height, channels: 3, background: { r: 40, g: 120, b: 200 } },
+      })
+        .jpeg({ quality: 90 })
+        .toBuffer(),
+    );
+  const project = async (bytes: Uint8Array, item: Record<string, unknown>) => {
+    const asset = {
+      ...file(photoId, "image/jpeg", bytes.length, "photo.jpg"),
+      sha256: sha256(bytes),
+    };
+    const projected = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => [asset],
+    )([{ ...item, [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: photoId }] }]);
+    const parts = projected[0]!.content as Array<Record<string, unknown>>;
+    const image = String(parts.find((part) => part.type === "input_image")!.image);
+    const receipt = String(parts.find((part) => String(part.text).includes(photoId))!.text);
+    return { image, receipt };
+  };
+  const dataUrl = (bytes: Uint8Array) =>
+    `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`;
+
+  test("a newly sent photo is downscaled to the bound stamped on its message", async () => {
+    const bytes = await photo(4032, 3024);
+    const { image, receipt } = await project(bytes, {
+      ...user("what is this?"),
+      [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+    });
+    expect(image.startsWith("data:image/jpeg;base64,")).toBe(true);
+    const sent = await sharp(Buffer.from(image.slice(image.indexOf(",") + 1), "base64")).metadata();
+    expect([sent.width, sent.height]).toEqual([2000, 1500]);
+    expect(receipt).toContain("downscaled to 2000x1500 from 4032x3024");
+    expect(receipt).toContain("the file itself is full resolution");
+  });
+
+  test("a photo from before the bound existed keeps its original bytes", async () => {
+    const bytes = await photo(4032, 3024);
+    const { image, receipt } = await project(bytes, user("what is this?"));
+    expect(image).toBe(dataUrl(bytes));
+    expect(receipt).not.toContain("downscaled");
+  });
+
+  test("a photo within the bound is sent unchanged", async () => {
+    const bytes = await photo(1200, 900);
+    const { image, receipt } = await project(bytes, {
+      ...user("what is this?"),
+      [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+    });
+    expect(image).toBe(dataUrl(bytes));
+    expect(receipt).not.toContain("downscaled");
   });
 });
