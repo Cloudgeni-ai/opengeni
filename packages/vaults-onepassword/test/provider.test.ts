@@ -147,6 +147,46 @@ describe("1Password adapter", () => {
     expect(fake.calls.filter((call) => call.op === "items.get")).toHaveLength(2);
   });
 
+  test("per-attempt cache: a new durable cache epoch or a forced refresh reads the item again", async () => {
+    const { provider, ctx, fake } = world();
+    const c = ctx();
+    const login = "login0000000000000000000000";
+    const gets = () => fake.calls.filter((call) => call.op === "items.get").length;
+    await provider.readFields({ ...c, cacheEpoch: "3" }, RW, login, ["password"]);
+    await provider.readFields({ ...c, cacheEpoch: "3" }, RW, login, ["username"]);
+    expect(gets()).toBe(1);
+    // A mirror refresh in another process advanced the vault's epoch.
+    await provider.readFields({ ...c, cacheEpoch: "4" }, RW, login, ["password"]);
+    expect(gets()).toBe(2);
+    await provider.readFields({ ...c, cacheEpoch: "4", forceRefresh: true }, RW, login, [
+      "password",
+    ]);
+    expect(gets()).toBe(3);
+    // The forced read replaced the entry; ordinary reads in the attempt reuse it.
+    await provider.readFields({ ...c, cacheEpoch: "4" }, RW, login, ["username"]);
+    expect(gets()).toBe(3);
+  });
+
+  test("per-attempt cache: another connection or token in the same attempt never reuses an item", async () => {
+    const { provider, ctx, fake, clientCache } = world();
+    const c = ctx();
+    const login = "login0000000000000000000000";
+    const gets = () => fake.calls.filter((call) => call.op === "items.get").length;
+    await provider.readFields(c, RW, login, ["password"]);
+    await provider.readFields({ ...c, connectionId: crypto.randomUUID() }, RW, login, ["password"]);
+    expect(gets()).toBe(2);
+    const otherToken = createOnePasswordVaultProvider({
+      token: fakeServiceAccountToken("https://other.1password.com/"),
+      planTier: "family",
+      sdk: fake.sdk,
+      clientCache,
+    });
+    await otherToken.readFields(c, RW, login, ["password"]);
+    expect(gets()).toBe(3);
+    await provider.readFields(c, RW, login, ["username"]);
+    expect(gets()).toBe(3);
+  });
+
   test("the connection quota is charged measured HTTP requests, including the first sign-in", async () => {
     const { provider, ctx } = world();
     const c = ctx();
@@ -215,6 +255,36 @@ describe("1Password adapter", () => {
     fake.failNext("vaults.list", () => new Error(NOT_AUTHENTICATED));
     expect((await provider.listVaults(c)).length).toBe(2);
     expect(fake.signIns).toBe(2);
+  });
+
+  test("a write 1Password fails without a classified answer has an unknown outcome and is not retried", async () => {
+    const { provider, ctx, fake } = world();
+    const c = ctx();
+    const write = {
+      name: "Maybe saved",
+      type: "api_key" as const,
+      websites: [],
+      fields: [{ name: "credential", kind: "concealed" as const, value: "sk-maybe" }],
+    };
+    const creates = () => fake.calls.filter((call) => call.op === "items.create").length;
+    fake.failNext("items.create", () => new Error("connection reset by peer"));
+    await expect(provider.writeItem(c, RW, write)).rejects.toMatchObject({
+      code: "provider_outcome_unknown",
+    });
+    expect(creates()).toBe(1);
+    fake.failNext("items.archive", () => new Error("connection reset by peer"));
+    await expect(provider.archiveItem(c, RW, "login0000000000000000000000")).rejects.toMatchObject({
+      code: "provider_outcome_unknown",
+    });
+    // A definitive refusal keeps its code, and a failed read is not a mutation.
+    fake.failNext("items.create", () => new Error("you don't have the right permissions"));
+    await expect(provider.writeItem(c, RW, write)).rejects.toMatchObject({
+      code: "provider_permission_denied",
+    });
+    fake.failNext("items.get", () => new Error("connection reset by peer"));
+    await expect(
+      provider.readFields(c, RW, "login0000000000000000000000", ["password"]),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
   });
 
   test("create: login built-ins plus TOTP in an Opengeni section; api_key value → credential", async () => {

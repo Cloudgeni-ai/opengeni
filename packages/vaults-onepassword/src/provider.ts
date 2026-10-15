@@ -78,11 +78,14 @@ export type OnePasswordVaultProvider = VaultProvider & {
   ): Promise<void>;
 };
 
-type CachedItem = { at: number; item: Promise<SdkItem> };
+type CachedItem = { at: number; epoch: string | null; item: Promise<SdkItem> };
 
 /**
  * Values never outlive the attempt that read them: the cache is keyed by the
  * attempt's budget object (one per attempt or request), so it is dropped with it.
+ * Within an attempt, entries are scoped to the connection and token that read
+ * them, and to the vault's durable cache epoch: a mirror refresh in any API or
+ * worker process advances the epoch, so later reads fetch the item again.
  */
 const attemptItemCaches = new WeakMap<ProviderCallBudget, Map<string, CachedItem>>();
 
@@ -138,6 +141,9 @@ export function createOnePasswordVaultProvider(
       ...(sdk.AuthExpiredError ? { AuthExpiredError: sdk.AuthExpiredError } : {}),
     };
     for (let attempt = 0; ; attempt += 1) {
+      // Set once a mutation is handed to the SDK: a failure 1Password does not
+      // classify after that may still have been applied.
+      let sent = false;
       try {
         const client = await clients.get(key.client, () =>
           sdk.createClient({
@@ -146,6 +152,7 @@ export function createOnePasswordVaultProvider(
             integrationVersion: options.integrationVersion ?? "1",
           }),
         );
+        sent = op === "write";
         return await fn(client);
       } catch (error) {
         const mapped = mapOnePasswordError(error, classes);
@@ -156,6 +163,13 @@ export function createOnePasswordVaultProvider(
           clients.drop(key.client);
         }
         if (attempt === 0 && isOnePasswordSessionError(mapped)) continue;
+        if (sent && mapped.code === "provider_unavailable") {
+          // Never reported as a plain failure that invites saving it again.
+          throw new VaultProviderError(
+            "provider_outcome_unknown",
+            "1Password did not confirm the change; it may have been applied",
+          );
+        }
         throw mapped;
       }
     }
@@ -170,22 +184,40 @@ export function createOnePasswordVaultProvider(
     return cache;
   }
 
-  /** Live item read, cached per attempt for 60 s with single-flight. */
-  function getItem(ctx: VaultProviderContext, vaultId: string, itemId: string): Promise<SdkItem> {
+  /**
+   * Live item read, cached per attempt for 60 s with single-flight. A changed
+   * `cacheEpoch` or `forceRefresh` reads the item again and replaces the entry.
+   */
+  async function getItem(
+    ctx: VaultProviderContext,
+    vaultId: string,
+    itemId: string,
+  ): Promise<SdkItem> {
+    const { client: clientKey } = await keys(ctx);
+    // No await between the lookup and the insert below keeps the single flight.
     const cache = itemCache(ctx);
-    const cacheKey = `${vaultId}/${itemId}`;
+    const cacheKey = `${clientKey}|${vaultId}/${itemId}`;
+    const epoch = ctx.cacheEpoch ?? null;
     const cached = cache.get(cacheKey);
-    if (cached && now() - cached.at < valueCacheMs) return cached.item;
+    if (cached && !ctx.forceRefresh && cached.epoch === epoch && now() - cached.at < valueCacheMs) {
+      return await cached.item;
+    }
     const item = call(ctx, "read", "itemsGet", (client) => client.items.get(vaultId, itemId));
-    cache.set(cacheKey, { at: now(), item });
+    cache.set(cacheKey, { at: now(), epoch, item });
     item.catch(() => {
       if (cache.get(cacheKey)?.item === item) cache.delete(cacheKey);
     });
-    return item;
+    return await item;
   }
 
+  /** Drops the attempt's cached copies of an item, whichever connection read them. */
   function forgetItem(ctx: VaultProviderContext, vaultId: string, itemId: string) {
-    attemptItemCaches.get(ctx.budget)?.delete(`${vaultId}/${itemId}`);
+    const cache = attemptItemCaches.get(ctx.budget);
+    if (!cache) return;
+    const suffix = `|${vaultId}/${itemId}`;
+    for (const cacheKey of [...cache.keys()]) {
+      if (cacheKey.endsWith(suffix)) cache.delete(cacheKey);
+    }
   }
 
   async function materialFor(
