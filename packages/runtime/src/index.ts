@@ -4702,43 +4702,61 @@ export type ConnectedMcpServerBatches = {
 };
 
 /**
- * Connect SDK-managed MCP servers in stable, bounded batches. The SDK cleans a
- * failing strict batch; this wrapper additionally closes every earlier batch
- * before rethrowing, so a later-batch failure cannot leak live connections.
+ * Connect SDK-managed MCP servers concurrently, at most
+ * MCP_MAX_CONCURRENT_SERVER_OPERATIONS at a time. Each server runs the SDK's
+ * awaited single-server path, so the turn's wall time is the slowest server
+ * rather than the sum of every handshake. Results keep the input order. A
+ * strict failure stops scheduling more servers, closes every server that did
+ * connect, and rethrows the failure of the earliest failing server.
  */
 export async function connectMcpServersInBatches(
   servers: MCPServer[],
   options: { strict: boolean; connectTimeoutMs?: number },
 ): Promise<ConnectedMcpServerBatches> {
   assertMcpServerSelectionWithinBounds(servers);
-  const batches: ConnectedMcpServerBatch[] = [];
-  try {
-    for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-      const batchServers = servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS);
+  const connectedByIndex = new Array<ConnectedMcpServerBatch | undefined>(servers.length);
+  const failures: Array<{ index: number; error: Error }> = [];
+  let nextIndex = 0;
+  const connectNext = async (): Promise<void> => {
+    while (failures.length === 0) {
+      const index = nextIndex;
+      if (index >= servers.length) return;
+      nextIndex += 1;
+      const server = servers[index]!;
       try {
-        batches.push(
-          await connectMcpServers(batchServers, {
-            ...(options.connectTimeoutMs === undefined
-              ? {}
-              : { connectTimeoutMs: options.connectTimeoutMs }),
-            // Opengeni already bounds lifecycle work in batches. The Agents SDK
-            // parallel path additionally starts a detached `void drain()` task;
-            // a best-effort server rejection can escape that task as a process-
-            // level unhandled rejection even though the session records and
-            // degrades the failed server. Keep lifecycle ownership on the
-            // awaited serial path inside each bounded batch.
-            connectInParallel: false,
-            strict: options.strict,
-          }),
-        );
+        connectedByIndex[index] = await connectMcpServers([server], {
+          ...(options.connectTimeoutMs === undefined
+            ? {}
+            : { connectTimeoutMs: options.connectTimeoutMs }),
+          // Concurrency is owned here, one awaited server per slot. The Agents
+          // SDK parallel path additionally starts a detached `void drain()`
+          // task; a best-effort server rejection can escape that task as a
+          // process-level unhandled rejection even though the session records
+          // and degrades the failed server.
+          connectInParallel: false,
+          strict: options.strict,
+        });
       } catch (error) {
         const sdkError = error instanceof Error ? error : new Error(String(error));
-        throw unwrapMcpLifecycleErrorFromServers(batchServers, sdkError, "connect");
+        failures.push({
+          index,
+          error: unwrapMcpLifecycleErrorFromServers([server], sdkError, "connect"),
+        });
       }
     }
-  } catch (error) {
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(MCP_MAX_CONCURRENT_SERVER_OPERATIONS, servers.length) }, () =>
+      connectNext(),
+    ),
+  );
+  const batches = connectedByIndex.filter(
+    (batch): batch is ConnectedMcpServerBatch => batch !== undefined,
+  );
+  if (failures.length > 0) {
     await closeMcpServerBatches(batches).catch(() => undefined);
-    throw error;
+    failures.sort((left, right) => left.index - right.index);
+    throw failures[0]!.error;
   }
 
   const errors = new Map<MCPServer, Error>();

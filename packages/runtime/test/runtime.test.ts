@@ -275,6 +275,72 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
   ).rejects.toThrow("MCP server connect timed out after 5ms");
 });
 
+function delayedConnectServer(
+  id: string,
+  delayMs: number,
+  events: string[],
+  fail = false,
+): PrefixedMcpServer {
+  return new PrefixedMcpServer(
+    {
+      name: `inner-${id}`,
+      cacheToolsList: false,
+      connect: async () => {
+        events.push(`start:${id}`);
+        await Bun.sleep(delayMs);
+        if (fail) throw new Error(`connect failed ${id}`);
+        events.push(`connected:${id}`);
+      },
+      close: async () => {
+        events.push(`close:${id}`);
+      },
+      listTools: async () => [],
+      callTool: async () => [],
+      invalidateToolsCache: async () => {},
+    } as MCPServer,
+    id,
+  );
+}
+
+test("connects MCP servers concurrently and keeps their input order", async () => {
+  const events: string[] = [];
+  const servers = [
+    delayedConnectServer("slow", 120, events),
+    delayedConnectServer("fast-a", 20, events),
+    delayedConnectServer("fast-b", 20, events),
+    delayedConnectServer("medium", 60, events),
+  ];
+  const startedAt = performance.now();
+  const connected = await connectMcpServersInBatches(servers, { strict: false });
+  const elapsedMs = performance.now() - startedAt;
+  // Serial connects would take at least 220 ms; concurrent ones about 120 ms.
+  expect(elapsedMs).toBeLessThan(200);
+  expect(events.slice(0, 4).every((event) => event.startsWith("start:"))).toBe(true);
+  expect(connected.active.map(runtimeMcpServerId)).toEqual(["slow", "fast-a", "fast-b", "medium"]);
+  await connected.close();
+});
+
+test("a strict MCP connect failure closes every server that already connected", async () => {
+  const events: string[] = [];
+  const servers = [
+    delayedConnectServer("ok-a", 10, events),
+    delayedConnectServer("broken", 30, events, true),
+    delayedConnectServer("ok-b", 10, events),
+  ];
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  console.warn = () => {};
+  console.error = () => {};
+  try {
+    await expect(connectMcpServersInBatches(servers, { strict: true })).rejects.toThrow();
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+  expect(events).toContain("close:ok-a");
+  expect(events).toContain("close:ok-b");
+});
+
 test("preserves nested MCP connectivity diagnostics while adding a typed retry marker", () => {
   const raw = new Error("MCP connect failed for https://private.example/token-value");
   raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
