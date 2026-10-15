@@ -395,19 +395,6 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       select authority_epoch as "authorityEpoch", visibility
       from sessions where id = ${session.id}
     `;
-    await admin.begin(async (tx) => {
-      await tx`select
-        set_config('opengeni.account_id', ${account!.id}, true),
-        set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true),
-        set_config('opengeni.subject_id', ${subjectId}, true)`;
-      await tx`
-        select grant_id from issue_self_user_resource_grant(
-          ${account!.id}::uuid, ${machineAuthority!.id}::uuid,
-          ${targetWorkspace!.id}::uuid, 'connected_machine.use', 'session',
-          ${sessionAuthority!.visibility}, ${session.id}::uuid, true
-        )
-      `;
-    });
     const executionGeneration = 1;
     const [turn] = await admin<Array<{ id: string }>>`
       insert into session_turns (
@@ -471,6 +458,37 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
         hostname: "personal-cross-workspace",
       }) as never,
     };
+    // Before the owner allows this chat, the agent's swap is a typed refusal
+    // with a plain reason, never a raw database error, and the route is unchanged.
+    const before = await readActiveSandbox(db, targetWorkspace!.id, session.id);
+    const refused = await swapActiveSandbox(services, ctx, machine.sandboxId);
+    expect(refused).toMatchObject({
+      swapped: false,
+      activeSandboxId: before?.activeSandboxId ?? null,
+      activeEpoch: before?.activeEpoch ?? 0,
+      code: "personal_machine_permission_required",
+    });
+    expect(refused.reason).toContain("its owner has not allowed this chat");
+    expect(refused.reason).not.toContain("Failed query");
+    const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
+      kind: "exec",
+      cmd: "hostname",
+    });
+    expect(refusedRun.ok).toBe(false);
+    expect(refusedRun.reason).toContain("its owner has not allowed this chat");
+    await admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${account!.id}, true),
+        set_config('opengeni.workspace_id', ${targetWorkspace!.id}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true)`;
+      await tx`
+        select grant_id from issue_self_user_resource_grant(
+          ${account!.id}::uuid, ${machineAuthority!.id}::uuid,
+          ${targetWorkspace!.id}::uuid, 'connected_machine.use', 'session',
+          ${sessionAuthority!.visibility}, ${session.id}::uuid, true
+        )
+      `;
+    });
     const withoutAttempt: FleetContext = {
       accountId: ctx.accountId,
       workspaceId: ctx.workspaceId,
