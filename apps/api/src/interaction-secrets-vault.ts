@@ -59,7 +59,11 @@ export function createVaultInteractionSecretsPort(deps: {
   /** Defaults to a service over the same database and key. */
   vaultService?: VaultService;
   /** Connected vaults (1Password, host) for a workspace's acting subject. */
-  providersFor?: (workspaceId: string, subjectId: string | null) => VaultProviderRegistry;
+  providersFor?: (
+    workspaceId: string,
+    subjectId: string | null,
+    principal?: AttemptSecretPrincipal,
+  ) => VaultProviderRegistry;
 }): InteractionSecretsPort {
   const encryptionKey = deps.encryptionKey;
   let service = deps.vaultService ?? null;
@@ -203,7 +207,7 @@ export function createVaultInteractionSecretsPort(deps: {
         ...(providersFor
           ? {
               providersForSubject: (subjectId: string | null) =>
-                providersFor(principal.workspaceId, subjectId),
+                providersFor(principal.workspaceId, subjectId, principal),
             }
           : {}),
       });

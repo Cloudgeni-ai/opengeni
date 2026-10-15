@@ -30,9 +30,12 @@ The `secret_*` tools take references as names and never resolve them.
 
 ## Tools
 
-- `secret_search {query?, website?, type?, vault?, cursor?}`: items and
+- `secret_search {query?, website?, type?, vault?, cursor?, refresh?}`: items and
   references, never values; no filters lists all, page one lists vaults.
-  Repeat with `cursor` while `nextCursor` is set.
+  Repeat with `cursor` while `nextCursor` is set, preserving the filters.
+  Check `complete` and provider freshness: an unavailable or incomplete source
+  is not proof of absence. Use `refresh: true` deliberately when inventory may
+  be stale; it does not bypass rate limits.
 - `secret_save {item, vault?, saveTo?, type?, websites?, username?, fields?, mode?}`:
   each field takes one of `value`, `generate`, `fromReference` or
   `restoreVersion`. Use `generate` for new passwords.
@@ -68,12 +71,22 @@ after one failure.
 - Name items after the service and account ("GitHub", "GitHub ops bot") and
   record `websites` and `username`.
 - Move an item with `secret_move` when a schedule or teammate needs it.
+- Connected password managers have different write capabilities. Do not work
+  around a read-only or unsupported operation by exposing values in logs or
+  process arguments. A move needs recoverable removal at the source; copy can
+  still be available when removal is not. Ask cards save to hosted vaults only.
 
 ## Missing secrets and errors
 
 A tool result with `secret_reference_error` ran nothing. For a missing secret
 it includes `askCard`: call `request_human_input` with it, changing only
 `saveTo` or `prompt`, then retry with the returned reference.
+
+A provider being offline, locked, rate-limited or only partially listed is not
+a missing secret. Respect its retry time or report the reconnect/unlock action
+needed; do not ask the person to enter the secret again. If a mutation reports
+an unknown outcome, inspect the provider's state before trying again. Never
+automatically repeat a create because the following inventory refresh failed.
 
 ## Playbooks
 

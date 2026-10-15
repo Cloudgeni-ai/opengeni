@@ -92,6 +92,7 @@ export function createSharedActivityServices(
           dependencies.onePasswordVaultProvider === undefined
             ? loadOnePasswordVaultProvider
             : dependencies.onePasswordVaultProvider,
+        externalVaultProviders: dependencies.externalVaultProviders ?? null,
       };
     })();
     return await servicesPromise;

@@ -40,6 +40,7 @@ export * from "./domain/realtime-voice-billing";
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
 export * from "./domain/vaults/provider-registry";
+export * from "./domain/vaults/external-provider-connections";
 export * from "./domain/vaults/provider-sync";
 export * from "./workflow-wake-contract";
 export * from "./user-presence";

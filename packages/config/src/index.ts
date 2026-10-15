@@ -493,6 +493,18 @@ const SettingsSchema = z.object({
   // 1Password tokens, backed by the in-memory fake provider. The managed
   // product posture refuses to start with it set (OP-7).
   onePasswordFakeTokens: EnvBoolean.default(false),
+  // Operator-installed official pass-cli; never auto-download or resolve an
+  // agent-controlled executable from PATH. The adapter verifies its version.
+  protonPassCliPath: z
+    .string()
+    .trim()
+    .min(1)
+    .max(1_024)
+    .refine(
+      (value) => value.startsWith("/") || /^[a-z]:[\\/]/i.test(value),
+      "Proton Pass CLI path must be absolute",
+    )
+    .optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
@@ -4641,6 +4653,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
+    protonPassCliPath: optional("OPENGENI_PROTON_PASS_CLI_PATH"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(

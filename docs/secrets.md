@@ -16,7 +16,7 @@ each hosted field keeps encrypted **versions**.
 | Concept | Values |
 |---|---|
 | Vault owner kind | `user` (shown as **Only me**), `workspace`, `organization`, `task` |
-| Vault source | `opengeni` (hosted), `onepassword`, `host` (embedder provider) |
+| Vault source | `opengeni` (hosted), `onepassword`, `host` (in-process embedder), `external` (remote embedder), `protonpass`, `keeper`, `bitwarden` |
 | Vault mode | `read_write`, `read_only` (hosted vaults are always read-write) |
 | Item type | `login`, `api_key`, `note`, `file`, `passkey` |
 | Field kind | `text`, `concealed`, `totp`, `file` |
@@ -38,7 +38,7 @@ each hosted field keeps encrypted **versions**.
   session, and it is deleted with that session.
 - Default hosted vaults are created on first use: **Private** (Only me),
   **Shared** (workspace) and **Task**.
-- Every value is encrypted with the deployment's environment encryption key,
+- Every hosted value is encrypted with the deployment's environment encryption key,
   including plain text fields. Ten versions are kept per field; older versions
   can be restored. Changing a field's kind needs a new value and starts its
   history over (hiding a text field as concealed keeps it). Deleting an item
@@ -125,7 +125,9 @@ literally.
   through.
 - A tool call resolves all of its references or none. On any failure nothing is
   dispatched and the tool returns a typed error naming the references, never
-  values. A missing secret's error includes a ready `request_human_input` call.
+  values. A missing secret's error includes a ready `request_human_input` call
+  only when the relevant provider inventory could be checked. A provider
+  outage or incomplete inventory is not proof that a secret is missing.
 - TOTP codes are computed at dispatch and never stored.
 
 The grammar, resolver, splicer, generator and TOTP each have one
@@ -189,6 +191,14 @@ With the `secrets` capability on, agents get:
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |
 | `secret_delete` | Archive an item. | `secrets:write` |
 
+Discovery with no filters lists items; an empty query is not required. Keep
+the same filters when following `nextCursor`. Provider freshness is reported
+separately from pagination: `complete: false` means a relevant source could
+not be checked, not that the caller should guess a different spelling. Use
+`refresh: true` deliberately to recheck metadata and invalidate cached values;
+it does not bypass provider rate limits. Check each source's `freshness` and
+retry time before concluding that an empty list proves absence.
+
 The always-on prompt block teaches the reference syntax and the login ladder
 (reuse a session, sign in with the saved login and `/otp`, enroll your own 2FA,
 read email or SMS codes through connectors, create accounts with generated
@@ -240,13 +250,22 @@ read-write) or create a managed vault with
   and worker. Their images keep `@1password/sdk` as an installed package
   rather than bundling it, because its core loads a WASM file from beside its
   own module.
-- Not yet supported in linked vaults: `secret_move` into or out of them,
-  restoring field history, and file fields.
+- Copying between hosted and linked vaults is supported when the destination
+  can create the item type. Moving additionally requires recoverable removal
+  at the source. Provider field-history restoration and unsupported file
+  operations are not offered. Provider removal never means permanent deletion.
 
 **Host provider (embedders).** Products that embed Opengeni can supply a
 `vaultProvider` implementing `VaultProvider` from `@opengeni/vaults`; link its
 vaults with `provider: "host"`. This replaces the removed `sandboxSecrets` port.
 See [embedding.md](embedding.md).
+
+**Additional providers and remote hosts.** Proton Pass, Keeper Secrets Manager,
+Bitwarden Password Manager through a customer-controlled bridge, and generic
+remote vaults use the same native ownership, references and discovery. Their
+write capabilities differ; a connected vault is not automatically fully
+editable. See [external-vaults.md](external-vaults.md) for setup, the supported
+operations, freshness, and the distinction from renewable run credentials.
 
 For local development, `OPENGENI_ONEPASSWORD_FAKE_TOKENS=1` enables the
 in-memory fake provider tokens `ops_fake_healthy` and `ops_fake_sync_error`.
@@ -266,6 +285,10 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
 | `POST /vaults/link`; `POST /vaults/:vaultId/sync` | Provider vaults |
+| `GET, POST /vault-providers/connections` | Unified connection metadata; install a first-wave provider |
+| `PUT /vault-providers/connections/:connectionId/credentials` | Reconnect without changing linked vault identities |
+| `POST /vault-providers/connections/:connectionId/verify` | Finish pending setup using saved credentials, without replaying a bootstrap token |
+| `DELETE /vault-providers/connections/:connectionId` | Unlink locally and revoke stored access; never delete upstream items |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).

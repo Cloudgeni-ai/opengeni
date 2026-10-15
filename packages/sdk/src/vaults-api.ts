@@ -228,7 +228,11 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
       ),
     /** Continue verification using the saved credentials, without replaying setup tokens. */
     verifyVaultProviderConnection: (connectionId: string) =>
-      json<InstallVaultProviderResponse>("POST", `${base}/vault-providers/connections/${enc(connectionId)}/verify`, {}),
+      json<InstallVaultProviderResponse>(
+        "POST",
+        `${base}/vault-providers/connections/${enc(connectionId)}/verify`,
+        {},
+      ),
     linkProviderVault: (request: LinkProviderVaultRequest) =>
       json<VaultSummary>("POST", `${base}/vaults/link`, request),
     createManagedProviderVault: (
