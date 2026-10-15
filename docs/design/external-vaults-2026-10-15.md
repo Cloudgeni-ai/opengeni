@@ -305,6 +305,12 @@ offer file writes; sync/error/source strings must not hardcode 1Password.
 Move/copy does have a core cross-provider implementation despite stale docs:
 keep supported copies, gate moves by recoverable source removal and valid
 destination create capabilities, and correct the docs.
+Cross-provider moves are not atomic: the original's provider version is read
+fresh before its values are copied and checked again just before the
+recoverable archive; a change, a missing item or a failed check keeps the
+original (`saved: true`, `sourceArchived: false`). Without a provider
+conditional archive, an edit between that check and the archive remains
+possible, and unversioned providers get no check.
 
 Review states: existing S1–S16, provider picker/disabled provider; empty/filled/
 invalid/expired setup; one-time bootstrap failure; read-only/unknown grant

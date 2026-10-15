@@ -19,6 +19,7 @@ import {
 import {
   isVaultProviderError,
   providerOperations,
+  readProviderItemInventory,
   type ProviderCallBudget,
   type ProviderWriteField,
   type VaultProvider,
@@ -548,6 +549,54 @@ export async function assertProviderVaultReleases(
     );
   }
   return archiveKind;
+}
+
+/** What a fresh provider listing says about one mirrored item. */
+export type ProviderItemObservation =
+  | { listed: true; version: string | null }
+  | { listed: false; consistent: boolean };
+
+/**
+ * The provider's current version of one item, from a fresh listing of its
+ * vault (provider caches bypassed). `version` is null when the provider does
+ * not version items. A provider failure is thrown as a `VaultError`.
+ *
+ * The provider contract has no conditional (compare-and-archive) operation,
+ * so this only narrows the window between reading an item and archiving it;
+ * it cannot close it.
+ */
+export async function observeProviderItemVersion(
+  deps: ProviderWriteDeps,
+  input: { vault: VaultRow; providerItemRef: string },
+): Promise<ProviderItemObservation> {
+  const { vault } = input;
+  const provider = await providerFor(deps, vault);
+  try {
+    const inventory = await readProviderItemInventory(
+      provider,
+      {
+        connectionId: vault.providerConnectionId,
+        budget: deps.budget ?? { take() {} },
+        cacheEpoch: vault.providerCacheEpoch ?? null,
+        forceRefresh: true,
+      },
+      vault.providerVaultRef ?? "",
+    );
+    const item = inventory.items.find((meta) => meta.externalItemId === input.providerItemRef);
+    if (!item) return { listed: false, consistent: inventory.consistent };
+    return {
+      listed: true,
+      version: typeof item.version === "string" && item.version.length > 0 ? item.version : null,
+    };
+  } catch (error) {
+    if (isVaultProviderError(error)) {
+      throw new VaultError(vaultErrorCodeForProvider(error.code, "vault"), error.message, {
+        vaultId: vault.id,
+        ...(error.retryAfterMs ? { retryAfterMs: error.retryAfterMs } : {}),
+      });
+    }
+    throw error;
+  }
 }
 
 /**

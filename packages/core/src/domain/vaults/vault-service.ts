@@ -56,6 +56,7 @@ import {
   ensureTaskVault,
   getSession,
   getSessionSecretsView,
+  getProviderVaultItemRef,
   getVault,
   getVaultItem,
   isVaultError,
@@ -104,6 +105,7 @@ import {
   archiveProviderVaultItem,
   assertProviderVaultAccepts,
   assertProviderVaultReleases,
+  observeProviderItemVersion,
   refuseProviderOperation,
   savedNotListedError,
   writeProviderVaultItem,
@@ -461,6 +463,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
    * target confirmed the write; an unknown or failed target write leaves it
    * untouched, and a confirmed copy whose original could not be archived is
    * reported as saved, so the move is not repeated.
+   *
+   * A move out of a connected vault records the provider's version of the
+   * original from a fresh listing before any value is read, and lists it
+   * again just before archiving. If the provider now reports another
+   * version, no longer lists it, or cannot be asked, the original is kept and
+   * the copy is reported as saved with `sourceArchived: false`. Providers
+   * offer no conditional archive, so a change landing between that last check
+   * and the archive is still archived (recoverably); a provider that does not
+   * version items gets no drift check.
    */
   async function moveAcrossProviders(input: {
     context: VaultDbContext;
@@ -501,6 +512,27 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     }
     if (input.mode === "move" && source.vaultSource !== "opengeni") {
       await assertProviderVaultReleases(input.providerWrites, sourceVault);
+    }
+    // The version the copied values belong to, observed before they are read:
+    // an edit after this makes the later check differ and keeps the original.
+    let pinned: { providerItemRef: string; version: string } | null = null;
+    if (input.mode === "move" && source.vaultSource !== "opengeni") {
+      const { providerItemRef } = await getProviderVaultItemRef(deps.db, input.context, {
+        vaultId: sourceVault.id,
+        itemId: source.id,
+      });
+      const observed = await observeProviderItemVersion(input.providerWrites, {
+        vault: sourceVault,
+        providerItemRef,
+      });
+      if (!observed.listed) {
+        throw new VaultError(
+          "vault_item_not_found",
+          `${source.name} is not listed in ${sourceVault.name} right now; sync the vault and try again`,
+          { itemId: source.id, vaultId: sourceVault.id },
+        );
+      }
+      if (observed.version !== null) pinned = { providerItemRef, version: observed.version };
     }
     const name = input.newName ?? source.name;
     const fields: FieldSource[] = [];
@@ -560,6 +592,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (input.mode === "move") {
       try {
         if (source.vaultSource !== "opengeni") {
+          if (pinned) await assertSourceUnchanged(input.providerWrites, sourceVault, pinned);
           await archiveProviderVaultItem(input.providerWrites, {
             vault: sourceVault,
             itemId: source.id,
@@ -568,12 +601,16 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           await archiveVaultItem(deps.db, input.context, { itemId: source.id });
         }
       } catch (error) {
+        const changed = isVaultError(error) && error.details?.sourceChanged === true;
         throw new VaultError(
           isVaultError(error) ? error.code : "provider_outcome_unknown",
-          `Saved ${name} in ${target.name}, but archiving the original in ${sourceVault.name} did not complete${isVaultError(error) ? ` (${error.message})` : ""}. Do not move it again: check ${sourceVault.name} and archive the original there if it is still listed.`,
+          changed
+            ? `Saved ${name} in ${target.name} with the values that were read, but the original in ${sourceVault.name} ${error.message}, so it was kept. Do not move it again: compare the two, then update the copy or archive the original in ${sourceVault.name}.`
+            : `Saved ${name} in ${target.name}, but archiving the original in ${sourceVault.name} did not complete${isVaultError(error) ? ` (${error.message})` : ""}. Do not move it again: check ${sourceVault.name} and archive the original there if it is still listed.`,
           {
             saved: true,
             sourceArchived: false,
+            ...(changed ? { sourceChanged: true } : {}),
             vaultId: target.id,
             ...(created ? { itemId: created.id } : {}),
             sourceItemId: source.id,
@@ -590,6 +627,30 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       });
     }
     return created!;
+  }
+
+  /**
+   * Refuses (before archiving) an original the provider no longer reports at
+   * the version its values were copied from. A failed listing throws its own
+   * provider error, so the original is kept either way.
+   */
+  async function assertSourceUnchanged(
+    providerWrites: ProviderWriteDeps,
+    vault: VaultRow,
+    pinned: { providerItemRef: string; version: string },
+  ): Promise<void> {
+    const now = await observeProviderItemVersion(providerWrites, {
+      vault,
+      providerItemRef: pinned.providerItemRef,
+    });
+    if (now.listed && now.version === pinned.version) return;
+    throw new VaultError(
+      now.listed ? "vault_generation_conflict" : "vault_item_not_found",
+      now.listed
+        ? "changed after its values were read"
+        : "is no longer listed at the version that was read",
+      { sourceChanged: true, vaultId: vault.id },
+    );
   }
 
   function toItem(row: VaultItemRow): VaultItem {
