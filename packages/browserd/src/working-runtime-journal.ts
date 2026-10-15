@@ -198,6 +198,21 @@ export async function isAbandonedLaunchReceipt(
   }
 }
 
+/** True when the latest receipt is a launch that never recorded completion:
+ * it is still prepared or dispatched and no owned browser process was ever
+ * recorded for it. Such a launch can't be adopted, and its retained profile
+ * may or may not have been used by a browser before the controller lost it. */
+export function isInterruptedLaunchReceipt(
+  receipt: BrowserWorkingRuntimeReceipt | null,
+): receipt is BrowserWorkingRuntimeReceipt {
+  return (
+    receipt !== null &&
+    receipt.intent === "launch" &&
+    receipt.process === null &&
+    (receipt.state === "prepared" || receipt.state === "dispatched")
+  );
+}
+
 export function boundedFailureCode(value: unknown): string {
   return typeof value === "string" && FAILURE_CODE.test(value) ? value : "internal";
 }

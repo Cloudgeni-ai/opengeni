@@ -1193,17 +1193,26 @@ export class BrowserControlServer {
 
   private async endSession(browserSessionId: string, request: Request): Promise<Response> {
     const body = await readJsonObject(request);
-    assertOnlyKeys(body, ["controllerGeneration", "removeState", "discardWorkingRuntime"]);
+    assertOnlyKeys(body, [
+      "controllerGeneration",
+      "removeState",
+      "discardWorkingRuntime",
+      "setAsideInterruptedLaunch",
+    ]);
     const controllerGeneration = requireGeneration(body.controllerGeneration);
     const removeState = requireBoolean(body.removeState, "removeState");
     const discardWorkingRuntime =
       body.discardWorkingRuntime === undefined
         ? false
         : requireBoolean(body.discardWorkingRuntime, "discardWorkingRuntime");
+    const setAsideInterruptedLaunch =
+      body.setAsideInterruptedLaunch === undefined
+        ? false
+        : requireBoolean(body.setAsideInterruptedLaunch, "setAsideInterruptedLaunch");
     return await this.withLifecycleLock(browserSessionId, async () => {
       await this.supervisor.endSession(
         { browserSessionId, controllerGeneration },
-        { removeState, discardWorkingRuntime },
+        { removeState, discardWorkingRuntime, setAsideInterruptedLaunch },
       );
       // Validate and complete the bound lifecycle transition before disrupting
       // viewers. A stale admin lifecycle request must not close a live session.
