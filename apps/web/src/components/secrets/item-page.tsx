@@ -49,7 +49,7 @@ import {
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
 import { hostOf, ITEM_TYPE_LABEL, vaultErrorText } from "./vault-model";
 import { ExpiryBadge, ItemTile } from "./vault-parts";
-import { removalLabel, sourceHome, vaultOperations } from "./vault-providers";
+import { removalLabel, sourceHome, vaultOperations, writesPausedReason } from "./vault-providers";
 
 /* ----------------------------------------------------------------------------
    An item's page (S3). Concealed values show as dots; Reveal and Copy read
@@ -437,17 +437,20 @@ export function ItemPage({
   const isProvider = vault.source !== "opengeni";
   const operations = vaultOperations(vault);
   const home = sourceHome(vault);
-  const canWrite = vault.canWrite && !archived;
+  const paused = isProvider && !archived && !readOnly ? writesPausedReason(vault) : null;
+  const canWrite = vault.canWrite && !archived && !paused;
   const canEdit = canWrite && operations.updateItem;
   const fields = [...item.fields].sort((a, b) => a.position - b.position);
   const primaryReference = item.references.primary;
   // Said where Edit would be, so the reason is visible without hovering.
   const editElsewhere =
-    isProvider && !archived && (readOnly || (vault.canWrite && !operations.updateItem))
-      ? readOnly
-        ? `Read-only: edit this item in ${home}.`
-        : `Edit this item in ${home}. Opengeni can save new items here, not change them.`
-      : null;
+    paused && vault.canWrite
+      ? paused
+      : isProvider && !archived && (readOnly || (vault.canWrite && !operations.updateItem))
+        ? readOnly
+          ? `Read-only: edit this item in ${home}.`
+          : `Edit this item in ${home}. Opengeni can save new items here, not change them.`
+        : null;
 
   const editButton = canEdit ? (
     <Button type="button" size="sm" onClick={actions.edit} className="pointer-coarse:h-11">

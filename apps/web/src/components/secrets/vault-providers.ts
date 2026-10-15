@@ -184,14 +184,46 @@ const NO_WRITES: Partial<VaultProviderOperations> = {
  * operations, narrowed by the linked mode and by the person's permission.
  */
 export function vaultOperations(
-  vault: Pick<VaultSummary, "source" | "mode" | "canWrite" | "providerOperations">,
+  vault: Pick<VaultSummary, "source" | "mode" | "canWrite" | "providerOperations"> &
+    Partial<Omit<HealthInput, "source">>,
 ): VaultProviderOperations {
   const base =
     vault.source === "opengeni"
       ? HOSTED_OPERATIONS
       : (vault.providerOperations ?? LEGACY_PROVIDER_OPERATIONS);
   if (!vault.canWrite || vault.mode === "read_only") return { ...base, ...NO_WRITES };
+  // A write can't reach a provider that refuses, is locked or is down: it waits.
+  if (writesPaused(vault)) return { ...base, ...NO_WRITES };
   return base;
+}
+
+/** The health states in which no write can reach the provider. */
+function writesPaused(vault: Partial<HealthInput>): VaultHealth["kind"] | null {
+  if (!vault.source || vault.source === "opengeni") return null;
+  const kind = vaultHealth(vault as HealthInput).kind;
+  return kind === "auth_expired" || kind === "locked" || kind === "unavailable" ? kind : null;
+}
+
+/** Why this provider vault takes no changes right now, or null when it can. */
+export function writesPausedReason(vault: Partial<HealthInput>): string | null {
+  const kind = writesPaused(vault);
+  if (!kind || !vault.source) return null;
+  const provider = providerOfVault({ source: vault.source });
+  const home = sourceHome({ source: vault.source });
+  switch (kind) {
+    case "auth_expired":
+      return `Changes wait until ${home} is reconnected.`;
+    case "locked":
+      return provider === "bitwarden"
+        ? `Changes wait until ${home} is unlocked on the bridge.`
+        : `Changes wait until ${home} is unlocked.`;
+    case "unavailable":
+      return isSelfHosted(provider)
+        ? `Changes wait until ${home} is reachable again.`
+        : `Changes wait until ${home} responds again.`;
+    default:
+      return null;
+  }
 }
 
 /** The item types a vault accepts; passkeys never (they come from a browser). */

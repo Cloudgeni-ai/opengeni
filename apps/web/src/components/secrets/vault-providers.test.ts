@@ -17,6 +17,7 @@ import {
   stillPending,
   vaultHealth,
   vaultOperations,
+  writesPausedReason,
   type VaultProviderOperations,
 } from "./vault-providers";
 
@@ -116,6 +117,37 @@ describe("what a vault can do", () => {
     );
     expect(removalLabel(vault({ source: "onepassword" }), "archive")).toBe("Archive in 1Password");
     expect(sourceHome(vault({ source: "external" }))).toBe("your vault service");
+  });
+
+  test("writes wait while the provider refuses, is locked or is down", () => {
+    const bitwarden = (overrides: Partial<VaultSummary>) =>
+      vault({ source: "bitwarden", providerOperations: PROTON, ...overrides });
+    for (const [paused, reason] of [
+      [bitwarden({ syncStatus: "auth_expired" }), "Changes wait until Bitwarden is reconnected."],
+      [
+        bitwarden({ syncStatus: "error", syncErrorCode: "provider_locked" }),
+        "Changes wait until Bitwarden is unlocked on the bridge.",
+      ],
+      [
+        bitwarden({ freshness: { state: "unavailable" } as VaultSummary["freshness"] }),
+        "Changes wait until Bitwarden is reachable again.",
+      ],
+    ] as const) {
+      expect(creatableTypes(vaultOperations(paused))).toEqual([]);
+      expect(vaultOperations(paused).archiveItem).toBe(false);
+      expect(writesPausedReason(paused)).toBe(reason);
+      expect(acceptsItem(paused, item())).toBe(false);
+    }
+    // Stale, rate-limited and incomplete listings still take writes.
+    for (const ok of [
+      bitwarden({ freshness: { state: "stale" } as VaultSummary["freshness"] }),
+      bitwarden({ syncStatus: "rate_limited" }),
+      bitwarden({ syncStatus: "error", syncErrorCode: "provider_inventory_incomplete" }),
+    ]) {
+      expect(creatableTypes(vaultOperations(ok))).toEqual(["login", "note"]);
+      expect(writesPausedReason(ok)).toBeNull();
+    }
+    expect(writesPausedReason(vault({ syncStatus: "auth_expired" }))).toBeNull();
   });
 });
 

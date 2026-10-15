@@ -830,7 +830,7 @@ const PROVIDER_STATES: CaptureState[] = [
     "Copy or move dialog from Proton Pass (targets that accept a TOTP login)",
     (ids) => item(ids, "Proton Ops/Grafana"),
     {
-      steps: itemMenu(/copy/iu),
+      steps: itemMenu(/^(Move or copy|Copy to another)/u),
     },
   ),
   s(
@@ -869,7 +869,7 @@ const PROVIDER_STATES: CaptureState[] = [
     "Copy Postgres primary from Keeper (copy only)",
     (ids) => item(ids, "Keeper Production/Postgres primary"),
     {
-      steps: itemMenu(/copy/iu),
+      steps: itemMenu(/^(Move or copy|Copy to another)/u),
     },
   ),
   s(
@@ -886,9 +886,9 @@ const PROVIDER_STATES: CaptureState[] = [
   ),
   s(
     "S22",
-    "bitwarden-item-viewer",
-    "Bitwarden item as a viewer",
-    (ids) => item(ids, "Bitwarden Personal/Bank"),
+    "proton-item-viewer",
+    "Proton Pass item as a viewer: no values, no actions",
+    (ids) => item(ids, "Proton Ops/Grafana"),
     {
       user: "tom",
     },
