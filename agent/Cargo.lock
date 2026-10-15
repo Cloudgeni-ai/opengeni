@@ -2102,6 +2102,7 @@ dependencies = [
  "opengeni-agent-linux-ffi",
  "opengeni-agent-macos-ffi",
  "opengeni-agent-proto",
+ "opengeni-agent-windows-ffi",
  "portable-pty",
  "prost",
  "rustix 1.1.4",
@@ -2160,6 +2161,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "opengeni-agent-windows-ffi"
+version = "0.1.64"
+dependencies = [
+ "thiserror 2.0.20",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
