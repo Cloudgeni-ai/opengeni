@@ -944,6 +944,24 @@ export function modelPreparationFailureEventPayload(error: unknown, durationMs: 
 }
 
 /**
+ * The turn's first model request could not be dispatched until the context
+ * was compacted (proactive threshold or an operator-requested Compact). That
+ * is an expected step of preparation, not a failure: the same activity
+ * compacts and then reopens preparation for the retried request.
+ */
+export function compactionFirstPreparationEventPayload(durationMs: number) {
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: true,
+    failureCategory: "context_compaction",
+    failureStage: "context_compaction",
+    failureCode: "compaction_required",
+    retryable: true,
+  } as const;
+}
+
+/**
  * Recognize active-route transitions that cannot finish inside their
  * originating attempt. A Modal-home session may start on a Connected Machine
  * without creating or leasing its managed home box. When an explicit attach

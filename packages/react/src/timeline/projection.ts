@@ -3640,6 +3640,16 @@ function startupPhaseFromPayload(value: unknown): StartupPhase | null {
 function startupLifecycleWaitReason(
   payload: Record<string, unknown>,
 ): StartupPhaseItem["blockedReason"] {
+  // The first model request waited for context compaction: an expected step
+  // of preparation that reopens after compacting, never a failure.
+  if (
+    payload.expectedTransition === true &&
+    payload.failureStage === "context_compaction" &&
+    payload.failureCategory === "context_compaction" &&
+    payload.failureCode === "compaction_required"
+  ) {
+    return "compaction_required";
+  }
   if (
     payload.expectedTransition !== true ||
     payload.failureStage !== "lifecycle_wait" ||
