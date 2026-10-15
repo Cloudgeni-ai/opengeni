@@ -107,7 +107,10 @@ import {
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
-import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  parseInteractionSessionListQuery,
+} from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
@@ -232,6 +235,7 @@ export function registerComputerSessionRoutes(
     const listed = await listComputerSessions(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
     });
     return context.json(
       ComputerSessionListResponse.parse({

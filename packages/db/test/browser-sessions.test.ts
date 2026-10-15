@@ -989,6 +989,60 @@ describe("durable BrowserSession lifecycle", () => {
     expect(failed.session).toMatchObject({ lifecycle: "lost", controller });
   });
 
+  test("narrows the inventory by associated session and terminal lifecycle", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const live = await activeBrowser(scope);
+    const ending = await activeBrowser(scope);
+    const endOperationId = crypto.randomUUID();
+    await prepareBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: ending.session.id,
+      operationId: endOperationId,
+      actorSubjectId: scope.subjectId,
+    });
+    await completeBrowserSessionEnd(client.db, {
+      ...scope,
+      browserSessionId: ending.session.id,
+      operationId: endOperationId,
+      expectedControllerGeneration: ending.controllerGeneration,
+    });
+    const peer = await createSession(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      initialMessage: "peer",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+    });
+    const peerBrowser = await prepareBrowserSessionCreate(client.db, {
+      ...createInput({ ...scope, sessionId: peer.id, sandboxGroupId: peer.sandboxGroupId }),
+    });
+    const ids = async (filter: { associatedSessionId?: string; includeTerminal?: boolean }) =>
+      (await listBrowserSessions(client.db, { ...scope, ...filter })).sessions
+        .map((session) => session.id)
+        .sort();
+
+    expect(await ids({})).toEqual(
+      [live.session.id, ending.session.id, peerBrowser.session.id].sort(),
+    );
+    expect(await ids({ includeTerminal: false })).toEqual(
+      [live.session.id, peerBrowser.session.id].sort(),
+    );
+    expect(await ids({ associatedSessionId: scope.sessionId })).toEqual(
+      [live.session.id, ending.session.id].sort(),
+    );
+    expect(await ids({ associatedSessionId: scope.sessionId, includeTerminal: false })).toEqual([
+      live.session.id,
+    ]);
+    expect(await ids({ associatedSessionId: peer.id, includeTerminal: false })).toEqual([
+      peerBrowser.session.id,
+    ]);
+  });
+
   test("serializes end and rejects a second active lifecycle operation", async () => {
     if (!available) return;
     const scope = await fixture();

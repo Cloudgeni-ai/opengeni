@@ -363,6 +363,57 @@ describe("interaction attempt tools", () => {
     ]);
   });
 
+  test("browser_open, computer_open and discovery narrow inventories in the query", async () => {
+    const requests: Array<{ kind: string; options: unknown }> = [];
+    const record = (kind: string) => async (_workspace: string, options?: unknown) => {
+      requests.push({ kind, options });
+      return { revision: 1, sessions: [] };
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: record("browser") as never,
+        listComputerSessions: record("computer") as never,
+        listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+        listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
+        createBrowserSession: async () => ({ session: { lifecycle: "starting" } }) as never,
+        createComputerSession: async () => ({ session: { lifecycle: "starting" } }) as never,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover", "browser_open", "computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const tool = (name: string) =>
+      definitions.find((entry) => entry.modelName === `interaction__${name}`)!;
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    const own = { associatedSessionId: sessionId, includeTerminal: false };
+
+    await tool("browser_open").execute({}, context());
+    await tool("computer_open").execute({}, context());
+    expect(requests.splice(0)).toEqual([
+      { kind: "browser", options: own },
+      { kind: "computer", options: own },
+    ]);
+
+    await tool("interaction_discover").execute({}, context());
+    expect(requests.splice(0)).toEqual([
+      { kind: "browser", options: own },
+      { kind: "computer", options: own },
+    ]);
+
+    await tool("interaction_discover").execute(
+      { scope: "workspace", includeTerminal: true },
+      context(),
+    );
+    expect(requests.splice(0)).toEqual([
+      { kind: "browser", options: {} },
+      { kind: "computer", options: {} },
+    ]);
+  });
+
   test("browser reuse never crosses explicit ephemeral and private profile modes", async () => {
     for (const requestedMode of ["private_profile", "ephemeral_context"] as const) {
       const createRequests: Array<Record<string, unknown>> = [];

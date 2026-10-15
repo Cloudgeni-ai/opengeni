@@ -4,7 +4,7 @@ export type {
   ComputerNativeReceipt,
   ComputerOperationReceipt,
 } from "@opengeni/contracts";
-import type { OpenGeniRequestOptions } from "./client";
+import type { InteractionSessionListOptions, OpenGeniRequestOptions } from "./client";
 import { browserSessionStorageMode } from "@opengeni/contracts/browser-storage";
 import type {
   BrowserDomReadRequest,
@@ -1438,7 +1438,7 @@ export interface InteractionTransport {
   ): Promise<BrowserRevisionListResponse>;
   listBrowserSessions(
     workspaceId: string,
-    options?: OpenGeniRequestOptions,
+    options?: OpenGeniRequestOptions | InteractionSessionListOptions,
   ): Promise<BrowserSessionListResponse>;
   getBrowserSession(
     workspaceId: string,
@@ -1584,7 +1584,7 @@ export interface InteractionTransport {
   ): Promise<BrowserSessionMutationResponse>;
   listComputerSessions(
     workspaceId: string,
-    options?: OpenGeniRequestOptions,
+    options?: OpenGeniRequestOptions | InteractionSessionListOptions,
   ): Promise<ComputerSessionListResponse>;
   getComputerSession(
     workspaceId: string,
@@ -2096,7 +2096,7 @@ export class BrowserSessionCollection {
 
   async list(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<BrowserSessionListResponse> {
     return await this.transport.listBrowserSessions(workspaceId, options);
   }
@@ -2452,7 +2452,7 @@ export class ComputerSessionCollection {
 
   async list(
     workspaceId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions | InteractionSessionListOptions = {},
   ): Promise<ComputerSessionListResponse> {
     return await this.transport.listComputerSessions(workspaceId, options);
   }

@@ -203,7 +203,10 @@ import {
   withCachedController,
   withControllerTransportRecovery,
 } from "../controller-data-plane";
-import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  parseInteractionSessionListQuery,
+} from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -309,6 +312,7 @@ export function registerBrowserSessionRoutes(
     const listed = await listBrowserSessions(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
     });
     return context.json(
       BrowserSessionListResponse.parse({
