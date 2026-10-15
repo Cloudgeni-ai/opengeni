@@ -235,6 +235,7 @@ export type {
   FetchLike,
   FetchResponse,
   GetSessionOptions,
+  InteractionSessionListOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
