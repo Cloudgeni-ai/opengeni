@@ -47,6 +47,7 @@ import {
   mediaPreviewFact,
   parseToolArgs,
   retainedScreenshotMetadata,
+  retainedToolResultImages,
   unwrapMcpOutput,
   screenshotDataUrl,
 } from "./parsers";
@@ -389,9 +390,48 @@ function RunOnRenderer({ item }: ToolRendererProps) {
  * status preview (Running… / Done / error snippet). No argument-field sniffing —
  * JSON stays in the expandable body only.
  */
-function UnreviewedGenericRenderer({ item }: ToolRendererProps) {
+function UnreviewedGenericRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const logo = useToolConnectorLogo(item.display);
-  return <PresentedToolRow presentation={genericToolPresentation(item)} logo={logo} />;
+  const { images, output } = retainedToolResultImages(item.output);
+  if (images.length === 0 || item.status === "running") {
+    return <PresentedToolRow presentation={genericToolPresentation(item)} logo={logo} />;
+  }
+  // A tool that returned images shows them like a viewed image, with its
+  // ordinary result text (and any further images) in the expanded body.
+  const presentation = genericToolPresentation({ ...item, output });
+  const Icon = toolIcon(presentation.icon);
+  const [first, ...rest] = images;
+  return (
+    <RetainedSessionImageDisclosure
+      artifact={first!}
+      load={loadRetainedScreenshot}
+      title={presentation.title}
+      caption={presentation.title}
+      noun="image"
+      icon={<ConnectorLogoIcon src={logo} fallback={<Icon className={ICON_SIZE} />} />}
+      lightboxLabel={presentation.title}
+      batched={null}
+      failed={presentation.failed ?? false}
+      cancelled={presentation.cancelled ?? false}
+    >
+      <PresentedBody body={presentation.body} />
+      {rest.map((image, index) => (
+        <RetainedSessionImageDisclosure
+          key={image.artifactId}
+          artifact={image}
+          load={loadRetainedScreenshot}
+          title={`Image ${index + 2}`}
+          caption={`${presentation.title}, image ${index + 2}`}
+          noun="image"
+          icon={<ImageIcon className={ICON_SIZE} />}
+          lightboxLabel={presentation.title}
+          batched={null}
+          failed={false}
+          cancelled={false}
+        />
+      ))}
+    </RetainedSessionImageDisclosure>
+  );
 }
 
 /* ---- computer_call --------------------------------------------------------- */
@@ -1760,10 +1800,10 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
  * status preview (Running… / Done / error snippet). No argument-field sniffing —
  * JSON stays in the expandable body only.
  */
-function GenericRenderer({ item }: ToolRendererProps) {
-  const reviewed = useHasToolReview(item.callId);
-  if (reviewed && item.callId) return <ReviewedGenericRenderer item={item} />;
-  return <UnreviewedGenericRenderer item={item} />;
+function GenericRenderer(props: ToolRendererProps) {
+  const reviewed = useHasToolReview(props.item.callId);
+  if (reviewed && props.item.callId) return <ReviewedGenericRenderer {...props} />;
+  return <UnreviewedGenericRenderer {...props} />;
 }
 
 /** Settled review states earn one quiet gutter word; success and waiting stay chip-free. */
@@ -1783,10 +1823,11 @@ const REVIEW_CHIP: Partial<Record<ToolReviewStatus, DisclosureChip>> = {
  * A call that went through approval keeps the ordinary row shape, titled with
  * what was approved. The expanded body is the saved review plus the result.
  */
-function ReviewedGenericRenderer({ item }: ToolRendererProps) {
+function ReviewedGenericRenderer(props: ToolRendererProps) {
+  const { item } = props;
   const { review, onViewDetails } = useRecordedToolReview(item.callId);
   const logo = useToolConnectorLogo(item.display);
-  if (!review) return <UnreviewedGenericRenderer item={item} />;
+  if (!review) return <UnreviewedGenericRenderer {...props} />;
   const ReviewIcon = toolIcon(genericToolIconKind(item.name));
   const icon = <ConnectorLogoIcon src={logo} fallback={<ReviewIcon className={ICON_SIZE} />} />;
   const waiting = review.status === "pending";
@@ -1794,7 +1835,7 @@ function ReviewedGenericRenderer({ item }: ToolRendererProps) {
     !waiting &&
     (review.status === "executing" || review.status === "approved") &&
     item.status === "running";
-  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  const { text: outText, isError } = unwrapMcpOutput(retainedToolResultImages(item.output).output);
   const chip =
     REVIEW_CHIP[review.status] ??
     (isError && !running && !waiting ? ({ tone: "bad", text: "error" } as const) : undefined);
