@@ -5,10 +5,8 @@ description: Use when signing in, creating accounts, storing or using passwords,
 
 # Secrets: sign in and use credentials yourself
 
-You are trusted with the user's vaults. Act on your own: sign in, create
-accounts when the task allows it, enroll your own 2FA, fetch email and SMS
-codes, and solve CAPTCHAs. You never need to see a value: write a reference and
-it resolves where it runs.
+Use references instead of viewing values. Sign in, create accounts when the
+task allows it, enroll 2FA, fetch codes and solve CAPTCHAs yourself.
 
 ## References
 
@@ -30,19 +28,15 @@ The `secret_*` tools take references as names and never resolve them.
 
 ## Tools
 
-- `secret_search {query?, website?, type?, vault?, cursor?, refresh?}`: items and
-  references, never values; no filters lists all, page one lists vaults.
-  Repeat with `cursor` while `nextCursor` is set, preserving the filters.
-  Check `complete` and provider freshness: an unavailable or incomplete source
-  is not proof of absence. Use `refresh: true` deliberately when inventory may
-  be stale; it does not bypass rate limits.
-- `secret_save {item, vault?, saveTo?, type?, websites?, username?, fields?, mode?}`:
-  each field takes one of `value`, `generate`, `fromReference` or
-  `restoreVersion`. Use `generate` for new passwords.
-- `secret_move {reference, toVault, mode, newName?}`: move or copy an item.
-- `secret_delete {reference}`: archive an item.
-- `secret_get {reference}`: plaintext, only with `secrets:read`. Use it only
-  when a tool cannot take a reference.
+- `secret_search`: metadata and references, never values. No filters lists all;
+  page one lists vaults. Follow `nextCursor` with unchanged filters. Check
+  `complete` and freshness before inferring absence. `refresh: true` requests
+  fresh inventory without bypassing rate limits.
+- `secret_save`: each field takes `value`, `generate`, `fromReference` or
+  `restoreVersion`. Generate new passwords.
+- `secret_move`: move or copy to another vault.
+- `secret_delete`: archive an item.
+- `secret_get`: plaintext with `secrets:read`, only if references cannot work.
 
 ## Login ladder
 
@@ -68,13 +62,9 @@ after one failure.
 
 - `saveTo`: `user` (Only me, reused later), `task` (throwaway, shared with this
   task's sessions) or `workspace` (team keys, schedules that run without you).
-- Name items after the service and account ("GitHub", "GitHub ops bot") and
-  record `websites` and `username`.
-- Move an item with `secret_move` when a schedule or teammate needs it.
-- Connected password managers have different write capabilities. Do not work
-  around a read-only or unsupported operation by exposing values in logs or
-  process arguments. A move needs recoverable removal at the source; copy can
-  still be available when removal is not. Ask cards save to hosted vaults only.
+- Name items by service/account; record `websites` and `username`.
+- Respect provider capabilities. Ask cards save to hosted vaults only.
+  Provider write and move limits: `references/troubleshooting.md`.
 
 ## Missing secrets and errors
 
@@ -82,18 +72,16 @@ A tool result with `secret_reference_error` ran nothing. For a missing secret
 it includes `askCard`: call `request_human_input` with it, changing only
 `saveTo` or `prompt`, then retry with the returned reference.
 
-A provider being offline, locked, rate-limited or only partially listed is not
-a missing secret. Respect its retry time or report the reconnect/unlock action
-needed; do not ask the person to enter the secret again. If a mutation reports
-an unknown outcome, inspect the provider's state before trying again. Never
-automatically repeat a create because the following inventory refresh failed.
+An unavailable or incomplete provider is not a missing secret: respect retry
+times or reconnect/unlock it. Inspect unknown write outcomes before retrying;
+never repeat a create just because its inventory refresh failed.
 
 ## Playbooks
 
-- `references/login-playbook.md`: browser sign-in, codes, CAPTCHAs.
-- `references/account-creation.md`: sign-ups and generated passwords.
-- `references/2fa-enrollment.md`: enroll and use your own TOTP.
-- `references/api-keys.md`: CLIs, env vars, config files, `secretfile`.
-- `references/ask-card.md`: the `kind: "secret"` question.
-- `references/troubleshooting.md`: every error code and what to do.
-- `references/codemode-and-scripts.md`: escaping in `ogtool` and scripts.
+- Login: `references/login-playbook.md`.
+- Sign-up: `references/account-creation.md`.
+- TOTP: `references/2fa-enrollment.md`.
+- CLI/files: `references/api-keys.md`.
+- Secret card: `references/ask-card.md`.
+- Errors: `references/troubleshooting.md`.
+- Escaping: `references/codemode-and-scripts.md`.

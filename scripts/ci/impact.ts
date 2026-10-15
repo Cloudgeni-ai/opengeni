@@ -325,6 +325,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
   "test/e2e/secrets-fake-login-suite.browser.e2e.ts": ["@opengeni/testing"],
+  "test/e2e/external-vaults.e2e.ts": [
+    "@opengeni/api-router",
+    "@opengeni/config",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/sdk",
+    "@opengeni/vaults",
+  ],
   "test/e2e/secrets-fake-login.browser.e2e.ts": [
     "@opengeni/api-router",
     "@opengeni/browserd",
