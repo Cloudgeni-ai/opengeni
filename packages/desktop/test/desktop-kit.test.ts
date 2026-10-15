@@ -323,8 +323,8 @@ describe("Linux autostart", () => {
     expect(autostartDesktopEntry("Opengeni", "/opt/Opengeni/opengeni")).toContain(
       "Exec=/opt/Opengeni/opengeni --hidden",
     );
-    expect(autostartDesktopEntry("Opengeni", "/home/a b/Opengeni.AppImage")).toContain(
-      'Exec="/home/a b/Opengeni.AppImage" --hidden',
+    expect(autostartDesktopEntry("Opengeni", "/home/user/My Apps/Opengeni.AppImage")).toContain(
+      'Exec="/home/user/My Apps/Opengeni.AppImage" --hidden',
     );
   });
 });

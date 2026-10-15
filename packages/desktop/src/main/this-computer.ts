@@ -127,6 +127,9 @@ const REQUEST_ARGUMENT: Record<ThisComputerPermissionId, string> = {
 const CONNECTIONS_TTL_MS = 3_000;
 /** Short, so a permission granted in System Settings shows up while the person watches. */
 const PERMISSIONS_TTL_MS = 900;
+/** After asking for a permission, how often and how long to look for the grant. */
+const GRANT_WATCH_INTERVAL_MS = 1_500;
+const GRANT_WATCH_LIMIT_MS = 10 * 60_000;
 const STOP_GRACE_MS = 15_000;
 const LOG_LIMIT_BYTES = 10 * 1024 * 1024;
 
@@ -155,6 +158,7 @@ export class ThisComputer {
   private busy = false;
   private error: string | null = null;
   private childPid: number | null = null;
+  private grantWatch: { timer: NodeJS.Timeout; until: number } | null = null;
 
   constructor(private readonly deps: ThisComputerDeps) {
     this.hostedPath = hostedAgentPath(deps.platform, deps.home, deps.env);
@@ -221,17 +225,29 @@ export class ThisComputer {
     connected: boolean;
     running: boolean;
     needsPermissions: boolean;
+    /** In the order to allow them. */
+    missingPermissions: ThisComputerPermissionId[];
   }> {
     if (!this.supported) {
-      return { installed: false, connected: false, running: false, needsPermissions: false };
+      return {
+        installed: false,
+        connected: false,
+        running: false,
+        needsPermissions: false,
+        missingPermissions: [],
+      };
     }
     const connections = await this.connections();
     const permissions = connections.length > 0 ? await this.permissionList() : null;
+    const missingPermissions = (permissions ?? [])
+      .filter((permission) => !permission.granted)
+      .map((permission) => permission.id);
     return {
       installed: existsSync(this.hostedPath),
       connected: connections.length > 0,
       running: !this.state.paused && this.agent.state !== "stopped",
-      needsPermissions: Boolean(permissions?.some((permission) => !permission.granted)),
+      needsPermissions: missingPermissions.length > 0,
+      missingPermissions,
     };
   }
 
@@ -286,6 +302,7 @@ export class ThisComputer {
    */
   async requestPermission(id: ThisComputerPermissionId): Promise<void> {
     if (this.deps.platform !== "darwin" || !PERMISSION_ORDER.includes(id)) return;
+    this.watchForGrants();
     if (this.state.requested.includes(id) || !existsSync(this.hostedPath)) {
       this.deps.openSystemSettings(SETTINGS_PANES[id]);
       return;
@@ -298,8 +315,38 @@ export class ThisComputer {
     this.deps.onChange();
   }
 
+  /**
+   * The grant happens in System Settings, where nothing tells the app. Look
+   * for it for a while, so the agent restarts with it and the menu bar item
+   * and window update, even when no window is asking.
+   */
+  private watchForGrants(): void {
+    const until = Date.now() + GRANT_WATCH_LIMIT_MS;
+    if (this.grantWatch) {
+      this.grantWatch.until = until;
+      return;
+    }
+    const tick = async (): Promise<void> => {
+      const watch = this.grantWatch;
+      if (!watch) return;
+      const missing = (await this.permissionList())?.some((permission) => !permission.granted);
+      if (!missing || Date.now() > watch.until) {
+        this.stopWatchingForGrants();
+        return;
+      }
+      watch.timer = setTimeout(() => void tick(), GRANT_WATCH_INTERVAL_MS);
+    };
+    this.grantWatch = { timer: setTimeout(() => void tick(), GRANT_WATCH_INTERVAL_MS), until };
+  }
+
+  private stopWatchingForGrants(): void {
+    if (this.grantWatch) clearTimeout(this.grantWatch.timer);
+    this.grantWatch = null;
+  }
+
   /** Stops the agent with the app. It starts again when the app next opens. */
   async shutdown(): Promise<void> {
+    this.stopWatchingForGrants();
     await this.agent.stop();
   }
 
@@ -308,6 +355,7 @@ export class ThisComputer {
    * Otherwise it would outlive the app and hold this computer's single agent.
    */
   shutdownNow(): void {
+    this.stopWatchingForGrants();
     const pid = this.childPid;
     if (pid !== null) killTree(pid, this.deps.platform, false, true);
   }
@@ -462,7 +510,8 @@ export class ThisComputer {
     const log = this.openLog();
     try {
       const child = spawn(this.hostedPath, ["--api-url", apiUrl, "run"], {
-        env: { ...process.env, ...HOST_ENV },
+        // Plain text: the log is a file, not a terminal.
+        env: { ...process.env, ...HOST_ENV, NO_COLOR: "1" },
         stdio: ["ignore", log ?? "ignore", log ?? "ignore"],
         windowsHide: true,
       });

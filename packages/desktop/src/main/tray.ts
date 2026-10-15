@@ -1,11 +1,13 @@
 import { Menu, nativeImage, Tray } from "electron";
 
+import type { ThisComputerPermissionId } from "../contract";
 import type { DesktopAppConfig } from "./config";
 
 export interface TrayActions {
   open(): void;
   pause(): void;
   resume(): void;
+  allow(permission: ThisComputerPermissionId): void;
   quit(): void;
 }
 
@@ -13,11 +15,20 @@ export interface TraySummary {
   installed: boolean;
   connected: boolean;
   running: boolean;
+  /** Screen-control permissions still to allow, in order. */
+  missingPermissions?: readonly ThisComputerPermissionId[];
 }
+
+const PERMISSION_LABELS: Record<ThisComputerPermissionId, string> = {
+  screenRecording: "Allow Screen Recording…",
+  accessibility: "Allow Accessibility…",
+  inputMonitoring: "Allow Input Monitoring…",
+};
 
 /**
  * The menu bar (macOS) or tray item: whether this computer is available to
- * agents, a pause control, and a way back to the window.
+ * agents, a pause control, any permission still to allow, and a way back to
+ * the window.
  */
 export class AppTray {
   private readonly tray: Tray;
@@ -34,6 +45,7 @@ export class AppTray {
   }
 
   update(summary: TraySummary): void {
+    const missing = summary.running ? (summary.missingPermissions ?? []) : [];
     this.tray.setToolTip(
       !summary.connected
         ? this.config.productName
@@ -43,9 +55,13 @@ export class AppTray {
       ? []
       : [
           {
-            label: summary.running ? "This computer: available to agents" : "This computer: paused",
+            label: statusText(summary.running, missing.length > 0),
             enabled: false,
           },
+          ...missing.map((permission) => ({
+            label: PERMISSION_LABELS[permission],
+            click: () => this.actions.allow(permission),
+          })),
           summary.running
             ? { label: "Pause This Computer", click: () => this.actions.pause() }
             : { label: "Resume This Computer", click: () => this.actions.resume() },
@@ -64,4 +80,11 @@ export class AppTray {
   destroy(): void {
     this.tray.destroy();
   }
+}
+
+function statusText(running: boolean, needsPermissions: boolean): string {
+  if (!running) return "This computer: paused";
+  return needsPermissions
+    ? "This computer: screen control needs permission"
+    : "This computer: available to agents";
 }

@@ -907,7 +907,13 @@ export class DesktopShell {
     const hasAccounts = this.store.snapshot().accounts.length > 0;
     const summary = this.config.thisComputer
       ? await this.computer.summary()
-      : { installed: false, connected: false, running: false, needsPermissions: false };
+      : {
+          installed: false,
+          connected: false,
+          running: false,
+          needsPermissions: false,
+          missingPermissions: [],
+        };
     if (summary.connected) this.openAtLogin();
     // macOS keeps running without a window anyway; the menu bar item is for the
     // computer. Elsewhere the tray is how a closed window comes back.
@@ -921,6 +927,8 @@ export class DesktopShell {
       open: () => this.reveal(),
       pause: () => void this.computer.pause().catch(() => undefined),
       resume: () => void this.computer.resume().catch(() => undefined),
+      allow: (permission) =>
+        void this.computer.requestPermission(permission).catch(() => undefined),
       quit: () => app.quit(),
     });
     this.tray.update(summary);
