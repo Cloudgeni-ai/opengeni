@@ -177,7 +177,7 @@ Headless machines keep the one-line installer and need no desktop app.
 | Platform | Package | Signing | Update |
 |---|---|---|---|
 | macOS (universal) | DMG and ZIP | Developer ID, hardened runtime, notarized | electron-updater from ZIP |
-| Windows (x64, arm64) | NSIS installer, per user | GitHub build provenance attestations; Authenticode once a signing identity is configured | electron-updater, differential |
+| Windows (x64, arm64) | NSIS installer, per user | Authenticode through Azure Artifact Signing when configured, plus GitHub build provenance attestations | electron-updater, differential |
 | Linux (x64, arm64) | AppImage, deb, rpm | SHA-256 checksums and GitHub build provenance attestations | AppImage self-update; deb and rpm download in the app and install with the user's password |
 
 Each version is published as its own GitHub release, `desktop-v<version>`,
@@ -248,8 +248,15 @@ winget follows once the Windows installer is Authenticode-signed.
   user, without administrator rights.
 - The app sets its application user model ID to the packaged app id, which is
   what Windows attributes notifications and the Start menu shortcut to.
-- Until an Authenticode identity is configured, SmartScreen warns on first
-  run; build provenance attestations still let people check a download.
+- Windows builds are Authenticode-signed with Azure Artifact Signing. The
+  release job signs in to Azure with GitHub's OIDC token, so no Azure secret is
+  stored; the repository variables `AZURE_SIGNING_*` name the account,
+  certificate profile and publisher, and the job checks every signature before
+  publishing. Signed installers carry the publisher name, and installed apps
+  then accept only updates signed by the same publisher. A build without those
+  variables is unsigned and SmartScreen warns on first run; build provenance
+  attestations still let people check a download. New publishers build
+  SmartScreen reputation over the first releases.
 
 ## Repository layout
 

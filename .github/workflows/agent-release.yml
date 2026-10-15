@@ -69,6 +69,10 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: guard
     environment: agent-release
+    permissions:
+      contents: read
+      # Windows signing signs in to Azure with GitHub's OIDC token.
+      id-token: write
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -361,14 +365,14 @@ jobs:
         shell: bash
         env:
           APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
-          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
+          AZURE_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
           MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         run: |
           set -euo pipefail
           # `[ -n "$X" ]` is the env-side presence check; secrets are masked, so this
           # never leaks the value, only its presence as a boolean output.
           if [ -n "${APPLE_DEVELOPER_ID:-}" ]; then echo "has_macos=true" >> "$GITHUB_OUTPUT"; else echo "has_macos=false" >> "$GITHUB_OUTPUT"; fi
-          if [ -n "${AZURE_KEY_VAULT_URL:-}" ]; then echo "has_windows=true" >> "$GITHUB_OUTPUT"; else echo "has_windows=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "${AZURE_SIGNING_CERTIFICATE_PROFILE:-}" ]; then echo "has_windows=true" >> "$GITHUB_OUTPUT"; else echo "has_windows=false" >> "$GITHUB_OUTPUT"; fi
           if [ -n "${MINISIGN_KEY:-}" ]; then echo "has_minisign=true" >> "$GITHUB_OUTPUT"; else echo "has_minisign=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: Require the release signing key
@@ -505,40 +509,65 @@ jobs:
           rm -rf "$VERIFY_DIR"
           rm -f /tmp/cert.p12 /tmp/asc.json
 
-      # ---- Windows Authenticode (POLISH, guarded). ----
-      - name: Windows Authenticode (if cert present)
+      # ---- Windows Authenticode with Azure Artifact Signing (guarded). ----
+      # Signs in with GitHub's OIDC token (no stored Azure secret). Repository
+      # variables: AZURE_SIGNING_CLIENT_ID, AZURE_SIGNING_TENANT_ID,
+      # AZURE_SIGNING_SUBSCRIPTION_ID, AZURE_SIGNING_ENDPOINT,
+      # AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_CERTIFICATE_PROFILE and
+      # AZURE_SIGNING_PUBLISHER. The client needs a federated credential for
+      # this repository's agent-release environment and the Artifact Signing
+      # Certificate Profile Signer role on the account.
+      - name: Sign in to Azure for code signing
         if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
-        env:
-          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
-          AZURE_KEY_VAULT_CERT: ${{ secrets.AZURE_KEY_VAULT_CERT }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+
+      - name: List the Windows binaries to sign
+        id: windows_binaries
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
         shell: pwsh
         run: |
-          Write-Host "Azure Key Vault cert present — Authenticode-signing ${{ matrix.asset }}"
-          dotnet tool install --global AzureSignTool
-          $artifacts = @(
+          $files = @(
             "${{ matrix.asset }}",
             "opengeni-browserd-${{ matrix.target }}.exe",
             "opengeni-agent-browser-${{ matrix.target }}.exe",
             "opengeni-computer-native-${{ matrix.target }}.exe"
-          ) | Where-Object { Test-Path $_ }
-          foreach ($artifact in $artifacts) {
-            AzureSignTool sign `
-              --azure-key-vault-url "$env:AZURE_KEY_VAULT_URL" `
-              --azure-key-vault-certificate "$env:AZURE_KEY_VAULT_CERT" `
-              --azure-key-vault-client-id "$env:AZURE_CLIENT_ID" `
-              --azure-key-vault-client-secret "$env:AZURE_CLIENT_SECRET" `
-              --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
-              --timestamp-rfc3161 "http://timestamp.digicert.com" `
-              --file-digest sha256 `
-              $artifact
+          ) | Where-Object { Test-Path $_ } | ForEach-Object { (Resolve-Path $_).Path }
+          "files=$($files -join ',')" >> $env:GITHUB_OUTPUT
+
+      - name: Windows Authenticode
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
+          files: ${{ steps.windows_binaries.outputs.files }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows signatures
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
+        shell: pwsh
+        env:
+          FILES: ${{ steps.windows_binaries.outputs.files }}
+          SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
+        run: |
+          foreach ($file in $env:FILES.Split(',')) {
+            $signature = Get-AuthenticodeSignature -FilePath $file
+            if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "CN=`"?$([regex]::Escape($env:SIGNING_PUBLISHER))") {
+              throw "$file is not validly signed by $env:SIGNING_PUBLISHER ($($signature.Status): $($signature.StatusMessage))"
+            }
+            Write-Host "$file signed by $($signature.SignerCertificate.Subject)"
           }
 
       - name: Windows unsigned note (no cert)
         if: matrix.kind == 'windows' && steps.creds.outputs.has_windows != 'true'
-        run: echo "::notice::Windows binary is UNSIGNED (no Authenticode cert) — minisign-attested only. SmartScreen warns on a fresh download until signing credentials are configured."
+        run: echo "::notice::Windows binary is UNSIGNED (no Artifact Signing certificate profile configured) — minisign-attested only. SmartScreen warns on a fresh download until signing is configured."
 
       # ---- minisign signature + sha256 (ALWAYS-ON; the trust root for self-update). ----
       - name: minisign-sign + sha256 the artifact
